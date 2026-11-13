@@ -55,6 +55,7 @@ if cmd == "print":
         print("something unexpected"); sys.exit(0)
     print(f"{argv[1]} = {{")
     print("\tactive count = 1")
+    print(f"\tpath = {read('path', label) or os.path.join(os.environ['ADE_SCHED_LAUNCH_AGENTS'], label + '.plist')}")
     print(f"\tstate = {read('state', label) or 'not running'}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
@@ -161,7 +162,7 @@ def test_parse_activity_on_real_launchctl_output(name, want):
 
 @pytest.mark.parametrize("text,want", [
     ("gui/501/x = {\n\tactive count = 1\n\tstate = not running\n}\n", "idle"),
-    ("gui/501/x = {\n\tstate = waiting\n}\n", "idle"),
+    ("gui/501/x = {\n\tstate = waiting\n}\n", "unknown"),   # never captured: fails closed until a capture shows it
     ("gui/501/x = {\n\tstate = running\n\tpid = 42\n}\n", "busy"),
     ("gui/501/x = {\n\tstate = running\n}\n", "busy"),
     ("gui/501/x = {\n\tstate = spawn scheduled\n}\n", "busy"),
@@ -175,6 +176,18 @@ def test_parse_activity_on_real_launchctl_output(name, want):
 ])
 def test_parse_activity(text, want):
     assert S.parse_launchd_activity(text) == want
+
+
+def test_parse_path_on_real_launchctl_output():
+    assert S.parse_launchd_path((FIXTURES / "print_idle.txt").read_text()).endswith("com.djbclark.w21b-probe-timer.plist")
+    assert S.parse_launchd_path("gui/501/x = {\n\t\tpath = /nested\n}\n") is None
+
+
+def test_parse_disabled_on_real_launchctl_output():
+    text = (FIXTURES / "print_disabled.txt").read_text()
+    assert S.parse_launchd_disabled(text, "com.example.off") is True
+    assert S.parse_launchd_disabled(text, "com.example.on") is False
+    assert S.parse_launchd_disabled(text, "com.example.absent") is False
 
 
 def _disabled(*rows):
@@ -273,6 +286,59 @@ def test_unload_that_did_not_take_defers(ld):
     assert "bootstrap" not in ld.verbs()  # nothing was unloaded, so nothing is reloaded
 
 
+def test_bootout_that_worked_but_whose_readback_failed_still_reloads(ld):
+    _existing(ld)
+    plist = ld.agents / f"{LABEL}.plist"
+    calls = {"print": 0}
+    real = ld.launchctl
+
+    def runner(argv, env):
+        if argv[1] == "print":
+            calls["print"] += 1
+            if calls["print"] == 2:  # the read-back after bootout, and only that one, fails
+                return 5, "", "launchd busy"
+        return S._run(argv, env)
+
+    err = io.StringIO()
+    adapter = S.launchd_admission(launchctl=real, uid=ld.uid, agents_dir=ld.agents, env=ld.env, err=err, run=runner)
+    with adapter(_step()) as ev:
+        assert "state unknown after bootout" in (ev.refusal() or "")
+        assert not ld.loaded()  # the unload did happen
+    assert ld.loaded() and plist.exists() and "bootstrap" in ld.verbs()  # restored although the read-back failed
+
+
+def test_restore_time_print_failure_still_attempts_the_reload(ld):
+    _existing(ld)
+    calls = {"print": 0}
+
+    def runner(argv, env):
+        if argv[1] == "print":
+            calls["print"] += 1
+            if calls["print"] >= 3:  # the restore's own read fails
+                return 5, "", "launchd busy"
+        return S._run(argv, env)
+
+    adapter = S.launchd_admission(launchctl=ld.launchctl, uid=ld.uid, agents_dir=ld.agents, env=ld.env, run=runner)
+    with adapter(_step()) as ev:
+        assert ev.refusal() is None
+    assert ld.loaded() and "bootstrap" in ld.verbs()
+
+
+def test_job_loaded_from_another_path_defers_untouched(ld):
+    _existing(ld)
+    ld.mark("path", text="/somewhere/else/job.plist")
+    with _adapter(ld)(_step()) as ev:
+        assert "loaded from /somewhere/else/job.plist" in (ev.refusal() or "")
+    assert ld.loaded() and ld.verbs() == ["print"]
+
+
+def test_absent_label_is_admitted_even_if_disabled(ld):
+    ld.mark("disabled")
+    with _adapter(ld)(_step("install")) as ev:
+        assert ev.refusal() is None
+    assert ld.verbs() == ["print"]  # trivially admitted: the later bootstrap fails loudly instead
+
+
 def test_operator_disabled_job_install_defers_and_removal_proceeds(ld):
     _existing(ld)
     ld.mark("disabled")
@@ -362,7 +428,7 @@ def test_fresh_install_is_admitted_and_ledgered(ld):
     assert ld.loaded() and not NEVER & set(ld.verbs())
 
 
-def test_reload_of_an_idle_job_unloads_it_first_and_loads_the_new_definition(ld):
+def test_reload_of_an_idle_job_is_admitted_then_loads_the_new_definition(ld):
     root, catalog = _installed(ld)
     plist = _drift(ld)
     ld.reset()
@@ -371,6 +437,7 @@ def test_reload_of_an_idle_job_unloads_it_first_and_loads_the_new_definition(ld)
     assert any(r["action"] == "installed" for r in rows)
     verbs = ld.verbs()
     assert verbs.index("print") < verbs.index("bootout") < verbs.index("bootstrap")
+    assert verbs.count("bootout") == 2  # the adapter's unload, then install's own (a no-op by then)
     assert verbs.count("bootstrap") == 1  # the restore did not load it a second time
     assert ld.loaded() and "drift" not in plist.read_text() and not NEVER & set(verbs)
 

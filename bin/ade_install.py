@@ -3482,9 +3482,9 @@ def apply_sched_reconcile(
 ) -> tuple[list[dict[str, Any]], int]:
     """Run ``ade-sched reconcile`` for labeled ADE jobs (Linux one-step demanual).
 
-    Live writes only when the host backend is the current reconcile write backend
-    (systemd on master). Other backends get report rows (exit 0) so Mac install
-    recipes stay on ``just *-install`` until launchd write lands.
+    Live writes only when the host backend is a reconcile write backend (systemd, cron,
+    launchd). Installs and removals pass ``native_admission=True``: on launchd the
+    native adapter admits idle jobs; every other backend defers (exit 6).
     """
     import ade_sched as sched  # noqa: WPS433 — optional at catalog-check time
 

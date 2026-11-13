@@ -1,0 +1,7 @@
+
+	disabled services = {
+		"com.example.first" => enabled
+		"com.example.on" => enabled
+		"com.example.off" => disabled
+		"com.example.second" => enabled
+	}

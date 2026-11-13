@@ -1948,7 +1948,7 @@ _DISABLED_ROW_RE = re.compile(r'\s*"([^"]+)"\s*=>\s*(\w+)\s*')
 
 def parse_launchd_activity(text: str) -> str:
     """idle | busy | unknown from `launchctl print gui/UID/LABEL`: the service block's own `state`/`pid` fields (one tab
-    deep), never a process-name match. A pid, `running` or a launch in progress is busy; only `not running` / `waiting`
+    deep), never a process-name match. A pid, `running` or a launch in progress is busy; only `not running`
     without a pid is idle; anything else, including a missing field, is unknown."""
     lines = text.splitlines()
     if not lines or not lines[0].rstrip().endswith("= {"):
@@ -1963,7 +1963,16 @@ def parse_launchd_activity(text: str) -> str:
         return "busy" if pid.isdigit() and int(pid) > 0 else "unknown"
     if state in ("running", "spawn scheduled", "xpcproxy"):
         return "busy"
-    return "idle" if state in ("not running", "waiting") else "unknown"
+    return "idle" if state == "not running" else "unknown"
+
+
+def parse_launchd_path(text: str) -> str | None:
+    """The plist path a loaded job came from: the service block's own `path = ...` field (one tab deep), else None."""
+    for line in text.splitlines()[1:]:
+        m = re.fullmatch(r"\tpath = (.+)", line.rstrip())
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def parse_launchd_disabled(text: str, label: str) -> bool | None:
@@ -1990,7 +1999,8 @@ def launchd_admission(
     *, launchctl: str, uid: int, agents_dir: Path, env: Mapping[str, str],
     err: TextIO | None = None, run: Runner | None = None,
 ) -> Callable[[ReconcileStep], contextlib.AbstractContextManager[JobAdmission]]:
-    """The native launchd adapter for `reconcile(admission=...)`: one label, held through read-back and the ownership commit.
+    """The native launchd adapter for `reconcile(admission=...)`: one label, under the reconcile lock for the whole step. The
+    launch exclusion lasts until install's own `bootstrap` loads the new definition.
 
     Probe, macOS 27.2 (2026-11-12): `launchctl disable` does NOT stop a loaded job's StartInterval trigger and
     `kickstart` still starts it, so a disable is no exclusion. Unloading is: a job that is not loaded has no launch path
@@ -2004,10 +2014,13 @@ def launchd_admission(
        loaded; the caller's own `bootout` is then a no-op and `bootstrap` loads the new definition. The one residual race
        is a run that starts between the idle read and the `bootout` (two `launchctl` calls); the pre-existing low-level
        install has the same window with no check at all.
-    4. A label the operator disabled cannot be bootstrapped: its install defers, its removal proceeds.
-    5. On exit, whatever happened, a job this adapter unloaded whose plist is still on disk and which is not loaded is
-       bootstrapped again; a restore that fails is reported on `err` and left to the next run (the ledger shows the step
-       as failed or pending, and the next reconcile plans the load).
+    4. A loaded or on-disk label the operator disabled cannot be bootstrapped: its install defers, its removal proceeds.
+    5. On every Python-level exit, a job this adapter tried to unload whose plist is still on disk and which is not
+       confirmed loaded is bootstrapped again (the plist then on disk: after an install wrote it, that is the new
+       definition); a restore that fails is reported on `err` and left to the next run (the ledger shows the step as
+       failed or pending, and the next reconcile plans the load). A SIGKILL or SIGTERM between the unload and install's
+       bootstrap runs no restore and leaves the job unloaded until the next reconcile.
+    6. A loaded job whose `print` `path =` is not `agents_dir/LABEL.plist` defers (the restore could not bring it back).
 
     The updater's own service (UPDATER_LABELS) reading busy keeps its existing refusal."""
     runner = run or _run
@@ -2042,6 +2055,12 @@ def launchd_admission(
             yield JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
             return
         activity = parse_launchd_activity(text) if loaded else "idle"
+        loaded_from = parse_launchd_path(text) if loaded else None
+        if loaded and activity == "idle" and (
+            loaded_from is None or os.path.realpath(loaded_from) != os.path.realpath(plist)
+        ):
+            yield JobAdmission(hold=f"{label} is loaded from {loaded_from or 'an unknown path'}, not {plist}")
+            return
         if activity != "idle":
             yield JobAdmission(
                 all_launch_paths=True, activity=activity,
@@ -2062,15 +2081,16 @@ def launchd_admission(
         unloaded = False
         try:
             if loaded:
+                unloaded = True  # an unload was attempted: the restore decides from a fresh read, not from this flag
                 launchctl_run("bootout", target)
                 now_loaded, _ = read_loaded(target)
                 if now_loaded is not False:
-                    yield JobAdmission(hold=f"could not unload {label}; launch paths not excluded")
+                    word = "could not unload" if now_loaded else "state unknown after bootout for"
+                    yield JobAdmission(hold=f"{word} {label}; launch paths not excluded")
                     return
-                unloaded = True
             yield JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
         finally:
-            if unloaded and plist.exists() and read_loaded(target)[0] is False:
+            if unloaded and plist.exists() and read_loaded(target)[0] is not True:
                 rc, _, err_txt = launchctl_run("bootstrap", domain, str(plist))
                 if rc != 0:
                     print(

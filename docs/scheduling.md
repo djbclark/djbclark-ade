@@ -406,7 +406,8 @@ is the first.
 
 `ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`, which on the **launchd** backend (with
 activation on) installs `launchd_admission` as the `admission` callback. It proves the contract for one label and holds it
-through read-back and the ownership commit; the reconcile lock is held the whole time. An explicit `admission` argument
+through read-back and the ownership commit under the reconcile lock; the launch exclusion itself lasts until install's own
+`bootstrap` loads the new definition. An explicit `admission` argument
 still wins, and no environment variable or CLI flag selects or bypasses the adapter.
 
 **Why unload, not disable.** A live probe on macOS 27.2 (2026-11-12, throwaway label `StartInterval=5`) showed that
@@ -419,19 +420,25 @@ all need it loaded), so exclusion is an unload of an *idle* job:
 1. **Absent job** (not loaded, no plist on disk): no launch path exists; admitted, nothing touched.
 2. **Busy or unknown job**: `launchctl print gui/UID/LABEL` is parsed for the service block's own `state` and `pid` fields
    (one tab deep; the nested coalition `state = active` lines are ignored; never `pgrep` or a name match). A pid, `running`
-   or a launch in progress is **busy**; only `not running` or `waiting` without a pid is **idle**; anything else, or a
+   or a launch in progress is **busy**; only `not running` without a pid is **idle**; anything else, or a
    `print` that fails other than "could not find service", is **unknown**. Busy and unknown defer (exit 6) with **nothing
    touched**: the job is never killed. Real captured output lives in `tests/fixtures/launchd/`.
 3. **Idle loaded job**: `launchctl bootout` unloads it (nothing runs, so nothing is killed) and `print` must then say it is
    not loaded; install's own `bootout` becomes a no-op and its `bootstrap` loads the new definition. A job that is not
    loaded but has a plist is admitted without an unload.
-4. **Operator-disabled label**: bootstrap cannot load it, so an install defers (hold) and a removal proceeds. The adapter
+4. **Operator-disabled label** (a loaded or on-disk job; an absent label is admitted without the check and its later
+   `bootstrap` fails loudly): bootstrap cannot load it, so an install defers (hold) and a removal proceeds. The adapter
    never touches the operator's override; an unreadable `print-disabled` (strict parse: header, `"label" => word` rows,
    closing brace) defers an install.
-5. **Restore on every exit**, including an exception mid-mutation: a job the adapter unloaded whose plist is still on disk
-   and which is not loaded is bootstrapped again. A reload that fails is reported on stderr with the command to run; the
-   ledger row is `failed`/`pending`, and the next reconcile plans the load (no durable launchd override is ever left).
-6. **Label check**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time and refused again before
+5. **Restore on every Python-level exit**, including an exception mid-mutation: a job the adapter tried to unload whose plist
+   is still on disk and which is not confirmed loaded (not loaded, or a failed read) is bootstrapped again. That loads the
+   plist then on disk, so after an install wrote it the new definition loads, and a rejected new definition leaves the job
+   unloaded until it is fixed. A reload that fails is reported on stderr with the command to run. A SIGKILL, SIGTERM or
+   `bin/deadline` kill between the unload and install's `bootstrap` runs no restore; the job stays unloaded until the next
+   reconcile, which plans the load because an unloaded launchd job is never healthy. No durable launchd override is ever left.
+6. **Loaded-from check**: a loaded job whose `print` `path =` is not `agents_dir/LABEL.plist` defers untouched, since the
+   restore could not bring that definition back.
+7. **Label check**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time and refused again before
    `install`, so the adapter can never admit one label while install boots out another.
 
 The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal. Known limits: a run that
