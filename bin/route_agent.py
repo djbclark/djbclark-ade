@@ -1532,7 +1532,10 @@ def _stale_pool_keys(payload: dict[str, Any], p_age: float | None) -> set[tuple[
                        for e in stale)):
         return None
     keys = {(e["provider"], e["pool_family"]) for e in stale}
-    rows = {(row.get("provider"), row.get("pool_family")) for row in avail if isinstance(row, dict)}
+    if not all(isinstance(row, dict) and isinstance(row.get("provider"), str)
+               and isinstance(row.get("pool_family"), (str, type(None))) for row in avail):
+        return None                      # an invalid row: load_snapshot's own "invalid row" fallback decides
+    rows = {(row["provider"], row.get("pool_family")) for row in avail}
     return keys if keys <= rows else None
 
 

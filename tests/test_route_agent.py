@@ -2402,6 +2402,22 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 self.assertGreater(age, r.STALE_SOFT)
                 self.assertIn("read as stale", r.quota_source_info()["detail"])
 
+    def test_a_malformed_available_row_takes_the_fallback_with_a_stale_pools_list(self):
+        """Adversary 2026-11-13 F6: an unhashable provider/pool_family raised out of load_snapshot."""
+        stale = [{"provider": "antigravity", "pool_family": "gemini_argon"}]
+        for name, bad in (("list-provider", {"provider": ["x"], "usable_now": True}),
+                          ("dict-family", {"provider": "codex", "pool_family": {"a": 1}}),
+                          ("list-family", {"provider": "codex", "pool_family": ["a"]}),
+                          ("non-dict-row", "junk")):
+            with self.subTest(name):
+                path = self.write("bad.json", self.payload(
+                    [bad, dict(self.argon_row(), age_seconds=700)], fresh=False, age_seconds=30.0,
+                    stale_pools=stale))
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertEqual(r.QuotaSource.kind, "snapshot")
+                self.assertIn("invalid row", r.quota_source_info()["fallback_reason"])
+                self.assertNotIn("antigravity-argon", quota)
+
     def test_a_stale_argon_row_never_reads_available_when_its_entry_misnames_it(self):
         """Adversary 2026-11-13 F1: an entry that matches no row marked nothing and left a 700 s Argon reading fresh."""
         argon = dict(self.argon_row(), age_seconds=700)
