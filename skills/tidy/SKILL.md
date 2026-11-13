@@ -49,8 +49,9 @@ current-work text; `--json` prints the machine form. Sections of the output:
    `--handled`).
 3. **C. Waiting on the OPERATOR** — question cards and permission cards; list them for the operator with the
    (bounded) question text. Do not answer them yourself.
-4. **D. Reconnect** — one plain `paseo send --json --no-wait` (never `--behavior steer`, only to an idle agent, at
-   most once per agent per hour) asking for a one-line status and `ack <lead id>`. A send is not delivery
+4. **D. Reconnect** — one plain `paseo send --json --no-wait` (no `--behavior` flag, only to an idle agent whose status
+   and permission list are re-read under the lock right before, at most once per agent per hour; only from the lead's
+   session, since a sourceless send defaults to interrupt) asking for a one-line status and `ack <lead id>`. A send is not delivery
    (AGENTS.md order 10): when the agent's `ack <lead id>` reaches you, run `bin/ade-tidy ack <agent id>`; an agent
    with a send older than 6 hours and no recorded ack shows as unreached (`D#u`): tell the operator, re-route.
 5. **E. Window names** — `paseo workspace rename` to the convention; legacy names (`workers <middle> <lead id>`,
@@ -58,7 +59,12 @@ current-work text; `--json` prints the machine form. Sections of the output:
 6. **F. Misplaced tabs** — see below.
 7. **G. Finished** — archive this lead's workers when `unit-<slice>.md` (in a `--reports-dir`) ends `DONE`, `.done` exists
    (touched after the report), the completion is handled (`.done.ack` touched after `.done`, or `--handled ID`), the
-   trailing text asks nothing and no card is pending. A `closed` worker alone is **not** archived: Paseo marks every
+   trailing text asks nothing and no card is pending. The report must not say `BLOCKED:`/`NO-REPORT:`/`STATUS: working`
+   in its first lines or its last 4 KB, and `--handled` is held to the same check (plus: the report quiet for two minutes
+   and not newer than a `.done`). **Re-tasking a finished worker: rename its `.done` to `.done.rN` first, then `paseo send`.**
+   ade-tidy also refuses a worker whose log tail holds a `[Message received]` entry other than a bare `ack …`, a human
+   prompt newer than `.done` (`lastUserMessageAt`, UTC), an empty or unreadable log, or an inbound message as the last
+   entry; apply re-runs this whole verdict right before each `paseo agent archive`. A `closed` worker alone is **not** archived: Paseo marks every
    interrupted agent `closed` at a daemon restart, so it is listed as `D#u` (resume or re-task it). Operator agents
    are only listed. A running agent is never archived (`paseo agent archive` runs without `--force`; Paseo unarchives an agent when it is resumed, but
    treat an archive as final). An empty window is archived only when all of these hold: not MAIN, `isolation` is `local` (archiving a

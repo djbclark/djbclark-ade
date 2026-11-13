@@ -11,8 +11,10 @@ precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
   1. Inventory: every live agent (`paseo ls -g --json`) whose cwd is the repo or one of its linked worktrees, owner class (self, own-worker = label ade.lead=<lead>, other-worker, lead,
      operator, helper), window, status, pending permissions, and a WAITING verdict (working, waiting-on-lead,
      waiting-on-operator, done, unknown). Agent text is DATA: excerpts are bounded and stripped of control characters.
-  2. Reconnect: one plain `paseo send --json --no-wait` (never steer) to an idle own worker / operator agent with no
-     proven contact, asking for a one-line status and `ack <lead id>`; at most once per agent per hour (state file).
+  2. Reconnect: one plain `paseo send --json --no-wait` (no --behavior flag: an idle agent just starts a turn; the
+     agent's status and permission list are re-read under the lock right before it) to an idle own worker / operator
+     agent with no proven contact, asking for a one-line status and `ack <lead id>`; at most once per agent per hour
+     (state file). Only from a session (PASEO_AGENT_ID set): a sourceless send would default to interrupt.
   3. Waiting report: workers waiting on the lead (answer first) and agents waiting on the operator.
   4. Names: windows named `<KIND> <repo> (<work>)` (bin/ade_ws_names.py); MAIN is never archived.
   5. Tabs: Paseo has no command to move an agent between windows (docs/workspace-layout.md), so a misplaced tab is
@@ -39,6 +41,7 @@ import tempfile
 import stat
 import time
 import unicodedata
+from datetime import datetime
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
@@ -48,6 +51,9 @@ RESEND_SECONDS = 3600  # at most one send per agent per hour
 CONTACT_FRESH_SECONDS = 6 * 3600  # an ack older than this no longer proves the link (memory: overdue acks re-route after 6h)
 EXCERPT = 300
 TAG_RE = re.compile(r"^\[[A-Za-z][A-Za-z ]*\]")
+# `paseo logs` labels (packages/protocol paseo-tool-presentation/agent-message.ts, activity-curator.ts): another party's words
+INBOUND_TAGS = ("[User]", "[Message received]", "[Agent finished]", "[Agent errored]", "[Agent closed]", "[Agent needs permission]")
+ACK_BODY_RE = re.compile(r"\s*ack\s+\S+(\s+\S+)?\s*", re.I)  # a bare `ack <id> [<msg-id>]` body: the lead's receipt, not a re-task
 CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 KINDS = ("MAIN", "WORKERS", "USER")
 KIND_FOR_CLASS = {"self": "MAIN", "lead": "MAIN", "own-worker": "WORKERS", "operator": "USER"}
@@ -164,9 +170,12 @@ def log_tail(agent_id: str) -> str | None:
 
 def last_text(log: str | None) -> tuple[str, bool, str]:
     """(trailing untagged text, a question-card/permission event in the last 5 tagged lines, state) where state is
-    "ok", "unreadable" (no log) or "inbound" (the untagged tail is the body of a `[User]` / `[Agent message]` entry, i.e.
-    another party's message, not the agent's own words)."""
-    if log is None:
+    "ok", "unreadable" (no log, an empty one, `No activity to display.`, or one with no tagged line at all) or "inbound"
+    (the untagged tail follows a `[User]` / `[Message received]` / `[Agent finished|errored|closed]` header: it is another
+    party's message, or the agent's plain-text reply to it, which the log does not tell apart; the text is still
+    returned so a BLOCKED line or a question in it is shown, never archived over)."""
+    if log is None or not log.strip() or log.strip() == "No activity to display." \
+            or not any(TAG_RE.match(ln) for ln in log.splitlines()):
         return "", False, "unreadable"
     lines = log.splitlines()
     tail: list[str] = []
@@ -179,9 +188,31 @@ def last_text(log: str | None) -> tuple[str, bool, str]:
     tail.reverse()
     tagged = [ln for ln in lines if TAG_RE.match(ln)][-5:]
     card = any(re.search(r"AskUserQuestion|\[Question\]|\[Permission\]", ln) for ln in tagged)
-    if head.startswith(("[User]", "[Agent message]", "[Message received]")):
-        return "", card, "inbound"
+    if head.startswith(INBOUND_TAGS):
+        return "\n".join(tail).strip(), card, "inbound"
     return "\n".join(tail).strip(), card, "ok"
+
+
+def log_has_retask(log: str | None) -> bool:
+    """True when the log tail holds a `[Message received]` entry whose first body line is more than a bare `ack ...`
+    receipt: the lead's `paseo send` re-task does not move the state record's lastUserMessageAt (an agent-sourced message
+    is projected as a tool call, not a user message). The initial brief is a `[User]` entry and is not counted (a human
+    prompt moves lastUserMessageAt instead). The worker's own plain-text reply follows the body, so only the first
+    non-empty line is judged."""
+    if not log:
+        return False
+    body: list[str] = []
+    inbound = False
+    for line in log.splitlines() + ["[end]"]:
+        if TAG_RE.match(line):
+            first = next((b for b in body if b.strip()), "")
+            if inbound and not ACK_BODY_RE.fullmatch(first):
+                return True
+            inbound = line.startswith("[Message received]")
+            body = []
+        else:
+            body.append(line)
+    return False
 
 
 # ----------------------------------------------------------------------------------------------- repo + agents
@@ -233,9 +264,10 @@ def report_for(slice_name: str | None, reports_dirs: list[str]) -> Path | None:
         return None
     for d in reports_dirs:
         root = os.path.realpath(os.path.expanduser(d))
-        rp = os.path.realpath(os.path.join(root, f"unit-{slice_name}.md"))
+        raw = os.path.join(root, f"unit-{slice_name}.md")
+        rp = os.path.realpath(raw)
         try:
-            ok = rp.startswith(root + os.sep) and stat.S_ISREG(os.lstat(rp).st_mode)
+            ok = rp == raw and rp.startswith(root + os.sep) and stat.S_ISREG(os.lstat(raw).st_mode)  # never through a symlink
         except OSError:
             continue
         if ok:
@@ -250,39 +282,62 @@ def mtime(path: Path) -> float | None:
         return None
 
 
-def report_done(report: Path | None) -> tuple[bool, bool]:
-    """(finished, acked). finished: the report's last non-empty line is DONE and `<report>.done` exists, touched no earlier
-    than the report. acked: `<report>.done.ack` exists, touched no earlier than `.done`. An ack without `.done` is not
-    proof (the lead renames `.done` to `.done.rN` to re-task a round): the lead passes --handled for that case."""
-    if report is None:
-        return False, False
+def report_scan(report: Path) -> tuple[bool, bool]:
+    """(blocked, ends_done) read from a bounded head and tail of the report. blocked: a `BLOCKED:`/`NO-REPORT:` line or
+    `STATUS: working` in the first non-empty lines (footer rule 6 puts BLOCKED on line 1) or the last 4 KB; such a report
+    is not a finished one even when it also ends DONE. ends_done: the last non-empty line is exactly DONE."""
     try:
-        with report.open("rb") as fh:  # only the tail matters: never read a huge file whole
+        with report.open("rb") as fh:  # never read a huge file whole
+            head = fh.read(4096).decode("utf-8", "replace")
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - 4096))
             tail = fh.read().decode("utf-8", "replace")
     except OSError:
+        return True, False
+    hl = [ln.strip() for ln in head.splitlines() if ln.strip()][:5]
+    tl = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    bad = re.compile(r"(BLOCKED|NO-REPORT):|STATUS:\s*working")
+    return any(bad.match(ln) for ln in hl + tl), bool(tl) and tl[-1] == "DONE"
+
+
+def report_done(report: Path | None) -> tuple[bool, bool]:
+    """(finished, acked). finished: not blocked, the last non-empty line is DONE and `<report>.done` exists, touched no
+    earlier than the report. acked: `<report>.done.ack` exists, touched no earlier than `.done`. An ack without `.done` is
+    not proof (the lead renames `.done` to `.done.rN` to re-task a round): the lead passes --handled for that case."""
+    if report is None:
         return False, False
-    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-    if any(re.match(r"(BLOCKED|NO-REPORT):|STATUS:\s*working", ln) for ln in lines):
-        return False, False  # a report that says BLOCKED/NO-REPORT/working is not a finished one even if it ends DONE
+    blocked, ends_done = report_scan(report)
     done = Path(f"{report}.done")
     r_m, d_m, a_m = mtime(report), mtime(done), mtime(Path(f"{done}.ack"))
-    finished = bool(lines) and lines[-1] == "DONE" and d_m is not None and r_m is not None and r_m <= d_m + 1
+    finished = not blocked and ends_done and d_m is not None and r_m is not None and r_m <= d_m + 1
     return finished, finished and a_m is not None and a_m + 1 >= d_m
 
 
+def report_handled_ok(report: Path) -> bool:
+    """The --handled path (no `.done`/ack needed): the same validator, plus the report must be quiet (not written in the last
+    two minutes: a worker may still be rewriting it) and, if a `.done` exists at all, not newer than it."""
+    blocked, ends_done = report_scan(report)
+    r_m, d_m = mtime(report), mtime(Path(f"{report}.done"))
+    if blocked or not ends_done or r_m is None or time.time() - r_m < 120:
+        return False
+    return d_m is None or r_m <= d_m + 1
+
+
 def last_user_message(agent_id: str) -> float:
-    """Epoch seconds of the last message sent to the agent (state record `lastUserMessageAt`); 0 when unknown."""
+    """Epoch seconds of the last human/sourceless message to the agent (state record `lastUserMessageAt`, a UTC ISO string
+    with `Z`); 0 when absent; infinity when present but unparsable (fail closed: counts as a re-task). An agent-sourced
+    message (the lead's `paseo send`) does not move this field: `log_has_retask` covers that."""
     v = (state_file(agent_id) or {}).get("lastUserMessageAt")
-    try:
-        return time.mktime(time.strptime(str(v)[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone if v else 0.0
-    except ValueError:
+    if v in (None, ""):
         return 0.0
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("inf")
 
 
 def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: list[str], handled: set[str],
-            logstate: str = "ok") -> None:
+            logstate: str = "ok", retask_log: bool = False) -> None:
     """Fill row['verdict'], row['reason'] (bounded excerpt) and row['verified_done']. Order matters: a question, a
     BLOCKED line or a card always wins over a finished report, so such an agent is shown, never archived."""
     cls, status = row["class"], row["status"]
@@ -300,7 +355,7 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
     own = cls == "own-worker"
     # evidence older than the last message sent to the agent is stale (a re-task): never "done"
     done_m = mtime(Path(f"{rep}.done")) if rep else None
-    retasked = bool(rep) and (any(rep.parent.glob(rep.name + ".done.r*"))
+    retasked = bool(rep) and (retask_log or any(rep.parent.glob(rep.name + ".done.r*"))
                               or (done_m is not None and last_user_message(row["id"]) > done_m + 2))
     if retasked:
         ok = acked = False
@@ -325,7 +380,7 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
             row["verdict"], row["reason"] = "waiting-on-lead", "completion notice not acked (write <done>.ack or pass --handled)"
     elif own and re.search(r"Please reply:\s*ack", text):
         row["verdict"], row["reason"] = "waiting-on-lead", "asks for ack: " + clean(last_line)
-    elif own and row["id"] in handled and rep is not None and not retasked and report_tail_is_done(rep):
+    elif own and row["id"] in handled and rep is not None and not retasked and report_handled_ok(rep):
         row["verified_done"] = True
         row["verdict"], row["reason"] = "done", "report ends DONE, lead passed --handled (no .done marker)"
     elif re.search(r"\bdone\b|^\s*written:", last_line, re.I):
@@ -334,17 +389,6 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
         row["verdict"], row["reason"] = "unknown", "closed (interrupted or daemon restart?): resume or re-task it; not archived"
     else:
         row["verdict"], row["reason"] = "unknown", clean(last_line)
-
-
-def report_tail_is_done(report: Path) -> bool:
-    try:
-        with report.open("rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - 4096))
-            lines = [ln.strip() for ln in fh.read().decode("utf-8", "replace").splitlines() if ln.strip()]
-    except OSError:
-        return False
-    return bool(lines) and lines[-1] == "DONE"
 
 
 _STATE_CACHE: list = [None]
@@ -410,8 +454,9 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
         if row["class"] in SKIP_CLASSES:
             row.update(verdict="n/a", reason="", verified_done=False)
         else:
-            text, card, lstate = last_text(log_tail(a["id"])) if a.get("status") != "running" else ("", False, "ok")
-            verdict(row, text, card, permits.get(a["id"]), opts.reports_dir or [], handled, lstate)
+            log = log_tail(a["id"]) if a.get("status") != "running" else None
+            text, card, lstate = last_text(log) if a.get("status") != "running" else ("", False, "ok")
+            verdict(row, text, card, permits.get(a["id"]), opts.reports_dir or [], handled, lstate, log_has_retask(log))
         out.append(row)
     return out, [w for w in wmap.values()]
 
@@ -748,7 +793,7 @@ def valid_id(i) -> bool:
         return False
 
 
-def apply(p: dict, lead: str, repo: str) -> list[dict]:
+def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
     """Act on the plan. Every precondition is re-read right before its action; a failure is recorded, never fatal."""
     results: list[dict] = []
 
@@ -780,6 +825,8 @@ def apply(p: dict, lead: str, repo: str) -> list[dict]:
         aid = s["agent"]
         if not valid_id(aid):
             return rec("send", clean(aid, 60), False, "malformed id: skipped")
+        if not os.environ.get("PASEO_AGENT_ID"):
+            return rec("send", aid, False, "sourceless session: a send would default to interrupt; run inside the lead's session")
         cur = nowrows.get(aid)
         if not cur or cur.get("status") != "idle" or aid in fresh_permits:
             return rec("send", aid, False, "not idle now (or a card is pending): nothing sent")
@@ -788,6 +835,10 @@ def apply(p: dict, lead: str, repo: str) -> list[dict]:
             st = load_state(lead)
             if now - send_ts(st, aid, now) < RESEND_SECONDS:
                 return rec("send", aid, False, "already sent within the hour")
+            latest = next((x for x in live_agents() if x["id"] == aid), None)  # the view may be a minute old: re-read now
+            permits_now = pending_permissions()
+            if not latest or latest.get("status") != "idle" or permits_now is None or aid in permits_now:
+                return rec("send", aid, False, "not idle now (or a card is pending, or permissions unreadable): nothing sent")
             rc, out, err = paseo(["send", "--json", "--no-wait", aid, "--prompt", send_text(lead, repo)])
             status = ""
             try:
@@ -824,11 +875,18 @@ def apply(p: dict, lead: str, repo: str) -> list[dict]:
                 or (stt.get("labels") or {}).get("ade.lead") != lead:
             return rec("archive-agent", aid, False, "not idle/closed now, card pending, gone, or not this lead's: skipped")
         freshrow = next((x for x in live_agents() if x["id"] == aid), None)  # re-read right before: status, text, retask
-        text, card, lstate = last_text(log_tail(aid))
-        if not freshrow or freshrow.get("status") not in ("idle", "closed") or lstate != "ok" or card \
-                or text.strip().endswith("?") or re.search(r"(^|\n)\s*BLOCKED:", text) \
+        log = log_tail(aid)
+        text, card, lstate = last_text(log)
+        permits_now = pending_permissions()
+        if not freshrow or freshrow.get("status") not in ("idle", "closed") or permits_now is None or aid in permits_now \
                 or last_user_message(aid) > fresh_msg.get(aid, 0.0) + 2:
-            return rec("archive-agent", aid, False, "changed since the plan (status, question, new message): skipped")
+            return rec("archive-agent", aid, False, "changed since the plan (status, card, new message): skipped")
+        # the whole verdict again: report (BLOCKED/DONE/.done/ack/.done.r*), question, inbound/empty log, re-task in the log
+        fresh = {"id": aid, "class": "own-worker", "status": freshrow.get("status"), "slice": (stt.get("labels") or {}).get("slice")}
+        verdict(fresh, text, card, None, (opts.reports_dir if opts else None) or [],
+                set(filter(None, ((opts.handled if opts else "") or "").split(","))), lstate, log_has_retask(log))
+        if not (fresh["verdict"] == "done" and fresh["verified_done"]):
+            return rec("archive-agent", aid, False, "no longer verified done: " + clean(fresh.get("reason", ""), 100))
         rc, out, err = paseo(["agent", "archive", aid])  # no --force: a running agent is never interrupted
         rec("archive-agent", aid, rc == 0, a["why"] if rc == 0 else clean(err or out, 120))
 
@@ -916,7 +974,7 @@ def main(argv: list[str]) -> int:
             print(json.dumps(pl, indent=1) if opts.json else render(pl))
             if not opts.apply:
                 return 0
-            res = apply(pl, lead, repo)
+            res = apply(pl, lead, repo, opts)
         finally:
             if lock is not None:
                 lock.close()

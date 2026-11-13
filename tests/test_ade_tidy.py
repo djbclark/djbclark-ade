@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -37,6 +38,11 @@ elif a[:2] == ["terminal", "ls"]:
         sys.exit(1)
     print(json.dumps(d.get("terminals", {}).get(a[a.index("--workspace") + 1], [])))
 elif a[0] == "logs":
+    n = d.get("log_calls", 0)
+    d["log_calls"] = n + 1
+    save()
+    if d.get("flip_after") is not None and n >= d["flip_after"]:
+        Path(d["flip_file"]).write_text("BLOCKED: x\\nDONE\\n")
     print(d.get("logs", {}).get(a[1], ""))
 elif a[0] == "send":
     print(json.dumps({"status": "sent"}))
@@ -127,7 +133,16 @@ class Env:
             Path(f"{rp}.done").write_text("")
         if ack:
             Path(f"{rp}.done.ack").write_text("")
+        self.age(rp)
         return rp
+
+    @staticmethod
+    def age(rp, epoch=None):
+        """Set the report and its markers to one old time (the --handled path wants a report quiet for two minutes)."""
+        t = epoch or time.time() - 600
+        for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+            if q.exists():
+                os.utime(q, (t, t))
 
 
 @pytest.fixture
@@ -434,7 +449,7 @@ def test_retasked_worker_is_not_archived(env):
 
 def test_inbound_message_or_unreadable_log_blocks_archive(env):
     env.report("s1", ack=True)
-    env.worker(1, text="please also fix X", tags=["[Agent message] 8cd86203"])   # untagged body of an inbound message
+    env.worker(1, text="please also fix X", tags=["[Message received] 8cd86203"])   # untagged body of an inbound message
     env.report("s2", ack=True)
     env.worker(2, text="finished")
     env.data["logs"].pop("00000002-0000-0000-0000-000000000000")                  # fake prints an empty log
@@ -445,6 +460,7 @@ def test_inbound_message_or_unreadable_log_blocks_archive(env):
 def test_handled_with_report_done_but_no_done_marker_archives(env):
     rp = env.reports / "unit-s1.md"
     rp.write_text("x\nDONE\n")
+    env.age(rp)
     env.worker(1, text="finished")
     assert env.plan()["archive_agents"] == []
     p = env.plan("--handled", "00000001-0000-0000-0000-000000000000")
@@ -477,3 +493,134 @@ def test_unreadable_state_record_blocks_window_archive(env):
     r = env.run(apply=True)
     assert r.returncode == 0, r.stderr
     assert [c for c in env.calls() if c[:2] == ["workspace", "archive"]] == []
+
+
+# ---- adversary round 3 -------------------------------------------------------------------------------------------
+
+W1 = "00000001-0000-0000-0000-000000000000"
+
+
+def test_agent_sourced_retask_in_log_blocks_archive_idle_and_closed(env):
+    """The lead's `paseo send` re-task is a `[Message received]` entry and leaves lastUserMessageAt unchanged."""
+    env.report("s1", ack=True)
+    env.worker(1, text="started the build, waiting for it", tags=["[Shell] ls", "[Message received] 8cd86203", "please also fix X"])
+    env.report("s2", ack=True)
+    env.worker(2, "closed", text="", tags=["[Message received] 8cd86203", "round 2: add tests", "[Shell] pytest"])
+    p = env.plan()
+    assert p["archive_agents"] == []
+    assert env.plan("--handled", f"{W1},00000002-0000-0000-0000-000000000000")["archive_agents"] == []
+
+
+def test_bare_ack_message_is_not_a_retask(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished", tags=["[Shell] ls", "[Message received] 8cd86203", "ack 00000001-0000-0000-0000-000000000000 m1", "[Shell] true"])
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+
+
+def test_human_retask_within_the_hour_under_dst(env, monkeypatch):
+    """lastUserMessageAt is UTC with Z: parse it as UTC, whatever TZ and DST say (an old mktime - timezone read it an hour early)."""
+    monkeypatch.setenv("TZ", "America/New_York")
+    rp = env.report("s1", ack=True)
+    july = 1782907200.0                                                  # 2026-07-01T12:00:00Z
+    env.age(rp, july)
+    env.worker(1, text="finished", last_user="2026-07-01T12:30:00.000Z")   # 30 minutes after .done
+    assert env.plan()["archive_agents"] == []
+    env.data["agents"].clear()
+    env.worker(1, text="finished", last_user="2026-07-01T11:00:00.000Z")   # an hour before .done: not a re-task
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+
+
+def test_unparsable_last_user_message_counts_as_retask(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished", last_user="not-a-time")
+    assert env.plan()["archive_agents"] == []
+
+
+def test_long_blocked_report_and_blocked_with_handled_are_never_archived(env):
+    rp = env.reports / "unit-s1.md"
+    rp.write_text("BLOCKED: need an answer\n" + "line of partial work\n" * 600 + "DONE\n")        # well over 4 KB
+    Path(f"{rp}.done").write_text("")
+    Path(f"{rp}.done.ack").write_text("")
+    env.age(rp)
+    env.worker(1, text="written: x")
+    assert env.plan()["archive_agents"] == []
+    assert env.plan("--handled", W1)["archive_agents"] == []
+    rp2 = env.reports / "unit-s2.md"
+    rp2.write_text("BLOCKED: q\nDONE\n")                                                          # no .done: the --handled branch
+    env.age(rp2)
+    env.worker(2, text="written: x")
+    assert env.plan("--handled", "00000002-0000-0000-0000-000000000000")["archive_agents"] == []
+
+
+def test_handled_refuses_a_report_rewritten_after_done_or_still_warm(env):
+    rp = env.report("s1")                                                # .done, no ack
+    time.sleep(0)
+    os.utime(rp, (time.time() - 100, time.time() - 100))                 # report newer than .done (which is 600 s old)
+    env.worker(1, text="finished")
+    assert env.plan("--handled", W1)["archive_agents"] == []
+    rp2 = env.reports / "unit-s2.md"
+    rp2.write_text("x\nDONE\n")                                         # written just now: still warm
+    env.worker(2, text="finished")
+    assert env.plan("--handled", "00000002-0000-0000-0000-000000000000")["archive_agents"] == []
+
+
+def test_empty_log_or_no_activity_is_unreadable_and_not_archived(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished")
+    env.data["logs"][W1] = ""
+    env.report("s2", ack=True)
+    env.worker(2, text="finished")
+    env.data["logs"]["00000002-0000-0000-0000-000000000000"] = "No activity to display."
+    p = env.plan()
+    assert p["archive_agents"] == []
+    assert by_id(p)["00000001"]["verdict"] == "unknown" and by_id(p)["00000002"]["verdict"] == "unknown"
+
+
+def test_plain_reply_after_inbound_message_still_shows_blocked(env):
+    env.worker(1, text="BLOCKED: which branch?", tags=["[Shell] ls", "[Message received] 8cd86203", "status please"])
+    p = env.plan()
+    assert [r["id"][:8] for r in p["waiting_on_lead"]] == ["00000001"]
+
+
+def test_child_agent_notice_is_not_the_workers_own_words(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished child", tags=["[Shell] ls", "[Agent finished] child"])
+    p = env.plan()
+    assert by_id(p)["00000001"]["verdict"] == "unknown" and p["archive_agents"] == []
+
+
+def test_archive_reruns_the_whole_verdict_at_apply(env):
+    """The report turns BLOCKED between the plan and the archive call: apply re-reads it and archives nothing."""
+    rp = env.report("s1", ack=True)
+    env.worker(1, text="finished")
+    env.data.update(flip_after=1, flip_file=str(rp))                  # the 2nd `paseo logs` call (apply's) rewrites the report
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert "no longer verified done" in r.stdout
+    assert [c for c in env.calls() if c[:2] == ["agent", "archive"]] == []
+
+
+def test_send_refused_without_a_session(env, monkeypatch):
+    env.worker(1)
+    monkeypatch.delenv("PASEO_AGENT_ID")
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert [c for c in env.calls() if c[0] == "send"] == [] and "sourceless" in r.stdout
+
+
+def test_send_rechecks_status_under_the_lock(env):
+    env.worker(1)
+    # ls calls: inventory, plan, apply start (idle) ... then the re-read inside the lock (running)
+    idle, running = list(env.data["agents"]), [{**x, "status": "running"} for x in env.data["agents"]]
+    env.data["ls_seq"] = [idle, idle, idle, running]
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert [c for c in env.calls() if c[0] == "send"] == []
+
+
+def test_report_symlink_inside_the_reports_folder_is_refused(env):
+    env.report("s1", ack=True)
+    (env.reports / "unit-s2.md").symlink_to(env.reports / "unit-s1.md")
+    env.worker(2, text="finished")
+    p = env.plan()
+    assert not by_id(p)["00000002"]["verified_done"] and p["archive_agents"] == []
