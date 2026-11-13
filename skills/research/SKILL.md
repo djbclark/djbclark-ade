@@ -262,7 +262,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    folder and the lead moves it to `report.md` (seen 2026-10-09).
 3. Slow steps run in the background; the lead waits on notifications.
 4. Scientific tooling (`paper-search` CLI, arXiv MCP, `book-kb`) is listed
-   in `references/literature.md`. Institutional full text: `RESEARCH_PROXY_URL`
+   in `references/literature.md`. Institutional full text: `RESEARCH_EZPROXY_PREFIX` (old name `RESEARCH_PROXY_URL` still read)
    (the operator's value is in site-private memory, never here).
 5. Lists in the reply are numbered.
 6. **Preflight mechanics.** Print the probe brief with `python3 -I

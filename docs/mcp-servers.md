@@ -41,6 +41,17 @@ until this cutover and no longer holds a GitHub token. Considered and not built:
 keyless hosted developer index (the commercial API, off by djbclark's ruling of 2026-10-18); free-tier hosts (Cloud Run, Fly,
 Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs cross-provider networking.
 
+## Firecrawl search warnings that are harmless (2026-11-13)
+
+1. `firecrawl_search` answers `"warning":"Some tool discovery results are unavailable."` with `"tools":[]`. It comes from
+   the stock API in the `djbclark-fc-api` microVM (`ghcr.io/firecrawl/firecrawl:2.11.519`): every `/v2/search` also runs
+   Firecrawl's Alexandria data-provider discovery (firecrawl/firecrawl PRs 5231 and 5546), which needs Firecrawl's hosted
+   catalogue; the self-hosted node cannot reach it, so the leg fails (retried once) and the warning is added while the web results
+   are unaffected (router log: `POST /v2/search -> primary 200 3.0s`). It is not a router fault and nothing we use is degraded
+   (`firecrawl_find_tools` and `alexandria` scrapes are unavailable on this deployment, as they were).
+2. `Unsupported protocol version: 2026-07-28` in `firecrawl-mcp.log`: a client probing a newer MCP protocol version than the
+   firecrawl-mcp server accepts; the client falls back and the call succeeds.
+
 ## Hermes (added 2026-08-23)
 
 `hermes` (`~/.local/bin/hermes`) is the **Hermes Agent** — Nous Research's

@@ -92,20 +92,31 @@ from its introduction citing another paper.
    opened text. On the operator's machine the general web ladder is the client's own
    search and fetch tools (Jina `search_arxiv`/`extract_pdf`, archives); `bin/web-get` and its
    written ladder were deleted 2026-11-06, and the pause rule below still applies.
-6. **Institutional access.** If `RESEARCH_PROXY_URL` is set (an EZproxy-style
+6. **Institutional access.** If `RESEARCH_EZPROXY_PREFIX` (old name `RESEARCH_PROXY_URL` still read) is set (an EZproxy-style
    prefix such as `https://proxy.example.edu/login?url=`), the `fetch`
    subcommand retries a page that looks paywalled through the proxy
    (`--via-proxy` forces it), keeping the proxy's session cookie across its
    redirect chain, and writes `via_proxy: true` into the saved header; tag
    the evidence row `via-proxy`. Use it only after the open-access ladder
    (Unpaywall, PMC, arXiv, publisher OA) fails. Never store credentials in the run folder; never put
-   institution-specific recipes in this public file. Two cautions: a VPN
+   institution-specific recipes in this public file. Cautions: a VPN
    that egresses through a cloud gateway may not present the institution's
-   address to publishers, so confirm with an "Access provided by …" banner
-   in a browser before relying on it; and an EZproxy login needs a
-   browser session with the institution's cookie, so proxied reads go
-   through a browser tool, not `fetch`. Library licences usually forbid
-   bulk downloading, so read per paper and quote-sized.
+   address to publishers, so confirm with an "Access provided by …"
+   banner in a browser before relying on it. Libraries publish the same
+   three paths: an institutional IP address, the institution's VPN, or a
+   single-sign-on login through the proxy. What `fetch` can do depends on the
+   egress address. Observed once (2026-11-13, one institution, proxy prefix over
+   `https://`; the `http://` form only redirected): from an institutional
+   address the proxy asked for no login and set no cookie; a licensed host was
+   bounced straight to the publisher (which recognised the address, so no
+   proxied content was ever saved) and an unlicensed host got a short "has not
+   been configured for access" page. `fetch` refuses that page, and keeps the
+   direct copy when a retry returns a refusal or a login/paywall stub; the
+   wording is one EZproxy install's, so another site's page may slip through.
+   Off-network (not observed) the proxy is expected to demand the
+   single-sign-on login; do that read in a browser tool with the
+   institution's cookie. Library licences usually forbid bulk
+   downloading, so read per paper and quote-sized.
 
 ## Reporting extras for literature work
 

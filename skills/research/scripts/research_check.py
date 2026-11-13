@@ -2,7 +2,7 @@
 """Mechanical checks for a `research` run folder. Standard library only.
 
     research_check.py fetch  <source_id> <url> <run> [--via-proxy]
-                                                       save sources/<source_id>.txt; with RESEARCH_PROXY_URL set
+                                                       save sources/<source_id>.txt; with RESEARCH_EZPROXY_PREFIX set
                                                        (EZproxy-style prefix) a paywalled page is retried via the proxy;
                                                        prints the HTTP status and final URL of every hop
     research_check.py quotes <run> [--no-update]        every quote occurs in its saved source
@@ -188,15 +188,46 @@ def titles_match(a: str, b: str) -> bool:
 
 PAYWALL_RE = re.compile(r"buy (this )?article|purchase (pdf|access)|access through your institution|get access|rent this article", re.I)
 ACCEPT = "text/html,application/pdf,text/plain;q=0.9,*/*;q=0.5"
+# EZproxy answers HTTP 200 with this page for a host the library has no stanza for (2026-11-13: an arXiv page
+# proxied from an institutional address saved as "via proxy" with 160 words of this text).
+PROXY_REFUSED_RE = re.compile(r"has\s+not\s+been\s+configured\s+for\s+access", re.I)
+
+
+REFUSED_STUB = (b"has not been configured for access", "text/html", 0, "")
+
+
+def proxy_prefix() -> str:
+    """The EZproxy-style prefix: RESEARCH_EZPROXY_PREFIX, else the old name RESEARCH_PROXY_URL (renamed 2026-11-13
+    because Hyades' Firecrawl API uses RESEARCH_PROXY_URL for something else; shells opened before the rename have the old one)."""
+    return os.environ.get("RESEARCH_EZPROXY_PREFIX") or os.environ.get("RESEARCH_PROXY_URL") or ""
+
+
+def proxy_stub(body: bytes) -> bool:
+    """A proxied body that is a login/paywall stub, not content: a PDF never is; HTML is under 200 words, or under 1000
+    words and carries paywall wording. A long article that mentions 'get access' is content."""
+    if body[:5] == b"%PDF-":
+        return False
+    text = html_to_text(body.decode("utf-8", "replace"))
+    words = len(text.split())
+    return words < 200 or (words < 1000 and bool(PAYWALL_RE.search(text)))
+
+
+def proxy_refused(body: bytes) -> bool:
+    """True for a short HTML page carrying EZproxy's refusal wording (one install's wording: other sites
+    customise it, so a miss falls back to the old behaviour). Never true for a PDF or an article-sized page."""
+    if body[:5] == b"%PDF-":
+        return False
+    text = html_to_text(body.decode("utf-8", "replace"))
+    return len(text.split()) < 300 and bool(PROXY_REFUSED_RE.search(text))
 
 
 def fetch_via_proxy(url: str) -> tuple[bytes, str, int, str]:
-    """Fetch through an EZproxy-style prefix (RESEARCH_PROXY_URL). The first request
+    """Fetch through an EZproxy-style prefix (RESEARCH_EZPROXY_PREFIX). The first request
     takes the login redirect and collects the session cookie; the second one, with
     the cookie, is redirected straight to the proxied content. Every hop's HTTP
     status and final URL is printed (a worker could not tell a proxied 200 from a
     hand-off page before 2026-10-09)."""
-    prefix = os.environ["RESEARCH_PROXY_URL"]
+    prefix = proxy_prefix()
     body, ctype, status, final = http_get(prefix + url, accept=ACCEPT)
     print(f"proxy hop: HTTP {status} {final[:140]}", file=sys.stderr)
     for _ in range(2):
@@ -209,7 +240,10 @@ def fetch_via_proxy(url: str) -> tuple[bytes, str, int, str]:
              or re.search(r"""http-equiv=["']?refresh["']?[^>]*url=([^"'>]+)""", head, re.I))
         if not m:
             break
-        body, ctype, status, final = http_get(html.unescape(m.group(1)), accept=ACCEPT)
+        hop = urllib.parse.urljoin(final, html.unescape(m.group(1)))
+        if urllib.parse.urlsplit(hop).scheme not in ("http", "https"):
+            die("proxy hand-off page points at a non-http(s) address; refusing to follow it")
+        body, ctype, status, final = http_get(hop, accept=ACCEPT)
         print(f"proxy hop: HTTP {status} {final[:140]}", file=sys.stderr)
     return body, ctype, status, final
 
@@ -231,16 +265,26 @@ def cmd_fetch(source_id: str, url: str, run: Path, via_proxy: bool = False) -> i
     out = out_dir / f"{source_id}.txt"
     proxied = False
     try:
-        if via_proxy and os.environ.get("RESEARCH_PROXY_URL"):
+        if via_proxy and proxy_prefix():
             body, ctype, status, final = fetch_via_proxy(url)
+            if proxy_refused(body):
+                die("the proxy answered HTTP 200 but refused the host (it is not in the library's licence list); "
+                    "nothing saved. Fetch it directly.")
             proxied = True
         else:
             body, ctype, status, final = http_get(url, accept=ACCEPT)
             print(f"direct: HTTP {status} {final[:140]}", file=sys.stderr)
-            if os.environ.get("RESEARCH_PROXY_URL") and looks_paywalled(body, ctype, url):
-                print("direct fetch looks paywalled or empty; retrying through RESEARCH_PROXY_URL", file=sys.stderr)
-                body, ctype, status, final = fetch_via_proxy(url)
-                proxied = True
+            if proxy_prefix() and looks_paywalled(body, ctype, url):
+                print("direct fetch looks paywalled or empty; retrying through the proxy prefix", file=sys.stderr)
+                try:
+                    pbody, pctype, pstatus, pfinal = fetch_via_proxy(url)
+                except SystemExit:
+                    pbody, pctype, pstatus, pfinal = REFUSED_STUB  # hop refused: keep the direct copy
+                if proxy_refused(pbody) or proxy_stub(pbody):
+                    print("proxy refused the host or returned a login/paywall stub; keeping the direct fetch", file=sys.stderr)
+                else:
+                    body, ctype, status, final = pbody, pctype, pstatus, pfinal
+                    proxied = True
     except urllib.error.HTTPError as exc:
         die(f"fetch failed: HTTP {exc.code} {exc.reason} for {exc.url}")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
