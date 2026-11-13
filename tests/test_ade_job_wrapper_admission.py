@@ -451,9 +451,11 @@ def test_killed_before_the_unload_leaves_a_pending_row_that_the_next_run_repairs
     ledger = S.load_jobs_ledger(ld.state, env=ld.env)
     ledger["entries"]["deadline-sweep"] = {**prior_entry, "status": "pending", "artifact_hash": "f" * 64}
     S.save_jobs_ledger(ledger, ld.state, env=ld.env)
+    _drift(root)   # the render differs again, so only a repaired (committed, owned) row lets the reload go through
     rows, rc = _reconcile(ld, root, catalog)
-    assert rc == 0 and any(r["action"] == "recover" for r in rows), rows
-    assert _entry(ld)["status"] == "committed" and _entry(ld)["artifact_hash"] == prior_entry["artifact_hash"]
+    assert rc == 0 and any(r["action"] == "recover" for r in rows) and any(r["action"] == "installed" for r in rows), rows
+    assert _entry(ld)["status"] == "committed" and _entry(ld)["artifact_hash"] != prior_entry["artifact_hash"]
+    assert b"<integer>120</integer>" in plist.read_bytes()
     assert not (ld.state / "admission" / f"{LABEL}.recovery.json").exists() and ld.loaded()
 
 
