@@ -19,7 +19,7 @@ options (before or after the subcommand):
   --set KEY=VALUE       fill a placeholder, literally as written in the plist (__STATE__=..., @TARGET@=...); repeatable
   --dry-run             install/uninstall: print the artifacts and commands, change nothing;
                         reconcile: plan only (default for reconcile when --yes is absent)
-  --yes                 reconcile: execute only admitted writes and write jobs.json; today that is launchd only (an absent-job create+bootstrap, or a bootstrap of an unloaded plist that byte-matches the render); loaded jobs, other files, every removal, systemd/cron and paseo steps defer (exit 6)
+  --yes                 reconcile: execute only admitted writes and write jobs.json; today that is launchd only (an absent-job create+bootstrap, or a bootstrap of an unloaded plist that byte-matches the render); a LOADED job is reloaded or removed only when its installed plist routes through bin/ade-job-run and is provably ADE's (W21c; a run in flight defers it); other loaded jobs, other files, removals that are not so, systemd/cron and paseo steps defer (exit 6)
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because
@@ -102,7 +102,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     _common(ap, top=True)
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
-    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None),
+    for name, arg, nargs in (("backend", None, None), ("render", "plist", None), ("install", "plist", None), ("migrate-wrapper", "plist", None),
                              ("uninstall", "label", None), ("status", "labels", "*"),
                              ("list", None, None), ("diff", None, None), ("reconcile", None, None)):
         sp = sub.add_parser(name)
@@ -309,8 +309,18 @@ def main(argv: list[str] | None = None) -> int:
             if not a.dry_run:
                 print(f"ade-sched: installed {job.label} on {r.backend}", file=sys.stderr)
             return 0
+        if a.cmd == "migrate-wrapper":
+            job = ade_sched.Job.from_plist(a.plist, _subst(a), ade=a.ade)
+            r = ade_sched.render(job, ade_sched.detect(backend))
+            if r.backend != "launchd":
+                raise ade_sched.SchedError(ade_sched.EX_USAGE, "migrate-wrapper is for launchd jobs")
+            if a.dry_run:
+                print(f"# migrate {job.label}: refuse unless idle, then bootout, write, bootstrap under the canonical lock", file=sys.stderr)
+                return 0
+            print(f"ade-sched: {ade_sched.migrate_wrapper_launchd(job, next(iter(r.files.values())))} {job.label}", file=sys.stderr)
+            return 0
         if a.cmd == "uninstall":
-            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate)
+            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade)
             if not a.dry_run:
                 print(f"ade-sched: {'removed' if found else 'not installed:'} {a.label}", file=sys.stderr)
             return 0

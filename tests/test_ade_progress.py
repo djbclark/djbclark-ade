@@ -473,7 +473,8 @@ def test_no_model_call_and_only_native_verbs(e):
 def test_plist_template_and_inventory_row():
     d = plistlib.loads((ROOT / "config" / "launchd" / "com.djbclark.ade-progress.plist").read_bytes())
     assert d["Label"] == "com.djbclark.ade-progress"
-    assert d["ProgramArguments"] == ["__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
+    assert d["ProgramArguments"] == ["__ADE__/bin/ade-job-run", "--lock-dir", "__ADMISSION__", "com.djbclark.ade-progress", "--",
+                                     "__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
     # slice 1b: inventoried as an optional row; chosen = true since 2026-11-13, so doctor expects the label
     rows = [r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
             if r["name"] == "ade-progress"]

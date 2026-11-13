@@ -303,7 +303,7 @@ def test_install_escapes_paths_in_the_plist(env, tmp_path):
         (REPO / "config/launchd/com.djbclark.pr-policy.plist").read_text())
     p = env("install", "--backend", "launchd", "--dry-run", "--ade", str(ade))
     assert p.returncode == 0, p.stderr
-    assert plist_of(p.stdout)["ProgramArguments"][0] == str(ade.resolve() / "bin/pr-policy")
+    assert plist_of(p.stdout)["ProgramArguments"][5] == str(ade.resolve() / "bin/pr-policy")   # [0:5] is the W21c wrapper
 
 
 def test_a_token_that_is_not_one_printable_word_is_refused_unechoed(env, tmp_path):
@@ -458,7 +458,9 @@ def test_install_dry_run_renders_the_template(env):
     assert not _PLACEHOLDER_LEFT.search(p.stdout), p.stdout
     pl = plist_of(p.stdout)
     assert pl["Label"] == "com.djbclark.pr-policy"
-    assert pl["ProgramArguments"] == [str(REPO / "bin/pr-policy"), "apply", "--yes", "--notify", "--quiet"]
+    pa = pl["ProgramArguments"]
+    assert pa[:2] == [str(REPO / "bin/ade-job-run"), "--lock-dir"] and os.path.isabs(pa[2]) and pa[2].endswith("/admission")
+    assert pa[3:] == ["com.djbclark.pr-policy", "--", str(REPO / "bin/pr-policy"), "apply", "--yes", "--notify", "--quiet"]
     assert pl["EnvironmentVariables"]["PR_POLICY_STATE_DIR"] == str((env.tmp / "state").resolve())
 
 

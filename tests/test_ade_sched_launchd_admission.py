@@ -52,8 +52,19 @@ def write(text, *p):
     open(os.path.join(root, *p), "w").write(text)
 cmd = argv[0]
 label = argv[1].rsplit("/", 1)[-1] if len(argv) > 1 else ""
+if flag("foreign_on", cmd):   # another (non-ADE) writer replaces/edits the plist while launchctl runs, after the writer hashed it
+    tgt = (os.path.basename(argv[2])[:-len(".plist")] if cmd == "bootstrap" and len(argv) > 2 else label)
+    target = os.path.join(os.environ["FAKE_AGENTS"], tgt + ".plist")
+    how = read("foreign_on", cmd)
+    drop("foreign_on", cmd)
+    if how == "edit":
+        open(target, "w").write("<plist><!-- foreign --></plist>")
+    else:
+        open(target + ".foreign", "w").write("<plist><!-- foreign --></plist>"); os.replace(target + ".foreign", target)
 if flag("fail", cmd):
     sys.stderr.write("fake failure\n"); sys.exit(int(read("fail", cmd) or 1))
+if flag("fail_once", cmd):   # fail the next call of this verb only
+    drop("fail_once", cmd); sys.stderr.write("fake failure once\n"); sys.exit(5)
 if cmd == "print":
     if not flag("loaded", label):
         n = int(read("load_after_absent_print") or 0)   # "the Nth not-loaded answer is followed by an outside loader"
@@ -68,6 +79,13 @@ if cmd == "print":
     print(f"{argv[1]} = {{")
     print("\tactive count = 1")
     print(f"\tstate = {read('state', label) or 'not running'}")
+    pth = read("path", label) or (os.path.join(os.environ["FAKE_AGENTS"], label + ".plist") if os.environ.get("FAKE_AGENTS") else None)
+    if pth: print(f"\tpath = {pth}")
+    a = read("args", label)   # the LOADED definition, recorded at bootstrap (launchd never re-reads an edited plist)
+    if a:
+        print(f"\tprogram = {a.splitlines()[0]}"); print("\targuments = {")
+        for x in a.splitlines(): print("\t\t" + x)
+        print("\t}")
     if flag("pid", label): print(f"\tpid = {read('pid', label)}")
     print("\tresource coalition = {")
     print("\t\tstate = active")   # nested decoy: only the service block's own fields count
@@ -79,18 +97,25 @@ elif cmd == "bootout":
     # killing running work is the one thing admission must never cause
     if read("pid", label):
         write("1", "killed", label)
-    drop("loaded", label)
+    drop("loaded", label); drop("args", label)
+    if flag("sigterm_after_bootout"):   # the reconcile process is terminated between bootout and bootstrap
+        import signal; os.kill(os.getppid(), signal.SIGTERM); import time; time.sleep(5)
 elif cmd == "bootstrap":
     base = os.path.basename(argv[2])[:-len(".plist")]
     if flag("loaded", base):
         sys.stderr.write("Bootstrap failed: 5: Input/output error\n"); sys.exit(5)
     touch("loaded", base)
+    import plistlib
+    try: pa = plistlib.load(open(argv[2], "rb")).get("ProgramArguments") or []
+    except Exception: pa = []
+    write("\n".join(pa), "args", base)
 sys.exit(0)
 """
 
 
 @pytest.fixture
-def ld(tmp_path):
+def ld(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "canonical_admission_dir", lambda: tmp_path / "jobs-state" / "admission")   # the one lock dir, injected
     root = tmp_path / "ld"
     root.mkdir()
     bin_dir = tmp_path / "fakebin"
@@ -105,6 +130,7 @@ def ld(tmp_path):
         "HOME": str(tmp_path / "home"),
         "USER": "tester",
         "FAKE_LD": str(root),
+        "FAKE_AGENTS": str(tmp_path / "agents"),
         "ADE_TIMEZONE": "America/New_York",
         "ADE_SCHED_LAUNCHCTL": str(launchctl),
         "ADE_SCHED_LAUNCH_AGENTS": str(tmp_path / "agents"),
@@ -669,7 +695,9 @@ def test_every_native_removal_defers_and_keeps_file_and_ledger(ld, loaded, hash_
     rows, rc = _reconcile_removal(ld, root, catalog, label)
     assert rc == 6 and any(r["action"] == "deferred" for r in rows), rows
     assert plist.exists() and "skillopt-sleep" in _entries(ld)
-    assert ld.loaded(label) is loaded and ld.verbs() == [] and not ld.killed(label)
+    # W21c: the adapter may now read `print` to look for wrapper routing, but a job that does not route through
+    # ade-job-run still gets no mutating call at all.
+    assert ld.loaded(label) is loaded and set(ld.verbs()) <= {"print"} and not ld.killed(label)
 
 
 def test_adopts_a_loaded_low_level_install_without_any_launchctl_mutation(ld):
@@ -766,8 +794,18 @@ def test_ade_install_apply_requests_the_native_adapter(ld, monkeypatch):
 
 def test_ade_sched_cli_reconcile_yes_uses_the_native_adapter(ld):
     root = _mini_catalog(ld.tmp)
+    # a child process is not reached by the fixture's monkeypatch: patch the canonical lock directory (never the operator's real
+    # one) before the CLI script runs, so its lock files land in the test's tmp dir
+    child = (
+        "import runpy, sys, pathlib; sys.path[:0] = [sys.argv[1]]\n"
+        "import ade_sched as S\n"
+        "S.canonical_admission_dir = lambda: pathlib.Path(sys.argv[2])\n"
+        "script = sys.argv[3]; sys.argv = ['ade-sched'] + sys.argv[4:]\n"
+        "runpy.run_path(script, run_name='__main__')\n"
+    )
     proc = subprocess.run(
-        [sys.executable, "-I", str(BIN / "ade-sched"), "--root", str(root), "--ade", str(root), "--backend", "launchd",
+        [sys.executable, "-c", child, str(BIN), str(ld.tmp / "jobs-state" / "admission"), str(BIN / "ade-sched"),
+         "--root", str(root), "--ade", str(root), "--backend", "launchd",
          "reconcile", "--yes", "--json", "--name", "deadline-sweep"],
         env=ld.env, capture_output=True, text=True, timeout=120,
     )

@@ -2,6 +2,7 @@
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -80,3 +81,18 @@ def _fresh_relay_links():
     """No test inherits another's first-contact state: relay.py's footer and the link ledger depend on it (2026-10-25)."""
     Path(os.environ["RELAY_LINKS_FILE"]).unlink(missing_ok=True)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_admission_dir(monkeypatch, tmp_path_factory):
+    """ade_sched locks launchd jobs in ONE canonical per-user directory taken from the password database (W21c, review F4 of #622),
+    no env knob. No in-process test may lock or write the operator's real one (a live wrapped job would skip a run): every test gets
+    its own, and a test that needs a known directory patches `canonical_admission_dir` itself. A CHILD process is not reached by
+    this: it must patch the function before it runs (see the CLI test in test_ade_sched_launchd_admission.py)."""
+    mod = sys.modules.get("ade_sched")
+    if mod is not None:
+        d = tmp_path_factory.mktemp("admission")
+        real = mod.canonical_admission_dir
+        patched = lambda: d   # noqa: E731
+        patched.real = real   # the one test of the real derivation reaches it here
+        monkeypatch.setattr(mod, "canonical_admission_dir", patched)

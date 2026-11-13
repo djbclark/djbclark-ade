@@ -37,7 +37,8 @@ def _script(path: Path, body: str) -> Path:
 
 
 @pytest.fixture
-def fake(tmp_path):
+def fake(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "canonical_admission_dir", lambda: tmp_path / "admission")   # never the real ~/.local/state lock dir
     """Fake launchctl/systemctl/loginctl/crontab; env knobs: FAKE_LINGER, FAKE_SD_STATE, FAKE_SD_VERSION, FAKE_CRONTAB_FAIL,
     FAKE_BOOTSTRAP_FAIL. Every call is logged as `name args...` in calls.log."""
     b = tmp_path / "fakebin"
@@ -55,7 +56,7 @@ def fake(tmp_path):
             'if [ "$1" = bootout ]; then lab="${2##*/}"; rm -f "$LOADED/$lab"; exit 0; fi\n'
             'if [ "$1" = print ]; then\n'
             '  if [ -n "$FAKE_PRINT_RC" ]; then exit "$FAKE_PRINT_RC"; fi\n'
-            '  lab="${2##*/}"; if [ -f "$LOADED/$lab" ]; then exit 0; fi; exit 1\n'
+            '  lab="${2##*/}"; if [ -f "$LOADED/$lab" ]; then exit 0; fi; echo "Could not find service" >&2; exit 113\n'
             'fi\n'
             'exit 0\n')
     _script(b / "systemctl", f'echo "systemctl $*" >> "{log}"\n'
@@ -224,7 +225,9 @@ def test_net_resume_template_quota_stays_dry_run(lead, fake, tmp_path):
     rendered = S.render(j, "launchd", env=fake.env)
     doc = plistlib.loads(next(iter(rendered.files.values())).encode())
     argv = doc["ProgramArguments"]
-    assert argv == [f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota"]
+    assert argv == [f"{tmp_path.resolve()}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],   # W21c: every launch is wrapped
+                    "com.djbclark.ade-net-resume", "--",
+                    f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota"]
     assert "--apply" not in argv
 
 
@@ -236,7 +239,8 @@ def test_unfilled_placeholder_is_exit_2():
 
 def test_default_subst_fills_ade_and_home(tmp_path):
     j = S.Job.from_plist(REPO / "config/launchd/com.djbclark.deadline-sweep.plist", {"__STATE__": "/s"}, ade=tmp_path)
-    assert j.argv[0] == f"{os.path.realpath(tmp_path)}/bin/deadline"
+    assert list(j.argv[:6]) == [f"{os.path.realpath(tmp_path)}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],
+                                "com.djbclark.deadline-sweep", "--", f"{os.path.realpath(tmp_path)}/bin/deadline"]
     assert j.env["PATH"].startswith(f"{os.environ.get('HOME') or Path.home()}/.local/bin:")
 
 
@@ -652,10 +656,15 @@ def test_launchd_install_status_uninstall(fake):
     assert d["Label"] == "t.job" and d["StartInterval"] == 300 and "KillMode" not in d
     assert stat.S_IMODE(p.stat().st_mode) == 0o600 and not list(fake.agents.glob(".*"))
     uid = os.getuid()
-    assert fake.calls() == [f"launchctl bootout gui/{uid}/t.job", f"launchctl bootstrap gui/{uid} {p}"]
+    assert fake.calls() == [f"launchctl print gui/{uid}/t.job",   # F4: the loaded-job proof comes first (not loaded here)
+                            f"launchctl bootout gui/{uid}/t.job", f"launchctl bootstrap gui/{uid} {p}"]
     st = S.status("t.job", "launchd", env=fake.env)
     assert st.installed and st.active
     assert S.installed_labels("launchd", env=fake.env) == ["t.job"]
+    with pytest.raises(S.SchedError, match="migrate-wrapper"):   # F4: a loaded job that does not run through the canonical wrapper
+        S.uninstall("t.job", "launchd", env=fake.env)
+    assert p.exists()
+    (fake.tmp / "launchd-loaded" / "t.job").unlink()            # ... until it is no longer loaded
     assert S.uninstall("t.job", "launchd", env=fake.env) is True and not p.exists()
     assert S.uninstall("t.job", "launchd", env=fake.env) is False
 

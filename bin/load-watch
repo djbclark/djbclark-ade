@@ -2469,7 +2469,7 @@ def cmd_install(a):
         over["agents_dir"] = os.environ["LW_LAUNCH_AGENTS"]
     try:
         if a.cmd == "uninstall":
-            ade_sched.uninstall(LABEL, a.backend, dry_run=a.dry_run, **over)
+            ade_sched.uninstall(LABEL, a.backend, dry_run=a.dry_run, ade=getattr(a, "ade", None), **over)
             return 0
         if not a.dry_run:
             STATE_DIR.mkdir(parents=True, exist_ok=True)

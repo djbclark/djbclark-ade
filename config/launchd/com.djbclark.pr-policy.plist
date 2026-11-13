@@ -7,6 +7,7 @@
   <key>Label</key><string>com.djbclark.pr-policy</string>
   <key>ProgramArguments</key>
   <array>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.pr-policy</string><string>--</string>
     <string>__ADE__/bin/pr-policy</string>
     <string>apply</string>
     <string>--yes</string>

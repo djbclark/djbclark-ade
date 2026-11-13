@@ -444,19 +444,73 @@ admission enables exactly the writes that cannot kill or overwrite under concurr
    check-and-overwrite atomic): it defers untouched, as does any foreign, replaced, non-UTF-8 or non-regular file.
 3. **Adoption** of a loaded job whose plist byte-matches the render stays a ledger-only record (`adopted`), with no
    `launchctl` call and no admission (nothing is mutated on the host).
-4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason). **Every removal** defers
-   before any `launchctl` call: an unlink cannot be compare-and-swap.
-5. **Renames and retirements** of launchd jobs stay deferred (exit 6): the removal of the old label defers, and the same
-   logical job's new-label install then defers behind it, until the follow-up below exists.
+4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason) **unless it is
+   wrapper-routed and provably ADE's**; see "Wrapper-routed jobs (W21c)" below. A removal defers unless the same proof holds.
+5. **Renames and retirements** of launchd jobs defer (exit 6) unless the old label is wrapper-routed and provably ADE's
+   (then its removal runs under the lock first and the new label installs as an absent job); a removal that defers
+   keeps the same logical job's new-label install deferred behind it.
 6. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
    and refused again before install. A blocked logical row (missing or unrenderable source, label mismatch) keeps its
    current and prior identities: `plan_reconcile` emits no removal for them (this protects low-level callers too).
 
 The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal reason.
 
-**Follow-up that unlocks the rest** (loaded-job reloads, replacements, removals): an ADE job wrapper that takes a shared
-admission lock on every run, with reconcile holding it exclusive, plus a writer ownership transaction so every definition
-writer shares the check-and-write. **Known limits:** a concurrent external loader can still bootstrap an absent or
+### Wrapper-routed jobs (W21c, 2026-11-13)
+
+Every ADE launchd job in `config/launchd/com.djbclark.*.plist` now starts through `bin/ade-job-run --lock-dir __ADMISSION__ LABEL -- COMMAND...`
+(`__ADMISSION__` is filled with the ONE canonical lock directory, `<real home>/.local/state/djbclark-ade/admission` from `pwd.getpwuid(os.getuid()).pw_dir` and never from `$HOME`, `XDG_STATE_HOME` or `ADE_JOBS_STATE_DIR` (`canonical_admission_dir`; tests inject it by monkeypatching that function); it is an argv value of the loaded job; `dev.herdr.server`, a KeepAlive server with a hard-coded path, is not migrated). Each run takes a **shared**,
+non-blocking `flock` on `<lock dir>/LABEL.lock` and keeps it for the whole run (the lock descriptor is
+inherited by the exec'd command, so it lives as long as the command; a child started with `close_fds=True` does not inherit it). If it cannot, because
+reconcile holds the lock exclusively, it logs one line to the job's stderr and exits 0 without running the command (launchd
+tries again on its own schedule). If the lock cannot be used for any other reason the command is not run (exit 75).
+
+For a **loaded** job, `launchd_admission(wrapped=...)` admits a reload or a removal only when all of these hold, each read
+at admission: (a) the INSTALLED plist bytes parse and route every launch through the wrapper (`ProgramArguments` is
+`[<abs>/ade-job-run, "--lock-dir", <abs dir>, LABEL, "--", command...]`, an existing executable wrapper, no `Program` key; the render is not
+trusted); (b) the ledger row is ADE's, `committed` (for a reload) or `committed`/`pending-remove` (for a removal), backend
+launchd, with the artifact hash of those very bytes; (c) `launchctl print` says it was loaded from that plist (`path =`) **and the LOADED definition is the wrapped one**: its
+`program`/`arguments` start with the same `[<ade-job-run>, --lock-dir, DIR, LABEL, --]`, and a printed `program` is required (launchd never re-reads an edited plist, so a
+file written by `install --no-activate` or a failed bootstrap can show the wrapper while the old unwrapped definition runs);
+(d) **the lock identity is the LOADED job's own argv** (review F1 of #622): the `--lock-dir DIR` that `launchctl print` shows for the
+loaded definition must equal the directory reconcile locks (`admission_dir`); the disk plist's `EnvironmentVariables`, a domain
+environment or a later edit are not proof, and a disagreement defers; (e) **the wrapper is positively identified** (review F2): the
+loaded `program` resolves (`realpath`) to `<ADE root>/bin/ade-job-run` of the checkout reconcile runs from, its bytes equal that
+checkout's `bin/ade-job-run`, and running it directly (no shell, 10 s timeout) with `--admission-protocol` prints `v1`
+(`WRAPPER_PROTOCOL`). A stale or custom executable of that name, or a wrapper edited since the job was loaded, defers; reinstall the job to migrate it.
+It then takes the label's lock **exclusive, non-blocking**: held by a run means busy, so the step defers (never wait, never
+kill); acquired means no run is active and none can start. The lock stays held across the whole mutation and is released
+only after the ledger commit.
+
+Mutation order (`reload_launchd_locked`): a private copy of the prior bytes and a durable recovery record in
+`<real home>/.local/state/djbclark-ade/admission/` (the canonical lock directory), then `bootout` (with proof it unloaded; if not, nothing changed and the step defers), the new
+bytes by atomic replace, `bootstrap`, read-back. A failure after the unload restores and bootstraps the **prior** bytes
+(`ReloadRolledBack`: the ledger keeps the old committed row and the run exits 1), or, if that also fails, keeps the record
+and exits 1. A SIGTERM, deadline kill or crash cannot run any cleanup, so the record is the guarantee: every `reconcile`
+first acts on records (`recover_launchd_records`; `--dry-run` lists them as `would-recover`): a loaded label clears a stale
+record; an unloaded label whose plist is still the prior (or the new) bytes is bootstrapped and its ledger row made
+committed for what is loaded; recovery acts only on a label some ADE launchd ledger row names; a plist that is neither is someone else's and is left alone (row `failed`, record kept).
+The lock is released only after the ledger commit, so the new definition's `RunAtLoad` run skips (exit 0) and the next run is at its `StartInterval`. A restore never overwrites a file that is neither the prior bytes nor the bytes this run wrote. A removal interrupted after the unlink (no plist, unloaded, ADE `pending-remove` row) is completed by the next run (the ledger row is dropped). Every ADE job now imports `ade_sched.py` from the shared checkout, so a broken checkout stops all of them (exit 1 or 127, not 75).
+**ADE writers serialize (review F3).** `install` and `uninstall` (launchd), `install_launchd_native`, the locked reload and removal and the recovery restore all take the label's admission lock **exclusive, non-blocking** around their check-and-write (`writer_lock`): a run in flight or another ADE writer makes them refuse (`SchedError` / `NativeDefer`, nothing written, no `bootout`). Under the lock every replace, unlink and restore re-reads the plist through one descriptor immediately before the syscall and compares its inode (`st_dev`/`st_ino`) and sha256 with the ones it hashed (`_guarded_replace`, `_guarded_unlink`): another inode or other bytes raise `ForeignWrite` and nothing is replaced or deleted. The `com.djbclark.ade-*` / ADE-catalog label namespace under `~/Library/LaunchAgents` is **reserved to ADE**: a non-ADE process writing there is outside the contract, and the residual window is the gap between that last read and the `rename`/`unlink` (and between our write and launchd's read of it). The `admission/` directory is never cleaned while jobs run: unlinking a held `LABEL.lock` lets reconcile lock a new inode and unload a live run. A recovery record that no ADE ledger row owns (or an unreadable one) fails every `--yes` run and every `--dry-run` until it is discarded by hand: delete `<real home>/.local/state/djbclark-ade/admission/LABEL.recovery.json` and `LABEL.prior.plist` (the environment does not move that directory); `ade-sched uninstall` of a label discards its record itself. **One lock identity (review F4).** The wrapper's rendered `--lock-dir`, reconcile, recovery and every low-level writer use `canonical_admission_dir()`; the caller's environment cannot move it, so two ADE writers can never lock one label in two places. Before any bootout, replace or unlink of a LOADED label, `ade-sched install`/`uninstall` also prove from `launchctl print` that the loaded job runs `ade-job-run --lock-dir <canonical> LABEL --` (the wrapper's realpath is `<ADE root>/bin/ade-job-run`, where the root is the explicitly selected `--ade` or else the checkout holding the running `ade_sched.py`, never unbound; this checkout's wrapper bytes; protocol v1) and refuse without writing otherwise (exit 1, naming `migrate-wrapper`). A LOADED, canonical job that is reinstalled goes through the same record-first reload as reconcile (prior copy, recovery record, restore on failure), and a new definition that would leave the wrapper is refused. `__ADMISSION__` cannot be set (`--set`, a catalog `set` row, `extra_subst`). A removal of an unloaded label re-asks launchd under the lock and defers if it was loaded meanwhile. Removal (`remove_launchd_locked`) re-hashes the file under the lock right before the unload, uses the same record while
+the job is loaded, and restores it if the unlink or read-back fails.
+
+**A job not routed through the wrapper keeps #619's deferral, so every existing install defers (exit 6) until it is
+migrated once, and low-level `install`/`uninstall` refuse it (exit 1).** Migration is the operator's call, at a quiet time:
+`bin/ade-sched migrate-wrapper PLIST [--ade DIR] [--set K=V]` (`migrate_wrapper_launchd`). It takes the canonical lock exclusive,
+refuses while `launchctl print` shows a pid or any state but `not running` (nothing changed), refuses a job that already runs
+through the canonical wrapper (use `install` or reconcile), then writes the recovery record, boots out, writes the new
+render, bootstraps and reads back; a failure restores the prior bytes. The one risk is a run of the OLD definition (it holds
+no lock) that starts between the idle read and the bootout: pick a quiet time. After it, reconcile adopts the file as the
+ledger's artifact and reloads it normally.
+
+`migrate-wrapper` refuses a new render that does not itself route through the canonical wrapper. **Jobs that are not wrapped by design**
+(`com.djbclark.load-watch`, `dev.herdr.server`, any non-catalog plist) therefore cannot be installed or uninstalled by `ade-sched`/`load-watch
+install` while LOADED: the refusal is the no-kill contract. An operator changes them with a manual `launchctl bootout gui/UID/LABEL` at a quiet
+time, then the ADE command; this is an open decision for the operator (PR #622): wrap load-watch's plist, or give unwrapped jobs a documented idle-only path.
+
+Not covered by the lock: a run launchd has spawned whose wrapper has not yet taken the shared lock when reconcile takes it
+(the wrapper has done no work, so the unload loses none); a writer that changes the plist between our byte-match and the
+write or unlink (the guarded re-read and inode check detect it except for the syscall gap);
+and a job that is not an ADE job. **Known limits:** a concurrent external loader can still bootstrap an absent or
 unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
 the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
 (`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; and, a limit that
