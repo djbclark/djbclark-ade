@@ -38,7 +38,14 @@ while disconnected. The scan may run out of budget before reaching every agent.
 Only the **last nonempty log line** can match the provider's explicit transient
 error table in the script. Antigravity recognizes the incident's exact system
 network error; Codex recognizes system stream-disconnect/request-send errors;
-Claude recognizes system connection/timeouts. Pi has testable classification
+Claude recognizes system connection/timeouts and, since 2026-11-13, the transient Cloudflare page
+`[System Error] Failed to authenticate. API Error: 403 Attention Required! | Cloudflare` (several agents stopped on it
+at once, ~10:15Z; the next prompt resumed each). That one line is the only auth-worded line exempt from the
+auth/403 skip, matched in full; a generic 403 or a plain "Failed to authenticate" is a real logout and is skipped.
+For Claude only, a trailing `Warning: claude.ai MCP servers blocked by enterprise policy: ...` line (and blank
+lines) after the error line is ignored when picking the deciding line. A persistent 403 (a real auth problem)
+is retried at most at the existing cap (two attempts per agent per hour, one per error event); further scans
+report it as `capped` until the hour rolls over. Pi has testable classification
 patterns but is held because its provider host depends on routing. Unknown
 errors and quota (1302/1308/429), auth, billing and refusal messages are skipped.
 Earlier quoted errors cannot authorize a send. Logs are treated as data; no

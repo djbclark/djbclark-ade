@@ -73,6 +73,54 @@ def test_provider_patterns(provider, line):
     assert M["transient"](provider, line)
 
 
+CF403 = "[System Error] Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"
+MCP_WARNING = "Warning: claude.ai MCP servers blocked by enterprise policy: claude.ai Gmail, claude.ai Context7"
+
+
+@pytest.mark.parametrize("logs", [CF403, "turn 1\n" + CF403, CF403 + "\n" + MCP_WARNING, CF403 + "\n\n" + MCP_WARNING + "\n"])
+def test_claude_cloudflare_403_is_resumed(logs):
+    assert M["transient"]("claude", logs)
+
+
+@pytest.mark.parametrize("provider,logs", [
+    ("claude", "[System Error] Failed to authenticate. API Error: 401 Invalid authentication credentials"),
+    ("claude", "[System Error] Failed to authenticate. API Error: 403 Forbidden"),
+    ("claude", "[System Error] Failed to authenticate."),
+    ("claude", CF403 + " quota"),
+    ("claude", CF403 + "\nA subsequent user turn"),
+    ("claude", CF403 + "\nWarning: something else"),
+    ("claude", MCP_WARNING),
+    ("claude", "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"),
+    ("codex", CF403),
+    ("antigravity", CF403),
+    ("codex", "[System Error] stream disconnected before completion\n" + MCP_WARNING),
+])
+def test_plain_auth_failure_never_resumed(provider, logs):
+    assert not M["transient"](provider, logs)
+
+
+def test_cloudflare_403_with_warning_scan_resumes_once_and_caps(fake):
+    data, scan, sent, _ = fake
+    data["agents"][CHILD]["Provider"] = "claude"
+    data["logs"] = "turn\n" + CF403 + "\n" + MCP_WARNING
+    assert scan() == 0
+    assert len(sent.read_text().splitlines()) == 1
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:59:59Z"  # a persistent 403: a new error event each time
+    assert scan() == 0
+    assert len(sent.read_text().splitlines()) == 2
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:59:58Z"
+    assert scan() == 0
+    assert len(sent.read_text().splitlines()) == 2  # the two-per-hour cap stops it
+
+
+def test_plain_auth_failure_scan_sends_nothing(fake):
+    data, scan, sent, _ = fake
+    data["agents"][CHILD]["Provider"] = "claude"
+    data["logs"] = "[System Error] Failed to authenticate. API Error: 401 Invalid authentication credentials\n" + MCP_WARNING
+    assert scan() == 0
+    assert not sent.exists()
+
+
 @pytest.mark.parametrize("line", [
     ERROR + " quota 1302", ERROR + " 1308", ERROR + " 429", ERROR + " auth failed",
     ERROR + " model refusal", "[System Error] quota exceeded", "[System Error] HTTP 401",

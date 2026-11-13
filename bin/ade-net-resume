@@ -25,11 +25,17 @@ CLI_TIMEOUT = 15
 RESERVE_MARGIN = 1
 
 PROMPT = "network outage over; continue from where you stopped, re-fetch first, same report path"
+# Claude's transient Cloudflare 403 page (real stop, 2026-11-13 ~10:15Z, several agents; the next prompt resumed each).
+# Exact wording only: a generic 403 or "Failed to authenticate" is a real logout and must never be resumed.
+CLAUDE_CLOUDFLARE_403 = (r"\[System Error\] Failed to authenticate\. API Error: 403 "
+                         r"Attention Required! \| Cloudflare")
+# Claude Code prints this unrelated warning after the stop line; it alone may trail the error line.
+CLAUDE_TRAILER = re.compile(r"Warning: claude\.ai MCP servers blocked by enterprise policy:.*")
 # Deliberately narrow: only the final rendered line, never a matching historical prompt.
 NETWORK = {
     "antigravity": (r"\[System Error\] There was a network issue connecting to the server, please try again\.",),
     "codex": (r"\[System Error\] (?:stream disconnected before completion|error sending request for url)",),
-    "claude": (r"\[System Error\] (?:Connection error\.|Request timed out\.)",),
+    "claude": (r"\[System Error\] (?:Connection error\.|Request timed out\.)", CLAUDE_CLOUDFLARE_403),
     "pi": (r"\[System Error\] (?:fetch failed|ECONNRESET|ETIMEDOUT)",),
 }
 HOSTS = {
@@ -119,10 +125,21 @@ def agent_id(value):
         raise ScanError("expected full agent UUID") from exc
 
 
-def transient(provider, logs):
+def final_lines(provider, logs):
+    """The rendered lines that decide a stop; Claude's trailing MCP-policy warning (and blanks) is not part of it."""
     lines = logs.strip().splitlines()
+    if provider == "claude":
+        while lines and (not lines[-1].strip() or CLAUDE_TRAILER.fullmatch(lines[-1].strip())):
+            lines.pop()
+    return lines
+
+
+def transient(provider, logs):
+    lines = final_lines(provider, logs)
     last = lines[-1].strip() if lines else ""
-    return bool(last and not DENIED.search(last) and any(
+    # The one DENIED exemption: the exact Cloudflare 403 line (it matches "403" and "auth" by wording alone).
+    cloudflare = provider == "claude" and re.fullmatch(CLAUDE_CLOUDFLARE_403, last)
+    return bool(last and (cloudflare or not DENIED.search(last)) and any(
         re.fullmatch(pattern, last) for pattern in NETWORK.get(provider, ())
     ))
 
@@ -220,18 +237,18 @@ class Scanner:
             text = item.get("text")
             if not isinstance(text, str):
                 raise ScanError("invalid assistant output")
-            if len(text.strip().splitlines()) == 1 and transient(provider, text):
+            if len(final_lines(provider, text)) == 1 and transient(provider, text):
                 continue  # The terminal system error is rendered as assistant text.
             # Only an unquoted, unfenced delivery line in the latest output counts.
             return done_line(text)
         return False
 
-    def signature(self, record, logs):
+    def signature(self, record, logs, provider=None):
         # UpdatedAt identifies the error event; timeline rendering can vary.
         updated = record.get("UpdatedAt")
         if not isinstance(updated, str) or not updated:
             raise ScanError("missing error event timestamp")
-        lines = logs.strip().splitlines()
+        lines = final_lines(provider, logs)
         if not lines:
             raise ScanError("error logs disappeared")
         line = lines[-1].strip()
@@ -594,7 +611,7 @@ class Scanner:
                         if self.delivered(aid, provider):
                             self.event(history, aid, "delivered")
                             continue
-                        signature = self.signature(record, logs)
+                        signature = self.signature(record, logs, provider)
                         attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
                         if (sum(e["time"] > time.time() - 3600 for e in attempts) >= 2
                                 or any(e.get("signature") == signature for e in attempts)):
@@ -611,7 +628,7 @@ class Scanner:
                         if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
                                 or fresh.get("Provider") != provider or not self.descendant(aid)
                                 or not self.recent_error(fresh) or self.delivered(aid, provider)
-                                or self.signature(fresh, self.cli("logs", aid)) != signature):
+                                or self.signature(fresh, self.cli("logs", aid), provider) != signature):
                             self.event(history, aid, "changed")
                             continue
                         # Reserve durably BEFORE the outward action. An uncertain send is never retried.
