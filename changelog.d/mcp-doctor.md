@@ -1,3 +1,3 @@
 ### Added
 
-- `ade-install doctor` reports whether Claude Code and Codex register the shared `firecrawl` and `basic-memory` MCP servers (`config/mcp-clients.toml`, `bin/ade_mcp_clients.py`): ok, or a warning with the exact fix command, observe-only (#633)
+- `ade-install doctor` / `just install-doctor` reports, per current TUI (the `bin/skill-everywhere` targets table), whether the shared MCP servers in `config/mcp-clients.toml` are registered in its config file and whether every skill is linked (`bin/ade_client_wiring.py`): ok, or a warning with the exact fix command; observe-only, TUIs without readable MCP config report unknown (#633)

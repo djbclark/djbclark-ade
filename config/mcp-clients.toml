@@ -1,17 +1,18 @@
-# Shared MCP servers and the agent clients that must register them
-# (docs/mcp-servers.md). Read by `ade-install doctor` (bin/ade_mcp_clients.py),
-# which only OBSERVES each client's config file and prints the fix command;
-# it never edits ~/.claude.json or ~/.codex/config.toml (standing order 11).
-# Client ids: claude-code (user-scope `mcpServers` in ~/.claude.json),
-# codex (`[mcp_servers.<id>]` in ~/.codex/config.toml).
+# Shared MCP servers and the TUIs that must register them (docs/mcp-servers.md).
+# Read by `ade-install doctor` (bin/ade_client_wiring.py), which only OBSERVES each
+# TUI's config file and prints the fix; it never edits ~/.claude.json,
+# ~/.codex/config.toml, ~/.cursor/mcp.json or ~/.hermes/config.yaml (order 11).
+# `clients` are TUI ids from the `targets` table in bin/skill-everywhere, the one
+# TUI roster (a client not in that table fails the doctor check). Pi and Grok Bot
+# have no file-readable MCP config here and report "unknown" if ever listed.
 schema_version = 1
 
 [[server]]
 id = "firecrawl"
 url = "http://127.0.0.1:18804/mcp"
-clients = ["claude-code", "codex"]
+clients = ["claude", "codex"]
 
 [[server]]
 id = "basic-memory"
 url = "http://127.0.0.1:18796/mcp"
-clients = ["claude-code", "codex"]
+clients = ["claude", "codex", "cursor-agent", "hermes"]
