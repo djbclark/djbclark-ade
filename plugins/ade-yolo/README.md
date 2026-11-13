@@ -19,6 +19,18 @@ requests (with no UI-prompting Pi extension installed: a Pi `extension_ui_reques
 unmarked modes refuse. A Pi catalog that is not enabled/ready gets no exemption. The
 allowlist (`UNATTENDED_BY_CONSTRUCTION`) is not generalised to other providers. Retired omp/OpenCode routes are not restored.
 
+**Attach-only providers (2026-11-13):** `herdr-generic` and `herdr-omp` (the herdr-harness plugin; its opt-in shell binding
+is part of `herdr-generic`) ATTACH to a process already running in a Herdr pane. Paseo starts nothing and cannot set a
+permission mode, so the pane's own launch decides it and ade-yolo's premise does not apply. They are a separate exact-id
+allowlist, `ATTACH_ONLY`, not `UNATTENDED_BY_CONSTRUCTION` (a Claude pane in default mode does prompt) and not generalised to
+unknown or modeless providers (Hermes and the rest still refuse). Create passes unchanged and unstamped, with no catalog
+lookup; resume, refresh and import pass. Where the open hook can read the agent snapshot, the resume identity check (id and
+provider) still applies and refuses a mismatch; an import has no agent record yet, so an unreadable snapshot is allowed for
+this provider set only. Each exempted create/open logs `ade-yolo: <provider>: ... attach-only: mode decided by the pane's
+launch`. The id is the Paseo provider id, which only routes to that attach provider: a Claude or Codex create cannot use it
+to skip the gate, because nothing is launched under it. No `ade-yolo.skip` metadata is involved. Reported by agent 5fd0bef1
+(paseo4herdr): every Herdr chat open and session import was refused.
+
 `agent.open.before` checks saved mode/control evidence on resume, refresh and
 import. **Drift** (evidence present and contradicting) and **missing evidence** refuse only for agents
 this plugin created: `agent.create.before` stamps those with metadata `ade-yolo.applied`. An agent without

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyYoloToCreateRequest, planYoloPatch, assertResumeConfig } from "./yolo-lib.mjs";
+import { ATTACH_ONLY, applyYoloToCreateRequest, planYoloPatch, assertResumeConfig } from "./yolo-lib.mjs";
 import { registerAdeYoloHooks } from "./hook.mjs";
 const row = (provider="claude", ids=["auto","bypassPermissions"]) => ({provider,enabled:true,status:"ready",modes:ids.map(id=>({id}))});
 const cfg = {provider:"claude/sonnet",modeId:"auto",cwd:"/repo"};
@@ -153,4 +153,51 @@ test("retired providers still refuse resume even as legacy agents without eviden
   const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
   const paseo={agents:{ref:()=>({refresh:async()=>({agent:{id:"a",provider:"omp"}})})}};
   await assert.rejects(hooks["agent.open.before"]({request:{...request,reason:"resume",purpose:"interactive"}},{paseo}),/retired/);
+});
+
+// Attach-only providers (herdr-harness): Paseo launches nothing and cannot set a mode (report 2026-11-13, agent 5fd0bef1).
+test("attach-only: the allowlist is exactly the herdr-harness provider ids",()=>{
+  assert.deepEqual([...ATTACH_ONLY].sort(),["herdr-generic","herdr-omp"]);
+});
+test("attach-only create passes unchanged and unstamped, with no catalog lookup and one log line",async()=>{
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  let lookups=0; const logs=[]; const logger={warn:m=>logs.push(m)};
+  const paseo={providers:{snapshot:async()=>{lookups++;return{entries:[]};}}};
+  for(const provider of ["herdr-generic","herdr-omp","herdr-generic/pane-1"]){
+    const out=await hooks["agent.create.before"]({request:{config:{provider,cwd:"/repo"}}},{paseo,logger});
+    assert.equal(out,undefined); // host keeps the request as is
+  }
+  assert.equal(lookups,0); assert.equal(logs.length,3); assert.match(logs[0],/attach-only: mode decided by the pane's launch/);
+  assert.equal(applyYoloToCreateRequest({config:{provider:"herdr-generic"}},undefined),undefined);
+  assert.equal(planYoloPatch({provider:"herdr-omp"},{},row("herdr-omp",[])),null);
+});
+test("attach-only open: import with no readable snapshot and resume with a matching snapshot pass; identity mismatch still refuses",async()=>{
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  const logs=[]; const logger={warn:m=>logs.push(m)};
+  const paseoWith=refresh=>({agents:{ref:()=>({refresh})}});
+  for(const provider of ["herdr-generic","herdr-omp"]){
+    const request={agentId:"a",provider,cwd:"/repo",reason:"import",purpose:"interactive",metadata:{}};
+    await hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>({agent:undefined})),logger}); // import: no record yet
+    await hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>{throw new Error("not found");}),logger});
+    await hooks["agent.open.before"]({request:{...request,reason:"resume"}},{paseo:paseoWith(async()=>({agent:{id:"a",provider}})),logger});
+    for(const bad of [{id:"b",provider},{id:"a",provider:"claude"}])
+      await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>({agent:bad}))}),/identity/);
+  }
+  assert.equal(logs.length,6); assert.match(logs[0],/attach-only: mode decided by the pane's launch/);
+  assert.throws(()=>assertResumeConfig({id:"b",provider:"herdr-generic"},{agentId:"a",provider:"herdr-generic"}),/identity/);
+  assertResumeConfig({id:"a",provider:"herdr-generic"},{agentId:"a",provider:"herdr-generic",metadata:{"ade-yolo.applied":"1"}});
+});
+test("attach-only allowlist is narrow: other modeless providers, lookalike ids and ordinary agents still refuse",async()=>{
+  for(const p of ["herdr","herdr-shell","herdr-generic2","Herdr-Generic","hermes","unknownprov"])
+    assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/no source-backed/);
+  assert.throws(()=>planYoloPatch({provider:"claude/herdr-generic"},{},row("claude",["default"])),/no source-backed/);
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  await assert.rejects(hooks["agent.create.before"]({request:{config:{provider:"hermes",cwd:"/repo"}}},{paseo:{providers:{snapshot:async()=>({entries:[row("hermes",[])]})}}}),/no source-backed/);
+  // An ordinary stamped Claude agent cannot ride the attach-only path: the snapshot identity must match the provider.
+  const request={agentId:"a",provider:"herdr-generic",cwd:"/repo",reason:"resume",purpose:"interactive",metadata:{}};
+  const paseo={agents:{ref:()=>({refresh:async()=>({agent:{id:"a",provider:"claude",metadata:{"ade-yolo.applied":"1"}}})})}};
+  await assert.rejects(hooks["agent.open.before"]({request},{paseo}),/identity/);
+  // Pi is unchanged: still stamped, catalog-checked.
+  assert.equal(applyYoloToCreateRequest({config:{provider:"pi"}},row("pi",[])).metadata["ade-yolo.applied"],"1");
+  assert.throws(()=>applyYoloToCreateRequest({config:{provider:"pi"}},{...row("pi",[]),status:"loading"}),/not enabled\/ready/);
 });
