@@ -63,11 +63,12 @@ def test_admit_hot_with_wait_zero_is_a_pure_check(tmp_path):
     assert time.monotonic() - t0 < 10  # no waiting at --wait 0
 
 
-def test_admit_default_limit_is_one_and_a_half_per_core(tmp_path):
-    assert admit(tmp_path, load1=CORES * 1.4).returncode == 0
-    assert admit(tmp_path, load1=CORES * 1.6).returncode == 75
+def test_admit_default_limit_is_two_per_core(tmp_path):
+    """2.0 per core since 2026-11-13 (1.5 before)."""
+    assert admit(tmp_path, load1=CORES * 1.9).returncode == 0
+    assert admit(tmp_path, load1=CORES * 2.1).returncode == 75
     # the base alone, not the watcher's blame step: a faked load without a measured churn never boosts
-    assert admit(tmp_path, load1=CORES * 1.9).returncode == 75
+    assert admit(tmp_path, load1=CORES * 3.0).returncode == 75
 
 
 def test_admit_max_per_core_override(tmp_path):
@@ -80,7 +81,7 @@ def test_admit_json_fields(tmp_path):
     assert r.returncode == 0, r.stderr
     rec = json.loads(r.stdout)
     assert rec["status"] == "ok" and rec["load1"] == 0.25 and rec["cores"] == CORES
-    assert rec["per_core"] == round(0.25 / CORES, 2) and rec["max_per_core"] == 1.5 and rec["waited_s"] == 0
+    assert rec["per_core"] == round(0.25 / CORES, 2) and rec["max_per_core"] == 2.0 and rec["waited_s"] == 0
     hot = admit(tmp_path, "--json", "--wait", "0", load1=CORES * 5)
     assert hot.returncode == 75
     assert json.loads(hot.stdout)["status"] == "hot"
@@ -193,7 +194,7 @@ def test_admit_hot_on_compressor_churn_even_when_load_is_low(tmp_path):
     r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="90000")
     assert r.returncode == 75, r.stderr
     rec = json.loads(r.stdout)
-    assert rec["status"] == "hot" and rec["mem_churn_pages_s"] == 90000 and rec["max_mem_churn_pages_s"] == 20000
+    assert rec["status"] == "hot" and rec["mem_churn_pages_s"] == 90000 and rec["max_mem_churn_pages_s"] == 30000
     assert rec["refused"] == ["compressor"]
 
 
@@ -219,7 +220,7 @@ def test_admit_waits_out_a_churn_spike(tmp_path):
 
 
 def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
-    """2026-11-01: load up to 4.0 per core (was 2.0 since 2026-10-25) is admitted while the compressor is calm; the default base stays 1.5."""
+    """2026-11-01: load up to 4.0 per core (was 2.0 since 2026-10-25) is admitted while the compressor is calm; the default base is 2.0 since 2026-11-13."""
     calm = {"LW_FAKE_CHURN": "10000"}
     assert admit(tmp_path, load1=CORES * 1.9, **calm).returncode == 0
     rec = json.loads(admit(tmp_path, "--json", load1=CORES * 1.9, **calm).stdout)
@@ -232,23 +233,23 @@ def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
 def test_admit_allows_3_9_per_core_at_low_churn_and_refuses_it_at_high_churn(tmp_path):
     """2026-11-01: 3.9 per core is fine for this machine while the compressor is calm, not once it churns."""
     assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="10000").returncode == 0
-    assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="20001").returncode == 75   # above the 20000 line (boost and limit)
+    assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="30001").returncode == 75   # above the 30000 line (boost and limit)
     assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="70000").returncode == 75   # far above it
 
 
 def test_calm_boost_off_when_churn_is_high_unreadable_or_disabled(tmp_path):
-    busy = {"LW_FAKE_CHURN": "30000"}  # above the 20000 line: refused outright, and no boost
+    busy = {"LW_FAKE_CHURN": "40000"}  # above the 30000 line (with load over 1.5 per core): refused, and no boost
     assert admit(tmp_path, load1=CORES * 1.9, **busy).returncode == 75
-    assert json.loads(admit(tmp_path, "--json", "--wait", "0", load1=CORES * 1.9, **busy).stdout)["max_per_core"] == 1.5
-    assert admit(tmp_path, "--boost-per-core", "0", load1=CORES * 1.9, LW_FAKE_CHURN="1000").returncode == 75
+    assert json.loads(admit(tmp_path, "--json", "--wait", "0", load1=CORES * 1.9, **busy).stdout)["max_per_core"] == 2.0
+    assert admit(tmp_path, "--boost-per-core", "0", load1=CORES * 2.1, LW_FAKE_CHURN="1000").returncode == 75
     # a faked load without a faked churn reads churn 0 but is not a measurement: no boost
-    assert admit(tmp_path, load1=CORES * 1.9).returncode == 75
+    assert admit(tmp_path, load1=CORES * 2.1).returncode == 75
     assert admit(tmp_path, "--boost-per-core", "nan", load1=1, LW_FAKE_CHURN="1").returncode == 2
 
 
 def test_admit_limit_unit():
     lw = load_module()
-    assert lw.admit_limit(1.5, 20000) == 4.0 and lw.admit_limit(1.5, 20001) == 1.5
+    assert lw.admit_limit(1.5, 30000) == 4.0 and lw.admit_limit(1.5, 30001) == 1.5
     assert lw.admit_limit(1.5, None) == 1.5
     assert lw.admit_limit(1.5, 0, boost=0) == 1.5 and lw.admit_limit(5.0, 0, boost=4.0) == 5.0
 
@@ -261,40 +262,68 @@ def refused(r):
 
 
 def test_free_memory_floor_refuses_below_and_passes_at_the_boundary(tmp_path):
-    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="299.9")
+    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="999.9")
     assert low.returncode == 75, low.stderr
     rec = json.loads(low.stdout)
-    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 299 and rec["min_free_mb"] == 300
+    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 999 and rec["min_free_mb"] == 1000
     assert "refused=free_mem" in admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="64").stdout
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="300").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1000").returncode == 0
     # tunable by flag and env
     assert admit(tmp_path, "--wait", "0", "--min-free-mb", "100", load1=0.1, LW_FAKE_FREE_MB="200").returncode == 0
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1500", LW_MIN_FREE_MB="2000").returncode == 75
 
 
 def test_churn_over_the_limit_refuses_only_with_load_or_pageins_or_over_the_hard_line(tmp_path):
-    """djbclark 2026-11-02: standing 30-65k churn with idle CPU refused nearly every launch for hours. Over 20000 refuses only
+    """djbclark 2026-11-02: standing 30-65k churn with idle CPU refused nearly every launch for hours. Over 30000 refuses only
     together with load above 1.5/core or pageins over their limit; over 60000 (the pre-2026-11-01 limit) refuses on its own."""
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="20000").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="30000").returncode == 0
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="38000").returncode == 0                 # standing pressure, idle CPU
-    r = admit(tmp_path, "--wait", "0", "--json", load1=CORES * 1.6, LW_FAKE_CHURN="20001")
+    r = admit(tmp_path, "--wait", "0", "--json", load1=CORES * 1.6, LW_FAKE_CHURN="30001")
     assert "compressor" in refused(r)                                                                   # with load: thrash
-    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="20001", LW_FAKE_PAGEINS="1001")
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="30001", LW_FAKE_PAGEINS="4001")
     assert refused(r) == ["compressor", "pageins"]                                                      # with pageins: thrash
     r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="60001")
     assert r.returncode == 75 and refused(r) == ["compressor"]                                          # hard line alone
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="60001", LW_MAX_COMPRESSOR_HARD_S="70000").returncode == 0
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="25000", LW_MAX_COMPRESSOR_S="30000",
-                 LW_FAKE_PAGEINS="1001").returncode == 75                                                # pageins alone still refuse
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="35000", LW_MAX_COMPRESSOR_S="40000",
+                 LW_FAKE_PAGEINS="4001").returncode == 75                                                # pageins alone still refuse
 
 
-def test_pageins_limit_is_1000_per_second(tmp_path):
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="1000").returncode == 0
-    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_PAGEINS="1001")
+def test_pageins_limit_is_4000_per_second(tmp_path):
+    """2026-11-13: 4000/s (was 1000) refuses on its own; measured here p90 1280/s, max 1916/s."""
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="4000").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="1760").returncode == 0   # the old limit does not refuse alone
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_PAGEINS="4001")
     rec = json.loads(r.stdout)
-    assert r.returncode == 75 and rec["refused"] == ["pageins"] and rec["pageins_s"] == 1001 and rec["max_pageins_s"] == 1000
-    assert admit(tmp_path, "--wait", "0", "--max-pageins", "2000", load1=0.1, LW_FAKE_PAGEINS="1760").returncode == 0
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="1760", LW_MAX_PAGEINS_S="1500").returncode == 75
+    assert r.returncode == 75 and rec["refused"] == ["pageins"] and rec["pageins_s"] == 4001 and rec["max_pageins_s"] == 4000
+    assert admit(tmp_path, "--wait", "0", "--max-pageins", "5000", load1=0.1, LW_FAKE_PAGEINS="4500").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="4500", LW_MAX_PAGEINS_S="3500").returncode == 75
+
+
+def test_the_old_1000_pageins_line_refuses_only_with_memory_pressure(tmp_path):
+    """The corroboration rule (2026-11-13): pageins over 1000/s but under 4000/s refuse only together with free memory below the
+    floor or compressor churn above its admit limit (swap-ins, the better corroboration, are not measured yet)."""
+    ok = {"LW_FAKE_PAGEINS": "1001"}
+    assert admit(tmp_path, "--wait", "0", load1=0.1, **ok).returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_PAGEINS="1000", LW_FAKE_FREE_MB="500").returncode == 75  # free_mem alone
+    # low free memory corroborates
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="999", **ok)
+    assert refused(r) == ["free_mem", "pageins"] and json.loads(r.stdout)["max_pageins_s"] == 1000  # the line that decided
+    # churn above the admit limit corroborates (idle CPU: the compressor gate itself stays open below the hard line)
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="30001", **ok)
+    assert refused(r) == ["pageins"]
+    # churn at the limit, or free memory at the floor, does not
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="30000", **ok).returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1000", **ok).returncode == 0
+    # at or under 1000 even pressure adds no pageins refusal
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="500", LW_FAKE_PAGEINS="1000")
+    assert refused(r) == ["free_mem"]
+    # the corroborated line is tunable, and never above the admit limit
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="30001", LW_FAKE_PAGEINS="1500",
+              LW_MAX_PAGEINS_CORROBORATED_S="2000")
+    assert refused(r) == [] and r.returncode == 0
+    r = admit(tmp_path, "--wait", "0", "--json", "--max-pageins", "800", load1=0.1, LW_FAKE_FREE_MB="999", LW_FAKE_PAGEINS="900")
+    assert refused(r) == ["free_mem", "pageins"]
 
 
 def test_agent_cap_is_off_unless_the_caller_passes_it(tmp_path):
@@ -306,15 +335,15 @@ def test_agent_cap_is_off_unless_the_caller_passes_it(tmp_path):
 
 
 def test_agent_cap_refuses_at_the_cap_and_zero_turns_it_off(tmp_path):
-    assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="13").returncode == 0
-    r = admit(tmp_path, "--wait", "0", "--json", "--max-agents", load1=0.1, LW_FAKE_AGENTS="14")
+    assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="19").returncode == 0
+    r = admit(tmp_path, "--wait", "0", "--json", "--max-agents", load1=0.1, LW_FAKE_AGENTS="20")
     rec = json.loads(r.stdout)
-    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["agents"] == 14 and rec["max_agents"] == 14
+    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["agents"] == 20 and rec["max_agents"] == 20
     assert "refused=agents" in admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="31").stdout
-    assert admit(tmp_path, "--wait", "0", "--max-agents", "20", load1=0.1, LW_FAKE_AGENTS="19").returncode == 0
-    assert admit(tmp_path, "--wait", "0", "--max-agents", "20", load1=0.1, LW_FAKE_AGENTS="20").returncode == 75
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "25", load1=0.1, LW_FAKE_AGENTS="24").returncode == 0
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "25", load1=0.1, LW_FAKE_AGENTS="25").returncode == 75
     # bare --max-agents takes LW_MAX_AGENTS (the number a dispatcher that starts agents also passes explicitly)
-    assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="20", LW_MAX_AGENTS="20").returncode == 75
+    assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="25", LW_MAX_AGENTS="25").returncode == 75
     assert admit(tmp_path, "--wait", "0", "--max-agents", load1=0.1, LW_FAKE_AGENTS="99", LW_MAX_AGENTS="0").returncode == 0
     assert admit(tmp_path, "--wait", "0", "--max-agents=0", load1=0.1, LW_FAKE_AGENTS="99").returncode == 0
     assert admit(tmp_path, "--wait", "0", "--max-agents", "-1", load1=0.1).returncode == 2
@@ -322,12 +351,12 @@ def test_agent_cap_refuses_at_the_cap_and_zero_turns_it_off(tmp_path):
 
 def test_every_gate_is_reported_together_and_each_alone_decides(tmp_path):
     r = admit(tmp_path, "--wait", "0", "--json", "--max-agents", load1=CORES * 9, LW_FAKE_CHURN="50000", LW_FAKE_FREE_MB="64",
-              LW_FAKE_PAGEINS="1760", LW_FAKE_AGENTS="31")
+              LW_FAKE_PAGEINS="5000", LW_FAKE_AGENTS="31")
     assert refused(r) == ["load", "compressor", "free_mem", "pageins", "agents"]
     line = admit(tmp_path, "--wait", "0", "--max-agents", load1=CORES * 9, LW_FAKE_CHURN="50000", LW_FAKE_FREE_MB="64",
-                 LW_FAKE_PAGEINS="1760", LW_FAKE_AGENTS="31").stdout
-    for part in ("mem_churn=50000", "free_mb=64", "pageins=1760", "agents=31", "max_mem_churn=20000", "min_free_mb=300",
-                 "max_pageins=1000", "max_agents=14"):
+                 LW_FAKE_PAGEINS="5000", LW_FAKE_AGENTS="31").stdout
+    for part in ("mem_churn=50000", "free_mb=64", "pageins=5000", "agents=31", "max_mem_churn=30000", "min_free_mb=1000",
+                 "max_pageins=4000", "max_agents=20"):
         assert part in line, line
 
 
@@ -410,7 +439,7 @@ def test_sampler_feeds_the_calm_clock(tmp_path, monkeypatch):
     lw.sample_calm(st, 1000.0, 5000, False)
     lw.sample_calm(st, 1020.0, 5000, False)
     assert json.loads((tmp_path / "calm.json").read_text()) == {"calm_since": 1000.0, "last_t": 1020.0}
-    lw.sample_calm(st, 1040.0, 21000, False)  # churn over the line: hot
+    lw.sample_calm(st, 1040.0, 31000, False)  # churn over the line: hot
     assert json.loads((tmp_path / "calm.json").read_text())["calm_since"] is None
     lw.sample_calm(st, 1060.0, 5000, False)
     lw.sample_calm(st, 1080.0, None, False)   # an unreadable reading is not calm
@@ -622,7 +651,7 @@ def test_linux_proc_equivalents(monkeypatch):
     assert lw._proc_snapshot() is None
 
 
-def real_admit(lw, monkeypatch, capsys, snaps, agents, tmp_path, cap=14):
+def real_admit(lw, monkeypatch, capsys, snaps, agents, tmp_path, cap=20):
     """cmd_admit on the real (non-faked) path: vm_snapshot returns (or, for an Exception item, raises) `snaps` in order,
     count_agents says `agents` (an Exception instance is raised). `cap` is the --max-agents the caller passed (0: not passed)."""
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS"):
@@ -657,14 +686,14 @@ def real_admit(lw, monkeypatch, capsys, snaps, agents, tmp_path, cap=14):
 
 def test_real_path_computes_rates_over_the_two_second_sample(tmp_path, monkeypatch, capsys):
     lw = load_module()
-    a = {"free_mb": 900.0, "compress": 1000, "pageins": 100}
-    b = {"free_mb": 700.0, "compress": 1000 + 2 * 20000, "pageins": 100 + 2 * 1000}  # exactly the limits, over 2 s
-    rc, rec, sleeps = real_admit(lw, monkeypatch, capsys, [a, b], 13, tmp_path)
+    a = {"free_mb": 1500.0, "compress": 1000, "pageins": 100}
+    b = {"free_mb": 1000.0, "compress": 1000 + 2 * 30000, "pageins": 100 + 2 * 4000}  # exactly the limits, over 2 s
+    rc, rec, sleeps = real_admit(lw, monkeypatch, capsys, [a, b], 19, tmp_path)
     assert rc == 0, rec
-    assert rec["mem_churn_pages_s"] == 20000 and rec["pageins_s"] == 1000 and rec["free_mb"] == 700 and rec["agents"] == 13
+    assert rec["mem_churn_pages_s"] == 30000 and rec["pageins_s"] == 4000 and rec["free_mb"] == 1000 and rec["agents"] == 19
     assert sleeps == [lw.ADMIT_MEM_WINDOW_S] and lw.ADMIT_MEM_WINDOW_S == 2.0
-    over = {"free_mb": lw.ADMIT_MIN_FREE_MB - 1, "compress": 1000 + 2 * 20002, "pageins": 100 + 2 * 1002}
-    rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, over], 14, tmp_path)
+    over = {"free_mb": lw.ADMIT_MIN_FREE_MB - 1, "compress": 1000 + 2 * 30002, "pageins": 100 + 2 * 4002}
+    rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, over], 20, tmp_path)
     assert rc == 75 and rec["refused"] == ["compressor", "free_mem", "pageins", "agents"]
 
 
@@ -672,11 +701,11 @@ def test_the_agent_cap_is_off_unless_the_caller_passes_it_and_count_is_not_even_
     """A1 of PR 210: `bg` test runs call admit without --max-agents; at the cap they must still be admitted, or the
     sessions the cap counts could never finish their tests."""
     lw = load_module()
-    a = {"free_mb": 900.0, "compress": 1000, "pageins": 100}
+    a = {"free_mb": 1500.0, "compress": 1000, "pageins": 100}
     rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, a], 31, tmp_path, cap=0)
     assert rc == 0, rec
     assert real_admit.ps_calls == 0 and "agents" not in rec and rec["max_agents"] == 0 and "unreadable" not in rec
-    rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, a], 31, tmp_path, cap=14)
+    rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, a], 31, tmp_path, cap=20)
     assert rc == 75 and rec["refused"] == ["agents"] and real_admit.ps_calls == 1
 
 
@@ -694,7 +723,7 @@ def test_a_failed_reading_on_a_host_that_has_the_tool_refuses(tmp_path, monkeypa
     """A3 of PR 210: a vm_stat/ps that times out, exits non-zero or prints nonsense is likeliest when the machine is
     starving; admit waits, it does not say ok."""
     lw = load_module()
-    good = {"free_mb": 900.0, "compress": 1000, "pageins": 100}
+    good = {"free_mb": 1500.0, "compress": 1000, "pageins": 100}
     # the first vm_stat read fails
     rc, rec, _ = real_admit(lw, monkeypatch, capsys, [lw.ReadFailed("timeout")], 3, tmp_path)
     assert rc == 75 and rec["refused"] == ["memory_unreadable"] and "mem_churn_pages_s" not in rec
@@ -727,7 +756,7 @@ def test_one_callers_loose_flags_do_not_start_the_shared_calm_clock(tmp_path):
     f = tmp_path / "state" / "calm.json"
     cases = ((("--min-free-mb", "0"), {"LW_FAKE_CHURN": "1000", "LW_FAKE_FREE_MB": "100"}),
              (("--max-pageins", "999999"), {"LW_FAKE_CHURN": "1000", "LW_FAKE_PAGEINS": "5000"}),
-             (("--max-mem-churn", "999999", "--boost-max-churn", "999999"), {"LW_FAKE_CHURN": "30000"}))
+             (("--max-mem-churn", "999999", "--boost-max-churn", "999999"), {"LW_FAKE_CHURN": "30001"}))
     for loose, env in cases:
         r = admit(tmp_path, "--wait", "0", "--max-per-core", "2.5", *loose, load1=0.1, **env)
         assert r.returncode == 0, (loose, r.stdout, r.stderr)  # the caller's own thresholds admit it...
@@ -752,9 +781,9 @@ def test_calm_note_serialises_on_a_lock(tmp_path, monkeypatch):
 
 
 def test_concurrent_admissions_cannot_all_pass_under_the_cap(tmp_path):
-    """Codex P2 on PR 210: with 13 of 14 agents alive, simultaneous dispatchers must not all be admitted."""
+    """Codex P2 on PR 210: with 19 of 20 agents alive, simultaneous dispatchers must not all be admitted."""
     env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
-               LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_RESERVE_S="90", LW_FAKE_LOAD1="0.1", LW_FAKE_AGENTS="13")
+               LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_RESERVE_S="90", LW_FAKE_LOAD1="0.1", LW_FAKE_AGENTS="19")
     procs = [subprocess.Popen([sys.executable, str(LW), "admit", "--wait", "0", "--max-agents", "--json"], env=env,
                               stdout=subprocess.PIPE, text=True) for _ in range(6)]
     outs = [(p.communicate(timeout=30)[0], p.returncode) for p in procs]
