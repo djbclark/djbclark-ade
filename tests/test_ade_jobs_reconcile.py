@@ -1797,3 +1797,48 @@ def test_chosen_progress_row_missing_plans_install_and_present_with_ledger_plans
     assert any(s.action == "install" and s.label == _PROGRESS_LABEL for s in _progress_plan(fake, chosen=True))
     steps = _progress_plan(fake, chosen=True, live_labels=[_PROGRESS_LABEL], entry=_owned_entry())
     assert not any(s.action == "remove" for s in steps)
+
+
+# --- pins for the unchosen-row wording guards (progress-nits, 2026-11-13) ---
+
+def test_unchosen_reason_needs_the_ledger_entry_id_to_equal_the_row_name(fake):
+    # D1: the label belongs to the unchosen row 'ade-progress', but the ledger records it under another logical id, so the
+    # remove must keep the generic reason and must not claim that this id's inventory row is unchosen.
+    import tomllib
+    row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
+               if r["name"] == "ade-progress")
+    row = dict(row, chosen=False)
+    live = S.LiveScan("systemd", (S.LiveJob(_PROGRESS_LABEL, "systemd", "generated", True),))
+    ledger = {"entries": {"old-progress-name": _owned_entry()}}
+    steps = S.plan_reconcile([row], [], ledger=ledger, live=live, backend_name="systemd", root=REPO, ade=REPO,
+                             env=fake.env, platform_name="linux")
+    removes = [s for s in steps if s.action == "remove"]
+    assert len(removes) == 1 and removes[0].label == _PROGRESS_LABEL and removes[0].touch
+    assert "dropped from inventory" in removes[0].detail and "is not chosen" not in removes[0].detail
+
+
+def test_retired_reason_wins_over_unchosen_reason(fake):
+    # D2a: a label that matches a retired pattern is 'retired' even when an unchosen row of the same name also claims it.
+    import tomllib
+    row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
+               if r["name"] == "ade-progress")
+    row = dict(row, chosen=False)
+    retired = [{"name": "ade-progress", "owner": "djbclark-ade", "label": _PROGRESS_LABEL}]
+    live = S.LiveScan("systemd", (S.LiveJob(_PROGRESS_LABEL, "systemd", "generated", True),))
+    steps = S.plan_reconcile([row], retired, ledger={"entries": {"ade-progress": _owned_entry()}}, live=live,
+                             backend_name="systemd", root=REPO, ade=REPO, env=fake.env, platform_name="linux")
+    removes = [s for s in steps if s.action == "remove"]
+    assert len(removes) == 1 and removes[0].touch
+    assert "(retired)" in removes[0].detail and "is not chosen" not in removes[0].detail
+
+
+def test_unchosen_row_of_another_kind_gets_no_unchosen_report_even_when_ade_owned(fake):
+    # D2b: the kind filter (ade-sched/paseo only) is independent of the owner filter: an ADE-owned unchosen 'service'
+    # row whose label is live must not get the 'set chosen = true to adopt it' report.
+    row = {"name": "ade-svc", "kind": "service", "owner": "djbclark-ade", "class": "optional", "chosen": False,
+           "label": "dev.ade.svc", "platforms": ["mac", "linux"]}
+    live = S.LiveScan("systemd", (S.LiveJob("dev.ade.svc", "systemd", "file", True),))
+    steps = S.plan_reconcile([row], [], ledger={"entries": {}}, live=live, backend_name="systemd", root=REPO, ade=REPO,
+                             env=fake.env, platform_name="linux")
+    assert not any("is not chosen" in s.detail for s in steps)
+    assert [(s.name, s.action) for s in steps if s.name == "ade-svc"] == [("ade-svc", "skip")]
