@@ -105,10 +105,10 @@ def test_cloudflare_403_with_warning_scan_resumes_once_and_caps(fake):
     data["logs"] = "turn\n" + CF403 + "\n" + MCP_WARNING
     assert scan() == 0
     assert len(sent.read_text().splitlines()) == 1
-    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T20:00:01Z"  # a persistent 403: a new error event each time
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:59:59Z"  # a persistent 403: a new error event each time
     assert scan() == 0
     assert len(sent.read_text().splitlines()) == 2
-    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T20:00:02Z"
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:59:58Z"
     assert scan() == 0
     assert len(sent.read_text().splitlines()) == 2  # the two-per-hour cap stops it
 
