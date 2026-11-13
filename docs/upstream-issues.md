@@ -1487,3 +1487,30 @@ pid was is unknown. No reproduction was attempted.
 
 djbclark decides whether to comment on #9006 with this evidence or file a new issue (suggested: new, request 2 is
 broader than the Antigravity bug).
+
+## Paseo: no way to move an agent between workspaces (windows)
+
+Drafted 2026-11-13 (tidy slice); not filed. djbclark decides whether to file against `getpaseo/paseo`.
+
+### Request
+
+Let a client move an existing agent (tab) from one workspace to another in the same project: `paseo agent update ID
+--workspace wks_…` (CLI), a `workspaceId` field on the MCP `update_agent` tool, and the same on the protocol's
+`update_agent_request`, plus the matching drag-a-tab action in the app. The agent's session, history and provider
+process stay untouched; only its workspace association changes.
+
+### Why
+
+A lead groups its own workers in one window, the operator's agents in another, and its own tab in a third
+(`docs/workspace-layout.md`). An agent started in the wrong window can only be fixed by relaunching it, which discards
+its context. Today a misplaced tab can only be reported (`bin/ade-tidy` section F).
+
+### Searched first (2026-11-13)
+
+Installed Paseo 0.16.0-beta.2 (`/Applications/Paseo.app` bundle: `update_agent_request` is `{agentId, name?, labels?}`),
+the CLI source (`packages/cli/src/commands/agent/update.ts`: `--name`, `--label`, `--thinking`), the MCP tool
+`update_agent` (`name`, `labels`, `settings`), the releases page, and web searches for "move agent to another workspace"
+on `getpaseo/paseo`: no move command or field. Related third-party work: bigforcegun/dotfiles `paseo-move-chat` ([internals](https://github.com/bigforcegun/dotfiles/blob/e0915023f13e8a393280f147e9baf559a68d52fd/.rulesync-global/.rulesync/skills/paseo-move-chat/references/internals.md)) confirms `update_agent_request` carries only `name` and `labels` and moves an idle agent by archive plus `import_agent_request` with `workspaceId` (no CLI flag; checked by its author through 0.9.2). Unrelated hits: discussion #3377 (fork or move a live session to another
+*host*), issue #2641 (importing a session into a provisional workspace), the 0.16 note that Remote Control sessions keep
+their folder. No duplicate issue was found: four web searches and three `gh search issues --repo getpaseo/paseo` queries ("move agent workspace", "change workspace of agent", "reassign tab workspace", "move tab to another workspace") returned nothing relevant.
+

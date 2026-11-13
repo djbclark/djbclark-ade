@@ -120,3 +120,11 @@ workers only; operator-requested ones are tabs in the lead's MAIN window again (
 - Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<task worktree>"`.
 - Agent title: `paseo agent update "$PASEO_AGENT_ID" --name "<name>"` (read in the Paseo 0.15.3 source,
   `packages/cli/src/commands/agent/index.ts`, 2026-11-06; run against 0.16.0-beta.2 on 2026-11-13), or set it at launch with `paseo run --title T`.
+
+## Tidying (2026-11-13)
+
+`bin/ade-tidy` and [skills/tidy](../skills/tidy/SKILL.md) inventory one repo's agents and windows, reconnect agents with
+no proven contact, report who waits on the lead or the operator, rename windows to the convention, and archive finished
+workers and empty windows. Paseo has **no command to move an agent to another window** (`paseo agent update` takes
+`--name`, `--label`, `--thinking`; the MCP `update_agent` and the protocol's `update_agent_request` carry no workspace;
+checked 2026-11-13), so a misplaced tab is reported, never relaunched; place agents correctly at launch. A third-party "rehome" (archive an idle agent, re-import it with a `workspaceId` through the daemon client; same agent id and provider session) is described in [paseo-move-chat internals](https://github.com/bigforcegun/dotfiles/blob/e0915023f13e8a393280f147e9baf559a68d52fd/.rulesync-global/.rulesync/skills/paseo-move-chat/references/internals.md) for Paseo 0.7-0.9.2; unverified on 0.16, not adopted.
