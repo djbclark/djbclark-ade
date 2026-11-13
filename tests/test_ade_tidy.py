@@ -888,6 +888,14 @@ def test_a_notice_must_be_the_last_tool_call_before_the_ack_and_the_command_itse
     assert late_ack_worker(env, peer)["archive_agents"] == []                                    # B2: a peer's ack, one token
     env.data["agents"].clear()
     assert late_ack_worker(env, [NOTICE, *receipt])["archive_agents"][0]["agent"] == W1         # control: the real flow
+    env.data["agents"].clear()
+    after = [NOTICE, "[Shell] bin/pytest -x &", "[Edit] bin/ade-tidy", *receipt]                  # notice, then more work, then the ack
+    assert late_ack_worker(env, after)["archive_agents"] == []
+    env.data["agents"].clear()
+    grep = ['[Shell] rg -n "paseo send --no-wait lead done: x" bin/ tests/']                  # a command that only mentions the notice
+    assert late_ack_worker(env, grep + receipt)["archive_agents"] == []
+    env.data["agents"].clear()
+    assert late_ack_worker(env, [NOTICE, "[Message received] 8cd86203", f"ack {W1}"])["archive_agents"] == []   # one-token ack: no receipt
 
 
 def test_ack_plus_task_with_edits_of_the_notice_tool_is_a_retask(env):
