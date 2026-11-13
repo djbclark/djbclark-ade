@@ -1410,7 +1410,8 @@ def diff_jobs(
         if not _job_expected(row):
             rows.append(DriftRow(
                 name, "unchosen", owner,
-                f"{kind} not chosen; doctor quiet",
+                f"{kind} not chosen; doctor quiet"
+                + ("; its label is live (installed but unchosen)" if isinstance(label, str) and label in ids else ""),
                 fail=False,
             ))
             continue
@@ -1955,6 +1956,15 @@ def plan_reconcile(
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
+    # ADE-owned ade-sched/paseo rows that carry a label but are not chosen (class optional/offered, chosen = false):
+    # label -> (name, owner). An installed label of such a row is not "foreign", and a ledger-owned one is unloaded because
+    # it was un-chosen. Dependency/service rows (herdr-server) are not adoptable, so they keep the old silent path.
+    unchosen_labels: dict[str, tuple[str, str]] = {
+        str(r["label"]): (str(r["name"]), str(r.get("owner") or "?"))
+        for r in jobs
+        if isinstance(r.get("label"), str) and r.get("label") and not _job_expected(r)
+        and r.get("owner") == OWNER_ADE and r.get("kind") in ("ade-sched", "paseo")
+    }
     write_ok = backend_name in RECONCILE_WRITE_BACKENDS
     live_ids = live.ids
     # Host + Paseo share LiveScan; Paseo presence must not treat a same-label host job as live.
@@ -2225,6 +2235,8 @@ def plan_reconcile(
             ))
             return
         why = "retired" if is_retired else ("dropped from inventory" if dropped else "orphan")
+        if not is_retired and unchosen_labels.get(label, ("",))[0] == logical_id:
+            why = f"inventory row {unchosen_labels[label][0]!r} is not chosen; set chosen = true to keep it"
         detail = (
             f"paseo schedule delete {label} ({why})"
             if paseo_entry else
@@ -2286,9 +2298,19 @@ def plan_reconcile(
             continue
         if any(_label_matches(pat, lj.id) for pat in inventory_labels):
             continue
-        if not _foreign_candidate(lj.id) and lj.source != "generated":
-            continue
         if any(s.label == lj.id for s in steps):
+            continue
+        if lj.id in unchosen_labels:
+            uname, uowner = unchosen_labels[lj.id]
+            steps.append(ReconcileStep(
+                uname, "report", uowner,
+                f"live label {lj.id} is installed but inventory row {uname!r} is not chosen "
+                f"(report only; not unloaded without ledger ownership; set chosen = true to adopt it)",
+                label=lj.id,
+                category="job",
+            ))
+            continue
+        if not _foreign_candidate(lj.id) and lj.source != "generated":
             continue
         steps.append(ReconcileStep(
             lj.id, "report", "unknown",

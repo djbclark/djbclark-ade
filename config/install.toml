@@ -886,13 +886,13 @@ name = "ade-progress"
 kind = "ade-sched"
 owner = "djbclark-ade"
 class = "optional"
-chosen = false
+chosen = true
 label = "com.djbclark.ade-progress"
 plist = "config/launchd/com.djbclark.ade-progress.plist"
 schedule = "StartInterval 300"
 command = "bin/ade-progress scan --yes"
 platforms = ["mac", "linux"]
-notes = "Slice 1b (2026-11-12) of docs/persistent-progress-reminder-design.md: zero-token reminder scan, no model prompt. Optional until installed: the operator installs it (docs/scheduling.md), then sets chosen = true so doctor expects it; unchosen, doctor and reconcile stay quiet. Logs: ~/.local/state/djbclark-ade/progress/scan.log."
+notes = "Slice 1b (2026-11-12) of docs/persistent-progress-reminder-design.md: zero-token reminder scan, no model prompt. Chosen 2026-11-13 (operator): doctor expects the label, so install it (docs/scheduling.md). Setting chosen = false later makes doctor quiet and makes reconcile unload a ledger-owned install. Logs: ~/.local/state/djbclark-ade/progress/scan.log."
 
 [[install.jobs]]
 name = "context-budget"

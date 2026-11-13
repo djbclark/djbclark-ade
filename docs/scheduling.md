@@ -85,6 +85,11 @@ This command activates the dry-run job; it does not enable resumes. See
 - A Paseo probe timeout or launch error, and a host-backend enumeration failure after detection,
   are `unknown` (unavailable), never a traceback and never an empty-job "all missing" false
   positive (2026-11-10).
+- **Unchosen optional rows (`class` `optional`/`offered`, `chosen = false`, 2026-11-13):** doctor and `diff` stay quiet
+  (`unchosen`; a live label adds "installed but unchosen"). `reconcile` plans `skip` for the row and reports a live label of
+  it as `installed but inventory row ... is not chosen` (report only, not "foreign"). **Un-choosing a job that the ledger
+  owns (an earlier `reconcile --yes` installed or adopted it) makes the next `reconcile --yes` unload it**: the plan step
+  reads `remove ... inventory row 'NAME' is not chosen`. A job installed by hand and never adopted is only reported.
 
 ## Reconcile and ownership ledger (S4b first write path, 2026-11-10)
 
@@ -157,9 +162,9 @@ yet; it never restarts a closed or errored session.
 
 Slice 1 (2026-11-12) ships [`bin/ade-progress`](../bin/ade-progress) (`declare`, `retire`, `scan`, `inbox`, `ack`;
 state-changing commands default to `--dry-run`) and the template
-`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). Slice 1b (2026-11-12) adds the
-`config/install.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`, `chosen = false`): while unchosen,
-`ade-sched diff`, `just doctor` and `reconcile` stay quiet and install nothing. Merging loads nothing. To enable it, from the
+`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). Slice 1b (2026-11-12) added the
+`config/install.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`); the operator chose it on 2026-11-13, so
+the row has `chosen = true` and `just doctor` fails with `missing` until the job is installed. Merging loads nothing. To install it, from the
 canonical checkout (a job installed from a linked worktree is refused):
 
 ```
@@ -168,8 +173,11 @@ bin/ade-sched install config/launchd/com.djbclark.ade-progress.plist --ade ~/src
 bin/ade-sched status com.djbclark.ade-progress
 ```
 
-then set `chosen = true` on the row (a one-line change, through a workspace) so doctor expects the label. The log is
-`~/.local/state/djbclark-ade/progress/scan.log`; `bin/ade-sched uninstall com.djbclark.ade-progress` removes the job.
+or in one step, `bin/ade-sched reconcile --yes --name ade-progress`, which installs it and records ledger ownership (the
+manual install is adopted by the next `reconcile --yes`). The log is `~/.local/state/djbclark-ade/progress/scan.log`;
+a full `reconcile --yes` or `ade-install apply --yes` (any host whose platform is mac or linux) installs it too;
+`bin/ade-sched uninstall com.djbclark.ade-progress` removes the job; setting `chosen = false` quiets doctor, and unloads it at the next
+`reconcile --yes` when the ledger owns it (see Inventory and drift).
 
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
