@@ -45,15 +45,23 @@ def rows(value):
     return value
 
 
-# Words (camelCase / snake_case split, lower-cased) that mark a request as an operator-facing
-# question or plan/mode approval: AskUserQuestion, ExitPlanMode, EnterPlanMode, plan_approval,
-# request_user_input, elicitation. Paseo permission kinds are tool|plan|question|mode|other; the
-# `permit ls` row only exposes `name`, so the name is checked, and `kind` too when a row carries it.
-OPERATOR_WORDS = {"ask", "askuser", "question", "questions", "plan", "elicit", "elicitation", "mode"}
+# A request that is a question or plan/mode approval for the operator must stay pending. Paseo's request
+# kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`), so
+# this is a name-based, best-effort DENYLIST that fails closed (false positives only leave a prompt for the
+# operator). Names seen in Paseo's providers: Claude AskUserQuestion / ExitPlanMode, Codex CodexPlanApproval /
+# CodexMcpElicitation / request_user_input, OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|
+# confirm", OMP "OMP ask" / "OMP select|...", ACP switch_mode. `kind` is also checked when a row carries it.
+# Substring stems are matched against the lower-cased name with separators removed (catches run-together
+# spellings); short words are matched as whole tokens (acronym- and camelCase-split) so "Task" is not "ask".
+STEMS = ("question", "elicit", "askuser", "userinput", "exitplan", "enterplan", "planmode", "planapproval",
+         "switchmode", "requestinput")
+TOKENS = {"ask", "plan", "mode", "prompt", "dialog", "approval", "approve", "choose", "choice", "answer"}
+UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods; ignored for mcp__ tools
 
 
 def words(name):
     spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
     return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
 
 
@@ -65,7 +73,10 @@ def operator_question(row):
     parts = words(name) if isinstance(name, str) else []
     if not parts:
         return True
-    return bool(OPERATOR_WORDS.intersection(parts)) or ("user" in parts and "input" in parts)
+    compact = "".join(parts)
+    if any(stem in compact for stem in STEMS) or TOKENS.intersection(parts):
+        return True
+    return not name.startswith("mcp__") and bool(UI_TOKENS.intersection(parts))
 
 
 def log_event(log, decision, reason, agent=None, request=None):
@@ -130,6 +141,14 @@ def sweep(lead, labels, log, all_local=False):
         if (agent, request) in seen:
             continue
         seen.add((agent, request))
+        if any(r is not row and isinstance(r, dict) and r.get("agentId") == agent
+               and isinstance(r.get("id"), str) and r["id"] != request and r["id"].startswith(request)
+               for r in requests):
+            # `paseo permit allow` matches ids by prefix and takes the first hit: another pending id that
+            # starts with this one could be answered instead (e.g. a question). Never allow such an id.
+            log_event(log, "skip", "ambiguous-request-id", agent, request)
+            failed = True
+            continue
         if operator_question(row):
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
             log_event(log, "skip", "operator-question", agent, request)

@@ -139,7 +139,7 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 `bin/ade-auto-permit` approves its permission requests through this label (audit reason `lead-label`;
 2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
 passes (operator, 2026-11-13), every local agent's tool prompts are approved (reason `all-local`), but never a question or
-plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`: logged `operator-question`, left pending). Its tab name carries the lead's id too
+plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP `select|input|editor|confirm`: a name-based fail-closed denylist, logged `operator-question`, left pending). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 
 ## 4. Size the run to the work

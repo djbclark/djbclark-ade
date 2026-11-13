@@ -52,6 +52,16 @@ def req(agent, rid='request', name='Bash'):
     return {'agentId':agent, 'id':rid, 'name':name, 'description':'SECRET must never enter audit'}
 
 
+# Every question/plan name Paseo's providers emit (read from its source, 2026-11-13) plus run-together spellings.
+PROVIDER_QUESTIONS = ['AskUserQuestion', 'ExitPlanMode', 'CodexPlanApproval', 'CodexMcpElicitation', 'request_user_input',
+                      'request_user_input_async', 'question', 'Pi ask_user', 'Pi ask_user_question', 'Pi select', 'Pi input',
+                      'Pi editor', 'Pi confirm', 'OMP ask', 'OMP select', 'OMP input', 'OMP editor', 'OMP confirm',
+                      'switch_mode', 'set_mode', 'mcp__x__AskUserQuestion', 'MCPElicitation', 'UIConfirm', 'askuserquestion',
+                      'exitplanmode', 'Exit_Planmode', 'userinput', 'HTTPQuestion']
+TOOL_NAMES = ['Bash', 'Read', 'Edit', 'Write', 'Task', 'WebFetch', 'NotebookEdit', 'mcp__graft__graft_find_code',
+              'mcp__paseo__browser_select', 'Explanation']
+
+
 def test_descendants_and_foreign(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[req(CHILD),req(OTHER),req(LEAD)],
                                       'parents':{CHILD:MID, MID:LEAD}})
@@ -219,7 +229,7 @@ def test_bad_local_listing_fails_closed(tmp_path):
 
 def test_operator_questions_never_approved_in_any_mode(tmp_path):
     import itertools
-    names = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'plan_approval', 'request_user_input', 'ask_user']
+    names = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'plan_approval', 'request_user_input', 'ask_user']  # + PROVIDER_QUESTIONS below
     for i, (mode, name) in enumerate(itertools.product(['all', 'descendant', 'label'], names)):
         d = tmp_path / f'case{i}'
         d.mkdir()
@@ -242,3 +252,39 @@ def test_non_tool_kind_and_unknown_name_are_skipped(tmp_path):
     (tmp_path / 'ok').mkdir()
     result, calls = run_fake(tmp_path / 'ok', {'requests':[ok], 'local':[OTHER]}, '--all-local')
     assert allows(calls) == [['permit','allow',OTHER,'k6']]
+
+
+def test_provider_question_names_are_never_tools():
+    module = runpy.run_path(str(SCRIPT))
+    for name in PROVIDER_QUESTIONS:
+        assert module['operator_question']({'name': name}), name
+    for name in TOOL_NAMES:
+        assert not module['operator_question']({'name': name}), name
+
+
+def test_provider_questions_not_allowed_end_to_end(tmp_path):
+    reqs = [req(OTHER, f'q{i:02d}', n) for i, n in enumerate(PROVIDER_QUESTIONS)]
+    result, calls = run_fake(tmp_path, {'requests':reqs, 'local':[OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not allows(calls)
+
+
+def test_prefix_colliding_request_id_is_never_allowed(tmp_path):
+    reqs = [req(OTHER, 'permission-1'), req(OTHER, 'permission-12', 'AskUserQuestion'), req(CHILD, 'x')]
+    result, calls = run_fake(tmp_path, {'requests':reqs, 'local':[OTHER, CHILD]}, '--all-local')
+    assert result.returncode == 1
+    assert allows(calls) == [['permit','allow',CHILD,'x']]  # permission-1 is ambiguous, the question stays pending
+    assert [r['reason'] for r in audit_rows(tmp_path) if r['decision'] == 'skip'] == ['ambiguous-request-id', 'operator-question']
+
+
+def test_paseo_host_env_is_not_forwarded(tmp_path, monkeypatch):
+    module = runpy.run_path(str(SCRIPT))
+    seen = []
+    class Done:
+        returncode, stdout = 0, '[]'
+    monkeypatch.setenv('PASEO_HOST', 'tcp://remote.example:1')
+    monkeypatch.setitem(module['call'].__globals__, 'subprocess',
+                        type('S', (), {'run': staticmethod(lambda argv, **kw: seen.append(kw['env']) or Done),
+                                       'TimeoutExpired': TimeoutError}))
+    assert module['call'](['ls', '-a', '-g']) == []
+    assert seen and 'PASEO_HOST' not in seen[0]

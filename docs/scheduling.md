@@ -405,11 +405,13 @@ session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`)
 id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
 without `--all-local` only those qualify and the lead is excluded. Only the local daemon is asked (no `--host`, any
 `PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode a request that is a question or plan
-approval for the operator is never answered** (`AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`, `plan_approval`,
-`request_user_input` and any name with a question, plan, ask, mode or elicitation word, a non-`tool` `kind`, or a missing
-name): it is logged `skip` / `operator-question` and stays pending. Audit decisions go
-to `auto-permit.jsonl`; after a merge, `bin/ade-sched reconcile --yes` applies the template. Audit decisions go
-See [fan-out](../skills/fan-out/SKILL.md) for scope and
+approval for the operator is never answered** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
+`select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or
+elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. The check is a
+name-based, best-effort denylist that fails closed, because `permit ls --json` rows carry no `kind` (it is also honoured
+when a row does); a request id that is a strict prefix of another pending id of the same agent is skipped
+(`ambiguous-request-id`), since `permit allow` matches ids by prefix. Audit decisions go to `auto-permit.jsonl`; after a
+merge, `bin/ade-sched reconcile --yes` applies the template. See [fan-out](../skills/fan-out/SKILL.md) for scope and
 failure behavior. Render/review is separate from `install`; this change does not
 activate a job. Unlike the judgment schedule defaults above, this system job
 implements the operator's explicit unattended permission grant for our agents.

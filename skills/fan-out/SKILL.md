@@ -214,8 +214,8 @@ Labels are trusted local-agent scope markers, not an external security boundary.
 
 `--all-local` (the checked-in launchd template passes it; operator, 2026-11-13) also admits every agent the local
 daemon lists, the lead included (audit reason `all-local`; no `--host`, so no remote agent). In every mode a question
-or plan approval for the operator (`AskUserQuestion`, `ExitPlanMode`, and similar names, non-`tool` kinds, missing
-names) is logged `skip` / `operator-question` and never answered.
+or plan approval for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP `select|input|editor|confirm`, similar
+names, missing names; a name-based fail-closed denylist) is logged `skip` / `operator-question` and never answered.
 
 Only explicit pending `(agentId, requestId)` pairs are allowed; no `--all`.
 Failed/malformed discovery fails closed. JSONL records skips, attempts, confirmations
