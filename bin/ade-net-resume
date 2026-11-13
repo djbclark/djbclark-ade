@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Resume a lead's descendants after recognized transient network failures, dry-run by default.
 
-See docs/net-resume.md. Exit 0: scan completed; 2: usage/state/CLI failure;
-3: another scanner holds the lock. No schedules are installed by this command.
+With --quota a second pass also resumes Pi agents stopped by a provider quota window once aiuse
+shows that window reset. See docs/net-resume.md. Exit 0: scan completed; 2: usage/state/CLI
+failure; 3: another scanner holds the lock. No schedules are installed by this command.
 """
 from __future__ import annotations
 
@@ -37,11 +38,78 @@ HOSTS = {
     "claude": "https://api.anthropic.com/",
     # Pi can route many services; a host cannot be inferred safely from 'pi'.
 }
+QUOTA_PROMPT = ("provider quota window reset; continue from where you stopped, check any interrupted "
+                "operation before retrying, same report path")
+# --quota only. The rendered last line of a real z.ai 5-hour stop (2026-11-12, agent f2802e7c); the
+# 5-hour wording keeps weekly stops out. Add a pool only together with a line copied from a real stop.
+QUOTA = {
+    "zai": r'\[System Error\] 429: \{"code":"1308","message":"Usage limit reached for 5 hour\. '
+           r'Your limit will reset at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"\} '
+           r'\(stopReason=error, model=zai/[\w.-]+\)',
+}
+POOL_MODEL_PREFIX = {"zai": "zai/"}  # Pi pools only: claude and codex belong to session-guard.
+QUOTA_DENIED = re.compile(r"auth|credential|api.?key|billing|credit|balance|\b1113\b|\b40[13]\b", re.I)
+QUOTA_MAX_WINDOW_MINUTES = 360  # 5-hour and session windows; a weekly wait exceeds any staleness bound.
+QUOTA_EXHAUSTED_PERCENT = 95
+QUOTA_POOL_GAP_SECONDS = 600  # At least this long between two quota resumes of one pool, across scans and runs.
+FIRST_SIGHT_BLOCKED = frozenset({"delivered", "changed"})  # First-sight outcomes that never arm a wait.
+GUARD_TERMINAL = frozenset({"resumed", "cancelled"})
+AIUSE_TIMEOUT = 30
 DENIED = re.compile(r"1302|1308|\b429\b|\b40[13]\b|quota|rate.?limit|auth|credential|api.?key|refus|policy|billing|credit|usage.?limit|capacity", re.I)
 
 
 class ScanError(Exception):
     pass
+
+
+def number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def stamp(value):
+    """Epoch seconds of a timezone-aware ISO timestamp; ValueError otherwise."""
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    return parsed.timestamp()
+
+
+def pool_of(record):
+    if record.get("Provider") != "pi":
+        return None
+    model = record.get("Model")
+    if not isinstance(model, str):
+        return None
+    for pool, prefix in POOL_MODEL_PREFIX.items():
+        if model.startswith(prefix):
+            return pool
+    return None
+
+
+def quota_line(pool, logs):
+    lines = logs.strip().splitlines()
+    last = lines[-1].strip() if lines else ""
+    pattern = QUOTA.get(pool)
+    return bool(last and pattern and not QUOTA_DENIED.search(last) and re.fullmatch(pattern, last))
+
+
+def done_line(text):
+    """Only an unquoted, unfenced delivery line counts."""
+    fence = None
+    for line in text.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker:
+            run = marker.group(1)
+            if fence is None:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not line[marker.end():].strip():
+                fence = None
+            continue
+        if fence is None and re.match(r"^done:[ \t]+\S", line):
+            return True
+    return False
 
 
 def agent_id(value):
@@ -60,12 +128,19 @@ def transient(provider, logs):
 
 
 class Scanner:
-    def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30):
+    def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30, quota=False,
+                 only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None):
         self.lead = agent_id(lead)
         self.state = state
         self.apply = apply
         self.max_error_age = max_error_age_minutes * 60
         self.deadline = time.monotonic() + duration
+        self.quota = quota
+        self.only = frozenset(agent_id(a) for a in only_agents)
+        self.quota_per_pool = quota_per_pool
+        self.quota_grace = quota_grace_seconds
+        self.guard_state = guard_state or Path.home() / ".paseo/plugin-data/session-guard/state.json"
+        self._aiuse = None
 
     def remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -148,19 +223,7 @@ class Scanner:
             if len(text.strip().splitlines()) == 1 and transient(provider, text):
                 continue  # The terminal system error is rendered as assistant text.
             # Only an unquoted, unfenced delivery line in the latest output counts.
-            fence = None
-            for line in text.splitlines():
-                marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-                if marker:
-                    run = marker.group(1)
-                    if fence is None:
-                        fence = run
-                    elif run[0] == fence[0] and len(run) >= len(fence) and not line[marker.end():].strip():
-                        fence = None
-                    continue
-                if fence is None and re.match(r"^done:[ \t]+\S", line):
-                    return True
-            return False
+            return done_line(text)
         return False
 
     def signature(self, record, logs):
@@ -181,6 +244,304 @@ class Scanner:
         file.flush()
         os.fsync(file.fileno())
         print(json.dumps(row, sort_keys=True), flush=True)
+
+    # --- quota pass (--quota): Pi pools only, aiuse is the reset anchor, fail closed ---
+
+    def note(self, history, events, aid, action, key=None, **fields):
+        """Write an event; with a key, once per (agent, action, key) so waiting never spams the ledger."""
+        if key is not None:
+            if any(e.get("agent") == aid and e.get("action") == action and e.get("key") == key for e in events):
+                return
+            fields["key"] = key
+        self.event(history, aid, action, **fields)
+        events.append({"agent": aid, "action": action, "time": time.time(), **fields})
+
+    def guard_pending(self, aid):
+        try:
+            text = self.guard_state.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ScanError("session-guard state unreadable") from exc
+        pauses = json.loads(text).get("pauses")
+        if not isinstance(pauses, list):
+            raise ScanError("invalid session-guard state")
+        return any(isinstance(p, dict) and p.get("agentId") == aid and p.get("phase") not in GUARD_TERMINAL
+                   for p in pauses)
+
+    def aiuse_account(self, pool):
+        """The pool's aiuse account, or None when aiuse is missing, unparseable or ambiguous."""
+        if self._aiuse is None:
+            accounts = False
+            try:
+                result = subprocess.run(["aiuse", "--json"], capture_output=True, text=True,
+                                        timeout=min(AIUSE_TIMEOUT, self.remaining()))
+                snapshot = json.loads(result.stdout).get("snapshot") if result.returncode == 0 else None
+                found = snapshot.get("accounts") if isinstance(snapshot, dict) else None
+                accounts = found if isinstance(found, list) else False
+            except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+                pass
+            self._aiuse = accounts
+        if self._aiuse is False:
+            return None
+        matches = [a for a in self._aiuse if isinstance(a, dict) and a.get("provider") == pool]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def windows(account):
+        found = account.get("windows")
+        return [w for w in found if isinstance(w, dict)] if isinstance(found, list) else []
+
+    @staticmethod
+    def exhausted(window):
+        used = window.get("used_percent")
+        return window.get("state") == "exhausted" or (number(used) and used >= QUOTA_EXHAUSTED_PERCENT)
+
+    def quota_anchor(self, account, error_time):
+        """('wait', fields) | ('unconfirmed'|'excluded'|'stale', None) from the exhausted window of an aiuse account."""
+        spent = [w for w in self.windows(account) if self.exhausted(w)]
+        if not spent:
+            return "unconfirmed", None
+        if any(not number(w.get("window_minutes")) or w["window_minutes"] > QUOTA_MAX_WINDOW_MINUTES for w in spent):
+            return "excluded", None  # A weekly stop binds this pool: no resume.
+        valid = []
+        for w in spent:
+            try:
+                reset = stamp(w.get("resets_at"))
+            except ValueError:
+                continue
+            if error_time < reset <= error_time + w["window_minutes"] * 60 and isinstance(w.get("window_id"), str):
+                valid.append((reset, w))
+        if not valid:
+            return "stale", None
+        reset, w = max(valid, key=lambda pair: pair[0])
+        return "wait", {"window_id": w["window_id"], "window_minutes": w["window_minutes"],
+                        "resets_at": w["resets_at"]}
+
+    def reset_confirmed(self, account, wait):
+        """A fresh, usable aiuse sample taken after reset plus grace shows the recorded window below the limit."""
+        if (not isinstance(account, dict) or account.get("fresh") is not True or account.get("stale") is True
+                or account.get("usable_now") is not True):
+            return False
+        try:
+            collected = stamp(account.get("collected_at"))
+            reset = stamp(wait["resets_at"])
+        except ValueError:
+            return False
+        if not reset + self.quota_grace <= collected <= time.time():
+            return False
+        if any(self.exhausted(w) and not (number(w.get("window_minutes"))
+                                          and w["window_minutes"] <= QUOTA_MAX_WINDOW_MINUTES)
+               for w in self.windows(account)):
+            return False  # A weekly (or unknown-length) window binds the pool, whatever usable_now says.
+        window = [w for w in self.windows(account) if w.get("window_id") == wait["window_id"]]
+        return (len(window) == 1 and not self.exhausted(window[0])
+                and number(window[0].get("used_percent")))
+
+    def quota_activity(self, aid, pool):
+        """'ok' | 'user' | 'changed' | 'delivered' for the timeline after the recorded quota stop."""
+        activity = json.loads(self.cli("logs", aid, "--json"))
+        if (not isinstance(activity, dict) or activity.get("agentId") != aid
+                or not isinstance(activity.get("items"), list)):
+            raise ScanError("invalid structured logs")
+        found = False
+        for item in reversed(activity["items"]):
+            if not isinstance(item, dict):
+                raise ScanError("invalid timeline item")
+            kind = item.get("type")
+            if kind == "user_message":
+                return "ok" if found else "user"  # Before the error: an older task. After: a new instruction.
+            if kind != "assistant_message":
+                continue
+            text = item.get("text")
+            if not isinstance(text, str):
+                raise ScanError("invalid assistant output")
+            if not found:
+                if len(text.strip().splitlines()) == 1 and quota_line(pool, text):
+                    found = True
+                    continue
+                return "changed"  # The agent produced other output after the stop.
+            return "delivered" if done_line(text) else "ok"
+        return "ok" if found else "changed"
+
+    def quota_waits(self, events):
+        waits = {}
+        for e in events:
+            if e.get("action") != "quota-wait":
+                continue
+            if not (isinstance(e.get("agent"), str) and all(isinstance(e.get(k), str) for k in
+                    ("signature", "pool", "window_id", "resets_at", "updated_at"))
+                    and number(e.get("window_minutes"))):
+                raise ScanError("invalid quota ledger")
+            try:
+                stamp(e["resets_at"])
+                stamp(e["updated_at"])
+            except ValueError as exc:
+                raise ScanError("invalid quota ledger") from exc
+            if e["agent"] not in waits or e["time"] >= waits[e["agent"]]["time"]:
+                waits[e["agent"]] = e
+        return waits
+
+    @staticmethod
+    def quota_first_rows(events):
+        """Latest first-sight outcome per agent: (agent, error event) pairs already read once."""
+        rows = {}
+        for e in events:
+            if e.get("stage") == "first-sight" and all(isinstance(e.get(k), str) for k in
+                                                       ("agent", "signature", "updated_at", "pool", "action")):
+                if e["agent"] not in rows or e["time"] >= rows[e["agent"]]["time"]:
+                    rows[e["agent"]] = e
+        return rows
+
+    def quota_scan(self, agents, history, events):
+        self._aiuse = None
+        waits = self.quota_waits(events)
+        firsts = self.quota_first_rows(events)
+        sent = {(e.get("agent"), e.get("signature")) for e in events if e.get("action") == "reserved"}
+        resumed = {}
+        for row in agents:
+            aid = None
+            try:
+                if not isinstance(row, dict) or row.get("status") not in ("error", "closed"):
+                    continue
+                aid = agent_id(row.get("id"))
+                if self.only and aid not in self.only:
+                    continue
+                wait = waits.get(aid)
+                if row.get("status") == "closed" and (
+                        wait is None or (aid, wait["signature"]) in sent
+                        or time.time() - stamp(wait["resets_at"]) > self.max_error_age):
+                    continue  # Only an agent we saw fail, not yet resumed and not stale, can be a closed candidate.
+                record = self.inspect(aid)
+                pool = pool_of(record)
+                if record.get("Archived") is not False or pool is None or not self.descendant(aid):
+                    continue
+                if self.guard_pending(aid):
+                    self.note(history, events, aid, "guard-owned", key=str(record.get("UpdatedAt")))
+                    continue
+                updated = record.get("UpdatedAt")
+                status = record.get("Status")
+                if status == "error":
+                    # `paseo logs` reloads an agent that is not live, and inspect keeps reporting the stored
+                    # `error` after a daemon restart: bound the age before any logs call (like recent_error).
+                    age = time.time() - stamp(updated)
+                    if not 0 <= age <= QUOTA_MAX_WINDOW_MINUTES * 60 + self.max_error_age:
+                        continue
+                    first = firsts.get(aid)
+                    known = first if (first is not None and first["pool"] == pool
+                                      and first["updated_at"] == updated) else None
+                    if wait is not None and wait["pool"] == pool and wait["updated_at"] == updated:
+                        signature = wait["signature"]  # The ledger already identifies this error event.
+                    elif known is not None:
+                        # Read once already (UpdatedAt is the event identity: any new activity changes it).
+                        if known["action"] in FIRST_SIGHT_BLOCKED:
+                            continue
+                        signature = known["signature"]
+                    else:
+                        logs = self.cli("logs", aid)
+                        if not quota_line(pool, logs):
+                            continue
+                        signature = self.signature(record, logs)
+                elif status == "closed" and wait is not None:
+                    if updated != wait["updated_at"]:
+                        self.note(history, events, aid, "changed", key=str(updated))
+                        continue
+                    signature = wait["signature"]
+                else:
+                    continue
+                if wait is None or wait["signature"] != signature or wait["pool"] != pool:
+                    if status == "error":
+                        self.quota_first_sight(history, events, waits, aid, pool, updated, signature,
+                                               checked=known is not None)
+                    continue
+                if (aid, signature) in sent:
+                    self.note(history, events, aid, "capped", key=signature)
+                    continue
+                reset = stamp(wait["resets_at"])
+                now = time.time()
+                if now - reset > self.max_error_age:
+                    self.note(history, events, aid, "stale", key=signature)
+                    continue
+                if now < reset + self.quota_grace or resumed.get(pool, 0) >= self.quota_per_pool:
+                    continue
+                if any(e.get("action") == "reserved" and e.get("kind") == "quota" and e.get("pool") == pool
+                       and number(e.get("time")) and e["time"] > now - QUOTA_POOL_GAP_SECONDS for e in events):
+                    self.note(history, events, aid, "pool-gap", key=f"{signature}:{int(now // 600)}", pool=pool)
+                    continue
+                account = self.aiuse_account(pool)
+                if not self.reset_confirmed(account, wait):
+                    self.note(history, events, aid, "quota-waiting", key=f"{signature}:{int(now // 600)}", pool=pool)
+                    continue
+                if status == "error":
+                    state = self.quota_activity(aid, pool)
+                    if state != "ok":
+                        self.note(history, events, aid, "delivered" if state == "delivered" else "changed",
+                                  key=signature)
+                        continue
+                attempts = [e for e in events if e.get("agent") == aid and e.get("action") == "reserved"]
+                if sum(e["time"] > now - 3600 for e in attempts) >= 2:
+                    self.note(history, events, aid, "capped", key=signature)
+                    continue
+                if not self.apply:
+                    self.note(history, events, aid, "would-resume-quota", key=signature, pool=pool)
+                    resumed[pool] = resumed.get(pool, 0) + 1
+                    continue
+                # Re-read mutable state and ancestry before sending.
+                fresh = self.inspect(aid)
+                fresh_logs = self.cli("logs", aid) if status == "error" else None
+                same = (fresh.get("Status") == status and fresh.get("Archived") is False
+                        and fresh.get("Provider") == record.get("Provider") and pool_of(fresh) == pool
+                        and fresh.get("UpdatedAt") == updated and self.descendant(aid)
+                        and not self.guard_pending(aid))
+                if same and status == "error":
+                    same = (quota_line(pool, fresh_logs) and self.signature(fresh, fresh_logs) == signature
+                            and self.quota_activity(aid, pool) == "ok")
+                if not same:
+                    self.note(history, events, aid, "changed", key=f"presend:{signature}")
+                    continue
+                if self.remaining() < CLI_TIMEOUT + RESERVE_MARGIN:
+                    self.event(history, aid, "deadline-before-reserve")
+                    return
+                self.event(history, aid, "reserved", signature=signature, pool=pool, kind="quota")
+                events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature,
+                               "pool": pool, "kind": "quota"})
+                sent.add((aid, signature))
+                resumed[pool] = resumed.get(pool, 0) + 1
+                self.cli("send", "--json", "--no-wait", "--", aid, QUOTA_PROMPT, accepted=True)
+                self.event(history, aid, "submitted", kind="quota")
+            except (ScanError, ValueError, TypeError, AttributeError) as exc:
+                self.remaining()  # Expired watch still exits at its deadline.
+                self.note(history, events, aid, "unavailable", key=f"{type(exc).__name__}:{int(time.time() // 600)}",
+                          kind="quota")
+
+    def quota_first_sight(self, history, events, waits, aid, pool, updated, signature, checked=False):
+        error_time = stamp(updated)
+        first = {"stage": "first-sight", "signature": signature, "updated_at": updated, "pool": pool}
+        if not 0 <= time.time() - error_time:
+            self.note(history, events, aid, "stale", key=signature)  # No stage: nothing was read, nothing is "known".
+            return
+        # The agent is still `error` (loaded) here: the only moment its timeline can be read safely, so the
+        # done:/new-instruction check is made before a wait is armed (a closed agent is never read later).
+        # `checked`: this error event was already read once (a first-sight row with the same UpdatedAt), so only
+        # aiuse is consulted again; the logs are not re-read for an agent that stays unconfirmed.
+        state = "ok" if checked else self.quota_activity(aid, pool)
+        if state != "ok":
+            self.note(history, events, aid, "delivered" if state == "delivered" else "changed", key=signature,
+                      **first)
+            return
+        account = self.aiuse_account(pool)
+        if account is None:
+            self.note(history, events, aid, "aiuse-unavailable", key=f"{signature}:{int(time.time() // 600)}",
+                      **first)
+            return
+        kind, fields = self.quota_anchor(account, error_time)
+        if kind != "wait":
+            self.note(history, events, aid, {"unconfirmed": "quota-unconfirmed", "excluded": "quota-excluded",
+                                              "stale": "stale"}[kind], key=signature, **first)
+            return
+        self.note(history, events, aid, "quota-wait", signature=signature, pool=pool, updated_at=updated,
+                  **fields)
+        waits[aid] = events[-1]
 
     def scan(self):
         self.state.mkdir(parents=True, exist_ok=True)
@@ -211,6 +572,8 @@ class Scanner:
                         if row.get("status") != "error":
                             continue
                         aid = agent_id(row.get("id"))
+                        if self.only and aid not in self.only:
+                            continue
                         if not self.descendant(aid):
                             continue
                         record = self.inspect(aid)
@@ -259,6 +622,8 @@ class Scanner:
                     except (ScanError, ValueError, TypeError, AttributeError):
                         self.remaining()  # Expired watch still exits at its deadline.
                         self.event(history, row.get("id") if isinstance(row, dict) else None, "unavailable")
+                if self.quota:
+                    self.quota_scan(agents, history, events)
 
         return 0
 
@@ -273,7 +638,19 @@ def main(argv=None):
     parser.add_argument("--interval", type=float, default=30, help="watch interval, 5..300 seconds")
     parser.add_argument("--max-error-age-minutes", type=float, default=30, metavar="MINUTES",
                         help="only consider errors this recent (default 30; positive, finite)")
+    parser.add_argument("--quota", action="store_true",
+                        help="also resume Pi agents stopped by a provider quota window after aiuse shows it reset")
+    parser.add_argument("--quota-per-pool", type=int, default=1, metavar="N",
+                        help="at most N quota resumes per pool per scan (default 1)")
+    parser.add_argument("--quota-grace-seconds", type=float, default=60, metavar="SECONDS",
+                        help="wait this long past a window's reset before resuming (default 60)")
+    parser.add_argument("--only-agent", action="append", default=[], metavar="UUID",
+                        help="restrict both passes to this full agent UUID (repeatable)")
     args = parser.parse_args(argv)
+    if args.quota_per_pool < 1:
+        parser.error("quota-per-pool must be at least 1")
+    if not math.isfinite(args.quota_grace_seconds) or args.quota_grace_seconds < 0:
+        parser.error("quota-grace-seconds must be non-negative and finite")
     if not math.isfinite(args.max_error_age_minutes * 60) or args.max_error_age_minutes <= 0:
         parser.error("max-error-age-minutes must be positive and finite")
     if not math.isfinite(args.interval) or not 5 <= args.interval <= 300:
@@ -281,7 +658,8 @@ def main(argv=None):
     if args.watch is not None and (not math.isfinite(args.watch) or not 1 <= args.watch <= 3600):
         parser.error("watch must be 1..3600 seconds")
     try:
-        scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120, args.max_error_age_minutes)
+        scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120, args.max_error_age_minutes,
+                          args.quota, args.only_agent, args.quota_per_pool, args.quota_grace_seconds)
         while True:
             rc = scanner.scan()
             if not args.watch:
