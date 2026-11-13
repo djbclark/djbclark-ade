@@ -167,6 +167,19 @@ This command activates the dry-run job; it does not enable resumes. See
   never rolled back), then doctor. See docs/install-catalog.md for the exit
   and evidence contract.
 
+## One-shot wake: `bin/fable-wait` (2026-11-13)
+
+Operator ruling 2026-11-13: when Fable is short, wait; start the queued work 1 minute after the next window starts. `bin/fable-wait
+arm` installs the job `com.djbclark.fable-wait` through `bin/ade-sched install` from a plist it writes to
+`~/.local/state/ade/fable-wait/wake.plist` (routed through `bin/ade-job-run`, so a re-arm is the normal record-first reload of a
+loaded job). ade-sched has no one-shot calendar time: `StartCalendarInterval` has no year, so the plist names the month, day, hour
+and minute of reset + 60 s (the minute rounded UP, local time) and is one-shot only because `fire` ignores a wake that is not in
+`wake.json` or not yet due, drops a stale one (more than 24 h late, or an unreadable record: nothing is sent, one `hermes-ping` says so), and
+otherwise, whatever goes wrong while sending (a corrupt `queue.jsonl` line is skipped and reported, an unreadable file is named in the ping), forgets it and starts a detached `fable-wait disarm --wait 180 --expect WAKE` (the running job's own
+wrapper holds the label's lock, so the uninstall must retry after it exits). Re-arming replaces the single wake; `arm` refuses (exit 3)
+when `paseo usage ls --json` gives no reset time or one already past. The wake sends messages and one `hermes-ping` only: no agent and no model quota.
+Details: the `bin/fable-wait` docstring; tests `tests/test_fable_wait.py`. Installing the wake is the lead's explicit `arm`; nothing arms it by itself.
+
 ## Paseo schedules (reconcile + operator, 2026-11-10)
 
 The [persistent progress reminder design](persistent-progress-reminder-design.md)

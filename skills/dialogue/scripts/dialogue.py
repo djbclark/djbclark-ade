@@ -230,7 +230,7 @@ def seat_env(seat: str, what: str) -> str:
 
 def apply_seat_overrides(models: dict[str, dict[str, Any]], env: Any) -> list[str]:
     """DIALOGUE_<SEAT>_{MODEL,AGENT,SET,POOL}: move a seat to another model or agent without editing
-    the config (e.g. DIALOGUE_FABLE_MODEL=claude-opus-5-5 while the Fable pool is spent). Mutates
+    the config (an operator's explicit choice; a spent Fable pool means wait, not an Opus seat: operator 2026-11-13). Mutates
     `models` in place; returns one line per override applied, for the turn log."""
     notes: list[str] = []
     for seat, spec in models.items():

@@ -48,9 +48,12 @@ def assert_modified_runtime():
     assert router.SUBLIMIT_FAMILIES == ("future_cap",)
     assert "future-frontier" in router.frontier_model_tokens()
     assert router.is_frontier_model("claude-fable-99 --effort high")
+    # The judgment overlay reaches the judgment role; a short frontier pool never swaps it in (operator 2026-11-13: wait,
+    # not degrade), so the frontier slice keeps its own model.
+    assert router._model_tiers.resolve("claude", "judgment", "claude", router.MODEL_TIERS) == "sonnet"
     assert router.suggest_model(
         router.BY_NAME["claude"], "frontier", {"sublimits": {"future_cap": 0}},
-    ) == "sonnet --effort high"
+    ) == router.BY_NAME["claude"].models["frontier"]
 
 
 def test_legacy_public_tiers_and_consumers_are_equivalent(tree, monkeypatch):
@@ -193,7 +196,7 @@ def test_reload_refreshes_same_path_overlay_and_legacy_cache(tree, monkeypatch):
     router.reload_policy()
     assert router.SUBLIMIT_FAMILIES == ("fable",)
     assert "future-frontier" not in router.frontier_model_tokens()
-    assert router.suggest_model(router.BY_NAME["claude"], "frontier", {"sublimits": {"fable": 0}}) == "haiku --effort high"
+    assert router._model_tiers.resolve("claude", "judgment", "claude", router.MODEL_TIERS) == "haiku"
     # A new native tier file at the same path must also win on the next reload.
     native = root / "config/model-tiers.toml"
     native.write_text(mt.dump_toml(modified_tiers(root)))

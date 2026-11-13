@@ -33,7 +33,7 @@ through) widen it unlogged: the internal-trust ruling of 2026-11-07 accepts that
 | `frontier1_per_wave` | 1 | 2 | 2 | frontier slices per wave on the claude pool |
 | `frontier2_per_wave` | 1 | 1 | 1 | the same on every other pool (codex, the Argon fallback) |
 | `frontier1_agent_calls_per_day` | 0 | 4 | 4 | Agent-tool Fable calls allowed without asking per America/New_York day |
-| `frontier1_min_left` | 15 | 15 | (code default) | percent of the Fable cap that must be left (15 since 2026-11-07: the old guard's `watch_fable` stop); below it a claude frontier slice is Opus |
+| `frontier1_min_left` | 15 | 15 | (code default) | percent of the Fable cap that must be left (15 since 2026-11-07: the old guard's `watch_fable` stop); below it claude is not offered for `frontier` and the slice waits for the Fable window or goes to another frontier family (2026-11-13: never Opus; `bin/fable-wait`) |
 | `frontier1_window_min_left` | 30 | 30 | (code default) | percent left on the tightest Claude window (the old quota guard's tight level: the stop signal) |
 | `frontier2_min_left` | 60 | 60 | (code default) | percent left on the codex binding window |
 

@@ -64,9 +64,9 @@ pace_penalty_judgment_factor = 0.5
 # Case: with the r11-r20 code pools at their headroom floors, code went to Gemini Flash (r40).
 # Nothing in the band has room: no route (keep it queued until a reset, or exclude by hand).
 quality_max_rank_gap = { code = 10, judgment = 10 }
-# Most `frontier` slices one wave puts on a single pool, and the Fable sublimit below which frontier on claude falls
-# back to Opus, are `frontier1_per_wave`/`frontier2_per_wave` and `frontier1_min_left` in config/gates.toml [frontier]
-# (docs/gates.md).
+# Most `frontier` slices one wave puts on a single pool, and the Fable sublimit below which claude is not offered for
+# frontier (the slice waits for the Fable window, never Opus: operator 2026-11-13), are `frontier1_per_wave`/
+# `frontier2_per_wave` and `frontier1_min_left` in config/gates.toml [frontier] (docs/gates.md).
 # Pools with `plenty_kinds` (codex's everyday kinds, operator 2026-10-25: "if we have lots of codex
 # quota and it is the best of available options we can use it for non-frontier") are eligible for
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly

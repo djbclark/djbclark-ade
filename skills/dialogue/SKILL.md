@@ -182,7 +182,7 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    route's model unless `_MODEL` is set; its `set` list and `effort` are dropped);
    `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `set` list (empty clears);
    `DIALOGUE_<SEAT>_POOL=<label>` changes the `aiuse` pool the quota wait reads. Examples:
-   `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (Fable weekly cap spent, 2026-10-10);
+   `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (an explicit operator choice only: 2026-10-10 it was the answer to a spent Fable cap, but since 2026-11-13 a spent Fable window means wait and `bin/fable-wait add`, never a quiet Opus seat);
    `DIALOGUE_GROK_AGENT=codex DIALOGUE_GROK_MODEL=gpt-6.1-sol DIALOGUE_GROK_POOL="Codex 5-hour"`
    (CLI `resolve_launch_mode` only allows catalog-mode providers while Cursor requires the SDK `auto_accept`
    control hook; OpenCode/omp seats are retired; Pi is the sole 3rd-party TUI — do not point CLI overrides at them).
