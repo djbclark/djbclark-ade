@@ -42,6 +42,19 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 `launchd/com.djbclark.load-watch.plist` is also inventoried (S4b).
 ```
 
+The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan
+every minute with `--quota`, **dry-run only** (no `--apply`; template update,
+2026-11-12). After merge, the lead must reinstall the updated template from the
+canonical checkout, replacing `LEAD_UUID` with the intended lead UUID. A source
+change alone does not update the installed job:
+
+```sh
+bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=$HOME/.local/state/ade/net-resume install config/launchd/com.djbclark.ade-net-resume.plist
+```
+
+This command activates the dry-run job; it does not enable resumes. See
+[net-resume.md](net-resume.md) for quota eligibility and ledger behavior.
+
 | option | meaning |
 | --- | --- |
 | `--backend auto\|launchd\|systemd\|cron` | default `auto` (the detection below) |
