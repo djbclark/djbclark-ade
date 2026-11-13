@@ -121,6 +121,17 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     continuation/quota/identity acceptance). Claude API credits remain billing-blocked, separate from the
     vendor subscription. Security implementation and SIPB reliability work are deferred; prior evidence
     remains in `docs/tui-security-and-pi-migration.md`.
+34. **Web search first and last** (operator, 2026-11-13: "a web-search-first-and-last policy for anything that could
+    plausibly benefit from finding prior art or better specs or API doc or whatever"): before designing, building or
+    fixing anything where prior art, a spec, an API or library doc, an upstream issue or a known bug could change the
+    answer, search first (`~/CLAUDE.md` item 7/14: the shared `mcp__firecrawl__*`, Context7 for library docs), and
+    record what was found or "no prior art" in the brief or PR body; before a slice reports done or a PR merges, search
+    again against what was built (current docs, changed APIs, new upstream fixes, prices and model ids; e.g. the
+    unverified Fable 5.2 price copied from 5.1, #627). Purely mechanical edits (renames, date bumps, typo fixes) are
+    exempt. To build: a "Prior art / docs checked" line in `docs/dispatch-footer.md` and the `skills/fan-out` brief, a
+    reviewer rule in `docs/code-review.md` (missing on a non-exempt PR is a LOW), and the closing search as a report
+    field. Today only "search first" exists, as an instruction (`~/CLAUDE.md` item 14,
+    `memory/feedback_heavy_web_search.md`).
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
