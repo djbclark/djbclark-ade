@@ -30,7 +30,7 @@ def test_proxy_refused_detects_only_short_refusal_page() -> None:
 
 def test_forced_proxy_refusal_saves_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _load()
-    monkeypatch.setenv("RESEARCH_PROXY_URL", "https://proxy.example.edu/login?url=")
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
     monkeypatch.setattr(mod, "http_get", lambda *a, **k: (REFUSED, "text/html", 200, "https://proxy.example.edu/login?url=x"))
     with pytest.raises(SystemExit) as exc:
         mod.cmd_fetch("s1", "https://arxiv.org/abs/1", tmp_path, via_proxy=True)
@@ -40,7 +40,7 @@ def test_forced_proxy_refusal_saves_nothing(tmp_path: Path, monkeypatch: pytest.
 
 def test_auto_retry_refusal_keeps_direct_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _load()
-    monkeypatch.setenv("RESEARCH_PROXY_URL", "https://proxy.example.edu/login?url=")
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
     short = b"<html><body>buy this article</body></html>"
 
     def fake(url, *a, **k):
@@ -58,7 +58,7 @@ def test_auto_retry_refusal_keeps_direct_fetch(tmp_path: Path, monkeypatch: pyte
 
 def test_auto_retry_login_stub_keeps_direct_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _load()
-    monkeypatch.setenv("RESEARCH_PROXY_URL", "https://proxy.example.edu/login?url=")
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
     direct = b"<html><body>get access through your institution</body></html>"
     login = b"<html><body>Sign in with your institution to continue</body></html>"
     monkeypatch.setattr(mod, "http_get", lambda url, *a, **k: (login, "text/html", 200, url) if "proxy.example" in url else (direct, "text/html", 200, url))
@@ -69,8 +69,65 @@ def test_auto_retry_login_stub_keeps_direct_fetch(tmp_path: Path, monkeypatch: p
 
 def test_proxy_hop_refuses_file_scheme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _load()
-    monkeypatch.setenv("RESEARCH_PROXY_URL", "https://proxy.example.edu/login?url=")
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
     page = b"<html><script>location = 'file:///etc/hosts'</script></html>"
     monkeypatch.setattr(mod, "http_get", lambda url, *a, **k: (page, "text/html", 200, url))
     with pytest.raises(SystemExit):
         mod.fetch_via_proxy("https://example.org/z")
+
+
+def test_old_variable_name_still_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load()
+    monkeypatch.delenv("RESEARCH_EZPROXY_PREFIX", raising=False)
+    monkeypatch.setenv("RESEARCH_PROXY_URL", "https://old.example.edu/login?url=")
+    assert mod.proxy_prefix() == "https://old.example.edu/login?url="
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://new.example.edu/login?url=")
+    assert mod.proxy_prefix() == "https://new.example.edu/login?url="
+
+
+def _retry(mod, monkeypatch, tmp_path, proxied_body, ctype="text/html"):
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
+    direct = b"<html><body>get access through your institution</body></html>"
+    monkeypatch.setattr(mod, "http_get", lambda url, *a, **k: (proxied_body, ctype, 200, url) if "proxy.example" in url else (direct, "text/html", 200, url))
+    assert mod.cmd_fetch("r", "https://example.org/a", tmp_path) == 0
+    return (tmp_path / "sources" / "r.txt").read_text()
+
+
+def test_auto_retry_accepts_long_article_with_paywall_phrase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load()
+    article = b"<html><body>" + b"word " * 3000 + b" get access to more. Purchase PDF </body></html>"
+    assert "# via_proxy: true" in _retry(mod, monkeypatch, tmp_path, article)
+
+
+def test_auto_retry_accepts_proxied_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load()
+    monkeypatch.setattr(mod.shutil, "which", lambda n: None)  # no pdftotext: die after the accept decision, proving it was accepted
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
+    direct = b"<html><body>buy this article</body></html>"
+    monkeypatch.setattr(mod, "http_get", lambda url, *a, **k: (b"%PDF-1.4 x", "application/pdf", 200, url) if "proxy.example" in url else (direct, "text/html", 200, url))
+    with pytest.raises(SystemExit) as exc:
+        mod.cmd_fetch("p", "https://example.org/a.pdf", tmp_path)
+    assert exc.value.code == 2  # reached the PDF branch with the proxied body
+
+
+def test_auto_retry_hop_refusal_keeps_direct(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load()
+    page = b"<html><script>location = 'file:///etc/hosts'</script></html>"
+    text = _retry(mod, monkeypatch, tmp_path, page)
+    assert "# via_proxy: false" in text and "get access through your institution" in text
+
+
+def test_relative_hop_is_joined_to_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load()
+    monkeypatch.setenv("RESEARCH_EZPROXY_PREFIX", "https://proxy.example.edu/login?url=")
+    seen = []
+
+    def fake(url, *a, **k):
+        seen.append(url)
+        if len(seen) == 1:
+            return b"<html><script>location = '/connect?x=1'</script></html>", "text/html", 200, "https://proxy.example.edu/login?url=u"
+        return BIG, "text/html", 200, url
+
+    monkeypatch.setattr(mod, "http_get", fake)
+    mod.fetch_via_proxy("https://example.org/z")
+    assert seen[1] == "https://proxy.example.edu/connect?x=1"

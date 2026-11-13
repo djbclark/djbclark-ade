@@ -92,7 +92,7 @@ from its introduction citing another paper.
    opened text. On the operator's machine the general web ladder is the client's own
    search and fetch tools (Jina `search_arxiv`/`extract_pdf`, archives); `bin/web-get` and its
    written ladder were deleted 2026-11-06, and the pause rule below still applies.
-6. **Institutional access.** If `RESEARCH_PROXY_URL` is set (an EZproxy-style
+6. **Institutional access.** If `RESEARCH_EZPROXY_PREFIX` (old name `RESEARCH_PROXY_URL` still read) is set (an EZproxy-style
    prefix such as `https://proxy.example.edu/login?url=`), the `fetch`
    subcommand retries a page that looks paywalled through the proxy
    (`--via-proxy` forces it), keeping the proxy's session cookie across its
