@@ -30,6 +30,17 @@ agent and model with `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (
 footer into every Agent-tool or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`);
 `agent_footer_gate` appends it when an Agent-tool prompt lacks it.
 
+**Search first and last (operator, 2026-11-13; footer rule 24).** Every brief for a non-mechanical slice carries a required line:
+
+```
+Prior art / docs checked: <what was searched, with which tool, and what was found, or "none">   (mechanical edit: "exempt: mechanical")
+```
+
+The lead fills it by searching before it writes the brief (shared `mcp__firecrawl__*` first, Context7 for library docs, `WebFetch`
+as the fallback; `~/CLAUDE.md` item 7) and the worker repeats it in its PR body. Every report then has a **`Closing search:`**
+field: the search run last against what was built (current docs, changed APIs, new upstream fixes, prices and model ids). The
+lead treats a report without it as unfinished, and a reviewer flags a non-exempt PR without the line (`docs/code-review.md` rule 12).
+
 ## 2. In process: the Agent tool or a Workflow
 
 For lookups, reviews and edits that fit this session's worktree, use the Agent tool (one sub-agent per slice,

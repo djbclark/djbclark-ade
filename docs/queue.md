@@ -121,17 +121,6 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     continuation/quota/identity acceptance). Claude API credits remain billing-blocked, separate from the
     vendor subscription. Security implementation and SIPB reliability work are deferred; prior evidence
     remains in `docs/tui-security-and-pi-migration.md`.
-34. **Web search first and last** (operator, 2026-11-13: "a web-search-first-and-last policy for anything that could
-    plausibly benefit from finding prior art or better specs or API doc or whatever"): before designing, building or
-    fixing anything where prior art, a spec, an API or library doc, an upstream issue or a known bug could change the
-    answer, search first (`~/CLAUDE.md` item 7/14: the shared `mcp__firecrawl__*`, Context7 for library docs), and
-    record what was found or "no prior art" in the brief or PR body; before a slice reports done or a PR merges, search
-    again against what was built (current docs, changed APIs, new upstream fixes, prices and model ids; e.g. the
-    unverified Fable 5.2 price copied from 5.1, #627). Purely mechanical edits (renames, date bumps, typo fixes) are
-    exempt. To build: a "Prior art / docs checked" line in `docs/dispatch-footer.md` and the `skills/fan-out` brief, a
-    reviewer rule in `docs/code-review.md` (missing on a non-exempt PR is a LOW), and the closing search as a report
-    field. Today only "search first" exists, as an instruction (`~/CLAUDE.md` item 14,
-    `memory/feedback_heavy_web_search.md`).
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
@@ -183,6 +172,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 7. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
 8. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
 9. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
+10. **Web search first and last** (operator, 2026-11-13; former Carried 34, shipped by the `websearch-policy` PR): the required `Prior art / docs checked:` brief line and the `Closing search:` report field live in `docs/dispatch-footer.md` rule 24 and the `skills/fan-out` brief section; the reviewer rule (missing on a non-exempt PR is a LOW) is `docs/code-review.md` rule 12.
 10. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
 11. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
 12. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
