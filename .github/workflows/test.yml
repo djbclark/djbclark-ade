@@ -24,7 +24,7 @@ jobs:
     # requested"): a manual dispatch with the `macos` input. Pull requests and pushes run the
     # Linux leg, so a slow macOS runner queue never blocks a merge.
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'true' && github.event.inputs.context_only != 'true' }}
-    runs-on: macos-latest
+    runs-on: warp-macos-26-arm64-6x
     # 45, not 30: the macOS runner is the slow leg. Four consecutive green runs measured 1446 s,
     # 1588 s, 1615 s and 1702 s against a 1800 s cap, and on 2026-10-27 the suite crossed it —
     # run 40533487414 was cancelled with "The job has exceeded the maximum execution time of
@@ -51,7 +51,7 @@ jobs:
 
   pytest-linux:
     if: ${{ github.event.inputs.context_only != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-2404-x64-4x
     timeout-minutes: 45
 
     steps:
