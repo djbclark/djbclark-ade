@@ -1899,9 +1899,9 @@ class JobAdmission:
     """Evidence held by an admission context across the entire mutation.
 
     An adapter must exclude new launches, observe this job's running work,
-    and stop future triggers without killing work. Only the launchd adapter
-    (`launchd_admission`) proves that; every other backend keeps the conservative
-    default.
+    and stop future triggers without killing work. No adapter can do that for a
+    loaded job yet: the launchd adapter (`launchd_admission`) admits only jobs that
+    are not loaded, and every other backend keeps the conservative default.
     """
 
     all_launch_paths: bool = False
@@ -1943,7 +1943,6 @@ LAUNCHD_NOT_LOADED_RC = 113
 # Jobs that are the updater's own service: busy means the updater is running this reconcile.
 UPDATER_LABELS = frozenset({"com.djbclark.ade-update-check"})
 _PRINT_FIELD_RE = re.compile(r"\t(state|pid) = (.*)")
-_DISABLED_ROW_RE = re.compile(r'\s*"([^"]+)"\s*=>\s*(\w+)\s*')
 
 
 def parse_launchd_activity(text: str) -> str:
@@ -1966,140 +1965,53 @@ def parse_launchd_activity(text: str) -> str:
     return "idle" if state == "not running" else "unknown"
 
 
-def parse_launchd_path(text: str) -> str | None:
-    """The plist path a loaded job came from: the service block's own `path = ...` field (one tab deep), else None."""
-    for line in text.splitlines()[1:]:
-        m = re.fullmatch(r"\tpath = (.+)", line.rstrip())
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def parse_launchd_disabled(text: str, label: str) -> bool | None:
-    """True/False: `label` is disabled/enabled in `launchctl print-disabled gui/UID`; None when the output is unreadable
-    (no header, a row that is not `"label" => word`, an unknown word, or no closing brace). A label with no row is enabled."""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines or lines[0] != "disabled services = {" or "}" not in lines:
-        return None
-    block = lines[1:lines.index("}")]  # later blocks (e.g. login item associations) are not ours
-    found: bool | None = False
-    for line in block:
-        m = _DISABLED_ROW_RE.fullmatch(line)
-        if not m:
-            return None
-        word = m.group(2).lower()
-        state = True if word in ("disabled", "true") else False if word in ("enabled", "false") else None
-        if state is None:
-            return None
-        if m.group(1) == label:
-            found = state
-    return found
-
-
 def launchd_admission(
     *, launchctl: str, uid: int, agents_dir: Path, env: Mapping[str, str],
-    err: TextIO | None = None, run: Runner | None = None,
+    provenance: Callable[[ReconcileStep, Path], str | None] | None = None,
+    run: Runner | None = None,
 ) -> Callable[[ReconcileStep], contextlib.AbstractContextManager[JobAdmission]]:
-    """The native launchd adapter for `reconcile(admission=...)`: one label, under the reconcile lock for the whole step. The
-    launch exclusion lasts until install's own `bootstrap` loads the new definition.
+    """The native launchd adapter for `reconcile(admission=...)`: it admits only what is provably safe and never mutates.
 
-    Probe, macOS 27.2 (2026-11-12): `launchctl disable` does NOT stop a loaded job's StartInterval trigger and
-    `kickstart` still starts it, so a disable is no exclusion. Unloading is: a job that is not loaded has no launch path
-    (RunAtLoad, StartInterval, StartCalendarInterval, KeepAlive and kickstart all need it loaded). The adapter therefore
-    reads `launchctl print gui/UID/LABEL` first and only then unloads:
+    A launch exclusion on a LOADED job does not exist from outside it. Probe, macOS 27.2 (2026-11-12): `launchctl disable`
+    does not stop a loaded job's StartInterval trigger and `kickstart` still starts it; and an idle read followed by
+    `bootout` is two separate launchd operations, so a trigger firing between them would be signalled (review of #619).
+    The adapter therefore runs one read-only `launchctl print gui/UID/LABEL` and decides:
 
-    1. A job neither loaded nor on disk has no launch path: admitted, nothing touched.
-    2. A loaded job reading busy (a pid, `running`, a launch in progress) or unknown defers with nothing touched: the
-       job is never killed. An unreadable `print` defers too.
-    3. An idle loaded job is unloaded with `bootout` (nothing is running, so nothing is killed) and read back as not
-       loaded; the caller's own `bootout` is then a no-op and `bootstrap` loads the new definition. The one residual race
-       is a run that starts between the idle read and the `bootout` (two `launchctl` calls); the pre-existing low-level
-       install has the same window with no check at all.
-    4. A loaded or on-disk label the operator disabled cannot be bootstrapped: its install defers, its removal proceeds.
-    5. On every Python-level exit, a job this adapter tried to unload whose plist is still on disk and which is not
-       confirmed loaded is bootstrapped again (the plist then on disk: after an install wrote it, that is the new
-       definition); a restore that fails is reported on `err` and left to the next run (the ledger shows the step as
-       failed or pending, and the next reconcile plans the load). A SIGKILL or SIGTERM between the unload and install's
-       bootstrap runs no restore and leaves the job unloaded until the next reconcile.
-    6. A loaded job whose `print` `path =` is not `agents_dir/LABEL.plist`, or whose plist is gone, defers untouched
-       (the restore could not bring it back); that covers its removal too.
+    1. Loaded, in any state: defer (hold), nothing touched, nothing killed. A loaded job is admitted only once its launch
+       path participates in admission (follow-up: an ADE job wrapper that takes a shared admission lock per run, with
+       reconcile holding it exclusive). The updater's own busy service keeps its existing refusal.
+    2. Not loaded and no plist at `agents_dir/LABEL.plist`: no launch path exists; admitted.
+    3. Not loaded but a plist exists: admitted only if `provenance(step, plist)` returns None, i.e. the file byte-matches
+       the ADE render or the ledger owns the label and its recorded artifact hash equals the file's hash; otherwise the
+       step defers untouched (a same-label, same-path foreign or replaced definition is never overwritten or removed).
+    4. `print` failing for any reason other than "could not find service" defers.
 
-    The updater's own service (UPDATER_LABELS) reading busy keeps its existing refusal."""
+    An unloaded job can still be bootstrapped by something outside this contract (a low-level `install`, a login); that is
+    the documented limit of an unloaded job's admission."""
     runner = run or _run
     domain = f"gui/{uid}"
-    err = err or sys.stderr
 
-    def launchctl_run(*args: str) -> tuple[int, str, str]:
-        return runner([launchctl, *args], env)
-
-    def read_loaded(target: str) -> tuple[bool | None, str]:
-        """(loaded, print text); loaded is None when launchctl could not say."""
-        rc, out, err_txt = launchctl_run("print", target)
-        if rc == 0:
-            return True, out
-        if rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err_txt.lower():
-            return False, ""
-        return None, err_txt
-
-    @contextlib.contextmanager
-    def admit(step: ReconcileStep) -> Iterator[JobAdmission]:
+    def admit(step: ReconcileStep) -> contextlib.AbstractContextManager[JobAdmission]:
         label = step.label
         if not isinstance(label, str) or not LABEL_RE.fullmatch(label):
-            yield JobAdmission()
-            return
-        target = f"{domain}/{label}"
+            return contextlib.nullcontext(JobAdmission())
+        rc, out, err_txt = runner([launchctl, "print", f"{domain}/{label}"], env)
+        if rc == 0:
+            activity = parse_launchd_activity(out)
+            if label in UPDATER_LABELS and activity == "busy":
+                return contextlib.nullcontext(JobAdmission(all_launch_paths=True, activity="busy", updater_running=True))
+            return contextlib.nullcontext(JobAdmission(hold=(
+                f"{label} is loaded (activity {activity}); a loaded launchd job defers until its launch path "
+                f"participates in admission"
+            )))
+        if rc != LAUNCHD_NOT_LOADED_RC and "could not find service" not in err_txt.lower():
+            return contextlib.nullcontext(JobAdmission(hold=f"launchd state of {label} unreadable (rc={rc})"))
         plist = agents_dir / f"{label}.plist"
-        loaded, text = read_loaded(target)
-        if loaded is None:
-            yield JobAdmission(hold=f"launchd state of {label} unreadable")
-            return
-        if not loaded and not plist.exists():
-            yield JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
-            return
-        activity = parse_launchd_activity(text) if loaded else "idle"
-        loaded_from = parse_launchd_path(text) if loaded else None
-        if loaded and activity == "idle" and (
-            loaded_from is None or os.path.realpath(loaded_from) != os.path.realpath(plist) or not plist.exists()
-        ):
-            yield JobAdmission(hold=f"{label} is loaded from {loaded_from or 'an unknown path'}; {plist} cannot restore it")
-            return
-        if activity != "idle":
-            yield JobAdmission(
-                all_launch_paths=True, activity=activity,
-                updater_running=activity == "busy" and label in UPDATER_LABELS,
-            )
-            return
-        if step.action == "install":
-            rc, out, _ = launchctl_run("print-disabled", domain)
-            disabled = parse_launchd_disabled(out, label) if rc == 0 else None
-            if disabled is None:
-                yield JobAdmission(hold=f"launchd enabled/disabled state of {label} unreadable")
-                return
-            if disabled:
-                yield JobAdmission(
-                    hold=f"{label} is disabled by the operator; launchd cannot load it to apply a new definition",
-                )
-                return
-        unloaded = False
-        try:
-            if loaded:
-                unloaded = True  # an unload was attempted: the restore decides from a fresh read, not from this flag
-                launchctl_run("bootout", target)
-                now_loaded, _ = read_loaded(target)
-                if now_loaded is not False:
-                    word = "could not unload" if now_loaded else "state unknown after bootout for"
-                    yield JobAdmission(hold=f"{word} {label}; launch paths not excluded")
-                    return
-            yield JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True)
-        finally:
-            if unloaded and plist.exists() and read_loaded(target)[0] is not True:
-                rc, _, err_txt = launchctl_run("bootstrap", domain, str(plist))
-                if rc != 0:
-                    print(
-                        f"ade-sched: could not reload {label} after reconcile (rc={rc}): {err_txt.strip()}; "
-                        f"if `launchctl print {target}` shows it absent, run: launchctl bootstrap {domain} {plist}",
-                        file=err,
-                    )
+        if plist.exists():
+            reason = provenance(step, plist) if provenance else "no provenance check supplied"
+            if reason is not None:
+                return contextlib.nullcontext(JobAdmission(hold=f"{plist} is not provably ADE's: {reason}"))
+        return contextlib.nullcontext(JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True))
 
     return admit
 
@@ -2558,9 +2470,9 @@ def reconcile(
     is orthogonal (ledger ``backend="paseo"``) and does not require a host write
     backend.
 
-    ``native_admission=True`` (the ade-sched CLI and ``ade-install apply`` set it) installs the launchd
-    adapter (``launchd_admission``) when no explicit ``admission`` is given, the backend is launchd and activation is on;
-    every other case keeps the conservative default.
+    ``native_admission=True`` (the ade-sched CLI and ``ade-install apply`` set it) installs the read-only launchd
+    adapter (``launchd_admission``) when no explicit ``admission`` is given, the backend is launchd and activation is on:
+    absent or provably-ADE unloaded jobs are admitted, loaded jobs defer; every other case keeps the conservative default.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 6 when work is durably deferred; 2 when ``--yes`` refuses host writes on a non-write
@@ -2597,8 +2509,36 @@ def reconcile(
         # The one native adapter (launchd); systemd/cron/paseo keep the conservative default. An explicit
         # `admission` always wins, and no environment or CLI switch reaches this branch.
         nc = _ctx(b, env, overrides)
+
+        def plist_provenance(step: ReconcileStep, plist: Path) -> str | None:
+            """None when the plist on disk is provably ADE's: the ADE render, or the ledger's recorded artifact."""
+            try:
+                disk_hash = artifact_hash({plist: plist.read_text(encoding="utf-8")})
+            except (OSError, UnicodeDecodeError) as exc:
+                return f"unreadable ({exc})"
+            if step.action == "remove":
+                entry = _removal_entry(entries, step.name, str(step.label), snapshot=step.ledger_snapshot)
+            else:
+                job_row = next((j for j in jobs if j.get("name") == step.name), None)
+                if isinstance(job_row, dict) and isinstance(job_row.get("plist"), str):
+                    try:
+                        subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
+                        job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
+                        if artifact_hash(render(job, b, env=env, **overrides).files) == disk_hash:
+                            return None
+                    except SchedError:
+                        pass
+                entry = entries.get(step.name)
+            if (
+                _ledger_owns(entry, label=str(step.label))
+                and entry.get("backend") == b.name
+                and entry.get("artifact_hash") == disk_hash
+            ):
+                return None
+            return "no ADE render match and no ledger ownership with a matching artifact hash"
+
         launchd_native = launchd_admission(
-            launchctl=nc.launchctl, uid=nc.uid, agents_dir=nc.agents_dir, env=nc.env, err=err,
+            launchctl=nc.launchctl, uid=nc.uid, agents_dir=nc.agents_dir, env=nc.env, provenance=plist_provenance,
         )
 
         def admission(step: ReconcileStep) -> Any:  # noqa: F811 - the resolved adapter
