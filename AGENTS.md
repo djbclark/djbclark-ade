@@ -55,6 +55,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the WORKERS window of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
+| [skills/tidy/](skills/tidy/SKILL.md) | `bin/ade-tidy` (2026-11-13): one repo's agents and windows: reconnect agents with no proven contact, list workers waiting on the lead and the operator, rename windows to `MAIN\|WORKERS\|USER <repo> (<work>)`, report misplaced tabs (Paseo cannot move an agent), archive finished workers and empty windows; observe-only unless `--apply` |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
 
 ## Trust (operator, 2026-11-07)
