@@ -2335,6 +2335,59 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertEqual(quota["omp"]["remaining"], 70.0)
         self.assertEqual(quota["codex"]["remaining"], 0.0)
 
+    # -- 2026-11-13: one stale pool must not make every pool read stale ------------------------
+
+    def incident_rows(self):
+        """The 2026-11-13 reading: claude default 93% and Fable 97% fresh, antigravity argon 12 min old."""
+        return [
+            {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 93.0,
+             "age_seconds": 20.0, "fresh": True, "stale": False},
+            {"provider": "claude", "pool_family": "fable", "usable_now": True, "headroom_percent": 97.0,
+             "age_seconds": 20.0, "fresh": True, "stale": False},
+            {"provider": "antigravity", "pool_family": "gemini_argon", "usable_now": True, "headroom_percent": 80.0,
+             "age_seconds": 720.0, "fresh": False, "stale": True},
+        ]
+
+    def stale_pools(self):
+        return [{"provider": "antigravity", "account": "a", "pool_family": "gemini_argon", "age_seconds": 720.0}]
+
+    def test_one_stale_pool_leaves_the_other_pools_fresh_and_frontier_routes(self):
+        path = self.write("p.json", self.payload(
+            self.incident_rows(), fresh=False, age_seconds=12.0, stale_pools=self.stale_pools()))
+        quota, age, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path), "ROUTE_AGENT_PASEO": "off"})
+        self.assertLess(age, r.STALE_SOFT)                           # the snapshot itself is 12 s old
+        self.assertEqual(quota["claude"]["remaining"], 93.0)
+        self.assertEqual(quota["claude"]["sublimits"].get("fable"), 97.0)
+        self.assertIsNone(quota["antigravity-argon"]["remaining"])         # only the stale pool reads unknown
+        self.assertIn("antigravity/gemini_argon", err)
+        self.assertIn("antigravity/gemini_argon", r.quota_source_info()["detail"])
+        self.assertEqual(r.plan(["frontier"], quota=quota)[0][1].service.name, "claude")
+
+    def test_stale_row_flags_alone_mark_the_row_when_stale_pools_names_a_sibling(self):
+        rows = self.incident_rows()
+        rows[0] = dict(rows[0], age_seconds=30.0, fresh=False, stale=True)     # claude default flagged by its own row
+        path = self.write("p.json", self.payload(
+            rows, fresh=False, age_seconds=12.0, stale_pools=self.stale_pools()))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path), "ROUTE_AGENT_PASEO": "off"})
+        self.assertIsNone(quota["claude"]["remaining"])              # a row aiuse calls stale is never trusted
+        self.assertEqual(quota["claude"]["sublimits"].get("fable"), 97.0)
+
+    def test_fresh_false_without_a_stale_pools_list_still_reads_the_whole_payload_stale(self):
+        for extra in ({}, {"stale_pools": []}, {"stale_pools": ["junk"]}, {"stale_pools": [{"pool_family": "x"}]}):
+            with self.subTest(extra=extra):
+                path = self.write("p.json", self.payload(
+                    self.incident_rows(), fresh=False, age_seconds=12.0, **extra))
+                quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path), "ROUTE_AGENT_PASEO": "off"})
+                self.assertIsNone(quota["claude"]["remaining"])
+                self.assertGreater(age, r.STALE_SOFT)
+
+    def test_an_old_snapshot_with_stale_pools_is_still_stale_everywhere(self):
+        path = self.write("p.json", self.payload(
+            self.incident_rows(), fresh=False, age_seconds=r.STALE_SOFT + 60, stale_pools=self.stale_pools()))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path), "ROUTE_AGENT_PASEO": "off"})
+        self.assertIsNone(quota["claude"]["remaining"])
+        self.assertGreater(age, r.STALE_SOFT)
+
     def test_no_fresh_key_uses_the_age_rule(self):
         base = {"available": [self.GOOD_ROW]}
         young = self.write("y.json", r.json.dumps({**base, "age_seconds": 5}))

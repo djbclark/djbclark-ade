@@ -27,7 +27,10 @@ a fresh `--available` leaves out reads 0% left (exhausted, excluded or hidden). 
 is missing, fails, times out or prints malformed JSON, routing logs that on stderr,
 falls back to the snapshot file (surfaced as `quota_source` in plan/route JSON and a
 WARNING in plan text) and a stale or missing snapshot degrades to capability-only routing
-rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests; reported
+rather than hanging. aiuse sets the payload's top-level `fresh` false when any usable pool is past its own
+fresh limit and lists those in `stale_pools` (2026-11-12): the router then reads only those pools (and rows flagged
+`stale`/`fresh: false`) as unknown and keeps every other pool's own age; `fresh` false with no usable `stale_pools`
+list, or an old snapshot, still reads the whole payload stale. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests; reported
 as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
@@ -1511,6 +1514,27 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
+def _stale_pool_ids(payload: dict[str, Any]) -> set[tuple[str, Any]]:
+    """(provider, pool_family) of each entry in the payload's `stale_pools` (aiuse 2026-11-12: usable-now pools past their
+    own fresh limit), or an empty set when the list is absent, empty or malformed (then the payload's `fresh` flag stands
+    for the whole payload)."""
+    entries = payload.get("stale_pools")
+    if not isinstance(entries, list) or not entries:
+        return set()
+    ids: set[tuple[str, Any]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("provider"), str) or not entry["provider"]:
+            return set()
+        ids.add((entry["provider"], entry.get("pool_family")))
+    return ids
+
+
+def _row_is_stale(row: dict[str, Any], stale_ids: set[tuple[str, Any]]) -> bool:
+    """Is this `--available` row one aiuse calls stale (its own `stale`/`fresh` flags, or named in `stale_pools`)?"""
+    return bool(stale_ids) and (row.get("stale") is True or row.get("fresh") is False
+                                or (row.get("provider"), row.get("pool_family")) in stale_ids)
+
+
 def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | None]:
     """Pool state per service: `aiuse --available --json`, else the snapshot file.
 
@@ -1534,6 +1558,14 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
             p_age = _payload_age(payload)
             # the contract's own staleness signal: `fresh` present and not True means stale
             marked_stale = payload.get("fresh") is not None and payload.get("fresh") is not True
+            stale_ids: set[tuple[str, Any]] = set()
+            if marked_stale and p_age is not None and p_age <= STALE_SOFT:
+                # aiuse sets top-level `fresh` false when ANY usable pool is past its own fresh limit
+                # (2026-11-12) and names the offenders in `stale_pools`: judge those rows alone, the
+                # rest keep their own ages (2026-11-13: a stale antigravity row read claude as 25 min old)
+                stale_ids = _stale_pool_ids(payload)
+                if stale_ids:
+                    marked_stale = False
             if marked_stale:
                 label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
                 if p_age is None or p_age <= STALE_SOFT:
@@ -1546,12 +1578,17 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                 try:
                     # a row without a usable age is stale, never fresh
                     rows = [dict(row, age_seconds=(
-                        STALE_HARD + 1 if marked_stale
+                        STALE_HARD + 1 if marked_stale or _row_is_stale(row, stale_ids)
                         else _clean_age(row.get("age_seconds"))
                         if _clean_age(row.get("age_seconds")) is not None
                         else (p_age if p_age is not None else STALE_HARD + 1)))
                         for row in payload["available"]]
                     fresh = _providers_from_available(rows, p_age)
+                    if stale_ids:
+                        names = ", ".join(sorted(f"{a}/{b}" if b else str(a) for a, b in stale_ids))
+                        label = f"{label} (stale pools read as unknown, the rest as listed: {names})"
+                        _log(f"stale pool readings read as unknown: {names}; "
+                             "other pools keep their own ages")
                 except (ValueError, TypeError, AttributeError, OverflowError):
                     label = f"{label}: unparseable rows"
         if canned:
