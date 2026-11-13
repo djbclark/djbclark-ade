@@ -10,7 +10,8 @@
                      [--state PATH] [--prefix DIR]
   ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
   ade-install python [--state-dir DIR] [--dry-run|--yes] [--recover] [--json]
-  ade-install doctor [--root DIR] [--id ID ...] [--json]
+  ade-install recover [--state-dir DIR] [--dry-run|--yes] [--json]   # W18 crash/orphan repair
+  ade-install doctor [--root DIR] [--state-dir DIR] [--id ID ...] [--json]
   ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
   ade-install keys [--root DIR] [--json] [--keys-state PATH]
   ade-install keys-plan [--root DIR] [--json] [--state PATH]
@@ -323,6 +324,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
         observations, rc = ai.doctor(catalog, component_ids=ids)
+        if ids is None:
+            # W18: installation-wide crash leftovers (orphaned pending entries, stale lock holder, temp files).
+            import ade_install_recovery as recovery
+
+            state_obs = recovery.observations(Path(args.state_dir) if args.state_dir else ai.default_state_dir())
+            observations = [*observations, *state_obs]
+            rc = 1 if rc or recovery.failing(state_obs) else 0
     except ai.InstallError as e:
         if args.json:
             _print_json({"ok": False, "scope": scope, "errors": [str(e)]})
@@ -346,6 +354,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("ade-install doctor: " + ("OK" if rc == 0 else "FAIL") + " (" + note + ")")
         for o in observations:
             print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
+    return rc
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Explicit crash/orphan repair (W18); dry-run unless --yes; never runs from another command."""
+    import ade_install_recovery as recovery
+
+    state = Path(args.state_dir) if args.state_dir else ai.default_state_dir()
+    try:
+        report, rc = recovery.recover(state, yes=args.yes)
+    except (OSError, ai.InstallError) as error:
+        report, rc = {"status": "unknown", "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install recover: {report['status']}")
+        if report.get("reason"):
+            print("  " + report["reason"])
+        for f in report.get("findings", []):
+            print(f"  {f['status']:12} {f['kind']}/{recovery.safe(f['id'])}: {recovery.safe(f['detail'])}")
+        for name in report.get("repaired", []):
+            print(f"  repaired     {recovery.safe(name)}")
+        for f in report.get("deferred", []):
+            print(f"  deferred     {f['kind']}/{f['id']}: run `{f['repair']}`")
+        if report.get("would_repair"):
+            print("  rerun with --yes to repair: " + ", ".join(recovery.safe(x) for x in report["would_repair"]))
     return rc
 
 
@@ -573,6 +607,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "keys-plan":
             p.add_argument("--state", help="existing nonsecret keys.json (default ADE_KEYS_STATE_PATH or user state); never refreshed")
         if name == "doctor":
+            p.add_argument("--state-dir", help="install state/ledger directory to scan for crash leftovers (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
             p.add_argument(
                 "--id", dest="ids", action="append",
                 help="check only this component (repeatable); skips installation-wide checks",
@@ -645,6 +680,14 @@ def main(argv: list[str] | None = None) -> int:
     pmode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or writes (default)")
     pmode.add_argument("--yes", action="store_true", help="acquire if missing, verify, and record in the install ledger")
     pp.set_defaults(func=cmd_python)
+
+    rp = sub.add_parser("recover", help="W18: repair crash leftovers (orphaned pending ledger entries, stale lock holder, half-written temp files); dry-run unless --yes; never re-runs an install")
+    rp.add_argument("--json", action="store_true")
+    rp.add_argument("--state-dir", help="ledger/state directory (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
+    rmode = rp.add_mutually_exclusive_group()
+    rmode.add_argument("--dry-run", action="store_true", help="report only (default)")
+    rmode.add_argument("--yes", action="store_true", help="relabel orphaned pending entries `interrupted`, quarantine temp files, keep all evidence")
+    rp.set_defaults(func=cmd_recover)
 
     hc = sub.add_parser(
         "hermes-choice",

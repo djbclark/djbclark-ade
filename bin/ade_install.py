@@ -18,6 +18,7 @@ Secrets are never read. A full apply (no ``--id``) also runs ``ade-sched reconci
 """
 from __future__ import annotations
 
+import calendar
 import copy
 import contextlib
 import datetime
@@ -1960,6 +1961,7 @@ def doctor(
     hermes_choice: dict[str, Any] | None = None,
     hermes_choice_state_dir: Path | None = None,
     hermes_home: Path | None = None,
+    install_state_dir: Path | None = None,
 ) -> tuple[list[Observation], int]:
     """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
     (including ``paseo_plugin`` missing/disabled when expected), or credential-bak
@@ -1975,6 +1977,10 @@ def doctor(
     missing/error. Unchosen ``paseo_plugin`` rows still print missing/disabled
     without failing. The Pi pool advisory (``ade-pi-pools``) may ``warn`` on
     UNACCEPTED pools without changing the exit code; it never writes acceptance.
+
+    With ``install_state_dir`` (full scope only) it also reports W18 crash leftovers
+    there (``install-state`` rows; orphaned/corrupt fail the exit code) and never
+    repairs them.
     """
     # Validate the entire selection before any probe. None keeps the original
     # full-installation check; an explicit selection checks components only.
@@ -2074,6 +2080,14 @@ def doctor(
         # WARN approaching + FAIL past (and warn itself fails the doctor run).
         if bak_obs.status in ("warn", "error", "missing"):
             hard_missing += 1
+    if install_state_dir is not None:
+        # W18: orphaned in-progress ledger entries, stale lock holders and
+        # half-written temp files. Observe-only; repair is `ade-install recover --yes`.
+        import ade_install_recovery as recovery  # noqa: WPS433
+
+        state_obs = recovery.observations(install_state_dir)
+        obs.extend(state_obs)
+        hard_missing += recovery.failing(state_obs)
     pools_obs = observe_pi_pools(
         root=catalog.root,
         acceptance_path=pi_pool_acceptance_path,
@@ -2569,10 +2583,10 @@ def read_python_pending(state_dir: Path) -> dict[str, str] | None:
     """Parse the pending-acquisition sentinel (key=value lines; the cold-start
     shell bridge writes the same file). Unreadable content is still pending."""
     path = python_pending_path(state_dir)
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
+    if not os.path.lexists(path):
         return None
+    raw = read_small_file(path)
+    text = (raw or b"").decode("utf-8", errors="replace")  # a non-regular sentinel is still pending, content unknown
     fields: dict[str, str] = {}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
@@ -2582,10 +2596,15 @@ def read_python_pending(state_dir: Path) -> dict[str, str] | None:
     return fields
 
 
+PID_MAX = 2**31 - 1
+
+
 def _pid_alive(pid: int) -> bool:
+    if not 0 < pid <= PID_MAX:
+        return False  # state-dir data can name any integer; nothing that large is a process
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
         return False
     except PermissionError:
         return True
@@ -2763,7 +2782,7 @@ def acquire_python(
             if owner == os.getpid() and token and pending.get("token") == token:
                 adopted = True  # the cold-start bridge exec'd into this process (same pid and one-time token)
                 owned = pending
-            elif owner > 0 and owner != os.getpid() and _pid_alive(owner):
+            elif owner > 0 and owner != os.getpid() and sentinel_owner_status(pending) in ("alive", "unverifiable"):
                 return fail("owner-active", f"pid {owner} is still acquiring Python; wait for it (if it is certainly gone, remove {pending['path']}). Nothing started")
             elif not recover:
                 return fail("pending-recovery", f"an earlier Python acquisition left {pending['path']} with an unknown outcome; run `{recover_cmd}` to verify and clear it. Nothing started")
@@ -2780,7 +2799,7 @@ def acquire_python(
                 owned = _write_python_pending(state_dir, uv_install)
             except FileExistsError:
                 return fail("owner-active", "another Python acquisition just started; wait for it. Nothing started")
-            record(ledger, "pending")
+            record(ledger, "pending", owner=current_owner())
             try:
                 result = run(uv_install)
             except (OSError, subprocess.TimeoutExpired) as error:
@@ -2830,10 +2849,221 @@ def catalog_summary(catalog: Catalog) -> dict[str, Any]:
     }
 
 
+# W18 crash/orphan recovery (2026-11-12). An owner is identified by PID plus the
+# process start time, never by a name pattern: a bare PID is reused after a crash.
+RECOVERY_EVIDENCE = "recovery-evidence.jsonl"
+UNKNOWN_START_TOKEN = "unknown"
+START_TOLERANCE_S = 2
+SENTINEL_REUSE_GAP_S = 120  # a process starting this long after the sentinel was written is not its writer
+
+
+def process_start_time(pid: int) -> int | None:
+    """Process start as epoch seconds (Linux /proc, else ``ps -o lstart=``); None if unreadable."""
+    if pid <= 0:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        ticks = int(stat_text.rpartition(")")[2].split()[19])  # field 22; comm may hold spaces
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+        return btime + ticks // os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    ps = "/bin/ps" if os.access("/bin/ps", os.X_OK) else None  # never a PATH-resolved ps
+    if not ps:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, never shell
+            [ps, "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False,
+            shell=False, timeout=5, env={"LC_ALL": "C", "TZ": "UTC0"},  # minimal, fixed zone: nothing inherited reaches ps
+        )
+        text = " ".join((proc.stdout or "").split())
+        return int(calendar.timegm(time.strptime(text, "%a %b %d %H:%M:%S %Y"))) if proc.returncode == 0 and text else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def current_owner() -> dict[str, Any]:
+    """Identity recorded on in-progress evidence: this process's PID and start time."""
+    return {"pid": os.getpid(), "start": process_start_time(os.getpid())}
+
+
+def _start_token(start: int | None) -> str:
+    return UNKNOWN_START_TOKEN if start is None else format(start & 0xFFFFFFFF, "08x")
+
+
+def owner_status(owner: Any) -> str:
+    """``alive`` | ``unverifiable`` (alive, start unknown: treated as live) | ``gone`` | ``reused`` | ``unknown``."""
+    if not isinstance(owner, dict):
+        return "unknown"
+    try:
+        pid = int(owner.get("pid"))
+    except (TypeError, ValueError):
+        return "unknown"
+    if not 0 < pid <= PID_MAX:
+        return "unknown"
+    if not _pid_alive(pid):
+        return "gone"
+    recorded = owner.get("start")
+    now_start = process_start_time(pid)
+    if recorded is None or now_start is None:
+        return "unverifiable"
+    try:
+        # +-START_TOLERANCE_S: /proc btime drifts when the wall clock is stepped (NTP, VM resume)
+        return "alive" if abs(int(recorded) - now_start) <= START_TOLERANCE_S else "reused"
+    except (TypeError, ValueError):
+        return "unverifiable"
+
+
+def sentinel_owner_status(fields: dict[str, str]) -> str:
+    """Owner of ``python-acquire.pending``: its ``started`` is the write time, so a
+    process that started after it is a reused PID. Missing evidence counts as live."""
+    try:
+        pid = int(fields.get("pid", ""))
+    except ValueError:
+        return "unknown"
+    if not 0 < pid <= PID_MAX:
+        return "unknown"
+    if not _pid_alive(pid):
+        return "gone"
+    now_start = process_start_time(pid)
+    try:
+        written = calendar.timegm(time.strptime(fields.get("started", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return "unverifiable"
+    if now_start is None:
+        return "unverifiable"
+    return "reused" if now_start > written + SENTINEL_REUSE_GAP_S else "alive"
+
+
+def owned_regular_file(fd: int) -> bool:
+    """True for a regular, singly-linked file owned by the effective user: the only kind
+    this module truncates or appends to (a state-dir symlink must never redirect a write,
+    least of all one made by a root run that inherited the user's HOME)."""
+    st = os.fstat(fd)
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
+
+
+def read_small_file(path: Path, limit: int = 4096) -> bytes | None:
+    """Bounded, non-blocking, symlink-refusing read of a regular file; None if absent or not a regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        return os.pread(fd, limit, 0) if stat.S_ISREG(os.fstat(fd).st_mode) else None
+    finally:
+        os.close(fd)
+
+
+# Under euid 0 (sudo keeps the user's HOME) the state directory is only used when every component from "/"
+# is a real directory owned by a trusted uid and not writable by others (sticky is the one exception).
+# Tests that model "root-owned" on a non-root machine replace this set.
+TRUSTED_OWNER_UIDS: frozenset[int] = frozenset({0})
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _before_open_component(parent: str, name: str) -> None:
+    """Test seam: runs after ``parent`` was validated and before ``name`` is opened beneath it."""
+
+
+def _after_state_dir_open(state_dir: Path) -> None:
+    """Test seam: runs after the state dir fd is held and before ledger.lock is opened beneath it."""
+
+
+def _root_refuse(path: str, why: str) -> InstallError:
+    return InstallError(f"{path}: refusing to use the install state as root: {why}; run as the target user")
+
+
+def _require_trusted_dir(fd: int, path: str, *, leaf: bool = False) -> None:
+    st = os.fstat(fd)
+    if st.st_uid not in TRUSTED_OWNER_UIDS:
+        raise _root_refuse(path, f"owned by uid {st.st_uid}, not root")
+    if st.st_mode & 0o022 and (leaf or not st.st_mode & stat.S_ISVTX):
+        # an ancestor may be sticky (like /tmp); the state directory itself may not be shared at all
+        raise _root_refuse(path, "group/world-writable" + ("" if leaf else " without the sticky bit"))
+
+
+def open_state_dir(state_dir: Path) -> int:
+    """Directory fd for the install state dir, created if missing.
+
+    Non-root: a plain mkdir. Root: walk from ``/`` with directory fds (``O_NOFOLLOW``,
+    ``dir_fd=``), refuse any existing component that is a symlink, is not root-owned, or is
+    group/world-writable without sticky, and create missing components with ``mkdir(dir_fd=)``
+    then re-open them ``O_NOFOLLOW``. The lock and the evidence log are opened relative to the
+    returned fd, so a swap after the check cannot redirect them; the other root writers (ledger,
+    temp files) re-resolve the path, which stays safe because every validated component is
+    root-owned and not writable by others, so only root can swap it. Limits: ACL grants to other
+    users are not examined, and a ``..`` in the path is refused (it would resolve differently
+    from the normalised path that was validated).
+    """
+    if os.geteuid() != 0:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    if ".." in Path(state_dir).parts:
+        raise _root_refuse(str(state_dir), "the path contains '..'")
+    names = [part for part in os.path.abspath(state_dir).split(os.sep) if part]
+    here = os.sep
+    fd = os.open(os.sep, _DIR_FLAGS)
+    try:
+        _require_trusted_dir(fd, here, leaf=not names)
+        for index, name in enumerate(names):
+            _before_open_component(here, name)
+            path = os.path.join(here, name)
+            try:
+                try:
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=fd)
+                    except FileExistsError:
+                        pass  # a concurrent root installer made it; the open below judges it like any component
+                    nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            except OSError as error:
+                raise _root_refuse(path, f"not a plain directory it can open or create ({error.strerror or error})") from error
+            os.close(fd)
+            fd, here = nxt, path
+            _require_trusted_dir(fd, here, leaf=index == len(names) - 1)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def append_recovery_evidence(state_dir: Path, record: dict[str, Any], *, dir_fd: int | None = None) -> None:
+    """Append-only, fsynced evidence of what recovery saw or changed; never rewritten."""
+    line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, sort_keys=True) + "\n"
+    own_dir = dir_fd is None
+    try:
+        if dir_fd is None:
+            dir_fd = open_state_dir(state_dir)
+        fd = os.open(RECOVERY_EVIDENCE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    except OSError as error:
+        raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: cannot open the evidence log ({error}); it must be a plain file") from error
+    finally:
+        if own_dir and dir_fd is not None:
+            os.close(dir_fd)
+    try:
+        if not owned_regular_file(fd):
+            raise InstallError(f"{state_dir / RECOVERY_EVIDENCE}: evidence log is not a regular file owned by you; refusing to write")
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        os.close(open_state_dir(path.parent))  # root: refuse unsafe ancestry before any write
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    # The temp name carries the writer's pid and start token so a kill between create
+    # and replace leaves a half-written artifact that recovery can attribute.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{path.name}.{os.getpid()}.{_start_token(process_start_time(os.getpid()))}.",
+        suffix=".tmp", dir=str(path.parent),
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -2873,7 +3103,7 @@ def load_ledger(state_dir: Path) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def install_ledger_lock(state_dir: Path) -> Iterator[None]:
+def install_ledger_lock(state_dir: Path, *, wait: bool = True) -> Iterator[dict[str, Any] | None]:
     """Serialize component planning, execution and ledger read-modify-write.
 
     Keep the lock on a stable file, not ledger.json (which is replaced). Live
@@ -2881,14 +3111,80 @@ def install_ledger_lock(state_dir: Path) -> Iterator[None]:
     ledger.lock already exists so executable eligibility is decided or
     re-validated under the lock. The kernel releases the lock on close/process
     exit, including exceptional outcomes.
+
+    W18: while held, ledger.lock carries the holder's pid and start time, cleared
+    on a clean release, so a record left behind names a holder that was killed.
+    A stale record is appended to the recovery evidence before it is superseded
+    and is yielded to the caller; ``wait=False`` raises ``InstallError`` instead
+    of blocking when another installer holds the lock.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state_dir / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        dir_fd = open_state_dir(state_dir)  # root: strict ancestry walk before anything is created or opened
+    except OSError as error:
+        raise InstallError(f"{state_dir}: cannot open the install state directory ({error})") from error
+    try:
+        _after_state_dir_open(state_dir)
+        try:
+            fd = os.open("ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        except OSError as error:
+            raise InstallError(f"{state_dir / 'ledger.lock'}: cannot open the install lock ({error}); it must be a plain file, not a link") from error
+        with _closing_after(fd):
+            yield from _held_lock(state_dir, fd, dir_fd, wait)
+    finally:
+        os.close(dir_fd)
+
+
+@contextlib.contextmanager
+def _closing_after(fd: int) -> Iterator[None]:
+    try:
         yield
     finally:
         os.close(fd)
+
+
+def _held_lock(state_dir: Path, fd: int, dir_fd: int, wait: bool) -> Iterator[dict[str, Any] | None]:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise InstallError(f"{state_dir / 'ledger.lock'}: the install lock must be a regular file")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except BlockingIOError as error:
+        raise InstallError(f"{state_dir / 'ledger.lock'}: install lock is held by a running installer") from error
+    previous, record_ok = _swap_lock_holder(state_dir, fd, dir_fd) if owned_regular_file(fd) else (None, False)
+    try:
+        yield previous
+    finally:
+        if record_ok:  # else keep the flock but never truncate/write through it, nor erase a record we could not log
+            with contextlib.suppress(OSError):
+                os.ftruncate(fd, 0)
+
+
+def parse_lock_holder(raw: bytes) -> dict[str, Any] | None:
+    try:
+        rec = json.loads(raw.decode("utf-8")) if raw.strip() else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _swap_lock_holder(state_dir: Path, fd: int, dir_fd: int) -> tuple[dict[str, Any] | None, bool]:
+    """Advisory holder record; failures here never fail the lock.
+
+    Returns ``(stale prior record, whether our record was written)``. The stale record is
+    erased only after its evidence line was appended; if the log refuses, it stays put.
+    """
+    stale = None
+    try:
+        prior = parse_lock_holder(os.pread(fd, 4096, 0))
+        if prior is not None and owner_status(prior) in ("gone", "reused"):
+            append_recovery_evidence(state_dir, {"event": "stale-lock-holder-superseded", "holder": prior}, dir_fd=dir_fd)
+            stale = prior
+        record = {**current_owner(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps(record).encode("utf-8"), 0)
+        os.fsync(fd)
+    except Exception:  # noqa: BLE001 - advisory record: no failure here (odd pid data, evidence log refused) may fail the lock
+        return None, False
+    return stale, True
 
 
 def save_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
@@ -3099,6 +3395,7 @@ def _run_install_argv(
         "kind": kind,
         "argv": list(step.argv),
         "at": stamp,
+        "owner": current_owner(),
     }
     save_ledger(state_dir, ledger)
     try:

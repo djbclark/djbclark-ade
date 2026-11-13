@@ -15,6 +15,7 @@ remains later work (`docs/setup-plan.md` S3).
 | `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
+| `bin/ade_install_recovery.py` | W18 crash/orphan scan (doctor) and explicit `recover` repair |
 | `bin/ade_user_install.py` / `bin/ade-user-install` | User-scoped uv/just fetch, `bin/` symlinks, Linux sudo-secretspec media |
 
 Reader adoption **2026-11-10**: default `ade_install.load_catalog()` reads the
@@ -194,6 +195,7 @@ ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
                    [--state PATH] [--prefix DIR]
 ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
 ade-install python [--state-dir DIR] [--dry-run|--yes] [--recover] [--json]
+ade-install recover [--state-dir DIR] [--dry-run|--yes] [--json]   # W18 crash/orphan repair; doctor reports, this repairs
 sh bin/ade-bootstrap [--yes] [--recover] [--state-dir DIR]   # cold start: no Python 3.11+ yet
 ade-install doctor [--root DIR] [--id ID ...] [--json]
 ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
@@ -282,8 +284,7 @@ already running) and the POSIX-sh cold-start bridge `sh bin/ade-bootstrap`
   Recovery verifies what is there and records it; it never re-downloads. A live
   owner pid reports `owner-active`. A known failure (`uv` exit nonzero, nothing
   verifiable) is recorded `failed` and the sentinel cleared.
-- Not done here: crash/orphan recovery of component operations (W18), a
-  `python3` shim, fetching uv, Just and full setup (`ade-install bootstrap` and
+- Not done here: a `python3` shim, fetching uv, Just and full setup (`ade-install bootstrap` and
   `just install` stay separate explicit steps).
 
 `ade-install bootstrap` is a separate opt-in partial bootstrap for a host that
@@ -442,14 +443,62 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
   `save_ledger` remains a low-level atomic replacement whose read-modify-write
   callers must hold this lock; all production callers do so.
 
-  This mutex (**2026-11-12**) covers concurrent live owners, not crash/orphan
-  admission or recovery. A failed terminal save or unexpected runner exception
-  may leave `pending` evidence, and a child could survive an owner crash. Those
-  existing unknown outcomes are preserved. Existing explicit apply eligibility is
-  unchanged; this is not a new pending/orphan admission gate and introduces no
-  automatic retry or recovery. The Python acquisition bridge (W17) uses this lock plus a
-  pending sentinel with explicit `--recover` (above); crash/orphan recovery of
-  component operations is still separate work (W18).
+  This mutex (**2026-11-12**) covers concurrent live owners. Crash and orphan
+  recovery is separate and explicit (W18, below); existing apply eligibility is
+  unchanged: apply is not gated on, and never retries or repairs, an unknown
+  `pending` outcome.
+
+  **Crash/orphan recovery (W18, 2026-11-12).** A killed or crashed install leaves
+  four kinds of evidence, all attributed by PID **plus process start time**
+  (`/proc` or `ps -o lstart=`; a reused PID with a different start is an orphan,
+  an unreadable start counts as live), never by a name pattern:
+  1. a `pending` ledger entry; new entries carry `owner: {pid, start}`. A pre-W18
+     entry has no owner and counts as orphaned only while `ledger.lock` is free
+     (pending is only written and resolved under the lock), `unverifiable` while
+     a running installer holds it;
+  2. `ledger.lock` itself: while held it records the holder's pid and start and
+     clears them on a clean release, so a record left behind names a holder that
+     was killed (the kernel already released the flock);
+  3. half-written atomic-write temp files `<name>.<pid>.<starttoken>.<rand>.tmp`
+     in the state directory (killed between create and `os.replace`; the target
+     was never replaced). Pre-W18 `ledger.json.<8 chars>` temps have no owner and
+     are orphaned only after 300 s;
+  4. `python-acquire.pending` (W17), now judged by pid plus start vs its `started`
+     time, so a reused pid no longer reports `owner-active` forever.
+
+  `ade-install doctor` reports them as `install-state` rows (`orphaned`/`corrupt`
+  fail the exit code; `active`/`unverifiable` do not) for a full-scope doctor,
+  scanning `--state-dir` (default the ledger directory). It never repairs.
+  `ade-install recover` (dry-run by default) names what `--yes` would do;
+  `ade-install recover --yes` is the only repair: under the ledger lock
+  (never waiting: a running installer gives `lock-busy`, exit 1; never as root),
+  it relabels each orphaned `pending` entry `status: interrupted` with every
+  original field kept plus `previous_status`, `interrupted_at`, `interrupted_reason`;
+  moves orphaned temp files to `<state>/recovered/`; and appends what it saw to
+  `<state>/recovery-evidence.jsonl` first. Nothing is deleted and it never
+  re-runs an install; an unreadable `ledger.json` is left untouched. A stale lock
+  holder record is superseded by the next lock acquirer of any command, with an
+  evidence line first (it is metadata about the dead holder, not ledger state).
+  The Python sentinel stays with `ade-install python --recover --yes`, which must
+  verify an interpreter; `recover` lists it as deferred. Repeating `recover --yes`
+  finds nothing. Tests (`tests/test_install_recovery.py`) SIGKILL a real apply at
+  five phases (before the pending record, in the command, before the terminal
+  save, between temp write and replace, after the terminal save).
+
+  Hardening (adversary review, 2026-11-12): `ledger.lock` and the evidence log are
+  opened `O_NOFOLLOW` and are only truncated or appended to when they are regular,
+  singly-linked files owned by the effective user (a planted link must never
+  redirect a write, e.g. a root `apply` that inherited the user's HOME); a link
+  makes `recover` and the lock refuse and doctor report one failing `state-file` row (no command repairs it: remove it by hand). Under euid 0 (`sudo` keeps the user's HOME) the state directory is opened by walking from `/` with directory fds (`O_NOFOLLOW`, `dir_fd=`): any existing component that is a symlink (root-owned or not), is not root-owned, or is group/world-writable without the sticky bit makes the lock, the evidence log and atomic writes refuse before anything is created; missing components are made with `mkdir(dir_fd=)` and re-opened `O_NOFOLLOW`; `ledger.lock` and the evidence log are opened relative to the final directory fd, so a swap after the check cannot redirect them (validated components can only be swapped by root). `apply`/`update` as root therefore need a real, root-owned, symlink-free state directory path (e.g. `ADE_INSTALL_STATE_DIR=/var/lib/...`; on macOS `/var` and `/tmp` are links, so use `/private/...`). The state directory itself must not be group/world-writable (sticky only excuses ancestors), a `..` in the path is refused, and ACL grants to other users are not examined (known limit). `recover` dry-run with only unrepairable rows reports `manual-repair-needed` (exit 0); `--yes` exits 1 `refused` for the same rows. Pids in state
+  data are bounded (an absurd pid is `unknown`, never a crash), state-file reads are
+  bounded and non-blocking, process start is compared with a 2 s tolerance (Linux
+  `btime` drifts when the clock steps), a temp whose writer pid was reused is
+  orphaned only once 300 s old, and file names are escaped in reports. Known limits:
+  a child that outlives a killed owner is not detected, so its entry is relabelled
+  `interrupted` while it may still be installing (the outcome is unknown either
+  way: check `ade-install doctor`); the shell bridge (`bin/ade-bootstrap`) still
+  judges its sentinel by bare pid; the stale-holder supersede at the next lock
+  acquisition writes one evidence line and no repair.
 - `ade-user-install uv|just|cursor-cli|hermes|link <name>|sudo-secretspec` fetches
   release binaries / vendor packages, symlinks a repo `bin/` tool, or stages
   Linux sudo-secretspec media into the prefix. No `shell=True`, no root. Cursor
