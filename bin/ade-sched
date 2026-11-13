@@ -119,6 +119,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
         if arg:
             sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
     a = ap.parse_args(argv)
+    if a.restart_service and a.cmd not in ("install", "uninstall"):   # W21d lows: a flag that stops a service is never silently ignored
+        ap.error(f"--restart-service applies only to install and uninstall, not {a.cmd}")
     a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
     a.names = [*a.names, *getattr(a, "sub_names", [])]
     if getattr(a, "sub_dry_run", False):
