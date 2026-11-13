@@ -41,19 +41,24 @@ A lead's workers and reviewers all go in **one new window per lead**, never one 
    and an agent-tool (MCP) `create_agent` title at 60 (`packages/server/src/server/agent/tools/paseo-tools.ts:1177`); the
    sidebar shows only the first words. Name tabs after launch with `paseo agent update`, not `--title`, so the 60/200
    launch caps never bite.
-4. **Mechanics** (launch recipe in `skills/fan-out` section 3): the first launch has no window yet, so it creates one
-   (`paseo run --new-workspace local …`). **Read the new window's id from that launch, never guess it:** `paseo run --json`
+4. **Mechanics: `bin/ade-worker-run`** (2026-11-13; recipe in `skills/fan-out` section 3). `ade-worker-run --lead <lead id>
+   --slice <name> [--window-middle <middle>] [--cwd <dir>] -- <paseo run args>` does the steps below and prints
+   `{agentId, workspaceId, windowName, tabName}`. The first launch has no window yet, so it creates one
+   (`paseo run --new-workspace local …`). **The new window's id is read from that launch, never guessed:** `paseo run --json`
    returns no `workspaceId` (Paseo 0.16.0-beta.2, 2026-11-13), and `paseo workspace ls` cannot tell the new window from other
-   leads' windows that share its cwd and branch name. Take it from the `Created workspace wks_… - <name>` line `paseo run`
-   prints on stderr (capture stderr to a file, not a pipe), or from the new agent's state file,
-   `$PASEO_HOME/agents/*/<agent id>.json` `workspaceId` (verified 2026-11-13). Record the `wks_…` in the lead's own state,
-   then `paseo workspace rename <wks> "workers <middle> <lead id>"`, and give every later launch `--workspace <wks>`. Rename
-   each tab with `paseo agent update <full agent id> --name "worker <middle> <lead id>"` (tabs share a name, so always pass
-   a full agent id, never a tab name). **Archive the window with `paseo workspace archive <wks>` only when all hold:** every
-   agent labelled `ade.lead=<own id>` is archived or idle with its DONE/BLOCKED handled (`paseo ls -a -g --json --label
-   ade.lead=<own id>`); no other live agent sits in the window (`paseo ls -a -g --json`, match its workspace; the archive
-   stops every live agent and terminal in the window, labelled or not); and the recorded `<wks>`'s name reads `workers …
-   <own lead id>`. Otherwise leave the window.
+   leads' windows that share its cwd and branch name. The helper takes it from the JSON when present, else from the single
+   `Created workspace wks_… - <name>` line `paseo run` prints on stderr (read from a file, not a pipe), cross-checked against
+   the new agent's state file, `$PASEO_HOME/agents/*/<agent id>.json` `workspaceId` (verified 2026-11-13); none or two
+   different ids fail closed. It then runs `paseo workspace rename <wks> "workers <middle> <lead id>"`; every later launch
+   finds the window by that exact name in `paseo workspace ls --json` (two matches are refused) and passes `--workspace <wks>`.
+   It adds `--label ade.lead=<lead id>` and `--label slice=<name>` and renames each tab with `paseo agent update <full agent
+   id> --name "worker <name> <lead id>"` (tabs share a name, so by hand always pass a full agent id, never a tab name). Only
+   a first launch's rename waits on `paseo run` returning, so pass `--no-wait`. **Archive the window with `ade-worker-run
+   archive-window --lead <lead id>` (it runs `paseo workspace archive <wks>`) only when all hold:** every live agent labelled
+   `ade.lead=<own id>` is closed, or idle with its DONE/BLOCKED handled (`--idle-handled`); no other live agent sits in the
+   window (the archive stops every live agent and terminal in it, labelled or not; the helper reads each live agent's
+   `workspaceId` from its state file and treats one with no state file as a blocker); and the window's name reads `workers …
+   <own lead id>`. Otherwise it archives nothing and lists the blockers. It does not look at the window's terminals.
 5. **cwd:** a window's `cwd` is the session directory its first launch gave it (the repo's primary checkout). Later tabs
    launch with `--workspace <wks> --cwd <that same directory>` (with `--workspace`, Paseo takes the agent's cwd from the
    window). Because that directory is the shared primary checkout, where nothing may be edited (AGENTS.md order 9), each
