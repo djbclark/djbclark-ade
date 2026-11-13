@@ -207,7 +207,7 @@ def test_routing_override_does_not_isolate_model_tier_domain(tree, monkeypatch):
     local_file(home, '[routing]\nplenty_min = 88.0\n' + tier_text(modified_tiers(root)))
     monkeypatch.setenv("ROUTING_POLICY", str(root / "config/routing.toml"))
     reload_at(root, monkeypatch)
-    assert router.PLENTY_MIN == 50
+    assert router.PLENTY_MIN == 20
     assert_modified_runtime()
 
 

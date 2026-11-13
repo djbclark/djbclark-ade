@@ -41,7 +41,7 @@ def local_file(home, text):
 def unified_file(root, *, plenty=65):
     # Only temporary fixture trees get a unified file; no tracked/live config.
     routing = (root / "config/routing.toml").read_text()
-    routing = routing.replace("plenty_min = 50.0", f"plenty_min = {plenty}.0")
+    routing = routing.replace("plenty_min = 20.0", f"plenty_min = {plenty}.0")
     path = root / "config/ade.toml"
     path.write_text("schema_version = 1\n" + routing)
     return path
@@ -150,7 +150,7 @@ def test_routing_policy_isolates_unified_and_local_but_not_gates(tree):
     result = cli(tree, "policy", env={"ROUTING_POLICY": str(selected)})
     assert result.returncode == 0, result.stderr
     policy = json.loads(result.stdout)
-    assert policy["routing"]["plenty_min"] == 50
+    assert policy["routing"]["plenty_min"] == 20
     assert policy["lead"]["fable_lead"] is True
     assert policy["path"] == str(selected)
     assert policy["frontier_gate"]["frontier1_judged"] == 0

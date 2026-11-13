@@ -75,7 +75,7 @@ preferences, because they encode consequences a score cannot see:
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
   headroom (the tightest window, 5-hour and weekly alike) is at least
-  `PLENTY_MIN` ([routing].plenty_min, 50), and with no fresh reading they are
+  `PLENTY_MIN` ([routing].plenty_min, 20), and with no fresh reading they are
   not, so below it codex is frontier-only again; inside that gate it competes
   on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
