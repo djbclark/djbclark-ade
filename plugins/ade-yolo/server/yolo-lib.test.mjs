@@ -163,13 +163,20 @@ test("attach-only create passes unchanged and unstamped, with no catalog lookup 
   const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
   let lookups=0; const logs=[]; const logger={warn:m=>logs.push(m)};
   const paseo={providers:{snapshot:async()=>{lookups++;return{entries:[]};}}};
-  for(const provider of ["herdr-generic","herdr-omp","herdr-generic/pane-1"]){
-    const out=await hooks["agent.create.before"]({request:{config:{provider,cwd:"/repo"}}},{paseo,logger});
+  const bind={herdrBind:{terminalId:"t1",paneId:"w1:p2"}};
+  for(const config of [{provider:"herdr-generic"},{provider:"herdr-generic/native-default",providerOptions:bind},{provider:"herdr-omp/native-default",providerOptions:bind}]){
+    const out=await hooks["agent.create.before"]({request:{config:{...config,cwd:"/repo"}}},{paseo,logger});
     assert.equal(out,undefined); // host keeps the request as is
   }
   assert.equal(lookups,0); assert.equal(logs.length,3); assert.match(logs[0],/attach-only: mode decided by the pane's launch/);
   assert.equal(applyYoloToCreateRequest({config:{provider:"herdr-generic"}},undefined),undefined);
-  assert.equal(planYoloPatch({provider:"herdr-omp"},{},row("herdr-omp",[])),null);
+  assert.equal(planYoloPatch({provider:"herdr-omp",providerOptions:bind},{},row("herdr-omp",[])),null);
+});
+test("herdr-omp create WITHOUT the bind option launches a retired omp: not attach-only, still refuses",async()=>{
+  for(const providerOptions of [undefined,{},{herdrBind:null},{herdrBind:{}},{herdrBind:{terminalId:""}},{herdrBind:"t1"}])
+    assert.throws(()=>planYoloPatch({provider:"herdr-omp/native-default",providerOptions},{},row("herdr-omp",[])),/no source-backed/);
+  const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
+  await assert.rejects(hooks["agent.create.before"]({request:{config:{provider:"herdr-omp/native-default",cwd:"/repo"}}},{paseo:{providers:{snapshot:async()=>({entries:[row("herdr-omp",[])]})}}}),/no source-backed/);
 });
 test("attach-only open: import with no readable snapshot and resume with a matching snapshot pass; identity mismatch still refuses",async()=>{
   const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
@@ -179,6 +186,11 @@ test("attach-only open: import with no readable snapshot and resume with a match
     const request={agentId:"a",provider,cwd:"/repo",reason:"import",purpose:"interactive",metadata:{}};
     await hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>({agent:undefined})),logger}); // import: no record yet
     await hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>{throw new Error("not found");}),logger});
+    for(const reason of ["resume","refresh"]){ // only an import may lack a snapshot
+      await assert.rejects(hooks["agent.open.before"]({request:{...request,reason}},{paseo:paseoWith(async()=>({agent:undefined}))}),/identity/);
+      await assert.rejects(hooks["agent.open.before"]({request:{...request,reason}},{paseo:paseoWith(async()=>{throw new Error("x");})}),/identity/);
+      await assert.rejects(hooks["agent.open.before"]({request:{...request,reason}},{paseo:{}}),/identity/);
+    }
     await hooks["agent.open.before"]({request:{...request,reason:"resume"}},{paseo:paseoWith(async()=>({agent:{id:"a",provider}})),logger});
     for(const bad of [{id:"b",provider},{id:"a",provider:"claude"}])
       await assert.rejects(hooks["agent.open.before"]({request},{paseo:paseoWith(async()=>({agent:bad}))}),/identity/);
@@ -190,6 +202,8 @@ test("attach-only open: import with no readable snapshot and resume with a match
 test("attach-only allowlist is narrow: other modeless providers, lookalike ids and ordinary agents still refuse",async()=>{
   for(const p of ["herdr","herdr-shell","herdr-generic2","Herdr-Generic","hermes","unknownprov"])
     assert.throws(()=>planYoloPatch({provider:p},{},row(p,[])),/no source-backed/);
+  for(const p of [" herdr-generic","herdr-generic "]) // whitespace never matches the exact id, so it gets the ordinary rules
+    assert.throws(()=>planYoloPatch({provider:p},{},row("herdr-generic",[])),/no source-backed/);
   assert.throws(()=>planYoloPatch({provider:"claude/herdr-generic"},{},row("claude",["default"])),/no source-backed/);
   const hooks={}; registerAdeYoloHooks({addHook(n,h){hooks[n]=h;return()=>{};}});
   await assert.rejects(hooks["agent.create.before"]({request:{config:{provider:"hermes",cwd:"/repo"}}},{paseo:{providers:{snapshot:async()=>({entries:[row("hermes",[])]})}}}),/no source-backed/);

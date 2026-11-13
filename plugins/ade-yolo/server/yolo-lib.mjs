@@ -16,6 +16,13 @@ export const UNATTENDED_BY_CONSTRUCTION = new Set(["pi"]);
  * never generalised to unknown or modeless providers.
  */
 export const ATTACH_ONLY = new Set(["herdr-generic", "herdr-omp"]);
+/**
+ * Attach-only providers whose create can also LAUNCH a process. herdr-omp has a launch spec: a create without the
+ * herdr-harness bind option (`providerOptions.herdrBind`) starts a fresh, retired `omp` in a new pane with no unattended
+ * flag. Only a create that carries the bind option (an existing terminal) is attach-only; herdr-generic has no launch.
+ */
+export const ATTACH_OR_LAUNCH = new Set(["herdr-omp"]);
+export const HERDR_BIND_OPTION = "herdrBind";
 export const STAMP_METADATA_KEY = "ade-yolo.applied";
 export const RESTRICTIVE_MODE_IDS = new Set(["plan", "read-only", "dontAsk"]);
 export const SKIP_METADATA_KEY = "ade-yolo.skip";
@@ -29,8 +36,16 @@ export function assertNotRetired(provider) {
 export function providerId(provider) {
   return typeof provider === "string" ? provider.trim().split("/", 1)[0] : "";
 }
+/** Exact id (an optional `/model` suffix is Paseo's own form): leading/trailing whitespace never matches. */
 export function isAttachOnly(provider) {
-  return ATTACH_ONLY.has(providerId(provider));
+  return typeof provider === "string" && provider === provider.trim() && ATTACH_ONLY.has(providerId(provider));
+}
+/** Create of an attach-only provider that binds an existing pane; herdr-omp without the bind option launches, so it is not one. */
+export function isAttachOnlyCreate(config) {
+  if (!isAttachOnly(config?.provider)) return false;
+  if (!ATTACH_OR_LAUNCH.has(providerId(config.provider))) return true;
+  const bind = config.providerOptions?.[HERDR_BIND_OPTION];
+  return typeof bind?.terminalId === "string" && bind.terminalId !== "";
 }
 export const ATTACH_ONLY_NOTE = "attach-only: mode decided by the pane's launch";
 export function shouldSkip(metadata) {
@@ -48,7 +63,7 @@ export function planYoloPatch(config, metadata, catalog, controls) {
   const provider = providerId(config?.provider);
   const unavailable = reason => { throw new Error(`ade-yolo: ${provider}: ${reason}`); };
   assertNotRetired(provider);
-  if (ATTACH_ONLY.has(provider)) return null; // no patch: Paseo launches nothing (see ATTACH_ONLY)
+  if (isAttachOnlyCreate(config)) return null; // no patch: Paseo launches nothing (see ATTACH_ONLY)
   if (!catalog || catalog.provider !== provider || catalog.enabled !== true || catalog.status !== "ready" || catalog.error)
     return unavailable("native provider catalog is not enabled/ready");
   if (!Array.isArray(catalog.modes) || catalog.modes.some(m => !m || typeof m.id !== "string" || !m.id))
@@ -76,7 +91,7 @@ export function applyYoloToCreateRequest(request, catalog, controls, log = () =>
   const config = request?.config ?? {};
   const patch = planYoloPatch(config, request?.metadata, catalog, controls);
   // Attach-only: unchanged and unstamped, so a later open reads as legacy rather than demanding saved-mode evidence.
-  if (!patch && isAttachOnly(config.provider) && !isExempt(config, request?.metadata)) {
+  if (!patch && isAttachOnlyCreate(config) && !isExempt(config, request?.metadata)) {
     log(`ade-yolo: ${providerId(config.provider)}: create ${ATTACH_ONLY_NOTE}`);
     return undefined;
   }
@@ -93,10 +108,11 @@ export function assertResumeIdentity(snapshot, request) {
 
 /**
  * Open of an attach-only provider (resume, refresh or import). An import has no agent record yet, so no snapshot is
- * readable: that alone is allowed, for this provider set only. Wherever a snapshot IS readable, identity is still checked.
+ * readable: that alone is allowed (reason "import" only), for this provider set only. Wherever a snapshot IS readable, identity is still checked.
  */
 export function assertAttachOnlyOpen(snapshot, request, log = () => {}) {
-  if (snapshot) assertResumeIdentity(snapshot, request);
+  // Only an import may lack a snapshot (no agent record yet); a resume or refresh needs one, as for any provider.
+  if (snapshot || request.reason !== "import") assertResumeIdentity(snapshot, request);
   log(`ade-yolo: ${providerId(request.provider)}: open ${ATTACH_ONLY_NOTE} (${snapshot ? "snapshot identity verified" : "no snapshot readable"})`);
 }
 

@@ -1,4 +1,4 @@
-import { applyYoloToCreateRequest, assertAttachOnlyOpen, assertNotRetired, assertResumeConfig, assertResumeIdentity, isAttachOnly,
+import { applyYoloToCreateRequest, assertAttachOnlyOpen, assertNotRetired, assertResumeConfig, assertResumeIdentity, isAttachOnly, isAttachOnlyCreate,
   isExempt, isLegacyAgent, providerId } from "./yolo-lib.mjs";
 
 async function nativeEvidence(paseo, config) {
@@ -22,7 +22,7 @@ const logWith = logger => msg => (logger?.warn ?? logger?.info ?? console.warn).
 export function registerAdeYoloHooks(server) {
   const offCreate = server.addHook("agent.create.before", async ({ request }, { paseo, logger }) => {
     if (isExempt(request.config, request.metadata)) return;
-    if (isAttachOnly(request.config?.provider)) // no catalog lookup: Paseo launches nothing
+    if (isAttachOnlyCreate(request.config)) // no catalog lookup: Paseo launches nothing
       return applyYoloToCreateRequest(request, undefined, undefined, logWith(logger));
     const { catalog, controls } = await nativeEvidence(paseo, request.config);
     return applyYoloToCreateRequest(request, catalog, controls);
@@ -32,7 +32,7 @@ export function registerAdeYoloHooks(server) {
     // Create has just passed the config gate. History does not launch a runtime.
     if (request.reason === "create" || request.purpose === "history" || isExempt({}, request.metadata)) return;
     if (isAttachOnly(request.provider)) {
-      // An import has no agent record to refresh; an unreadable snapshot is allowed for this provider set only.
+      // An import has no agent record to refresh; assertAttachOnlyOpen allows an unreadable snapshot for imports only.
       const refreshed = await paseo?.agents?.ref?.(request.agentId)?.refresh?.().catch(() => undefined);
       return assertAttachOnlyOpen(refreshed?.agent, request, log);
     }
