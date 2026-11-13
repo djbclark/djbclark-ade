@@ -2344,7 +2344,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         stale = [{"provider": "antigravity", "account": None, "pool_family": "gemini_argon",
                   "age_seconds": 1424.6, "stale_reason": "reading is 24 minutes old"}]
         path = self.write("sp.json", self.payload(
-            [self.GOOD_ROW, self.codex_row(), self.argon_row()], fresh=False, age_seconds=830.0,
+            [dict(self.GOOD_ROW, age_seconds=20), dict(self.codex_row(), age_seconds=20),
+             self.argon_row()], fresh=False, age_seconds=830.0,
             stale_pools=stale))
         quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(quota["omp"]["remaining"], 70.0)
@@ -2365,27 +2366,67 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_stale_pools_does_not_stale_a_family_it_does_not_name(self):
         stale = [{"provider": "antigravity", "pool_family": "gemini"}]
         argon = dict(self.argon_row(), age_seconds=5)
-        path = self.write("sp.json", self.payload([argon], fresh=False, age_seconds=5, stale_pools=stale))
+        gemini = {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+                  "headroom_percent": 60.0, "age_seconds": 1424.6}
+        path = self.write("sp.json", self.payload(
+            [argon, gemini], fresh=False, age_seconds=5, stale_pools=stale))
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(quota["antigravity-argon"]["remaining"], 80.0)   # only gemini was named
 
     def test_fresh_false_without_a_usable_stale_pools_list_stays_fully_stale(self):
-        good = {"provider": "antigravity", "pool_family": "gemini", "usable_now": True}
+        good = {"provider": "antigravity", "pool_family": "gemini"}
+        gem_row = {"provider": "antigravity", "pool_family": "gemini", "usable_now": True}
         for name, extra in (("missing", {}), ("empty", {"stale_pools": []}),
                             ("null", {"stale_pools": None}), ("not-a-list", {"stale_pools": "x"}),
-                            ("malformed-entry", {"stale_pools": [{"provider": "antigravity"}, 7]}),
+                            ("malformed-entry", {"stale_pools": [good, 7]}),
                             ("no-provider", {"stale_pools": [{"pool_family": "gemini"}]}),
                             ("old-snapshot", {"stale_pools": [good], "age_seconds": r.STALE_SOFT + 100}),
-                            ("no-age", {"stale_pools": [good], "age_seconds": None})):
+                            ("no-age", {"stale_pools": [good], "age_seconds": None}),
+                            ("family-key-missing", {"stale_pools": [{"provider": "antigravity"}]}),
+                            ("family-misspelled", {"stale_pools": [
+                                {"provider": "antigravity", "pool_family": "gemini-argon"}]}),
+                            ("names-no-available-row", {"stale_pools": [
+                                {"provider": "zai", "pool_family": "5h"}]}),
+                            ("one-entry-matches-one-does-not", {"stale_pools": [
+                                good, {"provider": "zai", "pool_family": "5h"}]}),
+                            ("fresh-garbage-string", {"fresh": "maybe", "stale_pools": [good]}),
+                            ("fresh-garbage-zero", {"fresh": 0, "stale_pools": [good]}),
+                            ("fresh-garbage-false-string", {"fresh": "false", "stale_pools": [good]})):
             with self.subTest(name):
                 body = {"schema_version": "1.5", "fresh": False, "age_seconds": 5,
-                        "available": [self.GOOD_ROW, self.codex_row()], **extra}
+                        "available": [self.GOOD_ROW, self.codex_row(), gem_row], **extra}
                 path = self.write("fs.json", r.json.dumps(body))
                 quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
                 self.assertIsNone(quota["omp"]["remaining"])
                 self.assertIsNone(quota["codex"]["remaining"])
                 self.assertGreater(age, r.STALE_SOFT)
                 self.assertIn("read as stale", r.quota_source_info()["detail"])
+
+    def test_a_stale_argon_row_never_reads_available_when_its_entry_misnames_it(self):
+        """Adversary 2026-11-13 F1: an entry that matches no row marked nothing and left a 700 s Argon reading fresh."""
+        argon = dict(self.argon_row(), age_seconds=700)
+        entries = {"contract-shaped": {"provider": "antigravity", "pool_family": "gemini_argon"},
+                   "family-key-missing": {"provider": "antigravity"},
+                   "family-misspelled": {"provider": "antigravity", "pool_family": "gemini-argon"},
+                   "family-null": {"provider": "antigravity", "pool_family": None}}
+        for name, entry in entries.items():
+            with self.subTest(name):
+                path = self.write("argon.json", self.payload(
+                    [argon, self.codex_row()], fresh=False, age_seconds=30.0, stale_pools=[entry]))
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertIsNone(quota["antigravity-argon"]["remaining"])
+
+    def test_an_ageless_unlisted_row_reads_stale_in_per_pool_mode(self):
+        """Adversary 2026-11-13 F3: it must not borrow the young snapshot's age."""
+        stale = [{"provider": "antigravity", "pool_family": "gemini_argon"}]
+        ageless = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
+        path = self.write("ageless.json", self.payload(
+            [ageless, dict(self.codex_row(), age_seconds=20), dict(self.argon_row(), age_seconds=700)],
+            fresh=False, age_seconds=30.0, stale_pools=stale))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["omp"]["remaining"])
+        self.assertEqual(quota["codex"]["remaining"], 55.0)   # a row with its own age keeps it
+        self.assertIsNone(quota["antigravity-argon"]["remaining"])
 
     def test_fresh_true_with_young_age_behaves_as_before(self):
         path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=True, age_seconds=5))

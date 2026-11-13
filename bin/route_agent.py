@@ -1516,17 +1516,24 @@ def _stale_pool_keys(payload: dict[str, Any], p_age: float | None) -> set[tuple[
 
     aiuse's top-level `fresh` is false when ANY usable entry is past its own pool's fresh limit (antigravity
     ships at 600 s and is queried at most every 15 min, so it is stale a third of the time); `stale_pools`
-    names those entries (`aiuse schema`, schema 1.5). When the list is a non-empty list of well-formed entries
-    and the snapshot itself is young (its own age is known and within STALE_SOFT), only those rows read as
-    stale. Anything else fails closed to a whole-payload stale read: no list or an empty one (some other
-    reason made it not fresh), a malformed entry, or an unknown or old snapshot age. Matching ignores
-    `account`, so a stale entry can only over-mark. 2026-11-13: one stale antigravity pool made `plan` refuse every pool."""
-    stale = payload.get("stale_pools")
-    if (not isinstance(stale, list) or not stale or p_age is None or p_age > STALE_SOFT
+    names those entries (`aiuse schema`, schema 1.5), a subset of `available`. Only a literal `fresh: false`,
+    a non-empty list of well-formed entries (`provider` str, the `pool_family` key present as str or null),
+    every one naming a (provider, pool_family) that some `available` row carries, and a snapshot whose own age
+    is known and within STALE_SOFT, read per pool: just those rows are stale. Anything else fails closed to a
+    whole-payload stale read: a non-False `fresh`, no list or an empty one, a malformed entry, a missing or
+    misspelled family (an entry that matches no row would mark nothing and leave the stale row reading fresh),
+    or an unknown or old snapshot age. Matching ignores `account`, so a stale entry can only over-mark.
+    2026-11-13: one stale antigravity pool made `plan` refuse every pool."""
+    stale, avail = payload.get("stale_pools"), payload.get("available")
+    if (payload.get("fresh") is not False or not isinstance(stale, list) or not stale
+            or not isinstance(avail, list) or p_age is None or p_age > STALE_SOFT
             or not all(isinstance(e, dict) and isinstance(e.get("provider"), str) and e["provider"]
-                       and isinstance(e.get("pool_family"), (str, type(None))) for e in stale)):
+                       and "pool_family" in e and isinstance(e["pool_family"], (str, type(None)))
+                       for e in stale)):
         return None
-    return {(e["provider"], e.get("pool_family")) for e in stale}
+    keys = {(e["provider"], e["pool_family"]) for e in stale}
+    rows = {(row.get("provider"), row.get("pool_family")) for row in avail if isinstance(row, dict)}
+    return keys if keys <= rows else None
 
 
 def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | None]:
@@ -1560,7 +1567,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                     stale_keys, marked_stale = blamed, False
                     label = (f"{label} (payload fresh={payload.get('fresh')!r}: stale_pools names "
                              + ", ".join(sorted(f"{p}/{f}" if f else p for p, f in blamed))
-                             + "; only those pools are stale)")
+                             + "; those pools read unknown)")
                 else:
                     label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
                     if p_age is None or p_age <= STALE_SOFT:
@@ -1577,7 +1584,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                         or (row.get("provider"), row.get("pool_family")) in stale_keys
                         else _clean_age(row.get("age_seconds"))
                         if _clean_age(row.get("age_seconds")) is not None
-                        else (p_age if p_age is not None else STALE_HARD + 1)))
+                        else (p_age if p_age is not None and not stale_keys else STALE_HARD + 1)))
                         for row in payload["available"]]
                     fresh = _providers_from_available(rows, p_age)
                 except (ValueError, TypeError, AttributeError, OverflowError):
