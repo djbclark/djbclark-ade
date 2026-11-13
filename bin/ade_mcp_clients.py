@@ -13,6 +13,8 @@ Statuses: ok | missing | wrong-url | wrong-type | disabled | error.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +24,9 @@ from urllib.parse import urlsplit
 CLIENTS = ("claude-code", "codex")
 # Claude Code accepts "streamable-http" as an alias of "http".
 CLAUDE_HTTP_TYPES = ("http", "streamable-http")
+
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+SAFE_URL = re.compile(r"https?://[A-Za-z0-9.:/_-]+\Z")
 
 Finding = tuple[str, str, str]  # (id, status, detail)
 
@@ -40,19 +45,21 @@ def load_roster(path: Path) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             raise ValueError("[[server]] row is not a table")
         sid, url, clients = row.get("id"), row.get("url"), row.get("clients")
-        if not isinstance(sid, str) or not sid or sid in seen:
+        if not isinstance(sid, str) or not SAFE_ID.match(sid) or sid in seen:
             raise ValueError(f"bad or duplicate server id {sid!r}")
         seen.add(sid)
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            raise ValueError(f"server {sid}: url must be http(s)")
+        if not isinstance(url, str) or not SAFE_URL.match(url):
+            raise ValueError(f"server {sid}: url must be plain http(s) (letters, digits, . : / _ -)")
         if (not isinstance(clients, list) or not clients
                 or any(c not in CLIENTS for c in clients)):
             raise ValueError(f"server {sid}: clients must be a subset of {list(CLIENTS)}")
     return rows
 
 
-def safe_url(url: Any) -> str:
-    """Scheme, host and path only: never userinfo, query or fragment."""
+def safe_url(url: Any, want: str) -> str:
+    """Scheme and host:port only; the path is shown only when it equals the
+    expected one (some endpoints carry an API key in the path). Never userinfo,
+    query or fragment; control characters are dropped."""
     if not isinstance(url, str):
         return "<non-string>"
     try:
@@ -60,21 +67,23 @@ def safe_url(url: Any) -> str:
         host = p.hostname or ""
         if p.port:
             host += f":{p.port}"
+        path = p.path if p.path.rstrip("/") == urlsplit(want).path.rstrip("/") else "/<other path>"
     except ValueError:
         return "<unparseable>"
-    return f"{p.scheme}://{host}{p.path}"
+    shown = f"{p.scheme}://{host}{path}"
+    return "".join(c if c.isprintable() else "?" for c in shown)[:120]
 
 
 def fix_add(client: str, sid: str, url: str) -> str:
     if client == "claude-code":
-        return f"claude mcp add --scope user --transport http {sid} {url}"
-    return f"codex mcp add {sid} --url {url}"
+        return f"claude mcp add --scope user --transport http {shlex.quote(sid)} {shlex.quote(url)}"
+    return f"codex mcp add {shlex.quote(sid)} --url {shlex.quote(url)}"
 
 
 def fix_remove(client: str, sid: str) -> str:
     if client == "claude-code":
-        return f"claude mcp remove --scope user {sid}"
-    return f"codex mcp remove {sid}"
+        return f"claude mcp remove --scope user {shlex.quote(sid)}"
+    return f"codex mcp remove {shlex.quote(sid)}"
 
 
 def _load_claude(home: Path) -> tuple[Path, dict[str, Any] | None]:
@@ -104,8 +113,10 @@ _LOADERS: dict[str, Callable[[Path], tuple[Path, dict[str, Any] | None]]] = {
 def _judge(client: str, sid: str, want: str, entry: Any) -> tuple[str, str]:
     add = fix_add(client, sid, want)
     swap = f"{fix_remove(client, sid)} && {add}"
-    if not isinstance(entry, dict):
+    if entry is None:
         return "missing", f"not registered; run: {add}"
+    if not isinstance(entry, dict):
+        return "wrong-type", f"entry is not a table/object; run: {swap}"
     if client == "claude-code" and entry.get("type") not in CLAUDE_HTTP_TYPES:
         # An entry without type is read as stdio, so its url is ignored.
         t = entry.get("type")
@@ -115,7 +126,7 @@ def _judge(client: str, sid: str, want: str, entry: Any) -> tuple[str, str]:
         return "disabled", f"present but enabled = false; set enabled = true in [mcp_servers.{sid}]"
     got = entry.get("url")
     if not isinstance(got, str) or got.rstrip("/") != want.rstrip("/"):
-        return "wrong-url", f"url is {safe_url(got)}, want {want}; run: {swap}"
+        return "wrong-url", f"url is {safe_url(got, want)}, want {want}; run: {swap}"
     return "ok", f"registered at {want}"
 
 
@@ -128,7 +139,7 @@ def observe(roster: list[dict[str, Any]], *, home: Path) -> list[Finding]:
             continue
         try:
             path, servers = _LOADERS[client](home)
-        except (OSError, ValueError, UnicodeDecodeError) as e:  # JSON/TOML errors ⊂ ValueError
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError) as e:  # JSON/TOML errors ⊂ ValueError
             out.append((f"{client}/*", "error", f"{client} config unreadable: {type(e).__name__}"))
             continue
         for r in wanted:

@@ -150,3 +150,33 @@ def test_doctor_silent_without_roster(tmp_path):
     obs, _ = ai.doctor(_catalog(tmp_path, False), skip_jobs=True, skip_credential_bak=True,
                        pi_pool_acceptance_path=tmp_path / "none.toml", mcp_home=tmp_path)
     assert not any(o.kind == "mcp" for o in obs)
+
+
+def test_path_secret_and_control_chars_never_printed(tmp_path, roster):
+    write_claude(tmp_path, {"firecrawl": {"type": "http",
+                                          "url": "https://mcp.example.dev/PATHSECRET/v2/mcp\x1b[31m"}})
+    write_codex(tmp_path, GOOD_CODEX)
+    st, detail = by_id(mc.observe(roster, home=tmp_path))["claude-code/firecrawl"]
+    assert st == "wrong-url" and "PATHSECRET" not in detail and "\x1b" not in detail
+
+
+def test_deep_nesting_is_error_not_crash(tmp_path, roster):
+    (tmp_path / ".claude.json").write_text("[" * 100000)
+    write_codex(tmp_path, GOOD_CODEX)
+    assert by_id(mc.observe(roster, home=tmp_path))["claude-code/*"][0] == "error"
+
+
+def test_non_table_entry_is_wrong_type_with_swap_fix(tmp_path, roster):
+    write_claude(tmp_path, {"firecrawl": "oops", "basic-memory": {"type": "http", "url": BM}})
+    write_codex(tmp_path, GOOD_CODEX)
+    st, detail = by_id(mc.observe(roster, home=tmp_path))["claude-code/firecrawl"]
+    assert st == "wrong-type" and "claude mcp remove --scope user firecrawl && claude mcp add" in detail
+
+
+@pytest.mark.parametrize("sid,url", [("a b", "http://x/mcp"), ("a;rm", "http://x/mcp"),
+                                     ("a", "http://x/mcp; rm -rf ~"), ("a", "http://x/$(id)")])
+def test_roster_rejects_shell_metacharacters(tmp_path, sid, url):
+    p = tmp_path / "r.toml"
+    p.write_text(f'[[server]]\nid="{sid}"\nurl="{url}"\nclients=["codex"]\n')
+    with pytest.raises(ValueError):
+        mc.load_roster(p)
