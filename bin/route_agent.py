@@ -1511,6 +1511,24 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
+def _stale_pool_keys(payload: dict[str, Any], p_age: float | None) -> set[tuple[str, Any]] | None:
+    """The (provider, pool_family) rows a `fresh: false` payload blames, or None when it blames nothing usable.
+
+    aiuse's top-level `fresh` is false when ANY usable entry is past its own pool's fresh limit (antigravity
+    ships at 600 s and is queried at most every 15 min, so it is stale a third of the time); `stale_pools`
+    names those entries (`aiuse schema`, schema 1.5). When the list is a non-empty list of well-formed entries
+    and the snapshot itself is young (its own age is known and within STALE_SOFT), only those rows read as
+    stale. Anything else fails closed to a whole-payload stale read: no list or an empty one (some other
+    reason made it not fresh), a malformed entry, or an unknown or old snapshot age. Matching ignores
+    `account`, so a stale entry can only over-mark. 2026-11-13: one stale antigravity pool made `plan` refuse every pool."""
+    stale = payload.get("stale_pools")
+    if (not isinstance(stale, list) or not stale or p_age is None or p_age > STALE_SOFT
+            or not all(isinstance(e, dict) and isinstance(e.get("provider"), str) and e["provider"]
+                       and isinstance(e.get("pool_family"), (str, type(None))) for e in stale)):
+        return None
+    return {(e["provider"], e.get("pool_family")) for e in stale}
+
+
 def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | None]:
     """Pool state per service: `aiuse --available --json`, else the snapshot file.
 
@@ -1534,10 +1552,19 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
             p_age = _payload_age(payload)
             # the contract's own staleness signal: `fresh` present and not True means stale
             marked_stale = payload.get("fresh") is not None and payload.get("fresh") is not True
+            stale_keys: set[tuple[str, Any]] = set()
             if marked_stale:
-                label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
-                if p_age is None or p_age <= STALE_SOFT:
-                    p_age = STALE_SOFT + 1
+                blamed = _stale_pool_keys(payload, p_age)
+                if blamed is not None:
+                    # `stale_pools` names the rows: only those read as stale, the rest use their own age
+                    stale_keys, marked_stale = blamed, False
+                    label = (f"{label} (payload fresh={payload.get('fresh')!r}: stale_pools names "
+                             + ", ".join(sorted(f"{p}/{f}" if f else p for p, f in blamed))
+                             + "; only those pools are stale)")
+                else:
+                    label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
+                    if p_age is None or p_age <= STALE_SOFT:
+                        p_age = STALE_SOFT + 1
             if not all(isinstance(row, dict) and isinstance(row.get("provider"), str)
                        and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))
                        for row in payload["available"]):
@@ -1547,6 +1574,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                     # a row without a usable age is stale, never fresh
                     rows = [dict(row, age_seconds=(
                         STALE_HARD + 1 if marked_stale
+                        or (row.get("provider"), row.get("pool_family")) in stale_keys
                         else _clean_age(row.get("age_seconds"))
                         if _clean_age(row.get("age_seconds")) is not None
                         else (p_age if p_age is not None else STALE_HARD + 1)))
