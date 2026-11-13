@@ -216,7 +216,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/peer_trust_gate.py\"",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 15
           }
         ]
@@ -306,7 +306,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/peer_trust_gate.py\"",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 15
           }
         ]
@@ -458,7 +458,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/peer_trust_gate.py\"",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 15
           }
         ]
@@ -531,7 +531,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/peer_trust_gate.py\"",
+            "command": "f=\"$HOME/.claude/hooks/peer_trust_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 15
           }
         ]
