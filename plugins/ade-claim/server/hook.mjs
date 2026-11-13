@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  appendObserveLog,
   buildAdeClaimsBindOwnerArgv,
+  buildObserveEntry,
   buildAdeClaimsReleaseArgv,
   buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
+  formatObserveLine,
   mergeOpenBeforeEnv,
   parseAgentCreateAfterAgent,
   parseAgentOpenBeforeRequest,
@@ -16,6 +19,7 @@ import {
   planWorktreeClaimCreate,
   resolveAdeClaimsScript,
   resolveClaimForCwd,
+  resolveClaimMode,
   resolveTrustedAdeClaimsScript,
   resolveTrustedAdeGitGuard,
   resolveTrustedAgentBinDir,
@@ -27,9 +31,52 @@ const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** Install soft-fail codes (do not abort worktree.create.after). */
 const INSTALL_SOFT_FAIL = new Set([73, 78]);
 
+/**
+ * Everything a hook touches outside its own arguments, so tests run offline: the daemon env, the state
+ * dir (mode flag + observe JSONL), the process spawner and the clock. Production uses the defaults.
+ *
+ * @typedef {{
+ *   env?: NodeJS.ProcessEnv | Record<string, string | undefined>,
+ *   stateDir?: string,
+ *   spawn?: typeof spawnSync,
+ *   now?: () => Date,
+ *   pluginRoot?: string,
+ *   log?: (line: string) => void,
+ * }} HookDeps
+ */
+
+/** @param {HookDeps} [deps] */
+function hookContext(deps = {}) {
+  return {
+    env: deps.env ?? process.env,
+    stateDir: deps.stateDir,
+    spawn: deps.spawn ?? spawnSync,
+    now: deps.now ?? (() => new Date()),
+    pluginRoot: deps.pluginRoot ?? PLUGIN_ROOT,
+    log: deps.log ?? ((line) => console.error(line)),
+  };
+}
+
+/** Mode for THIS call: env flag and state file are re-read every time (no daemon restart). */
+function callMode(ctx) {
+  return resolveClaimMode({ env: ctx.env, stateDir: ctx.stateDir });
+}
+
+/**
+ * One line per hook call: stderr (plugin logs) plus the append-only JSONL for the D3 soak.
+ * Never throws; `planned` is argv or an env delta, never the launch env or a secret.
+ */
+function record(ctx, m, hook, planned, ids, error) {
+  const entry = buildObserveEntry({ hook, mode: m.mode, reason: m.reason, planned, ids, error, now: ctx.now() });
+  ctx.log(formatObserveLine(entry));
+  appendObserveLog(entry, { stateDir: ctx.stateDir });
+}
+
+const errText = (err) => String(err instanceof Error ? err.message : err);
+
 /** @param {string} cwd */
-export function gitRevParseHead(cwd) {
-  const r = spawnSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" });
+export function gitRevParseHead(cwd, spawn = spawnSync) {
+  const r = spawn("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" });
   if (r.status !== 0 || !r.stdout?.trim()) {
     throw new Error(`git rev-parse HEAD failed in ${cwd}: ${r.stderr?.trim() || r.status}`);
   }
@@ -37,8 +84,8 @@ export function gitRevParseHead(cwd) {
 }
 
 /** @param {string} cwd */
-export function gitRemoteOriginUrl(cwd) {
-  const r = spawnSync(
+export function gitRemoteOriginUrl(cwd, spawn = spawnSync) {
+  const r = spawn(
     "git",
     ["-C", cwd, "config", "--get", "remote.origin.url"],
     { encoding: "utf8" },
@@ -48,8 +95,8 @@ export function gitRemoteOriginUrl(cwd) {
 }
 
 /** @param {string} cwd */
-export function gitRevParseGitDir(cwd) {
-  const r = spawnSync("git", ["-C", cwd, "rev-parse", "--git-dir"], { encoding: "utf8" });
+export function gitRevParseGitDir(cwd, spawn = spawnSync) {
+  const r = spawn("git", ["-C", cwd, "rev-parse", "--git-dir"], { encoding: "utf8" });
   if (r.status !== 0 || !r.stdout?.trim()) {
     throw new Error(`git rev-parse --git-dir failed in ${cwd}: ${r.stderr?.trim() || r.status}`);
   }
@@ -64,17 +111,18 @@ export function gitRevParseGitDir(cwd) {
  *
  * @param {string} cwd
  * @param {string} script
+ * @param {typeof spawnSync} [spawn]
  * @returns {{ id: string, path: string, owner?: Record<string, unknown> } | null}
  */
-export function lookupClaimForCwd(cwd, script) {
+export function lookupClaimForCwd(cwd, script, spawn = spawnSync) {
   let pointer = null;
   try {
-    const gitDir = gitRevParseGitDir(cwd);
+    const gitDir = gitRevParseGitDir(cwd, spawn);
     pointer = parseClaimPointer(readFileSync(join(gitDir, "ade-claim"), "utf8"));
   } catch {
     // Missing git dir / pointer / unreadable: registry-only.
   }
-  const run = spawnSync("python3", [script, "list", "--json", "--state", "active"], {
+  const run = spawn("python3", [script, "list", "--json", "--state", "active"], {
     encoding: "utf8",
   });
   if (run.status !== 0) {
@@ -95,57 +143,79 @@ export function lookupClaimForCwd(cwd, script) {
  * missing binary, 73/78, or other non-zero so a claim create is never rolled back.
  *
  * @param {string} worktreePath
+ * @param {HookDeps} [deps]
  */
-export function runTrustedAdeGitGuardInstall(worktreePath) {
+export function runTrustedAdeGitGuardInstall(worktreePath, deps = {}) {
+  const ctx = hookContext(deps);
   let guard;
   try {
-    guard = resolveTrustedAdeGitGuard(process.env, { pluginRoot: PLUGIN_ROOT });
+    guard = resolveTrustedAdeGitGuard(ctx.env, { pluginRoot: ctx.pluginRoot });
   } catch (err) {
-    console.error(`ade-claim: skipping ade-git-guard install: ${err}`);
+    ctx.log(`ade-claim: skipping ade-git-guard install: ${err}`);
     return;
   }
   const { argv } = buildAdeGitGuardInstallArgv({ adeGitGuard: guard, worktreePath });
-  const run = spawnSync(guard, argv, { encoding: "utf8" });
+  const run = ctx.spawn(guard, argv, { encoding: "utf8" });
   if (run.status === 0) return;
   const detail = (run.stderr || run.stdout || "").trim();
   const soft = INSTALL_SOFT_FAIL.has(run.status ?? -1);
-  console.error(
+  ctx.log(
     `ade-claim: ade-git-guard install failed (exit ${run.status})${soft ? " (soft)" : ""}${detail ? `: ${detail}` : ""}`,
   );
 }
 
 /**
- * W2: claim the worktree (`ade_claims.py new --ttl`), then install ref hooks
- * via trusted ade-git-guard. ADE_CLAIM_DRY_RUN=1|true|yes observes only:
- * logs the planned argv (including --ttl) and skips registry write + install.
+ * W2: claim the worktree (`ade_claims.py new --ttl`), then install ref hooks via trusted
+ * ade-git-guard. In observe mode (see resolveClaimMode) it logs the planned argv and does nothing else,
+ * and never throws: observing must not abort a worktree creation.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ * @param {HookDeps} [deps]
  */
-export function registerWorktreeClaimHook(server) {
+export function registerWorktreeClaimHook(server, deps = {}) {
+  const ctx = hookContext(deps);
   return server.addHook("worktree.create.after", async ({ worktree }) => {
-    const wt = parseWorktreePayload(worktree);
-    const script = resolveAdeClaimsScript(wt, process.env, { pluginRoot: PLUGIN_ROOT });
-    const baseSha = gitRevParseHead(wt.path);
-    const repoOrigin = gitRemoteOriginUrl(wt.path);
-    const plan = planWorktreeClaimCreate(wt, {
-      adeClaimsScript: script,
-      baseSha,
-      repoOrigin,
-      env: process.env,
-    });
-    if (plan.dryRun) {
-      console.error(
-        `ade-claim: ADE_CLAIM_DRY_RUN: would run ${plan.python} ${script} ${plan.argv.join(" ")}`
-          + ` (ttlHours=${plan.ttlHours}); skipping ade-git-guard install`,
-      );
-      return;
+    const m = callMode(ctx);
+    const observing = m.mode === "observe";
+    /** @type {Record<string, unknown>} */
+    let ids = {};
+    try {
+      const wt = parseWorktreePayload(worktree);
+      ids = { worktree: wt.path, branch: wt.branch };
+      const script = resolveAdeClaimsScript(wt, ctx.env, { pluginRoot: ctx.pluginRoot });
+      const baseSha = gitRevParseHead(wt.path, ctx.spawn);
+      const repoOrigin = gitRemoteOriginUrl(wt.path, ctx.spawn);
+      const plan = planWorktreeClaimCreate(wt, {
+        adeClaimsScript: script,
+        baseSha,
+        repoOrigin,
+        env: ctx.env,
+      });
+      let guard = null;
+      try {
+        guard = resolveTrustedAdeGitGuard(ctx.env, { pluginRoot: ctx.pluginRoot });
+      } catch { /* install is soft-skipped without a trusted guard */ }
+      const planned = {
+        argv: [plan.python, script, ...plan.argv],
+        ttlHours: plan.ttlHours,
+        then: guard ? [guard, "install", wt.path] : null,
+      };
+      if (observing) {
+        record(ctx, m, "worktree.create.after", planned, ids);
+        return;
+      }
+      const run = ctx.spawn(plan.python, [script, ...plan.argv], { encoding: "utf8" });
+      if (run.status !== 0) {
+        const detail = (run.stderr || run.stdout || "").trim();
+        throw new Error(`ade_claims.py new failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
+      }
+      record(ctx, m, "worktree.create.after", planned, ids);
+      runTrustedAdeGitGuardInstall(wt.path, deps);
+    } catch (err) {
+      record(ctx, m, "worktree.create.after", null, ids, errText(err));
+      if (observing) return;
+      throw err;
     }
-    const run = spawnSync(plan.python, [script, ...plan.argv], { encoding: "utf8" });
-    if (run.status !== 0) {
-      const detail = (run.stderr || run.stdout || "").trim();
-      throw new Error(`ade_claims.py new failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
-    }
-    runTrustedAdeGitGuardInstall(wt.path);
   });
 }
 
@@ -154,42 +224,56 @@ export function registerWorktreeClaimHook(server) {
  * Notification hook: never throw.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ * @param {HookDeps} [deps]
  */
-export function registerWorkspaceArchiveReleaseHook(server) {
-  return server.addHook("workspace.archive.after", async ({ workspace }) => {
+export function registerWorkspaceArchiveReleaseHook(server, deps = {}) {
+  const ctx = hookContext(deps);
+  const hook = "workspace.archive.after";
+  return server.addHook(hook, async ({ workspace }) => {
+    const m = callMode(ctx);
+    /** @type {Record<string, unknown>} */
+    let ids = {};
     let parsed;
     try {
       parsed = parseWorkspaceArchivePayload(workspace);
+      ids = { workspace: parsed.id, cwd: parsed.cwd };
     } catch (err) {
-      console.error(`ade-claim: workspace.archive.after payload: ${err}`);
+      record(ctx, m, hook, null, ids, errText(err));
       return;
     }
     let script;
     try {
-      script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
+      script = resolveTrustedAdeClaimsScript(ctx.env, { pluginRoot: ctx.pluginRoot });
     } catch (err) {
-      console.error(`ade-claim: skipping release: ${err}`);
+      record(ctx, m, hook, null, ids, `skipping release: ${errText(err)}`);
       return;
     }
     let claim;
     try {
-      claim = lookupClaimForCwd(parsed.cwd, script);
+      claim = lookupClaimForCwd(parsed.cwd, script, ctx.spawn);
     } catch (err) {
-      console.error(`ade-claim: claim lookup on archive failed: ${err}`);
+      record(ctx, m, hook, null, ids, `claim lookup failed: ${errText(err)}`);
       return;
     }
-    if (!claim) return;
-    const { python, argv } = buildAdeClaimsReleaseArgv({
-      adeClaimsScript: script,
-      claimId: claim.id,
-    });
-    const run = spawnSync(python, [script, ...argv], { encoding: "utf8" });
+    if (!claim) {
+      record(ctx, m, hook, { action: "none", why: "no active claim for cwd" }, ids);
+      return;
+    }
+    const { python, argv } = buildAdeClaimsReleaseArgv({ adeClaimsScript: script, claimId: claim.id });
+    const planned = { argv: [python, script, ...argv] };
+    ids = { ...ids, claim: claim.id };
+    if (m.mode === "observe") {
+      record(ctx, m, hook, planned, ids);
+      return;
+    }
+    const run = ctx.spawn(python, [script, ...argv], { encoding: "utf8" });
     if (run.status !== 0) {
       const detail = (run.stderr || run.stdout || "").trim();
-      console.error(
-        `ade-claim: ade_claims.py release failed (exit ${run.status})${detail ? `: ${detail}` : ""}`,
-      );
+      record(ctx, m, hook, planned, ids,
+        `release failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
+      return;
     }
+    record(ctx, m, hook, planned, ids);
   });
 }
 
@@ -198,22 +282,39 @@ export function registerWorkspaceArchiveReleaseHook(server) {
  * - export ADE_CLAIM_ID when a claim exists for cwd
  * - put trusted libexec/agent-bin first on PATH (git → ade-git-guard)
  * agent.create.after cannot change env (Paseo notification); open.before can.
+ * Observe mode: lookups still run (read-only), the planned env delta is logged, and the request is
+ * returned untouched (undefined) — no ADE_CLAIM_ID, no PATH change, never throws.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ * @param {HookDeps} [deps]
  */
-export function registerAgentClaimEnvHook(server) {
-  return server.addHook("agent.open.before", async ({ request }) => {
-    const parsed = parseAgentOpenBeforeRequest(request);
+export function registerAgentClaimEnvHook(server, deps = {}) {
+  const ctx = hookContext(deps);
+  const hook = "agent.open.before";
+  return server.addHook(hook, async ({ request }) => {
+    const m = callMode(ctx);
+    const observing = m.mode === "observe";
+    /** @type {Record<string, unknown>} */
+    let ids = {};
+    let parsed;
+    try {
+      parsed = parseAgentOpenBeforeRequest(request);
+      ids = { agent: parsed.agentId, cwd: parsed.cwd };
+    } catch (err) {
+      record(ctx, m, hook, null, ids, errText(err));
+      if (observing) return undefined;
+      throw err;
+    }
     let agentBinDir = null;
     try {
-      agentBinDir = resolveTrustedAgentBinDir(process.env, { pluginRoot: PLUGIN_ROOT });
+      agentBinDir = resolveTrustedAgentBinDir(ctx.env, { pluginRoot: ctx.pluginRoot });
     } catch {
       // PATH shim optional when ADE_AGENT_BIN unset and plugin is not beside a checkout.
     }
     let claimId = null;
     try {
-      const script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
-      const claim = lookupClaimForCwd(parsed.cwd, script);
+      const script = resolveTrustedAdeClaimsScript(ctx.env, { pluginRoot: ctx.pluginRoot });
+      const claim = lookupClaimForCwd(parsed.cwd, script, ctx.spawn);
       if (claim && claimAllowsAgent(claim, parsed.agentId)) {
         claimId = claim.id;
       }
@@ -224,35 +325,61 @@ export function registerAgentClaimEnvHook(server) {
     const env = mergeOpenBeforeEnv(parsed.env, {
       claimId,
       agentBinDir,
-      fallbackPath: process.env.PATH,
+      fallbackPath: ctx.env.PATH,
     });
-    if (!env) return undefined;
+    // Env delta only: names, plus the two values this plugin itself sets. Never the launch env.
+    const planned = {
+      wouldChange: Boolean(env),
+      ADE_CLAIM_ID: claimId ? { set: claimId }
+        : (Object.prototype.hasOwnProperty.call(parsed.env, "ADE_CLAIM_ID") ? "clear" : "unchanged"),
+      PATH: agentBinDir ? { prepend: agentBinDir } : "unchanged",
+    };
+    record(ctx, m, hook, planned, claimId ? { ...ids, claim: claimId } : ids);
+    if (observing || !env) return undefined;
     return { ...request, env };
   });
 }
 
 /**
  * W3: bind owner.agent (and owner.record) once the agent id exists.
+ * Observe mode logs the planned bind-owner argv and does not write the registry.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ * @param {HookDeps} [deps]
  */
-export function registerAgentClaimOwnerHook(server) {
-  return server.addHook("agent.create.after", async ({ agent }) => {
-    const parsed = parseAgentCreateAfterAgent(agent);
+export function registerAgentClaimOwnerHook(server, deps = {}) {
+  const ctx = hookContext(deps);
+  const hook = "agent.create.after";
+  return server.addHook(hook, async ({ agent }) => {
+    const m = callMode(ctx);
+    /** @type {Record<string, unknown>} */
+    let ids = {};
+    let parsed;
+    try {
+      parsed = parseAgentCreateAfterAgent(agent);
+      ids = { agent: parsed.id, cwd: parsed.cwd };
+    } catch (err) {
+      record(ctx, m, hook, null, ids, errText(err));
+      if (m.mode === "observe") return;
+      throw err;
+    }
     let script;
     try {
-      script = resolveTrustedAdeClaimsScript(process.env, { pluginRoot: PLUGIN_ROOT });
-    } catch {
+      script = resolveTrustedAdeClaimsScript(ctx.env, { pluginRoot: ctx.pluginRoot });
+    } catch (err) {
+      record(ctx, m, hook, null, ids, `no trusted ade_claims.py: ${errText(err)}`);
       return;
     }
     let claim;
     try {
-      claim = lookupClaimForCwd(parsed.cwd, script);
-    } catch {
+      claim = lookupClaimForCwd(parsed.cwd, script, ctx.spawn);
+    } catch (err) {
+      record(ctx, m, hook, null, ids, `claim lookup failed: ${errText(err)}`);
       return;
     }
     if (!claim || !claimAllowsAgent(claim, parsed.id)) {
       // No claim, or another agent already owns it: do not overwrite.
+      record(ctx, m, hook, { action: "none", why: claim ? "claim owned by another agent" : "no active claim for cwd" }, ids);
       return;
     }
     const { python, argv } = buildAdeClaimsBindOwnerArgv({
@@ -261,15 +388,21 @@ export function registerAgentClaimOwnerHook(server) {
       ownerAgent: parsed.id,
       ownerRecord: parsed.id,
     });
-    const run = spawnSync(python, [script, ...argv], { encoding: "utf8" });
+    const planned = { argv: [python, script, ...argv] };
+    ids = { ...ids, claim: claim.id };
+    if (m.mode === "observe") {
+      record(ctx, m, hook, planned, ids);
+      return;
+    }
+    const run = ctx.spawn(python, [script, ...argv], { encoding: "utf8" });
     if (run.status !== 0) {
       const detail = (run.stderr || run.stdout || "").trim();
-      // Notification hook: log via throw only if we want Paseo to record it;
-      // prefer stderr so a bind miss never aborts creation (already finished).
-      console.error(
-        `ade-claim: ade_claims.py bind-owner failed (exit ${run.status})${detail ? `: ${detail}` : ""}`,
-      );
+      // Notification hook: log only so a bind miss never aborts creation (already finished).
+      record(ctx, m, hook, planned, ids,
+        `bind-owner failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
+      return;
     }
+    record(ctx, m, hook, planned, ids);
   });
 }
 
@@ -277,12 +410,13 @@ export function registerAgentClaimOwnerHook(server) {
  * Register W2 + W2-follow-up + W3 + W4 hooks; returns a disposer that removes all of them.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
+ * @param {HookDeps} [deps]
  */
-export function registerAdeClaimHooks(server) {
-  const removeWt = registerWorktreeClaimHook(server);
-  const removeArchive = registerWorkspaceArchiveReleaseHook(server);
-  const removeEnv = registerAgentClaimEnvHook(server);
-  const removeOwner = registerAgentClaimOwnerHook(server);
+export function registerAdeClaimHooks(server, deps = {}) {
+  const removeWt = registerWorktreeClaimHook(server, deps);
+  const removeArchive = registerWorkspaceArchiveReleaseHook(server, deps);
+  const removeEnv = registerAgentClaimEnvHook(server, deps);
+  const removeOwner = registerAgentClaimOwnerHook(server, deps);
   return () => {
     removeWt();
     removeArchive();

@@ -2,7 +2,9 @@
  * Pure helpers for the ade-claim Paseo plugin (unit-tested without a daemon).
  *
  * W2: worktree.create.after → ade_claims.py new --ttl + trusted ade-git-guard install
- *     (ADE_CLAIM_DRY_RUN observes argv only; ADE_CLAIM_TTL overrides default 72 h)
+ *     (ADE_CLAIM_TTL overrides default 72 h)
+ * Observe mode (resolveClaimMode): EVERY hook logs its planned action and does nothing
+ *     else; a per-call state-file flag, fail-safe to observe.
  * W2 follow-up: workspace.archive.after → ade_claims.py release
  * W3: agent.open.before exports ADE_CLAIM_ID; agent.create.after binds owner
  *     (Paseo's agent.create.after is a notification and cannot change env).
@@ -15,7 +17,20 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, realpathSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  writeSync,
+} from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -27,9 +42,8 @@ export const DEFAULT_CLAIM_TTL_HOURS = 72;
 const MAX_CLAIM_TTL_HOURS = 24 * 366;
 
 /**
- * Truthy ADE_CLAIM_DRY_RUN (1 / true / yes, case-insensitive): observe-only.
- * worktree.create.after logs the planned `ade_claims.py new --ttl` argv and
- * skips both the registry write and ade-git-guard install.
+ * Truthy ADE_CLAIM_DRY_RUN (1 / true / yes, case-insensitive). Legacy W2-only predicate kept for the
+ * pure planner; hooks use resolveClaimMode (which also honours the state-file flag and fails safe).
  *
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | undefined} env
  */
@@ -38,6 +52,194 @@ export function isAdeClaimDryRun(env = process.env) {
   if (typeof raw !== "string") return false;
   const v = raw.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
+}
+
+/** Per-call switch file under the state dir: `observe` or `enforce` (anything else = observe). */
+export const CLAIM_MODE_FILE = "ade-claim.mode";
+
+/** Append-only JSONL of every hook call (D3 soak). */
+export const CLAIM_OBSERVE_LOG = "ade-claim-observe.jsonl";
+
+/** Mode file is a one-word flag: never read more than this many bytes. */
+export const MODE_FILE_READ_CAP = 64;
+
+/** Rotate the JSONL to `.1` once it reaches this size (one generation kept). */
+export const OBSERVE_LOG_MAX_BYTES = 1024 * 1024;
+
+/** One JSONL line is capped (a hook call is small; a runaway field must not bloat the log). */
+const OBSERVE_LINE_MAX_BYTES = 4096;
+
+/**
+ * State dir for the mode flag and the observe log: `<real home>/.local/state/djbclark-ade`.
+ * Home comes from the password database, never `$HOME` / `XDG_STATE_HOME` (an env value must not
+ * redirect where the safety flag is read from).
+ */
+export function defaultClaimStateDir() {
+  return join(userInfo().homedir, ".local", "state", "djbclark-ade");
+}
+
+/** Own-user, not group/world-writable. */
+function ownedAndClosed(st) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid !== null && st.uid !== uid) return false;
+  return (st.mode & 0o022) === 0;
+}
+
+/**
+ * Read the mode flag file without following symlinks. Returns the trimmed lowercase text, or
+ * `{ problem }` when the file is absent / not a plain own-user file / too large / unreadable.
+ * @param {string} stateDir
+ * @returns {{ text: string } | { problem: string }}
+ */
+function readModeFile(stateDir) {
+  const file = join(stateDir, CLAIM_MODE_FILE);
+  let fd = null;
+  try {
+    const dir = lstatSync(stateDir);
+    if (!dir.isDirectory() || !ownedAndClosed(dir)) return { problem: "state dir is not an own-user plain directory" };
+    const pre = lstatSync(file);
+    if (!pre.isFile() || !ownedAndClosed(pre)) return { problem: "mode file is not an own-user plain file" };
+    if (pre.size > MODE_FILE_READ_CAP) return { problem: "mode file too large" };
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.ino !== pre.ino || st.dev !== pre.dev || !ownedAndClosed(st)) {
+      return { problem: "mode file changed while opening" };
+    }
+    const buf = Buffer.alloc(MODE_FILE_READ_CAP + 1);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    if (n > MODE_FILE_READ_CAP) return { problem: "mode file too large" };
+    return { text: buf.subarray(0, n).toString("utf8").trim().toLowerCase() };
+  } catch (err) {
+    const code = /** @type {{ code?: string }} */ (err)?.code;
+    return { problem: code === "ENOENT" ? "mode file missing" : "mode file unreadable" };
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * The ONE observe predicate every hook uses. Re-evaluated on each hook call (no daemon restart).
+ *
+ *  - env ADE_CLAIM_DRY_RUN set to anything but an explicit false (`0` / `false` / `no` / `off` / empty)
+ *    forces observe, even over a mode file saying `enforce`;
+ *  - otherwise `enforce` only when `<stateDir>/ade-claim.mode` is an own-user plain file (not a symlink,
+ *    not group/world-writable, in an own-user plain directory, <= 64 bytes) whose trimmed text is exactly
+ *    `enforce` (case-insensitive);
+ *  - everything else (missing, symlink, wrong owner, too big, unreadable, `observe`, garbage) = observe.
+ *
+ * @param {{ env?: NodeJS.ProcessEnv | Record<string, string | undefined>, stateDir?: string }} [opts]
+ * @returns {{ mode: "observe" | "enforce", reason: string }}
+ */
+export function resolveClaimMode(opts = {}) {
+  const env = opts.env ?? process.env;
+  const raw = env?.ADE_CLAIM_DRY_RUN;
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (v !== "" && v !== "0" && v !== "false" && v !== "no" && v !== "off") {
+      return { mode: "observe", reason: "env ADE_CLAIM_DRY_RUN" };
+    }
+  }
+  let stateDir = opts.stateDir;
+  if (stateDir === undefined) {
+    try {
+      stateDir = defaultClaimStateDir();
+    } catch {
+      return { mode: "observe", reason: "no home directory" };
+    }
+  }
+  const read = readModeFile(stateDir);
+  if ("problem" in read) return { mode: "observe", reason: read.problem };
+  if (read.text === "enforce") return { mode: "enforce", reason: "mode file" };
+  if (read.text === "observe") return { mode: "observe", reason: "mode file" };
+  return { mode: "observe", reason: "mode file not recognised" };
+}
+
+/** Shorten any value for the log: strings capped, control characters removed. */
+function logSafe(v, depth = 0) {
+  if (typeof v === "string") return v.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
+  if (v === null || typeof v === "number" || typeof v === "boolean") return v;
+  if (depth >= 3) return String(v).slice(0, 64);
+  if (Array.isArray(v)) return v.slice(0, 32).map((x) => logSafe(x, depth + 1));
+  if (v && typeof v === "object") {
+    const out = {};
+    for (const [k, x] of Object.entries(v).slice(0, 32)) out[String(k).slice(0, 64)] = logSafe(x, depth + 1);
+    return out;
+  }
+  return undefined;
+}
+
+/**
+ * One observe/enforce log record. `planned` carries argv or an env delta (key names + the two values
+ * this plugin itself sets, ADE_CLAIM_ID and the agent-bin dir; never the launch env).
+ *
+ * @param {{ hook: string, mode: string, reason?: string, planned?: unknown, ids?: Record<string, unknown>,
+ *           error?: string, now?: Date }} opts
+ */
+export function buildObserveEntry(opts) {
+  const entry = {
+    ts: (opts.now ?? new Date()).toISOString(),
+    hook: opts.hook,
+    mode: opts.mode,
+    reason: opts.reason,
+    planned: opts.planned,
+    ids: opts.ids,
+    error: opts.error,
+  };
+  return /** @type {Record<string, unknown>} */ (logSafe(entry));
+}
+
+/** Short human line for stderr / `paseo plugin logs`. */
+export function formatObserveLine(entry) {
+  return `ade-claim[${entry.mode}] ${entry.hook}: ${JSON.stringify(entry.planned ?? null)}`
+    + (entry.error ? ` (error: ${entry.error})` : "");
+}
+
+/**
+ * Append one JSON line to `<stateDir>/ade-claim-observe.jsonl` (mode 0600, no symlink follow, own-user
+ * plain file only), rotating to `.1` at OBSERVE_LOG_MAX_BYTES. Best effort: returns false instead of
+ * throwing, so a log problem can never fail a waiting hook.
+ *
+ * @param {Record<string, unknown>} entry
+ * @param {{ stateDir?: string, maxBytes?: number }} [opts]
+ */
+export function appendObserveLog(entry, opts = {}) {
+  let fd = null;
+  try {
+    const stateDir = opts.stateDir ?? defaultClaimStateDir();
+    const maxBytes = opts.maxBytes ?? OBSERVE_LOG_MAX_BYTES;
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const dir = lstatSync(stateDir);
+    if (!dir.isDirectory() || !ownedAndClosed(dir)) return false;
+    const file = join(stateDir, CLAIM_OBSERVE_LOG);
+    try {
+      const cur = lstatSync(file);
+      if (!cur.isFile() || !ownedAndClosed(cur)) return false;
+      if (cur.size >= maxBytes) renameSync(file, `${file}.1`);
+    } catch (err) {
+      if (/** @type {{ code?: string }} */ (err)?.code !== "ENOENT") return false;
+    }
+    let line = `${JSON.stringify(entry)}\n`;
+    if (Buffer.byteLength(line) > OBSERVE_LINE_MAX_BYTES) {
+      line = `${JSON.stringify({ ts: entry.ts, hook: entry.hook, mode: entry.mode, truncated: true })}\n`;
+    }
+    fd = openSync(
+      file,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    const st = fstatSync(fd);
+    if (!st.isFile() || !ownedAndClosed(st)) return false;
+    writeSync(fd, line);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
 }
 
 /**

@@ -4,7 +4,7 @@ Thin daemon plugin for [wave4-E8 F4](https://github.com/djbclark/djbclark-ade/bl
 
 | Wave | Hook | Behaviour |
 |---|---|---|
-| W2 | `worktree.create.after` | Run `python3 …/bin/ade_claims.py new --ttl <hours>` (default 72; `ADE_CLAIM_TTL` overrides) so every Paseo-created worktree gets a registry claim; then run trusted `ade-git-guard install <path>` (soft-fails on 73/78). `ADE_CLAIM_DRY_RUN=1` logs the planned argv and skips both steps. |
+| W2 | `worktree.create.after` | Run `python3 …/bin/ade_claims.py new --ttl <hours>` (default 72; `ADE_CLAIM_TTL` overrides) so every Paseo-created worktree gets a registry claim; then run trusted `ade-git-guard install <path>` (soft-fails on 73/78). Observe mode logs the planned argv and skips both steps. |
 | W2 follow-up | `workspace.archive.after` | Mark the active claim for `workspace.cwd` `released` via `ade_claims.py release` (notification; worktree teardown can still be pending). |
 | W3 | `agent.open.before` | If a claim exists for the agent's cwd, merge `ADE_CLAIM_ID=<claim id>` into the launch env. |
 | W3 | `agent.create.after` | Bind `owner.agent` / `owner.record` to the new agent id via `ade_claims.py bind-owner`. |
@@ -13,6 +13,31 @@ Thin daemon plugin for [wave4-E8 F4](https://github.com/djbclark/djbclark-ade/bl
 Enforcement stays in `ade-git-guard` and the git hooks; this plugin only creates/releases claims, installs hooks, and binds identity.
 
 **Not installed on the operator Mac yet** (2026-11-09): scaffold + W2–W4 draft; install with `paseo plugin install /absolute/path/to/plugins/ade-claim` after review.
+
+## Observe mode (#638 D1, 2026-11-13)
+
+**Every hook** (W2 create, W2 follow-up archive release, W3 owner bind, W3/W4 `agent.open.before`) asks one predicate,
+`resolveClaimMode` in `server/claim-lib.mjs`, on **each call**. In `observe` a hook logs what it *would* do and does nothing
+else: no `ade_claims.py new` / `release` / `bind-owner`, no `ade-git-guard install`, no `ADE_CLAIM_ID`, no `PATH` change
+(`agent.open.before` returns `undefined`). It also never throws, so observing cannot abort a worktree creation. Lookups stay
+(read-only: `git rev-parse`, `git config`, `ade_claims.py list --json`) so the log shows the real planned argv / env delta.
+
+| Input | Effect |
+|---|---|
+| env `ADE_CLAIM_DRY_RUN` set to anything but `0` / `false` / `no` / `off` / empty | forces `observe` (wins over the file) |
+| `~/.local/state/djbclark-ade/ade-claim.mode` containing `enforce` | `enforce` |
+| the file containing `observe`, anything else, or **missing** | `observe` (fail safe) |
+
+Switch with no daemon restart: `printf 'enforce\n' > ~/.local/state/djbclark-ade/ade-claim.mode` (and back with `observe`;
+`rm` also means observe). The file is read per hook call and only trusted when it is a plain file (not a symlink) owned by
+the user, not group/world-writable, in an own-user plain directory, at most 64 bytes; anything odd = `observe`. The state
+dir comes from the password database home, never `$HOME` / `XDG_STATE_HOME`.
+
+Logs: one stderr line per call (`paseo plugin logs ade-claim`) and an append-only JSONL
+`~/.local/state/djbclark-ade/ade-claim-observe.jsonl` (mode 0600, one line per call in **both** modes: `ts` UTC, `hook`,
+`mode`, `reason`, `planned` argv or env delta, `ids` worktree/agent/workspace/claim, `error`; rotates to `.jsonl.1` at 1 MiB,
+a line over 4 KiB is replaced by a stub). Launch env values are never logged, only the key names and the two values this
+plugin itself sets (`ADE_CLAIM_ID`, the agent-bin dir). The D3 soak reads this file.
 
 Manifest: `id` is `ade-claim` (lowercase/hyphen only); `requirements.paseo` is `>=0.14.0` (not a top-level `paseoVersion`).
 
@@ -27,7 +52,7 @@ So W3 exports `ADE_CLAIM_ID` from `agent.open.before`, and uses `agent.create.af
 
 ## Hook payloads (Paseo ≥0.14)
 
-- **worktree.create.after**: `{ worktree: { path, branch, sourceCheckout } }`. No workspace or agent id yet; `base_sha` and `remote.origin.url` are read with `git -C <path>`. Claim ids append an 8-hex suffix per creation so a recreate/released claim cannot exit 3 and abort the worktree. Always passes `--ttl` (see Environment). After `new`, runs trusted `ade-git-guard install` (never throws on install failure). Dry-run skips both.
+- **worktree.create.after**: `{ worktree: { path, branch, sourceCheckout } }`. No workspace or agent id yet; `base_sha` and `remote.origin.url` are read with `git -C <path>`. Claim ids append an 8-hex suffix per creation so a recreate/released claim cannot exit 3 and abort the worktree. Always passes `--ttl` (see Environment). After `new`, runs trusted `ade-git-guard install` (never throws on install failure). Observe mode skips both.
 - **workspace.archive.after**: `{ workspace: { id, cwd, … } }` — side effect only (`release`); no claim is a no-op; failures are logged, never thrown (archive already finished; worktree cleanup can still be pending).
 - **agent.open.before**: `{ request: { agentId, cwd, env, … } }` — return `{ …request, env: { …env, ADE_CLAIM_ID } }` or `undefined`. Only when the claim is unbound or already owned by `agentId` (never export a foreign claim id: `caller_ident` trusts `ADE_CLAIM_ID`).
 - **agent.create.after**: `{ agent: { id, cwd, … } }` — side effect only (`bind-owner`); skips when another agent already owns the claim; failures are logged, never thrown (creation already finished).
@@ -42,7 +67,7 @@ Claim lookup: read `ade_claims.py list --json --state active`, prefer `<git-dir>
 | `ADE_GIT_GUARD` | Absolute path to a **trusted** `ade-git-guard` (required when the plugin is not installed beside a checkout that contains `bin/ade-git-guard`) |
 | `ADE_AGENT_BIN` | Absolute path to a **trusted** `libexec/agent-bin` (required when the plugin is not installed beside a checkout that contains that directory) |
 | `ADE_CLAIM_TTL` | Hours for `ade_claims.py new --ttl` on W2 (default `72`; `0` = never). Invalid values abort the waiting hook. |
-| `ADE_CLAIM_DRY_RUN` | When `1` / `true` / `yes`: observe-only W2 — log planned `new --ttl` argv, skip registry write and `ade-git-guard install`. |
+| `ADE_CLAIM_DRY_RUN` | Truthy (see Observe mode): forces observe for **all** hooks, over the state file. |
 
 The hooks never run a checkout-local helper: an untrusted worktree must not supply what the daemon execs. Resolution order: env override, then walk parents of the plugin install directory for `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin`.
 

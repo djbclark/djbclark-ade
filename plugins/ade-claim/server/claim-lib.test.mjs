@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
+  registerAdeClaimHooks,
+  registerAgentClaimEnvHook,
+  registerAgentClaimOwnerHook,
+  registerWorkspaceArchiveReleaseHook,
+  registerWorktreeClaimHook,
+} from "./hook.mjs";
+import {
+  CLAIM_MODE_FILE,
+  CLAIM_OBSERVE_LOG,
+  MODE_FILE_READ_CAP,
+  appendObserveLog,
+  buildObserveEntry,
+  resolveClaimMode,
   activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
@@ -338,4 +362,317 @@ test("resolveTrustedAdeGitGuard walks pluginRoot for bin/ade-git-guard", () => {
   const pluginRoot = new URL("..", import.meta.url).pathname;
   const guard = resolveTrustedAdeGitGuard({}, { pluginRoot });
   assert.match(guard, /\/bin\/ade-git-guard$/);
+});
+
+// ---------------------------------------------------------------------------
+// Observe mode (#638 D1): one predicate, every hook, switchable per call.
+// ---------------------------------------------------------------------------
+
+function tmp(prefix = "ade-claim-obs-") {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+/** A state dir the way the plugin expects it: own-user, not group/world-writable. */
+function stateDirWith(modeText) {
+  const dir = tmp();
+  chmodSync(dir, 0o700);
+  if (modeText !== undefined) writeFileSync(join(dir, CLAIM_MODE_FILE), modeText);
+  return dir;
+}
+
+const CLEAN_ENV = {}; // no ADE_CLAIM_DRY_RUN
+
+test("resolveClaimMode: missing file fails safe to observe", () => {
+  const m = resolveClaimMode({ env: CLEAN_ENV, stateDir: stateDirWith() });
+  assert.equal(m.mode, "observe");
+  assert.match(m.reason, /missing/);
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: join(tmp(), "nope") }).mode, "observe");
+});
+
+test("resolveClaimMode: file says enforce / observe / garbage (re-read per call)", () => {
+  const dir = stateDirWith("enforce\n");
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: dir }).mode, "enforce");
+  writeFileSync(join(dir, CLAIM_MODE_FILE), "  Enforce  ");
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: dir }).mode, "enforce");
+  writeFileSync(join(dir, CLAIM_MODE_FILE), "observe\n");
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: dir }).mode, "observe");
+  for (const junk of ["", "enforced", "enforce observe", "yes", "1", "ENFORCE\u0000"]) {
+    writeFileSync(join(dir, CLAIM_MODE_FILE), junk);
+    assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: dir }).mode, "observe", JSON.stringify(junk));
+  }
+});
+
+test("resolveClaimMode: env ADE_CLAIM_DRY_RUN forces observe over an enforce file", () => {
+  const dir = stateDirWith("enforce");
+  for (const v of ["1", "true", "YES", "on", "dry", "2"]) {
+    assert.equal(resolveClaimMode({ env: { ADE_CLAIM_DRY_RUN: v }, stateDir: dir }).mode, "observe", v);
+  }
+  for (const v of ["0", "false", "no", "off", "", "  "]) {
+    assert.equal(resolveClaimMode({ env: { ADE_CLAIM_DRY_RUN: v }, stateDir: dir }).mode, "enforce", JSON.stringify(v));
+  }
+});
+
+test("resolveClaimMode: refuses symlinks, odd owners/perms, big files, bad dirs", () => {
+  const real = tmp();
+  writeFileSync(join(real, "elsewhere"), "enforce");
+  // symlinked mode file
+  const linked = stateDirWith();
+  symlinkSync(join(real, "elsewhere"), join(linked, CLAIM_MODE_FILE));
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: linked }).mode, "observe");
+  // symlinked state dir
+  const dirLink = join(tmp(), "state");
+  writeFileSync(join(real, CLAIM_MODE_FILE), "enforce");
+  chmodSync(real, 0o700);
+  symlinkSync(real, dirLink);
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: dirLink }).mode, "observe");
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: real }).mode, "enforce");
+  // group/world-writable file or dir
+  const loose = stateDirWith("enforce");
+  chmodSync(join(loose, CLAIM_MODE_FILE), 0o666);
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: loose }).mode, "observe");
+  chmodSync(join(loose, CLAIM_MODE_FILE), 0o600);
+  chmodSync(loose, 0o777);
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: loose }).mode, "observe");
+  // mode file is a directory
+  const asDir = stateDirWith();
+  mkdirSync(join(asDir, CLAIM_MODE_FILE));
+  assert.equal(resolveClaimMode({ env: CLEAN_ENV, stateDir: asDir }).mode, "observe");
+  // over the read cap, even when it starts with "enforce"
+  const big = stateDirWith("enforce" + " ".repeat(MODE_FILE_READ_CAP));
+  const m = resolveClaimMode({ env: CLEAN_ENV, stateDir: big });
+  assert.equal(m.mode, "observe");
+  assert.match(m.reason, /too large/);
+});
+
+test("buildObserveEntry caps and cleans values", () => {
+  const e = buildObserveEntry({
+    hook: "agent.open.before",
+    mode: "observe",
+    planned: { PATH: { prepend: "/x" }, note: "a\nb".repeat(500) },
+    ids: { agent: "a1" },
+    now: new Date("2026-11-13T01:02:03.000Z"),
+  });
+  assert.equal(e.ts, "2026-11-13T01:02:03.000Z");
+  assert.ok(/** @type {string} */ (e.planned.note).length <= 512);
+  assert.ok(!String(e.planned.note).includes("\n"));
+});
+
+test("appendObserveLog appends JSONL at 0600, rotates at the cap, refuses a symlink log", () => {
+  const dir = stateDirWith();
+  const base = { ts: "t", hook: "h", mode: "observe", planned: null };
+  assert.equal(appendObserveLog({ ...base, n: 1 }, { stateDir: dir }), true);
+  assert.equal(appendObserveLog({ ...base, n: 2 }, { stateDir: dir }), true);
+  const logPath = join(dir, CLAIM_OBSERVE_LOG);
+  const lines = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((l) => l.n), [1, 2]);
+  assert.equal(statSyncMode(logPath), 0o600);
+  // rotate: tiny cap forces .1, new file holds only the newest line
+  assert.equal(appendObserveLog({ ...base, n: 3 }, { stateDir: dir, maxBytes: 10 }), true);
+  assert.equal(readFileSync(logPath, "utf8").trim().split("\n").length, 1);
+  assert.equal(readFileSync(`${logPath}.1`, "utf8").trim().split("\n").length, 2);
+  // oversize line is replaced by a stub, never written whole
+  assert.equal(appendObserveLog({ ...base, planned: "x".repeat(10000) }, { stateDir: dir }), true);
+  assert.match(readFileSync(logPath, "utf8"), /"truncated":true/);
+  // a symlinked log is refused (and the link target untouched)
+  const evil = stateDirWith();
+  const target = join(tmp(), "target");
+  writeFileSync(target, "keep\n");
+  symlinkSync(target, join(evil, CLAIM_OBSERVE_LOG));
+  assert.equal(appendObserveLog(base, { stateDir: evil }), false);
+  assert.equal(readFileSync(target, "utf8"), "keep\n");
+});
+
+function statSyncMode(path) {
+  return statSync(path).mode & 0o777;
+}
+
+/**
+ * Offline harness: a fake Paseo server, fake trusted tools on disk (never executed), and a scripted
+ * spawn that records every call. A call is "mutating" when it would write the registry or install hooks.
+ */
+function harness({ modeText, env = {}, claims } = {}) {
+  const stateDir = stateDirWith(modeText);
+  const tools = tmp("ade-claim-tools-");
+  const claimsPy = join(tools, "ade_claims.py");
+  const guard = join(tools, "ade-git-guard");
+  const agentBin = join(tools, "agent-bin");
+  mkdirSync(agentBin);
+  writeFileSync(claimsPy, "# stub\n");
+  writeFileSync(guard, "# stub\n");
+  chmodSync(guard, 0o755);
+  writeFileSync(join(agentBin, "git"), "# stub\n");
+  const cwd = tmp("ade-claim-cwd-");
+  const rows = claims ?? [{ id: "wt-test-1", path: cwd, shown_state: "active" }];
+  /** @type {{ cmd: string, args: string[] }[]} */
+  const calls = [];
+  const spawn = (cmd, args) => {
+    calls.push({ cmd, args });
+    const sub = cmd === "git" ? args.slice(2).join(" ") : args[1];
+    if (cmd === "git") {
+      if (sub === "rev-parse HEAD") return { status: 0, stdout: "abc1234def\n", stderr: "" };
+      if (sub === "config --get remote.origin.url") return { status: 0, stdout: "git@example.com:o/r.git\n", stderr: "" };
+      if (sub === "rev-parse --git-dir") return { status: 0, stdout: ".git\n", stderr: "" };
+    }
+    if (cmd === "python3" && sub === "list") return { status: 0, stdout: JSON.stringify(rows), stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const lines = [];
+  const deps = {
+    env: { ADE_CLAIMS_PY: claimsPy, ADE_GIT_GUARD: guard, ADE_AGENT_BIN: agentBin, PATH: "/usr/bin", ...env },
+    stateDir,
+    spawn,
+    log: (l) => lines.push(l),
+    now: () => new Date("2026-11-13T00:00:00.000Z"),
+  };
+  const mutating = () => calls.filter((c) =>
+    (c.cmd === "python3" && ["new", "bind-owner", "release"].includes(c.args[1])) || c.cmd === guard);
+  const jsonl = () => {
+    try {
+      return readFileSync(join(stateDir, CLAIM_OBSERVE_LOG), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    } catch {
+      return [];
+    }
+  };
+  const hooks = new Map();
+  const server = { addHook: (name, fn) => { hooks.set(name, fn); return () => hooks.delete(name); } };
+  return { deps, server, hooks, calls, mutating, jsonl, lines, cwd, stateDir, claimsPy, guard, agentBin };
+}
+
+const WT = (h) => ({ worktree: { path: h.cwd, branch: "ws/obs", sourceCheckout: "/src/repo" } });
+const OPEN = (h, env = { KEEP: "1" }) => ({ request: { agentId: "agent-1", cwd: h.cwd, env } });
+
+for (const mode of ["observe", "enforce"]) {
+  const modeText = mode;
+  test(`worktree.create.after [${mode}]`, async () => {
+    const h = harness({ modeText });
+    registerWorktreeClaimHook(h.server, h.deps);
+    await h.hooks.get("worktree.create.after")(WT(h));
+    const rec = h.jsonl();
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0].hook, "worktree.create.after");
+    assert.equal(rec[0].mode, mode);
+    assert.equal(rec[0].planned.argv[2], "new");
+    assert.equal(rec[0].planned.ttlHours, 72);
+    assert.equal(rec[0].ids.worktree, h.cwd);
+    if (mode === "observe") {
+      assert.deepEqual(h.mutating(), []);
+      assert.match(h.lines[0], /^ade-claim\[observe\] worktree\.create\.after/);
+    } else {
+      const m = h.mutating();
+      assert.equal(m.length, 2, "new + guard install");
+      assert.deepEqual(m[0].args.slice(0, 2), [h.claimsPy, "new"]);
+      assert.equal(m[1].cmd, h.guard);
+    }
+  });
+
+  test(`workspace.archive.after [${mode}]`, async () => {
+    const h = harness({ modeText });
+    registerWorkspaceArchiveReleaseHook(h.server, h.deps);
+    await h.hooks.get("workspace.archive.after")({ workspace: { id: "ws-1", cwd: h.cwd } });
+    const rec = h.jsonl();
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0].mode, mode);
+    assert.deepEqual(rec[0].planned.argv.slice(2), ["release", "--id", "wt-test-1"]);
+    assert.equal(h.mutating().length, mode === "observe" ? 0 : 1);
+  });
+
+  test(`agent.create.after [${mode}]`, async () => {
+    const h = harness({ modeText });
+    registerAgentClaimOwnerHook(h.server, h.deps);
+    await h.hooks.get("agent.create.after")({ agent: { id: "agent-1", cwd: h.cwd } });
+    const rec = h.jsonl();
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0].mode, mode);
+    assert.deepEqual(rec[0].planned.argv.slice(2, 4), ["bind-owner", "--id"]);
+    assert.equal(h.mutating().length, mode === "observe" ? 0 : 1);
+  });
+
+  test(`agent.open.before [${mode}]`, async () => {
+    const h = harness({ modeText, env: { PATH: "/usr/bin" } });
+    registerAgentClaimEnvHook(h.server, h.deps);
+    const input = OPEN(h, { KEEP: "1", ADE_CLAIM_ID: "foreign" });
+    const out = await h.hooks.get("agent.open.before")(input);
+    const rec = h.jsonl();
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0].mode, mode);
+    assert.equal(rec[0].planned.wouldChange, true);
+    assert.deepEqual(rec[0].planned.ADE_CLAIM_ID, { set: "wt-test-1" });
+    assert.deepEqual(rec[0].planned.PATH, { prepend: h.agentBin });
+    assert.ok(!JSON.stringify(rec[0]).includes("KEEP"), "launch env values never logged");
+    assert.equal(h.mutating().length, 0);
+    if (mode === "observe") {
+      assert.equal(out, undefined, "request untouched: no ADE_CLAIM_ID, no PATH change");
+      assert.equal(input.request.env.ADE_CLAIM_ID, "foreign");
+    } else {
+      assert.equal(out.env.ADE_CLAIM_ID, "wt-test-1");
+      assert.equal(out.env.PATH.split(":")[0], h.agentBin);
+      assert.equal(out.env.KEEP, "1");
+    }
+  });
+}
+
+test("every hook honours ADE_CLAIM_DRY_RUN over an enforce file, and the file is re-read per call", async () => {
+  const h = harness({ modeText: "enforce", env: { ADE_CLAIM_DRY_RUN: "1" } });
+  registerAdeClaimHooks(h.server, h.deps);
+  await h.hooks.get("worktree.create.after")(WT(h));
+  await h.hooks.get("workspace.archive.after")({ workspace: { id: "w", cwd: h.cwd } });
+  await h.hooks.get("agent.create.after")({ agent: { id: "agent-1", cwd: h.cwd } });
+  assert.equal(await h.hooks.get("agent.open.before")(OPEN(h)), undefined);
+  assert.deepEqual(h.mutating(), []);
+  assert.deepEqual(h.jsonl().map((r) => r.mode), ["observe", "observe", "observe", "observe"]);
+
+  // No restart: flip the flag file and the very next call enforces.
+  const h2 = harness({ modeText: "observe" });
+  registerAgentClaimEnvHook(h2.server, h2.deps);
+  assert.equal(await h2.hooks.get("agent.open.before")(OPEN(h2)), undefined);
+  writeFileSync(join(h2.stateDir, CLAIM_MODE_FILE), "enforce\n");
+  const out = await h2.hooks.get("agent.open.before")(OPEN(h2));
+  assert.equal(out.env.ADE_CLAIM_ID, "wt-test-1");
+  rmModeFile(h2);
+  assert.equal(await h2.hooks.get("agent.open.before")(OPEN(h2)), undefined, "deleted flag = observe");
+});
+
+function rmModeFile(h) {
+  chmodSync(join(h.stateDir, CLAIM_MODE_FILE), 0o666); // odd perms (still says enforce): observe
+}
+
+test("missing mode file = observe for all four hooks (fail safe)", async () => {
+  const h = harness(); // no mode file
+  registerAdeClaimHooks(h.server, h.deps);
+  await h.hooks.get("worktree.create.after")(WT(h));
+  await h.hooks.get("workspace.archive.after")({ workspace: { id: "w", cwd: h.cwd } });
+  await h.hooks.get("agent.create.after")({ agent: { id: "agent-1", cwd: h.cwd } });
+  assert.equal(await h.hooks.get("agent.open.before")(OPEN(h)), undefined);
+  assert.deepEqual(h.mutating(), []);
+  assert.equal(h.jsonl().length, 4);
+});
+
+test("observe never throws on a waiting hook (bad payload, missing trusted helper, bad TTL)", async () => {
+  const h = harness({ modeText: "observe", env: { ADE_CLAIM_TTL: "nope" } });
+  registerAdeClaimHooks(h.server, h.deps);
+  await h.hooks.get("worktree.create.after")(WT(h)); // bad ADE_CLAIM_TTL
+  await h.hooks.get("worktree.create.after")({ worktree: null });
+  assert.equal(await h.hooks.get("agent.open.before")({ request: { agentId: "" } }), undefined);
+  const rec = h.jsonl();
+  assert.equal(rec.length, 3);
+  assert.ok(rec.every((r) => typeof r.error === "string" && r.mode === "observe"));
+  assert.deepEqual(h.mutating(), []);
+  // ...while enforce still fails loudly (abort creation) as before
+  const e = harness({ modeText: "enforce", env: { ADE_CLAIM_TTL: "nope" } });
+  registerWorktreeClaimHook(e.server, e.deps);
+  await assert.rejects(() => e.hooks.get("worktree.create.after")(WT(e)), /ADE_CLAIM_TTL/);
+});
+
+test("observe lookup is read-only: only git rev-parse/config and ade_claims.py list run", async () => {
+  const h = harness({ modeText: "observe" });
+  registerAdeClaimHooks(h.server, h.deps);
+  await h.hooks.get("worktree.create.after")(WT(h));
+  await h.hooks.get("workspace.archive.after")({ workspace: { id: "w", cwd: h.cwd } });
+  await h.hooks.get("agent.create.after")({ agent: { id: "agent-1", cwd: h.cwd } });
+  await h.hooks.get("agent.open.before")(OPEN(h));
+  for (const c of h.calls) {
+    const ok = (c.cmd === "git" && ["rev-parse", "config"].includes(c.args[2]))
+      || (c.cmd === "python3" && c.args[1] === "list");
+    assert.ok(ok, `unexpected spawn in observe: ${c.cmd} ${c.args.join(" ")}`);
+  }
 });
