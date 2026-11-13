@@ -162,3 +162,11 @@ resume then failed with `Failed to send message: Invalid params: Session "<sessi
 The run stopped immediately, removed the plugin and source worktree, and archived all six throwaways.
 The error alone does not establish a plugin root cause. The explicit-bypass Claude resume, stamped creates,
 restrictive escape and full-canary success remain unverified; rerun the complete procedure after diagnosis.
+
+**Plugin-free control (2026-11-12):** a new Cursor throwaway launched with the same three-variable form;
+its immediate second-message send and a further send after 60 seconds idle were both accepted without the
+session-not-found error. Inspections bracketing the idle interval showed idle status and unchanged `UpdatedAt`.
+The activity returned `Upgrade your plan to continue`, limiting comparison with a functioning model session.
+The run stopped after the control, archived its throwaway, and left the plugin uninstalled. Cursor resume
+session-not-found remains an **unexpected** canary result; this control did not justify treating it as a
+pre-existing limitation or attributing it to the plugin.
