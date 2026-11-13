@@ -269,6 +269,10 @@ for both `statuses: write` and `checks: write`, so the App must have both.
    Check: `gh api repos/djbclark/djbclark-ade/rules/branches/master`. Before this the checks were advisory (no ruleset,
    branch protection `required_status_checks: null`). `pytest` (the macOS job) is not required: it is skipped on every
    PR by design.
+   Proof (throwaway draft PR 660, closed): an owner-authored PR with no marker reads `adversary-marker=success`
+   ("owner-authored PR (marker optional)", owner-trust), so it was `CLEAN`; with a BLOCK marker in the body the App posted
+   `failure`, `mergeStateStatus` went `BLOCKED` and `gh pr merge --match-head-commit` was refused. An open PR with the App's
+   `success` status (657) reads `CLEAN`, so a commit status from the pinned App satisfies the pin.
 
 ## `bin/codex-open-threads`: rule 9 hygiene on merged PRs (2026-11-10)
 
