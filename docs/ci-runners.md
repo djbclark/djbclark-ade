@@ -1,8 +1,16 @@
 # CI runners: WarpBuild for long jobs
 
-Snapshot **2026-11-13** (operator ruling, card answers): every GitHub Actions job estimated to take **more than 10 minutes** runs on
-[WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) runners; jobs of 10 minutes or less stay on GitHub-hosted runners.
-Applies to the operator's active repositories (not archived ones, third-party forks, or repos with no recent CI).
+Snapshot **2026-11-13** (operator rulings, card answers). A GitHub Actions job moves to
+[WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) runners only when **both** hold:
+
+1. It takes **more than 10 minutes** on GitHub-hosted runners.
+2. A measured pilot shows WarpBuild **at least 50% faster** (operator, 2026-11-13: "Let's put a minimum 50% faster and each project can see
+   if its stuff gets past that gate"). Faster means GitHub-hosted time divided by WarpBuild time is at least 1.5, so the WarpBuild run takes
+   at most two thirds as long.
+
+Everything else stays on GitHub-hosted runners. Each project measures its own jobs (section B) and moves only the jobs that pass. Applies to the
+operator's active repositories (not archived ones, third-party forks, or repos with no recent CI). djbclark-ade itself failed the gate
+(section C pilot: 1.07x Linux, 1.22x macOS) and stays on GitHub-hosted runners under `djbclark`.
 
 ## A. Labels (WarpBuild's own mapping, `mcp__warpbuild__suggest_runner_labels`)
 
@@ -21,9 +29,14 @@ Leave self-hosted labels and `runs-on` expressions alone and list them in the PR
    (`gh api -X PATCH orgs/<org>/actions/runner-groups/1 -F allows_public_repositories=true`, needs `admin:org`: add it with
    `gh auth refresh -s admin:org` and drop it afterwards, or use the web UI). That opens every runner in the group to every repo the group
    reaches, so also set group 1 to `visibility=selected` listing only the switched repos, and install the app on "Only select repositories".
-3. Edit `runs-on` of each job over 10 minutes (use `gh run view --json jobs` durations), open a PR titled
-   "Switch CI to WarpBuild runners", confirm a job starts on a `warp-*` runner and compare durations, then merge.
-4. MCP server (user scope): `claude mcp add --transport http --scope user warpbuild https://mcp.warpbuild.com/mcp && claude mcp login warpbuild`
+3. Measure before moving anything: copy the repo's tree (secret-free workflows only) into `frdminc/warpbuild-pilot` (add it nowhere else),
+   run each job over 10 minutes once on its `warp-*` label and once on its GitHub-hosted label, and compare job durations
+   (`gh run view --json jobs`). Only jobs at 1.5x or better pass the gate. A personal-account repo that passes needs a transfer to an
+   organization first (section C; the operator decides per repo, and the transfer audit has to cover the merge-gate App, rulesets and the
+   org's installed apps).
+4. Edit `runs-on` of each passing job, open a PR titled "Switch CI to WarpBuild runners", confirm a job starts on a `warp-*` runner and
+   compare durations again, then merge.
+5. MCP server (user scope): `claude mcp add --transport http --scope user warpbuild https://mcp.warpbuild.com/mcp && claude mcp login warpbuild`
    (the old `docs/apply-toolchain-prompt.md` is archived under `docs/history/`, so the entry lives here). Prefer `--scope local` in the repo
    being switched, or `claude mcp remove warpbuild` after setup: at user scope its vendor-written instructions load into every session, and
    `send_setup_report` sends repo details to WarpBuild.
@@ -49,15 +62,16 @@ both sides because that workflow file was left out of the copy). Jobs started wi
 | pytest-linux (suite 794 s vs 851 s) | `warp-ubuntu-2404-x64-4x` 13.4 min | `ubuntu-latest` 14.4 min | about 7% |
 | macOS pytest (suite 1361 s vs 1646 s) | `warp-macos-26-arm64-6x` 23.1 min | `macos-latest` 28.1 min | about 18% |
 
-Evidence: runs 43514103522 (warp) and 43514108143 (GitHub) in that repository. The gain is modest; the macOS leg gains most.
+Evidence: runs 43514103522 (warp) and 43514108143 (GitHub) in that repository. Speed-up: 1.07x Linux, 1.22x macOS, both below the
+1.5x gate, so djbclark-ade was not transferred (an audit for the transfer, kept in the lead's state, found the private `ade-merge-gate`
+App cannot follow the repo to an org).
 
 ## D. API access
 
 `https://api.warpbuild.com/api/v1`, `Authorization: Bearer wkey-…` (a key with the `ci` scope from <https://app.warpbuild.com/settings/api-keys>).
-Pass a key from a file or the environment, never on argv. The `WARPBUILD_API_KEY` in `sudo-secretspec` is a 36-character UUID with no `wkey-`
-prefix; it gets 403 (authenticated-but-refused, or a different key type, not proof it is dead) from `/runner_instance` and
-`/reports/billing/ci`. Identify it in the WarpBuild console and revoke or replace it. The MCP's OAuth session (`mcp__warpbuild__call_api`)
-works without it.
+Pass a key from a file or the environment, never on argv. The name `WARPBUILD_API_KEY` stays declared in `sudo-secretspec` with no
+value: the UUID first stored there got 403 from `/runner_instance` and `/reports/billing/ci` and was deleted (operator, 2026-11-13). Store a
+`wkey-` key there only when a script needs the API. The MCP's OAuth session (`mcp__warpbuild__call_api`) works without one.
 
 ## E. Cost and exposure
 
