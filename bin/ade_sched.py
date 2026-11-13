@@ -107,7 +107,8 @@ def default_subst(ade: str | os.PathLike[str] | None = None, env: Mapping[str, s
     env = os.environ if env is None else env
     root = os.path.realpath(ade) if ade else str(REPO)
     home = env.get("HOME") or str(Path.home())
-    return {"__ADE__": root, "@ADE@": root, "__HOME__": home, "@HOME@": home}
+    return {"__ADE__": root, "@ADE@": root, "__HOME__": home, "@HOME@": home,
+            "__ADMISSION__": str(admission_dir(None, env=env))}   # W21c: the wrapper's fixed, absolute lock directory
 
 
 def _one_line(s: str) -> str:
@@ -957,22 +958,25 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
             _activate(c, [c.crontab, "-"], stdin=cur + (r.cron_block or ""))
         return r
     _log_dirs(job)
-    if r.backend == "systemd":
-        stale = c.units / f"{job.label}.timer"
-        if stale not in r.files and stale.exists():   # the job lost its schedule: the old timer would keep firing
-            if activate:
-                _activate(c, [c.systemctl, "--user", "disable", "--now", stale.name], ignore=True)
-            stale.unlink()
-    for path, text in r.files.items():
-        atomic_write(path, text)
-    if not activate:
-        for argv in r.activation:
-            print(shlex.join(argv), file=out)
-        return r
-    for i, argv in enumerate(r.activation):
-        _activate(c, argv, ignore=(r.backend == "launchd" and i == 0))   # bootout of a job not loaded fails: fine
-    if r.backend == "systemd":
-        _cron_remove(c, job.label, err, quiet_missing=True)
+    # F3 of #622: a launchd plist write (and the bootout that follows it) serializes with every other ADE writer and refuses
+    # while a wrapped run of the job holds the admission lock shared; the other backends have no wrapper lock to take.
+    with (writer_lock(job.label, None, c.env) if r.backend == "launchd" else contextlib.nullcontext()):
+        if r.backend == "systemd":
+            stale = c.units / f"{job.label}.timer"
+            if stale not in r.files and stale.exists():   # the job lost its schedule: the old timer would keep firing
+                if activate:
+                    _activate(c, [c.systemctl, "--user", "disable", "--now", stale.name], ignore=True)
+                stale.unlink()
+        for path, text in r.files.items():
+            atomic_write(path, text)
+        if not activate:
+            for argv in r.activation:
+                print(shlex.join(argv), file=out)
+            return r
+        for i, argv in enumerate(r.activation):
+            _activate(c, argv, ignore=(r.backend == "launchd" and i == 0))   # bootout of a job not loaded fails: fine
+        if r.backend == "systemd":
+            _cron_remove(c, job.label, err, quiet_missing=True)
     return r
 
 
@@ -1000,7 +1004,7 @@ def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
 
 
 def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None = None, err: TextIO | None = None,
-                           **overrides: Any) -> str:
+                           state_dir: Path | None = None, **overrides: Any) -> str:
     """The only launchd write that native admission enables: it can neither kill a running job nor replace a definition.
 
     1. The target is absent: create it exclusively, then `launchctl bootstrap` (never `bootout`).
@@ -1010,6 +1014,12 @@ def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None
 
     If `bootstrap` fails (for example the label was loaded meanwhile) the error is raised without any `bootout` or unlink;
     a plist this call created stays on disk and is named in the message. Returns "created" or "bootstrapped"."""
+    with writer_lock(job.label, state_dir, env, busy=NativeDefer):
+        return _install_launchd_native_locked(job, text, env=env, err=err, **overrides)
+
+
+def _install_launchd_native_locked(job: Job, text: str, *, env: Mapping[str, str] | None = None, err: TextIO | None = None,
+                                   **overrides: Any) -> str:
     err = err or sys.stderr
     c = _ctx("launchd", env, overrides)
     plist = c.agents_dir / f"{job.label}.plist"
@@ -1046,6 +1056,98 @@ class ReloadRolledBack(SchedError):
     """A locked reload/removal failed after the job was unloaded; the PRIOR definition was restored and bootstrapped."""
 
 
+class ForeignWrite(SchedError):
+    """The plist is no longer what this writer hashed (another inode or other bytes): nothing was replaced or deleted."""
+
+
+_PlistId = tuple[int, int]   # (st_dev, st_ino) of the file that was hashed
+
+
+def _read_identity(path: Path, limit: int = 1 << 20) -> tuple[bytes, _PlistId]:
+    """The bytes of a regular file read through ONE descriptor, with that descriptor's (st_dev, st_ino): the bytes that were
+    hashed and the inode they came from. FileNotFoundError when absent; OSError for a symlink, FIFO, device or oversize file."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        data = b""
+        while len(data) <= limit:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > limit:
+            raise OSError(f"{path} is larger than {limit} bytes")
+        return data, (st.st_dev, st.st_ino)
+    finally:
+        os.close(fd)
+
+
+def _guarded_replace(path: Path, data: bytes, *, expect_id: _PlistId | None, allowed_sha: set[str], mode: int = 0o600) -> _PlistId:
+    """`os.replace` the plist only when it is STILL what the caller hashed: one more read through a single descriptor
+    immediately before the rename must show the same inode (when `expect_id`) and bytes whose sha256 is in `allowed_sha`.
+    Another writer's replacement or edit after the earlier hash raises ForeignWrite and nothing is replaced. What cannot be
+    closed from here is the syscall gap between that last read and `rename` (documented in docs/scheduling.md); ADE's own
+    writers cannot reach it, they serialize on the label's admission lock. Returns the new file's identity."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        try:
+            cur, cur_id = _read_identity(path)
+        except FileNotFoundError as exc:
+            raise ForeignWrite(EX_ACTIVATE, f"{path} disappeared since it was hashed; left untouched") from exc
+        except OSError as exc:
+            raise ForeignWrite(EX_ACTIVATE, f"{path} is no longer a regular file ({exc}); left untouched") from exc
+        if (expect_id is not None and cur_id != expect_id) or hashlib.sha256(cur).hexdigest() not in allowed_sha:
+            raise ForeignWrite(EX_ACTIVATE, f"{path} was changed by another writer since it was hashed; left untouched")
+        os.replace(tmp, path)
+        return (os.lstat(path).st_dev, os.lstat(path).st_ino)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _guarded_unlink(path: Path, *, expect_id: _PlistId, allowed_sha: set[str]) -> None:
+    """Unlink the plist only when one more read, immediately before, shows the inode and bytes that were hashed."""
+    try:
+        cur, cur_id = _read_identity(path)
+    except OSError as exc:
+        raise ForeignWrite(EX_ACTIVATE, f"{path} changed since it was hashed ({exc}); left untouched") from exc
+    if cur_id != expect_id or hashlib.sha256(cur).hexdigest() not in allowed_sha:
+        raise ForeignWrite(EX_ACTIVATE, f"{path} was changed by another writer since it was hashed; left untouched")
+    path.unlink()
+
+
+@contextlib.contextmanager
+def writer_lock(label: str, state_dir: Path | None, env: Mapping[str, str] | None, *, held: bool = False,
+                busy: type[Exception] = SchedError) -> Iterator[None]:
+    """Every ADE plist writer (`install`, `uninstall`, `install_launchd_native`, recovery) takes the label's EXCLUSIVE admission
+    lock without waiting around its check-and-write, so ADE writers serialize and a run in flight (which holds it shared) makes
+    the writer refuse instead of unloading it (review F3 of #622). `held`: the caller already holds it (reconcile's locked
+    reload/removal). Contention raises `busy` (NativeDefer for reconcile, SchedError for the low-level commands)."""
+    if held:
+        yield
+        return
+    def refuse(msg: str) -> Exception:
+        return busy(msg) if busy is NativeDefer else busy(EX_ACTIVATE, msg)
+    try:
+        fd = acquire_admission_lock(label, exclusive=True, state_dir=state_dir, env=env)
+    except OSError as exc:
+        raise refuse(f"the admission lock of {label} is unavailable ({exc}); refused, nothing written") from exc
+    if fd is None:
+        raise refuse(f"a run or another ADE writer of {label} holds its admission lock; refused, nothing written")
+    try:
+        yield
+    finally:
+        release_admission_lock(fd)
+
+
 def _launchctl_print(c: _Ctx, label: str, runner: Runner | None = None) -> tuple[int, str, str]:
     return (runner or _run)([c.launchctl, "print", f"gui/{c.uid}/{label}"], c.env)
 
@@ -1072,22 +1174,24 @@ def clear_recovery_record(label: str, state_dir: Path | None, env: Mapping[str, 
             pass
 
 
-def _restore_prior_and_load(c: _Ctx, label: str, plist: Path, prior: bytes, replace_only: set[str] | None = None) -> None:
+def _restore_prior_and_load(c: _Ctx, label: str, plist: Path, prior: bytes, replace_only: set[str] | None = None,
+                            expect_id: _PlistId | None = None) -> None:
     """Put the prior bytes back and bootstrap; raises SchedError. A file is replaced only when it is the prior bytes or
-    one whose sha256 is in `replace_only` (the bytes this run wrote); any other file is someone else's: the restore fails
-    and the recovery record stays."""
+    one whose sha256 is in `replace_only` (the bytes this run wrote, and with `expect_id` the very inode this run wrote); the
+    replacement re-reads the file immediately before the rename (`_guarded_replace`). Any other file is someone else's: the
+    restore fails and the recovery record stays. The caller holds the label's admission lock."""
     try:
-        have = read_regular_bytes(plist)
-    except OSError:
-        have = None
+        have, have_id = _read_identity(plist)
+    except FileNotFoundError:
+        have, have_id = None, None
+    except OSError as exc:
+        raise SchedError(EX_ACTIVATE, f"{plist} is not a regular file ({exc}); the prior definition was not restored") from exc
     if have is None:
-        if os.path.lexists(plist):
-            raise SchedError(EX_ACTIVATE, f"{plist} is not a regular file; the prior definition was not restored")
         create_exclusive(plist, prior.decode("utf-8"))
     elif have != prior:
-        if hashlib.sha256(have).hexdigest() not in (replace_only or set()):
+        if hashlib.sha256(have).hexdigest() not in (replace_only or set()) or (expect_id is not None and have_id != expect_id):
             raise SchedError(EX_ACTIVATE, f"{plist} changed under us and is not ours; the prior definition was not restored")
-        _atomic_write_bytes(plist, prior)
+        _guarded_replace(plist, prior, expect_id=have_id, allowed_sha=set(replace_only or ()))
     _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
     rc, _, err_txt = _launchctl_print(c, label)
     if rc != 0:
@@ -1116,7 +1220,7 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
     try:   # every failure before the unload changes nothing: the prior definition keeps running and keeps its ledger row
         if job.worktree:
             raise SchedError(EX_USAGE, f"__ADE__ defaulted to {job.worktree}, a linked git worktree that is deleted after its merge")
-        prior = read_regular_bytes(plist)
+        prior, prior_id = _read_identity(plist)
         if expect_hash is not None and artifact_hash({plist: prior.decode("utf-8", errors="replace")}) != expect_hash:
             raise SchedError(EX_ACTIVATE, f"{plist} is no longer the ledger's artifact (re-checked under the lock)")
         _log_dirs(job)
@@ -1129,15 +1233,17 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
     except SchedError as exc:   # still loaded: nothing changed, the job keeps running its prior definition
         clear_recovery_record(label, state_dir, env)
         raise NativeDefer(f"bootout of {label} did not unload it ({exc}); left untouched") from exc
+    new_id: _PlistId | None = None
     try:
-        _atomic_write_bytes(plist, new)
+        # re-hash immediately before the replace: the bytes AND the inode must still be the ones hashed under the lock
+        new_id = _guarded_replace(plist, new, expect_id=prior_id, allowed_sha={hashlib.sha256(prior).hexdigest()})
         _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
         rc, _, err_txt = _launchctl_print(c, label)
         if rc != 0:
             raise SchedError(EX_ACTIVATE, f"read-back: {label} not loaded after bootstrap: {err_txt.strip()}")
     except BaseException as exc:
         try:
-            _restore_prior_and_load(c, label, plist, prior, replace_only={new_sha})
+            _restore_prior_and_load(c, label, plist, prior, replace_only={new_sha}, expect_id=new_id)
         except (SchedError, OSError) as back:
             raise SchedError(EX_ACTIVATE, f"reload of {label} failed ({exc}) and the prior definition could not be restored "
                                           f"({back}); recovery record kept in {admission_dir(state_dir, env=env)}") from exc
@@ -1157,9 +1263,9 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
     c = _ctx("launchd", env, overrides)
     plist = c.agents_dir / f"{label}.plist"
     try:
-        prior = read_regular_bytes(plist)
+        prior, prior_id = _read_identity(plist)
     except FileNotFoundError:
-        prior = None
+        prior, prior_id = None, None
     except OSError as exc:
         raise NativeDefer(f"{plist} is unreadable ({exc})") from exc
     if prior is None:
@@ -1176,7 +1282,8 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
             clear_recovery_record(label, state_dir, env)
             raise NativeDefer(f"bootout of {label} did not unload it ({exc}); left untouched") from exc
     try:
-        plist.unlink()
+        assert prior_id is not None
+        _guarded_unlink(plist, expect_id=prior_id, allowed_sha={hashlib.sha256(prior).hexdigest()})   # re-hashed right before
         rc, _, _ = _launchctl_print(c, label)
         if rc == 0:
             raise SchedError(EX_ACTIVATE, f"read-back: launchd {label} still loaded after removal")
@@ -1191,6 +1298,8 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise ReloadRolledBack(EX_ACTIVATE, f"removal of {label} failed ({exc}); the prior definition is loaded again") from exc
+        if isinstance(exc, ForeignWrite):   # nothing was unloaded or deleted: a deferral, not a failure
+            raise NativeDefer(str(exc)) from exc
         raise
     clear_recovery_record(label, state_dir, env)
     return True
@@ -1233,57 +1342,70 @@ def recover_launchd_records(*, state_dir: Path | None, owns: Callable[[str], boo
             row.update(action="would-recover", detail=f"{label}: interrupted {action}; the next --yes loads it again")
             rows.append(row)
             continue
-        rc, _, _ = _launchctl_print(c, label)
-        if rc == 0:
-            if action == "reload":   # killed before the unload: the ledger row may still be pending for bytes never written
-                try:
-                    if hashlib.sha256(read_regular_bytes(plist)).hexdigest() == prior_sha:
-                        row["ledger_fix"] = {"label": label, "artifact_hash": rec.get("prior_artifact_hash")}
-                except OSError:
-                    pass
-            clear_recovery_record(label, state_dir, env)
-            row.update(detail=f"{label} is loaded again; stale recovery record cleared")
-            rows.append(row)
-            continue
-        try:
-            have: bytes | None = read_regular_bytes(plist)
-        except FileNotFoundError:
-            have = None
+        try:   # an ADE writer like any other: the label's exclusive admission lock, never waited on (a run in flight: deferred)
+            lock_fd = acquire_admission_lock(label, exclusive=True, state_dir=state_dir, env=env)
         except OSError as exc:
-            row.update(action="failed", ok=False, detail=f"{plist} is unreadable ({exc}); recovery record kept")
+            row.update(action="failed", ok=False, detail=f"admission lock of {label} unavailable ({exc}); recovery record kept")
             rows.append(row)
             continue
-        sha = hashlib.sha256(have).hexdigest() if have is not None else None
-        if have is None and action == "remove":
-            clear_recovery_record(label, state_dir, env)
-            row["ledger_fix"] = {"label": label, "drop": True}
-            row.update(detail=f"removal of {label} had completed; recovery record cleared")
-            rows.append(row)
-            continue
-        if have is not None and sha not in (prior_sha, new_sha):
-            row.update(action="failed", ok=False, detail=f"{plist} is neither the prior nor the new ADE definition; left untouched, record kept")
+        if lock_fd is None:
+            row.update(action="failed", ok=False, detail=f"a run or another ADE writer of {label} holds its admission lock; recovery deferred, record kept")
             rows.append(row)
             continue
         try:
-            prior = read_regular_bytes(recovery_prior_path(label, state_dir, env=env))
-            if hashlib.sha256(prior).hexdigest() != prior_sha:
-                raise OSError("prior copy does not match its record")
-            if have is None:
-                _restore_prior_and_load(c, label, plist, prior)
-            else:
-                _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
-                rc2, _, err2 = _launchctl_print(c, label)
-                if rc2 != 0:
-                    raise SchedError(EX_ACTIVATE, f"{label} not loaded after bootstrap: {err2.strip()}")
-        except (SchedError, OSError) as exc:
-            row.update(action="failed", ok=False, detail=f"recovery of {label} failed ({exc}); record kept")
+            rc, _, _ = _launchctl_print(c, label)
+            if rc == 0:
+                if action == "reload":   # killed before the unload: the ledger row may still be pending for bytes never written
+                    try:
+                        if hashlib.sha256(read_regular_bytes(plist)).hexdigest() == prior_sha:
+                            row["ledger_fix"] = {"label": label, "artifact_hash": rec.get("prior_artifact_hash")}
+                    except OSError:
+                        pass
+                clear_recovery_record(label, state_dir, env)
+                row.update(detail=f"{label} is loaded again; stale recovery record cleared")
+                rows.append(row)
+                continue
+            try:
+                have: bytes | None = read_regular_bytes(plist)
+            except FileNotFoundError:
+                have = None
+            except OSError as exc:
+                row.update(action="failed", ok=False, detail=f"{plist} is unreadable ({exc}); recovery record kept")
+                rows.append(row)
+                continue
+            sha = hashlib.sha256(have).hexdigest() if have is not None else None
+            if have is None and action == "remove":
+                clear_recovery_record(label, state_dir, env)
+                row["ledger_fix"] = {"label": label, "drop": True}
+                row.update(detail=f"removal of {label} had completed; recovery record cleared")
+                rows.append(row)
+                continue
+            if have is not None and sha not in (prior_sha, new_sha):
+                row.update(action="failed", ok=False, detail=f"{plist} is neither the prior nor the new ADE definition; left untouched, record kept")
+                rows.append(row)
+                continue
+            try:
+                prior = read_regular_bytes(recovery_prior_path(label, state_dir, env=env))
+                if hashlib.sha256(prior).hexdigest() != prior_sha:
+                    raise OSError("prior copy does not match its record")
+                if have is None:
+                    _restore_prior_and_load(c, label, plist, prior)
+                else:
+                    _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
+                    rc2, _, err2 = _launchctl_print(c, label)
+                    if rc2 != 0:
+                        raise SchedError(EX_ACTIVATE, f"{label} not loaded after bootstrap: {err2.strip()}")
+            except (SchedError, OSError) as exc:
+                row.update(action="failed", ok=False, detail=f"recovery of {label} failed ({exc}); record kept")
+                rows.append(row)
+                continue
+            clear_recovery_record(label, state_dir, env)
+            row.update(detail=f"{label} loaded again after an interrupted {action}")
+            if action == "reload":   # the ledger row was left pending/failed for the new bytes: make it say what is loaded now
+                row["ledger_fix"] = {"label": label, "artifact_hash": rec.get("prior_artifact_hash") if sha in (None, prior_sha) else None}
             rows.append(row)
-            continue
-        clear_recovery_record(label, state_dir, env)
-        row.update(detail=f"{label} loaded again after an interrupted {action}")
-        if action == "reload":   # the ledger row was left pending/failed for the new bytes: make it say what is loaded now
-            row["ledger_fix"] = {"label": label, "artifact_hash": rec.get("prior_artifact_hash") if sha in (None, prior_sha) else None}
-        rows.append(row)
+        finally:
+            release_admission_lock(lock_fd)
     return rows
 
 
@@ -1304,21 +1426,22 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# remove {path}" if path.exists() else f"# {path} not present", file=out)
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
-        if activate:
-            # bootout of a missing job fails: ignore that, but refuse to drop the plist
-            # while launchctl still reports the job loaded (Codex P2 on #514).
-            _activate(c, cmd, ignore=True)
-            rc, _, err_txt = _run([c.launchctl, "print", f"gui/{c.uid}/{label}"], c.env)
-            if rc == 0:
-                raise SchedError(
-                    EX_ACTIVATE,
-                    f"launchd {label} still loaded after bootout"
-                    + (f": {err_txt.strip()}" if err_txt and err_txt.strip() else ""),
-                )
-        else:
-            print(shlex.join(cmd), file=out)
-        found = path.exists()
-        path.unlink(missing_ok=True)
+        with writer_lock(label, None, c.env):   # F3 of #622: serialize with every other ADE writer; refuse during a wrapped run
+            if activate:
+                # bootout of a missing job fails: ignore that, but refuse to drop the plist
+                # while launchctl still reports the job loaded (Codex P2 on #514).
+                _activate(c, cmd, ignore=True)
+                rc, _, err_txt = _run([c.launchctl, "print", f"gui/{c.uid}/{label}"], c.env)
+                if rc == 0:
+                    raise SchedError(
+                        EX_ACTIVATE,
+                        f"launchd {label} still loaded after bootout"
+                        + (f": {err_txt.strip()}" if err_txt and err_txt.strip() else ""),
+                    )
+            else:
+                print(shlex.join(cmd), file=out)
+            found = path.exists()
+            path.unlink(missing_ok=True)
         return found
     if name == "systemd":
         present = [u for u in (c.units / f"{label}.timer", c.units / f"{label}.service") if u.exists()]
@@ -1989,7 +2112,7 @@ def admission_lock_path(label: str, state_dir: Path | None = None, *, env: Mappi
 
 
 def acquire_admission_lock(label: str, *, exclusive: bool, state_dir: Path | None = None,
-                           env: Mapping[str, str] | None = None) -> int | None:
+                           env: Mapping[str, str] | None = None, lock_dir: Path | None = None) -> int | None:
     """Take the per-label admission lock without waiting: the descriptor, or None when it is busy.
 
     Every run of a wrapped job (`bin/ade-job-run`) holds it SHARED for the whole run; reconcile takes it EXCLUSIVE around a
@@ -1997,7 +2120,12 @@ def acquire_admission_lock(label: str, *, exclusive: bool, state_dir: Path | Non
     exclusive attempt fail (busy: defer, never wait and never kill) and reconcile holding it makes a new run skip. The
     lock file is opened without following a symlink and, after the lock is held, must still be the file at the path
     (an unlinked lock file would split the two sides). Raises OSError for anything but contention."""
-    path = admission_lock_path(label, state_dir, env=env)
+    if lock_dir is not None:   # the wrapper: the directory is an ABSOLUTE argv value of the loaded job, never the environment
+        if not LABEL_RE.fullmatch(label) or not lock_dir.is_absolute():
+            raise SchedError(EX_USAGE, f"bad label or lock directory {label!r} {str(lock_dir)!r}")
+        path = lock_dir / f"{label}.lock"
+    else:
+        path = admission_lock_path(label, state_dir, env=env)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(path, flags, 0o600)
@@ -2027,11 +2155,16 @@ def release_admission_lock(fd: int | None) -> None:
             pass
 
 
-def wrapper_route_problem(data: bytes, label: str) -> str | None:
-    """None only when the INSTALLED plist bytes provably send every launch through `bin/ade-job-run LABEL --`: a Label that
-    matches, no `Program` key (it would replace ProgramArguments[0] as the executable), and ProgramArguments of the form
-    [<absolute path>/ade-job-run, LABEL, "--", command...] whose wrapper file exists and is executable. The proof is read
-    from the bytes launchd loaded, never from the render."""
+WRAPPER_PROTOCOL = "v1"   # what `ade-job-run --admission-protocol` prints: the shared-lock-before-exec contract
+_WRAP_HEAD = 5            # [wrapper, "--lock-dir", ABS-DIR, LABEL, "--", command...]
+
+
+def wrapper_route_problem(data: bytes, label: str, *, lock_dir: Path | None = None) -> str | None:
+    """None only when the INSTALLED plist bytes provably send every launch through
+    `bin/ade-job-run --lock-dir DIR LABEL --`: a Label that matches, no `Program` key (it would replace ProgramArguments[0]
+    as the executable), and ProgramArguments of the form [<absolute path>/ade-job-run, "--lock-dir", <absolute DIR>, LABEL,
+    "--", command...] whose wrapper file exists and is executable; with `lock_dir`, DIR must be exactly that directory. The
+    proof is read from the bytes launchd loaded, never from the render."""
     try:
         d = plistlib.loads(data)
     except Exception:  # noqa: BLE001 - plistlib raises several types for malformed input
@@ -2041,12 +2174,43 @@ def wrapper_route_problem(data: bytes, label: str) -> str | None:
     if "Program" in d:
         return "installed plist sets Program (it replaces ProgramArguments[0])"
     pa = d.get("ProgramArguments")
-    if not (isinstance(pa, list) and len(pa) >= 4 and all(isinstance(x, str) for x in pa)):
-        return "installed plist has no ProgramArguments of the form ade-job-run LABEL -- COMMAND"
-    if not os.path.isabs(pa[0]) or os.path.basename(pa[0]) != JOB_RUN_WRAPPER or pa[1] != label or pa[2] != "--":
-        return f"installed plist does not route through {JOB_RUN_WRAPPER} {label} --"
+    if not (isinstance(pa, list) and len(pa) > _WRAP_HEAD and all(isinstance(x, str) for x in pa)):
+        return f"installed plist has no ProgramArguments of the form {JOB_RUN_WRAPPER} --lock-dir DIR LABEL -- COMMAND"
+    if (not os.path.isabs(pa[0]) or os.path.basename(pa[0]) != JOB_RUN_WRAPPER or pa[1] != "--lock-dir"
+            or not os.path.isabs(pa[2]) or pa[3] != label or pa[4] != "--"):
+        return f"installed plist does not route through {JOB_RUN_WRAPPER} --lock-dir DIR {label} --"
+    if lock_dir is not None and pa[2] != str(lock_dir):
+        return f"the wrapper would lock in {pa[2]}, not in reconcile's {lock_dir}"
     if not (os.path.isfile(pa[0]) and os.access(pa[0], os.X_OK)):
         return f"{pa[0]} is not an executable file"
+    return None
+
+
+def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[str]) -> str | None:
+    """Positive proof that `program` is THIS checkout's wrapper and speaks the admission protocol (review F2 of #622): its
+    realpath is <ADE root>/bin/ade-job-run, its bytes equal the ade-job-run beside this ade_sched.py, and it answers
+    `--admission-protocol` with `v1` (run directly, no shell, short timeout). A stale or custom executable of the same name,
+    one that runs the command without the shared lock, fails here and the job defers."""
+    if not program:
+        return "launchctl print shows no program for the loaded definition"
+    want = os.path.join(os.path.realpath(ade_root), "bin", JOB_RUN_WRAPPER)
+    got = os.path.realpath(program)
+    if got != want:
+        return f"the wrapper {program!r} is not {want} (the checkout reconcile runs from)"
+    try:
+        have = read_regular_bytes(Path(got))
+        mine = read_regular_bytes(Path(os.path.realpath(__file__)).parent / JOB_RUN_WRAPPER)
+    except OSError as exc:
+        return f"the wrapper cannot be read ({exc})"
+    if have != mine:
+        return f"{got} differs from this checkout's {JOB_RUN_WRAPPER}; reinstall the job to migrate it"
+    try:
+        r = subprocess.run([got, "--admission-protocol"], capture_output=True, text=True, timeout=10,
+                           stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{got} --admission-protocol failed ({exc})"
+    if r.returncode != 0 or r.stdout.strip() != WRAPPER_PROTOCOL:
+        return f"{got} does not declare admission protocol {WRAPPER_PROTOCOL}"
     return None
 
 
@@ -2089,42 +2253,26 @@ def parse_launchd_definition(text: str) -> tuple[str | None, list[str] | None]:
     return program, args
 
 
-def loaded_definition_problem(print_out: str, data: bytes, label: str) -> str | None:
+def loaded_definition_problem(print_out: str, data: bytes, label: str, *, lock_dir: Path) -> str | None:
     """None only when the definition launchd HAS LOADED (its `program`/`arguments`) starts with the same
-    `[<ade-job-run>, LABEL, "--"]` as the installed file. A file edited or replaced after the load (a `--no-activate`
-    install, a manual copy, a failed bootstrap) can show the wrapper while the old, unwrapped definition still runs."""
+    `[<ade-job-run>, --lock-dir, DIR, LABEL, --]` as the installed file, runs that wrapper as its program, and DIR is
+    exactly `lock_dir`, the directory reconcile would lock (review F1 of #622: the lock identity is read from the LOADED
+    argv, never from the plist file or an environment). A file edited or replaced after the load (a `--no-activate`
+    install, a manual copy, a failed bootstrap) can show the wrapper while the old definition still runs."""
     try:
         pa = plistlib.loads(data).get("ProgramArguments")
     except Exception:  # noqa: BLE001
         return "installed plist does not parse"
     program, args = parse_launchd_definition(print_out)
-    if not isinstance(pa, list) or args is None or len(args) < 4:
+    if not isinstance(pa, list) or args is None or len(args) <= _WRAP_HEAD:
         return "launchctl print shows no arguments for the loaded definition"
-    if args[:3] != [pa[0], label, "--"]:
-        return f"the LOADED definition does not start with {JOB_RUN_WRAPPER} {label} -- (it is {args[:3]!r})"
-    if program is not None and program != args[0]:
-        return f"the loaded definition runs program {program!r}, not the wrapper"
+    if args[:_WRAP_HEAD] != pa[:_WRAP_HEAD]:
+        return f"the LOADED definition does not start with {JOB_RUN_WRAPPER} --lock-dir DIR {label} -- like the file (it is {args[:_WRAP_HEAD]!r})"
+    if not os.path.isabs(args[2]) or args[2] != str(lock_dir):
+        return f"the LOADED definition locks in {args[2]!r}, not in reconcile's {lock_dir}"
+    if program is None or program != args[0]:
+        return f"the loaded definition runs program {program!r}, not the wrapper {args[0]!r}"
     return None
-
-
-def wrapper_lock_dir(data: bytes, uid: int) -> Path:
-    """The admission directory the wrapper in these installed bytes will use: its own environment is the plist's
-    EnvironmentVariables over the user's HOME (launchd sets HOME), through the same `admission_dir`."""
-    try:
-        home = pwd.getpwuid(uid).pw_dir
-    except KeyError:
-        home = str(Path.home())
-    env = {"HOME": home}
-    try:
-        ev = plistlib.loads(data).get("EnvironmentVariables")
-    except Exception:  # noqa: BLE001
-        ev = None
-    if isinstance(ev, dict):
-        env.update({k: v for k, v in ev.items() if isinstance(k, str) and isinstance(v, str)})
-    state = env.get("ADE_JOBS_STATE_DIR", "")
-    if state and not os.path.isabs(state):   # a relative or `~` value resolves differently in the job and in reconcile
-        return Path("/nonexistent/relative-ADE_JOBS_STATE_DIR")
-    return admission_dir(None, env=env)
 
 
 def recovery_record_path(label: str, state_dir: Path | None = None, *, env: Mapping[str, str] | None = None) -> Path:
@@ -2298,6 +2446,7 @@ def job_subst_from_row(
             raise SchedError(EX_USAGE, f"job {row.get('name')!r}: set item must be a string")
         key, val = expand_job_set_item(item, root=root, env=env)
         subst[key] = val
+    subst.setdefault("__ADMISSION__", str(admission_dir(None, env=env)))   # the wrapper's lock directory, from the same env reconcile reads
     return subst
 
 
@@ -3196,16 +3345,21 @@ def reconcile(
                 return f"no plist at {plist}"
             except (OSError, UnicodeDecodeError) as exc:
                 return f"{plist} unreadable ({exc})"
-            why = wrapper_route_problem(data, label)
+            lock_dir = admission_dir(state_dir, env=env)
+            why = wrapper_route_problem(data, label, lock_dir=lock_dir)
             if why is not None:
                 return why
-            if print_out is not None:
-                why = loaded_definition_problem(print_out, data, label)
+            program: str | None
+            if print_out is not None:   # the LOADED definition is the proof: its lock directory and program (F1, F2 of #622)
+                why = loaded_definition_problem(print_out, data, label, lock_dir=lock_dir)
                 if why is not None:
                     return why
-            if wrapper_lock_dir(data, nc.uid) != admission_dir(state_dir, env=env):
-                return (f"the wrapper would lock in {wrapper_lock_dir(data, nc.uid)}, not reconcile's "
-                        f"{admission_dir(state_dir, env=env)}")
+                program = parse_launchd_definition(print_out)[0]
+            else:
+                program = plistlib.loads(data)["ProgramArguments"][0]
+            why = wrapper_identity_problem(program, os.path.realpath(ade) if ade else str(REPO))
+            if why is not None:
+                return why
             if step.action == "remove":
                 entry = _removal_entry(entries, step.name, label, snapshot=step.ledger_snapshot)
             else:
@@ -3673,7 +3827,8 @@ def reconcile(
                                     )
                                 else:
                                     install_launchd_native(
-                                        job, next(iter(rendered.files.values())), env=env, err=err, **overrides,
+                                        job, next(iter(rendered.files.values())), env=env, err=err,
+                                        state_dir=state_dir, **overrides,
                                     )
                             except (OSError, ValueError) as exc:  # mkdir/link/chmod/encode: a failed row, not a traceback
                                 raise SchedError(EX_ACTIVATE, f"native launchd install of {label} failed: {exc}") from exc

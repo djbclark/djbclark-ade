@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -26,18 +27,27 @@ from test_ade_sched_launchd_admission import KILLERS, LABEL, ld  # noqa: E402,F4
 WRAPPER = BIN / "ade-job-run"
 
 
-def _wrap(root: Path, label: str = LABEL, state: Path | None = None) -> None:
-    """Route the mini catalog's plist through the wrapper, as config/launchd/ now does (the stub only has to be executable)."""
-    stub = root / "bin" / "ade-job-run"
-    stub.write_text("#!/bin/sh\nexit 0\n")
-    stub.chmod(0o755)
+def _wrap(root: Path, label: str = LABEL, state: Path | None = None, *, stub: bool = False, lock_dir: Path | None = None,
+          wrapper: Path | None = None) -> None:
+    """Route the mini catalog's plist through the wrapper, as config/launchd/ now does. The ADE root gets the REAL
+    bin/ade-job-run (and the ade_sched.py it imports), so admission proves the real wrapper; `stub=True` installs an
+    exit-0 shell script instead (negative cases only). The lock directory is an absolute argv value."""
+    (root / "bin").mkdir(exist_ok=True)
+    if stub:
+        (root / "bin" / "ade-job-run").write_text("#!/bin/sh\nexit 0\n")
+    else:
+        shutil.copy2(WRAPPER, root / "bin" / "ade-job-run")
+        shutil.copy2(BIN / "ade_sched.py", root / "bin" / "ade_sched.py")
+    (root / "bin" / "ade-job-run").chmod(0o755)
     plist = root / "config" / "launchd" / f"{label}.plist"
     text = plist.read_text()
     old = "<string>__ADE__/bin/deadline</string>"
     assert old in text
-    text = text.replace(old, f"<string>__ADE__/bin/ade-job-run</string><string>{label}</string><string>--</string>{old}")
-    if state is not None:   # the wrapper's own environment decides its lock directory (launchd plists set neither normally)
-        text = text.replace("<key>DEADLINE_STATE_DIR</key>", f"<key>ADE_JOBS_STATE_DIR</key><string>{state}</string>\n    <key>DEADLINE_STATE_DIR</key>")
+    where = lock_dir if lock_dir is not None else (state / "admission" if state is not None else None)
+    assert where is not None
+    prog = str(wrapper) if wrapper is not None else "__ADE__/bin/ade-job-run"
+    text = text.replace(old, f"<string>{prog}</string><string>--lock-dir</string><string>{where}</string>"
+                             f"<string>{label}</string><string>--</string>{old}")
     plist.write_text(text)
 
 
@@ -76,7 +86,7 @@ def _lock_is_free(ld, label=LABEL) -> bool:
 
 def _hold_a_run(ld):
     """A real wrapped run: `ade-job-run LABEL -- sleep 60` holds the shared lock until it is stopped."""
-    p = subprocess.Popen([sys.executable, str(WRAPPER), LABEL, "--", "sleep", "60"], env=ld.env,
+    p = subprocess.Popen([sys.executable, str(WRAPPER), "--lock-dir", str(ld.state / "admission"), LABEL, "--", "sleep", "60"], env=ld.env,
                          stderr=subprocess.DEVNULL)
     for _ in range(100):
         if not _lock_is_free(ld):
@@ -90,7 +100,7 @@ def _hold_a_run(ld):
 
 def test_wrapper_runs_the_command_holding_a_shared_lock_and_skips_while_reconcile_holds_it(ld, tmp_path):
     marker = tmp_path / "ran"
-    cmd = [sys.executable, str(WRAPPER), LABEL, "--", "/usr/bin/touch", str(marker)]
+    cmd = [sys.executable, str(WRAPPER), "--lock-dir", str(ld.state / "admission"), LABEL, "--", "/usr/bin/touch", str(marker)]
     excl = S.acquire_admission_lock(LABEL, exclusive=True, state_dir=ld.state)
     assert excl is not None
     r = subprocess.run(cmd, env=ld.env, capture_output=True, text=True, timeout=30)
@@ -114,12 +124,13 @@ def test_a_wrapped_run_in_flight_blocks_the_exclusive_lock_and_a_finished_one_do
 def test_wrapper_refuses_to_run_unlocked_and_rejects_bad_usage(ld, tmp_path):
     blocker = tmp_path / "state-is-a-file"
     blocker.write_text("x")
-    env = {**ld.env, "ADE_JOBS_STATE_DIR": str(blocker)}
     marker = tmp_path / "ran"
-    r = subprocess.run([sys.executable, str(WRAPPER), LABEL, "--", "/usr/bin/touch", str(marker)], env=env,
-                       capture_output=True, text=True, timeout=30)
+    r = subprocess.run([sys.executable, str(WRAPPER), "--lock-dir", str(blocker), LABEL, "--", "/usr/bin/touch", str(marker)],
+                       env=ld.env, capture_output=True, text=True, timeout=30)
     assert r.returncode == 75 and not marker.exists() and "not running" in r.stderr
-    for argv in ([LABEL], [LABEL, "/bin/true"], ["bad label", "--", "/bin/true"]):
+    d = str(ld.state / "admission")
+    for argv in ([LABEL], [LABEL, "/bin/true"], ["bad label", "--", "/bin/true"], [LABEL, "--", "/bin/true"],   # the old form
+                 ["--lock-dir", "relative", LABEL, "--", "/bin/true"], ["--lock-dir", d, "bad label", "--", "/bin/true"]):
         r = subprocess.run([sys.executable, str(WRAPPER), *argv], env=ld.env, capture_output=True, text=True, timeout=30)
         assert r.returncode == 2
 
@@ -128,8 +139,11 @@ def test_wrapper_refuses_to_run_unlocked_and_rejects_bad_usage(ld, tmp_path):
     (lambda d: d.update(Program="/bin/sh"), "Program"),
     (lambda d: d.update(ProgramArguments=["/bin/true"]), "ProgramArguments"),
     (lambda d: d.update(Label="other"), "Label"),
-    (lambda d: d["ProgramArguments"].__setitem__(1, "other"), "does not route"),
-    (lambda d: d["ProgramArguments"].__setitem__(2, "-x"), "does not route"),
+    (lambda d: d["ProgramArguments"].__setitem__(3, "other"), "does not route"),
+    (lambda d: d["ProgramArguments"].__setitem__(4, "-x"), "does not route"),
+    (lambda d: d["ProgramArguments"].__setitem__(1, "-x"), "does not route"),
+    (lambda d: d["ProgramArguments"].__setitem__(2, "rel/state"), "does not route"),   # a relative lock dir is never proof
+    (lambda d: d["ProgramArguments"].__setitem__(2, "/elsewhere"), "would lock in"),
     (lambda d: d["ProgramArguments"].__setitem__(0, "/nonexistent/ade-job-run"), "not an executable"),
 ])
 def test_wrapper_route_proof_is_read_from_the_installed_bytes(tmp_path, edit, why):
@@ -137,10 +151,10 @@ def test_wrapper_route_proof_is_read_from_the_installed_bytes(tmp_path, edit, wh
     stub = tmp_path / "ade-job-run"
     stub.write_text("#!/bin/sh\n")
     stub.chmod(0o755)
-    d = {"Label": LABEL, "ProgramArguments": [str(stub), LABEL, "--", "/bin/true"]}
-    assert S.wrapper_route_problem(plistlib.dumps(d), LABEL) is None
+    d = {"Label": LABEL, "ProgramArguments": [str(stub), "--lock-dir", "/state/admission", LABEL, "--", "/bin/true"]}
+    assert S.wrapper_route_problem(plistlib.dumps(d), LABEL, lock_dir=Path("/state/admission")) is None
     edit(d)
-    assert why in (S.wrapper_route_problem(plistlib.dumps(d), LABEL) or "")
+    assert why in (S.wrapper_route_problem(plistlib.dumps(d), LABEL, lock_dir=Path("/state/admission")) or "")
     assert S.wrapper_route_problem(b"not a plist", LABEL) is not None
 
 
@@ -182,7 +196,7 @@ def test_non_wrapped_loaded_job_still_defers_and_an_old_install_is_not_reloaded(
     assert rc == 0, rows
     plist = ld.agents / f"{LABEL}.plist"
     old = plist.read_bytes()
-    _wrap(root)                                       # the catalog moves to the wrapper: the render now differs
+    _wrap(root, state=ld.state)                       # the catalog moves to the wrapper: the render now differs
     ld.reset()
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 6 and any("ade-job-run" in r["detail"] for r in rows if r["action"] == "deferred"), rows
@@ -276,9 +290,8 @@ def _wrapped_retired(ld, loaded=True):
     label = "com.djbclark.skillopt-sleep"
     plist = ld.agents / f"{label}.plist"
     import plistlib
-    pa = [str(root / "bin" / "ade-job-run"), label, "--", "/bin/true"]
-    plist.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": pa,
-                                      "EnvironmentVariables": {"ADE_JOBS_STATE_DIR": str(ld.state)}}))
+    pa = [str(root / "bin" / "ade-job-run"), "--lock-dir", str(ld.state / "admission"), label, "--", "/bin/true"]
+    plist.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": pa}))
     if loaded:
         ld.mark("loaded", label)
         ld.mark("args", label, "\n".join(pa))
@@ -314,7 +327,7 @@ def test_wrapped_ledger_owned_hash_matching_job_is_removed_under_the_lock(ld, lo
 
 def test_removal_defers_while_a_run_is_in_flight(ld):
     root, catalog, label, plist = _wrapped_retired(ld)
-    run = subprocess.Popen([sys.executable, str(WRAPPER), label, "--", "sleep", "60"], env=ld.env, stderr=subprocess.DEVNULL)
+    run = subprocess.Popen([sys.executable, str(WRAPPER), "--lock-dir", str(ld.state / "admission"), label, "--", "sleep", "60"], env=ld.env, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             if not _lock_is_free(ld, label):
@@ -355,7 +368,7 @@ def test_file_says_wrapper_but_the_loaded_definition_is_unwrapped_defers(ld):
     # F1: `install --no-activate` wrote the wrapped file while the old, unwrapped definition stayed loaded.
     root, catalog, plist = _installed_wrapped(ld)
     (ld.root / "args").mkdir(exist_ok=True)
-    (ld.root / "args" / LABEL).write_text("/old/ade/bin/deadline\nsweep\n--\nx")        # what launchd actually runs
+    (ld.root / "args" / LABEL).write_text("/old/ade/bin/deadline\nsweep\n--\nx\ny\nz")        # what launchd actually runs
     _drift(root)
     ld.reset()
     rows, rc = _reconcile(ld, root, catalog)
@@ -370,9 +383,9 @@ def test_parse_launchd_definition_reads_program_and_arguments():
 
 
 def test_wrapper_that_would_lock_elsewhere_defers(ld):
-    # F2: the plist does not set ADE_JOBS_STATE_DIR, so the wrapper would lock under HOME, not under reconcile's state dir.
+    # F2: the plist's --lock-dir is not the directory reconcile would lock.
     root = _mini_catalog(ld.tmp)
-    _wrap(root)                                                    # no state env in the plist
+    _wrap(root, lock_dir=ld.tmp / "elsewhere")
     catalog = ai.load_catalog(root=root)
     rows, rc = _reconcile(ld, root, catalog)
     assert rc == 0, rows
@@ -398,18 +411,20 @@ def test_failure_before_the_unload_defers_and_keeps_the_committed_row(ld, monkey
 
 
 def test_restore_never_overwrites_a_file_that_is_not_ours(ld):
-    # F4: the new bytes were replaced by another writer before the rollback: the restore fails and the record stays.
+    # F4: the new bytes were edited by another writer before the rollback: the restore fails and the record stays.
     root, catalog, plist = _installed_wrapped(ld)
     _drift(root)
     ld.mark("fail_once", "bootstrap")
-    orig = S._atomic_write_bytes
+    orig, calls = S._guarded_replace, []
 
-    def write_then_foreign(path, data, mode=0o600):
-        orig(path, data, mode)
-        if path == plist:
-            path.write_bytes(b"<plist><!-- foreign --></plist>")   # someone else replaces our new bytes
+    def write_then_foreign(path, data, **k):
+        r = orig(path, data, **k)
+        if path == plist and not calls:
+            calls.append(1)
+            path.write_bytes(b"<plist><!-- foreign --></plist>")   # someone else edits our new bytes in place
+        return r
     import unittest.mock as m
-    with m.patch.object(S, "_atomic_write_bytes", write_then_foreign):
+    with m.patch.object(S, "_guarded_replace", write_then_foreign):
         rows, rc = _reconcile(ld, root, catalog)
     assert rc == 1 and b"foreign" in plist.read_bytes() and not ld.loaded(), rows
     assert (ld.state / "admission" / f"{LABEL}.recovery.json").exists()
@@ -459,12 +474,6 @@ def test_killed_before_the_unload_leaves_a_pending_row_that_the_next_run_repairs
     assert not (ld.state / "admission" / f"{LABEL}.recovery.json").exists() and ld.loaded()
 
 
-def test_relative_state_dir_in_the_plist_never_matches_reconciles_lock_dir(tmp_path):
-    import plistlib
-    d = plistlib.dumps({"Label": LABEL, "EnvironmentVariables": {"ADE_JOBS_STATE_DIR": "rel/state"}})
-    assert S.wrapper_lock_dir(d, os.getuid()) == Path("/nonexistent/relative-ADE_JOBS_STATE_DIR")
-
-
 def test_ledger_artifact_is_rechecked_under_the_lock_before_the_unload(ld):
     root, catalog, plist = _installed_wrapped(ld)
     job = S.Job.from_plist(root / "config" / "launchd" / f"{LABEL}.plist", S.job_subst_from_row(
@@ -472,3 +481,230 @@ def test_ledger_artifact_is_rechecked_under_the_lock_before_the_unload(ld):
     with pytest.raises(S.NativeDefer):
         S.reload_launchd_locked(job, "x", state_dir=ld.state, env=ld.env, expect_hash="0" * 64)
     assert "bootout" not in ld.verbs() and ld.loaded() and not list((ld.state / "admission").glob("*.recovery.json"))
+
+
+# ------------------------------------------------------------------------------------------------ round 2 (review of #622)
+
+def _job_of(ld, root, catalog):
+    return S.Job.from_plist(root / "config" / "launchd" / f"{LABEL}.plist", S.job_subst_from_row(
+        next(j for j in catalog.jobs if j["name"] == "deadline-sweep"), root=root, env=ld.env, extra=None), ade=root)
+
+
+def _set_loaded_args(ld, **repl):
+    """Rewrite the LOADED definition the fake launchd printed (what launchd actually runs), index -> value."""
+    f = ld.root / "args" / LABEL
+    lines = f.read_text().splitlines()
+    for i, v in repl.items():
+        lines[int(i[1:])] = v
+    f.write_text("\n".join(lines))
+
+
+def test_f1_the_lock_dir_comes_from_the_loaded_argv_not_the_disk_plist(ld, tmp_path):
+    # F1: disk says reconcile's lock dir A, but the LOADED job (and its running work) uses C. The disk plist and the ledger
+    # hash both pass; only the loaded argv tells the truth. Work holds C's lock: nothing may be booted out.
+    root, catalog, plist = _installed_wrapped(ld)
+    other = tmp_path / "other-admission"
+    _set_loaded_args(ld, a2=str(other))
+    run = subprocess.Popen([sys.executable, str(WRAPPER), "--lock-dir", str(other), LABEL, "--", "sleep", "60"],
+                           env=ld.env, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if (other / f"{LABEL}.lock").exists() and S.acquire_admission_lock(LABEL, exclusive=True, lock_dir=other) is None:
+                break
+            time.sleep(0.1)
+        before = plist.read_bytes()
+        _drift(root)
+        rows, rc = _reconcile(ld, root, catalog)
+        assert rc == 6 and any("LOADED definition" in r["detail"] for r in rows), rows
+        assert not KILLERS & set(ld.verbs()) and plist.read_bytes() == before and ld.loaded() and run.poll() is None
+    finally:
+        run.terminate()
+        run.wait(timeout=10)
+
+
+def test_f1_a_loaded_lock_dir_that_differs_from_the_disk_one_defers_even_when_the_file_is_consistent(ld, tmp_path):
+    # The loaded job's argv is internally consistent with the file except for the lock dir only in the loaded copy.
+    root, catalog, plist = _installed_wrapped(ld)
+    out = f"x = {{\n\tpath = {plist}\n\tprogram = /w\n\targuments = {{\n\t\t/w\n\t\t--lock-dir\n\t\t/elsewhere\n\t\t{LABEL}\n\t\t--\n\t\tcmd\n\t}}\n}}\n"
+    import plistlib
+    d = plistlib.loads(plist.read_bytes())
+    d["ProgramArguments"][0] = "/w"
+    d["ProgramArguments"][2] = "/elsewhere"
+    assert "locks in" in (S.loaded_definition_problem(out, plistlib.dumps(d), LABEL, lock_dir=ld.state / "admission") or "")
+    d["ProgramArguments"][2] = str(ld.state / "admission")
+    assert S.loaded_definition_problem(out, plistlib.dumps(d), LABEL, lock_dir=ld.state / "admission") is not None
+
+
+def test_f2_a_printed_program_is_required():
+    out = f"x = {{\n\targuments = {{\n\t\t/w\n\t\t--lock-dir\n\t\t/d\n\t\t{LABEL}\n\t\t--\n\t\tcmd\n\t}}\n}}\n"
+    import plistlib
+    data = plistlib.dumps({"Label": LABEL, "ProgramArguments": ["/w", "--lock-dir", "/d", LABEL, "--", "cmd"]})
+    assert "program" in (S.loaded_definition_problem(out, data, LABEL, lock_dir=Path("/d")) or "")
+    assert S.wrapper_identity_problem(None, "/anywhere") is not None
+
+
+def test_f2_identity_accepts_only_this_checkouts_real_wrapper(ld, tmp_path):
+    root = _mini_catalog(ld.tmp)
+    _wrap(root, state=ld.state)
+    prog = str(root / "bin" / "ade-job-run")
+    assert S.wrapper_identity_problem(prog, root) is None                                   # the real one, copied into the root
+    assert "is not" in S.wrapper_identity_problem(prog, tmp_path / "other-root")             # not the checkout reconcile runs from
+    (root / "bin" / "ade-job-run").write_text("#!/bin/sh\nexec \"$@\"\n")                   # an old/custom wrapper: no shared lock
+    assert "differs" in S.wrapper_identity_problem(prog, root)
+
+
+def test_f2_a_wrapper_that_speaks_another_protocol_defers(ld, monkeypatch):
+    root, catalog, plist = _installed_wrapped(ld)
+    _drift(root)
+    monkeypatch.setattr(S, "WRAPPER_PROTOCOL", "v2")
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any("protocol" in r["detail"] for r in rows), rows
+    assert set(ld.verbs()) <= {"print"} and ld.loaded()
+
+
+def test_f2_a_stub_wrapper_never_admits_a_reload(ld):
+    # The old tests used an exit-0 shell stub as the "wrapper"; it must not pass.
+    root = _mini_catalog(ld.tmp)
+    _wrap(root, state=ld.state, stub=True)
+    catalog = ai.load_catalog(root=root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0, rows                                       # the unloaded install needs no wrapper proof
+    ld.reset()
+    _drift(root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any("differs from this checkout" in r["detail"] for r in rows), rows
+    assert set(ld.verbs()) <= {"print"}
+
+
+def test_f2_a_wrapper_outside_the_ade_root_defers(ld, tmp_path):
+    elsewhere = tmp_path / "elsewhere" / "bin"
+    elsewhere.mkdir(parents=True)
+    shutil.copy2(WRAPPER, elsewhere / "ade-job-run")
+    shutil.copy2(BIN / "ade_sched.py", elsewhere / "ade_sched.py")
+    root = _mini_catalog(ld.tmp)
+    _wrap(root, state=ld.state, wrapper=elsewhere / "ade-job-run")
+    catalog = ai.load_catalog(root=root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0, rows
+    ld.reset()
+    _drift(root)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 6 and any("checkout reconcile runs from" in r["detail"] for r in rows), rows
+    assert set(ld.verbs()) <= {"print"}
+
+
+# F3 ----------------------------------------------------------------------------------------------------------------
+
+FOREIGN = b"<plist><!-- foreign --></plist>"
+
+
+@pytest.mark.parametrize("how", ["rename", "edit"])
+def test_f3_reload_never_replaces_a_plist_a_foreign_writer_changed_after_the_hash(ld, how):
+    root, catalog, plist = _installed_wrapped(ld)
+    _drift(root)
+    ld.mark("foreign_on", "bootout", how)           # the foreign write lands during `bootout`: after the hash, before our replace
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 1, rows
+    assert plist.read_bytes().strip() == FOREIGN.strip() or b"foreign" in plist.read_bytes()   # their bytes survive
+    assert b"<integer>120</integer>" not in plist.read_bytes()
+    assert (ld.state / "admission" / f"{LABEL}.recovery.json").exists()    # the unloaded job keeps a recovery record
+    assert "bootstrap" not in ld.verbs()
+
+
+@pytest.mark.parametrize("how", ["rename", "edit"])
+def test_f3_removal_never_unlinks_a_plist_a_foreign_writer_changed_after_the_hash(ld, how):
+    root, catalog, label, plist = _wrapped_retired(ld)
+    ld.mark("foreign_on", "bootout", how)
+    rows, rc = _remove(ld, root, catalog, label)
+    assert rc == 1, rows
+    assert plist.exists() and b"foreign" in plist.read_bytes()             # not deleted
+    assert (ld.state / "admission" / f"{label}.recovery.json").exists()
+
+
+def test_f3_restore_never_replaces_a_plist_a_foreign_writer_renamed_in(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    _drift(root)
+    ld.mark("fail_once", "bootstrap")
+    ld.mark("foreign_on", "bootstrap", "rename")    # during our bootstrap, so our rollback finds another inode with other bytes
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 1 and b"foreign" in plist.read_bytes() and not ld.loaded(), rows
+    assert (ld.state / "admission" / f"{LABEL}.recovery.json").exists()
+
+
+def test_f3_guarded_replace_and_unlink_see_a_swapped_inode_and_an_edit(tmp_path):
+    f = tmp_path / "x.plist"
+    f.write_bytes(b"prior")
+    data, ident = S._read_identity(f)
+    sha = {__import__("hashlib").sha256(data).hexdigest()}
+    side = tmp_path / "side"
+    side.write_bytes(b"prior")                      # same bytes, another inode: a foreign writer replaced the file
+    os.replace(side, f)
+    with pytest.raises(S.ForeignWrite):
+        S._guarded_replace(f, b"new", expect_id=ident, allowed_sha=sha)
+    with pytest.raises(S.ForeignWrite):
+        S._guarded_unlink(f, expect_id=ident, allowed_sha=sha)
+    assert f.read_bytes() == b"prior"
+    data, ident = S._read_identity(f)
+    f.write_bytes(b"edited")                        # same inode, other bytes
+    with pytest.raises(S.ForeignWrite):
+        S._guarded_replace(f, b"new", expect_id=ident, allowed_sha=sha)
+    with pytest.raises(S.ForeignWrite):
+        S._guarded_unlink(f, expect_id=ident, allowed_sha=sha)
+    assert f.read_bytes() == b"edited"
+    f.write_bytes(b"prior")
+    data, ident = S._read_identity(f)
+    S._guarded_replace(f, b"new", expect_id=ident, allowed_sha=sha)         # unchanged: replaced
+    assert f.read_bytes() == b"new"
+    data, ident = S._read_identity(f)
+    S._guarded_unlink(f, expect_id=ident, allowed_sha={__import__("hashlib").sha256(b"new").hexdigest()})
+    assert not f.exists()
+    with pytest.raises(S.ForeignWrite):             # a vanished file is a refusal, not a create
+        S._guarded_replace(f, b"x", expect_id=ident, allowed_sha=sha)
+
+
+def _ade_writers(ld, root, catalog):
+    """Every other ADE plist writer, as a callable: each must refuse while the label's admission lock is held."""
+    job = _job_of(ld, root, catalog)
+    return {
+        "install": lambda: S.install(job, "launchd", env=ld.env),
+        "uninstall": lambda: S.uninstall(LABEL, "launchd", env=ld.env),
+        "install_native": lambda: S.install_launchd_native(job, "x", env=ld.env, state_dir=ld.state),
+    }
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall", "install_native"])
+@pytest.mark.parametrize("holder", ["run", "reconcile"])
+def test_f3_every_ade_writer_refuses_while_the_admission_lock_is_held(ld, who, holder):
+    root, catalog, plist = _installed_wrapped(ld)
+    before = plist.read_bytes()
+    writers = _ade_writers(ld, root, catalog)
+    if holder == "run":
+        proc = _hold_a_run(ld)
+        fd = None
+    else:
+        proc, fd = None, S.acquire_admission_lock(LABEL, exclusive=True, state_dir=ld.state)
+        assert fd is not None
+    try:
+        with pytest.raises((S.SchedError, S.NativeDefer)):
+            writers[who]()
+    finally:
+        S.release_admission_lock(fd)
+        if proc is not None:
+            proc.terminate()
+            proc.wait(timeout=10)
+    assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+def test_f3_recovery_is_an_ade_writer_and_defers_while_a_run_holds_the_lock(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    S.write_recovery_record(LABEL, action="reload", plist=plist, prior=plist.read_bytes(), new_sha=None, state_dir=ld.state, env=ld.env)
+    (ld.root / "loaded" / LABEL).unlink()   # the interrupted reload left the job unloaded
+    ld.reset()
+    run = _hold_a_run(ld)
+    try:
+        rows = S.recover_launchd_records(state_dir=ld.state, env=ld.env, owns=lambda _l: True)
+    finally:
+        run.terminate()
+        run.wait(timeout=10)
+    assert any(r["action"] == "failed" and "holds its admission lock" in r["detail"] for r in rows), rows
+    assert "bootstrap" not in ld.verbs() and (ld.state / "admission" / f"{LABEL}.recovery.json").exists()

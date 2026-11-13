@@ -288,8 +288,9 @@ def test_install_dry_run_renders_a_valid_plist(env, tmp_path):
     assert r.returncode == 0, r.stderr
     p = plist_of(r.stdout)
     assert p["Label"] == "com.djbclark.deadline-sweep" and p["StartInterval"] == 60
-    assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/ade-job-run", "com.djbclark.deadline-sweep", "--",
-                                     f"{ade.resolve()}/bin/deadline", "sweep"]
+    pa = p["ProgramArguments"]
+    assert pa[:2] == [f"{ade.resolve()}/bin/ade-job-run", "--lock-dir"] and os.path.isabs(pa[2]) and pa[2].endswith("/admission")
+    assert pa[3:] == ["com.djbclark.deadline-sweep", "--", f"{ade.resolve()}/bin/deadline", "sweep"]
     assert not _PLACEHOLDER_LEFT.search(r.stdout), r.stdout
 
 

@@ -52,6 +52,15 @@ def write(text, *p):
     open(os.path.join(root, *p), "w").write(text)
 cmd = argv[0]
 label = argv[1].rsplit("/", 1)[-1] if len(argv) > 1 else ""
+if flag("foreign_on", cmd):   # another (non-ADE) writer replaces/edits the plist while launchctl runs, after the writer hashed it
+    tgt = (os.path.basename(argv[2])[:-len(".plist")] if cmd == "bootstrap" and len(argv) > 2 else label)
+    target = os.path.join(os.environ["FAKE_AGENTS"], tgt + ".plist")
+    how = read("foreign_on", cmd)
+    drop("foreign_on", cmd)
+    if how == "edit":
+        open(target, "w").write("<plist><!-- foreign --></plist>")
+    else:
+        open(target + ".foreign", "w").write("<plist><!-- foreign --></plist>"); os.replace(target + ".foreign", target)
 if flag("fail", cmd):
     sys.stderr.write("fake failure\n"); sys.exit(int(read("fail", cmd) or 1))
 if flag("fail_once", cmd):   # fail the next call of this verb only

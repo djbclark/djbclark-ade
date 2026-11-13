@@ -2805,8 +2805,8 @@ def test_schedule_plist_is_checked_in_with_strict_keep_and_clean_parts():
     assert plist.is_file()
     data = plistlib.loads(plist.read_bytes())
     argv = data["ProgramArguments"]
-    assert argv[:3] == ["__ADE__/bin/ade-job-run", "com.djbclark.ade-backup-stores", "--"]   # W21c: wrapped launch
-    assert argv[3].endswith("bin/ade-backup-stores")
+    assert argv[:5] == ["__ADE__/bin/ade-job-run", "--lock-dir", "__ADMISSION__", "com.djbclark.ade-backup-stores", "--"]   # W21c: wrapped launch
+    assert argv[5].endswith("bin/ade-backup-stores")
     assert "--strict-stores" in argv and "--clean-parts" in argv
     assert argv[argv.index("--keep") + 1] == "3"
     assert "StartCalendarInterval" in data

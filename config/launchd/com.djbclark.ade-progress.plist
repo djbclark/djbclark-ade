@@ -8,7 +8,7 @@
   <key>Label</key><string>com.djbclark.ade-progress</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__ADE__/bin/ade-job-run</string><string>com.djbclark.ade-progress</string><string>--</string>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.ade-progress</string><string>--</string>
     <string>__ADE__/bin/ade-progress</string>
     <string>scan</string>
     <string>--yes</string>

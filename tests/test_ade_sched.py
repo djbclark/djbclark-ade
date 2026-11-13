@@ -224,7 +224,8 @@ def test_net_resume_template_quota_stays_dry_run(lead, fake, tmp_path):
     rendered = S.render(j, "launchd", env=fake.env)
     doc = plistlib.loads(next(iter(rendered.files.values())).encode())
     argv = doc["ProgramArguments"]
-    assert argv == [f"{tmp_path.resolve()}/bin/ade-job-run", "com.djbclark.ade-net-resume", "--",   # W21c: every launch is wrapped
+    assert argv == [f"{tmp_path.resolve()}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],   # W21c: every launch is wrapped
+                    "com.djbclark.ade-net-resume", "--",
                     f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota"]
     assert "--apply" not in argv
 
@@ -237,8 +238,8 @@ def test_unfilled_placeholder_is_exit_2():
 
 def test_default_subst_fills_ade_and_home(tmp_path):
     j = S.Job.from_plist(REPO / "config/launchd/com.djbclark.deadline-sweep.plist", {"__STATE__": "/s"}, ade=tmp_path)
-    assert list(j.argv[:4]) == [f"{os.path.realpath(tmp_path)}/bin/ade-job-run", "com.djbclark.deadline-sweep", "--",
-                          f"{os.path.realpath(tmp_path)}/bin/deadline"]
+    assert list(j.argv[:6]) == [f"{os.path.realpath(tmp_path)}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],
+                                "com.djbclark.deadline-sweep", "--", f"{os.path.realpath(tmp_path)}/bin/deadline"]
     assert j.env["PATH"].startswith(f"{os.environ.get('HOME') or Path.home()}/.local/bin:")
 
 
