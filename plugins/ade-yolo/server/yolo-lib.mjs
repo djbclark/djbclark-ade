@@ -7,6 +7,22 @@ export const YOLO_BY_PROVIDER = {
 };
 /** Providers that never raise permission requests; a modeless ready catalog needs no patch. */
 export const UNATTENDED_BY_CONSTRUCTION = new Set(["pi"]);
+/**
+ * Providers that ATTACH to a process already running in a Herdr pane (herdr-harness plugin: `herdr-generic` and
+ * `herdr-omp`; the opt-in shell binding is part of `herdr-generic`). Paseo starts nothing and cannot set a permission
+ * mode there: the pane's own launch decides it, so ade-yolo's premise (Paseo sets the unattended mode at create/resume)
+ * does not apply. Deliberately NOT in UNATTENDED_BY_CONSTRUCTION: a Claude pane in default mode does prompt. Report of
+ * 2026-11-13 from agent 5fd0bef1 (paseo4herdr): every herdr chat open and session import was refused. Exact ids only,
+ * never generalised to unknown or modeless providers.
+ */
+export const ATTACH_ONLY = new Set(["herdr-generic", "herdr-omp"]);
+/**
+ * Attach-only providers whose create can also LAUNCH a process. herdr-omp has a launch spec: a create without the
+ * herdr-harness bind option (`providerOptions.herdrBind`) starts a fresh, retired `omp` in a new pane with no unattended
+ * flag. Only a create that carries the bind option (an existing terminal) is attach-only; herdr-generic has no launch.
+ */
+export const ATTACH_OR_LAUNCH = new Set(["herdr-omp"]);
+export const HERDR_BIND_OPTION = "herdrBind";
 export const STAMP_METADATA_KEY = "ade-yolo.applied";
 export const RESTRICTIVE_MODE_IDS = new Set(["plan", "read-only", "dontAsk"]);
 export const SKIP_METADATA_KEY = "ade-yolo.skip";
@@ -20,6 +36,18 @@ export function assertNotRetired(provider) {
 export function providerId(provider) {
   return typeof provider === "string" ? provider.trim().split("/", 1)[0] : "";
 }
+/** Exact id (an optional `/model` suffix is Paseo's own form): leading/trailing whitespace never matches. */
+export function isAttachOnly(provider) {
+  return typeof provider === "string" && provider === provider.trim() && ATTACH_ONLY.has(providerId(provider));
+}
+/** Create of an attach-only provider that binds an existing pane; herdr-omp without the bind option launches, so it is not one. */
+export function isAttachOnlyCreate(config) {
+  if (!isAttachOnly(config?.provider)) return false;
+  if (!ATTACH_OR_LAUNCH.has(providerId(config.provider))) return true;
+  const bind = config.providerOptions?.[HERDR_BIND_OPTION];
+  return typeof bind?.terminalId === "string" && bind.terminalId !== "";
+}
+export const ATTACH_ONLY_NOTE = "attach-only: mode decided by the pane's launch";
 export function shouldSkip(metadata) {
   const value = metadata?.[SKIP_METADATA_KEY];
   return [true, 1, "1", "true", "yes"].includes(value) ||
@@ -35,6 +63,7 @@ export function planYoloPatch(config, metadata, catalog, controls) {
   const provider = providerId(config?.provider);
   const unavailable = reason => { throw new Error(`ade-yolo: ${provider}: ${reason}`); };
   assertNotRetired(provider);
+  if (isAttachOnlyCreate(config)) return null; // no patch: Paseo launches nothing (see ATTACH_ONLY)
   if (!catalog || catalog.provider !== provider || catalog.enabled !== true || catalog.status !== "ready" || catalog.error)
     return unavailable("native provider catalog is not enabled/ready");
   if (!Array.isArray(catalog.modes) || catalog.modes.some(m => !m || typeof m.id !== "string" || !m.id))
@@ -58,9 +87,14 @@ export function planYoloPatch(config, metadata, catalog, controls) {
   if (UNATTENDED_BY_CONSTRUCTION.has(provider) && ids.length === 0) return {};
   return unavailable("no source-backed/catalog-marked unattended mode or supported control");
 }
-export function applyYoloToCreateRequest(request, catalog, controls) {
+export function applyYoloToCreateRequest(request, catalog, controls, log = () => {}) {
   const config = request?.config ?? {};
   const patch = planYoloPatch(config, request?.metadata, catalog, controls);
+  // Attach-only: unchanged and unstamped, so a later open reads as legacy rather than demanding saved-mode evidence.
+  if (!patch && isAttachOnlyCreate(config) && !isExempt(config, request?.metadata)) {
+    log(`ade-yolo: ${providerId(config.provider)}: create ${ATTACH_ONLY_NOTE}`);
+    return undefined;
+  }
   // The stamp marks agents this plugin created: only they must carry saved-mode evidence on resume.
   return patch ? { ...request, config: { ...config, ...patch },
     metadata: { ...request?.metadata, [STAMP_METADATA_KEY]: "1" } } : undefined;
@@ -70,6 +104,16 @@ export function applyYoloToCreateRequest(request, catalog, controls) {
 export function assertResumeIdentity(snapshot, request) {
   if (!snapshot || snapshot.id !== request.agentId || snapshot.provider !== providerId(request.provider))
     throw new Error("ade-yolo: resume identity/readback unavailable");
+}
+
+/**
+ * Open of an attach-only provider (resume, refresh or import). An import has no agent record yet, so no snapshot is
+ * readable: that alone is allowed (reason "import" only), for this provider set only. Wherever a snapshot IS readable, identity is still checked.
+ */
+export function assertAttachOnlyOpen(snapshot, request, log = () => {}) {
+  // Only an import may lack a snapshot (no agent record yet); a resume or refresh needs one, as for any provider.
+  if (snapshot || request.reason !== "import") assertResumeIdentity(snapshot, request);
+  log(`ade-yolo: ${providerId(request.provider)}: open ${ATTACH_ONLY_NOTE} (${snapshot ? "snapshot identity verified" : "no snapshot readable"})`);
 }
 
 const blank = v => v === undefined || v === null || v === "";
@@ -96,6 +140,7 @@ export function assertResumeConfig(snapshot, request, catalog, controls, log = (
     providerOptions: snapshot.options };
   if (isExempt(config, request.metadata)) return;
   assertNotRetired(providerId(request.provider));
+  if (isAttachOnly(request.provider)) return assertAttachOnlyOpen(snapshot, request, log);
   if (isLegacyAgent(snapshot, request)) {
     log(`ade-yolo: ${request.agentId}: provider=${providerId(request.provider)} saved mode=${JSON.stringify(snapshot.currentModeId ?? null)} auto_accept=${JSON.stringify(snapshot.options?.auto_accept ?? null)}; legacy agent allowed without mode mutation`);
     return;

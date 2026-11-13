@@ -1,5 +1,5 @@
-import { applyYoloToCreateRequest, assertNotRetired, assertResumeConfig, assertResumeIdentity, isExempt, isLegacyAgent,
-  providerId } from "./yolo-lib.mjs";
+import { applyYoloToCreateRequest, assertAttachOnlyOpen, assertNotRetired, assertResumeConfig, assertResumeIdentity, isAttachOnly, isAttachOnlyCreate,
+  isExempt, isLegacyAgent, providerId } from "./yolo-lib.mjs";
 
 async function nativeEvidence(paseo, config) {
   if (!paseo?.providers?.snapshot) throw new Error("ade-yolo: native catalog API unavailable; update host");
@@ -16,17 +16,26 @@ async function nativeEvidence(paseo, config) {
   return { catalog, controls };
 }
 
+const logWith = logger => msg => (logger?.warn ?? logger?.info ?? console.warn).call(logger ?? console, msg);
+
 /** create.before is awaited by native Paseo; exceptions refuse the create. */
 export function registerAdeYoloHooks(server) {
-  const offCreate = server.addHook("agent.create.before", async ({ request }, { paseo }) => {
+  const offCreate = server.addHook("agent.create.before", async ({ request }, { paseo, logger }) => {
     if (isExempt(request.config, request.metadata)) return;
+    if (isAttachOnlyCreate(request.config)) // no catalog lookup: Paseo launches nothing
+      return applyYoloToCreateRequest(request, undefined, undefined, logWith(logger));
     const { catalog, controls } = await nativeEvidence(paseo, request.config);
     return applyYoloToCreateRequest(request, catalog, controls);
   });
   const offOpen = server.addHook("agent.open.before", async ({ request }, { paseo, logger }) => {
-    const log = msg => (logger?.warn ?? logger?.info ?? console.warn).call(logger ?? console, msg);
+    const log = logWith(logger);
     // Create has just passed the config gate. History does not launch a runtime.
     if (request.reason === "create" || request.purpose === "history" || isExempt({}, request.metadata)) return;
+    if (isAttachOnly(request.provider)) {
+      // An import has no agent record to refresh; assertAttachOnlyOpen allows an unreadable snapshot for imports only.
+      const refreshed = await paseo?.agents?.ref?.(request.agentId)?.refresh?.().catch(() => undefined);
+      return assertAttachOnlyOpen(refreshed?.agent, request, log);
+    }
     if (!paseo?.agents?.ref) throw new Error("ade-yolo: native agent snapshot API unavailable");
     const agent = paseo.agents.ref(request.agentId);
     const refreshed = await agent.refresh();
