@@ -797,11 +797,11 @@ def test_off_tail_retask_with_a_late_disk_ack_is_caught_by_activity(env):
 
 def test_thought_or_longer_or_tool_reply_to_the_ack_is_still_a_finished_worker(env):
     t0, ack = aged_report(env, "s1", 600, 300)
-    env.worker(1, text="Acknowledged.", tags=["[Message received] 8cd86203", f"ack {W1} m1", "[Thought] they acked"])
+    env.worker(1, text="Acknowledged.", tags=["[Shell] paseo send --json --no-wait lead --prompt done: x", "[Message received] 8cd86203", f"ack {W1} m1", "[Thought] they acked"])
     aged_report(env, "s2", 600, 300)
-    env.worker(2, text="Nothing further.\nAll done.", tags=["[Message received] 8cd86203", "ack 00000002-0000-0000-0000-000000000000 m1"])
+    env.worker(2, text="Nothing further.\nAll done.", tags=["[Shell] paseo send --json --no-wait lead --prompt done: x", "[Message received] 8cd86203", "ack 00000002-0000-0000-0000-000000000000 m1"])
     aged_report(env, "s3", 600, 300)
-    env.worker(3, text="checked", tags=["[Message received] 8cd86203", "ack 00000003-0000-0000-0000-000000000000 m1",
+    env.worker(3, text="checked", tags=["[Shell] paseo send --json --no-wait lead --prompt done: x", "[Message received] 8cd86203", "ack 00000003-0000-0000-0000-000000000000 m1",
                                         "[Shell] completion-notice --check-ack unit-s3"])
     for n in (1, 2, 3):
         set_state(env, f"0000000{n}-0000-0000-0000-000000000000", lastActivityAt=iso(ack + 10))
@@ -820,3 +820,48 @@ def test_failed_rename_drops_the_registry_entry_it_added(env):
     assert env.run(apply=True).returncode == 0
     reg = Path(os.environ["ADE_WORKER_RUN_STATE"]) / f"{LEAD}.windows.json"
     assert W_WORK not in (json.loads(reg.read_text())["windows"] if reg.exists() else [])
+
+
+# ---- adversary round 6 -------------------------------------------------------------------------------------------
+
+NOTICE = "[Shell] paseo send --json --no-wait lead --prompt done: x"
+
+
+def test_late_ack_explains_activity_only_when_this_rounds_notice_precedes_it(env):
+    t0, ack = aged_report(env, "s1", 3000, 1000)
+    env.worker(1, text="suite running", tags=["[Message received] 8cd86203", f"ack {W1} m1"])        # a receipt, but no notice before it
+    set_state(env, W1, lastActivityAt=iso(ack + 30))
+    assert env.plan()["archive_agents"] == []
+    env.data["logs"][W1] = "\n".join([NOTICE, "[Message received] 8cd86203", f"ack {W1} m1", "suite running"])
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+
+
+def test_newer_done_after_a_rename_is_the_next_rounds_completion(env):
+    rp = env.report("s1", ack=True)
+    renamed = Path(f"{rp}.done.r1")
+    renamed.write_text("")
+    now = time.time()
+    os.utime(renamed, (now - 3000, now - 3000))                          # the round-1 marker, renamed
+    for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+        os.utime(q, (now - 600, now - 600))                              # round 2's own completion, acked
+    env.worker(1, text="finished", tags=[NOTICE])
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+    os.utime(renamed, (now - 100, now - 100))                            # a rename newer than .done: re-tasked since
+    assert env.plan()["archive_agents"] == []
+
+
+def test_reply_tools_are_shell_commands_or_the_send_tool_not_edits(env):
+    aged_report(env, "s1", 600, 300)
+    env.worker(1, text="ok", tags=[NOTICE, "[Message received] 8cd86203", f"ack {W1} m1", "[Send message] lead"])
+    aged_report(env, "s2", 600, 300)
+    env.worker(2, text="ok", tags=[NOTICE, "[Message received] 8cd86203", "ack 00000002-0000-0000-0000-000000000000 m1",
+                                   "[Edit] bin/completion-notice"])
+    p = env.plan()
+    assert [x["agent"][:8] for x in p["archive_agents"]] == ["00000001"]
+
+
+def test_a_peers_earlier_ack_does_not_make_later_ordinary_work_a_retask(env):
+    aged_report(env, "s1", 600, 300)
+    env.worker(1, text="finished", tags=[NOTICE, "[Message received] peer", f"ack {W1} m0", "[Shell] ls", "[Shell] git status",
+                                         "[Message received] 8cd86203", f"ack {W1} m1"])
+    assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]

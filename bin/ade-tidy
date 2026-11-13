@@ -196,20 +196,22 @@ def last_text(log: str | None) -> tuple[str, bool, str]:
     return "\n".join(tail).strip(), card, "ok"
 
 
-REPLY_TOOL_RE = re.compile(r"completion-notice|paseo send")  # the ordinary ways a worker answers an ack (footer rule 22, order 10)
+# the worker's own completion notice / reply to an ack (footer rule 22, order 10): a shell command or Paseo's send tool, never an edit
+REPLY_TOOL_RE = re.compile(r"^\[(?:Shell|Bash)\].*\b(?:completion-notice|paseo send)\b|^\[Send message\]")
 
 
 def scan_log(log: str | None) -> tuple[bool, bool]:
     """(retask, receipt) read from the log tail. retask: a `[Message received]` entry whose first body line is not a bare
     `ack <id> [<msg-id>]` receipt (the lead's `paseo send` re-task does not move the state record's lastUserMessageAt: an
-    agent-sourced message is projected as a tool call, not a user message), or, after a receipt, any tool call other than
-    the worker's ordinary reply (`completion-notice`, `paseo send`); `[Thought]` entries and any amount of plain text are
-    the worker's reply. receipt: a bare-ack message is in the tail. The initial brief is a `[User]` entry and is not
-    counted (a human prompt moves lastUserMessageAt). The tail is only 40 items: `verdict` bounds `lastActivityAt` too."""
+    agent-sourced message is projected as a tool call, not a user message), or, after the LAST receipt, a tool call other
+    than the worker's ordinary reply (REPLY_TOOL_RE); `[Thought]` entries and any amount of plain text are the worker's
+    reply. receipt: a bare-ack message is in the tail AND the worker's own completion notice (REPLY_TOOL_RE) precedes it,
+    so the lead's ack belongs to this round. The initial brief is a `[User]` entry and is not counted (a human prompt moves
+    lastUserMessageAt). The tail is only 40 items: `verdict` bounds `lastActivityAt` too."""
     if not log:
         return False, False
     body: list[str] = []
-    inbound = receipt = False
+    inbound = acked = receipt_ok = tool_after = notice_seen = False
     for line in log.splitlines() + ["[end]"]:
         if not TAG_RE.match(line):
             body.append(line)
@@ -217,14 +219,16 @@ def scan_log(log: str | None) -> tuple[bool, bool]:
         lines = [b for b in body if b.strip()]
         if inbound:
             if not lines or not ACK_BODY_RE.fullmatch(lines[0]):
-                return True, receipt
-            receipt = True
-        if receipt and line != "[end]" and not line.startswith(INBOUND_TAGS) and not line.startswith("[Thought]") \
-                and not REPLY_TOOL_RE.search(line):
-            return True, receipt  # a tool call after the receipt that is not the worker's reply: it is working again
+                return True, False
+            acked, receipt_ok, tool_after = True, notice_seen, False  # a peer's earlier ack does not make later work a re-task
+        if line != "[end]" and not line.startswith(INBOUND_TAGS):
+            if REPLY_TOOL_RE.match(line):
+                notice_seen = notice_seen or not acked
+            elif acked and not line.startswith("[Thought]"):
+                tool_after = True  # a tool call after the last receipt that is not the worker's reply: it is working again
         inbound = line.startswith("[Message received]")
         body = []
-    return False, receipt
+    return tool_after, acked and receipt_ok and not tool_after
 
 
 # ----------------------------------------------------------------------------------------------- repo + agents
@@ -387,7 +391,8 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
     # last activity is explained by the lead's ack only when its receipt is visible in the log; else it must be near completion
     # (a prompt-only ack with no `.done.ack` on disk explains nothing: write the file)
     act_base = max(done_evidence, ack_m) if receipt and ack_m and done_evidence else done_evidence
-    retasked = bool(rep) and (retask_log or any(rep.parent.glob(rep.name + ".done.r*"))
+    rename_m = max((mtime(q) or 0.0 for q in rep.parent.glob(rep.name + ".done.r*")), default=None) if rep else None
+    retasked = bool(rep) and (retask_log or (rename_m is not None and (done_m is None or done_m <= rename_m))  # a newer `.done` is the next round's
                               or (done_evidence is not None and (last_user_message(row["id"]) > done_evidence + 2
                                                                  or last_activity(row["id"]) > act_base + ACTIVITY_MARGIN)))
     if retasked:

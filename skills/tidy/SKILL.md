@@ -61,11 +61,11 @@ current-work text; `--json` prints the machine form. Sections of the output:
    (touched after the report), the completion is handled (`.done.ack` touched after `.done`, or `--handled ID`), the
    trailing text asks nothing and no card is pending. The report must not say `BLOCKED:`/`NO-REPORT:`/`STATUS: working`
    in its first lines or its last 4 KB, and `--handled` is held to the same check (plus: the report quiet for two minutes
-   and not newer than a `.done`). **Re-tasking a finished worker: rename its `.done` to `.done.rN` first, then `paseo send`.**
+   and not newer than a `.done`). **Re-tasking a finished worker: rename its `.done` to `.done.rN` first, then `paseo send`** (a `.done` newer than every `.done.rN` is the next round's completion).
    ade-tidy also refuses a worker whose log tail holds a `[Message received]` entry other than a bare `ack …`, a tool call
-   after such a receipt that is not the worker's reply (`completion-notice`, `paseo send`), a human prompt newer than the
+   after the last such receipt that is not the worker's reply (a shell `completion-notice` / `paseo send`, or the send tool), a human prompt newer than the
    worker's own completion (`max(report, .done)`, via `lastUserMessageAt`, UTC), activity (`lastActivityAt`) more than
-   90 s after that completion (more than 90 s after the `.done.ack` when the receipt is visible in the log), an empty or
+   90 s after that completion (more than 90 s after the `.done.ack` only when the worker's own completion notice and then the lead's bare `ack` are visible in the log, so the ack belongs to this round), an empty or
    unreadable log, or an inbound message as the last entry. Write `.done.ack` even when you also send the ack prompt. A
    rename or relabel of a finished tab moves `lastActivityAt` too and then blocks the archive (archive by hand); apply re-runs this whole verdict right before each `paseo agent archive`. A `closed` worker alone is **not** archived: Paseo marks every
    interrupted agent `closed` at a daemon restart, so it is listed as `D#u` (resume or re-task it). Operator agents
