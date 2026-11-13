@@ -22,6 +22,14 @@ options (before or after the subcommand):
   --yes                 reconcile: execute only admitted writes and write jobs.json; today that is launchd only (an absent-job create+bootstrap, or a bootstrap of an unloaded plist that byte-matches the render); a LOADED job is reloaded or removed only when its installed plist routes through bin/ade-job-run and is provably ADE's (W21c; a run in flight defers it); other loaded jobs, other files, removals that are not so, systemd/cron and paseo steps defer (exit 6)
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
+  --restart-service     launchd install/uninstall of a LOADED job that is not canonical-wrapped: allowed ONLY for a KeepAlive service that does
+                        not run through bin/ade-job-run (the LOADED definition must itself show KeepAlive, and the installed file must be the
+                        loaded definition, at the loaded path, with a truthy KeepAlive: any truthy KeepAlive counts, conditional dicts
+                        included, ADE-owned or not; an install also needs the new definition's KeepAlive), as a deliberate service restart. The bootout STOPS the running service
+                        (not paid-work-safe); the prior bytes and a recovery record are saved first and the prior definition is loaded again if
+                        the new one fails (if that fails too the service stays down: the error prints the manual steps). Otherwise the job is
+                        refused (exit 1). No effect on a canonical-wrapped job, systemd or cron; --no-activate is refused (exit 2) only when it
+                        would restart; a busy admission lock still refuses
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because
                         user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
   --json                list/diff/reconcile: machine-readable output
@@ -94,6 +102,7 @@ def _common(p: argparse.ArgumentParser, top: bool) -> None:
     p.add_argument("--name", action="append", metavar="NAME", dest="names" if top else "sub_names", **dflt([]))
     p.add_argument("--no-activate", action="store_true", **dflt(False))
     p.add_argument("--allow-no-linger", action="store_true", **dflt(False))
+    p.add_argument("--restart-service", action="store_true", **dflt(False))
     p.add_argument("--json", action="store_true", **dflt(False))
 
 
@@ -305,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
                 ade_sched.print_artifacts(r, sys.stdout)
                 return 0
             r = ade_sched.install(job, backend, dry_run=a.dry_run, activate=not a.no_activate,
-                                  allow_no_linger=a.allow_no_linger)
+                                  allow_no_linger=a.allow_no_linger, restart_service=a.restart_service)
             if not a.dry_run:
                 print(f"ade-sched: installed {job.label} on {r.backend}", file=sys.stderr)
             return 0
@@ -320,7 +329,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ade-sched: {ade_sched.migrate_wrapper_launchd(job, next(iter(r.files.values())))} {job.label}", file=sys.stderr)
             return 0
         if a.cmd == "uninstall":
-            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade)
+            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade,
+                                       restart_service=a.restart_service)
             if not a.dry_run:
                 print(f"ade-sched: {'removed' if found else 'not installed:'} {a.label}", file=sys.stderr)
             return 0
