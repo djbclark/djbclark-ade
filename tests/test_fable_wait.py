@@ -3,6 +3,8 @@ resets). Hermetic: a temp state dir, a fixed clock (FABLE_WAIT_NOW) and fake `pa
 log every call. No real launchd or cron install, no real send, no model."""
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import plistlib
@@ -12,6 +14,7 @@ import textwrap
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -169,6 +172,24 @@ def test_add_refuses_control_and_format_characters(fw, tmp_path):
     assert r.returncode == 2 and "category C" in r.stderr
     assert fw.run("add", "--title", "caf\u00e9 \u65e5\u672c", "--lead", LEAD).returncode == 0       # ordinary non-ASCII is fine
     assert [json.loads(x)["title"] for x in (fw.state / "queue.jsonl").read_text().splitlines()] == ["caf\u00e9 \u65e5\u672c"]
+
+
+def test_line_separators_in_a_brief_path_are_refused_and_never_split_a_record(fw, tmp_path):
+    odd = tmp_path / "b\u2028c\u2029d.md"
+    odd.write_text("x")
+    r = fw.run("add", "--title", "ok", "--lead", LEAD, "--brief-file", str(odd))
+    assert r.returncode == 2 and "category C" in r.stderr and not (fw.state / "queue.jsonl").exists()
+    # a hand-written record with raw U+2028/U+2029/U+0085 inside a string is still ONE record
+    fw.state.mkdir()
+    rec = {"v": 1, "op": "add", "id": "fw-20260101T000000Z-aaaaaa", "ts": "2026-01-01T00:00:00Z", "title": "t", "lead": LEAD,
+           "kind": "deferred", "brief_file": "/b\u2028c\u2029d\u0085e"}
+    (fw.state / "queue.jsonl").write_text(json.dumps(rec, ensure_ascii=False) + "\n")
+    out = json.loads(fw.run("ls", "--json").stdout)
+    assert [i["id"] for i in out["items"]] == ["fw-20260101T000000Z-aaaaaa"]
+    assert fw.run("add", "--title", "caf\u00e9", "--lead", LEAD).returncode == 0
+    text = (fw.state / "queue.jsonl").read_text()
+    assert text.splitlines()[-1].isascii() and "caf\\u00e9" in text                       # new records are written ASCII-escaped
+    assert len(json.loads(fw.run("ls", "--json").stdout)["items"]) == 2
 
 
 def test_ls_escapes_control_characters_written_by_hand(fw):
@@ -513,6 +534,29 @@ def test_disarm_retries_while_the_running_wake_holds_its_lock(fw):
     assert r.returncode == 0 and "disarmed" in r.stdout
     assert len([c for c in fw.calls("sched") if "uninstall" in c]) == 2
     assert not (fw.state / "wake.json").exists() and not (fw.state / "wake.plist").exists()
+
+
+def test_disarm_expect_none_never_removes_a_readable_wake(fw):
+    """`fire` that dropped an unreadable wake.json cannot name it: its disarm must leave any wake armed afterwards."""
+    wake = arm(fw)
+    r = fw.run("disarm", "--expect", "none")
+    assert r.returncode == 0 and "leaving it" in r.stdout
+    assert json.loads((fw.state / "wake.json").read_text())["wake_id"] == wake["wake_id"]
+    assert not [c for c in fw.calls("sched") if "uninstall" in c]
+    (fw.state / "wake.json").unlink()                                       # nothing armed: the dropped wake's job is removed
+    assert fw.run("disarm", "--expect", "none").returncode == 0
+    assert len([c for c in fw.calls("sched") if "uninstall" in c]) == 1
+
+
+def test_the_disarm_after_an_unidentified_wake_is_started_with_expect_none():
+    loader = importlib.machinery.SourceFileLoader("fable_wait_mod", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("fable_wait_mod", loader))
+    loader.exec_module(mod)
+    seen: list[list[str]] = []
+    with mock.patch.object(mod.subprocess, "Popen", lambda cmd, **_kw: seen.append(cmd)):
+        mod.spawn_disarm(None)
+        mod.spawn_disarm("abcd1234")
+    assert seen[0][-2:] == ["--expect", "none"] and seen[1][-2:] == ["--expect", "abcd1234"]
 
 
 def test_disarm_expect_leaves_a_newer_wake(fw):

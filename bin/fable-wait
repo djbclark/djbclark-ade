@@ -13,7 +13,8 @@ have a timer to start up work 1 minute after the next time window starts."
   arm   [--dry-run] [--ade DIR]    read the Fable window's reset (`paseo usage ls --json`: claude, window `weekly_model_fable`,
                                    else `weekly`) and install ONE one-shot wake at reset + 60 s through bin/ade-sched;
                                    re-arming replaces the previous wake. Refuses (exit 3) when the reset is unknown or past.
-  disarm [--wait S] [--expect WAKE]  remove the wake (retries up to S seconds while the running wake still holds its lock)
+  disarm [--wait S] [--expect WAKE|none]  remove the wake (retries up to S seconds while the running wake still holds its lock;
+                                   `none`: only when no readable wake is armed)
   fire  [--dry-run] [--force]      what the wake runs: `paseo send --json --no-wait` each lead the open items it owns, one
                                    `hermes-ping`, then disarm. Starts no work and spends no model quota. Once the wake is
                                    due, every way out (a corrupt queue line, a failed send) still forgets wake.json and starts
@@ -118,7 +119,7 @@ def atomic_write(path: Path, text: str) -> None:
 
 def append_record(rec: dict) -> None:
     """One JSON line, one write(2) on an O_APPEND descriptor: a reader never sees half a record."""
-    line = (json.dumps(rec, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    line = (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")      # ASCII-escaped: no raw separator can split a record
     fd = os.open(ensure_state() / "queue.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         view = memoryview(line)
@@ -141,7 +142,7 @@ def scan_records() -> tuple[list[dict], list[tuple[int, str]]]:
         raise Fail(4, f"cannot read {path}: {e}") from e
     out: list[dict] = []
     bad: list[tuple[int, str]] = []
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in enumerate(text.split("\n"), 1):       # only "\n" ends a record (str.splitlines also splits on U+2028 and more)
         if not line.strip():
             continue
         try:
@@ -201,13 +202,14 @@ def tool(env_key: str, name: str) -> list[str] | None:
 # ---------- add / close / ls ----------
 
 def control_chars(text: str) -> bool:
-    """True when text holds a Unicode category C character (control, format such as bidi overrides, surrogate, private use)."""
-    return any(unicodedata.category(c).startswith("C") for c in text)
+    """True when text holds a Unicode category C character (control, format such as bidi overrides, surrogate, private use) or a
+    line or paragraph separator (Zl, Zp: U+2028 and U+2029 split lines for str.splitlines)."""
+    return any(unicodedata.category(c).startswith("C") or unicodedata.category(c) in ("Zl", "Zp") for c in text)
 
 
 def escape_c(text: object) -> str:
     """text with every category C character written as \\uXXXX (a terminal or a peer never sees a raw control sequence)."""
-    return "".join(f"\\u{ord(c):04x}" if unicodedata.category(c).startswith("C") else c for c in str(text))
+    return "".join(f"\\u{ord(c):04x}" if control_chars(c) else c for c in str(text))
 
 
 def quoted(text: object, limit: int) -> str:
@@ -424,7 +426,10 @@ def cmd_disarm(a: argparse.Namespace) -> int:
     while True:
         with Lock():
             wake = read_wake()
-            if a.expect and wake is not None and wake.get("wake_id") != a.expect:
+            if a.expect == "none" and wake is not None:
+                print(f"a readable wake {wake.get('wake_id')} is armed; leaving it")       # fire could not identify the wake it dropped
+                return 0
+            if a.expect and a.expect != "none" and wake is not None and wake.get("wake_id") != a.expect:
                 print(f"a newer wake {wake.get('wake_id')} is armed; leaving it")
                 return 0
             rc, out, err = run(sched_cmd() + ["uninstall", LABEL], 120)
@@ -593,8 +598,7 @@ def spawn_disarm(wake_id: str | None) -> None:
     """The wake's own wrapper holds the job's lock while `fire` runs, so uninstalling from inside it would be refused: a
     detached `disarm --wait` retries until this process has exited."""
     cmd = [sys.executable, str(Path(os.path.realpath(__file__))), "disarm", "--wait", "180"]
-    if wake_id:
-        cmd += ["--expect", wake_id]
+    cmd += ["--expect", wake_id or "none"]       # "none": only if no readable wake is armed by then
     try:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
@@ -627,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_arm)
     s = sub.add_parser("disarm", help="remove the wake")
     s.add_argument("--wait", type=int, default=0, help="retry for up to this many seconds while the running wake holds its lock")
-    s.add_argument("--expect", help="only if this wake id is the armed one")
+    s.add_argument("--expect", help="only if this wake id is the armed one (`none`: only if no readable wake is armed)")
     s.set_defaults(fn=cmd_disarm)
     s = sub.add_parser("fire", help="what the wake runs: message the leads, one hermes-ping, disarm")
     s.add_argument("--dry-run", action="store_true")
