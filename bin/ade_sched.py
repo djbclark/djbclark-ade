@@ -1208,7 +1208,8 @@ def write_recovery_record(label: str, *, action: str, plist: Path, prior: bytes,
             "prior_artifact_hash": artifact_hash({plist: prior.decode("utf-8", errors="replace")}),
         })
     except BaseException:
-        clear_recovery_record(label, state_dir, env)
+        with contextlib.suppress(OSError):   # a cleanup error must not replace the original one
+            clear_recovery_record(label, state_dir, env)
         raise
 
 
@@ -1313,7 +1314,9 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
 
     `loaded_proof(print_out, prior)` (W21d lows): for a loaded job, called under the lock with a fresh `launchctl print` and the
     very bytes captured here; it returns a reason (NativeDefer, nothing changed) unless those bytes are the LOADED definition,
-    since the rollback loads exactly them and a file edited after the load would otherwise come back as a different job.
+    since the rollback loads exactly them and a file edited after the load would otherwise come back as a different job. The
+    uninstall's proof is `loaded_definition_problem` plus `loaded_file_problem` (full argv, program, source path; not the
+    environment, schedule or KeepAlive keys of the file).
     A disk error while writing the recovery record is a NativeDefer too: nothing is unloaded and no half record remains."""
     c = _ctx("launchd", env, overrides)
     plist = c.agents_dir / f"{label}.plist"
@@ -1538,7 +1541,8 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
                     try:
                         return remove_launchd_locked(label, expect_hash=artifact_hash({path: data.decode("utf-8", errors="replace")}),
                                                      loaded=True, state_dir=None, env=c.env,
-                                                     loaded_proof=lambda out_txt, prior: loaded_definition_problem(out_txt, prior, label, lock_dir=admission_dir()),
+                                                     loaded_proof=lambda out_txt, prior: (loaded_definition_problem(out_txt, prior, label, lock_dir=admission_dir())
+                                                                          or loaded_file_problem(out_txt, prior, path, label)),
                                                      **overrides)
                     except NativeDefer as exc:
                         raise SchedError(EX_ACTIVATE, str(exc)) from exc
@@ -2404,6 +2408,30 @@ def loaded_definition_problem(print_out: str, data: bytes, label: str, *, lock_d
         return f"the LOADED definition locks in {args[2]!r}, not in reconcile's {lock_dir}"
     if program is None or program != args[0]:
         return f"the loaded definition runs program {program!r}, not the wrapper {args[0]!r}"
+    return None
+
+
+def loaded_file_problem(print_out: str, data: bytes, plist: Path, label: str) -> str | None:
+    """None only when `data` provably IS the loaded definition as far as argv and source go: it parses, is this label's, has no
+    `Program` key, its `ProgramArguments` equal the FULL `arguments` of `launchctl print` (not just the wrapper head) with
+    `program == arguments[0]`, and the loaded `path =` is `plist` (realpath compared). Environment, schedule and KeepAlive keys of the
+    file are NOT compared: `launchctl print` does not give them in a form that can be matched (the documented residual)."""
+    program, args = parse_launchd_definition(print_out)
+    if not args:
+        return "launchctl print shows no arguments for the loaded definition"
+    if program is None or program != args[0]:
+        return f"the loaded definition runs program {program!r}, not {args[0]!r}"
+    loaded_path = parse_launchd_path(print_out)
+    if not loaded_path or os.path.realpath(loaded_path) != os.path.realpath(plist):
+        return f"the loaded definition came from {loaded_path!r}, not {plist}"
+    try:
+        d = plistlib.loads(data)
+    except Exception:  # noqa: BLE001 - plistlib raises several types for malformed input
+        return f"{plist} does not parse"
+    if not isinstance(d, dict) or d.get("Label") != label:
+        return f"{plist} is not {label}'s"
+    if "Program" in d or d.get("ProgramArguments") != args:
+        return f"{plist} does not have the loaded definition's full arguments (launchd keeps running what it loaded)"
     return None
 
 

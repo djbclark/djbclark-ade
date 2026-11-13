@@ -1695,6 +1695,28 @@ def test_w21d_lows_a_file_edited_after_the_load_is_never_removed_record_first(ld
     assert plist.read_bytes() == before and ld.loaded(LW_LABEL) and not KILLERS & set(ld.verbs()) and not _admission_files(ld)
 
 
+def test_w21d_lows_a_file_whose_argv_tail_was_edited_after_the_load_is_never_removed_record_first(ld, monkeypatch):
+    # same wrapper head, a different command after `--` (a `--no-activate` install staged over the loaded job): the head-only proof
+    # passed this, and a rollback would have loaded the different command
+    import plistlib
+    root, plist = _loaded_lw(ld)
+    d = plistlib.loads(plist.read_bytes())
+    d["ProgramArguments"] = [*d["ProgramArguments"][:5], "/bin/sh", "-c", "echo DIFFERENT JOB"]
+    plist.write_bytes(plistlib.dumps(d))
+    before = plist.read_bytes()
+    monkeypatch.setattr(S, "_guarded_unlink", lambda *a, **k: (_ for _ in ()).throw(S.SchedError(S.EX_ACTIVATE, "unlink failed")))
+    with pytest.raises(S.SchedError, match="not the loaded definition"):
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert plist.read_bytes() == before and ld.loaded(LW_LABEL) and not KILLERS & set(ld.verbs()) and not _admission_files(ld)
+
+
+def test_w21d_lows_a_loaded_job_from_another_path_is_not_removed_record_first(ld):
+    root, plist = _loaded_lw(ld)
+    pr = S.loaded_file_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LW_LABEL)[1], plist.read_bytes(), ld.tmp / "other.plist", LW_LABEL)
+    assert pr is not None and "came from" in pr
+    assert S.loaded_file_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LW_LABEL)[1], plist.read_bytes(), plist, LW_LABEL) is None
+
+
 @pytest.mark.parametrize("fail_at", ["_atomic_write_bytes", "_atomic_write_json"])
 @pytest.mark.parametrize("who", ["uninstall", "restart-uninstall"])
 def test_w21d_lows_a_disk_error_writing_the_recovery_record_refuses_before_any_bootout(ld, monkeypatch, fail_at, who):
