@@ -86,10 +86,12 @@ This command activates the dry-run job; it does not enable resumes. See
   are `unknown` (unavailable), never a traceback and never an empty-job "all missing" false
   positive (2026-11-10).
 - **Unchosen optional rows (`class` `optional`/`offered`, `chosen = false`, 2026-11-13):** doctor and `diff` stay quiet
-  (`unchosen`; a live label adds "installed but unchosen"). `reconcile` plans `skip` for the row and reports a live label of
-  it as `installed but inventory row ... is not chosen` (report only, not "foreign"). **Un-choosing a job that the ledger
+  (`unchosen`; a live label adds "installed but unchosen"). `reconcile` plans `skip` for the row; for an **ADE-owned
+  `ade-sched` or `paseo` row** (not a `service` or dependency row such as `herdr-server`, which keep the old silent path) it
+  reports a live label as `installed but inventory row ... is not chosen` (report only, not "foreign"; an unchosen `paseo` row
+  with a live label was silent before 2026-11-13). **Un-choosing a job that the ledger
   owns (an earlier `reconcile --yes` installed or adopted it) makes the next `reconcile --yes` unload it**: the plan step
-  reads `remove ... inventory row 'NAME' is not chosen`. A job installed by hand and never adopted is only reported.
+  reads `remove ... inventory row 'NAME' is not chosen` (only when the ledger id equals the row name and the label is not retired). A job installed by hand and never adopted is only reported.
 
 ## Reconcile and ownership ledger (S4b first write path, 2026-11-10)
 
