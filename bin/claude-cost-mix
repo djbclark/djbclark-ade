@@ -43,7 +43,7 @@ def median(xs):
 PRICES = {
     "claude-opus-5-5": (4.0, 0.05),
     "claude-sonnet-5-5": (2.0, 0.05),
-    "claude-fable-5-2": (10.0, 0.025),  # 5.2 priced as 5.1 (unverified, 2026-11-13)
+    "claude-fable-5-2": (8.0, 0.025),  # pricing page, verified 2026-11-13
     "claude-fable-5-1": (10.0, 0.025),  # kept: old transcripts
 }
 DEFAULT_PRICE = (1.0, 0.1)

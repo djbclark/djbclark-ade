@@ -68,10 +68,10 @@ def test_pricing():
     assert abs(base_op - 4.0e-6) < 1e-12
     assert abs(rd_op - 0.05) < 1e-12
 
-    # Fable 5.2 (and the old 5.1 id, kept for old transcripts): $10.0/MTok base, 0.025 read
-    for fable_id in ("claude-fable-5-2", "claude-fable-5-1"):
+    # Fable 5.2: $8/MTok base; the old 5.1 id, kept for old transcripts: $10/MTok base; both 0.025 read
+    for fable_id, want in (("claude-fable-5-2", 8.0e-6), ("claude-fable-5-1", 10.0e-6)):
         base_fb, rd_fb = mod.price(fable_id)
-        assert abs(base_fb - 10.0e-6) < 1e-12
+        assert abs(base_fb - want) < 1e-12
         assert abs(rd_fb - 0.025) < 1e-12
 
     # Unknown: $1.0/MTok base, 0.1 read
