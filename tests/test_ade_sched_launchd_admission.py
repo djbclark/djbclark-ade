@@ -569,9 +569,11 @@ def test_ade_install_apply_requests_the_native_adapter(ld, monkeypatch):
         return [], 0
 
     monkeypatch.setattr(S, "reconcile", fake_reconcile)
+    monkeypatch.setattr(sys, "platform", "linux")  # CI runs on Linux: the backend must come from the env, not the host
     root = _mini_catalog(ld.tmp)
     catalog = ai.load_catalog(root=root)
-    ai.apply_sched_reconcile(catalog, dry_run=False, names={"deadline-sweep"}, env=ld.env, state_dir=ld.state)
+    env = {**ld.env, "ADE_SCHED_BACKEND": "launchd"}
+    ai.apply_sched_reconcile(catalog, dry_run=False, names={"deadline-sweep"}, env=env, state_dir=ld.state)
     assert seen and seen[0].get("native_admission") is True
 
 
