@@ -72,7 +72,9 @@ quality_max_rank_gap = { code = 10, judgment = 10 }
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
 # alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
 # again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
-plenty_min = 50.0
+# Lowered from 50 to 20 (operator 2026-11-13: "change the codex gate quota from 50% to 20%"); the
+# [frontier] floors in config/gates.toml are unchanged.
+plenty_min = 20.0
 # Curated profiles overlay discovery (`paseo provider ls --json` plus the quota snapshot's pools); anything
 # discovered without one gets default_profile so a newly-added provider is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }

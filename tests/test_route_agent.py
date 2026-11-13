@@ -1565,8 +1565,8 @@ class TestCodexEverydayKinds(unittest.TestCase):
         """The partial-reading rule lives in the plenty gate: no other pool carries one."""
         self.assertEqual([s.name for s in r.SERVICES if s.plenty_kinds], ["codex"])
 
-    def test_the_default_constant_is_half_the_window(self):
-        self.assertEqual(r.PLENTY_MIN, 50.0)
+    def test_the_default_constant_is_a_fifth_of_the_window(self):
+        self.assertEqual(r.PLENTY_MIN, 20.0)
 
     def test_route_never_hands_codex_an_everyday_slice_below_the_constant(self):
         low = self.drained(codex={"remaining": r.PLENTY_MIN - 1})
@@ -1577,19 +1577,22 @@ class TestCodexEverydayKinds(unittest.TestCase):
         self.assertTrue(self.codex().eligible("frontier", low))      # frontier stays codex's below the constant ...
         at_floor = self.drained(codex={"remaining": 60.0})            # ... but the planner hands it a slice only at the astra estimate floor
         self.assertEqual(r.route("frontier", quota=at_floor).service.name, "codex")
-        self.assertIsNone(r.route("frontier", quota=low))             # uncalibrated, 49% is below what dispatch will demand
-        # the positive control (adversary R4): the plenty gate (50) does not reach frontier inside route(); with a
-        # calibrated history (median 20) the planner hands codex a frontier slice at 49
-        state = Path(tempfile.mkdtemp(prefix="route-hist-"))
-        (state / "task" / "jobs").mkdir(parents=True)
-        for k in range(3):
-            (state / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(
-                {"agent": "codex", "model": "gpt-6-astra", "kind": "frontier", "effort": "high", "measured_usage_pct": 20.0}))
-        r._FRONTIER_HISTORY_MEMO.clear()
-        self.addCleanup(r._FRONTIER_HISTORY_MEMO.clear)
-        with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(state / "sf")}), \
-                mock.patch.object(r, "ACP_DISPATCH_STATE", state):
-            self.assertEqual(r.route("frontier", quota=low).service.name, "codex")
+        mid = self.drained(codex={"remaining": 49.0})                 # a fixed 49, independent of the plenty gate (20 since 2026-11-13)
+        self.assertIsNone(r.route("frontier", quota=mid))             # uncalibrated, 49% is below what dispatch will demand
+        # the positive control (adversary R4): the plenty gate (20 since 2026-11-13) does not reach frontier inside route();
+        # with a calibrated history the planner hands codex a frontier slice BELOW the gate (19, median 10 fits above
+        # min_headroom 15), and at a fixed 49 (median 20)
+        for quota, pct in ((low, 10.0), (mid, 20.0)):
+            state = Path(tempfile.mkdtemp(prefix="route-hist-"))
+            (state / "task" / "jobs").mkdir(parents=True)
+            for k in range(3):
+                (state / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(
+                    {"agent": "codex", "model": "gpt-6-astra", "kind": "frontier", "effort": "high", "measured_usage_pct": pct}))
+            r._FRONTIER_HISTORY_MEMO.clear()
+            self.addCleanup(r._FRONTIER_HISTORY_MEMO.clear)
+            with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(state / "sf")}), \
+                    mock.patch.object(r, "ACP_DISPATCH_STATE", state):
+                self.assertEqual(r.route("frontier", quota=quota).service.name, "codex", quota)
 
     def test_astra_is_frontier_only_in_the_profile(self):
         models = self.codex().models
@@ -1619,13 +1622,13 @@ class TestCodexEverydayKinds(unittest.TestCase):
 
     def test_policy_json_and_md_carry_the_constant_and_the_gated_kinds(self):
         pub = r.policy_public()
-        self.assertEqual(pub["routing"]["plenty_min"], 50.0)
+        self.assertEqual(pub["routing"]["plenty_min"], 20.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
         self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)
-        self.assertIn("| routing.plenty_min | 50 |", buf.getvalue())
+        self.assertIn("| routing.plenty_min | 20 |", buf.getvalue())
 
 
 
