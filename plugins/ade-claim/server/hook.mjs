@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,8 +26,26 @@ import {
   resolveTrustedAgentBinDir,
 } from "./claim-lib.mjs";
 
-/** Reviewed plugin directory (never the agent's worktree). */
-const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/**
+ * Reviewed plugin directory (never the agent's worktree).
+ *
+ * Paseo bundles `index.server.ts` to CommonJS and `eval`s it (daemon `compiler-build.js` format "cjs",
+ * `bundle-evaluator.js`), and never tells the plugin its own directory; so in the daemon `import.meta.url`
+ * is undefined and `fileURLToPath(undefined)` threw at load ("The "path" argument must be of type string
+ * or an instance of URL. Received undefined", #638 D2). Under plain Node ESM (the tests) the file URL is
+ * real and wins; in the daemon the plugin falls back to the shared checkout `~/src/djbclark-ade`.
+ * `ADE_CLAIMS_PY`, `ADE_GIT_GUARD` and `ADE_AGENT_BIN` still override each tool.
+ *
+ * @param {{ metaUrl?: unknown, home?: string }} [opts]
+ */
+export function resolvePluginRoot({ metaUrl, home = homedir() } = {}) {
+  if (typeof metaUrl === "string" && metaUrl.startsWith("file:")) {
+    return join(dirname(fileURLToPath(metaUrl)), "..");
+  }
+  return join(home, "src", "djbclark-ade", "plugins", "ade-claim");
+}
+
+const PLUGIN_ROOT = resolvePluginRoot({ metaUrl: import.meta?.url });
 
 /** Install soft-fail codes (do not abort worktree.create.after). */
 const INSTALL_SOFT_FAIL = new Set([73, 78]);

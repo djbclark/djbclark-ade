@@ -18,6 +18,7 @@ import {
   registerAgentClaimOwnerHook,
   registerWorkspaceArchiveReleaseHook,
   registerWorktreeClaimHook,
+  resolvePluginRoot,
 } from "./hook.mjs";
 import {
   CLAIM_MODE_FILE,
@@ -709,4 +710,31 @@ test("enforce records the ade-git-guard install outcome", async () => {
   registerWorktreeClaimHook(h.server, h.deps);
   await h.hooks.get("worktree.create.after")(WT(h));
   assert.equal(h.jsonl()[0].planned.install, "failed (exit 73) (soft)");
+});
+
+// #638 D2: Paseo bundles index.server.ts to CJS and eval()s it, so import.meta.url is undefined in the
+// daemon; hook.mjs threw at load ("path" argument must be of type string ... Received undefined).
+test("resolvePluginRoot uses a real file: URL (plain Node ESM, tests)", () => {
+  const root = resolvePluginRoot({ metaUrl: "file:///opt/ade/plugins/ade-claim/server/hook.mjs", home: "/h" });
+  assert.equal(root, "/opt/ade/plugins/ade-claim");
+});
+
+test("resolvePluginRoot falls back to the shared checkout when import.meta.url is undefined (Paseo CJS bundle)", () => {
+  for (const metaUrl of [undefined, null, "", "data:text/javascript,1", 42]) {
+    assert.equal(
+      resolvePluginRoot({ metaUrl, home: "/Users/x" }),
+      "/Users/x/src/djbclark-ade/plugins/ade-claim",
+    );
+  }
+});
+
+test("no server module calls fileURLToPath/URL on an unguarded import.meta.url", () => {
+  const dir = new URL(".", import.meta.url);
+  for (const name of ["hook.mjs", "claim-lib.mjs"]) {
+    const src = readFileSync(new URL(name, dir), "utf8");
+    const uses = src.split("\n").filter((l) => l.includes("import.meta") && !l.trimStart().startsWith("*"));
+    for (const line of uses) {
+      assert.match(line, /import\.meta\?\.url/, `${name}: unguarded import.meta use: ${line.trim()}`);
+    }
+  }
 });

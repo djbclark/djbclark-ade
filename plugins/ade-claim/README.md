@@ -12,7 +12,7 @@ Thin daemon plugin for [wave4-E8 F4](https://github.com/djbclark/djbclark-ade/bl
 
 Enforcement stays in `ade-git-guard` and the git hooks; this plugin only creates/releases claims, installs hooks, and binds identity.
 
-**Not installed on the operator Mac yet** (2026-11-09): scaffold + W2–W4 draft; install with `paseo plugin install /absolute/path/to/plugins/ade-claim` after review.
+**Install status** (2026-11-13): operator approved an observe-mode install; the first `paseo plugin install /Users/djbclark/src/djbclark-ade/plugins/ade-claim` registered but failed to load (`import.meta.url` undefined in Paseo's CJS bundle, fixed in this change; #638 D2). Install with `paseo plugin install /absolute/path/to/plugins/ade-claim`.
 
 ## Observe mode (#638 D1, 2026-11-13)
 
@@ -69,7 +69,7 @@ Claim lookup: read `ade_claims.py list --json --state active`, prefer `<git-dir>
 | `ADE_CLAIM_TTL` | Hours for `ade_claims.py new --ttl` on W2 (default `72`; `0` = never). Invalid values abort the waiting hook. |
 | `ADE_CLAIM_DRY_RUN` | Truthy (see Observe mode): forces observe for **all** hooks, over the state file. |
 
-The hooks never run a checkout-local helper: an untrusted worktree must not supply what the daemon execs. Resolution order: env override, then walk parents of the plugin install directory for `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin`.
+The hooks never run a checkout-local helper: an untrusted worktree must not supply what the daemon execs. Resolution order: env override, then walk parents of the plugin install directory for `bin/ade_claims.py` / `bin/ade-git-guard` / `libexec/agent-bin`. Paseo bundles the entry to CommonJS and does not tell a plugin its directory (`import.meta.url` is undefined in the daemon), so the plugin install directory is taken as `~/src/djbclark-ade/plugins/ade-claim` (the shared checkout); install the plugin from that path, or set the three env overrides.
 
 ## Tests
 
