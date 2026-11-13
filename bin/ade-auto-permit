@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Approve pending requests only for a lead's descendants or selected ADE labels."""
+"""Approve pending requests only for a lead's descendants, its `ade.lead=<lead>` workers or selected ADE labels."""
 import argparse
 from datetime import datetime, timezone
 import fcntl
@@ -71,13 +71,15 @@ def descendant(agent, lead, cache):
 
 def sweep(lead, labels, log):
     requests = rows(call(["permit", "ls"]))
-    eligible = set()
+    eligible = {}
     # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
-    for label in labels:
+    # The lead's own `ade.lead=<lead>` label is always checked: a lead launches top-level
+    # (env-stripped) workers that are not descendants, and they carry that label.
+    for reason, label in [("lead-label", f"ade.lead={lead}")] + [("ade-label", v) for v in labels]:
         for row in rows(call(["ls", "-a", "-g", "--label", label])):
             if not isinstance(row, dict) or not identifier(row.get("id")):
                 raise ProbeError("invalid labelled agent")
-            eligible.add(row["id"])
+            eligible.setdefault(row["id"], reason)
     cache, seen, failed = {}, set(), False
     for row in requests:
         if not isinstance(row, dict):
@@ -96,7 +98,7 @@ def sweep(lead, labels, log):
             if agent == lead:
                 reason = None
             elif agent in eligible:
-                reason = "ade-label"
+                reason = eligible[agent]
             else:
                 reason = "descendant" if descendant(agent, lead, cache) else None
             if reason is None:

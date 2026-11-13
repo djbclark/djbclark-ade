@@ -132,6 +132,11 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 # or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
 ```
 
+`--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
+`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` is not a descendant of the lead, and
+`bin/ade-auto-permit` approves its permission requests only through this label (audit reason `lead-label`;
+2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt).
+
 ## 4. Size the run to the work
 
 1. **Scale slice count with complexity.** Anthropic's research system uses one
