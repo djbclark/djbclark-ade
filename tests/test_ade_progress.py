@@ -9,6 +9,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -469,12 +470,35 @@ def test_no_model_call_and_only_native_verbs(e):
         assert banned not in src
 
 
-def test_plist_template_is_shipped_but_not_installed():
+def test_plist_template_and_inventory_row():
     d = plistlib.loads((ROOT / "config" / "launchd" / "com.djbclark.ade-progress.plist").read_bytes())
     assert d["Label"] == "com.djbclark.ade-progress"
     assert d["ProgramArguments"] == ["__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
-    # slice 1b adds the inventory row, after the operator has seen `scan --dry-run` on real declarations
-    assert "ade-progress" not in (ROOT / "config" / "install.toml").read_text()
+    # slice 1b: inventoried, but optional and unchosen, so doctor and reconcile expect and install nothing
+    rows = [r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
+            if r["name"] == "ade-progress"]
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r["kind"], r["owner"], r["class"], r["chosen"]) == ("ade-sched", "djbclark-ade", "optional", False)
+    assert r["label"] == d["Label"] and r["plist"] == "config/launchd/com.djbclark.ade-progress.plist"
+
+
+def test_inventory_row_doctor_expectations():
+    """Unchosen: quiet whether or not the label is live. Chosen: ok when live, a failing `missing` row when absent."""
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_sched as S
+    row = next(r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
+               if r["name"] == "ade-progress")
+    live = S.LiveScan("launchd", (S.LiveJob("com.djbclark.ade-progress", "launchd", "generated"),), ())
+    none = S.LiveScan("launchd", (), ())
+
+    def status(r, scan):
+        return [(x.status, x.fail) for x in S.diff_jobs([r], [], scan) if x.name == "ade-progress"]
+
+    assert status(row, live) == [("unchosen", False)] and status(row, none) == [("unchosen", False)]
+    chosen = dict(row, chosen=True)
+    assert status(chosen, live) == [("ok", False)]
+    assert status(chosen, none) == [("missing", True)]
 
 
 def test_one_wake_per_agent_per_window_even_with_several_tasks(e):
