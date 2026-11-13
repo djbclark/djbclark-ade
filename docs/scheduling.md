@@ -486,7 +486,7 @@ and exits 1. A SIGTERM, deadline kill or crash cannot run any cleanup, so the re
 first acts on records (`recover_launchd_records`; `--dry-run` lists them as `would-recover`): a loaded label clears a stale
 record; an unloaded label whose plist is still the prior (or the new) bytes is bootstrapped and its ledger row made
 committed for what is loaded; recovery acts only on a label some ADE launchd ledger row names; a plist that is neither is someone else's and is left alone (row `failed`, record kept).
-A restore never overwrites a file that is neither the prior bytes nor the bytes this run wrote. A removal interrupted after the unlink (no plist, unloaded, ADE `pending-remove` row) is completed by the next run (the ledger row is dropped). Every ADE job now imports `ade_sched.py` from the shared checkout, so a broken checkout stops all of them (exit 1 or 127, not 75).
+The lock is released only after the ledger commit, so the new definition's `RunAtLoad` run skips (exit 0) and the next run is at its `StartInterval`. The lock-directory proof cannot see launchd's own domain environment (`launchctl setenv`) or a relative `ADE_JOBS_STATE_DIR` (those never match); nothing in the repo sets them. A restore never overwrites a file that is neither the prior bytes nor the bytes this run wrote. A removal interrupted after the unlink (no plist, unloaded, ADE `pending-remove` row) is completed by the next run (the ledger row is dropped). Every ADE job now imports `ade_sched.py` from the shared checkout, so a broken checkout stops all of them (exit 1 or 127, not 75).
 Removal (`remove_launchd_locked`) re-hashes the file under the lock right before the unload, uses the same record while
 the job is loaded, and restores it if the unlink or read-back fails.
 

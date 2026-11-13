@@ -1103,7 +1103,7 @@ def _bootout_checked(c: _Ctx, label: str) -> None:
 
 
 def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: Mapping[str, str] | None = None,
-                          **overrides: Any) -> str:
+                          expect_hash: str | None = None, **overrides: Any) -> str:
     """Replace a LOADED, wrapper-routed ADE definition. The caller holds the label's EXCLUSIVE admission lock for the whole
     call (no run is active, none can start), has proven the installed bytes are the ledger's, and has the ledger row
     pending. Order: private prior copy + durable recovery record, bootout, write the new bytes, bootstrap, read-back,
@@ -1117,6 +1117,8 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
         if job.worktree:
             raise SchedError(EX_USAGE, f"__ADE__ defaulted to {job.worktree}, a linked git worktree that is deleted after its merge")
         prior = read_regular_bytes(plist)
+        if expect_hash is not None and artifact_hash({plist: prior.decode("utf-8", errors="replace")}) != expect_hash:
+            raise SchedError(EX_ACTIVATE, f"{plist} is no longer the ledger's artifact (re-checked under the lock)")
         _log_dirs(job)
         write_recovery_record(label, action="reload", plist=plist, prior=prior, new_sha=new_sha, state_dir=state_dir, env=env)
     except (SchedError, OSError) as exc:
@@ -1233,6 +1235,12 @@ def recover_launchd_records(*, state_dir: Path | None, owns: Callable[[str], boo
             continue
         rc, _, _ = _launchctl_print(c, label)
         if rc == 0:
+            if action == "reload":   # killed before the unload: the ledger row may still be pending for bytes never written
+                try:
+                    if hashlib.sha256(read_regular_bytes(plist)).hexdigest() == prior_sha:
+                        row["ledger_fix"] = {"label": label, "artifact_hash": rec.get("prior_artifact_hash")}
+                except OSError:
+                    pass
             clear_recovery_record(label, state_dir, env)
             row.update(detail=f"{label} is loaded again; stale recovery record cleared")
             rows.append(row)
@@ -2113,6 +2121,9 @@ def wrapper_lock_dir(data: bytes, uid: int) -> Path:
         ev = None
     if isinstance(ev, dict):
         env.update({k: v for k, v in ev.items() if isinstance(k, str) and isinstance(v, str)})
+    state = env.get("ADE_JOBS_STATE_DIR", "")
+    if state and not os.path.isabs(state):   # a relative or `~` value resolves differently in the job and in reconcile
+        return Path("/nonexistent/relative-ADE_JOBS_STATE_DIR")
     return admission_dir(None, env=env)
 
 
@@ -3657,7 +3668,8 @@ def reconcile(
                             try:
                                 if isinstance(evidence, JobAdmission) and evidence.locked and evidence.loaded:
                                     reload_launchd_locked(   # under the exclusive admission lock `evidence` holds
-                                        job, next(iter(rendered.files.values())), state_dir=state_dir, env=env, **overrides,
+                                        job, next(iter(rendered.files.values())), state_dir=state_dir, env=env,
+                                        expect_hash=(prev or {}).get("artifact_hash"), **overrides,
                                     )
                                 else:
                                     install_launchd_native(
@@ -3688,13 +3700,15 @@ def reconcile(
                         results.append(row)
                         continue
                     except (KeyboardInterrupt, SystemExit):
-                        # An interrupt after a rollback (or before the unload): the prior definition is what is loaded.
-                        if prev is None:
-                            entries.pop(step.name, None)
-                        else:
-                            entries[step.name] = prev
-                        ledger["entries"] = entries
-                        save_jobs_ledger(ledger, state_dir, env=env)
+                        if isinstance(evidence, JobAdmission) and evidence.locked and evidence.loaded:
+                            # An interrupt in the locked reload (after a rollback or before the unload): the prior
+                            # definition is what is loaded, so the ledger keeps its old row.
+                            if prev is None:
+                                entries.pop(step.name, None)
+                            else:
+                                entries[step.name] = prev
+                            ledger["entries"] = entries
+                            save_jobs_ledger(ledger, state_dir, env=env)
                         raise
                     except ReloadRolledBack as e:
                         # The job is loaded again with its PRIOR definition: the ledger keeps owning it (committed), the run fails.

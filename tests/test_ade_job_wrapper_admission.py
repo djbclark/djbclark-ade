@@ -351,7 +351,7 @@ def test_installed_bytes_that_differ_from_the_ledger_artifact_defer_untouched(ld
 
 # ------------------------------------------------------------------------------------------------ adversary round 1 (BLOCK)
 
-def test_file_says_wrapper_but_the_loaded_definition_is_unwrapped_defers_with_a_run_in_flight(ld):
+def test_file_says_wrapper_but_the_loaded_definition_is_unwrapped_defers(ld):
     # F1: `install --no-activate` wrote the wrapped file while the old, unwrapped definition stayed loaded.
     root, catalog, plist = _installed_wrapped(ld)
     (ld.root / "args").mkdir(exist_ok=True)
@@ -438,6 +438,35 @@ def test_removal_interrupted_after_the_unlink_completes_its_ledger_row(ld):
     ledger["entries"]["skillopt-sleep"]["status"] = "pending-remove"
     S.save_jobs_ledger(ledger, ld.state, env=ld.env)
     rows, rc = _remove(ld, root, catalog, label)
-    assert any(r["action"] == "recover" and r["ok"] for r in rows), rows
+    assert rc == 0 and any(r["action"] == "recover" and r["ok"] for r in rows), rows
     assert "skillopt-sleep" not in S.load_jobs_ledger(ld.state, env=ld.env)["entries"]
     assert not (ld.state / "admission" / f"{label}.recovery.json").exists() and "bootstrap" not in ld.verbs()
+
+
+def test_killed_before_the_unload_leaves_a_pending_row_that_the_next_run_repairs(ld):
+    # round 2, item 2: SIGTERM after the pending row is saved but before bootout; the old definition stays loaded.
+    root, catalog, plist = _installed_wrapped(ld)
+    prior_entry = _entry(ld)
+    S.write_recovery_record(LABEL, action="reload", plist=plist, prior=plist.read_bytes(), new_sha="0" * 64, state_dir=ld.state, env=ld.env)
+    ledger = S.load_jobs_ledger(ld.state, env=ld.env)
+    ledger["entries"]["deadline-sweep"] = {**prior_entry, "status": "pending", "artifact_hash": "f" * 64}
+    S.save_jobs_ledger(ledger, ld.state, env=ld.env)
+    rows, rc = _reconcile(ld, root, catalog)
+    assert rc == 0 and any(r["action"] == "recover" for r in rows), rows
+    assert _entry(ld)["status"] == "committed" and _entry(ld)["artifact_hash"] == prior_entry["artifact_hash"]
+    assert not (ld.state / "admission" / f"{LABEL}.recovery.json").exists() and ld.loaded()
+
+
+def test_relative_state_dir_in_the_plist_never_matches_reconciles_lock_dir(tmp_path):
+    import plistlib
+    d = plistlib.dumps({"Label": LABEL, "EnvironmentVariables": {"ADE_JOBS_STATE_DIR": "rel/state"}})
+    assert S.wrapper_lock_dir(d, os.getuid()) == Path("/nonexistent/relative-ADE_JOBS_STATE_DIR")
+
+
+def test_ledger_artifact_is_rechecked_under_the_lock_before_the_unload(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = S.Job.from_plist(root / "config" / "launchd" / f"{LABEL}.plist", S.job_subst_from_row(
+        next(j for j in catalog.jobs if j["name"] == "deadline-sweep"), root=root, env=ld.env, extra=None), ade=root)
+    with pytest.raises(S.NativeDefer):
+        S.reload_launchd_locked(job, "x", state_dir=ld.state, env=ld.env, expect_hash="0" * 64)
+    assert "bootout" not in ld.verbs() and ld.loaded() and not list((ld.state / "admission").glob("*.recovery.json"))
