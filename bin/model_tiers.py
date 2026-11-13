@@ -39,9 +39,9 @@ import tomllib
 ROLES: tuple[str, ...] = ("frontier", "judgment", "everyday", "bulk")
 SCHEMA = 1
 
-# Fail-safe copy of today's table (2026-11-09). Keep in sync with config/model-tiers.toml.
+# Fail-safe copy of today's table (2026-11-13). Keep in sync with config/model-tiers.toml.
 DEFAULTS: dict[str, Any] = {
-    "meta": {"schema": SCHEMA, "updated": "2026-11-09"},
+    "meta": {"schema": SCHEMA, "updated": "2026-11-13"},
     "rank": {
         "order": ["claude", "codex"],
         "since": "2026-10-26",
