@@ -51,6 +51,8 @@ POOL_MODEL_PREFIX = {"zai": "zai/"}  # Pi pools only: claude and codex belong to
 QUOTA_DENIED = re.compile(r"auth|credential|api.?key|billing|credit|balance|\b1113\b|\b40[13]\b", re.I)
 QUOTA_MAX_WINDOW_MINUTES = 360  # 5-hour and session windows; a weekly wait exceeds any staleness bound.
 QUOTA_EXHAUSTED_PERCENT = 95
+QUOTA_POOL_GAP_SECONDS = 600  # At least this long between two quota resumes of one pool, across scans and runs.
+FIRST_SIGHT_BLOCKED = frozenset({"delivered", "changed"})  # First-sight outcomes that never arm a wait.
 GUARD_TERMINAL = frozenset({"resumed", "cancelled"})
 AIUSE_TIMEOUT = 30
 DENIED = re.compile(r"1302|1308|\b429\b|\b40[13]\b|quota|rate.?limit|auth|credential|api.?key|refus|policy|billing|credit|usage.?limit|capacity", re.I)
@@ -328,6 +330,10 @@ class Scanner:
             return False
         if not reset + self.quota_grace <= collected <= time.time():
             return False
+        if any(self.exhausted(w) and not (number(w.get("window_minutes"))
+                                          and w["window_minutes"] <= QUOTA_MAX_WINDOW_MINUTES)
+               for w in self.windows(account)):
+            return False  # A weekly (or unknown-length) window binds the pool, whatever usable_now says.
         window = [w for w in self.windows(account) if w.get("window_id") == wait["window_id"]]
         return (len(window) == 1 and not self.exhausted(window[0])
                 and number(window[0].get("used_percent")))
@@ -371,9 +377,21 @@ class Scanner:
                 waits[e["agent"]] = e
         return waits
 
+    @staticmethod
+    def quota_first_rows(events):
+        """Latest first-sight outcome per agent: (agent, error event) pairs already read once."""
+        rows = {}
+        for e in events:
+            if e.get("stage") == "first-sight" and all(isinstance(e.get(k), str) for k in
+                                                       ("agent", "signature", "updated_at", "pool", "action")):
+                if e["agent"] not in rows or e["time"] >= rows[e["agent"]]["time"]:
+                    rows[e["agent"]] = e
+        return rows
+
     def quota_scan(self, agents, history, events):
         self._aiuse = None
         waits = self.quota_waits(events)
+        firsts = self.quota_first_rows(events)
         sent = {(e.get("agent"), e.get("signature")) for e in events if e.get("action") == "reserved"}
         resumed = {}
         for row in agents:
@@ -404,8 +422,16 @@ class Scanner:
                     age = time.time() - stamp(updated)
                     if not 0 <= age <= QUOTA_MAX_WINDOW_MINUTES * 60 + self.max_error_age:
                         continue
+                    first = firsts.get(aid)
+                    known = first if (first is not None and first["pool"] == pool
+                                      and first["updated_at"] == updated) else None
                     if wait is not None and wait["pool"] == pool and wait["updated_at"] == updated:
                         signature = wait["signature"]  # The ledger already identifies this error event.
+                    elif known is not None:
+                        # Read once already (UpdatedAt is the event identity: any new activity changes it).
+                        if known["action"] in FIRST_SIGHT_BLOCKED:
+                            continue
+                        signature = known["signature"]
                     else:
                         logs = self.cli("logs", aid)
                         if not quota_line(pool, logs):
@@ -420,7 +446,8 @@ class Scanner:
                     continue
                 if wait is None or wait["signature"] != signature or wait["pool"] != pool:
                     if status == "error":
-                        self.quota_first_sight(history, events, waits, aid, pool, updated, signature)
+                        self.quota_first_sight(history, events, waits, aid, pool, updated, signature,
+                                               checked=known is not None)
                     continue
                 if (aid, signature) in sent:
                     self.note(history, events, aid, "capped", key=signature)
@@ -431,6 +458,10 @@ class Scanner:
                     self.note(history, events, aid, "stale", key=signature)
                     continue
                 if now < reset + self.quota_grace or resumed.get(pool, 0) >= self.quota_per_pool:
+                    continue
+                if any(e.get("action") == "reserved" and e.get("kind") == "quota" and e.get("pool") == pool
+                       and number(e.get("time")) and e["time"] > now - QUOTA_POOL_GAP_SECONDS for e in events):
+                    self.note(history, events, aid, "pool-gap", key=f"{signature}:{int(now // 600)}", pool=pool)
                     continue
                 account = self.aiuse_account(pool)
                 if not self.reset_confirmed(account, wait):
@@ -461,40 +492,47 @@ class Scanner:
                     same = (quota_line(pool, fresh_logs) and self.signature(fresh, fresh_logs) == signature
                             and self.quota_activity(aid, pool) == "ok")
                 if not same:
-                    self.event(history, aid, "changed")
+                    self.note(history, events, aid, "changed", key=f"presend:{signature}")
                     continue
                 if self.remaining() < CLI_TIMEOUT + RESERVE_MARGIN:
                     self.event(history, aid, "deadline-before-reserve")
                     return
                 self.event(history, aid, "reserved", signature=signature, pool=pool, kind="quota")
-                events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature})
+                events.append({"agent": aid, "action": "reserved", "time": time.time(), "signature": signature,
+                               "pool": pool, "kind": "quota"})
                 sent.add((aid, signature))
                 resumed[pool] = resumed.get(pool, 0) + 1
                 self.cli("send", "--json", "--no-wait", "--", aid, QUOTA_PROMPT, accepted=True)
                 self.event(history, aid, "submitted", kind="quota")
-            except (ScanError, ValueError, TypeError, AttributeError):
+            except (ScanError, ValueError, TypeError, AttributeError) as exc:
                 self.remaining()  # Expired watch still exits at its deadline.
-                self.event(history, aid, "unavailable", kind="quota")
+                self.note(history, events, aid, "unavailable", key=f"{type(exc).__name__}:{int(time.time() // 600)}",
+                          kind="quota")
 
-    def quota_first_sight(self, history, events, waits, aid, pool, updated, signature):
+    def quota_first_sight(self, history, events, waits, aid, pool, updated, signature, checked=False):
         error_time = stamp(updated)
+        first = {"stage": "first-sight", "signature": signature, "updated_at": updated, "pool": pool}
         if not 0 <= time.time() - error_time:
-            self.note(history, events, aid, "stale", key=signature)
+            self.note(history, events, aid, "stale", key=signature, **first)
             return
         # The agent is still `error` (loaded) here: the only moment its timeline can be read safely, so the
         # done:/new-instruction check is made before a wait is armed (a closed agent is never read later).
-        state = self.quota_activity(aid, pool)
+        # `checked`: this error event was already read once (a first-sight row with the same UpdatedAt), so only
+        # aiuse is consulted again; the logs are not re-read for an agent that stays unconfirmed.
+        state = "ok" if checked else self.quota_activity(aid, pool)
         if state != "ok":
-            self.note(history, events, aid, "delivered" if state == "delivered" else "changed", key=signature)
+            self.note(history, events, aid, "delivered" if state == "delivered" else "changed", key=signature,
+                      **first)
             return
         account = self.aiuse_account(pool)
         if account is None:
-            self.note(history, events, aid, "aiuse-unavailable", key=f"{signature}:{int(time.time() // 600)}")
+            self.note(history, events, aid, "aiuse-unavailable", key=f"{signature}:{int(time.time() // 600)}",
+                      **first)
             return
         kind, fields = self.quota_anchor(account, error_time)
         if kind != "wait":
             self.note(history, events, aid, {"unconfirmed": "quota-unconfirmed", "excluded": "quota-excluded",
-                                              "stale": "stale"}[kind], key=signature, pool=pool)
+                                              "stale": "stale"}[kind], key=signature, **first)
             return
         self.note(history, events, aid, "quota-wait", signature=signature, pool=pool, updated_at=updated,
                   **fields)

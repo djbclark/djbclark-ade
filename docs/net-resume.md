@@ -113,11 +113,15 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 3. **aiuse is the reset anchor, fail closed.** On first sight of an eligible error the scan records `quota-wait`
    (`signature`, `pool`, `window_id`, `window_minutes`, `resets_at`, `updated_at`) from the exhausted aiuse window
    (`state` exhausted or used 95% or more). The reset must fall after the error and within `window_minutes` of it, else
-   `stale`; no exhausted window is `quota-unconfirmed`, never a resume. aiuse nulls `resets_at` after a reset (it can also carry an earlier reset forward as an estimate),
+   `stale`; no exhausted window is `quota-unconfirmed`, never a resume. **aiuse dependency (2026-11-12):** the wait is armed
+   only when aiuse itself shows the window `exhausted` or at 95% or more. If aiuse's collector lags, or its own quota-note
+   matching (family `5h` against a window whose `pool_family` is null) never flips the `primary` window, the pass stays
+   `quota-unconfirmed` and never fires; check with a dry-run canary first. aiuse is not changed by this pass.
+   An unconfirmed agent is re-evaluated against aiuse on every scan but its logs are not re-read (see 5). aiuse nulls `resets_at` after a reset (it can also carry an earlier reset forward as an estimate),
    so the ledger copy is the only anchor and the resume gate still needs a fresh post-reset sample.
 4. **Resume gate.** A resume needs a fresh aiuse sample (`fresh` true, not stale, `usable_now` true) whose
    `collected_at` is at or after `resets_at` plus grace and not in the future, showing the recorded window below the
-   limit. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`, or
+   limit and no window longer than 360 minutes (or of unknown length) exhausted, whatever `usable_now` says. A missing aiuse, bad JSON, a missing or ambiguous account, or a stale sample waits (`quota-waiting`, or
    `aiuse-unavailable` at first sight, once per ten minutes each). The reset may be at most `--max-error-age-minutes` (default 30) in the past, else `stale`.
 5. **Agent state.** `error` is eligible after `paseo logs --json` shows the quota line still last: a newer user
    message or other output is `changed`, a `done:` line before the error is `delivered`. That check runs **before**
@@ -131,10 +135,10 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    `docs/upstream-issues.md`), so `error` does **not** prove the agent is loaded. The pass therefore never calls
    `paseo logs` for a `closed` agent, never for an `error` agent whose `UpdatedAt` is older than 360 minutes plus
    `--max-error-age-minutes` (the quota analogue of the network path's age rule; note that widening that flag
-   widens this bound too) or in the future, and not again once a `quota-wait` is armed for that `UpdatedAt` (the
-   ledger's signature identifies the error event) until the reset check. Before a wait is armed (first sight ends in
-   `aiuse-unavailable`, `quota-unconfirmed`, `quota-excluded`, `stale`, `delivered` or `changed`) each scan reads the
-   logs again while the agent stays `error`. What remains is a reload of an unloaded `error` agent younger than the
+   widens this bound too) or in the future, and not again once the ledger holds a row for that `UpdatedAt`: a
+   `quota-wait` (the scan matches its `updated_at` and pool and reuses the stored signature) until the reset check, or
+   a first-sight row (`quota-unconfirmed`, `quota-excluded`, `aiuse-unavailable`, `stale`, which are only re-checked
+   against aiuse, and `delivered`/`changed`, which end the matter for that error event). What remains is a reload of an unloaded `error` agent younger than the
    bound: Paseo's reload turns its stored `error` into `idle` and drops `lastError`, so the scan reads it about once, and
    that agent is skipped (fails closed) with **no ledger row** and no longer shows as errored; a later idle collection
    closes it. A reload at the reset check (an armed agent unloaded by a daemon restart before its reset) writes
@@ -143,8 +147,13 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
    `lastUserMessageAt` (design B4d), so the closed-agent identity check is the unchanged `UpdatedAt`, which a new
    user message changes because the agent runs.
 6. **Prompt and dry run.** `provider quota window reset; continue from where you stopped, check any interrupted operation before
-   retrying, same report path`. One resume per pool per scan, so a just-reset pool is not drained at once. A dry run counts a `would-resume-quota` toward that cap, so with
-   several agents in one pool it shows only the first until it goes stale.
+   retrying, same report path`. One resume per pool per scan, and at least 600 seconds between two quota
+   resumes of one pool (`QUOTA_POOL_GAP_SECONDS`, read from the ledger's quota `reserved` rows across scans and runs; a
+   blocked agent logs `pool-gap`), so a just-reset pool is not drained at once. A dry run counts a `would-resume-quota`
+   toward the per-scan cap, so with several agents in one pool it shows only the first one (every scan) until that error
+   goes stale (reset plus `--max-error-age-minutes`).
+7. **Ledger rows.** `changed`, `unavailable` and the waiting/gap notes are written once per error event (or per ten
+   minutes), not once per scan; a persistent mismatch or failure is one row.
 
 `--quota` shares the network pass's ledger, so a malformed `quota-wait` row fails the whole run (exit 2) after the network
 pass; a lead that replaces a quota-stopped agent with a new one should archive the old agent, or the old one may be resumed

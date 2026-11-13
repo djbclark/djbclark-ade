@@ -499,6 +499,10 @@ def test_quota_is_off_by_default(quota):
     {"account": lambda: account([window()], collected="2026-11-12T20:34:00+00:00", usable=True)},  # still exhausted
     {"account": lambda: account([window("ok", 0.0, None, window_id="other")], collected="2026-11-12T20:34:00+00:00", usable=True)},
     {"account": lambda: account([window("ok", 96.0, None)], collected="2026-11-12T20:34:00+00:00", usable=True)},
+    {"account": lambda: account([window("ok", 0.0, None), window("exhausted", 100.0, "2026-11-18T14:56:01+00:00", 10080, "secondary")],
+                                collected="2026-11-12T20:34:00+00:00", usable=True)},  # weekly binds despite usable_now
+    {"account": lambda: account([window("ok", 0.0, None), {**window("exhausted", 100.0, None, 10080, "x"), "window_minutes": None}],
+                                collected="2026-11-12T20:34:00+00:00", usable=True)},  # unknown-length window
     {"account": lambda: reset_account(provider="claude")},  # missing account
     {"raw": "not json"}, {"raw": "[]"}, {"raw": '{"snapshot": {"accounts": "x"}}'}, {"none": True},
 ])
@@ -632,7 +636,7 @@ def test_weekly_or_unconfirmed_windows_never_wait(quota):
     assert not quota["sent"].exists()
 
 
-def test_d7_one_resume_per_pool_per_scan(quota):
+def test_d7_one_resume_per_pool_per_scan_and_a_gap_between_scans(quota):
     data = quota["data"]
     data["agents"][CHILD2] = {**data["agents"][CHILD], "Id": CHILD2}
     quota["put"](exhausted_account())
@@ -640,10 +644,19 @@ def test_d7_one_resume_per_pool_per_scan(quota):
     assert quota["actions"](CHILD) == quota["actions"](CHILD2) == ["quota-wait"]
     quota["clock"](at(20, 35))
     quota["put"](reset_account())
+    sent_to = lambda: [json.loads(line)[4] for line in quota["sent"].read_text().splitlines()]
     assert quota["scan"]() == 0
-    assert [json.loads(line)[4] for line in quota["sent"].read_text().splitlines()] == [CHILD]
+    assert sent_to() == [CHILD]
+    assert quota["scan"](quota_per_pool=5) == 0  # Even a larger per-scan cap cannot beat the ledger gap.
+    assert sent_to() == [CHILD]
+    assert quota["actions"](CHILD2)[-1] == "pool-gap"
+    quota["clock"](at(20, 36))
     assert quota["scan"]() == 0
-    assert [json.loads(line)[4] for line in quota["sent"].read_text().splitlines()] == [CHILD, CHILD2]
+    assert sent_to() == [CHILD]
+    quota["clock"](at(20, 46))  # Ten minutes after the first reservation (still inside the 30-minute stale window).
+    quota["put"](reset_account(collected="2026-11-12T20:45:00+00:00"))
+    assert quota["scan"]() == 0
+    assert sent_to() == [CHILD, CHILD2]
 
 
 def test_d8_closed_agent_with_unchanged_ledger_entry_is_resumed(quota):
@@ -816,3 +829,91 @@ def test_would_resume_is_written_once_per_error_event(quota):
     for _ in range(3):
         assert quota["scan"](False) == 0
     assert quota["actions"]().count("would-resume-quota") == 1
+
+
+@pytest.mark.parametrize("status", ["error", "closed"])
+@pytest.mark.parametrize("mutation", ["archived", "updated-at", "not-descendant", "status", "pool"])
+def test_pre_send_reinspection_blocks_each_change(quota, monkeypatch, status, mutation):
+    quota["wait"]()
+    quota["data"]["agents"][CHILD]["Status"] = status
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    armed = {"on": False, "used": False}
+    original_guard = Scanner.guard_pending
+    original_inspect = Scanner.inspect
+    def guard(self, aid):
+        armed["on"] = True  # The first call precedes the pre-send re-read.
+        return original_guard(self, aid)
+    def inspect(self, aid):
+        record = original_inspect(self, aid)
+        if aid == CHILD and armed["on"]:
+            armed["used"] = True
+            if mutation == "archived": record["Archived"] = True
+            if mutation == "updated-at": record["UpdatedAt"] = "2026-11-12T20:10:00Z"
+            if mutation == "not-descendant": record["ParentAgentId"] = None
+            if mutation == "status": record["Status"] = "idle"
+            if mutation == "pool": record["Model"] = "opencode-go/glm"
+        return record
+    monkeypatch.setattr(Scanner, "guard_pending", guard)
+    monkeypatch.setattr(Scanner, "inspect", inspect)
+    assert quota["scan"]() == 0
+    assert armed["used"]
+    assert not quota["sent"].exists()
+    assert quota["actions"]()[-1] == "changed"
+    assert "reserved" not in quota["actions"]()
+    for _ in range(2):  # The same mismatch on later scans (re-armed just before each pre-send re-read).
+        armed["on"] = False
+        assert quota["scan"]() == 0
+    assert quota["actions"]().count("changed") == 1  # One ledger row, not one per scan.
+    assert not quota["sent"].exists()
+
+
+def test_persistent_failure_writes_one_unavailable_row(quota):
+    quota["wait"]()
+    path = quota["state"] / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["resets_at"] = "garbage"  # A string, so the ledger loads, but it cannot be parsed.
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    quota["data"]["agents"][CHILD]["Status"] = "closed"
+    for _ in range(3):
+        assert quota["scan"]() == 0
+    assert quota["actions"]().count("unavailable") == 1
+    assert not quota["sent"].exists()
+
+
+def test_unconfirmed_agent_is_not_re_read_but_is_re_evaluated(quota):
+    quota["put"](account([window("ok", 12.0, None)]))  # aiuse has not (yet) seen the exhaustion
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-unconfirmed"]
+    first = len(logs_calls())
+    assert first >= 2  # plain logs + structured logs at first sight
+    for _ in range(3):
+        assert quota["scan"]() == 0
+    assert len(logs_calls()) == first
+    assert quota["actions"]() == ["quota-unconfirmed"]
+    quota["put"](exhausted_account())  # aiuse catches up: the wait is armed without reading the logs again
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == ["quota-unconfirmed", "quota-wait"]
+    assert len(logs_calls()) == first
+    quota["clock"](at(20, 35))
+    quota["put"](reset_account())
+    assert quota["scan"]() == 0
+    assert quota["sent"].exists()
+
+
+@pytest.mark.parametrize("activity,action", [
+    ([{"type": "user_message", "text": "r"}, {"type": "assistant_message", "text": "done: W1 https://example.test/1"},
+      {"type": "assistant_message", "text": QLINE}], "delivered"),
+    ([{"type": "user_message", "text": "r"}, {"type": "assistant_message", "text": QLINE},
+      {"type": "user_message", "text": "new task"}], "changed"),
+])
+def test_blocked_first_sight_is_not_re_read(quota, activity, action):
+    quota["data"]["activity"] = activity
+    quota["put"](exhausted_account())
+    assert quota["scan"]() == 0
+    assert quota["actions"]() == [action]
+    first = len(logs_calls())
+    for _ in range(3):
+        assert quota["scan"]() == 0
+    assert len(logs_calls()) == first
+    assert quota["actions"]() == [action]
