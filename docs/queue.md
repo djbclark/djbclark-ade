@@ -172,7 +172,6 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 7. Keep every machine current, and a changelog (2026-10-20): `bin/ade-update`, `CHANGELOG.md`, fragments since 2026-10-31.
 8. Phase 0 backups (PR 24) and the templates (PR 23), 2026-10-20.
 9. ade-git-guard O2 redesign adopted and built (PR 59, 2026-10-25).
-24. **Web search first and last** (operator, 2026-11-13; former Carried 34, shipped by the `websearch-policy` PR): the required `Prior art / docs checked:` brief line and the `Closing search:` report field live in `docs/dispatch-footer.md` rule 24 and the `skills/fan-out` brief section; the reviewer rule (missing on a non-exempt PR is a LOW) is `docs/code-review.md` rule 12.
 10. An absolute "all work in a worktree" commandment (2026-10-25): adopted as order 9.
 11. Deadline waiters register themselves (2026-11-02); the sweep installs on Linux too (`deadline install --backend`).
 12. Queued lows branch, adversary BLOCK, repair and round 2 APPROVE (2026-10-24).
@@ -187,3 +186,4 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 21. Flaky MockWebServer tests on the SIPB runner (2026-10-14).
 22. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
 23. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).
+24. **Web search first and last** (operator, 2026-11-13; former Carried 34, shipped by the `websearch-policy` PR): the required `Prior art / docs checked:` brief line and the `Closing search:` report field live in `docs/dispatch-footer.md` rule 24 and the `skills/fan-out` brief section; the reviewer rule (missing on a non-exempt PR is a LOW) is `docs/code-review.md` rule 12.
