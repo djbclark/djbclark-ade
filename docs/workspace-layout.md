@@ -49,10 +49,11 @@ A lead's workers and reviewers all go in **one new window per lead**, never one 
    `$PASEO_HOME/agents/*/<agent id>.json` `workspaceId` (verified 2026-11-13). Record the `wks_…` in the lead's own state,
    then `paseo workspace rename <wks> "workers <middle> <lead id>"`, and give every later launch `--workspace <wks>`. Rename
    each tab with `paseo agent update <full agent id> --name "worker <middle> <lead id>"` (tabs share a name, so always pass
-   a full agent id, never a tab name). **Archive the window only when both hold:** every agent labelled `ade.lead=<own id>`
-   is archived or idle with its DONE/BLOCKED handled (`paseo ls -a -g --json`; `paseo workspace archive` archives every
-   agent still live in the window and stops its terminals), and the recorded `<wks>`'s name reads `workers … <own lead id>`.
-   Otherwise leave the window (`paseo workspace archive <wks>`).
+   a full agent id, never a tab name). **Archive the window with `paseo workspace archive <wks>` only when all hold:** every
+   agent labelled `ade.lead=<own id>` is archived or idle with its DONE/BLOCKED handled (`paseo ls -a -g --json --label
+   ade.lead=<own id>`); no other live agent sits in the window (`paseo ls -a -g --json`, match its workspace; the archive
+   stops every live agent and terminal in the window, labelled or not); and the recorded `<wks>`'s name reads `workers …
+   <own lead id>`. Otherwise leave the window.
 5. **cwd:** a window's `cwd` is the session directory its first launch gave it (the repo's primary checkout). Later tabs
    launch with `--workspace <wks> --cwd <that same directory>` (with `--workspace`, Paseo takes the agent's cwd from the
    window). Because that directory is the shared primary checkout, where nothing may be edited (AGENTS.md order 9), each

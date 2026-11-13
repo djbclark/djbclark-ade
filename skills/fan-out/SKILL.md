@@ -77,8 +77,9 @@ archiving an agent keeps its window). Instead:
 3. After each launch, name the tab: `paseo agent update <full agent id> --name "worker <middle> <lead agent id>"` (singular
    `worker`; tabs share a name, so always pass a full agent id).
 4. When the run ends, archive the agents, then the window (`paseo workspace archive wks_…`) only if every agent labelled
-   `ade.lead=<own id>` is archived or idle with its report handled (`paseo ls -a -g --json`) and the recorded window's
-   name reads `workers … <own id>`: the archive stops every live agent and terminal in the window.
+   `ade.lead=<own id>` is archived or idle with its report handled (`paseo ls -a -g --json --label ade.lead=<own id>`), no
+   other live agent sits in the window, and the recorded window's name reads `workers … <own id>`: the archive stops every
+   live agent and terminal in the window, labelled or not.
 
 A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
 its own placement, and opens its own workers window under its own id.
