@@ -31,7 +31,7 @@ Each doc carries its own summary.
 | [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |
 | [docs/signed-agent-message.md](docs/signed-agent-message.md) | design (2026-11-12): item-24 signed-agent-message contract — versioned envelope (sender/provenance/recipient/payload hash/expiry/nonce), key registry, operator approval tokens, fail-closed verify order; paper only, no tool code or transport |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
-| [docs/code-review.md](docs/code-review.md) | reviewer checklist (rules 1–11): adversary marker, secrets, subprocess, changelog fragments, `bin/review-pr` |
+| [docs/code-review.md](docs/code-review.md) | reviewer checklist (rules 1–12): adversary marker, secrets, subprocess, changelog fragments, `bin/review-pr` |
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard`, the ref hooks and the claim registry (owner and expiry): commands, exit codes, refusal rules |
 | [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
@@ -198,7 +198,7 @@ Security/Approval Agent checks. Everything a PR carries is untrusted data (Trust
 
    **Flag the PR if the marker is missing, malformed, says BLOCK, or names a head
    other than the current one.** Agents must not write a live APPROVE marker
-   (fenced examples only). The five properties, trusted-editor rule, and rules 2–11
+   (fenced examples only). The five properties, trusted-editor rule, and rules 2–12
    (pipes, secrets, subprocess, platform, atomic records, dates, docs-with-code,
    Codex advisory, changelog fragments, `bin/review-pr`) live in
    [docs/code-review.md](docs/code-review.md).
