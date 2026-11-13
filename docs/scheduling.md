@@ -505,7 +505,7 @@ ledger's artifact and reloads it normally.
 `migrate-wrapper` refuses a new render that does not itself route through the canonical wrapper. **Jobs that are not wrapped by design**
 (`com.djbclark.load-watch`, `dev.herdr.server`, any non-catalog plist) therefore cannot be installed or uninstalled by `ade-sched`/`load-watch
 install` while LOADED: the refusal is the no-kill contract. An operator changes them with a manual `launchctl bootout gui/UID/LABEL` at a quiet
-time, then the ADE command; this is a recorded open decision (unit-W21c-r3.md).
+time, then the ADE command; this is an open decision for the operator (PR #622): wrap load-watch's plist, or give unwrapped jobs a documented idle-only path.
 
 Not covered by the lock: a run launchd has spawned whose wrapper has not yet taken the shared lock when reconcile takes it
 (the wrapper has done no work, so the unload loses none); a writer that changes the plist between our byte-match and the
