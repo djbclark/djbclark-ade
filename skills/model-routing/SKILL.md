@@ -25,7 +25,7 @@ threshold from this file or any other.
 
 | Tier | Roles | Effort |
 |---|---|---|
-| A1. **Fable 5.1** | the lead of a planned multi-slice project, architects, adversaries | `high` (its default); `xhigh` only for a synthesis the operator asked for; never `max` |
+| A1. **Fable 5.2** | the lead of a planned multi-slice project, architects, adversaries | `high` (its default); `xhigh` only for a synthesis the operator asked for; never `max` |
 | A2. **Opus 5.5** | rewrites, reviewers, judgment slices, the next rung after a failed Sonnet check | `high` |
 | A3. **Sonnet 5.5** | audits, deletions, inventories, everyday code from a clear brief, a pipeline-only lead | `medium` (`high` where verification matters) |
 | A4. **Haiku 5.5** | mechanical work: lookups, classification, extraction, reformatting | `low` |
@@ -45,7 +45,7 @@ makes an unpinned one Sonnet (`bin/claude-settings-env`); pass `model: "opus"` f
 ## B. Effort
 
 B1. Levels `low`, `medium`, `high`, `xhigh`, `max`. Precedence: `CLAUDE_CODE_EFFORT_LEVEL` > `/effort` > `--effort` >
-settings `effortLevel` > the model default (`high` on Fable 5.1, `medium` on Opus, Sonnet and Haiku 5.5). **Set a
+settings `effortLevel` > the model default (`high` on Fable 5.2, `medium` on Opus, Sonnet and Haiku 5.5). **Set a
 sub-agent's effort explicitly**; `CLAUDE_CODE_SUBAGENT_EFFORT` pins it for every sub-agent, and a sub-agent on another
 model uses that model's effort.
 B2. Classify the next several actions, not the last one: applying a decision already made (edits, commits, docs, known

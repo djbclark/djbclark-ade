@@ -29,7 +29,7 @@ History:
   come back), so the old 150k / +70k tiers re-fired after ~40 requests, and
   sessions compacted every ~25 min (one 24 times in a day). Each compaction
   re-writes ~70k tokens at the 1-hour cache's 2x rate plus the summary, ~150-
-  180k base-input-equivalent; with cache reads at 0.025x (Fable 5.1) / 0.05x
+  180k base-input-equivalent; with cache reads at 0.025x (Fable 5.2) / 0.05x
   (Opus/Sonnet 5.5) that pays back only after ~45-85 requests, so most were a
   net loss. Growth now counts from the floor after the latest compaction, the
   compact tier is +200k (or 400k total), and the early tier no longer
@@ -106,7 +106,7 @@ POST_TOOL_CHECK_SECONDS = 20
 # djbclark, 2026-10-23: lead sessions run on Opus 5.5 high, not Fable (a Fable lead burned ~30% of
 # a week's Claude quota); since 2026-11-07 `[lead].fable_lead = true` in config/routing.toml allows a Fable lead.  The quota guard's tight/critical downshift went with the guard (2026-11-07,
 # slim-down E7): pausing at a quota limit is the session-guard and usage-auto-resume plugins' job.
-FABLE_MODEL = "claude-fable-5-1"
+FABLE_MODEL = "claude-fable-5-2"
 SUCCESSOR_OPUS = "claude/claude-opus-5-5"
 
 # Compaction is not free (see History, 2026-10-10): only compact once the

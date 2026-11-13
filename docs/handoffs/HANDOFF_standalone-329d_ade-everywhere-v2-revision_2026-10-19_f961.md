@@ -118,7 +118,7 @@ that model-routing is a guideline, not a limit, for this project.
    phase": a table of phase, slice kind, vendor, model version, effort, context/cache size,
    quota pool and headroom, from `aiuse --available --json` and the rulings above. Suggested
    shape: judgment and integration on Claude Opus 5.5 high; frontier reviews on codex
-   gpt-6-astra high and Fable 5.1 high (one each per phase gate); code on Claude Sonnet 5.5 high
+   gpt-6-astra high and Fable 5.2 high (one each per phase gate); code on Claude Sonnet 5.5 high
    with 1M context only for whole-archive refactors; research on agy gemini-3.8-flash high while
    its Gemini pool is near 100; bulk and mechanical on cursor auto or zai GLM-5.3 Flash low;
    never copilot, gemini CLI, qwen-code, cline, hermes.

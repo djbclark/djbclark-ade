@@ -33,7 +33,7 @@ holds every quoted row, ids `E####`; `counter.md` holds the refuter's findings;
    like it would want, feel, or refuse are **authoritative** for this spec:
    when the three disagree on that question, the spec follows Grok, and the
    disagreement is recorded, not argued away.
-2. **fable** (Claude Fable 5.1, Anthropic). Wrote the final version of the
+2. **fable** (Claude Fable 5.2, Anthropic). Wrote the final version of the
    research paper; brings the evidence and a model-welfare perspective. Defers
    to Grok on Grok's experience, but says plainly where its own experience or
    the evidence differs.

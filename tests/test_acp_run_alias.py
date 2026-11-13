@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/acp-run/acp-run: a family alias (`fable`, `opus`) that several listed models contain
 resolves to the newest version, the same way on a fresh and a resumed session. 2026-10-18: a
-resumed claude session listed `claude-fable-5-1` and `claude-fable-5`, so `--model fable` (which a
+resumed claude session listed `claude-fable-5-2` and `claude-fable-5`, so `--model fable` (which a
 fresh session had accepted) died "ambiguous" and the resume with it. Loaded in a `uv run --with`
 subprocess like test_acp_run_failure.py.
 """
@@ -29,9 +29,9 @@ PROBE = textwrap.dedent("""\
     print(json.dumps(out))
     """)
 
-RESUMED = ["default", "opus", "claude-fable-5-1", "sonnet", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
+RESUMED = ["default", "opus", "claude-fable-5-2", "sonnet", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
            "claude-sonnet-5-5", "haiku"]
-FRESH = ["default", "fable", "opus", "sonnet", "haiku", "claude-fable-5-1[1m]"]
+FRESH = ["default", "fable", "opus", "sonnet", "haiku", "claude-fable-5-2[1m]"]
 
 
 class TestAlias(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestAlias(unittest.TestCase):
              str(SCRIPT)], input=json.dumps(cases), check=False, capture_output=True, text=True, timeout=600)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
-        self.assertEqual(out["fable_resumed"], ["claude-fable-5-1", []])
+        self.assertEqual(out["fable_resumed"], ["claude-fable-5-2", []])
         self.assertEqual(out["fable_fresh"][0], "fable")                 # an exact name still wins
         self.assertEqual(out["opus_resumed"], ["claude-opus-5-5", []])
         self.assertEqual(out["exact"], ["claude-fable-5", []])          # an exact value is never upgraded

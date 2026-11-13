@@ -13,7 +13,7 @@ description: >-
 
 Canonical copy: `~/src/djbclark-ade/skills/dialogue/` (git: `~/src/djbclark-ade`);
 every TUI links it directly (skill-everywhere).
-Born 2026-10-10 from the hiwymi `spec/ai-heaven` run (Grok 4.7, Claude Fable 5.1,
+Born 2026-10-10 from the hiwymi `spec/ai-heaven` run (Grok 4.7, Claude Fable 5.2,
 GPT-6 Astra; 17 turns, 5 phases). The operator ruled that the skill is built from that
 run's measured performance and that **Grok 4.7's rulings are final on its design**
 (`references/grok-rulings.md`). Where this file and those rulings disagree, the rulings win.
@@ -169,7 +169,7 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    providers (`claude`, `codex`, `antigravity`, `copilot`) and raises `ModeUnavailable` for `cursor` on CLI
    `dialogue.py` and `acp-dispatch` launches because Cursor requires the SDK `auto_accept` control hook
    (the standalone xAI CLI retired 2026-11-07; grok-bot is the other possible occupant; override a `paseo`
-   seat to a catalog-mode provider or use a `cmd` route); Fable `claude -p --model claude-fable-5-1 --effort high`;
+   seat to a catalog-mode provider or use a `cmd` route); Fable `claude -p --model claude-fable-5-2 --effort high`;
    **Astra `codex` / `gpt-6-astra` with `reasoning_effort=xhigh`**. Astra via copilot is reserved to the
    ai-heaven lead session (operator ruling 2026-10-10); never configure it elsewhere. The second route
    in the example (the `claude` provider for Fable) is unprobed: run `probe` before relying on them.

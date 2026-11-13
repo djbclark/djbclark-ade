@@ -39,11 +39,11 @@
       ]
     },
     "fable": {
-      "label": "Claude Fable 5.1",
+      "label": "Claude Fable 5.2",
       "pool_label": "Claude Code 5-hour",
       "routes": [
-        {"kind": "claude", "model": "claude-fable-5-1", "effort": "high"},
-        {"kind": "paseo", "agent": "claude", "model": "claude-fable-5-1"}
+        {"kind": "claude", "model": "claude-fable-5-2", "effort": "high"},
+        {"kind": "paseo", "agent": "claude", "model": "claude-fable-5-2"}
       ]
     },
     "astra": {

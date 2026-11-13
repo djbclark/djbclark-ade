@@ -28,7 +28,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(os.environ.get("ACP_DISPATCH_SCRIPT", str(ROOT / "bin" / "acp-dispatch")))
 FAKES = ROOT / "tests" / "fakes"
-FABLE = "claude-fable-5-1[1m]"
+FABLE = "claude-fable-5-2[1m]"
 REASON = "the cross-file invariant needs frontier-level adjudication"
 
 

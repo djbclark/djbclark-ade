@@ -15,9 +15,9 @@ that supercedes fable comes out, our gates shift, so that the new frontier model
 fable becomes treated like current opus. We should do the same type of thing for the popularly acclaimed 2nd best AI
 coding vendor, at this time that is codex astra as the 2nd top frontier model."
 
-Problem: every gate that rations a scarce model names that model. `claude-fable-5-1`, `claude-opus-5-5`, `fable`,
+Problem: every gate that rations a scarce model names that model. `claude-fable-5-2`, `claude-opus-5-5`, `fable`,
 `opus`, `gpt-6-astra` and `gpt-6.1-sol` appear as literals, regexes, substrings and prose in about 40 places
-(section A). When a model supersedes Fable, the gates keep rationing Fable 5.1 and let the new model through
+(section A). When a model supersedes Fable, the gates keep rationing Fable 5.2 and let the new model through
 ungated, or block it as unknown in one place and wave it through in another. Decision: one versioned file,
 `config/model-tiers.toml`, maps **roles** to concrete ids per vendor. Every gate reads roles. A `promote` operation
 shifts a vendor's ladder in one reviewed commit. The Fable allowance the `away` profile needs (section C) is written
@@ -75,13 +75,13 @@ default = everyday); `tools/acp-run/acp-run:2972` headless fallback `model = a.m
 | A2.1 | `bin/claude-fleet-governor:94-96` | `OPUS = "claude-opus-5-5"`, `SONNET = "claude-sonnet-5-5"`, `HANDOFF_SUCCESSOR = "omp/anthropic/claude-sonnet-5-5"` (also passed to `bin/paseo-set-model`) |
 | A2.2 | `bin/claude-fleet-governor:106-107` | regexes `claude-fable[...]`, `claude-(opus|fable)[...]` (family patterns) |
 | A2.3 | `bin/claude-quota-guard:117-119` | `_SELF_SLASH ... claude/claude-sonnet-5-5`, `_ADVERSARY ... anthropic/claude-opus-5-5` |
-| A2.4 | `claude/hooks/context_size_nudge.py:74-76` | `FABLE_MODEL = "claude-fable-5-1"`, `SUCCESSOR_OPUS`, `SUCCESSOR_SONNET` |
+| A2.4 | `claude/hooks/context_size_nudge.py:74-76` | `FABLE_MODEL = "claude-fable-5-2"`, `SUCCESSOR_OPUS`, `SUCCESSOR_SONNET` |
 | A2.5 | `config/routing.toml:195,224,260,284,325,386,416,432` | `[[service]] models`: claude aliases (`opus`/`fable`/`sonnet`), omp `anthropic/claude-*-5-5`, codex `gpt-6-astra`/`gpt-6.1-sol`/`gpt-6-luna`, agy `claude-opus-5-5`, copilot `claude-sonnet-5.5` (dotted), cursor `claude-sonnet-5-5`/`claude-haiku-5-5`, opencode-go `opencode-go/gpt-6-luna` |
 | A2.6 | `bin/failover.py:212-214,221` | `models=("haiku","sonnet")`, `model_allow` regex, `native_models` `claude-haiku-5-5`/`claude-sonnet-5-5`, agy `claude-sonnet-5-5` |
-| A2.7 | `bin/claude-cost-mix:44-46` | price table keyed by id (`claude-fable-5-1` 10.0/0.025 ...); reporting only |
+| A2.7 | `bin/claude-cost-mix:44-46` | price table keyed by id (`claude-fable-5-2` 10.0/0.025 ...); reporting only |
 | A2.8 | `claude/agents/adversary.md:9` | comment: `acp-dispatch omp --model anthropic/claude-opus-5-5 ...` |
 | A2.9 | `claude/hooks/frontier_agent_gate.py:41-44` | the ask message names `opus` and `gpt-6.1-sol` |
-| A2.10 | `tools/acp-run/acp-run:2181-2214` | alias resolution: `fable` resolves to the newest `claude-fable-*` (claude ACP lists both `fable` and `claude-fable-5-1[1m]`) |
+| A2.10 | `tools/acp-run/acp-run:2181-2214` | alias resolution: `fable` resolves to the newest `claude-fable-*` (claude ACP lists both `fable` and `claude-fable-5-2[1m]`) |
 | A2.11 | tests | `tests/test_claude_quota_guard.py` (fixtures `fable=`), `tests/test_claude_fleet_governor.py`, `claude/hooks/handoff-tools/tests/test_context_size_nudge.py:414-531`, `tests/test_acp_dispatch.py:191` (`"fable"`/`"astra"` in model) |
 
 ### A3. (c) Vendor, pool and window names (7 sites)
@@ -120,7 +120,7 @@ Count: 24 (a), 11 (b), 7 (c), 10 (d) groups.
 Four roles per vendor, from most to least scarce: `frontier`, `judgment`, `everyday`, `bulk`. A role names a model.
 Effort stays with the caller (`routing.toml` rows keep `--effort`). So codex's `judgment` and `everyday` can both
 be `gpt-6.1-sol`, at `high` and `medium`. The words `frontier-1` and `frontier-2` are **ranks of vendors**, not
-roles. `frontier-1` is the `frontier` role of the rank-1 vendor (Fable 5.1 today), `frontier-2` that of the rank-2
+roles. `frontier-1` is the `frontier` role of the rank-1 vendor (Fable 5.2 today), `frontier-2` that of the rank-2
 vendor (codex gpt-6-astra today). Gates written for "frontier-1" follow the rank, so a rank swap moves them with no
 code change.
 
@@ -144,7 +144,7 @@ reason = "djbclark 2026-10-26: Fable is the top frontier coding model; codex ast
 # A model string belongs to this vendor when it matches; an UNKNOWN id that matches is treated as `frontier`
 # (the strictest role) by every gate until `model-tiers set/promote` names it (fail closed).
 family = '^(anthropic/|claude/|omp/anthropic/)?(claude-[a-z]+-[0-9][\w.\[\]-]*|opus|sonnet|haiku|fable)$'
-roles = { frontier = "claude-fable-5-1", judgment = "claude-opus-5-5", everyday = "claude-sonnet-5-5", bulk = "claude-haiku-5-5" }
+roles = { frontier = "claude-fable-5-2", judgment = "claude-opus-5-5", everyday = "claude-sonnet-5-5", bulk = "claude-haiku-5-5" }
 # How each route spells an id. `{id}` canonical, `{alias}` the model's alias. Per-model exceptions live under [model."..."].
 spell = { claude = "{alias}", claude-code = "{alias}", paseo = "{id}", omp = "anthropic/{id}", agy = "{id}", cursor = "{id}", copilot = "{id_dotted}" }
 cascade = 2          # roles `promote` shifts by default: frontier -> judgment only (B4)
@@ -158,10 +158,10 @@ spell = { codex = "{id}", opencode-go = "opencode-go/{id}" }
 cascade = 2
 pools = {}           # no model sublimit: every role draws the account's 5-hour and weekly windows (A3.7)
 
-[model."claude-fable-5-1"]
+[model."claude-fable-5-2"]
 vendor = "claude"
 alias = "fable"
-display = "Fable 5.1"
+display = "Fable 5.2"
 [model."claude-opus-5-5"]
 vendor = "claude"
 alias = "opus"
@@ -205,7 +205,7 @@ rules stay as they are.
 | `frontier_tokens()` | every spelling and alias of each vendor's `frontier` role. Replaces `[dispatch].frontier_models` |
 | `rank(vendor)` | 1-based rank; `ranked_frontier(n)` gives `(vendor, id)` |
 | `pool(vendor, role)` | the `pools` entry or `None` |
-| `display(vendor, role)` | "Fable 5.1", used by every advice and ask text |
+| `display(vendor, role)` | "Fable 5.2", used by every advice and ask text |
 
 CLI `bin/model-tiers`: `show [--json]`, `resolve`, `classify MODEL`, `validate`, `promote`, `set`, `rank`, `undo`,
 `render [--check]`, `log`. Exit codes: 0 ok, 2 usage, 3 validation failed, 4 dry-run diff non-empty under `--check`.
@@ -256,11 +256,11 @@ What reads roles (after slice 3, section D):
    left on a retired id.
 4. **Dry run** prints a unified diff of `model-tiers.toml` and every rendered file, plus a "gates that change"
    table: each consumer in B3 with its before/after resolution (e.g. `governor: Fable->Opus move now targets
-   claude-fable-6 -> claude-fable-5-1`).
+   claude-fable-6 -> claude-fable-5-2`).
 5. **Audit and ping.** A non-dry run appends a JSON line (`ts`, `op`, `vendor`, `before`, `after`, `reason`,
    `probe`, `pool`, `set_by`, workspace HEAD) to `~/.local/state/ade/model-tiers.log` and writes the same `before`
    and `after` into the commit message it prepares (the caller commits with `git-commit-own`). It sends one
-   `hermes-ping "djbclark-ade: model-tiers promote claude: claude-fable-6 -> frontier, Fable 5.1 -> judgment
+   `hermes-ping "djbclark-ade: model-tiers promote claude: claude-fable-6 -> frontier, Fable 5.2 -> judgment
    (merge to apply)"`.
 6. **`undo`** applies the inverse of the newest audit line whose `after` equals the current file. It refuses if the
    file changed since (then `git revert` the promote commit). It audits and pings like promote. A merged promote
@@ -286,7 +286,7 @@ default comes from `resolve("claude","everyday","claude-code")` at run time (it 
 block, the table in B6. `render --check` runs in CI. Aliases: Claude Code's `fable`/`opus` aliases follow the
 newest model of that family, so a same-family release (Fable 5.2) is picked up by `model: fable` before anyone
 runs promote. After a promote, the judgment role may be a former frontier model in the same family
-(`claude-fable-5-1` as judgment while `fable` means Fable 6). The alias then no longer distinguishes the roles,
+(`claude-fable-5-2` as judgment while `fable` means Fable 6). The alias then no longer distinguishes the roles,
 and the render must write the full id. Whether Claude Code agent frontmatter and the Agent tool's `model`
 parameter accept a full id is **unverified** (R2; slice 4 proves it first).
 
@@ -294,7 +294,7 @@ parameter accept a full id is **unverified** (R2; slice 4 proves it first).
 
 | role | claude (rank 1) | codex (rank 2) |
 | --- | --- | --- |
-| frontier | `claude-fable-5-1` (`fable`) = **frontier-1** | `gpt-6-astra` = **frontier-2** |
+| frontier | `claude-fable-5-2` (`fable`) = **frontier-1** | `gpt-6-astra` = **frontier-2** |
 | judgment | `claude-opus-5-5` (`opus`) | `gpt-6.1-sol` (at `high`) |
 | everyday | `claude-sonnet-5-5` (`sonnet`) | `gpt-6.1-sol` (at `medium`) |
 | bulk | `claude-haiku-5-5` (`haiku`) | `gpt-6-luna` |
@@ -372,7 +372,7 @@ value under any other profile.
 
 ### C4. Quota-guard advice, role-based (exact draft text)
 
-Placeholders render from tiers: `{F1}` = `display(rank-1 vendor, frontier)` ("Fable 5.1"), `{J}` = claude judgment
+Placeholders render from tiers: `{F1}` = `display(rank-1 vendor, frontier)` ("Fable 5.2"), `{J}` = claude judgment
 ("Opus 5.5"), `{E}` = claude everyday ("Sonnet 5.5"), `{E_id}` = `resolve(claude, everyday, claude)`, `{ADV}` = the
 adversary command with `resolve(claude, judgment, omp)`, `{until}` = the profile end in New York time, `{min}`,
 `{left}` = frontier-1 cap floor and current value, `{n}` = `frontier1_agent_calls_per_day`.
@@ -439,12 +439,12 @@ a scarce model.
    sentence (only Opus 5.5+ edits the file, same length; the session that applies it re-checks the 14,000-byte cap):
    "**Routing policy: minimise cost, maximise code quality, not tokens. Model names come from
    `djbclark-ade/config/model-tiers.toml`: judgment is claude's judgment tier (Opus 5.5) at `high`; each
-   vendor's frontier tier (Fable 5.1, codex gpt-6-astra) only via `frontier`, or, while a gate profile allows it,
+   vendor's frontier tier (Fable 5.2, codex gpt-6-astra) only via `frontier`, or, while a gate profile allows it,
    where an agent judges it significantly better than judgment and says why in one line; codex otherwise: ample
    quota and top router rank (2026-10-25); frontier at `xhigh` almost never; claude codes on its everyday tier
    (Sonnet 5.5), never frontier**". The rest of the item is unchanged.
 2. **djbclark-ade `AGENTS.md` order 7** names no model. Optional clause: "model names: `config/model-tiers.toml`".
-3. **SKILL.md *Routing policy* items 1b, 1d, 2, 4d, 4e** say "Fable 5.1", "gpt-6-astra", "Opus 5.5". Rewrite in
+3. **SKILL.md *Routing policy* items 1b, 1d, 2, 4d, 4e** say "Fable 5.2", "gpt-6-astra", "Opus 5.5". Rewrite in
    roles with the generated "today" table (slice 5). Add item 1e for the away allowance (slice 1).
 4. **`good_at.frontier` prefers codex (1) over claude (2)** (A1.7) while the operator ranks Fable first. Vendor rank
    (quality) and routing preference (scarcity) are different axes, so this design does **not** let rank reorder

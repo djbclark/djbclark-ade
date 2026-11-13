@@ -11,7 +11,7 @@ checked on 2026-10-19 unless marked otherwise.
 
 ## 1. Sources
 
-1. Fable 5.1 high, read-only advise (`acp-dispatch --kind frontier --role advise`), report copied to
+1. Fable 5.2 high, read-only advise (`acp-dispatch --kind frontier --role advise`), report copied to
    [software-factory-reviews/fable-research-2026-10-19.md](software-factory-reviews/fable-research-2026-10-19.md).
 2. Codex `gpt-6-astra` high, same brief, third attempt (the first two ended on a refused
    escalation and a sandboxed-execute tripwire; both fixed in b33d028 and e72a777). Still running

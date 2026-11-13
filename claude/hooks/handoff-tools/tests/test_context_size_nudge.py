@@ -629,7 +629,7 @@ def test_reads_large_transcript_from_tail_only(hook, tmp_path):
 
 
 # --- successor form (2026-10-23): a Fable session hands off to Opus unless [lead].fable_lead (2026-11-07) ---
-_FABLE = "claude-fable-5-1"
+_FABLE = "claude-fable-5-2"
 
 
 def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
@@ -704,7 +704,7 @@ def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     path = tmp_path / "t.jsonl"
     rows = [
         {"message": {"model": "claude-opus-5-5", "role": "assistant"}},
-        {"isSidechain": True, "message": {"model": "claude-fable-5-1", "role": "assistant"}},
+        {"isSidechain": True, "message": {"model": "claude-fable-5-2", "role": "assistant"}},
         {"message": {"model": "<synthetic>", "role": "assistant"}},
     ]
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -712,7 +712,7 @@ def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
 
 
-@pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
+@pytest.mark.parametrize("model", ["claude-fable-5-2[1m]", "claude-fable-5-2", "claude-fable-5-1[1m]", "claude-fable-6"])
 def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
     assert nudge._successor_target(model) == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
     assert nudge._successor_target("claude-opus-5-5[1m]") is None

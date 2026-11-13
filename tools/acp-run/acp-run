@@ -1466,7 +1466,7 @@ def _toks(x, split="-"):
 def match_value(values, want):
     """(the value dict matching want, []) or (None, ambiguous candidates). An exact value or
     name wins. The claude ACP server's model list varies between launches ("fable" one
-    time, "claude-fable-5-1[1m]" the next; 2026-10-10), so fall back to a unique token
+    time, "claude-fable-5-2[1m]" the next; 2026-10-10), so fall back to a unique token
     match: a value whose dash-separated tokens contain the wanted name's tokens as a
     contiguous run."""
     for v in values:
@@ -1492,7 +1492,7 @@ def match_value(values, want):
 
 
 def newest_version(cands, wt, split):
-    """Among several values that all contain the wanted tokens (`fable` in claude-fable-5-1 and
+    """Among several values that all contain the wanted tokens (`fable` in claude-fable-5-2 and
     claude-fable-5), the one whose version tokens after the match are greatest, when that is
     unique: a family alias then resolves the same way on a fresh and a resumed session
     (2026-10-18: a resumed claude session listed both and `--model fable` died ambiguous)."""

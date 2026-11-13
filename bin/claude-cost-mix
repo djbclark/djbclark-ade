@@ -19,7 +19,7 @@ tool output carries (2026-10-18: navigation output was <=15% of Claude cost).
 
 Costs are API list-price dollars per request's own model (PRICES, from
 platform.claude.com/docs/en/about-claude/pricing, 2026-10-18): base input per MTok and the
-cache-read multiplier (0.05 on Opus/Sonnet 5.5, 0.025 on Fable 5.1, 0.1 otherwise; unknown
+cache-read multiplier (0.05 on Opus/Sonnet 5.5, 0.025 on Fable 5.2 (and 5.1), 0.1 otherwise; unknown
 models priced at $1 base). On a subscription these are equivalents, not a bill. Cache writes
 are 2.0x base (the 1-hour TTL, ENABLE_PROMPT_CACHING_1H; 5-minute writes are 1.25x: transcripts
 do not record the TTL, so pass --write 1.25), output 5x. --read forces one read multiplier.
@@ -43,7 +43,8 @@ def median(xs):
 PRICES = {
     "claude-opus-5-5": (4.0, 0.05),
     "claude-sonnet-5-5": (2.0, 0.05),
-    "claude-fable-5-1": (10.0, 0.025),
+    "claude-fable-5-2": (10.0, 0.025),  # 5.2 priced as 5.1 (unverified, 2026-11-13)
+    "claude-fable-5-1": (10.0, 0.025),  # kept: old transcripts
 }
 DEFAULT_PRICE = (1.0, 0.1)
 
