@@ -1656,3 +1656,132 @@ def test_b7_f6_migrate_never_creates_a_missing_old_lock_directory(ld, tmp_path):
     assert not old_dir.exists()
     assert S.migrate_wrapper_launchd(job, text, env=ld.env) == "migrated"       # no directory, so no lock to take: the idle check applies
     assert not old_dir.exists()
+
+
+# ------------------------------------------------------------------------------------------------ W21d lows (after #626)
+
+def _admission_files(ld):
+    d = ld.state / "admission"
+    return sorted(p.name for p in d.glob("*.recovery.json")) + sorted(p.name for p in d.glob("*.prior.plist"))
+
+
+def test_w21d_lows_the_rollback_never_loads_a_path_that_was_rewritten_after_the_unload(ld, monkeypatch):
+    # the unlink step fails and the file on disk is by then different bytes: the rollback restores only the CAPTURED definition,
+    # so it refuses to bootstrap the rewritten path and keeps the record with the captured prior copy
+    root, plist = _loaded_lw(ld)
+    before = plist.read_bytes()
+
+    def edit_then_fail(*a, **k):
+        plist.write_bytes(before + b"<!-- edited after the unload -->")
+        raise S.SchedError(S.EX_ACTIVATE, "unlink failed")
+
+    monkeypatch.setattr(S, "_guarded_unlink", edit_then_fail)
+    with pytest.raises(S.SchedError, match="could not be restored"):
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert ld.verbs().count("bootstrap") == 0 and not ld.loaded(LW_LABEL)
+    assert S.recovery_prior_path(LW_LABEL).read_bytes() == before and S.recovery_record_path(LW_LABEL).exists()
+
+
+def test_w21d_lows_a_file_edited_after_the_load_is_never_removed_record_first(ld):
+    # the file no longer says what launchd runs: a rollback would load a different job, so nothing is unloaded or written
+    root, plist = _loaded_lw(ld)
+    canon = str(S.canonical_admission_dir())
+    text = plist.read_text()
+    assert canon in text
+    plist.write_text(text.replace(canon, str(ld.tmp / "elsewhere-admission")))
+    before = plist.read_bytes()
+    with pytest.raises(S.SchedError, match="not the loaded definition"):
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert plist.read_bytes() == before and ld.loaded(LW_LABEL) and not KILLERS & set(ld.verbs()) and not _admission_files(ld)
+
+
+def test_w21d_lows_a_file_whose_argv_tail_was_edited_after_the_load_is_never_removed_record_first(ld, monkeypatch):
+    # same wrapper head, a different command after `--` (a `--no-activate` install staged over the loaded job): the head-only proof
+    # passed this, and a rollback would have loaded the different command
+    import plistlib
+    root, plist = _loaded_lw(ld)
+    d = plistlib.loads(plist.read_bytes())
+    d["ProgramArguments"] = [*d["ProgramArguments"][:5], "/bin/sh", "-c", "echo DIFFERENT JOB"]
+    plist.write_bytes(plistlib.dumps(d))
+    before = plist.read_bytes()
+    monkeypatch.setattr(S, "_guarded_unlink", lambda *a, **k: (_ for _ in ()).throw(S.SchedError(S.EX_ACTIVATE, "unlink failed")))
+    with pytest.raises(S.SchedError, match="not the loaded definition"):
+        S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)
+    assert plist.read_bytes() == before and ld.loaded(LW_LABEL) and not KILLERS & set(ld.verbs()) and not _admission_files(ld)
+
+
+def test_w21d_lows_a_loaded_job_from_another_path_is_not_removed_record_first(ld):
+    root, plist = _loaded_lw(ld)
+    pr = S.loaded_file_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LW_LABEL)[1], plist.read_bytes(), ld.tmp / "other.plist", LW_LABEL)
+    assert pr is not None and "came from" in pr
+    assert S.loaded_file_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LW_LABEL)[1], plist.read_bytes(), plist, LW_LABEL) is None
+
+
+@pytest.mark.parametrize("fail_at", ["_atomic_write_bytes", "_atomic_write_json"])
+@pytest.mark.parametrize("who", ["uninstall", "restart-uninstall"])
+def test_w21d_lows_a_disk_error_writing_the_recovery_record_refuses_before_any_bootout(ld, monkeypatch, fail_at, who):
+    if who == "uninstall":
+        root, plist = _loaded_lw(ld)
+        label = LW_LABEL
+        op = lambda: S.uninstall(LW_LABEL, "launchd", env=ld.env, ade=root)   # noqa: E731
+    else:
+        job, plist = _loaded_service(ld)
+        label = HERDR
+        op = lambda: S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)   # noqa: E731
+    before = plist.read_bytes()
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(S, fail_at, boom)
+    with pytest.raises(S.SchedError, match="recovery record could not be written") as e:   # a refusal, not a raw OSError
+        op()
+    assert e.value.code == S.EX_ACTIVATE
+    assert plist.read_bytes() == before and ld.loaded(label) and not KILLERS & set(ld.verbs())
+    assert not _admission_files(ld)                                          # no orphan prior copy, no partial record
+
+
+def test_w21d_lows_a_failed_record_json_after_the_prior_copy_leaves_no_orphan_copy(ld, tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    monkeypatch.setattr(S, "_atomic_write_json", lambda *a, **k: (_ for _ in ()).throw(OSError(5, "io")))
+    with pytest.raises(OSError):
+        S.write_recovery_record("com.djbclark.x", action="remove", plist=tmp_path / "x.plist", prior=b"<plist/>", new_sha=None,
+                                state_dir=state, env=ld.env)
+    assert not list(state.rglob("*.prior.plist")) and not list(state.rglob("*.recovery.json"))
+
+
+def test_w21d_lows_the_keepalive_parser_is_not_spoofed_by_a_newline_in_an_environment_value():
+    assert not S.parse_launchd_keepalive("svc = {\n\tproperties = runatload | inferred program\n}\n")
+    # an environment value `a\n\tproperties = keepalive` prints a forged one-tab line next to the real one: two `properties` lines
+    forged = "svc = {\n\tenvironment = {\n\t\tX => a\n\tproperties = keepalive\n\t}\n\tproperties = runatload | inferred program\n}\n"
+    assert not S.parse_launchd_keepalive(forged)
+    # a value that closes the block, forges the line and opens a fake block: balanced, so only the second `properties` line betrays it
+    assert not S.parse_launchd_keepalive("svc = {\n\tenvironment = {\n\t\tX => a\n\t}\n\tproperties = keepalive\n\tfake = {\n\t}\n"
+                                         "\tproperties = runatload | inferred program\n}\n")
+    # a forged close of the block: the real close is then a stray `\t}`
+    assert not S.parse_launchd_keepalive("svc = {\n\tenvironment = {\n\t\tX => a\n\t}\n\tproperties = keepalive\n\t}\n\tproperties = runatload\n}\n")
+    assert not S.parse_launchd_keepalive("svc = {\n\tproperties = keepalive\n\tenvironment = {\n")   # a block left open: unknown layout
+    assert S.parse_launchd_keepalive("svc = {\n\tenvironment = {\n\t\tA => b\n\t}\n\tproperties = keepalive | runatload\n}\n")
+
+
+def test_w21d_lows_a_renamed_wrapper_inside_an_sh_c_string_is_never_restarted(ld, tmp_path):
+    old_dir = tmp_path / "old-admission"
+    copy = tmp_path / "jobrun"
+    copy.write_bytes(Path(WRAPPER).read_bytes())
+    args = ["/bin/sh", "-c", f"exec {copy} --lock-dir {old_dir} {HERDR} -- /usr/bin/true alpha"]
+    assert S._runs_wrapper(args) and not S._runs_wrapper(["/usr/bin/true", "alpha"])
+    job, plist = _loaded_service(ld, args=args)
+    before = plist.read_bytes()
+    for op in (lambda: S.install(_service(ld, tag="bravo"), "launchd", env=ld.env, restart_service=True),
+               lambda: S.uninstall(HERDR, "launchd", env=ld.env, restart_service=True)):
+        with pytest.raises(S.SchedError, match="never restarts a wrapped job"):
+            op()
+    assert plist.read_bytes() == before and ld.loaded(HERDR) and not KILLERS & set(ld.verbs())
+
+
+@pytest.mark.parametrize("sub", [["status", HERDR], ["list"], ["diff"], ["reconcile"], ["render", "x.plist"], ["backend"], ["migrate-wrapper", "x.plist"]])
+@pytest.mark.parametrize("first", [True, False])
+def test_w21d_lows_restart_service_on_any_other_subcommand_is_a_usage_error(ld, sub, first):
+    r = _child_cli(ld, *(["--restart-service", *sub] if first else [*sub, "--restart-service"]))
+    assert r.returncode == S.EX_USAGE and "applies only to install and uninstall" in r.stderr
+    assert not KILLERS & set(ld.verbs())

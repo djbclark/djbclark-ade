@@ -1200,12 +1200,17 @@ def write_recovery_record(label: str, *, action: str, plist: Path, prior: bytes,
 
     A SIGTERM, deadline kill or crash between `bootout` and `bootstrap` cannot run any cleanup; the next reconcile reads
     this record (`recover_launchd_records`) and loads the job again."""
-    _atomic_write_bytes(recovery_prior_path(label, state_dir, env=env), prior)
-    _atomic_write_json(recovery_record_path(label, state_dir, env=env), {
-        "schema_version": 1, "label": label, "action": action, "plist": str(plist),
-        "prior_sha256": hashlib.sha256(prior).hexdigest(), "new_sha256": new_sha, "created_at": _utc_now(),
-        "prior_artifact_hash": artifact_hash({plist: prior.decode("utf-8", errors="replace")}),
-    })
+    try:   # a disk error leaves no half record: neither the prior copy nor a record (the caller has not unloaded anything yet)
+        _atomic_write_bytes(recovery_prior_path(label, state_dir, env=env), prior)
+        _atomic_write_json(recovery_record_path(label, state_dir, env=env), {
+            "schema_version": 1, "label": label, "action": action, "plist": str(plist),
+            "prior_sha256": hashlib.sha256(prior).hexdigest(), "new_sha256": new_sha, "created_at": _utc_now(),
+            "prior_artifact_hash": artifact_hash({plist: prior.decode("utf-8", errors="replace")}),
+        })
+    except BaseException:
+        with contextlib.suppress(OSError):   # a cleanup error must not replace the original one
+            clear_recovery_record(label, state_dir, env)
+        raise
 
 
 def clear_recovery_record(label: str, state_dir: Path | None, env: Mapping[str, str] | None) -> None:
@@ -1301,10 +1306,18 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
 
 
 def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_dir: Path | None,
-                          env: Mapping[str, str] | None = None, **overrides: Any) -> bool:
+                          env: Mapping[str, str] | None = None,
+                          loaded_proof: Callable[[str, bytes], str | None] | None = None, **overrides: Any) -> bool:
     """Remove a wrapper-routed, ledger-owned ADE definition under the label's EXCLUSIVE admission lock. The bytes are
     re-hashed here, under the lock, immediately before the unload; a different file is a NativeDefer. A loaded job gets the
-    recovery record first and is re-bootstrapped from its prior bytes when the removal fails after the unload."""
+    recovery record first and is re-bootstrapped from its prior bytes when the removal fails after the unload.
+
+    `loaded_proof(print_out, prior)` (W21d lows): for a loaded job, called under the lock with a fresh `launchctl print` and the
+    very bytes captured here; it returns a reason (NativeDefer, nothing changed) unless those bytes are the LOADED definition,
+    since the rollback loads exactly them and a file edited after the load would otherwise come back as a different job. The
+    uninstall's proof is `loaded_definition_problem` plus `loaded_file_problem` (full argv, program, source path; not the
+    environment, schedule or KeepAlive keys of the file).
+    A disk error while writing the recovery record is a NativeDefer too: nothing is unloaded and no half record remains."""
     c = _ctx("launchd", env, overrides)
     plist = c.agents_dir / f"{label}.plist"
     try:
@@ -1324,7 +1337,15 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
         if rc == 0:
             raise NativeDefer(f"{label} was loaded after admission; left untouched")
     if loaded:
-        write_recovery_record(label, action="remove", plist=plist, prior=prior, new_sha=None, state_dir=state_dir, env=env)
+        if loaded_proof is not None:
+            rc, print_out, _ = _launchctl_print(c, label)
+            why = loaded_proof(print_out, prior) if rc == 0 else f"launchctl print failed (rc={rc})"
+            if why is not None:
+                raise NativeDefer(f"{label}: the bytes on disk are not the loaded definition ({why}); left untouched")
+        try:
+            write_recovery_record(label, action="remove", plist=plist, prior=prior, new_sha=None, state_dir=state_dir, env=env)
+        except (SchedError, OSError) as exc:   # nothing is unloaded yet; write_recovery_record removed any half record
+            raise NativeDefer(f"removal of {label} not started: the recovery record could not be written ({exc}); left untouched") from exc
         try:
             _bootout_checked(c, label)
         except SchedError as exc:
@@ -1519,7 +1540,10 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
                 if data is not None:
                     try:
                         return remove_launchd_locked(label, expect_hash=artifact_hash({path: data.decode("utf-8", errors="replace")}),
-                                                     loaded=True, state_dir=None, env=c.env, **overrides)
+                                                     loaded=True, state_dir=None, env=c.env,
+                                                     loaded_proof=lambda out_txt, prior: (loaded_definition_problem(out_txt, prior, label, lock_dir=admission_dir())
+                                                                          or loaded_file_problem(out_txt, prior, path, label)),
+                                                     **overrides)
                     except NativeDefer as exc:
                         raise SchedError(EX_ACTIVATE, str(exc)) from exc
             if activate:
@@ -2387,6 +2411,30 @@ def loaded_definition_problem(print_out: str, data: bytes, label: str, *, lock_d
     return None
 
 
+def loaded_file_problem(print_out: str, data: bytes, plist: Path, label: str) -> str | None:
+    """None only when `data` provably IS the loaded definition as far as argv and source go: it parses, is this label's, has no
+    `Program` key, its `ProgramArguments` equal the FULL `arguments` of `launchctl print` (not just the wrapper head) with
+    `program == arguments[0]`, and the loaded `path =` is `plist` (realpath compared). Environment, schedule and KeepAlive keys of the
+    file are NOT compared: `launchctl print` does not give them in a form that can be matched (the documented residual)."""
+    program, args = parse_launchd_definition(print_out)
+    if not args:
+        return "launchctl print shows no arguments for the loaded definition"
+    if program is None or program != args[0]:
+        return f"the loaded definition runs program {program!r}, not {args[0]!r}"
+    loaded_path = parse_launchd_path(print_out)
+    if not loaded_path or os.path.realpath(loaded_path) != os.path.realpath(plist):
+        return f"the loaded definition came from {loaded_path!r}, not {plist}"
+    try:
+        d = plistlib.loads(data)
+    except Exception:  # noqa: BLE001 - plistlib raises several types for malformed input
+        return f"{plist} does not parse"
+    if not isinstance(d, dict) or d.get("Label") != label:
+        return f"{plist} is not {label}'s"
+    if "Program" in d or d.get("ProgramArguments") != args:
+        return f"{plist} does not have the loaded definition's full arguments (launchd keeps running what it loaded)"
+    return None
+
+
 def ade_root_of(ade: str | os.PathLike[str] | None) -> str:
     """The ADE root every launchd writer binds the wrapper to: the explicitly selected one (`--ade`), else the checkout that
     holds this scheduler implementation (the same rule as reconcile). Never None."""
@@ -2417,26 +2465,49 @@ _PRINT_PROPERTIES_RE = re.compile(r"\tproperties = (.*)")
 def parse_launchd_keepalive(text: str) -> bool:
     """True when the LOADED definition shows KeepAlive in `launchctl print` (the service block, one tab deep): a boolean KeepAlive
     prints as a `properties = keepalive | ...` line, a dict KeepAlive as a `semaphores = {` block. launchd never re-reads an
-    edited plist, so this, not the file, says whether the running job is a KeepAlive service."""
+    edited plist, so this, not the file, says whether the running job is a KeepAlive service.
+
+    W21d lows: an environment value can carry a newline and so print a forged one-tab line. The real service block has exactly one
+    `\tproperties =` line and balanced one-tab `{`/`}` lines; anything else (a second `properties`, a stray `\t}`, a block left open,
+    a second `semaphores` block) is a forgery or an unknown layout and counts as NOT KeepAlive (fail closed). A forged line inside a
+    well-formed block cannot be told from a real one: that residual is the documented limit."""
+    props: list[str] = []
+    sem = depth = 0
     for line in text.splitlines()[1:]:
         line = line.rstrip("\r")
-        if line == "\tsemaphores = {":
-            return True
-        m = _PRINT_PROPERTIES_RE.fullmatch(line)
-        if m and "keepalive" in {t.strip() for t in m.group(1).split("|")}:
-            return True
-    return False
+        if line == "\t}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif line == "\tsemaphores = {":
+            sem += 1
+            depth += 1
+        elif re.fullmatch(r"\t[^\t].* = \{", line):   # another one-tab block (environment, ...)
+            depth += 1
+        elif depth == 0:
+            m = _PRINT_PROPERTIES_RE.fullmatch(line)
+            if m:
+                props.append(m.group(1))
+    if depth != 0 or len(props) > 1 or sem > 1:
+        return False
+    return bool(sem) or (len(props) == 1 and "keepalive" in {t.strip() for t in props[0].split("|")})
 
 
 def _runs_wrapper(argv: list[str]) -> bool:
     """True when any element of the loaded argv is (a name for) `ade-job-run`, or the argv contains a `--lock-dir DIR LABEL --`
-    sequence anywhere: a symlink or copy under another name, an interpreter or `sh -c` in front of it (W21d review B3)."""
-    for i, a in enumerate(argv):
+    sequence anywhere: a symlink or copy under another name, an interpreter or `sh -c` in front of it (W21d review B3). An element
+    that holds `--lock-dir` inside a longer string (a renamed copy named in an `sh -c` string, W21d lows) counts too, and the
+    sequence is also looked for in the whitespace-split words of every element."""
+    words: list[str] = list(argv)
+    for a in argv:
+        if any(ch.isspace() for ch in a):
+            words.extend(a.split())
+    for a in words:
         if JOB_RUN_WRAPPER in a:   # the wrapper by name, also inside `sh -c 'exec .../ade-job-run ...'`
             return True
-        if os.path.basename(os.path.realpath(a)) == JOB_RUN_WRAPPER:   # a symlink under another name
+        if "--lock-dir" in a:   # a copy under another name, also inside a shell string: never a restartable job
             return True
-        if a == "--lock-dir" and i + 3 < len(argv) and argv[i + 3] == "--":   # a copy under another name
+        if os.path.basename(os.path.realpath(a)) == JOB_RUN_WRAPPER:   # a symlink under another name
             return True
     return False
 
