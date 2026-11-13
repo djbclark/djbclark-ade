@@ -143,7 +143,7 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Observation:
-    kind: str  # component | key | login | catalog | settings | job | retired-job | vault | pools
+    kind: str  # component | key | login | catalog | settings | job | retired-job | vault | pools | tui | mcp | skill
     id: str
     status: str  # ok | missing | disabled | unknown | error | unchosen | never | planned | present | foreign | warn
     detail: str
@@ -1946,6 +1946,28 @@ def observe_pi_pools(
     )
 
 
+def observe_client_wiring(
+    *,
+    root: Path,
+    home: Path | None = None,
+    roster_path: Path | None = None,
+    runner: Callable[..., Any] | None = None,
+) -> list[Observation]:
+    """Advisory check that every current TUI has the shared MCP servers and skills.
+
+    TUI roster: the ``targets`` table of ``bin/skill-everywhere``. MCP roster:
+    ``config/mcp-clients.toml``. Skills: ``skill-everywhere --check --all`` (read-only).
+    Absent roster or script (fixture catalogs) returns ``[]``. Statuses: ok, warn
+    (a gap, with the exact fix in the detail, never run), unknown (TUI with no
+    readable MCP config / not installed; never fails), error (unreadable roster or
+    client config). Observe-only: never edits a client config (order 11).
+    """
+    import ade_client_wiring as cw  # noqa: PLC0415
+
+    rows = cw.observe(root, home=home, roster_path=roster_path, runner=runner)
+    return [Observation(kind, rid, status, detail) for kind, rid, status, detail in rows]
+
+
 def doctor(
     catalog: Catalog,
     *,
@@ -1962,6 +1984,8 @@ def doctor(
     hermes_choice_state_dir: Path | None = None,
     hermes_home: Path | None = None,
     install_state_dir: Path | None = None,
+    wiring_home: Path | None = None,
+    skill_check_runner: Callable[..., Any] | None = None,
 ) -> tuple[list[Observation], int]:
     """Observe-only doctor. Exit 1 if any expected component/settings/job drifts
     (including ``paseo_plugin`` missing/disabled when expected), or credential-bak
@@ -2096,6 +2120,14 @@ def doctor(
         obs.append(pools_obs)
         # Advisory warn stays exit 0; only a broken acceptance file fails doctor.
         if pools_obs.status == "error":
+            hard_missing += 1
+    # TUI wiring (MCP registrations + skill links): gaps are advisory warn (exit 0);
+    # only a broken roster or unreadable client config fails doctor.
+    for wire_obs in observe_client_wiring(
+        root=catalog.root, home=wiring_home, runner=skill_check_runner,
+    ):
+        obs.append(wire_obs)
+        if wire_obs.status == "error":
             hard_missing += 1
     return obs, (1 if hard_missing else 0)
 
