@@ -196,22 +196,27 @@ def last_text(log: str | None) -> tuple[str, bool, str]:
     return "\n".join(tail).strip(), card, "ok"
 
 
-# the worker's own completion notice / reply to an ack (footer rule 22, order 10): a shell command or Paseo's send tool, never an edit
-REPLY_TOOL_RE = re.compile(r"^\[(?:Shell|Bash)\].*\b(?:completion-notice|paseo send)\b|^\[Send message\]")
+# The worker's own completion notice (footer rule 22: `completion-notice --send`, a plain `paseo send ... done:`, the relay shim,
+# or the send tool) and its ordinary replies to an ack. Matched on the command itself (first word, optional path), never a mention.
+_CMD = r"^\[(?:Shell|Bash)\]\s+(?:[A-Za-z_]+=\S+\s+)*(?:python3\s+)?(?:\S*/)?"
+NOTICE_RE = re.compile(_CMD + r"(?:completion-notice\s+--send\b|(?:paseo\s+send|relay\.py)\b.*\bdone:)|^\[Send message\].*\bdone:")
+REPLY_TOOL_RE = re.compile(_CMD + r"(?:completion-notice\s+--(?:send|check-ack|print)\b|paseo\s+send\b)|^\[Send message\]")
+RECEIPT_RE = re.compile(r"\s*ack\s+\S+\s+\S+\s*", re.I)  # the lead's completion ack: `ack <worker id> <msg-id>` (rule 22)
 
 
 def scan_log(log: str | None) -> tuple[bool, bool]:
     """(retask, receipt) read from the log tail. retask: a `[Message received]` entry whose first body line is not a bare
-    `ack <id> [<msg-id>]` receipt (the lead's `paseo send` re-task does not move the state record's lastUserMessageAt: an
-    agent-sourced message is projected as a tool call, not a user message), or, after the LAST receipt, a tool call other
-    than the worker's ordinary reply (REPLY_TOOL_RE); `[Thought]` entries and any amount of plain text are the worker's
-    reply. receipt: a bare-ack message is in the tail AND the worker's own completion notice (REPLY_TOOL_RE) precedes it,
-    so the lead's ack belongs to this round. The initial brief is a `[User]` entry and is not counted (a human prompt moves
-    lastUserMessageAt). The tail is only 40 items: `verdict` bounds `lastActivityAt` too."""
+    `ack <id> [<msg-id>]` (the lead's `paseo send` re-task does not move the state record's lastUserMessageAt: an
+    agent-sourced message is projected as a tool call, not a user message), or, after the LAST ack, a tool call other than
+    the worker's ordinary reply (REPLY_TOOL_RE); `[Thought]` entries and any amount of plain text are the worker's reply.
+    receipt: the lead's `ack <id> <msg-id>` is in the tail and the worker's own completion notice (NOTICE_RE) was its last
+    tool call before it (replies in between allowed), so the ack belongs to this round. The initial brief is a `[User]`
+    entry and is not counted (a human prompt moves lastUserMessageAt). The tail is only 40 items: `verdict` bounds
+    `lastActivityAt` too."""
     if not log:
         return False, False
     body: list[str] = []
-    inbound = acked = receipt_ok = tool_after = notice_seen = False
+    inbound = acked = receipt_ok = tool_after = notice_pending = False
     for line in log.splitlines() + ["[end]"]:
         if not TAG_RE.match(line):
             body.append(line)
@@ -220,12 +225,16 @@ def scan_log(log: str | None) -> tuple[bool, bool]:
         if inbound:
             if not lines or not ACK_BODY_RE.fullmatch(lines[0]):
                 return True, False
-            acked, receipt_ok, tool_after = True, notice_seen, False  # a peer's earlier ack does not make later work a re-task
-        if line != "[end]" and not line.startswith(INBOUND_TAGS):
-            if REPLY_TOOL_RE.match(line):
-                notice_seen = notice_seen or not acked
-            elif acked and not line.startswith("[Thought]"):
-                tool_after = True  # a tool call after the last receipt that is not the worker's reply: it is working again
+            acked, receipt_ok, tool_after = True, notice_pending and bool(RECEIPT_RE.fullmatch(lines[0])), False
+        if line != "[end]" and not line.startswith(INBOUND_TAGS) and not line.startswith("[Thought]"):
+            if NOTICE_RE.match(line):
+                notice_pending = True  # a completion notice (after a receipt it is also an ordinary reply, not work)
+            elif REPLY_TOOL_RE.match(line) and acked:
+                pass  # the worker's reply to the ack: keeps the pending notice, is not work
+            else:
+                notice_pending = False  # any other tool call: the notice is no longer the last thing the worker did
+                if acked:
+                    tool_after = True
         inbound = line.startswith("[Message received]")
         body = []
     return tool_after, acked and receipt_ok and not tool_after

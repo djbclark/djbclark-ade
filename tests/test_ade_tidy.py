@@ -865,3 +865,46 @@ def test_a_peers_earlier_ack_does_not_make_later_ordinary_work_a_retask(env):
     env.worker(1, text="finished", tags=[NOTICE, "[Message received] peer", f"ack {W1} m0", "[Shell] ls", "[Shell] git status",
                                          "[Message received] 8cd86203", f"ack {W1} m1"])
     assert [x["agent"][:8] for x in env.plan()["archive_agents"]] == ["00000001"]
+
+
+# ---- adversary round 7 -------------------------------------------------------------------------------------------
+
+def late_ack_worker(env, tags, reply="Acknowledged."):
+    """A worker whose round-1 report is acked late (ack 60 s ago, .done 1 h ago) and idled 40 s after the ack."""
+    t0, ack = aged_report(env, "s1", 3600, 60)
+    env.worker(1, text=reply, tags=tags)
+    set_state(env, W1, lastActivityAt=iso(ack + 40))
+    return env.plan()
+
+
+def test_a_notice_must_be_the_last_tool_call_before_the_ack_and_the_command_itself(env):
+    receipt = ["[Message received] 8cd86203", f"ack {W1} m1"]
+    mention = ['[Shell] rg -n "paseo send" bin/', "[Edit] bin/completion-notice", "[Shell] nohup make test &"]
+    assert late_ack_worker(env, mention + receipt)["archive_agents"] == []                        # B1: a mention, then work
+    env.data["agents"].clear()
+    assert late_ack_worker(env, ["[Shell] git diff bin/completion-notice", "[Shell] bin/pytest -x &"] + receipt)["archive_agents"] == []   # B3
+    env.data["agents"].clear()
+    peer = ["[Shell] paseo send --no-wait peer --prompt 'started suite. Please reply: ack W'", "[Message received] peer", f"ack {W1}"]
+    assert late_ack_worker(env, peer)["archive_agents"] == []                                    # B2: a peer's ack, one token
+    env.data["agents"].clear()
+    assert late_ack_worker(env, [NOTICE, *receipt])["archive_agents"][0]["agent"] == W1         # control: the real flow
+
+
+def test_ack_plus_task_with_edits_of_the_notice_tool_is_a_retask(env):
+    p = late_ack_worker(env, [NOTICE, "[Message received] 8cd86203", f"ack {W1} m1", "also fix the bug",
+                              "[Shell] gsed -i s/a/b/ bin/completion-notice", "[Shell] git commit -am fix bin/completion-notice"], "fixed.")
+    assert p["archive_agents"] == []
+
+
+def test_peer_ack_before_the_notice_does_not_void_the_leads_later_receipt(env):
+    tags = ["[Message received] peer", f"ack {W1} m0", "[Shell] make test", "[Shell] bin/completion-notice --send --requester x --title t",
+            "[Message received] 8cd86203", f"ack {W1} m1"]
+    assert [x["agent"] for x in late_ack_worker(env, tags)["archive_agents"]] == [W1]
+
+
+def test_other_notice_forms_count_as_the_notice(env):
+    receipt = ["[Message received] 8cd86203", f"ack {W1} m1"]
+    for notice in ("[Send message] lead done: x", "[Shell] python3 ~/src/session-finder/relay.py send lead done: x",
+                   "[Shell] bin/completion-notice --send --requester x --title t"):
+        env.data["agents"].clear()
+        assert [x["agent"] for x in late_ack_worker(env, [notice, *receipt])["archive_agents"]] == [W1], notice
