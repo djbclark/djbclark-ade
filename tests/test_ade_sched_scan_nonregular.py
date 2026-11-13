@@ -49,18 +49,18 @@ def test_helper_classifies_without_blocking(tmp_path):
     os.mkfifo(fifo)
     reg = tmp_path / "r.plist"
     reg.write_text(f"<!-- {S.GENERATED} -->" + "x" * 9000)
-    link = tmp_path / "l.plist"
-    link.symlink_to(reg)
-    fifo_link = tmp_path / "fl.plist"
-    fifo_link.symlink_to(fifo)
-    assert S._unit_head(fifo) is S._NON_REGULAR
-    assert S._unit_head(fifo_link) is S._NON_REGULAR
-    assert S._unit_head(tmp_path) is S._NON_REGULAR
-    assert S._unit_head(tmp_path / "missing.plist") is S._UNREADABLE
-    assert S._unit_head(tmp_path / "dangling.plist") is S._UNREADABLE
-    head = S._unit_head(reg)
-    assert isinstance(head, str) and len(head) == 4096 and S.GENERATED in head
-    assert S._unit_head(link) == head
+    (tmp_path / "l.plist").symlink_to(reg)
+    (tmp_path / "fl.plist").symlink_to(fifo)
+    child = ("import sys; sys.path.insert(0, sys.argv[1]); import ade_sched as S; from pathlib import Path\n"
+             "d = Path(sys.argv[2])\n"
+             "kind = lambda v: 'nonreg' if v is S._NON_REGULAR else 'unread' if v is S._UNREADABLE else len(v)\n"
+             "print([kind(S._unit_head(d / n)) for n in ('x.plist', 'fl.plist', '.', 'missing.plist', 'r.plist', 'l.plist')])\n"
+             "print(S._on_disk_files_match(S.Rendered(backend='launchd', files={d / 'x.plist': 't'}, activation=[], notes=[]), "
+             "backend_name='launchd', label='x', env={}, overrides={}))")
+    r = subprocess.run([sys.executable, "-c", child, str(BIN), str(tmp_path)], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0] == "['nonreg', 'nonreg', 'nonreg', 'unread', 4096, 4096]"
+    assert r.stdout.splitlines()[1] == "False"   # a FIFO at a rendered path is no match, and the call returns
 
 
 @pytest.mark.parametrize("make", ["fifo", "fifo-symlink"])
@@ -130,12 +130,12 @@ def test_whole_file_reads_refuse_a_fifo_without_hanging(tmp_path):
              "for n in ('f', 'l'):\n"
              "    try: S.read_regular_bytes(Path(sys.argv[2]) / n)\n"
              "    except OSError as e: print('refused', n)\n"
-             "print(S._on_disk_files_match is not None)")
+             "print('done')")
     os.mkfifo(tmp_path / "f")
     (tmp_path / "l").symlink_to(tmp_path / "f")
     r = subprocess.run([sys.executable, "-c", child, str(BIN), str(tmp_path)], capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["refused", "f", "refused", "l", "True"]
+    assert r.stdout.split() == ["refused", "f", "refused", "l", "done"]
     reg = tmp_path / "ok"
     reg.write_bytes(b"x" * 10)
     assert S.read_regular_bytes(reg) == b"x" * 10

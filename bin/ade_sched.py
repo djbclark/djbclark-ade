@@ -1667,6 +1667,8 @@ def diff_jobs(
 
     known_exact = {lab for lab in inventory_labels if not any(ch in lab for ch in "*?[")}
     for lj in live_jobs:
+        if lj.source == "non-regular":   # not a live identity; the scan note already reports it
+            continue
         if lj.id in known_exact:
             continue
         if any(_label_matches(pat, lj.id) for pat in inventory_labels):
@@ -2549,6 +2551,8 @@ def plan_reconcile(
         inventory_labels.add(pattern)
     known_exact = {lab for lab in inventory_labels if not any(ch in lab for ch in "*?[")}
     for lj in live.jobs:
+        if lj.source == "non-regular":   # not a live identity; the scan note already reports it
+            continue
         if lj.id in known_exact:
             continue
         if any(_label_matches(pat, lj.id) for pat in inventory_labels):
