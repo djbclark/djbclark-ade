@@ -55,11 +55,12 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -949,6 +950,72 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     return r
 
 
+class NativeDefer(Exception):
+    """The native launchd install found the path occupied or not provably ADE's: no definition was written; the step defers."""
+
+
+def create_exclusive(path: Path, text: str, mode: int = 0o600) -> None:
+    """Create `path` with `text` only if nothing exists there: an O_EXCL temp file hard-linked to the target.
+
+    os.link never replaces, so a writer that got there first (a file, a symlink, even a dangling one) makes this raise
+    FileExistsError and its bytes survive. The temp name is removed either way; the target is never unlinked."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:  # bytes: the byte-match compare is UTF-8 whatever the locale
+            fh.write(text.encode("utf-8"))
+        os.chmod(tmp, mode)
+        os.link(tmp, path)
+    finally:
+        try:
+            Path(tmp).unlink(missing_ok=True)  # only our own temp name; a failure here must not hide a successful link
+        except OSError:
+            pass
+
+
+def install_launchd_native(job: Job, text: str, *, env: Mapping[str, str] | None = None, err: TextIO | None = None,
+                           **overrides: Any) -> str:
+    """The only launchd write that native admission enables: it can neither kill a running job nor replace a definition.
+
+    1. The target is absent: create it exclusively, then `launchctl bootstrap` (never `bootout`).
+    2. The target is a regular file that byte-matches `text` (an unloaded ADE definition): `bootstrap` only, no write.
+    3. Anything else (it appeared since admission, differs, is a symlink or special file): raise NativeDefer; no launchd
+       definition is written (the log directories may already exist).
+
+    If `bootstrap` fails (for example the label was loaded meanwhile) the error is raised without any `bootout` or unlink;
+    a plist this call created stays on disk and is named in the message. Returns "created" or "bootstrapped"."""
+    err = err or sys.stderr
+    c = _ctx("launchd", env, overrides)
+    plist = c.agents_dir / f"{job.label}.plist"
+    if job.worktree:
+        raise SchedError(EX_USAGE, f"__ADE__ defaulted to {job.worktree}, a linked git worktree that is deleted after its "
+                                   f"merge; install from the primary checkout (or pass --ade DIR where the tool has it)")
+    _log_dirs(job)
+    created = False
+    if os.path.lexists(plist):
+        try:
+            st = os.lstat(plist)
+            if not stat.S_ISREG(st.st_mode):
+                raise NativeDefer(f"{plist} is not a regular file")
+            have = plist.read_bytes()
+        except OSError as exc:
+            raise NativeDefer(f"{plist} is unreadable ({exc})") from exc
+        if have != text.encode("utf-8"):
+            raise NativeDefer(f"{plist} exists and is not the ADE render; native admission never overwrites it")
+    else:
+        try:
+            create_exclusive(plist, text)
+        except FileExistsError as exc:
+            raise NativeDefer(f"{plist} appeared after admission; left untouched") from exc
+        created = True
+    try:
+        _activate(c, [c.launchctl, "bootstrap", f"gui/{c.uid}", str(plist)])
+    except SchedError as exc:
+        where = f"; {plist} was created by this run and left in place (no bootout, no unlink)" if created else ""
+        raise SchedError(exc.code, f"{exc}{where}") from exc
+    return "created" if created else "bootstrapped"
+
+
 def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
               env: Mapping[str, str] | None = None, out: TextIO | None = None, err: TextIO | None = None,
               **overrides: Any) -> bool:
@@ -1797,7 +1864,7 @@ def _on_disk_files_match(
             if path.is_file():
                 current[path] = path.read_text(encoding="utf-8")
         return set(current) == set(rendered.files) and artifact_hash(current) == artifact_hash(rendered.files)
-    except (OSError, SchedError):
+    except (OSError, SchedError, ValueError):  # ValueError: a non-UTF-8 file is not a match
         return False
 
 
@@ -1899,18 +1966,22 @@ class JobAdmission:
     """Evidence held by an admission context across the entire mutation.
 
     An adapter must exclude new launches, observe this job's running work,
-    and stop future triggers without killing work. No native adapter currently
-    proves all launch paths participate, so the default is conservative.
+    and stop future triggers without killing work. No adapter can do that for a
+    loaded job yet: the launchd adapter (`launchd_admission`) admits only jobs that
+    are not loaded, and every other backend keeps the conservative default.
     """
 
     all_launch_paths: bool = False
     activity: str = "unknown"  # idle | busy | unknown
     triggers_drained: bool = False
     updater_running: bool = False
+    hold: str | None = None  # adapter-supplied refusal reason (loaded job, state unreadable, foreign plist, ...)
 
     def refusal(self) -> str | None:
         if self.updater_running:
             return "updater's own running service; next generation pending"
+        if self.hold:
+            return self.hold
         if not self.all_launch_paths:
             return "shared admission incomplete; launch paths do not all participate"
         if self.activity != "idle":
@@ -1932,6 +2003,88 @@ class ReconcileStep:
     touch: bool = False
     category: str = "job"  # job | retired | foreign | ledger
     ledger_snapshot: Mapping[str, Any] | None = None  # remove: ownership at plan time
+
+
+# launchctl exit status for "Could not find service" (the label is not loaded).
+LAUNCHD_NOT_LOADED_RC = 113
+# Jobs that are the updater's own service: busy means the updater is running this reconcile.
+UPDATER_LABELS = frozenset({"com.djbclark.ade-update-check"})
+_PRINT_FIELD_RE = re.compile(r"\t(state|pid) = (.*)")
+
+
+def parse_launchd_activity(text: str) -> str:
+    """idle | busy | unknown from `launchctl print gui/UID/LABEL`: the service block's own `state`/`pid` fields (one tab
+    deep), never a process-name match. A pid, `running` or a launch in progress is busy; only `not running`
+    without a pid is idle; anything else, including a missing field, is unknown."""
+    lines = text.splitlines()
+    if not lines or not lines[0].rstrip().endswith("= {"):
+        return "unknown"
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        m = _PRINT_FIELD_RE.fullmatch(line.rstrip())
+        if m:
+            fields.setdefault(m.group(1), m.group(2).strip())
+    pid, state = fields.get("pid"), fields.get("state")
+    if pid is not None:
+        return "busy" if pid.isdigit() and int(pid) > 0 else "unknown"
+    if state in ("running", "spawn scheduled", "xpcproxy"):
+        return "busy"
+    return "idle" if state == "not running" else "unknown"
+
+
+def launchd_admission(
+    *, launchctl: str, uid: int, agents_dir: Path, env: Mapping[str, str],
+    provenance: Callable[[ReconcileStep, Path], str | None] | None = None,
+    run: Runner | None = None,
+) -> Callable[[ReconcileStep], contextlib.AbstractContextManager[JobAdmission]]:
+    """The native launchd adapter for `reconcile(admission=...)`: it admits only what is provably safe and never mutates.
+
+    A launch exclusion on a LOADED job does not exist from outside it. Probe, macOS 27.2 (2026-11-12): `launchctl disable`
+    does not stop a loaded job's StartInterval trigger and `kickstart` still starts it; and an idle read followed by
+    `bootout` is two separate launchd operations, so a trigger firing between them would be signalled (review of #619).
+    Nor can a check of a plist and the later write be one atomic step against other writers. So the adapter admits only
+    the writes that cannot kill or overwrite (executed by `install_launchd_native`, never `bootout`, never a replace):
+
+    1. Removal: always defer. An unlink cannot be compare-and-swap.
+    2. Loaded, in any state: defer, nothing touched. (The updater's own busy service keeps its existing refusal.)
+    3. Not loaded and nothing at `agents_dir/LABEL.plist` (not even a dangling symlink): admitted; the install creates the
+       file exclusively and bootstraps it.
+    4. Not loaded and a file exists: admitted only if `provenance(step, plist)` returns None, i.e. it byte-matches the ADE
+       render; the install then only bootstraps it. Any other file defers untouched.
+    5. `print` failing for any reason other than "could not find service" defers.
+
+    Follow-up that unlocks the rest: an ADE job wrapper taking a shared admission lock per run (reconcile exclusive), and
+    a writer ownership transaction. An unloaded job can still be bootstrapped by something outside this contract (a
+    low-level `install`, a login); `install_launchd_native` never boots it out and fails or defers instead."""
+    runner = run or _run
+    domain = f"gui/{uid}"
+
+    def admit(step: ReconcileStep) -> contextlib.AbstractContextManager[JobAdmission]:
+        label = step.label
+        if not isinstance(label, str) or not LABEL_RE.fullmatch(label):
+            return contextlib.nullcontext(JobAdmission())
+        if step.action == "remove":
+            return contextlib.nullcontext(JobAdmission(hold=(
+                f"removal of {label} defers: an unlink cannot be compare-and-swap against other writers")))
+        rc, out, err_txt = runner([launchctl, "print", f"{domain}/{label}"], env)
+        if rc == 0:
+            activity = parse_launchd_activity(out)
+            if label in UPDATER_LABELS and activity == "busy":
+                return contextlib.nullcontext(JobAdmission(all_launch_paths=True, activity="busy", updater_running=True))
+            return contextlib.nullcontext(JobAdmission(hold=(
+                f"{label} is loaded (activity {activity}); a loaded launchd job defers until its launch path "
+                f"participates in admission"
+            )))
+        if rc != LAUNCHD_NOT_LOADED_RC and "could not find service" not in err_txt.lower():
+            return contextlib.nullcontext(JobAdmission(hold=f"launchd state of {label} unreadable (rc={rc})"))
+        plist = agents_dir / f"{label}.plist"
+        if os.path.lexists(plist):
+            reason = provenance(step, plist) if provenance else "no provenance check supplied"
+            if reason is not None:
+                return contextlib.nullcontext(JobAdmission(hold=f"{plist} is not provably ADE's: {reason}"))
+        return contextlib.nullcontext(JobAdmission(all_launch_paths=True, activity="idle", triggers_drained=True))
+
+    return admit
 
 
 def plan_reconcile(
@@ -1956,6 +2109,7 @@ def plan_reconcile(
     assert isinstance(entries, dict)
     steps: list[ReconcileStep] = []
     expected_labels: dict[str, str] = {}  # label -> logical name
+    blocked_names: set[str] = set()  # logical rows blocked this plan: their removals are suppressed
     # ADE-owned ade-sched/paseo rows that carry a label but are not chosen (class optional/offered, chosen = false):
     # label -> (name, owner). An installed label of such a row is not "foreign", and a ledger-owned one is unloaded because
     # it was un-chosen. Dependency/service rows (herdr-server) are not adoptable, so they keep the old silent path.
@@ -2097,6 +2251,7 @@ def plan_reconcile(
             continue
         plist_path = (root / plist).resolve()
         if not plist_path.is_file():
+            blocked_names.add(name)
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"plist missing: {plist}",
@@ -2109,9 +2264,18 @@ def plan_reconcile(
             job = Job.from_plist(plist_path, subst, ade=ade)
             rendered = render(job, backend_name, env=env, **overrides)
         except SchedError as e:
+            blocked_names.add(name)
             steps.append(ReconcileStep(
                 name, "blocked", owner,
                 f"render failed: {e}",
+                label=label,
+            ))
+            continue
+        if job.label != label:
+            blocked_names.add(name)
+            steps.append(ReconcileStep(
+                name, "blocked", owner,
+                f"catalog label {label!r} differs from the plist Label {job.label!r}",
                 label=label,
             ))
             continue
@@ -2256,6 +2420,10 @@ def plan_reconcile(
             continue
         if not isinstance(entry, dict):
             continue
+        if logical_id in blocked_names:
+            # A blocked row (missing or unrenderable source, label mismatch) keeps its current AND prior identities:
+            # removing the last valid definition because its replacement is broken would leave nothing running.
+            continue
         label = entry.get("label")
         if isinstance(label, str) and label and label not in expected_labels:
             _plan_remove(logical_id, entry, label=label)
@@ -2369,6 +2537,7 @@ def reconcile(
     out: TextIO | None = None,
     err: TextIO | None = None,
     admission: Callable[[ReconcileStep], Any] | None = None,
+    native_admission: bool = False,
     **overrides: Any,
 ) -> tuple[list[dict[str, Any]], int]:
     """Reconcile ADE-owned ade-sched and paseo jobs; write the ownership ledger.
@@ -2379,6 +2548,10 @@ def reconcile(
     launchd LaunchAgents (``RECONCILE_WRITE_BACKENDS``). Paseo schedule create/delete
     is orthogonal (ledger ``backend="paseo"``) and does not require a host write
     backend.
+
+    ``native_admission=True`` (the ade-sched CLI and ``ade-install apply`` set it) installs the read-only launchd
+    adapter (``launchd_admission``) when no explicit ``admission`` is given, the backend is launchd and activation is on:
+    absent or provably-ADE unloaded jobs are admitted, loaded jobs defer; every other case keeps the conservative default.
 
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 6 when work is durably deferred; 2 when ``--yes`` refuses host writes on a non-write
@@ -2410,6 +2583,42 @@ def reconcile(
             "touch": False,
             "ok": False,
         }], EX_UNAVAILABLE if e.code == EX_UNAVAILABLE else EX_USAGE)
+
+    native_install = False  # True: installs go through install_launchd_native (create-exclusive + bootstrap, no bootout)
+    if admission is None and native_admission and b.name == "launchd" and activate:
+        native_install = True
+        # The one native adapter (launchd); systemd/cron/paseo keep the conservative default. An explicit
+        # `admission` always wins, and no environment or CLI switch reaches this branch.
+        nc = _ctx(b, env, overrides)
+
+        def plist_provenance(step: ReconcileStep, plist: Path) -> str | None:
+            """None only when the file on disk is a regular file that byte-matches the ADE render (then it is bootstrapped,
+            never written). A ledger hash is not enough: it could not stop a replacement between check and write."""
+            try:
+                if not stat.S_ISREG(os.lstat(plist).st_mode):
+                    return "not a regular file"
+                disk_hash = artifact_hash({plist: plist.read_text(encoding="utf-8")})
+            except (OSError, UnicodeDecodeError) as exc:
+                return f"unreadable ({exc})"
+            job_row = next((j for j in jobs if j.get("name") == step.name), None)
+            if isinstance(job_row, dict) and isinstance(job_row.get("plist"), str):
+                try:
+                    subst = job_subst_from_row(job_row, root=root, env=env, extra=extra_subst)
+                    job = Job.from_plist(root / str(job_row["plist"]), subst, ade=ade)
+                    if artifact_hash(render(job, b, env=env, **overrides).files) == disk_hash:
+                        return None
+                except SchedError:
+                    pass
+            return "exists and does not byte-match the ADE render"
+
+        launchd_native = launchd_admission(
+            launchctl=nc.launchctl, uid=nc.uid, agents_dir=nc.agents_dir, env=nc.env, provenance=plist_provenance,
+        )
+
+        def admission(step: ReconcileStep) -> Any:  # noqa: F811 - the resolved adapter
+            if _step_targets_paseo(step):
+                return contextlib.nullcontext(JobAdmission())
+            return launchd_native(step)
 
     if live is None:
         try:
@@ -2502,6 +2711,19 @@ def reconcile(
             + [s for s in steps if s.action != "remove"]
         )
 
+        def record_deferral(step: ReconcileStep, reason: str, previous: Any) -> None:
+            nonlocal deferred
+            deferred = True
+            deferred_names.add(step.name)
+            target_backend = "paseo" if _step_targets_paseo(step) else b.name
+            key = json.dumps([step.name, target_backend, step.label, step.action])
+            deferrals["jobs"][key] = {
+                "logical_id": step.name, "backend": target_backend, "label": step.label,
+                "action": step.action, "reason": reason, "updated_at": _utc_now(),
+                "prior_identity": previous,
+            }
+            _atomic_write_json(deferrals_path, deferrals)
+
         for step in ordered_steps:
             with contextlib.ExitStack() as admissions:
                 row: dict[str, Any] = {
@@ -2530,16 +2752,7 @@ def reconcile(
                     reason = (evidence.refusal() if isinstance(evidence, JobAdmission)
                               else "unknown shared admission evidence")
                 if reason is not None:
-                    deferred = True
-                    deferred_names.add(step.name)
-                    target_backend = "paseo" if _step_targets_paseo(step) else b.name
-                    key = json.dumps([step.name, target_backend, step.label, step.action])
-                    deferrals["jobs"][key] = {
-                        "logical_id": step.name, "backend": target_backend, "label": step.label,
-                        "action": step.action, "reason": reason, "updated_at": _utc_now(),
-                        "prior_identity": previous,
-                    }
-                    _atomic_write_json(deferrals_path, deferrals)
+                    record_deferral(step, reason, previous)
                     row.update(action="deferred", detail=reason, touch=False, ok=False)
                     results.append(row)
                     continue
@@ -2801,14 +3014,41 @@ def reconcile(
                     ledger["generation"] = generation
                     save_jobs_ledger(ledger, state_dir, env=env)
                     try:
-                        install(
-                            job, b, dry_run=False, activate=activate,
-                            allow_no_linger=allow_no_linger, env=env, out=out, err=err,
-                            **overrides,
-                        )
+                        if job.label != label:
+                            raise SchedError(
+                                EX_USAGE,
+                                f"catalog label {label!r} differs from the plist Label {job.label!r}; "
+                                f"refusing to act on an unadmitted label",
+                            )
+                        if native_install:
+                            try:
+                                install_launchd_native(
+                                    job, next(iter(rendered.files.values())), env=env, err=err, **overrides,
+                                )
+                            except (OSError, ValueError) as exc:  # mkdir/link/chmod/encode: a failed row, not a traceback
+                                raise SchedError(EX_ACTIVATE, f"native launchd install of {label} failed: {exc}") from exc
+                        else:
+                            install(
+                                job, b, dry_run=False, activate=activate,
+                                allow_no_linger=allow_no_linger, env=env, out=out, err=err,
+                                **overrides,
+                            )
                         st = status(label, b, env=env, **overrides)
                         if not st.installed:
                             raise SchedError(EX_ACTIVATE, f"read-back: {label} not installed after install")
+                    except NativeDefer as e:
+                        # No launchd definition was written: put the ledger row back as it was and defer (exit 6), never "failed".
+                        if prev is None:
+                            entries.pop(step.name, None)
+                        else:
+                            entries[step.name] = prev
+                        ledger["entries"] = entries
+                        save_jobs_ledger(ledger, state_dir, env=env)
+                        reason = str(e)
+                        record_deferral(step, reason, prev)
+                        row.update(action="deferred", detail=reason, touch=False, ok=False)
+                        results.append(row)
+                        continue
                     except SchedError as e:
                         entries[step.name] = _with_prior_identity(
                             _entry_for_install(

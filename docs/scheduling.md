@@ -401,13 +401,64 @@ context held through read-back and the ownership commit. Its `JobAdmission`
 evidence must prove all launch paths participate, per-job activity is idle,
 and future triggers are safely drained. Busy/unknown jobs and the updater's own
 running service defer without stopping work. A fleet idle snapshot is insufficient.
+Before 2026-11-12 no native adapter existed and production deferred every install and removal; the launchd adapter below
+is the first.
 
-No native backend adapter currently proves those conditions. Production therefore
-conservatively defers all installs and removals; it does not claim race-free quiescence.
-The library `admission` callback is a trusted adapter seam, not a CLI bypass or
-an environment opt-in. An adapter must retain the launch exclusion throughout
-its context and drain future triggers without killing running work. Direct low-level `install`/`uninstall` are outside this new reconcile
-admission contract; callers must not treat those paths as proof of global admission.
+### Native launchd admission (2026-11-12, narrowed in rounds 2 and 3)
+
+`ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`. On the **launchd** backend (activation
+on) that installs `launchd_admission` as the `admission` callback and routes installs through `install_launchd_native`.
+An explicit `admission` argument still wins, and no environment variable or CLI flag selects or bypasses the native path.
+The adapter runs one read-only `launchctl print gui/UID/LABEL`; the install path never calls `bootout`, never replaces
+or unlinks a file, and never disables, enables or kickstarts anything.
+
+**Why so little is enabled.** A live probe on macOS 27.2 (2026-11-12, throwaway label `StartInterval=5`) showed
+`launchctl disable` on a *loaded* job does **not** stop its StartInterval trigger and `kickstart` still starts it. An idle
+read followed by `bootout` is two operations (a trigger can start work between them), and a hash check followed by a
+replace or an unlink cannot be atomic against another writer: the reconcile lock only serializes reconcilers. So native
+admission enables exactly the writes that cannot kill or overwrite under concurrency, and everything else defers
+(durable `jobs-deferred.json`, exit 6):
+
+1. **Absent job** (not loaded; nothing at `agents_dir/LABEL.plist`, not even a dangling symlink): the plist is created
+   exclusively (an `O_EXCL` temp file hard-linked to the target, so an existing path is never replaced) and then
+   `launchctl bootstrap` runs. If the path appeared since admission, nothing is written and the step defers with the
+   pending ledger intent rolled back (the log directories may already exist). If `bootstrap` fails (for example an outside loader loaded the label meanwhile) the
+   step is `failed` with **no** `bootout` and no unlink: the running work survives, and the new plist stays on disk and
+   is named in the failure.
+2. **Unloaded job whose plist byte-matches the ADE render** (a regular file, not a symlink): `launchctl bootstrap` only,
+   no write. A ledger-owned file that differs from the render is **not** overwritten (a recorded hash cannot make
+   check-and-overwrite atomic): it defers untouched, as does any foreign, replaced, non-UTF-8 or non-regular file.
+3. **Adoption** of a loaded job whose plist byte-matches the render stays a ledger-only record (`adopted`), with no
+   `launchctl` call and no admission (nothing is mutated on the host).
+4. **Loaded job, any state**: defers untouched (`parse_launchd_activity` only words the reason). **Every removal** defers
+   before any `launchctl` call: an unlink cannot be compare-and-swap.
+5. **Renames and retirements** of launchd jobs stay deferred (exit 6): the removal of the old label defers, and the same
+   logical job's new-label install then defers behind it, until the follow-up below exists.
+6. **Label check** and **blocked rows**: a catalog `label` that differs from the plist `Label` is `blocked` at plan time
+   and refused again before install. A blocked logical row (missing or unrenderable source, label mismatch) keeps its
+   current and prior identities: `plan_reconcile` emits no removal for them (this protects low-level callers too).
+
+The updater's own service (`com.djbclark.ade-update-check`) running keeps its existing refusal reason.
+
+**Follow-up that unlocks the rest** (loaded-job reloads, replacements, removals): an ADE job wrapper that takes a shared
+admission lock on every run, with reconcile holding it exclusive, plus a writer ownership transaction so every definition
+writer shares the check-and-write. **Known limits:** a concurrent external loader can still bootstrap an absent or
+unloaded job (this path then fails or defers and never boots it out); another writer that changes an unloaded file between
+the byte-match read and `bootstrap` gets its definition loaded (nothing is overwritten); an operator-disabled
+(`launchctl disable`), unloaded ADE job is admitted, its `bootstrap` fails and the ledger row becomes `failed`; and, a limit that
+stays latent until removals are ever admitted, adoption does not compare the loaded job's `path =` with our plist, so a job an
+outside loader loaded can be adopted ledger-only when a matching file sits at the path (any removal follow-up must require
+a regular-file plist and a `print` `path =` equal to it); the pre-existing live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a FIFO planted there
+hangs `reconcile` before admission runs.
+
+**systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
+launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
+Direct low-level `install`/`uninstall` are outside this contract; callers must not treat those paths as proof of global
+admission.
+
+**Adoption.** A job installed with low-level `ade-sched install` whose files match the ADE render and which is loaded is
+recorded in the ledger by `reconcile --yes` as `adopted`, without a reload and without admission (nothing is mutated on the
+host). A job whose files differ from the render is an install/reload step and goes through the adapter.
 
 Deferral intent is atomically stored in `jobs-deferred.json` beside `jobs.json`,
 under the existing reconciliation lock, with logical ID, action, backend, label,

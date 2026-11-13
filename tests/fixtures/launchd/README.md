@@ -1,0 +1,1 @@
+Real `launchctl print gui/UID/LABEL` output captured 2026-11-12 on macOS 27.2 from a throwaway probe job (paths and uid sanitized): `print_idle.txt` (a loaded StartInterval job, `state = not running`) and `print_running.txt` (a RunAtLoad job mid-run, `state = running`, `pid`). Nested `state = active` lines (coalitions) sit two tabs deep and must not count.
