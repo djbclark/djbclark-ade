@@ -32,7 +32,8 @@ elif a[:2] == ['agent','inspect']:
     print(json.dumps({'Id': a[2], 'ParentAgentId':parent}))
 elif a[0] == 'ls' and '--label' not in a:
     if s.get('bad_local'): print('bad'); sys.exit(0)
-    print(json.dumps([{'id':x} for x in s.get('local', [])]))
+    ids = s['local'] if 'local' in s else sorted({r['agentId'] for r in s.get('requests', []) if isinstance(r, dict) and 'agentId' in r})
+    print(json.dumps([{'id':x, 'provider':s.get('providers', {}).get(x, 'claude/sonnet')} for x in ids]))
 elif a[0] == 'ls': print(json.dumps([{'id':x} for x in s.get('labelled',{}).get(a[a.index('--label')+1], [])]))
 elif a[:2] == ['permit','allow']:
     if s.get('allow_error'): sys.exit(1)
@@ -103,7 +104,7 @@ def test_unconfirmed_allow_audited(tmp_path):
 def test_watch_is_bounded(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[]}, '--watch','--interval','0.01','--duration','0.05')
     assert result.returncode == 0
-    assert calls and all(c in (['permit','ls'], ['ls','-a','-g','--label',f'ade.lead={LEAD}']) for c in calls)
+    assert calls and all(c in (['permit','ls'], ['ls','-a','-g'], ['ls','-a','-g','--label',f'ade.lead={LEAD}']) for c in calls)
 
 
 def test_reject_foreign_selector(tmp_path):
@@ -218,7 +219,6 @@ def test_remote_or_unlisted_agent_not_included(tmp_path):
 def test_without_flag_unrelated_agent_still_skipped(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[req(OTHER)], 'parents':{OTHER:None}, 'local':[OTHER]})
     assert not allows(calls)
-    assert ['ls','-a','-g'] not in calls
 
 
 def test_bad_local_listing_fails_closed(tmp_path):
@@ -229,7 +229,7 @@ def test_bad_local_listing_fails_closed(tmp_path):
 
 def test_operator_questions_never_approved_in_any_mode(tmp_path):
     import itertools
-    names = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'plan_approval', 'request_user_input', 'ask_user']  # + PROVIDER_QUESTIONS below
+    names = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'plan_approval', 'request_user_input', 'ask_user']
     for i, (mode, name) in enumerate(itertools.product(['all', 'descendant', 'label'], names)):
         d = tmp_path / f'case{i}'
         d.mkdir()
@@ -288,3 +288,34 @@ def test_paseo_host_env_is_not_forwarded(tmp_path, monkeypatch):
                                        'TimeoutExpired': TimeoutError}))
     assert module['call'](['ls', '-a', '-g']) == []
     assert seen and 'PASEO_HOST' not in seen[0]
+
+
+EXTRA_QUESTIONS = ['plan_exit', 'ReviewPlan', 'prompt_user', 'show_dialog', 'get_approval', 'approve_change', 'choose_one',
+                   'pick_choice', 'give_answer', 'enterplanmode', 'planapproval', 'switchmode', 'requestinput', 'askuser',
+                   'choose_db', 'exitplan', 'enterplan']
+
+
+def test_extra_question_shapes_and_tokens():
+    module = runpy.run_path(str(SCRIPT))
+    for name in EXTRA_QUESTIONS:
+        assert module['operator_question']({'name': name}), name
+
+
+def test_acp_and_unknown_providers_are_left_for_the_operator(tmp_path):
+    for i, prov in enumerate(['cursor-acp/auto', 'kimi-acp', '', None]):
+        d = tmp_path / f'p{i}'
+        d.mkdir()
+        scenario = {'requests':[req(OTHER, 'r', 'other'), req(CHILD, 'r', 'Which database should we use?')],
+                    'parents':{OTHER:None, CHILD:LEAD}, 'providers':{OTHER:prov, CHILD:prov}}
+        result, calls = run_fake(d, scenario, '--all-local')
+        assert result.returncode == 0, result.stderr
+        assert not allows(calls), prov
+        assert {r['reason'] for r in audit_rows(d)} == {'unclassified-provider'}
+
+
+def test_known_providers_all_approved(tmp_path):
+    provs = {OTHER:'codex/gpt', CHILD:'opencode/x'}
+    result, calls = run_fake(tmp_path, {'requests':[req(OTHER), req(CHILD)], 'parents':{CHILD:LEAD, OTHER:None},
+                                      'providers':provs}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert len(allows(calls)) == 2

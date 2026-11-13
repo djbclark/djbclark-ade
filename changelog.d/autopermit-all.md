@@ -1,0 +1,3 @@
+### Changed
+
+- `bin/ade-auto-permit --all-local` now approves tool-permission prompts for every agent the local Paseo daemon lists, the lead included (audit reason `all-local`), so operator-started agents no longer stall; the launchd template passes it. In every mode the job skips, and logs, requests that look like questions or plan approvals for the operator (`operator-question`: a best-effort name denylist covering Claude, Codex, OpenCode, Pi, OMP and ACP `switch_mode`; missing names fail closed), requests of agents whose provider is outside that known set (`unclassified-provider`, e.g. ACP-backed agents) and request ids that are a prefix of another pending id (`ambiguous-request-id`). (#653)

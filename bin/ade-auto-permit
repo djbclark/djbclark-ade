@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Approve pending tool-permission requests for a lead's descendants, its `ade.lead=<lead>` workers,
 selected ADE labels or, with `--all-local`, every agent this host's daemon lists. A request that is a question
-or plan approval meant for the operator is never answered, in any mode."""
+or plan approval meant for the operator is skipped in any mode (best-effort name denylist, and only for
+providers whose question names are known: claude, codex, opencode, pi, omp)."""
 import argparse
 from datetime import datetime, timezone
 import fcntl
@@ -47,12 +48,13 @@ def rows(value):
 
 # A request that is a question or plan/mode approval for the operator must stay pending. Paseo's request
 # kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`), so
-# this is a name-based, best-effort DENYLIST that fails closed (false positives only leave a prompt for the
-# operator). Names seen in Paseo's providers: Claude AskUserQuestion / ExitPlanMode, Codex CodexPlanApproval /
+# this is a name-based, best-effort DENYLIST (a missing name or a non-`tool` kind fails closed; an unlisted
+# question name is NOT caught, so only providers in CLASSIFIED_PROVIDERS, whose names are known, are served). Names seen in Paseo's providers: Claude AskUserQuestion / ExitPlanMode, Codex CodexPlanApproval /
 # CodexMcpElicitation / request_user_input, OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|
 # confirm", OMP "OMP ask" / "OMP select|...", ACP switch_mode. `kind` is also checked when a row carries it.
 # Substring stems are matched against the lower-cased name with separators removed (catches run-together
 # spellings); short words are matched as whole tokens (acronym- and camelCase-split) so "Task" is not "ask".
+CLASSIFIED_PROVIDERS = {"claude", "codex", "opencode", "pi", "omp"}  # question names read from Paseo's source
 STEMS = ("question", "elicit", "askuser", "userinput", "exitplan", "enterplan", "planmode", "planapproval",
          "switchmode", "requestinput")
 TOKENS = {"ask", "plan", "mode", "prompt", "dialog", "approval", "approve", "choose", "choice", "answer"}
@@ -112,13 +114,14 @@ def descendant(agent, lead, cache):
 def sweep(lead, labels, log, all_local=False):
     requests = rows(call(["permit", "ls"]))
     eligible = {}
-    local = set()
-    if all_local:
-        # This host's daemon only (no --host): remote hosts' agents are never in this list.
-        for row in rows(call(["ls", "-a", "-g"])):
-            if not isinstance(row, dict) or not identifier(row.get("id")):
-                raise ProbeError("invalid local agent")
-            local.add(row["id"])
+    # This host's daemon only (no --host): remote hosts' agents are never in this list. It also gives each
+    # agent's provider, which decides whether its question names are known (CLASSIFIED_PROVIDERS).
+    providers = {}
+    for row in rows(call(["ls", "-a", "-g"])):
+        if not isinstance(row, dict) or not identifier(row.get("id")):
+            raise ProbeError("invalid local agent")
+        provider = row.get("provider")
+        providers[row["id"]] = provider.split("/")[0].lower() if isinstance(provider, str) else ""
     # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
     # The lead's own `ade.lead=<lead>` label is always checked: a lead launches top-level
     # (env-stripped) workers that are not descendants, and they carry that label.
@@ -146,12 +149,21 @@ def sweep(lead, labels, log, all_local=False):
                for r in requests):
             # `paseo permit allow` matches ids by prefix and takes the first hit: another pending id that
             # starts with this one could be answered instead (e.g. a question). Never allow such an id.
+            # Snapshot-only: a prefix-colliding id that appears after this `permit ls` is not seen.
             log_event(log, "skip", "ambiguous-request-id", agent, request)
             failed = True
             continue
         if operator_question(row):
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
             log_event(log, "skip", "operator-question", agent, request)
+            continue
+        if agent not in providers:
+            log_event(log, "skip", "outside-scope", agent, request)
+            continue
+        if providers[agent] not in CLASSIFIED_PROVIDERS:
+            # ACP-backed providers name questions by tool kind or free-text title, so a question cannot be
+            # told from a tool prompt by name; their prompts stay for the operator.
+            log_event(log, "skip", "unclassified-provider", agent, request)
             continue
         try:
             if agent == lead:
@@ -165,7 +177,7 @@ def sweep(lead, labels, log, all_local=False):
                     if not all_local:
                         raise
                     reason = None  # all-local does not depend on ancestry; local membership decides
-            if reason is None and all_local and agent in local:
+            if reason is None and all_local and agent in providers:
                 reason = "all-local"
             if reason is None:
                 log_event(log, "skip", "outside-scope", agent, request)
