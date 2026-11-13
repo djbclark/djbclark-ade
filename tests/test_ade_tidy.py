@@ -33,6 +33,8 @@ elif a[:2] == ["workspace", "ls"]:
 elif a[:2] == ["permit", "ls"]:
     print(json.dumps(d.get("permits", [])))
 elif a[:2] == ["terminal", "ls"]:
+    if d.get("terminal_fail"):
+        sys.exit(1)
     print(json.dumps(d.get("terminals", {}).get(a[a.index("--workspace") + 1], [])))
 elif a[0] == "logs":
     print(d.get("logs", {}).get(a[1], ""))
@@ -77,8 +79,16 @@ class Env:
         self.window(W_WORK, "workers myrepo Wave 7 " + LEAD, str(self.repo))
         self.window(W_USER, "scratch", str(self.repo))
 
-    def window(self, wid, name, cwd=None, project="myrepo"):
-        self.data["workspaces"].append({"workspaceId": wid, "project": project, "name": name, "cwd": cwd or str(self.tmp / "elsewhere" if project != "myrepo" else self.repo)})
+    def window(self, wid, name, cwd=None, project="myrepo", isolation="local"):
+        self.data["workspaces"].append({"workspaceId": wid, "project": project, "name": name, "isolation": isolation,
+                                        "cwd": cwd or str(self.tmp / "elsewhere" if project != "myrepo" else self.repo)})
+
+    def record(self, aid, wks, lead=LEAD, archived=True):
+        """A state record that is not in `paseo ls -g` (an archived agent, or a background one when archived=False)."""
+        p = self.home / "agents/proj" / f"{aid}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"id": aid, "workspaceId": wks, "labels": {"ade.lead": lead} if lead else {},
+                                 **({"archivedAt": "2026-11-13T00:00:00Z"} if archived else {})}))
 
     def agent(self, aid, wks, name, status="idle", cwd=None, labels=None, text="", tags=None):
         self.data["agents"].append({"id": aid, "name": name, "status": status, "cwd": str(cwd or self.repo)})
@@ -95,7 +105,7 @@ class Env:
         self.data_path.write_text(json.dumps(self.data))
         cmd = [sys.executable, str(SCRIPT), "--repo", str(self.repo), "--json", "--reports-dir", str(self.reports), *args]
         if apply:
-            cmd.append("--apply")
+            cmd += ["--lead", LEAD, "--apply"]
         return subprocess.run(cmd, capture_output=True, text=True)
 
     def calls(self):
@@ -160,7 +170,8 @@ def test_verdicts(env):
     env.agent("00000004-0000-0000-0000-000000000000", W_USER, "op card", tags=["[Tool] AskUserQuestion"], text="")
     env.worker(5, text="done: Please reply: ack 00000005-0000-0000-0000-000000000000")
     env.worker(6, text="working on it, nothing to say")
-    env.data["permits"] = [{"agentId": "00000007-0000-0000-0000-000000000000", "name": "Bash", "description": "rm"}]
+    env.data["permits"] = [{"id": "11111111-1111-1111-1111-111111111111", "agentId": "00000007-0000-0000-0000-000000000000",
+                            "name": "Bash", "description": "rm -rf secrets"}]
     env.worker(7, "running")
     a = by_id(env.plan())
     assert a["00000001"]["verdict"] == "working"
@@ -170,10 +181,12 @@ def test_verdicts(env):
     assert a["00000005"]["verdict"] == "waiting-on-lead"  # asks for an ack
     assert a["00000006"]["verdict"] == "unknown"
     assert a["00000007"]["verdict"] == "waiting-on-operator" and "permission" in a["00000007"]["reason"]
+    assert "rm -rf" not in a["00000007"]["reason"]   # only the tool name is shown
 
 
 def test_done_needs_ack_before_archive(env):
-    env.worker(1, text="written: " + str(env.report("s1")))
+    env.report("s1")
+    env.worker(1, text="written: x")
     p = env.plan()
     assert by_id(p)["00000001"]["verdict"] == "waiting-on-lead" and p["archive_agents"] == []
     Path(f"{env.reports}/unit-s1.md.done.ack").write_text("")
@@ -187,12 +200,38 @@ def test_done_needs_ack_before_archive(env):
 
 
 def test_unverified_done_is_never_archived(env):
-    env.worker(1, text="all done!")                       # says done, no report
-    env.worker(2, text="written: " + str(env.report("s2", last="not finished", done=True, ack=True)))
-    env.worker(3, text="written: " + str(env.report("s3", done=False)))   # DONE line but no .done marker
+    env.report("s2", last="not finished", done=True, ack=True)
+    env.report("s3", done=False, ack=True)                                # DONE line, ack, but no .done marker
+    env.worker(1, text="all done!")                                       # says done, no report
+    env.worker(2, text="x")
+    env.worker(3, text="x")
     p = env.plan()
     assert by_id(p)["00000001"]["verdict"] == "done" and "not verified" in by_id(p)["00000001"]["reason"]
     assert p["archive_agents"] == []
+    # the lead passes --handled for an ack-without-.done case: that archives s3 (report ends DONE), never s2 (not DONE)
+    p = env.plan("--handled", ",".join(f"0000000{n}-0000-0000-0000-000000000000" for n in (1, 2, 3)))
+    assert [x["agent"][:8] for x in p["archive_agents"]] == ["00000003"]
+
+
+def test_question_or_blocked_beats_a_finished_report(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="done, but should I merge now?")
+    env.report("s2", ack=True)
+    env.worker(2, text="BLOCKED: need a decision")
+    p = env.plan()
+    assert [by_id(p)[k]["verdict"] for k in ("00000001", "00000002")] == ["waiting-on-lead", "waiting-on-lead"]
+    assert p["archive_agents"] == []
+
+
+def test_closed_worker_is_archived_only_with_verified_done(env):
+    env.worker(1, "closed", text="BLOCKED: waiting")             # interrupted by a daemon restart
+    env.worker(2, "closed", text="")                             # closed, nothing known
+    env.report("s3", ack=True)
+    env.worker(3, "closed", text="finished")
+    p = env.plan()
+    assert [x["agent"][:8] for x in p["archive_agents"]] == ["00000003"]
+    assert {u[:8] for u in p["unreached"]} >= {"00000002"}
+    assert by_id(p)["00000002"]["verdict"] == "unknown" and "closed" in by_id(p)["00000002"]["reason"]
 
 
 def test_operator_agents_listed_never_archived(env):
@@ -246,7 +285,8 @@ def test_send_skipped_when_agent_no_longer_idle(env):
 
 
 def test_apply_archives_done_worker_not_a_running_one(env):
-    env.worker(1, text="written: " + str(env.report("s1", ack=True)))
+    env.report("s1", ack=True)
+    env.worker(1, text="finished")
     env.data["ls_seq"] = [list(env.data["agents"]), [{**x, "status": "running"} for x in env.data["agents"]]]
     r = env.run(apply=True)
     assert r.returncode == 0, r.stderr
@@ -276,22 +316,44 @@ def test_windows_renamed_main_kept_empty_archived(env):
     env.agent(LEAD, W_MAIN, "LEAD myrepo Wave 7", "running")
     env.worker(1, "running")
     env.window(W_EMPTY, "master")
+    env.record("0000000b-0000-0000-0000-000000000000", W_EMPTY)           # only this lead's archived worker ever lived there
     p = env.plan()
     ren = {r["windowId"]: r["to"] for r in p["renames"]}
     assert ren[W_WORK] == "WORKERS myrepo (Wave 7)" and W_MAIN not in ren   # MAIN already conforms
-    assert [w["windowId"] for w in p["archive_windows"]] == [W_EMPTY, W_USER] or \
-        {w["windowId"] for w in p["archive_windows"]} == {W_EMPTY, W_USER}
-    assert W_MAIN not in {w["windowId"] for w in p["archive_windows"]}
+    assert {w["windowId"] for w in p["archive_windows"]} == {W_EMPTY}
+    assert {w["windowId"] for w in p["empty_not_ours"]} == {W_USER}          # owner unknown: listed, not archived
     r = env.run(apply=True)
     assert r.returncode == 0, r.stderr
     assert ["workspace", "rename", W_WORK, "WORKERS myrepo (Wave 7)"] in env.calls()
     archived = {c[2] for c in env.calls() if c[:2] == ["workspace", "archive"]}
-    assert archived == {W_EMPTY, W_USER} and W_MAIN not in archived and W_WORK not in archived
+    assert archived == {W_EMPTY} and W_MAIN not in archived and W_WORK not in archived
+
+
+def test_worktree_isolated_window_other_leads_window_and_background_agent_kept(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window("wks_wt", "slice", isolation="worktree")
+    env.record("0000000c-0000-0000-0000-000000000000", "wks_wt")           # ours, but a worktree: archive would delete it
+    env.window("wks_olead", "WORKERS myrepo (theirs)")
+    env.record("0000000d-0000-0000-0000-000000000000", "wks_olead", lead=OTHER_LEAD)
+    env.window("wks_bg", "background only")
+    env.record("0000000e-0000-0000-0000-000000000000", "wks_bg", archived=False)   # background agent: not in `paseo ls -g`
+    p = env.plan()
+    assert not {w["windowId"] for w in p["archive_windows"]} & {"wks_wt", "wks_olead", "wks_bg", W_MAIN}
+    assert {w["windowId"] for w in p["empty_not_ours"]} >= {"wks_wt", "wks_olead"}
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert not {c[2] for c in env.calls() if c[:2] == ["workspace", "archive"]} & {"wks_wt", "wks_olead", "wks_bg", W_MAIN}
+
+
+def test_apply_needs_explicit_lead(env):
+    r = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(env.repo), "--apply"], capture_output=True, text=True)
+    assert r.returncode == 1 and "explicit --lead" in r.stderr and env.mutating() == []
 
 
 def test_window_with_terminal_or_foreign_agent_not_archived(env):
     env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
     env.window(W_EMPTY, "master")
+    env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY)
     env.data["terminals"] = {W_EMPTY: [{"id": "t1"}]}
     env.agent("00000009-0000-0000-0000-000000000000", W_USER, "another repo's agent", cwd=env.tmp,
               labels={})  # in W_USER (project=myrepo) so it is in scope; also keeps W_USER occupied
@@ -321,3 +383,28 @@ def test_agent_text_is_bounded_and_stripped(env):
     env.worker(1, text="BLOCKED: " + "x\x1b[31m" * 500)
     reason = env.plan()["waiting_on_lead"][0]["reason"]
     assert len(reason) <= 300 and "\x1b" not in reason
+
+
+def test_report_path_outside_reports_dir_is_ignored(env):
+    outside = env.tmp / "elsewhere"
+    outside.mkdir()
+    rp = outside / "unit-x.md"
+    rp.write_text("DONE\n")
+    Path(f"{rp}.done").write_text("")
+    Path(f"{rp}.done.ack").write_text("")
+    env.worker(1, text=f"written: {rp}")                        # path named by agent text: never used
+    (env.reports / "unit-s2.md").symlink_to(rp)                 # symlink out of the reports folder
+    env.worker(2, text="nothing")
+    p = env.plan()
+    assert not by_id(p)["00000001"]["verified_done"] and not by_id(p)["00000002"]["verified_done"]
+    assert p["archive_agents"] == []
+
+
+def test_terminal_list_failure_blocks_window_archive(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_EMPTY, "master")
+    env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY)
+    env.data["terminal_fail"] = True
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert [c for c in env.calls() if c[:2] == ["workspace", "archive"]] == []

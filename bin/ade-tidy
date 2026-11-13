@@ -2,7 +2,7 @@
 """Tidy one repo's Paseo agents and windows: inventory, reconnect, waiting report, names, finished agents.
 
   ade-tidy [--repo DIR] [--lead ID] [--json] [--reports-dir DIR ...] [--handled ID,...] [--work KIND=TEXT ...]
-           [--max-age-min N] [--apply]
+           [--apply]
   ade-tidy ack AGENT_ID [--lead ID]        record proven contact (the agent's `ack <lead id>` reached the lead)
 
 Observe-only by default: it prints the plan and changes nothing. `--apply` prints the plan first, then acts, with each
@@ -18,9 +18,11 @@ precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
   4. Names: windows named `<KIND> <repo> (<work>)` (bin/ade_ws_names.py); MAIN is never archived.
   5. Tabs: Paseo has no command to move an agent between windows (docs/workspace-layout.md), so a misplaced tab is
      reported, never relaunched.
-  6. Finished: archive this lead's DONE workers (report ends DONE, .done or .done.ack exists, completion acked or --handled) and
-     closed own workers; operator agents are only listed; a running agent is never archived; empty windows other than
-     MAIN are archived after a fresh emptiness check.
+  6. Finished: archive this lead's workers whose `unit-<slice>.md` ends DONE with `.done` present and the completion
+     handled (`.done.ack` or --handled); a merely `closed` worker is listed, not archived (a daemon restart closes
+     interrupted agents); operator agents are only listed; a running agent is never archived. A window is archived only
+     when empty (every unarchived agent record, no terminal), `isolation` is local, it is not MAIN and it is provably
+     this lead's; occupancy is read last. Other empty windows are listed.
 
 Exit 0: ok (also when nothing to do); 1: refused or a paseo call failed; 2: usage.
 """
@@ -35,7 +37,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import stat
 import time
+import unicodedata
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
@@ -84,7 +88,8 @@ def paseo_json(args: list[str]):
 
 def clean(text: str, limit: int = EXCERPT) -> str:
     """Agent-written text is data: control characters out, one line, bounded."""
-    text = CTRL_RE.sub(" ", str(text))
+    text = "".join(" " if unicodedata.category(c) in ("Cf", "Cc", "Cs", "Co") else c for c in str(text))
+    text = CTRL_RE.sub(" ", text)
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -124,21 +129,28 @@ def terminals_in(wks: str) -> int:
     return len(rows)
 
 
-def pending_permissions() -> dict[str, str]:
-    """agent id -> bounded text of its pending permission request (`paseo permit ls --json`); fail soft to {}."""
+def terminals_in_safe(wks: str) -> int:
+    """Terminal count, or 1 (treated as occupied) when the list cannot be read: never archive on a failed read."""
+    try:
+        return terminals_in(wks)
+    except Refused:
+        return 1
+
+
+def pending_permissions() -> dict[str, str] | None:
+    """agent id -> the pending request's tool name (`paseo permit ls --json`, keyed by the row's agentId, never its own
+    request id); None when the list cannot be read, so apply can refuse to act on a blind view."""
     try:
         rows = paseo_json(["permit", "ls", "--json"])
     except Refused:
-        return {}
+        return None
     found: dict[str, str] = {}
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        agent = next((v for v in row.values() if isinstance(v, str) and UUID_RE.fullmatch(v)), None)
-        if agent is None:
-            continue
-        what = " ".join(str(row.get(k, "")) for k in ("name", "tool", "description") if row.get(k))
-        found[agent] = clean(what or "permission request", 160)
+        agent = row.get("agentId") or row.get("agent_id")
+        if isinstance(agent, str) and UUID_RE.fullmatch(agent):
+            found[agent] = clean(str(row.get("name") or row.get("tool") or "request"), 40)
     return found
 
 
@@ -189,7 +201,7 @@ def in_roots(cwd: str, roots: list[str]) -> bool:
     return any(c == r or c.startswith(r + os.sep) for r in roots)
 
 
-def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str]) -> str:
+def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str], foreign_main: bool = False) -> str:
     aid, name = agent["id"], str(agent.get("name") or "")
     labels = (st or {}).get("labels") or {}
     owner = labels.get("ade.lead") if isinstance(labels, dict) else None
@@ -201,39 +213,58 @@ def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str]) -> str
         return "own-worker"
     if owner:
         return "other-worker"
-    if aid in lead_ids or re.match(r"(?i)(lead|main)\b", name):
-        return "lead"
+    if aid in lead_ids or foreign_main or re.match(r"(?i)(lead|main)\b", name):
+        return "lead"  # foreign_main: an unlabelled agent in another lead's MAIN window is not the operator's
     return "operator"
 
 
-def report_for(text: str, slice_name: str | None, reports_dirs: list[str]) -> Path | None:
-    cands = [Path(m) for m in re.findall(r"written:\s*(/[^\s`'\"]+\.md)", text)][-1:]
+def report_for(slice_name: str | None, reports_dirs: list[str]) -> Path | None:
+    """The worker's own report: `unit-<slice>.md` in a --reports-dir (a regular file, resolved inside that folder).
+    A path an agent writes in its text is never used: it could name another worker's report."""
+    if not slice_name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", slice_name):
+        return None
     for d in reports_dirs:
-        if slice_name:
-            cands.append(Path(d) / f"unit-{slice_name}.md")
-    for p in cands:
-        if p.is_absolute() and p.name.endswith(".md") and p.exists():
-            return p
+        root = os.path.realpath(os.path.expanduser(d))
+        rp = os.path.realpath(os.path.join(root, f"unit-{slice_name}.md"))
+        try:
+            ok = rp.startswith(root + os.sep) and stat.S_ISREG(os.lstat(rp).st_mode)
+        except OSError:
+            continue
+        if ok:
+            return Path(rp)
     return None
 
 
+def mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def report_done(report: Path | None) -> tuple[bool, bool]:
-    """(report's last non-empty line is DONE and `<report>.done` exists, `<report>.done.ack` exists)."""
+    """(finished, acked). finished: the report's last non-empty line is DONE and `<report>.done` exists, touched no earlier
+    than the report. acked: `<report>.done.ack` exists, touched no earlier than `.done`. An ack without `.done` is not
+    proof (the lead renames `.done` to `.done.rN` to re-task a round): the lead passes --handled for that case."""
     if report is None:
         return False, False
-    done = Path(f"{report}.done")
     try:
-        lines = [ln.strip() for ln in report.read_text(errors="replace").splitlines() if ln.strip()]
+        with report.open("rb") as fh:  # only the tail matters: never read a huge file whole
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            tail = fh.read().decode("utf-8", "replace")
     except OSError:
         return False, False
-    ack = Path(f"{done}.ack").exists()
-    # the lead renames `.done` to `.done.rN` when it re-tasks a round, so an ack alone also proves a finished DONE report
-    ok = bool(lines) and lines[-1] == "DONE" and (done.exists() or ack)
-    return ok, ok and ack
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    done = Path(f"{report}.done")
+    r_m, d_m, a_m = mtime(report), mtime(done), mtime(Path(f"{done}.ack"))
+    finished = bool(lines) and lines[-1] == "DONE" and d_m is not None and r_m is not None and r_m <= d_m + 1
+    return finished, finished and a_m is not None and a_m + 1 >= d_m
 
 
 def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: list[str], handled: set[str]) -> None:
-    """Fill row['verdict'], row['reason'] (bounded excerpt) and row['verified_done']."""
+    """Fill row['verdict'], row['reason'] (bounded excerpt) and row['verified_done']. Order matters: a question, a
+    BLOCKED line or a card always wins over a finished report, so such an agent is shown, never archived."""
     cls, status = row["class"], row["status"]
     last_line = next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
     row["verified_done"] = False
@@ -243,28 +274,75 @@ def verdict(row: dict, text: str, card: bool, permit: str | None, reports_dirs: 
     if status == "running":
         row["verdict"], row["reason"] = "working", ""
         return
-    rep = report_for(text, row.get("slice"), reports_dirs)
+    rep = report_for(row.get("slice"), reports_dirs)
     ok, acked = report_done(rep)
     row["report"] = str(rep) if rep else None
-    if re.search(r"(^|\n)\s*BLOCKED:", text) and cls == "own-worker":
+    own = cls == "own-worker"
+    if own and re.search(r"(^|\n)\s*BLOCKED:", text):
         row["verdict"], row["reason"] = "waiting-on-lead", clean(text[text.rfind("BLOCKED:"):])
-    elif ok and cls == "own-worker":
-        row["verified_done"] = True
+    elif last_line.rstrip().endswith("?"):
+        row["verdict"] = "waiting-on-lead" if own else "waiting-on-operator"
+        row["reason"] = clean(last_line)
+    elif card:
+        row["verdict"], row["reason"] = "waiting-on-operator", "question card pending: " + clean(text)
+    elif own and ok:
         if acked or row["id"] in handled:
+            row["verified_done"] = True
             row["verdict"], row["reason"] = "done", "report ends DONE, .done present, completion handled"
         else:
             row["verdict"], row["reason"] = "waiting-on-lead", "completion notice not acked (write <done>.ack or pass --handled)"
-    elif card:
-        row["verdict"], row["reason"] = "waiting-on-operator", "question card pending: " + clean(text)
-    elif last_line.rstrip().endswith("?"):
-        who = "waiting-on-lead" if cls == "own-worker" else "waiting-on-operator"
-        row["verdict"], row["reason"] = who, clean(last_line)
-    elif re.search(r"Please reply:\s*ack", text) and cls == "own-worker":
+    elif own and re.search(r"Please reply:\s*ack", text):
         row["verdict"], row["reason"] = "waiting-on-lead", "asks for ack: " + clean(last_line)
-    elif ok or re.search(r"\bdone\b|^\s*written:", last_line, re.I):
-        row["verdict"], row["reason"] = "done", "says done" + ("" if ok else " (report not verified)")
+    elif own and row["id"] in handled and rep is not None and report_tail_is_done(rep):
+        row["verified_done"] = True
+        row["verdict"], row["reason"] = "done", "report ends DONE, lead passed --handled (no .done marker)"
+    elif re.search(r"\bdone\b|^\s*written:", last_line, re.I):
+        row["verdict"], row["reason"] = "done", "says done (report not verified)"
+    elif status == "closed":
+        row["verdict"], row["reason"] = "unknown", "closed (interrupted or daemon restart?): resume or re-task it; not archived"
     else:
         row["verdict"], row["reason"] = "unknown", clean(last_line)
+
+
+def report_tail_is_done(report: Path) -> bool:
+    try:
+        with report.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            lines = [ln.strip() for ln in fh.read().decode("utf-8", "replace").splitlines() if ln.strip()]
+    except OSError:
+        return False
+    return bool(lines) and lines[-1] == "DONE"
+
+
+def agent_state_files() -> list[dict]:
+    """Every agent record under $PASEO_HOME/agents (live and archived): the daemon archives a window by these."""
+    out = []
+    for p in sorted((paseo_home() / "agents").glob("*/*.json")):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def occupants_of(wks: str, live_ids: set[str]) -> list[str]:
+    """Agents in a window by what the daemon would archive: unarchived state records with that workspaceId, plus any live
+    agent whose record says so (background and internal agents are in the records, not in `paseo ls -g`)."""
+    found = {d["id"] for d in agent_state_files()
+             if d.get("workspaceId") == wks and not d.get("archivedAt") and isinstance(d.get("id"), str)}
+    return sorted(found | {i for i in live_ids if (state_file(i) or {}).get("workspaceId") == wks})
+
+
+def window_is_ours(wks: str, name: str, lead: str) -> bool:
+    """Provably this lead's: every agent ever recorded in it (live or archived) carries ade.lead=<lead> and there is at
+    least one, or its name is the legacy `workers ... <lead id>` form. An empty window of unknown owner is only listed."""
+    if name.startswith(("workers ", "WORKERS ")) and name.endswith(f" {lead}"):
+        return True
+    recs = [d for d in agent_state_files() if d.get("workspaceId") == wks]
+    return bool(recs) and all((d.get("labels") or {}).get("ade.lead") == lead for d in recs)
 
 
 def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict], list[dict]]:
@@ -273,18 +351,22 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
     states = {r["id"]: state_file(r["id"]) for r in allrows}
     lead_ids = {s["labels"]["ade.lead"] for s in states.values()
                 if s and isinstance(s.get("labels"), dict) and s["labels"].get("ade.lead")}
-    permits = pending_permissions()
+    self_wks = (states.get(lead) or {}).get("workspaceId")
+    permits = opts.permits or {}
     handled = set(filter(None, (opts.handled or "").split(",")))
     out = []
     for a in allrows:
         st = states[a["id"]]
         wks = st.get("workspaceId") if st and WKS_RE.fullmatch(str(st.get("workspaceId", ""))) else None
         win = wmap.get(wks) if wks else None
-        if not (in_roots(a.get("cwd") or "", roots) or (win and win.get("project") == repo)):
+        # in scope by the agent's own directory, or by a window whose directory is in the repo (not by project name alone:
+        # the project is the directory's basename, so a same-named checkout elsewhere would match)
+        if not (in_roots(a.get("cwd") or "", roots) or (win and in_roots(win.get("cwd") or "", roots))):
             continue
-        row = {"id": a["id"], "name": clean(a.get("name") or "", 120), "status": a.get("status"),
-               "cwd": a.get("cwd"), "windowId": wks, "windowName": win.get("name") if win else None,
-               "class": classify(a, st, lead, lead_ids), "slice": ((st or {}).get("labels") or {}).get("slice"),
+        foreign_main = bool(win and wks != self_wks and re.match(r"MAIN\b", str(win.get("name") or "")))
+        row = {"id": a["id"], "name": clean(a.get("name") or "", 120), "status": clean(a.get("status"), 20),
+               "cwd": a.get("cwd"), "windowId": wks, "windowName": clean(win.get("name"), 120) if win else None,
+               "class": classify(a, st, lead, lead_ids, foreign_main), "slice": ((st or {}).get("labels") or {}).get("slice"),
                "labels": (st or {}).get("labels") or {}}
         if row["class"] in SKIP_CLASSES:
             row.update(verdict="n/a", reason="", verified_done=False)
@@ -305,9 +387,23 @@ def state_path(lead: str) -> Path:
 def load_state(lead: str) -> dict:
     try:
         d = json.loads(state_path(lead).read_text())
-        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {"sends": {}, "acks": {}}
+    d = d if isinstance(d, dict) else {}
+    for k in ("sends", "acks"):
+        if not isinstance(d.get(k), dict):
+            d[k] = {}
+    return d
+
+
+def num(v, default: float) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
+def send_ts(st: dict, aid: str, now: float) -> float:
+    """When the last send to aid was made; an unreadable record counts as 'just now' (fail closed: no second send)."""
+    rec = st["sends"].get(aid)
+    return 0.0 if rec is None else (num(rec.get("ts"), now) if isinstance(rec, dict) else now)
 
 
 def save_state(lead: str, data: dict) -> None:
@@ -319,13 +415,29 @@ def save_state(lead: str, data: dict) -> None:
     os.replace(tmp, p)
 
 
+def flock_timeout(path: Path, seconds: int = 120):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a")
+    end = time.time() + seconds
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.time() > end:
+                fh.close()
+                raise Refused(f"could not take {path} within {seconds}s (another ade-tidy or ade-worker-run holds it)")
+            time.sleep(0.5)
+
+
+def state_lock(lead: str):
+    return flock_timeout(state_path(lead).with_suffix(".lock"), 30)
+
+
 def lock_for(lead: str):
-    """The same per-lead lock ade-worker-run holds while launching or archiving a workers window."""
+    """The same per-lead lock ade-worker-run holds while launching or archiving a workers window (bounded wait)."""
     d = Path(os.environ.get("ADE_WORKER_RUN_STATE") or Path.home() / ".local/state/ade/worker-run")
-    d.mkdir(parents=True, exist_ok=True)
-    fh = (d / f"{lead}.lock").open("a")
-    fcntl.flock(fh, fcntl.LOCK_EX)
-    return fh
+    return flock_timeout(d / f"{lead}.lock", 120)
 
 
 # ----------------------------------------------------------------------------------------------- plan
@@ -336,17 +448,15 @@ def send_text(lead: str, repo: str) -> str:
 
 
 def reconnect_candidates(rows: list[dict], st: dict, now: float) -> list[dict]:
-    acks, sends = st.get("acks", {}), st.get("sends", {})
     out = []
     for r in rows:
         if r["class"] not in ("own-worker", "operator") or r["status"] != "idle":
             continue
-        if r["verdict"] in ("done", "waiting-on-operator") or r["verified_done"]:
+        if r["verdict"] != "unknown":  # waiting-on-lead is answered, not pinged; done and operator-waiting need nothing
             continue
-        if now - float(acks.get(r["id"], 0)) < CONTACT_FRESH_SECONDS:
+        if now - num(st["acks"].get(r["id"]), 0.0) < CONTACT_FRESH_SECONDS:
             continue  # contact proven recently
-        last = sends.get(r["id"], {}).get("ts", 0)
-        if now - float(last) < RESEND_SECONDS:
+        if now - send_ts(st, r["id"], now) < RESEND_SECONDS:
             continue
         out.append(r)
     return out
@@ -368,12 +478,12 @@ def window_kind(agents: list[dict]) -> str | None:
 # ----------------------------------------------------------------------------------------------- windows
 
 def names_mod():
-    """bin/ade_ws_names.py (window name builder/parser, ws-naming slice); imported lazily so observe works without it."""
+    """bin/ade_ws_names.py (window name builder/parser, ws-naming slice), or None: only the rename step needs it."""
     sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
     try:
         import ade_ws_names
-    except ImportError as e:
-        raise Refused(f"bin/ade_ws_names.py is missing ({e}); it ships with the window-naming change") from e
+    except ImportError:
+        return None
     return ade_ws_names
 
 
@@ -416,12 +526,12 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
     for w in wins:
         wks = w["workspaceId"]
         agents = [r for r in by_win.get(wks, []) if r["class"] not in SKIP_CLASSES]
-        if not (w.get("project") == repo or in_roots(w.get("cwd") or "", roots) or by_win.get(wks)):
+        if not (in_roots(w.get("cwd") or "", roots) or by_win.get(wks)):
             continue
         kind = window_kind(agents)
         occupants = occupancy.get(wks, [])
         foreign = [a for a in occupants if a not in {r["id"] for r in by_win.get(wks, [])}]
-        entry = {"windowId": wks, "name": w.get("name"), "kind": kind, "agents": [r["id"] for r in agents],
+        entry = {"windowId": wks, "name": clean(w.get("name"), 120), "kind": kind, "isolation": w.get("isolation"), "agents": [r["id"] for r in agents],
                  "occupants": len(occupants), "outsideRepoAgents": len(foreign)}
         out["windows"].append(entry)
         for r in agents:
@@ -436,6 +546,9 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
             out["notes"].append(f"{wks} holds {len(foreign)} live agent(s) outside {repo}: not renamed")
             continue
         cur = w.get("name") or ""
+        if names is None:
+            out["notes"].append("bin/ade_ws_names.py is missing: no window is renamed")
+            continue
         parsed, legacy = names.parse(cur), names.parse_legacy(cur)
         work = work_over.get(kind) or (parsed.work if parsed else None) \
             or (names.normalize_work(legacy.middle, repo) if legacy else None) or derive_work(kind, agents, repo)
@@ -460,45 +573,54 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
     names = names_mod()
     now = time.time()
     st = load_state(lead)
+    opts.permits = pending_permissions()
+    permits_ok = opts.permits is not None
+    if not permits_ok:
+        opts.permits = {}
     rows, wins = inventory(opts, lead, repo, roots)
-    occupancy: dict[str, list[str]] = {}
-    unplaced = []
-    for a in live_agents():
-        s = state_file(a["id"])
-        if s and WKS_RE.fullmatch(str(s.get("workspaceId", ""))):
-            occupancy.setdefault(s["workspaceId"], []).append(a["id"])
-        else:
-            unplaced.append(a["id"])
+    live_ids = {a["id"] for a in live_agents()}
+    unplaced = [i for i in live_ids if not WKS_RE.fullmatch(str((state_file(i) or {}).get("workspaceId", "")))]
+    occupancy = {w["workspaceId"]: occupants_of(w["workspaceId"], live_ids) for w in wins}
     mine = [r for r in rows if r["class"] not in SKIP_CLASSES]
-    p = {"repo": repo, "lead": lead, "roots": roots, "agents": rows}
+    p = {"repo": repo, "lead": lead, "roots": roots, "agents": rows, "permits_ok": permits_ok, "notes": []}
     p["waiting_on_lead"] = [r for r in mine if r["verdict"] == "waiting-on-lead"]
     p["waiting_on_operator"] = [r for r in mine if r["verdict"] == "waiting-on-operator"]
     p["send"] = [{"agent": r["id"], "name": r["name"], "class": r["class"]} for r in reconnect_candidates(mine, st, now)]
-    p["unreached"] = [r["id"] for r in mine if r["id"] in st.get("sends", {}) and r["id"] not in st.get("acks", {})
-                      and now - float(st["sends"][r["id"]]["ts"]) >= CONTACT_FRESH_SECONDS and r["status"] == "idle"]
+    p["unreached"] = [r["id"] for r in mine if r["status"] == "closed" and r["class"] == "own-worker" and r["verdict"] != "done"] + \
+        [r["id"] for r in mine if r["status"] == "idle" and r["id"] in st["sends"] and r["id"] not in st["acks"]
+         and now - send_ts(st, r["id"], now) >= CONTACT_FRESH_SECONDS]
     win = plan_windows(rows, wins, occupancy, repo, roots, opts, names)
-    p.update(win)
-    p["archive_agents"] = [{"agent": r["id"], "name": r["name"], "why": "closed" if r["status"] == "closed" else "done"}
-                           for r in mine if r["class"] == "own-worker" and r["status"] != "running"
-                           and (r["status"] == "closed" or (r["verdict"] == "done" and r["verified_done"]))]
+    notes = p["notes"]
+    p.update({k: v for k, v in win.items() if k != "notes"})
+    p["notes"] = notes + win["notes"]
+    if not permits_ok:
+        p["notes"].append("`paseo permit ls` failed: apply will send and archive nothing")
+    # archive only a worker of this lead that is not running and whose DONE report is verified and handled (a `closed`
+    # agent was often only interrupted by a daemon restart, so closed alone proves nothing)
+    p["archive_agents"] = [{"agent": r["id"], "name": r["name"], "why": "done"}
+                           for r in mine if r["class"] == "own-worker" and r["status"] in ("idle", "closed")
+                           and r["verdict"] == "done" and r["verified_done"]]
     p["list_only"] = [{"agent": r["id"], "name": r["name"], "class": r["class"], "status": r["status"],
                        "why": "operator agent: archive only on the operator's yes"}
                       for r in mine if r["class"] == "operator" and (r["status"] == "closed" or r["verdict"] == "done")]
     leaving = {a["agent"] for a in p["archive_agents"]}
-    p["archive_windows"] = []
+    p["archive_windows"], p["empty_not_ours"] = [], []
+    if unplaced:
+        p["notes"].append(f"{len(unplaced)} live agent(s) have no workspaceId in a state file: no window is archived")
     for w in win["windows"]:
-        wks = w["windowId"]
-        nm = w.get("name") or ""
+        wks, nm = w["windowId"], w.get("name") or ""
         if is_main_name(nm) or w["kind"] == "MAIN" or any(r["class"] == "self" for r in mine if r["windowId"] == wks):
             continue
+        if [a for a in occupancy.get(wks, []) if a not in leaving]:
+            continue  # someone stays in it
         if unplaced:
-            continue  # a live agent with no known window could be in this one
-        left = [a for a in occupancy.get(wks, []) if a not in leaving]
-        if not left:
-            p["archive_windows"].append({"windowId": wks, "name": nm,
-                                         "conditional": bool(occupancy.get(wks))})
-    if unplaced:
-        p.setdefault("notes", []).append(f"{len(unplaced)} live agent(s) have no workspaceId in a state file: no window is archived")
+            continue
+        if w.get("isolation") != "local":
+            p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": f"isolation {w.get('isolation')!r}: archiving would delete its worktree"})
+        elif not window_is_ours(wks, nm, lead):
+            p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": "owner not provably this lead: operator's call"})
+        else:
+            p["archive_windows"].append({"windowId": wks, "name": nm, "conditional": bool(occupancy.get(wks))})
     return p
 
 
@@ -511,8 +633,8 @@ def render(p: dict) -> str:
     add("")
     add("A. Inventory")
     for i, r in enumerate(p["agents"], 1):
-        add(f" A{i}. {r['id'][:8]} {r['class']:<12} {str(r['status']):<8} {r['verdict']:<20} "
-            f"{r['name'][:50]} | window {r['windowId']} {r['windowName']!s:.50}")
+        add(f" A{i}. {r['id'][:8]} {r['class']:<12} {clean(r['status'], 12):<8} {r['verdict']:<20} "
+            f"{clean(r['name'], 50)} | window {r['windowId']} {clean(r['windowName'], 50)}")
     add("")
     add("B. Waiting on the LEAD (answer each before anything else)")
     for i, r in enumerate(p["waiting_on_lead"], 1):
@@ -530,13 +652,13 @@ def render(p: dict) -> str:
     for i, s in enumerate(p["send"], 1):
         add(f" D{i}. send to {s['agent']} ({s['class']}) {s['name'][:40]}")
     for i, a in enumerate(p["unreached"], 1):
-        add(f" D{i}u. no ack from {a} after a send: report to the operator, re-route")
+        add(f" D{i}u. {a}: closed, or no ack after a send: report to the operator, resume or re-route")
     if not p["send"] and not p["unreached"]:
         add(" D-. nothing to send")
     add("")
     add("E. Window names")
     for i, r in enumerate(p["renames"], 1):
-        add(f" E{i}. {r['windowId']}: {r['from']!r} -> {r['to']!r}")
+        add(f" E{i}. {r['windowId']}: {clean(r['from'], 120)!r} -> {r['to']!r}")
     for n in p["notes"]:
         add(f" E-. {n}")
     if not p["renames"] and not p["notes"]:
@@ -553,9 +675,11 @@ def render(p: dict) -> str:
         add(f" G{i}. archive agent {a['agent']} ({a['why']}) {a['name'][:40]}")
     for i, a in enumerate(p["list_only"], 1):
         add(f" G{i}o. {a['agent']} {a['name'][:40]} ({a['status']}): {a['why']}")
+    for i, w in enumerate(p["empty_not_ours"], 1):
+        add(f" G{i}n. empty window {w['windowId']} {w['name']!r} left alone: {w['why']}")
     for i, w in enumerate(p["archive_windows"], 1):
         add(f" G{i}w. archive window {w['windowId']} {w['name']!r}" + (" once its agents are archived" if w["conditional"] else " (empty)"))
-    if not (p["archive_agents"] or p["list_only"] or p["archive_windows"]):
+    if not (p["archive_agents"] or p["list_only"] or p["archive_windows"] or p["empty_not_ours"]):
         add(" G-. nothing finished")
     return "\n".join(out)
 
@@ -564,92 +688,121 @@ def render(p: dict) -> str:
 
 def ids_ok(*ids: str) -> None:
     for i in ids:
-        if not (UUID_RE.fullmatch(i) or WKS_RE.fullmatch(i)):
+        if not isinstance(i, str) or not (UUID_RE.fullmatch(i) or WKS_RE.fullmatch(i)):
             raise Refused(f"refusing malformed id {i!r}")
+
+
+def valid_id(i) -> bool:
+    try:
+        ids_ok(i)
+        return True
+    except Refused:
+        return False
 
 
 def apply(p: dict, lead: str, repo: str) -> list[dict]:
     """Act on the plan. Every precondition is re-read right before its action; a failure is recorded, never fatal."""
     results: list[dict] = []
-    st = load_state(lead)
-    now = time.time()
-    try:
-        nowrows = {a["id"]: a for a in live_agents()}
-    except Refused as e:
-        return [{"op": "apply", "ok": False, "why": str(e)}]
 
     def rec(op, target, ok, why=""):
         results.append({"op": op, "target": target, "ok": ok, "why": why})
 
-    for s in p["send"]:
-        aid = s["agent"]
-        ids_ok(aid)
-        cur = nowrows.get(aid)
-        if not cur or cur.get("status") != "idle":
-            rec("send", aid, False, "not idle now: nothing sent")
-            continue
-        if now - float(load_state(lead).get("sends", {}).get(aid, {}).get("ts", 0)) < RESEND_SECONDS:
-            rec("send", aid, False, "already sent within the hour")
-            continue
-        rc, out, err = paseo(["send", "--json", "--no-wait", aid, "--prompt", send_text(lead, repo)])
-        status = ""
+    def attempt(op, target, fn):
         try:
-            status = str(json.loads(out).get("status", ""))[:40]
-        except (ValueError, AttributeError):
-            pass
-        st = load_state(lead)
-        st.setdefault("sends", {})[aid] = {"ts": now, "rc": rc, "status": status}
-        save_state(lead, st)
+            fn()
+        except Refused as e:
+            rec(op, target, False, clean(str(e), 160))
+
+    if not p.get("permits_ok"):
+        rec("apply", "", False, "permission list unreadable: no send and no archive")
+        sends, archive_agents = [], []
+    else:
+        sends, archive_agents = p["send"], p["archive_agents"]
+    try:
+        nowrows = {a["id"]: a for a in live_agents()}
+        fresh_permits = pending_permissions()
+    except Refused as e:
+        return [{"op": "apply", "target": "", "ok": False, "why": clean(str(e), 160)}]
+    if fresh_permits is None:
+        return [{"op": "apply", "target": "", "ok": False, "why": "permission list unreadable: nothing done"}]
+
+    def do_send(s):
+        aid = s["agent"]
+        if not valid_id(aid):
+            return rec("send", clean(aid, 60), False, "malformed id: skipped")
+        cur = nowrows.get(aid)
+        if not cur or cur.get("status") != "idle" or aid in fresh_permits:
+            return rec("send", aid, False, "not idle now (or a card is pending): nothing sent")
+        now = time.time()
+        with state_lock(lead):
+            st = load_state(lead)
+            if now - send_ts(st, aid, now) < RESEND_SECONDS:
+                return rec("send", aid, False, "already sent within the hour")
+            rc, out, err = paseo(["send", "--json", "--no-wait", aid, "--prompt", send_text(lead, repo)])
+            status = ""
+            try:
+                status = clean(str(json.loads(out).get("status", "")), 40)
+            except (ValueError, AttributeError):
+                pass
+            st["sends"][aid] = {"ts": now, "rc": rc, "status": status}
+            save_state(lead, st)
         rec("send", aid, rc == 0, f"status {status or '?'}; delivery unproven until `ack {lead}` arrives (ade-tidy ack {aid})"
             if rc == 0 else clean(err or out, 120))
-    for r in p["renames"]:
-        ids_ok(r["windowId"])
+
+    for s in sends:
+        attempt("send", s["agent"], lambda s=s: do_send(s))
+
+    def do_rename(r):
+        if not valid_id(r["windowId"]):
+            return rec("rename", clean(r["windowId"], 60), False, "malformed id: skipped")
         cur = next((w for w in workspaces() if w["workspaceId"] == r["windowId"]), None)
         if not cur or cur.get("name") != r["from"]:
-            rec("rename", r["windowId"], False, "window changed since the plan: skipped")
-            continue
+            return rec("rename", r["windowId"], False, "window changed since the plan: skipped")
         rc, out, err = paseo(["workspace", "rename", r["windowId"], r["to"]])
         rec("rename", r["windowId"], rc == 0, r["to"] if rc == 0 else clean(err or out, 120))
-    archived = set()
-    for a in p["archive_agents"]:
+
+    for r in p["renames"]:
+        attempt("rename", r["windowId"], lambda r=r: do_rename(r))
+
+    def do_archive_agent(a):
         aid = a["agent"]
-        ids_ok(aid)
+        if not valid_id(aid):
+            return rec("archive-agent", clean(aid, 60), False, "malformed id: skipped")
         cur = nowrows.get(aid)
         stt = state_file(aid) or {}
-        if not cur or cur.get("status") == "running" or (stt.get("labels") or {}).get("ade.lead") != lead:
-            rec("archive-agent", aid, False, "running, gone, or not this lead's: skipped")
-            continue
-        if cur.get("status") != "closed" and not a["why"] == "done":
-            rec("archive-agent", aid, False, "status changed: skipped")
-            continue
+        if not cur or cur.get("status") not in ("idle", "closed") or aid in fresh_permits \
+                or (stt.get("labels") or {}).get("ade.lead") != lead:
+            return rec("archive-agent", aid, False, "not idle/closed now, card pending, gone, or not this lead's: skipped")
         rc, out, err = paseo(["agent", "archive", aid])  # no --force: a running agent is never interrupted
         rec("archive-agent", aid, rc == 0, a["why"] if rc == 0 else clean(err or out, 120))
-        if rc == 0:
-            archived.add(aid)
-    for w in p["archive_windows"]:
+
+    for a in archive_agents:
+        attempt("archive-agent", a["agent"], lambda a=a: do_archive_agent(a))
+
+    def do_archive_window(w):
         wks = w["windowId"]
-        ids_ok(wks)
-        live = {x["id"] for x in live_agents()}
-        occupants, unplaced = [], False
-        for aid in live:
-            s = state_file(aid)
-            if s and WKS_RE.fullmatch(str(s.get("workspaceId", ""))):
-                if s["workspaceId"] == wks:
-                    occupants.append(aid)
-            else:
-                unplaced = True
+        if not valid_id(wks):
+            return rec("archive-window", clean(wks, 60), False, "malformed id: skipped")
         cur = next((x for x in workspaces() if x["workspaceId"] == wks), None)
         if not cur or is_main_name(cur.get("name") or ""):
-            rec("archive-window", wks, False, "gone or MAIN: skipped")
-        elif unplaced:
-            rec("archive-window", wks, False, "a live agent has no known window: skipped")
-        elif occupants:
-            rec("archive-window", wks, False, f"{len(occupants)} live agent(s) still in it: skipped")
-        elif terminals_in(wks):
-            rec("archive-window", wks, False, "has a terminal: skipped")
-        else:
-            rc, out, err = paseo(["workspace", "archive", wks])
-            rec("archive-window", wks, rc == 0, "" if rc == 0 else clean(err or out, 120))
+            return rec("archive-window", wks, False, "gone or MAIN: skipped")
+        if cur.get("isolation") != "local":
+            return rec("archive-window", wks, False, "not a local window: archiving would delete its worktree")
+        if not window_is_ours(wks, cur.get("name") or "", lead):
+            return rec("archive-window", wks, False, "not provably this lead's: skipped")
+        if terminals_in_safe(wks):
+            return rec("archive-window", wks, False, "has a terminal (or they could not be listed): skipped")
+        live = {x["id"] for x in live_agents()}
+        if any(not WKS_RE.fullmatch(str((state_file(i) or {}).get("workspaceId", ""))) for i in live):
+            return rec("archive-window", wks, False, "a live agent has no known window: skipped")
+        occupants = occupants_of(wks, live)  # last read before the archive: the daemon archives everything in the window
+        if occupants:
+            return rec("archive-window", wks, False, f"{len(occupants)} agent(s) still in it: skipped")
+        rc, out, err = paseo(["workspace", "archive", wks])
+        rec("archive-window", wks, rc == 0, "" if rc == 0 else clean(err or out, 120))
+
+    for w in p["archive_windows"] if p.get("permits_ok") else []:
+        attempt("archive-window", w["windowId"], lambda w=w: do_archive_window(w))
     return results
 
 
@@ -674,9 +827,10 @@ def main(argv: list[str]) -> int:
         try:
             lead = resolve_lead(o.lead)
             ids_ok(o.agent)
-            st = load_state(lead)
-            st.setdefault("acks", {})[o.agent] = time.time()
-            save_state(lead, st)
+            with state_lock(lead):
+                st = load_state(lead)
+                st["acks"][o.agent] = time.time()
+                save_state(lead, st)
         except Refused as e:
             sys.stderr.write(f"ade-tidy: {e}\n")
             return 1
@@ -693,6 +847,12 @@ def main(argv: list[str]) -> int:
     opts = p.parse_args(argv)
     try:
         lead = resolve_lead(opts.lead)
+        if opts.apply:
+            if not opts.lead:
+                raise Refused("--apply needs an explicit --lead (the lead's full agent id)")
+            mine = (state_file(os.environ.get("PASEO_AGENT_ID", "")) or {}).get("labels") or {}
+            if mine.get("ade.lead") and os.environ.get("PASEO_AGENT_ID") == lead:
+                raise Refused("this agent is a worker (label ade.lead): only its lead applies a tidy")
         repo, roots = repo_info(opts.repo)
         lock = lock_for(lead) if opts.apply else None
         try:

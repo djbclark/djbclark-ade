@@ -30,14 +30,14 @@ Builder and parser: `bin/ade_ws_names.py`; the layout rules are in
 
 ## Procedure
 
-Run the observe pass first, read it, then `--apply`:
+Run the observe pass first, read it, then `--apply` (which needs an explicit `--lead` and refuses to run as a worker):
 
 ```
 bin/ade-tidy --repo ~/src/<repo> --lead <your full agent id> --reports-dir <report folder>   # observe only
 bin/ade-tidy ... --apply                                                                      # prints the plan, then acts
 ```
 
-`--reports-dir` (repeatable) is where the workers' `unit-<slice>.md` reports and `.done` markers live; `--handled
+`--reports-dir` (repeatable; without it nothing is verified done, so nothing is archived) is where the workers' `unit-<slice>.md` reports and `.done` markers live; `--handled
 ID,ID` marks workers whose completion you handled without writing a `.done.ack`; `--work KIND=TEXT` sets a window's
 current-work text; `--json` prints the machine form. Sections of the output:
 
@@ -57,11 +57,16 @@ current-work text; `--json` prints the machine form. Sections of the output:
 5. **E. Window names** — `paseo workspace rename` to the convention; legacy names (`workers <middle> <lead id>`,
    `MAIN <middle>`) are migrated. A window holding agents from another repo is not renamed.
 6. **F. Misplaced tabs** — see below.
-7. **G. Finished** — archive this lead's workers whose report ends `DONE` with `.done` (or `.done.ack`) present and
-   the completion handled, and this lead's `closed` workers; operator agents are listed, never archived without the
-   operator's yes; a running agent is never archived (`paseo agent archive` runs without `--force`). Empty windows
-   (no live agent, no terminal) other than MAIN are archived after a fresh emptiness check right before
-   (`paseo workspace archive` archives everything the window owns).
+7. **G. Finished** — archive this lead's workers when `unit-<slice>.md` (in a `--reports-dir`) ends `DONE`, `.done` exists
+   (touched after the report), the completion is handled (`.done.ack` touched after `.done`, or `--handled ID`), the
+   trailing text asks nothing and no card is pending. A `closed` worker alone is **not** archived: Paseo marks every
+   interrupted agent `closed` at a daemon restart, so it is listed as `D#u` (resume or re-task it). Operator agents
+   are only listed. A running agent is never archived (`paseo agent archive` runs without `--force`; Paseo has no
+   unarchive). An empty window is archived only when all of these hold: not MAIN, `isolation` is `local` (archiving a
+   worktree window deletes its worktree and any uncommitted work), no unarchived agent record names it (background
+   and internal agents included), no terminal, and it is provably this lead's (every agent ever recorded in it carries
+   `ade.lead=<lead>`, or it is a legacy `workers … <lead id>` window). Other empty windows are listed (`G#n`) for the
+   operator. Occupancy is read last, right before the archive.
 
 `--apply` takes the same per-lead lock as `bin/ade-worker-run`, so a launch cannot land in a window while it is
 archived, and re-reads each precondition immediately before its action; a skipped action is printed as `SKIP`.
@@ -78,7 +83,7 @@ feature request is drafted in [docs/upstream-issues.md](../../docs/upstream-issu
 
 ## Do not
 
-1. Run `--apply` inside a worker or reviewer sub-agent (lifecycle actions are top-level only).
+1. Run `--apply` inside a worker or reviewer sub-agent (lifecycle actions are top-level only; `ade-tidy` refuses it for a labelled worker).
 2. Archive MAIN, an operator's agent without a yes, another lead's agent or window, or anything still running.
 3. Steer a working agent, or message an agent waiting on a card (the operator clears the card; re-send afterwards).
 4. Treat the exit code of `paseo send` as delivery.
