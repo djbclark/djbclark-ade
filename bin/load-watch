@@ -24,6 +24,8 @@
                                             (launchd on the Mac, a systemd user timer on Linux; docs/scheduling.md). cron cannot run
                                             every 20 s: exit 69, use systemd. Exit 69 also: no scheduler, or Linger=no without
                                             --allow-no-linger. --ade is needed from a linked worktree (exit 2 otherwise).
+                                            The job runs through bin/ade-job-run (W21d): a LOADED install made before that is migrated once with
+                                            `ade-sched migrate-wrapper launchd/com.djbclark.load-watch.plist --ade DIR`; install/uninstall refuse it (exit 1) until then.
                                             `guard reset` is macOS only (exit 69 without launchctl); the sampler never needs it.
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
@@ -61,6 +63,7 @@ Job guard (2026-10-18): each sample also checks launchd jobs (see the `job guard
 any non-Apple job (20 failed restarts in 10 min, or 60 in 2 h), and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
 A trip boots the job out, kills its processes, pings Hermes and cools it down 90 min, then re-tests it; a
 5th round in 24 h disables it for good (`load-watch guard reset LABEL` brings it back). Events: guard.jsonl.
+The guard is the ONE deliberate exception to ade-sched's admission lock and no-kill contract (docs/scheduling.md, W21d).
 
 Load watcher (djbclark, 2026-10-20): `watcher set` registers one Paseo agent (`--paseo ID`, default $PASEO_AGENT_ID),
 reached by `paseo send`. Every incident, every sustained load no agent explains or several could, and every guard trip

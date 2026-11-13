@@ -22,6 +22,11 @@ options (before or after the subcommand):
   --yes                 reconcile: execute only admitted writes and write jobs.json; today that is launchd only (an absent-job create+bootstrap, or a bootstrap of an unloaded plist that byte-matches the render); a LOADED job is reloaded or removed only when its installed plist routes through bin/ade-job-run and is provably ADE's (W21c; a run in flight defers it); other loaded jobs, other files, removals that are not so, systemd/cron and paseo steps defer (exit 6)
   --name NAME           reconcile: limit to these logical job names (repeatable)
   --no-activate         install/uninstall/reconcile: write or remove the files, print the activation commands instead of running them
+  --restart-service     launchd install/uninstall of a LOADED job that is not wrapped in bin/ade-job-run: allowed ONLY for a KeepAlive service
+                        (install: the new definition's KeepAlive; uninstall: the installed plist file's KeepAlive), as a deliberate
+                        service restart. The bootout STOPS the running service (not paid-work-safe); the prior bytes and a recovery
+                        record are saved first and the prior definition is loaded again if the new one fails. Without the flag
+                        such a job is refused (exit 1); with it a canonical-wrapped job takes the normal path; a busy admission lock still refuses
   --allow-no-linger     systemd install/reconcile: proceed when loginctl says Linger=no (default: exit 69 before writing, because
                         user timers stop at logout); never runs sudo, prints `sudo loginctl enable-linger USER`
   --json                list/diff/reconcile: machine-readable output
@@ -109,6 +114,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
         _common(sp, top=False)
         if arg:
             sp.add_argument(arg, nargs=nargs) if nargs else sp.add_argument(arg)
+        if name in ("install", "uninstall"):
+            sp.add_argument("--restart-service", action="store_true")
     a = ap.parse_args(argv)
     a.subst = [*a.subst, *getattr(a, "sub_subst", [])]   # --set before and after the subcommand both count
     a.names = [*a.names, *getattr(a, "sub_names", [])]
@@ -305,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
                 ade_sched.print_artifacts(r, sys.stdout)
                 return 0
             r = ade_sched.install(job, backend, dry_run=a.dry_run, activate=not a.no_activate,
-                                  allow_no_linger=a.allow_no_linger)
+                                  allow_no_linger=a.allow_no_linger, restart_service=a.restart_service)
             if not a.dry_run:
                 print(f"ade-sched: installed {job.label} on {r.backend}", file=sys.stderr)
             return 0
@@ -320,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ade-sched: {ade_sched.migrate_wrapper_launchd(job, next(iter(r.files.values())))} {job.label}", file=sys.stderr)
             return 0
         if a.cmd == "uninstall":
-            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade)
+            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade,
+                                       restart_service=a.restart_service)
             if not a.dry_run:
                 print(f"ade-sched: {'removed' if found else 'not installed:'} {a.label}", file=sys.stderr)
             return 0

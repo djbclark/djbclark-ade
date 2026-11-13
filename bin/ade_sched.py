@@ -917,11 +917,17 @@ def _log_dirs(job: Job) -> None:
 
 
 def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
-            allow_no_linger: bool = False, env: Mapping[str, str] | None = None, out: TextIO | None = None,
-            err: TextIO | None = None, **overrides: Any) -> Rendered:
+            allow_no_linger: bool = False, restart_service: bool = False, env: Mapping[str, str] | None = None,
+            out: TextIO | None = None, err: TextIO | None = None, **overrides: Any) -> Rendered:
     """Install `job` on the backend (auto-detected when None). dry_run prints every artifact under a `# <path>` header and
     the commands, changing nothing; activate=False writes the files and prints the activation commands instead of running
-    them. On systemd, Linger=no is exit 69 before anything is written unless allow_no_linger. Raises SchedError."""
+    them. On systemd, Linger=no is exit 69 before anything is written unless allow_no_linger. Raises SchedError.
+
+    `restart_service` (launchd only; W21d): the ONE way to replace a LOADED job that is not canonical-wrapped, and only a
+    KeepAlive service (the new definition's KeepAlive is truthy). It is a deliberate service restart: the `bootout` stops the
+    running service (not paid-work-safe), after the durable recovery record and the prior bytes are saved; the prior
+    definition is restored if the new one does not load. It has no effect on a canonical-wrapped loaded job (the normal
+    path) and never bypasses the exclusive admission lock."""
     out = out or sys.stdout
     err = err or sys.stderr
     c = _ctx(backend, env, overrides)
@@ -966,12 +972,18 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     with (writer_lock(job.label, None, c.env) if r.backend == "launchd" else contextlib.nullcontext()):
         loaded_launchd = False
         if r.backend == "launchd":
-            loaded_launchd = require_canonical_when_loaded(c, job.label, "install", ade_root_of(job.ade_root))   # F4: a loaded job must prove the canonical lock identity
+            def keep_alive_new() -> str | None:   # W21d: --restart-service is only for a KeepAlive service
+                return None if job.supervised else f"the new definition of {job.label} is not a KeepAlive service"
+            state = require_canonical_when_loaded(c, job.label, "install", ade_root_of(job.ade_root),   # F4: a loaded job must prove the canonical lock identity
+                                                  restart_check=keep_alive_new if restart_service else None)
+            loaded_launchd = state != LOADED_ABSENT
+            if state == LOADED_RESTART and not activate:
+                raise SchedError(EX_USAGE, f"--restart-service of {job.label} needs activation (a restart is a bootout); nothing written")
             if loaded_launchd and activate:
                 # B2 of the r3 review: a LOADED job is replaced the record-first way (prior copy, recovery record, rollback), never
                 # by a bare write + bootout + bootstrap that could leave a ledger-owned job unloaded with nothing to recover it.
                 (_, new_text), = r.files.items()
-                why = wrapper_route_problem(new_text.encode("utf-8"), job.label, lock_dir=admission_dir())
+                why = wrapper_route_problem(new_text.encode("utf-8"), job.label, lock_dir=admission_dir()) if state == LOADED_CANONICAL else None
                 if why is not None:
                     raise SchedError(EX_ACTIVATE, f"install of {job.label} refused, nothing written: the new definition would leave the "
                                                   f"canonical wrapper ({why}); bootout the job by hand if that is intended")
@@ -1438,9 +1450,15 @@ def recover_launchd_records(*, state_dir: Path | None, owns: Callable[[str], boo
 
 def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
               env: Mapping[str, str] | None = None, out: TextIO | None = None, err: TextIO | None = None,
-              ade: str | os.PathLike[str] | None = None, **overrides: Any) -> bool:
+              ade: str | os.PathLike[str] | None = None, restart_service: bool = False, **overrides: Any) -> bool:
     """Remove the job; True when something was installed. Not installed is not an error. `ade` is the explicitly selected ADE
-    root a LOADED wrapped job's wrapper must live in (default: the checkout beside this module)."""
+    root a LOADED wrapped job's wrapper must live in (default: the checkout beside this module).
+
+    `restart_service` (launchd only; W21d): the ONE way to remove a LOADED job that is not canonical-wrapped, and only when
+    the INSTALLED plist file has a truthy KeepAlive (no file or an unparseable one is refused). A deliberate service stop:
+    the `bootout` ends the running service (not paid-work-safe), after the durable recovery record and the prior bytes are
+    saved; the prior definition is loaded again if the removal fails. No effect on a canonical-wrapped loaded job; a busy
+    admission lock still refuses."""
     out = out or sys.stdout
     err = err or sys.stderr
     if not LABEL_RE.fullmatch(label):
@@ -1455,7 +1473,17 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
         with writer_lock(label, None, c.env):   # F3 of #622: serialize with every other ADE writer; refuse during a wrapped run
-            require_canonical_when_loaded(c, label, "uninstall", ade_root_of(ade))   # F4: a loaded job must prove the canonical lock identity
+            state = require_canonical_when_loaded(c, label, "uninstall", ade_root_of(ade),   # F4: a loaded job must prove the canonical lock identity
+                                                  restart_check=(lambda: _installed_keep_alive_problem(path, label)) if restart_service else None)
+            if state == LOADED_RESTART:   # W21d: a deliberate stop of a KeepAlive service, record-first, restored if the removal fails
+                if not activate:
+                    raise SchedError(EX_USAGE, f"--restart-service of {label} needs activation (a restart is a bootout); nothing removed")
+                prior = read_regular_bytes(path)
+                try:
+                    return remove_launchd_locked(label, expect_hash=artifact_hash({path: prior.decode("utf-8", errors="replace")}),
+                                                 loaded=True, state_dir=None, env=c.env, **overrides)
+                except NativeDefer as exc:
+                    raise SchedError(EX_ACTIVATE, str(exc)) from exc
             if activate:
                 # bootout of a missing job fails: ignore that, but refuse to drop the plist
                 # while launchctl still reports the job loaded (Codex P2 on #514).
@@ -2341,24 +2369,56 @@ def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path, ade_root:
     return wrapper_identity_problem(program, ade_root)
 
 
-def require_canonical_when_loaded(c: "_Ctx", label: str, op: str, ade_root: str | os.PathLike[str]) -> bool:
+LOADED_ABSENT, LOADED_CANONICAL, LOADED_RESTART = "absent", "canonical", "restart"
+
+
+def _installed_keep_alive_problem(plist: Path, label: str) -> str | None:
+    """None only when the INSTALLED plist file (read as bytes, parsed with plistlib) is this label's and has a truthy KeepAlive:
+    the one kind of unwrapped service `--restart-service` may stop on uninstall. No file or an unparseable one is a refusal."""
+    try:
+        data = read_regular_bytes(plist)
+    except OSError as exc:
+        return f"the installed plist {plist} cannot be read ({exc})"
+    try:
+        d = plistlib.loads(data)
+    except Exception:  # noqa: BLE001 - plistlib raises several types for malformed input
+        return f"the installed plist {plist} does not parse"
+    if not isinstance(d, dict) or d.get("Label") != label:
+        return f"the installed plist {plist} is not {label}'s"
+    if not d.get("KeepAlive"):
+        return f"the installed definition of {label} is not a KeepAlive service"
+    return None
+
+
+def require_canonical_when_loaded(c: "_Ctx", label: str, op: str, ade_root: str | os.PathLike[str], *,
+                                  restart_check: Callable[[], str | None] | None = None) -> str:
     """For a low-level ADE writer holding the label's canonical lock: refuse (SchedError, nothing written) when the label is
-    LOADED and its loaded argv does not prove the canonical lock identity (review F4 of #622). Returns whether it is loaded.
+    LOADED and its loaded argv does not prove the canonical lock identity (review F4 of #622). Returns LOADED_ABSENT (not
+    loaded), LOADED_CANONICAL (loaded and proven) or, only with `restart_check`, LOADED_RESTART.
     A job that was installed before the wrapper (or with another lock dir) cannot be updated without risking its running
-    work, since its runs do not hold the canonical lock; `migrate_wrapper_launchd` is the one explicit step for it."""
+    work, since its runs do not hold the canonical lock; `migrate_wrapper_launchd` is the one explicit step for it.
+    `restart_check` (W21d, the `--restart-service` flag) is called only for a loaded job that is NOT proven canonical: None
+    from it means the caller may deliberately stop and replace this KeepAlive service (LOADED_RESTART), otherwise the
+    refusal names what it found. Without it every such job is refused as before."""
     rc, out, err_txt = _launchctl_print(c, label)
     if rc != 0:
         if rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err_txt.lower():
-            return False
+            return LOADED_ABSENT
         raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: launchd state unreadable (rc={rc})")
     why = loaded_wrapper_problem(out, label, admission_dir(), ade_root)
-    if why is not None:
-        raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
-                                      f"the canonical admission lock, so a bootout could kill running work (a job installed from another checkout needs `--ade DIR` naming it). If its new definition is "
-                                      f"wrapped (a config/launchd plist), migrate it once at a quiet time: `ade-sched migrate-wrapper PLIST`; "
-                                      f"a job that is not wrapped (load-watch, dev.herdr.server) is changed by an operator "
-                                      f"`launchctl bootout` (docs/scheduling.md)")
-    return True
+    if why is None:
+        return LOADED_CANONICAL
+    if restart_check is not None:
+        bad = restart_check()
+        if bad is None:
+            return LOADED_RESTART
+        raise SchedError(EX_ACTIVATE, f"{op} of {label} refused even with --restart-service, nothing written: it is loaded and {why}; "
+                                      f"and {bad} (--restart-service only restarts a KeepAlive service)")
+    raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
+                                  f"the canonical admission lock, so a bootout could kill running work (a job installed from another checkout needs `--ade DIR` naming it). If its new definition is "
+                                  f"wrapped (a config/launchd plist or launchd/com.djbclark.load-watch.plist), migrate it once at a quiet time: `ade-sched migrate-wrapper PLIST`; "
+                                  f"a KeepAlive service that is not wrapped (dev.herdr.server) is replaced or removed only by an explicit "
+                                  f"`--restart-service`, a deliberate restart that stops it (docs/scheduling.md)")
 
 
 def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | None = None, **overrides: Any) -> str:
@@ -2366,9 +2426,14 @@ def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | N
     install, or another lock dir): under the canonical lock, refuse unless launchd reports it idle (no pid, `not running`),
     then record, bootout, write `text`, bootstrap and read back (`reload_launchd_locked`: the prior bytes are restored on
     failure, the recovery record survives a kill). The old definition's runs hold no lock, so a run that starts between the
-    idle read and the bootout is the one risk of this step: choose a quiet time. Returns "migrated"."""
+    idle read and the bootout is the one risk of this step: choose a quiet time. Returns "migrated".
+
+    B7 of the r3 review (W21d): when the OLD loaded definition is itself a wrapped job (ade-job-run, `--lock-dir DIR`, its label)
+    whose DIR is not the canonical directory, that directory's `LABEL.lock` is also taken exclusive and non-blocking for the
+    whole migration (released in a finally): a run of the old wrapper holds it shared, so a busy lock refuses with nothing
+    changed and no bootout. A pre-wrapper (unwrapped) old definition has no lock to take: the documented idle-only race stays."""
     c = _ctx("launchd", env, overrides)
-    with writer_lock(job.label, None, c.env):
+    with writer_lock(job.label, None, c.env), contextlib.ExitStack() as held:
         rc, out, err_txt = _launchctl_print(c, job.label)
         if rc != 0:
             raise SchedError(EX_ACTIVATE, f"{job.label} is not loaded (rc={rc}); use `ade-sched install PLIST`")
@@ -2378,8 +2443,19 @@ def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | N
         if why_new is not None:
             raise SchedError(EX_ACTIVATE, f"{job.label}: the new definition does not route through the canonical wrapper ({why_new}), so "
                                           f"migrating would not make it updatable by ADE tools; nothing changed. Jobs that are not "
-                                          f"wrapped (load-watch, dev.herdr.server, non-catalog plists) are changed by an operator "
-                                          f"`launchctl bootout` at a quiet time")
+                                          f"wrapped (dev.herdr.server, non-catalog plists) are changed by an operator "
+                                          f"`launchctl bootout` at a quiet time (a KeepAlive one: `install`/`uninstall --restart-service`)")
+        _, old_args = parse_launchd_definition(out)
+        if (old_args is not None and len(old_args) > 3 and os.path.isabs(old_args[0]) and os.path.basename(old_args[0]) == JOB_RUN_WRAPPER
+                and old_args[1] == "--lock-dir" and os.path.isabs(old_args[2]) and old_args[3] == job.label
+                and os.path.realpath(old_args[2]) != os.path.realpath(admission_dir())):
+            try:   # the OLD wrapper's runs hold THAT directory's lock shared: take it exclusive too, never waiting
+                old_fd = acquire_admission_lock(job.label, exclusive=True, lock_dir=Path(old_args[2]))
+            except (OSError, SchedError) as exc:
+                raise SchedError(EX_ACTIVATE, f"{job.label}: the old wrapper's admission lock in {old_args[2]} is unavailable ({exc}); nothing changed") from exc
+            if old_fd is None:
+                raise SchedError(EX_ACTIVATE, f"{job.label}: a run of the old wrapper holds its admission lock in {old_args[2]}; migrate at a quiet time, nothing changed")
+            held.callback(release_admission_lock, old_fd)
         activity = parse_launchd_activity(out)
         if activity != "idle":
             raise SchedError(EX_ACTIVATE, f"{job.label} is {activity} (a pid or unknown state); migrate at a quiet time, nothing changed")
