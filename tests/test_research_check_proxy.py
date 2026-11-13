@@ -11,6 +11,13 @@ REFUSED = b"<html><body>Oops! It looks like you have attempted to view a page th
 BIG = (b"<html><body>" + b"word " * 400 + b"</body></html>")
 
 
+@pytest.fixture(autouse=True)
+def _clean_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's shell exports the proxy variables; a test must start without them."""
+    monkeypatch.delenv("RESEARCH_PROXY_URL", raising=False)
+    monkeypatch.delenv("RESEARCH_EZPROXY_PREFIX", raising=False)
+
+
 def _load():
     spec = importlib.util.spec_from_file_location("research_check", SCRIPT)
     assert spec and spec.loader
@@ -131,3 +138,12 @@ def test_relative_hop_is_joined_to_proxy_url(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(mod, "http_get", fake)
     mod.fetch_via_proxy("https://example.org/z")
     assert seen[1] == "https://proxy.example.edu/connect?x=1"
+
+
+def test_proxy_stub_word_thresholds() -> None:
+    mod = _load()
+    page = lambda n, extra="": b"<html><body>" + b"word " * n + extra.encode() + b"</body></html>"
+    assert mod.proxy_stub(page(150))                       # short: stub
+    assert mod.proxy_stub(page(500, " get access "))       # mid-length with paywall wording: stub
+    assert not mod.proxy_stub(page(500))                   # mid-length, no paywall wording: content
+    assert not mod.proxy_stub(page(1500, " get access "))  # long: content

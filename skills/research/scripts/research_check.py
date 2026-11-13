@@ -2,7 +2,7 @@
 """Mechanical checks for a `research` run folder. Standard library only.
 
     research_check.py fetch  <source_id> <url> <run> [--via-proxy]
-                                                       save sources/<source_id>.txt; with RESEARCH_EZPROXY_PREFIXRL set
+                                                       save sources/<source_id>.txt; with RESEARCH_EZPROXY_PREFIX set
                                                        (EZproxy-style prefix) a paywalled page is retried via the proxy;
                                                        prints the HTTP status and final URL of every hop
     research_check.py quotes <run> [--no-update]        every quote occurs in its saved source
