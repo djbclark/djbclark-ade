@@ -202,8 +202,9 @@ def main():
     parser.add_argument("--ade-label", action="append", default=[], metavar="ade.KEY=VALUE",
                         help="exact ADE label selectors; any matching selector qualifies")
     parser.add_argument("--all-local", action="store_true",
-                        help="also approve every agent this host's daemon lists, the lead included "
-                             "(never a remote host's, never an operator question or plan approval)")
+                        help="also approve every local agent of a classified provider (claude, codex, opencode, pi, omp), "
+                             "the lead included (never a remote host's; best-effort skip of operator "
+                             "questions and plan approvals; other providers keep their prompts)")
     parser.add_argument("--log", required=True, type=Path, help="append-only JSONL audit path")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--interval", type=float, default=2)

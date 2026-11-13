@@ -302,7 +302,7 @@ def test_extra_question_shapes_and_tokens():
 
 
 def test_acp_and_unknown_providers_are_left_for_the_operator(tmp_path):
-    for i, prov in enumerate(['cursor-acp/auto', 'kimi-acp', '', None]):
+    for i, prov in enumerate(['cursor-acp/auto', 'kimi-acp', 'copilot', 'hermes/x', 'zai/glm', '', None]):
         d = tmp_path / f'p{i}'
         d.mkdir()
         scenario = {'requests':[req(OTHER, 'r', 'other'), req(CHILD, 'r', 'Which database should we use?')],
@@ -319,3 +319,20 @@ def test_known_providers_all_approved(tmp_path):
                                       'providers':provs}, '--all-local')
     assert result.returncode == 0, result.stderr
     assert len(allows(calls)) == 2
+
+
+def test_unclassified_provider_in_descendant_and_label_modes(tmp_path):
+    for i, extra in enumerate([[], ['--ade-label', 'ade.task=wave']]):
+        d = tmp_path / f'm{i}'
+        d.mkdir()
+        result, calls = run_fake(d, {'requests':[req(CHILD)], 'parents':{CHILD:LEAD}, 'labelled':{'ade.task=wave':[CHILD]},
+                                    'providers':{CHILD:'copilot'}}, *extra)
+        assert result.returncode == 0, result.stderr
+        assert not allows(calls)
+        assert [r['reason'] for r in audit_rows(d)] == ['unclassified-provider']
+
+
+def test_agent_missing_from_listing_is_outside_scope_in_every_mode(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests':[req(CHILD)], 'parents':{CHILD:LEAD}, 'local':[OTHER]})
+    assert not allows(calls)
+    assert [r['reason'] for r in audit_rows(tmp_path)] == ['outside-scope']

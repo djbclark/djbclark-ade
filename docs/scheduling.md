@@ -398,8 +398,8 @@ bin/ade-sched --set __LEAD__=FULL_LEAD_UUID --set __STATE__=/absolute/existing/s
   render config/launchd/com.djbclark.ade-auto-permit.plist
 ```
 
-The template passes `--all-local` (operator ruling 2026-11-13, "All local agents"): every agent this host's daemon
-lists qualifies, the lead included (audit reason `all-local`; the operator wants no prompts, and the lead's own
+The template passes `--all-local` (operator ruling 2026-11-13, "All local agents"): every local agent of a classified provider
+(`claude`, `codex`, `opencode`, `pi`, `omp`) qualifies, the lead included (audit reason `all-local`; the operator wants no prompts, and the lead's own
 prompts are the same kind of tool request), because operator-started agents (a Bash prompt in a `bypassPermissions`
 session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`), agents labelled `ade.lead=<that lead's
 id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
@@ -411,7 +411,7 @@ elicitation word, or a missing name): it is logged `skip` / `operator-question` 
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,
-such as ACP-backed ones, whose question names are free text, are skipped as `unclassified-provider` and keep their
+(ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers; their question names are free text) are skipped as `unclassified-provider` and keep their
 prompts for the operator. `mcp__` tools are exempt from the Pi/OMP `select|input|editor|confirm` words only. A request id that is a strict prefix of another pending id of the same agent is skipped
 (`ambiguous-request-id`), since `permit allow` matches ids by prefix (checked against the sweep's snapshot only). Audit decisions go to `auto-permit.jsonl`; after a
 merge, `bin/ade-sched reconcile --yes` applies the template. See [fan-out](../skills/fan-out/SKILL.md) for scope and
