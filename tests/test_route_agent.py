@@ -1579,18 +1579,20 @@ class TestCodexEverydayKinds(unittest.TestCase):
         self.assertEqual(r.route("frontier", quota=at_floor).service.name, "codex")
         mid = self.drained(codex={"remaining": 49.0})                 # a fixed 49, independent of the plenty gate (20 since 2026-11-13)
         self.assertIsNone(r.route("frontier", quota=mid))             # uncalibrated, 49% is below what dispatch will demand
-        # the positive control (adversary R4): the plenty gate (20) does not reach frontier inside route(); with a
-        # calibrated history (median 20) the planner hands codex a frontier slice at 49
-        state = Path(tempfile.mkdtemp(prefix="route-hist-"))
-        (state / "task" / "jobs").mkdir(parents=True)
-        for k in range(3):
-            (state / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(
-                {"agent": "codex", "model": "gpt-6-astra", "kind": "frontier", "effort": "high", "measured_usage_pct": 20.0}))
-        r._FRONTIER_HISTORY_MEMO.clear()
-        self.addCleanup(r._FRONTIER_HISTORY_MEMO.clear)
-        with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(state / "sf")}), \
-                mock.patch.object(r, "ACP_DISPATCH_STATE", state):
-            self.assertEqual(r.route("frontier", quota=mid).service.name, "codex")
+        # the positive control (adversary R4): the plenty gate (20 since 2026-11-13) does not reach frontier inside route();
+        # with a calibrated history the planner hands codex a frontier slice BELOW the gate (19, median 10 fits above
+        # min_headroom 15), and at a fixed 49 (median 20)
+        for quota, pct in ((low, 10.0), (mid, 20.0)):
+            state = Path(tempfile.mkdtemp(prefix="route-hist-"))
+            (state / "task" / "jobs").mkdir(parents=True)
+            for k in range(3):
+                (state / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(
+                    {"agent": "codex", "model": "gpt-6-astra", "kind": "frontier", "effort": "high", "measured_usage_pct": pct}))
+            r._FRONTIER_HISTORY_MEMO.clear()
+            self.addCleanup(r._FRONTIER_HISTORY_MEMO.clear)
+            with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(state / "sf")}), \
+                    mock.patch.object(r, "ACP_DISPATCH_STATE", state):
+                self.assertEqual(r.route("frontier", quota=quota).service.name, "codex", quota)
 
     def test_astra_is_frontier_only_in_the_profile(self):
         models = self.codex().models
