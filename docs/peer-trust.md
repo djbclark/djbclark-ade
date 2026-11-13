@@ -37,8 +37,12 @@ Until PR #645 merges, `~/.claude/hooks/peer_trust_gate.py` links into the worktr
 
 **Provenance, not text matching.** An envelope is believed only where Paseo itself put it: the UserPromptSubmit `prompt` (Claude
 Code runs that hook for a mid-turn message; observed 2026-11-13), and a transcript record `{"type": "attachment", "attachment":
-{"type": "queued_command", "prompt": ...}}` that Claude Code writes for a message queued to the session (Claude Code 2.1.323,
-with a matching `queue-operation ... absorbed_mid_turn` record). Tool results, tool inputs, `last_assistant_message` and the
+{"type": "queued_command", "commandMode": "prompt", "prompt": [text blocks]}}` with no `origin`, written within the last 6 hours, that
+Claude Code writes for a message queued to the session (Claude Code 2.1.323, with a matching `queue-operation ...
+absorbed_mid_turn` record). Records with an `origin` (a sub-agent's SendMessage, a human typing while busy, channel relays), string
+prompts and stale records are ignored (adversary r2 A1/C1). The text must also be a complete sequence of envelopes, as Paseo's
+own parser requires, so an envelope quoted in a finding or a fenced block never counts. `decisions.jsonl` records how each was
+reached (`via`). Tool results, tool inputs, `last_assistant_message` and the
 model's own turns are never scanned, so a PR comment, CI log, web page or file containing an envelope gets no framing (adversary
 r1 A2/B2). Parsing mirrors Paseo's own: `version="1"`, no duplicate attributes, an XML-escaped body, UUID `source-agent-id`, a
 plain `message-id`; anything else (documentation placeholders, injected newlines) is ignored. Sub-agent events and events without
@@ -66,7 +70,7 @@ hook fails open.
    delivers the envelope as a user input item and no Codex refusal has been seen. Not registered (a live Codex apply needs the
    operator's yes, order 11); the AGENTS.md paragraph and `~/CLAUDE.md` item 24 cover it.
 2. **Pi, Cursor, Hermes, OpenCode**: no hook registered; instruction only. If one of them refuses a peer message, add its hook
-   the same way (the script is event-shape compatible with any client that sends `hook_event_name`, `prompt`, `tool_response`).
+   the same way (the script needs Claude Code's transcript format and emits Claude-style `hookSpecificOutput` JSON, so another client needs a small adapter).
 
 ## The accepted weakness
 
