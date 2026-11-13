@@ -215,6 +215,7 @@ class Job:
     raw: dict[str, Any] = field(default_factory=dict, compare=False)
     source: str = "<dict>"
     worktree: str | None = None           # set when __ADE__ defaulted into a linked worktree: install refuses (exit 2)
+    ade_root: str | None = field(default=None, compare=False)   # the explicitly selected ADE root (--ade), realpath; None: the checkout beside this module
 
     @classmethod
     def from_plist(cls, path: str | os.PathLike[str], subst: Mapping[str, str] | None = None, *,
@@ -312,7 +313,7 @@ class Job:
                    stdout=_abs(raw, "StandardOutPath"), stderr=_abs(raw, "StandardErrorPath"), nice=nice,
                    low_io=_bool(raw, "LowPriorityIO"), process_type=pt, kill_mode=km, raw=raw,
                    source=canonical_source(source, default_subst(ade)["__ADE__"]),
-                   worktree=worktree)
+                   worktree=worktree, ade_root=os.path.realpath(ade) if ade is not None else None)
 
     @property
     def ignored_keys(self) -> list[str]:
@@ -965,7 +966,7 @@ def install(job: Job, backend: str | Backend | None = None, *, dry_run: bool = F
     with (writer_lock(job.label, None, c.env) if r.backend == "launchd" else contextlib.nullcontext()):
         loaded_launchd = False
         if r.backend == "launchd":
-            loaded_launchd = require_canonical_when_loaded(c, job.label, "install")   # F4: a loaded job must prove the canonical lock identity
+            loaded_launchd = require_canonical_when_loaded(c, job.label, "install", ade_root_of(job.ade_root))   # F4: a loaded job must prove the canonical lock identity
             if loaded_launchd and activate:
                 # B2 of the r3 review: a LOADED job is replaced the record-first way (prior copy, recovery record, rollback), never
                 # by a bare write + bootout + bootstrap that could leave a ledger-owned job unloaded with nothing to recover it.
@@ -1437,8 +1438,9 @@ def recover_launchd_records(*, state_dir: Path | None, owns: Callable[[str], boo
 
 def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool = False, activate: bool = True,
               env: Mapping[str, str] | None = None, out: TextIO | None = None, err: TextIO | None = None,
-              **overrides: Any) -> bool:
-    """Remove the job; True when something was installed. Not installed is not an error."""
+              ade: str | os.PathLike[str] | None = None, **overrides: Any) -> bool:
+    """Remove the job; True when something was installed. Not installed is not an error. `ade` is the explicitly selected ADE
+    root a LOADED wrapped job's wrapper must live in (default: the checkout beside this module)."""
     out = out or sys.stdout
     err = err or sys.stderr
     if not LABEL_RE.fullmatch(label):
@@ -1453,7 +1455,7 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
             print(f"# run: {shlex.join(cmd)}", file=out)
             return path.exists()
         with writer_lock(label, None, c.env):   # F3 of #622: serialize with every other ADE writer; refuse during a wrapped run
-            require_canonical_when_loaded(c, label, "uninstall")   # F4: a loaded job must prove the canonical lock identity
+            require_canonical_when_loaded(c, label, "uninstall", ade_root_of(ade))   # F4: a loaded job must prove the canonical lock identity
             if activate:
                 # bootout of a missing job fails: ignore that, but refuse to drop the plist
                 # while launchctl still reports the job loaded (Codex P2 on #514).
@@ -2229,7 +2231,7 @@ def wrapper_route_problem(data: bytes, label: str, *, lock_dir: Path | None = No
     return None
 
 
-def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[str] | None) -> str | None:
+def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[str]) -> str | None:
     """Positive proof that `program` is THIS checkout's wrapper and speaks the admission protocol (review F2 of #622): its
     realpath is <ADE root>/bin/ade-job-run, its bytes equal the ade-job-run beside this ade_sched.py, and it answers
     `--admission-protocol` with `v1` (run directly, no shell, short timeout). A stale or custom executable of the same name,
@@ -2237,10 +2239,9 @@ def wrapper_identity_problem(program: str | None, ade_root: str | os.PathLike[st
     if not program:
         return "launchctl print shows no program for the loaded definition"
     got = os.path.realpath(program)
-    if ade_root is not None:   # reconcile: the checkout it runs from; a low-level writer checks bytes and protocol only
-        want = os.path.join(os.path.realpath(ade_root), "bin", JOB_RUN_WRAPPER)
-        if got != want:
-            return f"the wrapper {program!r} is not {want} (the checkout reconcile runs from)"
+    want = os.path.join(os.path.realpath(ade_root), "bin", JOB_RUN_WRAPPER)   # never skipped (r4 review F5): every ADE writer binds the root
+    if got != want:
+        return f"the wrapper {program!r} is not {want} (the ADE root this writer runs from)"
     try:
         have = read_regular_bytes(Path(got))
         mine = read_regular_bytes(Path(os.path.realpath(__file__)).parent / JOB_RUN_WRAPPER)
@@ -2319,7 +2320,13 @@ def loaded_definition_problem(print_out: str, data: bytes, label: str, *, lock_d
     return None
 
 
-def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path) -> str | None:
+def ade_root_of(ade: str | os.PathLike[str] | None) -> str:
+    """The ADE root every launchd writer binds the wrapper to: the explicitly selected one (`--ade`), else the checkout that
+    holds this scheduler implementation (the same rule as reconcile). Never None."""
+    return os.path.realpath(ade) if ade else str(REPO)
+
+
+def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path, ade_root: str | os.PathLike[str]) -> str | None:
     """None only when the LOADED job (its `launchctl print` program/arguments) runs `ade-job-run --lock-dir <lock_dir> LABEL --`."""
     program, args = parse_launchd_definition(print_out)
     if args is None or len(args) <= _WRAP_HEAD:
@@ -2331,10 +2338,10 @@ def loaded_wrapper_problem(print_out: str, label: str, lock_dir: Path) -> str | 
         return f"it locks in {args[2]!r}, not in the canonical {lock_dir}"
     if program is None or program != args[0]:
         return f"the loaded definition runs program {program!r}, not the wrapper {args[0]!r}"
-    return wrapper_identity_problem(program, None)
+    return wrapper_identity_problem(program, ade_root)
 
 
-def require_canonical_when_loaded(c: "_Ctx", label: str, op: str) -> bool:
+def require_canonical_when_loaded(c: "_Ctx", label: str, op: str, ade_root: str | os.PathLike[str]) -> bool:
     """For a low-level ADE writer holding the label's canonical lock: refuse (SchedError, nothing written) when the label is
     LOADED and its loaded argv does not prove the canonical lock identity (review F4 of #622). Returns whether it is loaded.
     A job that was installed before the wrapper (or with another lock dir) cannot be updated without risking its running
@@ -2344,7 +2351,7 @@ def require_canonical_when_loaded(c: "_Ctx", label: str, op: str) -> bool:
         if rc == LAUNCHD_NOT_LOADED_RC or "could not find service" in err_txt.lower():
             return False
         raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: launchd state unreadable (rc={rc})")
-    why = loaded_wrapper_problem(out, label, admission_dir())
+    why = loaded_wrapper_problem(out, label, admission_dir(), ade_root)
     if why is not None:
         raise SchedError(EX_ACTIVATE, f"{op} of {label} refused, nothing written: it is loaded and {why}. Its runs do not hold "
                                       f"the canonical admission lock, so a bootout could kill running work. If its new definition is "
@@ -2365,7 +2372,7 @@ def migrate_wrapper_launchd(job: "Job", text: str, *, env: Mapping[str, str] | N
         rc, out, err_txt = _launchctl_print(c, job.label)
         if rc != 0:
             raise SchedError(EX_ACTIVATE, f"{job.label} is not loaded (rc={rc}); use `ade-sched install PLIST`")
-        if loaded_wrapper_problem(out, job.label, admission_dir()) is None:
+        if loaded_wrapper_problem(out, job.label, admission_dir(), ade_root_of(job.ade_root)) is None:
             raise SchedError(EX_ACTIVATE, f"{job.label} already runs through the canonical wrapper; use `ade-sched install` or reconcile")
         why_new = wrapper_route_problem(text.encode("utf-8"), job.label, lock_dir=admission_dir())
         if why_new is not None:
@@ -3468,7 +3475,7 @@ def reconcile(
                 program = parse_launchd_definition(print_out)[0]
             else:
                 program = plistlib.loads(data)["ProgramArguments"][0]
-            why = wrapper_identity_problem(program, os.path.realpath(ade) if ade else str(REPO))
+            why = wrapper_identity_problem(program, ade_root_of(ade))
             if why is not None:
                 return why
             if step.action == "remove":

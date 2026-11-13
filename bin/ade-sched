@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ade-sched: {ade_sched.migrate_wrapper_launchd(job, next(iter(r.files.values())))} {job.label}", file=sys.stderr)
             return 0
         if a.cmd == "uninstall":
-            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate)
+            found = ade_sched.uninstall(a.label, backend, dry_run=a.dry_run, activate=not a.no_activate, ade=a.ade)
             if not a.dry_run:
                 print(f"ade-sched: {'removed' if found else 'not installed:'} {a.label}", file=sys.stderr)
             return 0

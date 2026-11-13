@@ -590,7 +590,7 @@ def test_f2_a_wrapper_outside_the_ade_root_defers(ld, tmp_path):
     ld.reset()
     _drift(root)
     rows, rc = _reconcile(ld, root, catalog)
-    assert rc == 6 and any("checkout reconcile runs from" in r["detail"] for r in rows), rows
+    assert rc == 6 and any("ADE root" in r["detail"] for r in rows), rows
     assert set(ld.verbs()) <= {"print"}
 
 
@@ -668,7 +668,7 @@ def _ade_writers(ld, root, catalog):
     job = _job_of(ld, root, catalog)
     return {
         "install": lambda: S.install(job, "launchd", env=ld.env),
-        "uninstall": lambda: S.uninstall(LABEL, "launchd", env=ld.env),
+        "uninstall": lambda: S.uninstall(LABEL, "launchd", env=ld.env, ade=root),
         "install_native": lambda: S.install_launchd_native(job, "x", env=ld.env, state_dir=ld.state),
     }
 
@@ -776,7 +776,7 @@ def test_an_interrupt_is_not_swallowed_when_the_restore_also_fails(ld, monkeypat
 def test_low_level_uninstall_discards_an_interrupted_reloads_record(ld):
     root, catalog, plist = _installed_wrapped(ld)
     S.write_recovery_record(LABEL, action="reload", plist=plist, prior=plist.read_bytes(), new_sha=None, state_dir=ld.state, env=ld.env)
-    assert S.uninstall(LABEL, "launchd", env=ld.env)
+    assert S.uninstall(LABEL, "launchd", env=ld.env, ade=root)
     assert not plist.exists() and not list((ld.state / "admission").glob("*.recovery.json"))
     assert not list((ld.state / "admission").glob("*.prior.plist"))
 
@@ -813,7 +813,7 @@ def test_f4_a_run_holding_the_canonical_lock_stops_a_writer_whose_env_points_els
     try:
         with pytest.raises((S.SchedError, S.NativeDefer), match="admission lock"):
             {"install": lambda: S.install(job, "launchd", env=env),
-             "uninstall": lambda: S.uninstall(LABEL, "launchd", env=env),
+             "uninstall": lambda: S.uninstall(LABEL, "launchd", env=env, ade=root),
              "install_native": lambda: S.install_launchd_native(job, "x", env=env)}[who]()
         assert run.poll() is None and not KILLERS & set(ld.verbs()) and not ld.killed()
     finally:
@@ -831,7 +831,7 @@ def test_f4_reconcile_and_a_low_level_writer_exclude_each_other_whatever_the_env
     try:
         env = _elsewhere_env(ld, tmp_path)
         with pytest.raises(S.SchedError, match="admission lock"):
-            S.install(job, "launchd", env=env) if who == "install" else S.uninstall(LABEL, "launchd", env=env)
+            S.install(job, "launchd", env=env) if who == "install" else S.uninstall(LABEL, "launchd", env=env, ade=root)
     finally:
         S.release_admission_lock(fd)
     assert plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
@@ -845,7 +845,7 @@ def test_f4_a_loaded_job_with_a_non_canonical_lock_dir_is_refused_untouched(ld, 
     ld.reset()
     before = plist.read_bytes()
     with pytest.raises(S.SchedError, match="migrate-wrapper") as e:
-        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env, ade=root)
     assert "canonical" in str(e.value) and plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs())
 
 
@@ -860,7 +860,7 @@ def test_f4_a_loaded_pre_wrapper_job_is_refused_by_low_level_install_and_uninsta
     job = _job_of(ld, root, catalog)
     ld.reset()
     with pytest.raises(S.SchedError, match="migrate-wrapper"):
-        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env, ade=root)
     assert plist.read_bytes() == old and ld.loaded() and not KILLERS & set(ld.verbs())
 
 
@@ -888,7 +888,7 @@ def test_f4_migrate_wrapper_moves_an_idle_pre_wrapper_job_under_the_canonical_lo
     root, job, text, plist = _pre_wrapper_install(ld)
     assert S.migrate_wrapper_launchd(job, text, env=ld.env) == "migrated"
     assert plist.read_text() == text and ld.loaded() and ld.verbs().count("bootout") == 1
-    assert S.loaded_wrapper_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LABEL)[1], LABEL, S.canonical_admission_dir()) is None
+    assert S.loaded_wrapper_problem(S._launchctl_print(S._ctx("launchd", ld.env, {}), LABEL)[1], LABEL, S.canonical_admission_dir(), root) is None
     assert _lock_is_free(ld) and not list((ld.state / "admission").glob("*.recovery.json"))
     with pytest.raises(S.SchedError, match="already runs through"):
         S.migrate_wrapper_launchd(job, text, env=ld.env)
@@ -990,5 +990,58 @@ def test_b5_the_low_level_proof_checks_the_loaded_wrapper_bytes(ld, who):
     ld.reset()
     (root / "bin" / "ade-job-run").write_text("#!/bin/sh\nexit 0\n")      # canonical argv, but not this checkout's wrapper
     with pytest.raises(S.SchedError, match="migrate-wrapper"):
-        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env)
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env, ade=root)
     assert ld.loaded() and not KILLERS & set(ld.verbs())
+
+
+# ------------------------------------------------------------------------------------------------ round 4 (F5: bind the root)
+
+def test_r4_a_present_but_different_program_is_rejected_by_both_proof_paths(tmp_path):
+    import plistlib
+    pa = ["/w/ade-job-run", "--lock-dir", "/d", LABEL, "--", "cmd"]
+    out = "x = {\n\tprogram = /other\n\targuments = {\n" + "".join(f"\t\t{a}\n" for a in pa) + "\t}\n}\n"
+    data = plistlib.dumps({"Label": LABEL, "ProgramArguments": pa})
+    assert "not the wrapper" in (S.loaded_definition_problem(out, data, LABEL, lock_dir=Path("/d")) or "")      # reconcile's proof
+    assert "not the wrapper" in (S.loaded_wrapper_problem(out, LABEL, Path("/d"), tmp_path) or "")              # the low-level proof
+
+
+def _foreign_checkout(tmp_path):
+    """A second ADE checkout: an IDENTICAL ade-job-run with a DIFFERENT adjacent ade_sched.py (what the wrapper imports)."""
+    other = tmp_path / "other-checkout"
+    (other / "bin").mkdir(parents=True)
+    shutil.copy2(WRAPPER, other / "bin" / "ade-job-run")
+    (other / "bin" / "ade_sched.py").write_text((BIN / "ade_sched.py").read_text() + "\n# stale or custom copy\n")
+    (other / "bin" / "ade-job-run").chmod(0o755)
+    return other
+
+
+@pytest.mark.parametrize("who", ["install", "uninstall"])
+def test_r4_a_loaded_wrapper_in_another_checkout_is_refused_by_the_low_level_writers(ld, tmp_path, who):
+    root, catalog, plist = _installed_wrapped(ld)
+    job = _job_of(ld, root, catalog)
+    other = _foreign_checkout(tmp_path)
+    foreign = str(other / "bin" / "ade-job-run")
+    _set_loaded_args(ld, a0=foreign)                  # canonical lock dir, identical wrapper bytes, protocol v1, another checkout
+    ld.reset()
+    assert S.wrapper_identity_problem(foreign, tmp_path / "nowhere") is not None
+    before = plist.read_bytes()
+    with pytest.raises(S.SchedError, match="migrate-wrapper") as e:
+        S.install(job, "launchd", env=ld.env) if who == "install" else S.uninstall(LABEL, "launchd", env=ld.env, ade=root)
+    assert "ADE root" in str(e.value) and plist.read_bytes() == before and ld.loaded() and not KILLERS & set(ld.verbs()) and not ld.killed()
+
+
+def test_r4_the_low_level_root_defaults_to_the_checkout_beside_the_scheduler(ld, tmp_path):
+    # no --ade and no job root: the root is REPO (never None), so a wrapper in a tmp root is not this scheduler's own
+    root, catalog, plist = _installed_wrapped(ld)
+    ld.reset()
+    with pytest.raises(S.SchedError, match="ADE root"):
+        S.uninstall(LABEL, "launchd", env=ld.env)
+    assert plist.exists() and ld.loaded() and not KILLERS & set(ld.verbs())
+    assert S.ade_root_of(None) == str(S.REPO) and S.ade_root_of(root) == os.path.realpath(root)
+
+
+def test_r4_a_loaded_canonical_idle_job_is_uninstalled_when_the_selected_root_holds_its_wrapper(ld):
+    root, catalog, plist = _installed_wrapped(ld)
+    ld.reset()
+    assert S.uninstall(LABEL, "launchd", env=ld.env, ade=root) is True        # --ade names the root the wrapper lives in
+    assert not plist.exists() and not ld.loaded()
