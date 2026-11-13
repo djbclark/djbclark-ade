@@ -329,23 +329,26 @@ def observe_skills(
         return out, glob
     attached: dict[str, list[Row]] = {t: [] for t in tuis}
     counts: dict[str, int] = {}
+    dropped = 0
     for line in (cp.stderr or "").splitlines():
         if line.strip():
             text = "".join(c if c.isprintable() else "?" for c in line)[:200]
             counts[text] = counts.get(text, 0) + 1
-    for n_seen, (text, times) in enumerate(counts.items()):
-        if n_seen >= MAX_STDERR_ROWS:
-            glob.append(("skill", "skill-everywhere", "warn", f"(+{len(counts) - MAX_STDERR_ROWS} more distinct stderr lines)"))
-            break
+    for text, times in counts.items():
         shown = text + (f" (x{times})" if times > 1 else "")
-        # The script's own TUI-specific warnings start `warning: <tui-id> ` (no colon: `warning: <skill>:`
-        # is a per-skill line, and a skill may share a TUI's name). Anything else is global.
-        m = re.match(r"warning: ([A-Za-z0-9][A-Za-z0-9._-]*) (?!:)", text)
+        # The script's own TUI-specific warnings start `warning: <tui-id> ` (the mandatory space rejects the
+        # per-skill form `warning: <skill>: ...`, so a skill named like a TUI stays global). Every line is
+        # attributed; only the GLOBAL rows are capped, so a late Hermes warning is never lost.
+        m = re.match(r"warning: ([A-Za-z0-9][A-Za-z0-9._-]*) ", text)
         owner = m.group(1) if m and m.group(1) in attached else None
         if owner:
             attached[owner].append(("skill", f"{owner}/warning", "warn", shown))
-        else:
+        elif sum(1 for g in glob if g[1] == "skill-everywhere") < MAX_STDERR_ROWS:
             glob.append(("skill", "skill-everywhere", "warn", shown))
+        else:
+            dropped += 1
+    if dropped:
+        glob.append(("skill", "skill-everywhere", "warn", f"(+{dropped} more distinct stderr lines)"))
     if cp.returncode not in (0, 1):
         glob.append(("skill", "skill-everywhere", "warn", f"check exited rc {cp.returncode}"))
     # cursor-agent-style TUIs read ~/.claude/skills: judge claude first, independent of table order.
@@ -366,7 +369,7 @@ def observe_skills(
                 continue
             if claude_unchecked or not claude_states:
                 out[tui].append(("skill", f"{tui}/*", "unknown",
-                                 "reads ~/.claude/skills, which was not checked (claude not installed)"))
+                                 "reads ~/.claude/skills, which was not checked (claude not installed or not reported)"))
                 continue
         groups: dict[str, list[str]] = {}
         for skill, state in sorted(states.items()):

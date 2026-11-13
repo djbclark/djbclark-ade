@@ -414,6 +414,8 @@ def test_stderr_attribution_is_structural_not_a_word_match():
     out, glob = stderr_rows("warning: skill root /private/tmp/claude-502/x does not exist\n"
                             "warning: claude: render for /d failed; treating as stale copy\n")
     assert len(glob) == 2 and not any(r[2] == "warn" for rows in out.values() for r in rows)
+    out, glob = stderr_rows("error: x warning: hermes y\n")  # mid-line prefix must not attach
+    assert [r[3] for r in glob] == ["error: x warning: hermes y"] and out["hermes"][0][2] == "ok"
     out, glob = stderr_rows("error: boom\n", rc=1)
     assert [r[3] for r in glob] == ["error: boom"]
 
@@ -426,8 +428,10 @@ def test_stderr_every_line_scanned_deduped_and_capped():
     out, glob = stderr_rows("warning: x\n" * 5)
     assert [r[3] for r in glob] == ["warning: x (x5)"]
     n = cw.MAX_STDERR_ROWS
-    out, glob = stderr_rows("\n".join(f"warning: n{i}" for i in range(n + 7)))
+    many = [f"warning: n{i}" for i in range(n + 7)] + ["warning: hermes no longer lists its skills dir"]
+    out, glob = stderr_rows("\n".join(many))
     assert len(glob) == n + 1 and "7 more distinct" in glob[-1][3]
+    assert any("hermes no longer" in r[3] for r in out["hermes"])  # past the cap, still attributed
     _, glob = skills({"a": ALL_OK}, rc=127)
     assert any("rc 127" in r[3] for r in glob)
 
@@ -452,6 +456,12 @@ def test_cursor_agent_unknown_when_claude_unchecked_and_order_independent():
         assert out["cursor-agent"][0][2] == "unknown" and "not checked" in out["cursor-agent"][0][3]
         out, _ = cw.observe_skills(REPO, order, runner=runner_for(check_text({"a": {**ALL_OK, "claude": "missing"}})))
         assert out["cursor-agent"][0][1] == "cursor-agent/via-claude"
+
+
+def test_cursor_agent_unknown_when_claude_absent_from_report():
+    text = check_text({"a": {k: v for k, v in ALL_OK.items() if k != "claude"}})
+    out, _ = cw.observe_skills(REPO, TUIS, runner=runner_for(text))
+    assert out["claude"][0][2] == "unknown" and out["cursor-agent"][0][2] == "unknown"
 
 
 def test_partly_unchecked_tui_is_unknown_not_ok(tmp_path, monkeypatch):
