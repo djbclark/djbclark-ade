@@ -2003,7 +2003,7 @@ def probe_present(monkeypatch):
 def test_repo_hermes_row_declares_advisory_exit():
     row = next(c for c in ai.load_catalog(root=REPO).components if c["id"] == "hermes")
     assert row["probe_warn_exit"] == [1]
-    assert row["probe_summary_re"] == r"Found \d+ issue"
+    assert row["probe_summary_re"] == r"^Found \d+ issue"
 
 
 def test_hermes_advisory_exit_is_warn_with_summary_detail(tmp_path, probe_present):

@@ -297,7 +297,7 @@ update_argv = ["hermes", "update"]
 probe = "hermes doctor"
 probe_argv = ["hermes", "doctor"]
 probe_warn_exit = [1]
-probe_summary_re = "Found \\d+ issue"
+probe_summary_re = "^Found \\d+ issue"
 presence = "hermes"
 platforms = ["mac", "linux"]
 notes = "Avoids curl|bash by urllib-fetching install.sh then argv `bash <temp>/install.sh --non-interactive` (shell=False). Non-dry-run needs ADE_USER_INSTALL_TRUST_VENDOR=1 (same CDN trust as curl|bash; no forever digest — order 8). S3a basic setup is opt-in: `just hermes-setup` (prompts/setup/hermes.md) or `just hermes-setup --self` (DIY checklist); does not force Hermes or configure peer-link live. peer-link and LiteLLM fork stay separate components."
