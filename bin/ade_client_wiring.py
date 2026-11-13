@@ -17,8 +17,8 @@ The TUI roster is not listed here: it is the ``targets`` table inside
 ``bin/skill-everywhere`` (docs/skill-everywhere.md), the one place that knows
 which TUIs are current. The MCP roster's ``clients`` must be a subset of it.
 
-Statuses: ok | warn | unknown | error. Only an unreadable roster or client
-config is ``error``.
+Statuses: ok | warn | unknown | error. ``error`` = an unreadable roster or client
+config, or exactly one of the roster / ``bin/skill-everywhere`` present.
 """
 from __future__ import annotations
 
@@ -41,7 +41,10 @@ except ImportError:  # pragma: no cover - exercised by the unknown-reason test
 SKILL_SCRIPT = ("bin", "skill-everywhere")
 SKILL_CHECK_TIMEOUT_S = 90
 SKILL_ENV_OVERRIDES = ("SKILL_EVERYWHERE_ONLY", "SKILL_EVERYWHERE_NO_COPY", "SKILL_EVERYWHERE_ADE",
-                       "SKILL_EVERYWHERE_PRIVATE", "SKILL_EVERYWHERE_SITE")
+                       "SKILL_EVERYWHERE_PRIVATE", "SKILL_EVERYWHERE_SITE", "SKILL_EVERYWHERE_GROKBOT_NOTE")
+# Also dropped when the caller pins HOME (fixtures): each one relocates a root the check reads.
+SKILL_ENV_HOME_RELATIVE = ("OPS_ROOT", "CODEX_HOME", "HERMES_HOME")
+MAX_STDERR_ROWS = 200  # distinct stderr lines kept; the rest are counted, not dropped silently
 MAX_DETAIL_LINES = 12
 
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -307,7 +310,8 @@ def observe_skills(
     fix = f"{script} --all"
     # An inherited ONLY/NO_COPY/root override would narrow or redirect the check and still print a
     # complete-looking report (bin/ade-update helper_env, round 15): drop them all.
-    env = {k: v for k, v in os.environ.items() if k not in SKILL_ENV_OVERRIDES}
+    drop = SKILL_ENV_OVERRIDES + (SKILL_ENV_HOME_RELATIVE if home is not None else ())
+    env = {k: v for k, v in os.environ.items() if k not in drop}
     if home is not None:
         env["HOME"] = str(home)
     run = runner or _default_runner
@@ -324,18 +328,34 @@ def observe_skills(
                      f"check ended early (rc {cp.returncode}, no '== end'); no skill result trusted"))
         return out, glob
     attached: dict[str, list[Row]] = {t: [] for t in tuis}
-    err_lines = [ln for ln in (cp.stderr or "").splitlines() if ln.strip()]
-    for line in err_lines[:MAX_DETAIL_LINES]:
-        text = "".join(c if c.isprintable() else "?" for c in line)[:200]
-        owner = next((t for t in tuis if re.search(rf"\b{re.escape(t)}\b", text, re.I)), None)
+    counts: dict[str, int] = {}
+    dropped = 0
+    for line in (cp.stderr or "").splitlines():
+        if line.strip():
+            text = "".join(c if c.isprintable() else "?" for c in line)[:200]
+            counts[text] = counts.get(text, 0) + 1
+    for text, times in counts.items():
+        shown = text + (f" (x{times})" if times > 1 else "")
+        # The script's own TUI-specific warnings start `warning: <tui-id> ` (the mandatory space rejects the
+        # per-skill form `warning: <skill>: ...`, so a skill named like a TUI stays global). Every line is
+        # attributed; only the GLOBAL rows are capped, so a late Hermes warning is never lost.
+        m = re.match(r"warning: ([A-Za-z0-9][A-Za-z0-9._-]*) ", text)
+        owner = m.group(1) if m and m.group(1) in attached else None
         if owner:
-            attached[owner].append(("skill", f"{owner}/warning", "warn", text))
+            attached[owner].append(("skill", f"{owner}/warning", "warn", shown))
+        elif sum(1 for g in glob if g[1] == "skill-everywhere") < MAX_STDERR_ROWS:
+            glob.append(("skill", "skill-everywhere", "warn", shown))
         else:
-            glob.append(("skill", "skill-everywhere", "warn", text))
-    if len(err_lines) > MAX_DETAIL_LINES:
-        glob.append(("skill", "skill-everywhere", "warn", f"(+{len(err_lines) - MAX_DETAIL_LINES} more stderr lines)"))
+            dropped += 1
+    if dropped:
+        glob.append(("skill", "skill-everywhere", "warn", f"(+{dropped} more distinct stderr lines)"))
     if cp.returncode not in (0, 1):
         glob.append(("skill", "skill-everywhere", "warn", f"check exited rc {cp.returncode}"))
+    # cursor-agent-style TUIs read ~/.claude/skills: judge claude first, independent of table order.
+    claude_states = table.get("claude") or {}
+    claude_gaps = any(classify_skill_state(st) not in ("ok", "unknown") for st in claude_states.values())
+    claude_unchecked = bool(claude_states) and all(
+        classify_skill_state(st) == "unknown" for st in claude_states.values())
     for tui in tuis:
         out[tui].extend(attached[tui])
         states = table.get(tui)
@@ -343,10 +363,13 @@ def observe_skills(
             out[tui].append(("skill", f"{tui}/*", "unknown", "skill-everywhere reported nothing for this TUI"))
             continue
         if all(st.startswith("via ") and "claude" in st for st in states.values()):
-            gaps = [r for r in out.get("claude", []) if r[0] == "skill" and r[2] == "warn"]
-            if gaps:
+            if claude_gaps:
                 out[tui].append(("skill", f"{tui}/via-claude", "warn",
                                  "reads ~/.claude/skills, which has gaps (see claude/* rows)"))
+                continue
+            if claude_unchecked or not claude_states:
+                out[tui].append(("skill", f"{tui}/*", "unknown",
+                                 "reads ~/.claude/skills, which was not checked (claude not installed or not reported)"))
                 continue
         groups: dict[str, list[str]] = {}
         for skill, state in sorted(states.items()):
@@ -380,8 +403,8 @@ def observe(
     runner: Runner | None = None,
 ) -> list[Row]:
     """All rows: per TUI one ``tui`` summary then its ``mcp``/``skill`` detail rows
-    (non-ok only, plus ok MCP rows), then global rows. ``[]`` when the roster or
-    skill-everywhere is absent (fixture catalogs)."""
+    (non-ok only, plus ok MCP rows), then global rows. ``[]`` when both the roster and
+    skill-everywhere are absent (fixture catalogs); exactly one of them is an error row."""
     path = roster_path if roster_path is not None else default_roster_path(root)
     has_script = root.joinpath(*SKILL_SCRIPT).is_file()
     if not has_script and not path.is_file():
