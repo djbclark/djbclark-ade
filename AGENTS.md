@@ -35,7 +35,7 @@ Each doc carries its own summary.
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard`, the ref hooks and the claim registry (owner and expiry): commands, exit codes, refusal rules |
 | [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
-| [docs/workspace-layout.md](docs/workspace-layout.md) | naming: project / window / tab, one `workers <middle> <lead agent id>` window per lead with `worker …` tabs (2026-11-13); renames with `paseo workspace rename`, `paseo agent update --name` |
+| [docs/workspace-layout.md](docs/workspace-layout.md) | naming: project / window / tab; windows are `<KIND> <repo> (<work>)`, KIND MAIN / WORKERS / USER, no lead id in the name; `worker <slice> <lead id>` tabs (2026-11-13); renames with `paseo workspace rename`, `paseo agent update --name` |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/upstream-review-gate.md](docs/upstream-review-gate.md) | `claude/hooks/upstream_review_gate.py` (2026-11-12): denies `gh`/`git push`/Jira writes to CFEngine upstream (`cfengine`, `NorthernTechHQ`) only; target resolution, limits, registration |
@@ -52,7 +52,7 @@ Each doc carries its own summary.
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
-| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the workers window of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
+| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the WORKERS window of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
 
