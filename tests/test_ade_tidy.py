@@ -624,3 +624,59 @@ def test_report_symlink_inside_the_reports_folder_is_refused(env):
     env.worker(2, text="finished")
     p = env.plan()
     assert not by_id(p)["00000002"]["verified_done"] and p["archive_agents"] == []
+
+
+# ---- after the ws-naming rebase: ade-worker-run's registry and lock order ----------------------------------------
+
+def registry(env, lead, wids):
+    d = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{lead}.windows.json").write_text(json.dumps({"windows": wids}))
+
+
+def test_registered_empty_window_is_ours_and_archived(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_EMPTY, "WORKERS myrepo (Wave 6)")
+    env.record("0000000f-0000-0000-0000-000000000000", W_EMPTY, lead=None)      # unlabelled record: ownership only via the registry
+    assert [c for c in env.calls() if c[:2] == ["workspace", "archive"]] == []
+    p = env.plan()
+    assert W_EMPTY not in [w["windowId"] for w in p["archive_windows"]] and any(w["windowId"] == W_EMPTY for w in p["empty_not_ours"])
+    registry(env, LEAD, [W_EMPTY])
+    assert W_EMPTY in [w["windowId"] for w in env.plan()["archive_windows"]]
+
+
+def test_other_leads_registered_window_is_never_renamed_or_archived(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_OTHER, "workers myrepo Wave 9 " + OTHER_LEAD)
+    env.record("0000000f-0000-0000-0000-000000000000", W_OTHER)                  # labelled for THIS lead, registered to the other
+    registry(env, OTHER_LEAD, [W_OTHER])
+    p = env.plan()
+    assert W_OTHER not in [w["windowId"] for w in p["archive_windows"]] and not any(r["windowId"] == W_OTHER for r in p["renames"])
+    assert env.run(apply=True).returncode == 0
+    assert not [c for c in env.calls() if c[:2] in (["workspace", "archive"], ["workspace", "rename"]) and W_OTHER in c]
+
+
+def test_unreadable_registry_stops_the_run(env):
+    d = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{LEAD}.windows.json").write_text("{nope")
+    r = env.run()
+    assert r.returncode == 1 and "unreadable" in r.stderr
+    assert env.mutating() == []
+
+
+def test_renaming_my_legacy_window_records_it_in_the_registry(env):
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.worker(1, text="BLOCKED: x")                                           # keeps W_WORK occupied by this lead's worker
+    assert env.run(apply=True).returncode == 0
+    reg = json.loads((Path(os.environ["ADE_WORKER_RUN_STATE"]) / f"{LEAD}.windows.json").read_text())
+    assert W_WORK in reg["windows"]
+    names = {w["workspaceId"]: w["name"] for w in json.loads(env.data_path.read_text())["workspaces"]}
+    assert names[W_WORK].startswith("WORKERS myrepo (")
+
+
+def test_apply_takes_the_lead_lock_then_the_global_lock(env):
+    env.worker(1)
+    assert env.run(apply=True).returncode == 0
+    d = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    assert (d / f"{LEAD}.lock").exists() and (d / "_global.lock").exists()

@@ -424,6 +424,10 @@ def occupants_of(wks: str, live_ids: set[str], refresh: bool = False) -> list[st
 def window_is_ours(wks: str, name: str, lead: str) -> bool:
     """Provably this lead's: every agent ever recorded in it (live or archived) carries ade.lead=<lead> and there is at
     least one, or its name is the legacy `workers ... <lead id>` form. An empty window of unknown owner is only listed."""
+    if wks in other_leads_windows(lead):
+        return False
+    if wks in read_registry(lead):
+        return True
     if name.startswith(("workers ", "WORKERS ")) and name.endswith(f" {lead}"):
         return True
     recs = [d for d in agent_state_files() if d.get("workspaceId") == wks]
@@ -518,10 +522,71 @@ def state_lock(lead: str):
     return flock_timeout(state_path(lead).with_suffix(".lock"), 30)
 
 
-def lock_for(lead: str):
-    """The same per-lead lock ade-worker-run holds while launching or archiving a workers window (bounded wait)."""
-    d = Path(os.environ.get("ADE_WORKER_RUN_STATE") or Path.home() / ".local/state/ade/worker-run")
-    return flock_timeout(d / f"{lead}.lock", 120)
+def worker_run_dir() -> Path:
+    return Path(os.environ.get("ADE_WORKER_RUN_STATE") or Path.home() / ".local/state/ade/worker-run")
+
+
+class Locks:
+    """ade-worker-run's locks, in its order (the lead's own, then `_global.lock`), each with a bounded wait: window ownership
+    is read and written across leads, so a tidy's find+rename+archive never interleaves with a launch or archive-window."""
+
+    def __init__(self, lead: str):
+        self.fhs: list = []
+        try:
+            for name in (f"{lead}.lock", "_global.lock"):
+                self.fhs.append(flock_timeout(worker_run_dir() / name, 120))
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        for fh in reversed(self.fhs):
+            fh.close()
+
+
+def lock_for(lead: str) -> Locks:
+    return Locks(lead)
+
+
+def read_registry(lead: str) -> set[str]:
+    """The window ids ade-worker-run recorded as this lead's (`<lead>.windows.json`). A missing file is an empty set; an
+    unreadable one raises Refused: ownership is unknown, so nothing is renamed or archived."""
+    path = worker_run_dir() / f"{lead}.windows.json"
+    try:
+        ids = json.loads(path.read_text())["windows"]
+        if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
+            raise ValueError("bad window id")
+        return set(ids)
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError, KeyError, TypeError):
+        raise Refused(f"the window ownership record {path} is unreadable: nothing is renamed or archived (fix or remove it by hand)")
+
+
+def other_leads_windows(lead: str) -> dict[str, str]:
+    """Window id -> another lead that registered it (such a window is never renamed or archived from here)."""
+    out: dict[str, str] = {}
+    for path in worker_run_dir().glob("*.windows.json"):
+        owner = path.name[: -len(".windows.json")]
+        if owner != lead and UUID_RE.fullmatch(owner):
+            for wks in read_registry(owner):
+                out.setdefault(wks, owner)
+    return out
+
+
+def register_window(lead: str, wks: str) -> None:
+    """Record wks as this lead's, atomically, in ade-worker-run's format (the caller holds the lead and global locks)."""
+    path = worker_run_dir() / f"{lead}.windows.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ids = read_registry(lead) | {wks}
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"windows": sorted(ids)}, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 # ----------------------------------------------------------------------------------------------- plan
@@ -635,6 +700,9 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
         if names is None:
             out["notes"].append("bin/ade_ws_names.py is missing: no window is renamed")
             continue
+        if wks in (opts.other_windows or {}):
+            out["notes"].append(f"{wks} is registered to another lead: not renamed")
+            continue
         parsed, legacy = names.parse(cur), names.parse_legacy(cur)
         if any(r["class"] in ("other-worker", "lead") for r in by_win.get(wks, [])) or (legacy and legacy.lead not in (None, opts.lead_id)):
             out["notes"].append(f"{wks} holds another lead's agent(s) or carries another lead's id: not renamed")
@@ -660,9 +728,18 @@ def is_main_name(name: str) -> bool:
     return bool(re.match(r"MAIN\b", name or ""))
 
 
+def _ours_or_unknown(wks: str, nm: str, lead: str) -> bool:
+    try:
+        return window_is_ours(wks, nm, lead)
+    except Refused:
+        return False
+
+
 def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
     names = names_mod()
     opts.lead_id = lead
+    opts.other_windows = other_leads_windows(lead)  # Refused (unreadable record) ends the run: ownership is unknown
+    read_registry(lead)
     now = time.time()
     st = load_state(lead)
     opts.permits = pending_permissions()
@@ -710,7 +787,7 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
             continue
         if w.get("isolation") != "local":
             p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": f"isolation {w.get('isolation')!r}: archiving would delete its worktree"})
-        elif not window_is_ours(wks, nm, lead):
+        elif not _ours_or_unknown(wks, nm, lead):
             p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": "owner not provably this lead: operator's call"})
         else:
             p["archive_windows"].append({"windowId": wks, "name": nm, "conditional": bool(occupancy.get(wks))})
@@ -859,8 +936,13 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         cur = next((w for w in workspaces() if w["workspaceId"] == r["windowId"]), None)
         if not cur or cur.get("name") != r["from"]:
             return rec("rename", r["windowId"], False, "window changed since the plan: skipped")
+        legacy_mine = cur["name"].startswith(("workers ", "WORKERS ")) and cur["name"].endswith(f" {lead}")
+        if r["windowId"] in other_leads_windows(lead):
+            return rec("rename", r["windowId"], False, "registered to another lead: skipped")
         rc, out, err = paseo(["workspace", "rename", r["windowId"], r["to"]])
         rec("rename", r["windowId"], rc == 0, r["to"] if rc == 0 else clean(err or out, 120))
+        if rc == 0 and legacy_mine:  # the new name no longer carries the lead id: record ownership as ade-worker-run does
+            register_window(lead, r["windowId"])
 
     for r in p["renames"]:
         attempt("rename", r["windowId"], lambda r=r: do_rename(r))
