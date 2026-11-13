@@ -3,6 +3,7 @@
 
   ade-worker-run --lead ID --slice NAME [--window-middle TEXT] [--cwd DIR] -- <paseo run args...>
   ade-worker-run archive-window --lead ID [--window-middle TEXT] [--idle-handled] [--dry-run]
+  (both take --on-behalf-of-lead: needed when $PASEO_AGENT_ID is set and is not --lead)
 
 Launch: strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every paseo call, finds the lead's
 window by exact name `workers <middle> <lead id>` in `paseo workspace ls --json` (refusing two matches), else mints
@@ -143,6 +144,14 @@ def lock_for(lead: str):
     return fh
 
 
+def check_caller(lead: str, on_behalf: bool) -> None:
+    """--lead is the caller's own agent id; a different one (a stale id in a brief) needs --on-behalf-of-lead."""
+    caller = os.environ.get("PASEO_AGENT_ID")
+    if caller and caller != lead and not on_behalf:
+        raise Refused(f"--lead {lead} is not this agent ({caller}); a wrong id would place or archive workers in another "
+                      "lead's window and label them for it. Pass --on-behalf-of-lead if that is intended")
+
+
 def passthrough_check(args: list[str]) -> None:
     if not args:
         raise Refused("nothing after `--`: pass the paseo run arguments (provider, mode, brief ...)")
@@ -164,6 +173,7 @@ def passthrough_check(args: list[str]) -> None:
 def launch(opts, rest: list[str]) -> int:
     lead, name = opts.lead, opts.slice
     check_names(lead, name, opts.window_middle)
+    check_caller(lead, opts.on_behalf_of_lead)
     passthrough_check(rest)
     cwd = os.path.realpath(opts.cwd or os.getcwd())
     lock = lock_for(lead)  # held to the end: launches and archive-window of one lead serialize (paseo run --no-wait is quick)
@@ -267,6 +277,7 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
 
 def archive_window(opts) -> int:
     check_names(opts.lead, None, opts.window_middle)
+    check_caller(opts.lead, opts.on_behalf_of_lead)
     lock = lock_for(opts.lead)  # a launch of this lead cannot slip in between the check and the archive
     try:
         return archive_locked(opts)
@@ -306,6 +317,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--window-middle")
         p.add_argument("--idle-handled", action="store_true")
         p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--on-behalf-of-lead", action="store_true")
         opts = p.parse_args(argv[1:])
         if rest:
             p.error("archive-window takes no `--` arguments")
@@ -316,6 +328,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--slice", required=True)
         p.add_argument("--window-middle")
         p.add_argument("--cwd")
+        p.add_argument("--on-behalf-of-lead", action="store_true")
         opts = p.parse_args(argv)
         run = lambda o: launch(o, rest)  # noqa: E731
     try:

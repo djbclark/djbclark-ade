@@ -54,7 +54,8 @@ A lead's workers and reviewers all go in **one new window per lead**, never one 
    It adds `--label ade.lead=<lead id>` and `--label slice=<name>` and renames each tab with `paseo agent update <full agent
    id> --name "worker <name> <lead id>"` (tabs share a name, so by hand always pass a full agent id, never a tab name). It requires
    `--no-wait` and holds a per-lead lock until `paseo run` returns, so launches and `archive-window` of one lead never
-   interleave; a `--window-middle` that matches no window while the lead has another is refused. **Archive the window with `ade-worker-run
+   interleave; a `--window-middle` that matches no window while the lead has another is refused. `--lead` is checked against the
+   caller's `PASEO_AGENT_ID` (refused when they differ, unless `--on-behalf-of-lead`). **Archive the window with `ade-worker-run
    archive-window --lead <lead id>` (it runs `paseo workspace archive <wks>`) only when all hold:** every live agent labelled
    `ade.lead=<own id>` is closed, or idle with its DONE/BLOCKED handled (`--idle-handled`); no other live agent sits in the
    window (the archive stops every live agent and terminal in it, labelled or not; the helper reads each live agent's

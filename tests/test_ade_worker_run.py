@@ -72,7 +72,7 @@ class Env:
         monkeypatch.setenv("FAKE_CALLS", str(self.calls_path))
         monkeypatch.setenv("PASEO_HOME", str(self.home))
         monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(tmp_path / "state"))
-        monkeypatch.setenv("PASEO_AGENT_ID", "ambient-agent")
+        monkeypatch.setenv("PASEO_AGENT_ID", LEAD)
         monkeypatch.setenv("PASEO_AGENT_CWD", "/ambient/cwd")
         monkeypatch.setenv("PASEO_WORKSPACE_ID", "wks_ambient")
         self.flush()
@@ -410,3 +410,24 @@ def test_launch_waits_for_the_lead_lock(env, existing):
         t.cancel()
         proc.kill()
         proc.communicate()
+
+
+def test_lead_that_is_not_the_caller_refused(env, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", OTHER_LEAD)
+    r = launch(env)
+    assert r.returncode == 1 and "not this agent" in r.stderr and not env.calls()
+    r = archive(env, "--idle-handled")
+    assert r.returncode == 1 and "not this agent" in r.stderr and not env.calls()
+
+
+def test_on_behalf_of_lead_allows_it(env, monkeypatch):
+    # the stub renames the minted window, so the archive below finds it
+    monkeypatch.setenv("PASEO_AGENT_ID", OTHER_LEAD)
+    assert launch(env, "alpha", "--on-behalf-of-lead").returncode == 0  # mints the window
+    env.data = json.loads(env.data_path.read_text())  # keep the stub's rename
+    assert env.run("archive-window", "--lead", LEAD, "--on-behalf-of-lead", "--dry-run").returncode == 0
+
+
+def test_no_caller_agent_id_needs_no_flag(env, monkeypatch):
+    monkeypatch.delenv("PASEO_AGENT_ID")
+    assert launch(env).returncode == 0
