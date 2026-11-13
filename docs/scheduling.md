@@ -444,6 +444,8 @@ launchd itself cannot start an unloaded job, so only an external loader can open
 writer between the provenance read and the atomic write is overwritten the same way. An operator-disabled (`launchctl
 disable`), unloaded ADE job is admitted (no `print-disabled` read): its `bootstrap` fails, the ledger row becomes `failed`,
 and later reconciles exit 1 until the override is cleared.
+Pre-existing and out of scope: the live backend scan (`list_backend_labels`) opens every `*.plist` in the agents directory, so a
+FIFO planted there hangs `reconcile` before the adapter runs.
 
 **systemd, cron and paseo keep the conservative default** (installs and removals defer, exit 6): no adapter proves their
 launch paths yet. A paseo step on a launchd host also keeps it, and so does `--no-activate` (the adapter needs `launchctl`).
