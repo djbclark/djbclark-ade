@@ -40,6 +40,8 @@ except ImportError:  # pragma: no cover - exercised by the unknown-reason test
 
 SKILL_SCRIPT = ("bin", "skill-everywhere")
 SKILL_CHECK_TIMEOUT_S = 90
+SKILL_ENV_OVERRIDES = ("SKILL_EVERYWHERE_ONLY", "SKILL_EVERYWHERE_NO_COPY", "SKILL_EVERYWHERE_ADE",
+                       "SKILL_EVERYWHERE_PRIVATE", "SKILL_EVERYWHERE_SITE")
 MAX_DETAIL_LINES = 12
 
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -248,12 +250,14 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
 def _default_runner(argv: list[str], env: dict[str, str]) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(  # noqa: S603 - argv list; the script is read-only under --check
         argv, capture_output=True, text=True, check=False, env=env,
-        timeout=SKILL_CHECK_TIMEOUT_S,
+        timeout=SKILL_CHECK_TIMEOUT_S, errors="replace",
     )
 
 
 def classify_skill_state(state: str) -> str:
-    """ok | unknown | missing | dangling | elsewhere | other."""
+    """ok | unknown | missing | dangling | elsewhere | other. Copy-target rows carry a
+    trailing ``(<dest>)`` (``copied (/x)``), stripped first."""
+    state = re.sub(r" \(.*\)$", "", state)
     if state == "linked" or state.startswith("via ") or state == "copied":
         return "ok"
     if state.startswith("not installed"):
@@ -268,19 +272,25 @@ def classify_skill_state(state: str) -> str:
 
 
 def parse_skill_check(text: str) -> tuple[dict[str, dict[str, str]], bool]:
-    """(tui -> skill -> state, complete). ``complete`` = the ``== end`` sentinel."""
+    """(tui -> skill -> state, complete). Complete = the last non-empty line is the
+    ``== end`` sentinel and every skill header has at least one row."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    complete = bool(lines) and lines[-1] == "== end"
     table: dict[str, dict[str, str]] = {}
     skill = None
-    complete = False
-    for line in text.splitlines():
-        if line == "== end":
-            complete = True
-        elif line.startswith("== "):
+    rowed: set[str] = set()
+    headers: list[str] = []
+    for line in lines[:-1] if complete else lines:
+        if line.startswith("== "):
             skill = line[3:].strip()
+            headers.append(skill)
         elif line.startswith("  ") and skill is not None:
             parts = line.split(None, 1)
             if len(parts) == 2:
                 table.setdefault(parts[0], {})[skill] = parts[1].strip()
+                rowed.add(skill)
+    if any(h not in rowed for h in headers):
+        complete = False
     return table, complete
 
 
@@ -295,7 +305,9 @@ def observe_skills(
     Runs ``skill-everywhere --check --all`` and nothing else."""
     script = root.joinpath(*SKILL_SCRIPT)
     fix = f"{script} --all"
-    env = dict(os.environ)
+    # An inherited ONLY/NO_COPY/root override would narrow or redirect the check and still print a
+    # complete-looking report (bin/ade-update helper_env, round 15): drop them all.
+    env = {k: v for k, v in os.environ.items() if k not in SKILL_ENV_OVERRIDES}
     if home is not None:
         env["HOME"] = str(home)
     run = runner or _default_runner
@@ -303,7 +315,7 @@ def observe_skills(
     out: dict[str, list[Row]] = {t: [] for t in tuis}
     try:
         cp = run([str(script), "--check", "--all"], env)
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
         glob.append(("skill", "skill-everywhere", "warn", f"check could not run ({type(e).__name__})"))
         return out, glob
     table, complete = parse_skill_check(cp.stdout or "")
@@ -311,14 +323,31 @@ def observe_skills(
         glob.append(("skill", "skill-everywhere", "warn",
                      f"check ended early (rc {cp.returncode}, no '== end'); no skill result trusted"))
         return out, glob
-    for line in (cp.stderr or "").splitlines()[:5]:
-        if line.startswith("warning:"):
-            glob.append(("skill", "skill-everywhere", "warn", "".join(c if c.isprintable() else "?" for c in line)[:200]))
+    attached: dict[str, list[Row]] = {t: [] for t in tuis}
+    err_lines = [ln for ln in (cp.stderr or "").splitlines() if ln.strip()]
+    for line in err_lines[:MAX_DETAIL_LINES]:
+        text = "".join(c if c.isprintable() else "?" for c in line)[:200]
+        owner = next((t for t in tuis if re.search(rf"\b{re.escape(t)}\b", text, re.I)), None)
+        if owner:
+            attached[owner].append(("skill", f"{owner}/warning", "warn", text))
+        else:
+            glob.append(("skill", "skill-everywhere", "warn", text))
+    if len(err_lines) > MAX_DETAIL_LINES:
+        glob.append(("skill", "skill-everywhere", "warn", f"(+{len(err_lines) - MAX_DETAIL_LINES} more stderr lines)"))
+    if cp.returncode not in (0, 1):
+        glob.append(("skill", "skill-everywhere", "warn", f"check exited rc {cp.returncode}"))
     for tui in tuis:
+        out[tui].extend(attached[tui])
         states = table.get(tui)
         if not states:
             out[tui].append(("skill", f"{tui}/*", "unknown", "skill-everywhere reported nothing for this TUI"))
             continue
+        if all(st.startswith("via ") and "claude" in st for st in states.values()):
+            gaps = [r for r in out.get("claude", []) if r[0] == "skill" and r[2] == "warn"]
+            if gaps:
+                out[tui].append(("skill", f"{tui}/via-claude", "warn",
+                                 "reads ~/.claude/skills, which has gaps (see claude/* rows)"))
+                continue
         groups: dict[str, list[str]] = {}
         for skill, state in sorted(states.items()):
             groups.setdefault(classify_skill_state(state), []).append(skill)
@@ -354,8 +383,13 @@ def observe(
     (non-ok only, plus ok MCP rows), then global rows. ``[]`` when the roster or
     skill-everywhere is absent (fixture catalogs)."""
     path = roster_path if roster_path is not None else default_roster_path(root)
-    if not path.is_file() or not root.joinpath(*SKILL_SCRIPT).is_file():
+    has_script = root.joinpath(*SKILL_SCRIPT).is_file()
+    if not has_script and not path.is_file():
         return []
+    if has_script and not path.is_file():
+        return [("tui", "roster", "error", f"MCP roster missing ({path}); skill-everywhere is present")]
+    if not has_script:
+        return [("tui", "roster", "error", f"{root.joinpath(*SKILL_SCRIPT)} missing; the TUI roster cannot be read")]
     home_dir = home if home is not None else Path.home()
     try:
         tuis = tui_roster(root)
@@ -372,8 +406,8 @@ def observe(
             status = "error"
         elif "warn" in statuses:
             status = "warn"
-        elif statuses <= {"unknown"}:
-            status = "unknown"
+        elif "unknown" in statuses:
+            status = "unknown"  # partly unchecked is never reported as ok
         else:
             status = "ok"
         parts = []

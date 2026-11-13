@@ -67,14 +67,15 @@ def test_tui_roster_is_the_skill_everywhere_table():
         assert retired not in TUIS
 
 
-def test_roster_matches_docs():
+def test_roster_matches_docs_scope_column_exactly():
     docs = (REPO / "docs" / "mcp-servers.md").read_text()
     names = {"claude": "Claude Code", "codex": "Codex", "cursor-agent": "Cursor", "hermes": "Hermes"}
     for row in cw.load_roster(REPO / "config" / "mcp-clients.toml", TUIS):
         line = next(l for l in docs.splitlines() if l.startswith(f"| `{row['id']}`"))
-        assert row["url"] in line, row["id"]
-        for c in row["clients"]:
-            assert names[c] in line, (row["id"], c)
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        assert row["url"] in cells[1], row["id"]
+        scope = cells[2].split("(")[0]
+        assert {c for c, n in names.items() if n in scope} == set(row["clients"]), row["id"]
 
 
 @pytest.mark.parametrize("sid,url,clients", [
@@ -238,11 +239,13 @@ def test_skills_runner_crash_is_warn():
 
 def test_skills_stderr_warnings_surface():
     _, glob = skills({"a": ALL_OK}, stderr="warning: skill root /x does not exist; its skills are not checked\nnoise\n")
-    assert len(glob) == 1 and "does not exist" in glob[0][3]
+    assert len(glob) == 2 and "does not exist" in glob[0][3] and glob[1][3] == "noise"  # unexplained stderr is kept
 
 
 @pytest.mark.parametrize("state,want", [
     ("linked", "ok"), ("via ~/.claude/skills", "ok"), ("copied", "ok"), ("not installed", "unknown"),
+    ("copied (/x/ade-demo)", "ok"), ("missing (/x/ade-demo)", "missing"), ("stale copy (/x)", "elsewhere"),
+    ("not installed (no /x/agent-data/workflows)", "unknown"),
     ("missing", "missing"), ("dangling -> /x", "dangling"), ("other link -> /x", "elsewhere"),
     ("chained via /x", "elsewhere"), ("real dir/file (not ours)", "elsewhere"), ("stale copy", "elsewhere"),
     ("weird", "other")])
@@ -353,3 +356,74 @@ def test_doctor_unreadable_config_fails(tmp_path):
 def test_doctor_silent_without_roster(tmp_path):
     obs, _ = _doctor(tmp_path, tmp_path, "")
     assert not any(o.kind in ("tui", "mcp", "skill") for o in obs)
+
+
+# ---- adversary round 3 -----------------------------------------------------------
+
+def test_skill_env_overrides_are_scrubbed(monkeypatch):
+    for k in cw.SKILL_ENV_OVERRIDES:
+        monkeypatch.setenv(k, "grokbot")
+    seen = {}
+
+    def run(argv, env):
+        seen.update(env)
+        return subprocess.CompletedProcess(argv, 0, check_text({"a": ALL_OK}), "")
+    cw.observe_skills(REPO, TUIS, runner=run)
+    assert not any(k in seen for k in cw.SKILL_ENV_OVERRIDES)
+
+
+def test_skills_undecodable_output_is_warn_not_crash():
+    def bad(argv, env):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+    _, glob = cw.observe_skills(REPO, TUIS, runner=bad)
+    assert glob[0][2] == "warn"
+
+
+def test_default_runner_decodes_with_replace(tmp_path):
+    script = tmp_path / "s"
+    script.write_bytes(b"#!/bin/sh\nprintf '\\377\\n'\n")
+    script.chmod(0o755)
+    cp = cw._default_runner([str(script)], dict(__import__("os").environ))
+    assert "\ufffd" in cp.stdout
+
+
+def test_stderr_all_scanned_and_attached_to_tui():
+    err = "\n".join(["warning: skill root /a does not exist"] * 6
+                    + ["warning: hermes no longer lists its skills dir", "error: boom"])
+    out, glob = skills({"a": ALL_OK}, stderr=err, rc=1)
+    assert any("hermes no longer" in r[3] for r in out["hermes"])
+    assert any("boom" in r[3] for r in glob + [r for rs in out.values() for r in rs])
+    out, glob = skills({"a": ALL_OK}, stderr="\n".join(f"warning: n{i}" for i in range(30)))
+    assert any("more stderr lines" in r[3] for r in glob)
+    _, glob = skills({"a": ALL_OK}, rc=127)
+    assert any("rc 127" in r[3] for r in glob)
+
+
+def test_sentinel_must_be_last_and_every_skill_needs_rows():
+    ok = "== a\n  claude linked\n== end\n"
+    assert cw.parse_skill_check(ok)[1] is True
+    assert cw.parse_skill_check("== end\n== a\n  claude linked\n")[1] is False  # skill named like the sentinel
+    assert cw.parse_skill_check("== a\n  claude linked\n== b\n== end\n")[1] is False  # header without rows
+    assert cw.parse_skill_check("== a\n  claude linked\n")[1] is False
+
+
+def test_cursor_agent_inherits_claude_skill_gaps():
+    out, _ = skills({"a": {**ALL_OK, "claude": "missing"}})
+    assert [r[1:3] for r in out["cursor-agent"]] == [("cursor-agent/via-claude", "warn")]
+
+
+def test_partly_unchecked_tui_is_unknown_not_ok(tmp_path, monkeypatch):
+    root = make_root(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    good_home(home)
+    monkeypatch.setattr(cw, "yaml", None)  # hermes MCP unreadable, skills fine
+    rows = cw.observe(root, home=home, runner=runner_for(check_text({"a": ALL_OK})))
+    assert {r[1]: r[2] for r in rows if r[0] == "tui"}["hermes"] == "unknown"
+
+
+def test_roster_missing_beside_skill_everywhere_is_error(tmp_path):
+    root = make_root(tmp_path)
+    (root / "config" / "mcp-clients.toml").unlink()
+    rows = cw.observe(root, home=tmp_path, runner=runner_for(check_text({"a": ALL_OK})))
+    assert rows[0][2] == "error" and "roster missing" in rows[0][3]
