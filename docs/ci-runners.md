@@ -30,6 +30,8 @@ WarpBuild registers its runners through its GitHub app at **organization** level
 `personal_account_not_supported: true` for `djbclark` (a `User`), even with the app installed on it, and personal accounts have no org runner
 groups to allow public repositories on. On 2026-11-13, PR #655 (`djbclark/djbclark-ade`, public, personal account) moved `pytest-linux` and the
 macOS leg to WarpBuild labels: the jobs stayed `queued` with no runner assigned, and `GET /runner_instance` listed zero instances.
+WarpBuild's [FAQ](https://www.warpbuild.com/faq) says the same ("requires a GitHub organization and cannot be installed on a personal account"), and
+its [migration guide](https://www.warpbuild.com/migrate/github-hosted-to-warpbuild) says it registers runners in the org's Default runner group (id 1).
 So a repository owned by a personal account stays on GitHub-hosted runners; moving it needs a transfer to an organization (operator's call).
 
 ## D. API access
