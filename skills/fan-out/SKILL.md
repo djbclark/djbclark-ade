@@ -47,11 +47,12 @@ After `route_agent.py plan` / `route` and `load-watch admit` (machine capacity �
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 paseo run --provider PROVIDER/MODEL --no-wait \
-  --mode FULL_ACCESS_MODE --workspace wks_… --cwd ~/src/<repo>-NAME-wt \
+  --mode FULL_ACCESS_MODE --workspace wks_… --cwd ~/src/<repo> \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
   --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
-# or, minting for a claimed worktree: --new-workspace local --cwd ~/src/<repo>-NAME-wt …
+# the lead's FIRST launch has no workers window yet: replace --workspace wks_… with --new-workspace local --cwd ~/src/<repo>
+# (then rename the new window, below); every later launch passes --workspace of that window
 ```
 
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
@@ -60,12 +61,28 @@ such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only 
 (2026-11-13: worker 2c54cedf, launched env-stripped without the label, stalled 1h40m on a Bash permission prompt
 that the watcher skipped as `outside-scope`).
 
+**Placement: one workers window per lead (operator ruling, 2026-11-13; naming and limits in `docs/workspace-layout.md`).**
+The env-stripped launch has no caller workspace, so each `--new-workspace` launch made its own "master" window (11 piled up;
+archiving an agent keeps its window). Instead:
+
+1. First launch of the run: `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run --new-workspace local
+   --cwd ~/src/<repo> … --json` creates the window; read its `workspaceId` (or `paseo workspace ls --json`) and name it:
+   `paseo workspace rename wks_… "workers <middle> <lead agent id>"` (`<middle>` the lead's choice, e.g. `djbclark-ade Wave 7`).
+2. Every later launch: the same env strip, `--workspace wks_… --cwd ~/src/<repo>` (the window's own cwd; the writer's
+   claimed worktree goes in its brief), never `--new-workspace`.
+3. After each launch, name the tab: `paseo agent update <id> --name "worker <middle> <lead agent id>"` (singular `worker`).
+4. When the run ends, archive the agents, then the window: `paseo workspace archive wks_…`.
+
+A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
+its own placement, and opens its own workers window under its own id.
+
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.
 
 Take `Choice.dispatch` from a **fresh** `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
 only placement flags and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
-`paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces.
+`paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
+lead's first launch of a run, which opens its workers window (above).
 As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
 `paseo workspace ls --json` and `-C` / `--cwd`) and never emit `--new-workspace` on an ordinary launch.
@@ -78,9 +95,10 @@ For a review slice: Claude runs through `bin/review-launch` (the enforced review
 repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12); every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
-The operator's temporary all-tabs-with-the-lead arrangement is described in `docs/workspace-layout.md`.
-Use the lead's existing workspace/session cwd for placement, while every writer's brief names a separate claimed
-execution worktree and every repository tool call targets it explicitly. Never turn a report folder into a workspace.
+The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
+naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the workers window's `cwd`, while every writer's
+brief names a separate claimed execution worktree and every repository tool call targets it explicitly. Never turn a
+report folder into a workspace.
 
 ## 4. Collect
 

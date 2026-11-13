@@ -143,7 +143,8 @@ Save the focus in the checkpoint first. `/new`, `/clear` and `/reset` through
 the scoped native path failed closed: a native reset needed both a durable
 owned handoff and a supported, acknowledged successor/baton path. A successful
 compaction request alone was not that evidence. The successor path remains a
-top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` that archives its
+top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` (a new lead with its own
+placement, not a worker in a `workers …` window, `docs/workspace-layout.md`) that archives its
 predecessor once it answers (`skills/handoff` Step 9; `self-slash --finish --successor`
 went 2026-11-06).
 
