@@ -5,7 +5,7 @@
                [--retry] [--resolve-finding ID] [--replacement-model M] [--stall-timeout S] [--no-deadline] [--json]
 
 Run it from a checkout of the repository, after the push has landed. It
-  1. reads the PR with `gh pr view PR --repo R --json headRefOid,baseRefOid,baseRefName,author,state`;
+  1. reads the PR with `gh pr view PR --repo R --json headRefOid,baseRefOid,baseRefName,headRefName,isCrossRepository,author,state`;
   2. refuses (exit 2) a PR whose author is neither the operator's login nor the authenticated gh user, unless
      --allow-untrusted: the reviewed tree and diff are the PR's, and they can try to steer the model
      (Codex Security Review on PR 130; the boundary limits what an injected review can DO, not what it says);
@@ -20,8 +20,10 @@ Run it from a checkout of the repository, after the push has landed. It
      external-security-critical input; docs/slim/audit-walk-decisions-2026-11-12.md section 8):
        restricted  `--mode review`: Read/Grep/Glob confined to the worktree, no commands (docs/review-boundary.md)
        yolo        `--mode trusted --trusted-author OWNER`: bypassPermissions with Bash; ONLY for a PR whose GitHub
-                   author is the operator's login (--allow-untrusted and the authenticated-user rule never enable it)
-       auto        (default) yolo for an owner-authored PR, else restricted
+                   author is the operator's login AND numeric user id (`gh api users/LOGIN`) and the operator pushed this head (the
+                   merge gate's `head_pusher_check`: the newest ref update of the PR branch, from the activity API); --allow-untrusted
+                   and the authenticated-user rule never enable it; a head someone else pushed is reviewed restricted
+       auto        (default) yolo for such an operator-authored and operator-pushed PR, else restricted
      The mode used is filed as `runtime` in the result.
   6. checks that the verdict names this head, prints the marker (retained for the local record):
          <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<the 40-hex head>"} -->
@@ -150,6 +152,35 @@ def _adversary_marker():
     finally:
         sys.path.pop(0)
     return adversary_marker
+
+
+class _GhGet:
+    """The read-only `get(path)` that `adversary_marker.head_pusher_check` wants, over `gh api` (a GET)."""
+
+    def __init__(self, marker) -> None:
+        self.marker = marker
+
+    def get(self, path: str):
+        try:
+            r = run(["gh", "api", path], timeout=GH_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise self.marker.ApiError(f"gh api {path}: {e}") from e
+        if r.returncode != 0:
+            raise self.marker.ApiError(f"gh api {path} failed: {r.stderr.strip()[:200]}")
+        return json.loads(r.stdout)    # a ValueError is caught by the check, and fails closed
+
+
+def operator_pushed_head(marker, repo: str, author: str, head: str, doc: dict) -> tuple[bool, str]:
+    """(ok, why not): the PR author is the operator by login AND numeric id, and the newest ref update of the PR branch is
+    this head, pushed by the operator (the gate's `head_pusher_check`). Anything unknown fails closed."""
+    try:
+        r = run(["gh", "api", f"users/{author}", "--jq", ".id"], timeout=GH_TIMEOUT)
+        uid = int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        uid = None
+    if marker.trusted_owner_user_state(author, uid) != "owner":
+        return False, f"the author's user id is not the operator's pinned id ({uid})"
+    return marker.head_pusher_check(_GhGet(marker), repo, head, doc.get("headRefName"), doc.get("isCrossRepository") is not False)
 
 
 def marker_reads_back(line: str, head: str, verdict: str) -> bool:
@@ -303,7 +334,7 @@ def review_attempt(argv: list[str]) -> int:
         return EXIT_USAGE
 
     try:
-        view = run(["gh", "pr", "view", str(a.pr), "--repo", repo, "--json", "headRefOid,baseRefOid,baseRefName,author,state"],
+        view = run(["gh", "pr", "view", str(a.pr), "--repo", repo, "--json", "headRefOid,baseRefOid,baseRefName,headRefName,isCrossRepository,author,state"],
                    timeout=GH_TIMEOUT)
         doc = json.loads(view.stdout) if view.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError) as e:
@@ -339,11 +370,17 @@ def review_attempt(argv: list[str]) -> int:
         return EXIT_USAGE
 
     owner_authored = marker.is_trusted_owner_login(author) and not author_is_bot
-    if a.runtime == "yolo" and not owner_authored:
-        note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored (this one: {author or '(unknown)'!r}); "
-             "use --runtime restricted")
+    # Full permissions need more than the author's login: the author's id, and that the operator pushed this head (the
+    # gate's own check). Anyone else who can push to the branch of an operator PR could plant instructions for the
+    # reviewing model in the diff (adversary review of #675, C1).
+    yolo_ok, why_not = (operator_pushed_head(marker, repo, author, head, doc) if owner_authored else (False, "not authored by the operator"))
+    if a.runtime == "yolo" and not yolo_ok:
+        note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored and pushed (this one: {author or '(unknown)'!r}: "
+             f"{why_not}); use --runtime restricted")
         return EXIT_USAGE
-    runtime = "yolo" if (a.runtime == "yolo" or (a.runtime == "auto" and owner_authored)) else "restricted"
+    runtime = "yolo" if (a.runtime == "yolo" or (a.runtime == "auto" and yolo_ok)) else "restricted"
+    if owner_authored and not yolo_ok:
+        note(f"runtime restricted: {why_not}")
 
     sd = state_dir()
     stem = f"{repo.replace('/', '__')}-pr{a.pr}-{head}"

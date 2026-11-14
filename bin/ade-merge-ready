@@ -511,7 +511,7 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
     )
     print(
         "# Prefer: bin/ade-merge-ready approve-post --via auto "
-        "(GitHub API, not herdr; outside tips → owner comment)."
+        "(GitHub API, not herdr; every tip gets an owner issue comment under --via auto)."
     )
     print(
         "# Owner tips (after #484 on master): no APPROVE paste when the operator "

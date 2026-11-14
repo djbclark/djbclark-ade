@@ -724,9 +724,22 @@ a = sys.argv[1:]
 if a[:2] == ["pr", "view"]:
     if s.get("view_rc"):
         sys.stderr.write("no such PR\n"); sys.exit(1)
-    print(json.dumps(s["view"])); sys.exit(0)
+    print(json.dumps({"headRefName": "feature", "isCrossRepository": False, **s["view"]})); sys.exit(0)
 if a[:2] == ["api", "user"]:
     print(s.get("me", "djbclark")); sys.exit(0)
+if len(a) >= 2 and a[0] == "api" and a[1].startswith("users/"):
+    login = a[1].split("/", 1)[1].lower()
+    ids = {"djbclark": 131936, **s.get("user_ids", {})}
+    if ids.get(login) is None:
+        sys.stderr.write("not found\n"); sys.exit(1)
+    print(ids[login]); sys.exit(0)
+if len(a) == 2 and a[0] == "api" and "/activity?" in a[1]:
+    if s.get("activity_rc"):
+        sys.stderr.write("HTTP 500\n"); sys.exit(1)
+    view = {"headRefName": "feature", **s["view"]}
+    default = [{"activity_type": "push", "ref": "refs/heads/" + view["headRefName"], "after": view["headRefOid"],
+                "actor": {"login": "djbclark", "type": "User", "id": 131936}}]
+    print(json.dumps(s.get("activity", default))); sys.exit(0)
 sys.stderr.write("fake gh: unserved " + " ".join(a) + "\n"); sys.exit(1)
 """
 
@@ -880,7 +893,9 @@ def test_review_pr_never_calls_gh_to_post(prw):
     prw.review()
     for line in (prw.tmp / "gh.log").read_text().splitlines():
         argv = json.loads(line)
-        assert argv[:2] in (["pr", "view"], ["api", "user"]), argv
+        assert argv[:2] in (["pr", "view"], ["api", "user"]) or (
+            argv[0] == "api" and argv[1].startswith(("users/", "repos/")) and len(argv) in (2, 4)
+            and not {"-X", "--method", "-f", "-F", "--input"} & set(argv)), argv
 
 
 # ---- E8 review repairs (2026-11-07) -------------------------------------------------------------------------
@@ -1145,6 +1160,68 @@ def test_a_bot_author_named_like_the_operator_never_gets_the_yolo_runtime(prw):
     assert prw.review().returncode == 0
     assert argv_val(prw.launches()[-1]["argv"], "--permission-mode") == "default"
     assert prw.review("--runtime", "yolo").returncode == 2
+
+
+def _push(prw, login="djbclark", type_="User", uid=131936, after=None, ref="refs/heads/feature", activity_type="push"):
+    return {"activity_type": activity_type, "ref": ref, "after": after or prw.pr_head,
+            "actor": {"login": login, "type": type_, "id": uid}}
+
+
+def _view(prw, **extra):
+    return {"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
+            "author": {"login": "djbclark"}, "state": "OPEN", **extra}
+
+
+@pytest.mark.parametrize("what,gh_kw", [
+    ("another member pushed", lambda p: {"activity": [_push(p, "technoeuphora", uid=1)]}),
+    ("a Cloud Agent pushed", lambda p: {"activity": [_push(p, "cursor[bot]", "Bot", 2)]}),
+    ("the operator's login with another id", lambda p: {"activity": [_push(p, uid=999)]}),
+    ("the newest update is another head", lambda p: {"activity": [_push(p, after="f" * 40), _push(p)]}),
+    ("another ref", lambda p: {"activity": [_push(p, ref="refs/heads/other")]}),
+    ("a branch deletion", lambda p: {"activity": [_push(p, activity_type="branch_deletion")]}),
+    ("no history", lambda p: {"activity": []}),
+    ("history unreadable", lambda p: {"activity_rc": 1}),
+    ("the author's user id is not the pinned one", lambda p: {"user_ids": {"djbclark": 424242}}),
+    ("the author's user id cannot be read", lambda p: {"user_ids": {"djbclark": None}}),
+])
+def test_review_pr_gives_the_operators_pr_the_yolo_runtime_only_when_the_operator_pushed_the_head(prw, what, gh_kw):
+    prw.gh(view=_view(prw), **gh_kw(prw))
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    argv = prw.launches()[0]["argv"]
+    assert argv_val(argv, "--permission-mode") == "default" and argv_val(argv, "--tools") == "Read,Grep,Glob", what
+    assert prw.filed()["runtime"] == "restricted" and "runtime restricted" in r.stderr
+    before = len(prw.calls())
+    r = prw.review("--runtime", "yolo")
+    assert r.returncode == 2 and "authored and pushed" in r.stderr and len(prw.calls()) == before
+
+
+def test_review_pr_gives_a_head_in_a_fork_the_restricted_runtime(prw):
+    prw.gh(view=_view(prw, isCrossRepository=True))
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default"
+    assert "fork" in r.stderr
+
+
+@pytest.mark.parametrize("branch", ["a b", "x&ref=refs/heads/y", "a#b", "caf\u00e9", "x\n"])
+def test_review_pr_gives_an_unusable_branch_name_the_restricted_runtime(prw, branch):
+    prw.gh(view=_view(prw, headRefName=branch))
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default"
+    assert not any("/activity" in line for line in (prw.tmp / "gh.log").read_text().splitlines())
+
+
+@pytest.mark.parametrize("repo_owner", ["djbclark", "frdminc"])
+def test_review_pr_reads_the_branch_history_of_the_repository_it_reviews(tmp_path, repo_owner):
+    w = PrWorld(tmp_path, owner=repo_owner)
+    r = w.review()
+    assert r.returncode == 0, r.stderr
+    assert argv_val(w.launches()[0]["argv"], "--permission-mode") == "bypassPermissions"
+    log = [json.loads(line) for line in (w.tmp / "gh.log").read_text().splitlines()]
+    assert ["api", f"repos/{repo_owner}/djbclark-ade/activity?ref=refs/heads/feature&direction=desc&per_page=1"] in log
+    assert ["api", "users/djbclark", "--jq", ".id"] in log
 
 
 def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_not_owner(prw):

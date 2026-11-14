@@ -27,7 +27,10 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    issue comment on the PR that the owner posted, not through a GitHub App, and that nobody but the owner has edited
    (GitHub lets any repository writer edit someone else's comment, so it is read through GraphQL with `editor`,
    `lastEditedAt`, `includesCreatedEdit` and `userContentEdits`, every edit in its history must be the owner's, and
-   anything unknown fails closed; Codex review of PR 300, 2026-11-07). On a PR written by anyone else (MEMBER and
+   anything unknown fails closed; Codex review of PR 300, 2026-11-07). Beside those two, a PR the operator wrote needs no marker
+   at all, but only while the operator also pushed its head: the author's login AND numeric id match, and the newest ref update of
+   the PR branch is to this head by that User (`head_pusher_check`); otherwise it is judged like an outside PR
+   (docs/review-boundary.md, "Two limits on owner trust"). On a PR written by anyone else (MEMBER and
    COLLABORATOR included), a body APPROVE never counts, whoever edited the body last (a listed App included): the
    operator approves it by posting the marker as their own comment ("outside PR: APPROVE only counts in an owner
    comment"). The owner-author rule was tightened on 2026-11-07 after Argon's review, because a checkbox click on an
