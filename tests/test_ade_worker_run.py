@@ -500,7 +500,7 @@ def test_repo_comes_from_the_main_checkout_even_in_a_linked_worktree(env, tmp_pa
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
     wt = tmp_path / "my-repo-feature-wt"
     git("worktree", "add", "-q", "-b", "feature", str(wt))
-    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", "B")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 0, r.stderr
     assert rename_calls(env)[0][3] == "WORKERS my-repo (Wave 7)"
 
@@ -1425,24 +1425,114 @@ def git(*args, cwd):
                    env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"})
 
 
-def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(env, tmp_path):
-    main = tmp_path / "libntech"
+def make_repo(tmp_path, name="libntech"):
+    main = tmp_path / name
     main.mkdir()
     git("init", "-q", "-b", "master", cwd=main)
     git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
-    wt = tmp_path / "libntech-strictjson-wt"
+    wt = tmp_path / f"{name}-strictjson-wt"
     git("worktree", "add", "-q", "-b", "sj", str(wt), cwd=main)
-    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B")
+    return main, wt
+
+
+def mint(env, wt, brief=None, slice_name="s", middle="strictjson"):
+    return env.run("--lead", LEAD, "--slice", slice_name, "--window-middle", middle, "--cwd", str(wt), "--", "--no-wait",
+                   brief if brief is not None else f"work in {wt}")
+
+
+def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--cwd") + 1] == os.path.realpath(main)
-    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (strictjson)"
+    out = json.loads(r.stdout)
+    assert out["windowName"] == "WORKERS libntech (strictjson)"
+    assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt)  # said, not silent
+    assert "primary checkout" in r.stderr
     # the placement check compares with the primary checkout: a worker that started there passes, one elsewhere is stopped
     env.data["workspaces"] = []
     env.data["inspect_cwd"] = os.path.realpath(main)
     own(LEAD)
-    assert env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B").returncode == 0
+    assert mint(env, wt, slice_name="s2").returncode == 0
     env.data["workspaces"] = []
     env.data["inspect_cwd"] = str(wt)
-    r = env.run("--lead", LEAD, "--slice", "s3", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B")
+    r = mint(env, wt, slice_name="s3")
     assert r.returncode == 1 and "started in" in r.stderr and "primary checkout" in r.stderr
+
+
+def test_a_minted_window_needs_the_worktree_named_in_the_brief(env, tmp_path):
+    """The worker starts in the shared primary checkout: a brief that never names the worktree is refused before any launch."""
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt, brief="just do the work")
+    assert r.returncode == 1 and str(os.path.realpath(wt)) in r.stderr and "brief" in r.stderr
+    assert not placed(env)
+
+
+def test_the_same_launch_again_goes_to_the_window_just_minted(env, tmp_path):
+    """The identical command line works twice: the second finds the window by name and places the worker at its cwd."""
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
+    assert r.returncode == 0, r.stderr
+    wid = json.loads(r.stdout)["workspaceId"]
+    env.data["workspaces"] = [{"workspaceId": wid, "name": "WORKERS libntech (strictjson)", "cwd": os.path.realpath(main)}]
+    r = mint(env, wt, slice_name="s2")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[1]
+    assert run[run.index("--workspace") + 1] == wid and run[run.index("--cwd") + 1] == os.path.realpath(main)
+    assert json.loads(r.stdout)["cwd"] == os.path.realpath(main)
+    assert mint(env, wt, brief="no worktree here", slice_name="s3").returncode == 1  # still needs the worktree in the brief
+
+
+def test_a_submodule_inside_a_claimed_worktree_resolves_to_the_superprojects_primary_checkout(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git("init", "-q", "-b", "master", cwd=sub)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=sub)
+    main = tmp_path / "super"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "libs/sub", cwd=main)
+    git("commit", "-q", "-m", "s", cwd=main)
+    wt = tmp_path / "super-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", cwd=wt)
+    assert wsn.primary_checkout_of(str(wt / "libs/sub")) == os.path.realpath(main / "libs/sub")
+    assert wsn.primary_checkout_of(str(wt)) == os.path.realpath(main)
+
+
+def test_a_worktree_of_a_separate_git_dir_or_bare_repo_has_no_primary_checkout_and_says_so(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    main = tmp_path / "plain"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
+    sep = tmp_path / "sep.git"  # a separate git dir: the common dir is not named `.git`
+    subprocess.run(["git", "init", "-q", "-b", "master", "--separate-git-dir", str(sep), str(tmp_path / "sepwork")], check=True,
+                   capture_output=True)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=tmp_path / "sepwork")
+    wt = tmp_path / "sepwork-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=tmp_path / "sepwork")
+    # git records no path to a --separate-git-dir repo's main work tree: nothing better than the worktree itself, said by linked_worktree
+    assert wsn.primary_checkout_of(str(wt)) == os.path.realpath(wt) and wsn.linked_worktree(str(wt))
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(main), str(bare)], check=True, capture_output=True)
+    git("worktree", "add", "-q", "-b", "w", str(tmp_path / "barewt"), cwd=bare)
+    assert wsn.primary_checkout_of(str(tmp_path / "barewt")) == os.path.realpath(tmp_path / "barewt")  # no main worktree: itself
+    assert wsn.linked_worktree(str(tmp_path / "barewt"))
+
+
+def test_the_typo_guard_ignores_the_case_of_the_repo_name(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+    own(LEAD, "wks_l")
+    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "LibNTech")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
+
+
+def test_a_legacy_row_without_a_workspace_id_is_a_refusal_not_a_traceback(env):
+    env.data["workspaces"] = [{"name": f"workers Wave 6 {LEAD}", "cwd": "/libntech"}]
+    r = other_repo_launch(env, "x", "/libntech")
+    assert "Traceback" not in r.stderr

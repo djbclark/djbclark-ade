@@ -93,21 +93,80 @@ def migrated_name(legacy: Legacy, repo: str) -> str:
     return build(legacy.kind, repo, normalize_work(legacy.middle, repo))
 
 
-def primary_checkout_of(cwd: str) -> str:
-    """The primary (non-worktree) checkout of the repo `cwd` is in: the parent of the git common dir when that is a `.git`,
-    else `cwd` itself (not a repo, a bare repo, a missing directory, or the directory does not exist). Never raises."""
-    path = os.path.realpath(cwd)
+def _git(path: str, *argv: str) -> str:
+    """One `git -C path ARGV` (GIT_* stripped, bounded, no stdin); its stripped stdout, "" on any failure."""
     try:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        out = subprocess.run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
+        out = subprocess.run(["git", "-C", path, *argv], capture_output=True, text=True, timeout=10,
+                             stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def primary_checkout_of(cwd: str, _depth: int = 0) -> str:
+    """The primary (non-worktree) checkout of the repo `cwd` is in, else `cwd` itself (not a repo, a missing directory, a bare
+    repo with no main worktree). A submodule resolves through its superproject's primary checkout (the submodule's own path
+    under it, when that exists): its git common dir is `.../modules/<name>`, not a `.git`. A common dir not named `.git`
+    takes the first entry of `git worktree list` (the main worktree) unless that is the git dir itself (a bare repo, or a `--separate-git-dir` repo, whose main work tree git does not record: `cwd` comes back and `linked_worktree` says so).
+    Never raises."""
+    path = os.path.realpath(cwd)
+    if _depth > 4:
         return path
-    if out.returncode == 0 and out.stdout.strip():
-        common = Path(out.stdout.strip())
-        if common.name == ".git" and common.parent.is_dir():
-            return os.path.realpath(common.parent)
+    sup = _git(path, "rev-parse", "--show-superproject-working-tree")
+    if sup:
+        sup = os.path.realpath(sup)
+        primary = primary_checkout_of(sup, _depth + 1)
+        top = _git(path, "rev-parse", "--show-toplevel")
+        if top:
+            cand = os.path.join(primary, os.path.relpath(os.path.realpath(top), sup))
+            if os.path.isdir(cand):
+                return os.path.realpath(cand)
+        return path
+    common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not common:
+        return path
+    if Path(common).name == ".git":
+        return os.path.realpath(Path(common).parent) if Path(common).parent.is_dir() else path
+    first = _git(path, "worktree", "list", "--porcelain").splitlines()[:3]
+    if first and first[0].startswith("worktree ") and "bare" not in first[1:]:
+        main = os.path.realpath(first[0][len("worktree "):])
+        if os.path.isdir(main) and main != os.path.realpath(common):
+            return main
     return path
+    sup = _git(path, "rev-parse", "--show-superproject-working-tree")
+    if sup:
+        sup = os.path.realpath(sup)
+        primary = primary_checkout_of(sup, _depth + 1)
+        top = _git(path, "rev-parse", "--show-toplevel")
+        if top:
+            cand = os.path.join(primary, os.path.relpath(os.path.realpath(top), sup))
+            if os.path.isdir(cand):
+                return os.path.realpath(cand)
+        return path
+    common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not common:
+        return path
+    if Path(common).name == ".git":
+        return os.path.realpath(Path(common).parent) if Path(common).parent.is_dir() else path
+    wt = _git(common, "config", "--get", "core.worktree")  # a --separate-git-dir repo records its work tree
+    if wt:
+        wt = os.path.realpath(os.path.join(common, wt))
+        if os.path.isdir(wt):
+            return wt
+    first = _git(path, "worktree", "list", "--porcelain").splitlines()[:3]
+    if first and first[0].startswith("worktree ") and "bare" not in first[1:]:
+        main = first[0][len("worktree "):]
+        if os.path.isdir(main):
+            return os.path.realpath(main)
+    return path
+
+
+def linked_worktree(path: str) -> bool:
+    """True when `path` is a linked worktree of a repo (its git dir is not its common dir)."""
+    gd = _git(path, "rev-parse", "--path-format=absolute", "--git-dir")
+    common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return bool(gd and common and os.path.realpath(gd) != os.path.realpath(common))
 
 
 def repo_of(cwd: str) -> str:

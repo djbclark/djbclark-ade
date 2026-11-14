@@ -10,7 +10,8 @@
 Window names (operator ruling 2026-11-13; bin/ade_ws_names.py): `<KIND> <repo> (<work>)`, KIND MAIN, WORKERS or USER;
 the lead id is NOT in a window name (it stays in the tab name and the ade.lead label). <repo> is --repo, else the repo
 of --cwd (the main checkout's name, also from a linked worktree); <work> is --window-middle.
-A window the launch opens is created in --cwd's primary checkout (never a claimed worktree; the brief names the worktree by absolute path).
+A window the launch opens is created in --cwd's primary checkout (never a claimed worktree): the launch is refused unless the brief
+names --cwd by absolute path, and the JSON line then carries cwd and requestedCwd. A repeat of the same --cwd into that window is placed at its cwd.
 --cwd must be the directory of the window the worker is placed in (`paseo run --workspace` ignores it, getpaseo/paseo#9699):
 a different --cwd is refused before anything is renamed or launched; after every launch with --cwd the agent's Cwd is read
 back (`paseo agent inspect`) and a mismatch stops the fresh worker (`paseo agent stop`, an interrupt, not an archive) and is reported (the agent
@@ -261,14 +262,14 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 owned.append(row)
                 if row.get("workspaceId") in own_ids:
                     owned_own.append(row)
-                    own_repo[row["workspaceId"]] = cur.repo
+                    own_repo[row.get("workspaceId")] = cur.repo
             if by_name or (middle is None and by_member):
                 hits.append((row, None, None))
         elif legacy and legacy.kind == "WORKERS" and legacy.lead in mine:
             owned.append(row)
             if legacy.lead == lead:
                 owned_own.append(row)
-                own_repo[row["workspaceId"]] = wsn.repo_of(row["cwd"]) if row.get("cwd") else None
+                own_repo[row.get("workspaceId")] = wsn.repo_of(row["cwd"]) if row.get("cwd") else None
             try:  # the new name is built for a hit only: an unbuildable legacy name must not block unrelated calls
                 new, err = legacy_target(row, legacy, repo, explicit), None
             except Refused as e:
@@ -284,7 +285,10 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     # One WORKERS window per (lead, repo): a typo guards only against a second window for the SAME repo. A launch for a repo the
     # lead has no window for mints one (2026-11-14, tendcf lead 698fa914: a libntech worker was refused for a cfengine-core window
     # and had to run in it). A window whose repo cannot be read still counts, and `repo` None keeps every owned window counting.
-    same_repo = [r for r in owned_own if repo is None or own_repo.get(r["workspaceId"]) in (None, repo)]
+    def same(r: dict) -> bool:  # names compare without case (`--repo CFEngine-core` is the repo `cfengine-core`)
+        theirs = own_repo.get(r.get("workspaceId"))
+        return theirs is None or theirs.casefold() == (repo or "").casefold()
+    same_repo = [r for r in owned_own if repo is None or same(r)]
     if middle is not None and not hits and same_repo:
         ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in same_repo)
         raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
@@ -547,7 +551,11 @@ def launch(opts, rest: list[str]) -> int:
             found = find_window(lead, repo, opts.window_middle, bool(opts.repo))
             win, rename_to = (found.row, found.rename_to) if found else (None, None)
             adopt = bool(found and not found.owned)  # an unclaimed, empty window of this exact name: recorded once the launch succeeds
-        if win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
+        redirected = False  # the window's own cwd is the repo's primary checkout of --cwd: placed there, the brief names the worktree
+        if win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd \
+                and wsn.primary_checkout_of(cwd) == os.path.realpath(win["cwd"]):
+            redirected = True
+        elif win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
             # `paseo run --workspace` takes the agent's cwd from the workspace and ignores --cwd (getpaseo/paseo#9699): a worker
             # started here would silently run in the window's directory, not the claimed worktree the caller named.
             raise Refused(f"window {row_wks(win)} ({win['name']}) runs in {win['cwd']}, but --cwd is {cwd}: paseo ignores --cwd "
@@ -574,9 +582,23 @@ def launch(opts, rest: list[str]) -> int:
         # A minted window's cwd is its repo's primary checkout, never the claimed worktree the caller named (docs/workspace-layout.md
         # item 5): every later worker of the window defaults to that directory, so a worktree there would hand another writer a
         # claimed worktree (2026-11-14, wr-01). The worktree travels in the brief by absolute path, as for an existing window.
-        new_cwd = wsn.primary_checkout_of(cwd)
-        place = ["--workspace", row_wks(win), "--cwd", opts.cwd and cwd or win.get("cwd") or cwd] if win \
-            else ["--new-workspace", "local", "--cwd", new_cwd]
+        if win is None:
+            eff_cwd = wsn.primary_checkout_of(cwd)
+        else:
+            eff_cwd = os.path.realpath(win["cwd"]) if redirected else (cwd if opts.cwd else win.get("cwd") or cwd)
+        if eff_cwd != cwd and opts.cwd and not main_place and cwd not in rest[-1] and opts.cwd not in rest[-1]:
+            # the worker starts in eff_cwd, the shared primary checkout where nothing may be edited: its brief must name the worktree
+            raise Refused(f"the worker would start in {eff_cwd} (the repo's primary checkout), not --cwd {cwd}, and the brief does "
+                          f"not name {cwd}: put that worktree in the brief as an absolute path so every repository operation runs "
+                          "there (docs/workspace-layout.md item 5), then launch again")
+        if eff_cwd != cwd and opts.cwd:
+            sys.stderr.write(f"ade-worker-run: the worker starts in {eff_cwd} (the window's primary checkout), not --cwd {cwd}; "
+                             "the brief carries the worktree\n")
+        place = ["--workspace", row_wks(win), "--cwd", eff_cwd] if win else ["--new-workspace", "local", "--cwd", eff_cwd]
+        linked = win is None and eff_cwd == cwd and wsn.linked_worktree(eff_cwd)
+        if linked:
+            sys.stderr.write(f"ade-worker-run: warning: no primary checkout found for {cwd}; the new window's cwd {eff_cwd} is a "
+                             "linked worktree (a later worker of the window would start in it)\n")
         args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}"]
         if main_place:
             args += ["--label", "ade.placement=main"]
@@ -604,7 +626,7 @@ def launch(opts, rest: list[str]) -> int:
             run_ok(["agent", "update", agent_id, "--name", tab])
             if opts.cwd:  # paseo drops --cwd in an existing window and from inside an agent (getpaseo/paseo#9699): check where it landed
                 got = agent_cwd(agent_id)
-                want = cwd if win is not None else new_cwd
+                want = eff_cwd if (win is None or redirected) else cwd
                 if got and os.path.realpath(got) != want:
                     stopped = stop_agent(agent_id)  # a fresh worker has done no work yet; running its brief in the wrong checkout is the harm
                     again = ("relaunch with the window's own --cwd" if win is not None else
@@ -616,7 +638,10 @@ def launch(opts, rest: list[str]) -> int:
     finally:
         if lock is not None:
             lock.close()
-    print(json.dumps({"agentId": agent_id, "workspaceId": wks, "windowName": wname, "tabName": tab}))
+    out = {"agentId": agent_id, "workspaceId": wks, "windowName": wname, "tabName": tab}
+    if eff_cwd != cwd and opts.cwd:  # the caller asked for another directory: say where the worker started
+        out.update({"cwd": eff_cwd, "requestedCwd": cwd})
+    print(json.dumps(out))
     return 0
 
 
