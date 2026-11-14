@@ -194,3 +194,41 @@ def test_resume_guard_fails_open_when_the_report_dir_cannot_be_made(tmp_path):
         assert out["permissionDecision"] == "deny" and "no delivery footer" in out["permissionDecisionReason"]
     finally:
         locked.chmod(0o755)
+
+
+def test_relaunch_with_the_hook_filled_real_footer_is_denied(tmp_path):
+    """adv10 F1: the real docs/dispatch-footer.md names its report only in "Write the full deliverable to `X`"."""
+    env = dict(os.environ, AGENT_FOOTER_FILE=str(REPO_FOOTER), AGENT_FOOTER_REPORT_DIR=str(tmp_path / "reports"))
+    first = run({"description": "Lead adversary review PR 684", "prompt": "review it"}, env=env)
+    filled = first["updatedInput"]["prompt"]
+    report = tmp_path / "reports" / "s1" / "lead-adversary-review-pr-684-report.md"
+    report.write_text("STATUS: working\n")
+    for desc in ("Lead adversary review PR 684", "A different description"):
+        out = run({"description": desc, "prompt": filled}, env=env)
+        assert out["permissionDecision"] == "deny" and str(report) in out["permissionDecisionReason"], desc
+    (tmp_path / "reports" / "s1" / (report.name + ".done")).write_text("")
+    assert run({"description": "Lead adversary review PR 684", "prompt": filled}, env=env) is None
+
+
+def test_two_different_report_paths_in_a_footer_prompt_are_ambiguous_and_skipped(tmp_path):
+    a, b = tmp_path / "a-report.md", tmp_path / "b-report.md"
+    a.write_text("x")
+    b.write_text("x")
+    prompt = f"Report path: {a}\nReport path: {b}\n## Delivery contract (shared footer)\n"
+    assert run({"description": "Two", "prompt": prompt}, env=footer_env(tmp_path)) is None
+
+
+def test_done_inbox_and_replies_paths_are_not_taken_as_the_report(tmp_path):
+    f = tmp_path / "own-adv-report.md"
+    f.write_text("x")
+    prompt = (f"Report path: {tmp_path / 'fresh-adv-report.md'}\ndone marker: {f}.done\ninbox: {f}.inbox.md\n"
+              "## Delivery contract (shared footer)\n")
+    assert run({"description": "Own", "prompt": prompt}, env=footer_env(tmp_path)) is None
+    prompt = f"mention {f}.done only\n## Delivery contract (shared footer)\nreport: {f}.done"
+    assert run({"description": "Own", "prompt": prompt}, env=footer_env(tmp_path)) is None
+
+
+def test_the_templates_own_placeholder_is_not_a_relaunch_reason(tmp_path):
+    stub_report(tmp_path)
+    out = run({"description": "Lead adversary review PR 684", "prompt": "x\nRelaunch-reason: <why>"}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny"

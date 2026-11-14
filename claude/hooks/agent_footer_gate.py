@@ -18,8 +18,8 @@ harness said to resume the stopped adversary with SendMessage, the lead launched
 description instead and ~20 minutes of paid review were redone). That launch is denied with the order to
 SendMessage the earlier agent (its id is in the spawn result / task notification) "resume from where you
 stopped"; a deliberate fresh start carries a prompt line `Relaunch-reason: <why>`, which the hook allows and
-logs to `<report dir>/relaunch.log`. The guard covers the path the hook would use and, for a prompt that
-already has the footer, the path the prompt labels ("Report path: ..."); it skips on any error (fail open).
+logs to `<report dir>/<session>/relaunch.log`. The guard covers the path the hook would use and, for a prompt that
+already has the footer, the path the prompt labels ("Report path: ...") or its footer's delivery line names; it skips on any error (fail open).
 Fills `docs/dispatch-footer.md` inline (2026-11-09: no longer shells out to
 `acp-dispatch footer`, which Wave 6 deletes). Fails open on any other error.
 """
@@ -36,8 +36,11 @@ DEFAULT_LEAD = "main"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FOOTER = _REPO_ROOT / "docs" / "dispatch-footer.md"
 _HOME_FOOTER = Path.home() / "src/djbclark-ade/docs/dispatch-footer.md"
-REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)\b")
-REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)\b")
+_END = r"(?!\w|\.(?:done|inbox|replies)\b)"      # not the middle of `X-report.md.done`
+REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)" + _END)
+REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)" + _END)
+# the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
+FOOTER_DELIVERY = re.compile(r"deliverable to `(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 DENY_REASON = (
@@ -52,9 +55,12 @@ RESUME_REASON = (
     "{report} already exists and {report}.done does not: an earlier sub-agent of this session with this report "
     "path did not finish (its process stopped or it is still running). Do not start a new one: resume it with "
     "SendMessage to its agent id (the agentId in its spawn result or task notification; ListAgents shows it) "
-    "and the text \"resume from where you stopped\". If you deliberately want a fresh start, add a line "
-    "`Relaunch-reason: <why>` to the prompt and launch again (the hook logs it). A report that is finished "
-    "needs `{report}.done` (touch it), or a different report path.")
+    "and the text \"resume from where you stopped\". Not an earlier agent of yours? If the path is another "
+    "agent's report named only as background, or two long descriptions cut to the same name, give this agent "
+    "its own `Report path: /abs/<name>-report.md` (or a distinct description). If you deliberately want a fresh "
+    "start, add a line `Relaunch-reason: <why>` to the prompt and launch again (the hook logs it, and the "
+    "earlier report is overwritten). Create `{report}.done` only for your own agent whose report is complete, "
+    "never for one still running.")
 
 
 def check_report_name(report: str) -> bool:
@@ -91,18 +97,19 @@ def report_path(data, tool_input):
 
 def relaunch_reason(prompt):
     m = RELAUNCH_TOKEN.search(prompt)
-    return m.group(1).strip() if m else None
+    why = m.group(1).strip() if m else ""
+    return None if why in ("", "<why>") else why        # the template's own placeholder is not a reason
 
 
 def unfinished_report(data, tool_input, has_footer):
     """The report path of an earlier sub-agent that did not finish, else None. A prompt without the footer is
-    checked on the path the hook would use; one with it only on the path it labels (a background mention of
-    someone else's report must not block the launch). Any error means no finding (fail open)."""
+    checked on the path the hook would use; one with it only on the path it labels or its footer's delivery line
+    names (a background mention of someone else's report must not block the launch). Any error means no finding (fail open)."""
     try:
         prompt = str(tool_input.get("prompt") or "")
         if has_footer:
-            labelled = REPORT_LABELLED.findall(prompt)
-            path = labelled[0] if len(set(labelled)) == 1 else None
+            paths = set(REPORT_LABELLED.findall(prompt)) | set(FOOTER_DELIVERY.findall(prompt))
+            path = next(iter(paths)) if len(paths) == 1 else None      # two different paths: ambiguous, skip
         else:
             path = report_path(data, tool_input)
         if path and Path(path).exists() and not Path(path + ".done").exists():
