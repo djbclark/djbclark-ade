@@ -469,20 +469,35 @@ def test_an_unclosed_fence_is_plain_text_even_with_a_peer_label_before_it(tmp_pa
     assert f"report: {own}" in foot and str(peer) not in foot
 
 
-def test_a_fenced_own_report_path_beats_a_peers_labelled_report_in_prose(tmp_path):
-    """Adversary r2 B1 (Q1): `Worker report:` outside the fence is a peer's labelled line, the fenced `Report path:` is the own one."""
+def test_a_fenced_own_report_path_against_a_peers_labelled_report_is_a_conflict_never_the_peer(tmp_path):
+    """Adversary r2 B1 (Q1) / r3 B1: `Worker report:` outside the fence vs a fenced `Report path:` cannot be told from their mirror
+    image (`Your report:` outside, a pasted peer's `Report path:` fenced): the answer is the hook's derived path, never the peer's."""
     peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
     peer.write_text("STATUS: wip\n")
     foot = _own_report_of(tmp_path, f"Worker report: {peer}\n```\nReport path: {own}\n```\nreview it")
-    assert f"report: {own}" in foot and str(peer) not in foot
+    assert str(peer) not in foot and f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in foot
 
 
-def test_a_quoted_own_report_path_beats_a_peers_labelled_report_in_prose(tmp_path):
-    """Adversary r2 B1 (Q2): was the hook's derived path on master, the PEER's at 6660ae84 and e21264d7."""
+def test_the_mirror_image_with_a_bare_own_label_outside_is_the_own_path(tmp_path):
+    """r3 R6: `Your report: own` outside and a pasted peer's `Report path:` fenced: the own label wins (level 2 outside, fence removed)."""
     peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
     peer.write_text("STATUS: wip\n")
-    foot = _own_report_of(tmp_path, f"> Report path: {own}\nWorker report: {peer}\nreview it")
+    foot = _own_report_of(tmp_path, f"Report: {own}\n```\nReport path: {peer}\n```\nreview it")
     assert f"report: {own}" in foot and str(peer) not in foot
+
+
+@pytest.mark.parametrize("prompt", [
+    "> Report path: {own}\nWorker report: {peer}\nreview it",                                   # Q2: master gave the derived path
+    "Your report path is {own}\n\nFrom the handoff:\n1. report: `{peer}`\nreview it",           # R1
+    "Your report: {own}\n> Report path: {peer}\nreview it",                                      # R5
+    "Report is {peer} (the worker's).\nYour report path is {own}\n",                             # R8
+])
+def test_conflicting_report_labels_never_resolve_to_the_peer(tmp_path, prompt):
+    """Adversary r3 B1: a prompt that gave the hook's own path on origin/master must not now name a peer's report."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, prompt.format(own=own, peer=peer))
+    assert str(peer) not in foot
 
 
 def test_a_fence_that_closes_after_an_unclosed_opener_is_still_removed(tmp_path):
@@ -501,3 +516,12 @@ def test_a_long_prompt_of_unclosed_openers_is_fast(tmp_path):
     assert f"report: {own}" in _own_report_of(tmp_path, prompt)
     assert time.monotonic() - t0 < 10
 
+
+def test_a_long_prompt_of_decreasing_length_openers_is_fast(tmp_path):
+    """Adversary r3 B2: openers of strictly decreasing length defeat a shortest-failed memo (each scanned to the end)."""
+    import time
+    own = tmp_path / "adv-report.md"
+    prompt = "".join("`" * n + "\n" for n in range(700, 2, -1)) + "x\n" * 200000 + f"Report path: {own}\n"
+    t0 = time.monotonic()
+    assert f"report: {own}" in _own_report_of(tmp_path, prompt)
+    assert time.monotonic() - t0 < 4      # linear: ~0.3 s; a per-opener rescan to the end took ~8 s

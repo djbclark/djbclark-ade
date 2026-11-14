@@ -50,6 +50,10 @@ REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?" + _MD + r"\s*(?:is|:|
 # removed; the whole-prompt pass finds a quoted own line): adversary r2 B1.
 REPORT_OWN = re.compile(r"(?im)^ {0,3}(?:>[ \t]*)*(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report(?:[ \t]+(?:path|file))?" + _MD + r"[ \t]*(?:is|:|=)"
                         + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
+# The strict own label: `Report path:` / `Report file:` at the start of a line, no quote prefix, no bare `Report:`: what a
+# prompt writes about ITSELF. Only a unique hit of it is taken on sight (adversary r3 B1).
+REPORT_OWN_STRICT = re.compile(r"(?im)^ {0,3}(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD
+                               + r"[ \t]*(?:is|:|=)" + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
 FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
@@ -91,49 +95,62 @@ _QUOTE_LINE = re.compile(r"^[ \t]*>")                            # a quoted line
 def _outside_pasted(prompt):
     """The prompt without its closed fenced code blocks and `>` quoted lines (CommonMark fences: a backtick fence's info
     string has no backtick; the closer is the same character, at least as long, with nothing after it). An opener with no
-    closer is plain text and the scan resumes on the line after it (adversary r2 B2), so a fence that does close later is
-    still removed; each line is quote-checked once, and each opener looks for its closer at most once per rescan."""
+    closer is plain text and the scan resumes on the line after it. Linear (adversary r3 B2): every line is matched once; one
+    backward pass records, per fence character, the longest closer at or after each line, so "does this opener have a
+    closer?" is one lookup and a failed opener costs nothing; a successful one searches forward to its first closer and
+    jumps past it."""
     lines = prompt.split("\n")
+    info = [_FENCE_LINE.match(ln) for ln in lines]
+    best = {"`": [0] * (len(lines) + 1), "~": [0] * (len(lines) + 1)}
+    for k in range(len(lines) - 1, -1, -1):
+        for ch in best:
+            best[ch][k] = best[ch][k + 1]
+        m = info[k]
+        if m and not m.group(2).strip():
+            best[m.group(1)[0]][k] = max(best[m.group(1)[0]][k], len(m.group(1)))
     out, i = [], 0
-    failed = {}     # fence char -> the shortest opener length that found no closer: a later opener of that char at least that long
-                    # cannot find one either (a closer for it would have closed the shorter one), so it is not searched for
     while i < len(lines):
-        line = lines[i]
-        m = _FENCE_LINE.match(line)
-        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)) and len(m.group(1)) < failed.get(m.group(1)[0], 1 << 60):
+        m = info[i]
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             ch, n = m.group(1)[0], len(m.group(1))
-            j = next((k for k in range(i + 1, len(lines))
-                      if (c := _FENCE_LINE.match(lines[k])) and c.group(1)[0] == ch and len(c.group(1)) >= n and not c.group(2).strip()),
-                     None)
-            if j is not None:
-                i = j + 1                       # the whole block, opener to closer, is pasted text
+            if best[ch][i + 1] >= n:
+                i = next(k for k in range(i + 1, len(lines)) if (c := info[k]) and c.group(1)[0] == ch
+                         and len(c.group(1)) >= n and not c.group(2).strip()) + 1      # the block, opener to closer, is pasted
                 continue
-            failed[ch] = n
-        if not _QUOTE_LINE.match(line):
-            out.append(line)
+        if not _QUOTE_LINE.match(lines[i]):
+            out.append(lines[i])
         i += 1
     return "\n".join(out)
 
 
+def _uniq(*lists):
+    return list(dict.fromkeys(x for xs in lists for x in xs))
+
+
 def named_report(prompt):
-    """The report path the prompt itself gives: its own `Report path:` line, else the only labelled one, else the only one
-    it mentions; two different labelled paths with no `Report path:` of its own give None (lw-01, #691 review B1: a
-    peer's `Worker report:` listed first was taken as this launch's report). A path whose
-    .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
-    background got that path), so it is never reused."""
-    # Text pasted into the prompt (a fenced block, a `>` quote, a 4-space indent) is a peer's brief, not this launch's own
-    # (ec-01 E2c). Tier-major order (adversary r1 B1): the tiers run on the text outside pasted blocks first, then the whole
-    # prompt, and a bare mention of some other report in prose never outranks a `Report path:` / labelled line, whichever
-    # text it is in; a brief that names a report only inside pasted text still gets that path, as before.
+    """The report path the prompt itself gives, or None (the hook then derives its own path, which never touches a peer's
+    file). Confidence levels, each tried only when the previous found nothing; a CONFLICT inside a level is ambiguous, never
+    a ranking, because mirror-image prompts (`Worker report: peer` outside + own `Report path:` fenced, vs `Your report:
+    own` outside + peer `Report path:` fenced) differ only in a qualifier word, so no fixed order is right for both
+    (adversary r3 B1; lw-01 #691 B1 and ec-01 E2c). The levels:
+      1. the strict own label (`Report path:` / `Report file:` at line start) in the text outside pasted blocks;
+      2. a bare own label (`Report:`) outside, merged with every labelled report outside;
+      3. the own and labelled reports of the whole prompt (a brief that names its report only inside pasted text);
+      4. a bare path mention, outside pasted text, then anywhere.
+    A path whose .done exists is someone's finished report (2026-10-18), so it is never reused."""
     outside = _outside_pasted(prompt)
-    paths = []
-    for text, rx in ((outside, REPORT_OWN), (prompt, REPORT_OWN), (outside, REPORT_LABELLED), (prompt, REPORT_LABELLED),
-                     (outside, REPORT_IN_PROMPT), (prompt, REPORT_IN_PROMPT)):
-        paths = list(dict.fromkeys(rx.findall(text)))
-        if paths:
-            break
+    strict = _uniq(REPORT_OWN_STRICT.findall(outside))
+    if strict:
+        paths = strict
+    else:
+        bare = _uniq(REPORT_OWN.findall(outside))
+        if bare:
+            paths = _uniq(bare, REPORT_LABELLED.findall(outside))
+        else:
+            paths = (_uniq(REPORT_OWN.findall(prompt), REPORT_LABELLED.findall(prompt))
+                     or _uniq(REPORT_IN_PROMPT.findall(outside)) or _uniq(REPORT_IN_PROMPT.findall(prompt)))
     if len(paths) != 1:
-        return None         # none, or two different ones with no `Report path:` of its own: the hook derives its own path
+        return None
     return None if Path(paths[0] + ".done").exists() else paths[0]
 
 
