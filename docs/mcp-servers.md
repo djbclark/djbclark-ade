@@ -86,7 +86,11 @@ exec/plugin approval prompts.
 Beeper Desktop serves MCP locally on port 23373 (HTTP, OAuth). **Registration is
 per machine and can vanish**: on 2026-11-14 `beeper` was missing from the user
 config and had to be added again; do not assume it is there. Check with
-`claude mcp list` / `claude mcp get beeper`, and re-register at user scope with:
+`claude mcp list` / `claude mcp get beeper`. Re-registering changes the live
+user-scope Claude config, so **an agent that finds `beeper` missing asks the
+operator before running `claude mcp add`** (and reports that it is missing; an
+agent cannot complete the OAuth afterwards anyway). With the operator's yes, or
+run by the operator, register at user scope with:
 
 ```
 claude mcp add --scope user --transport http beeper http://127.0.0.1:23373/v0/mcp
