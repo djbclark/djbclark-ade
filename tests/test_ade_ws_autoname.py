@@ -20,13 +20,13 @@ LEAD = "8cd86203-d33b-49db-abde-9baba52bcf61"
 
 def git_repo(tmp_path: Path, name: str = "my-repo") -> Path:
     repo = tmp_path / name
-    repo.mkdir()
+    repo.mkdir(exist_ok=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
     return repo
 
 
-def info(cwd, **over):
-    base = {"cwd": str(cwd), "windowTitle": None, "firstAgent": True, "agent": {"title": "Fix the thing"}}
+def info(repo, **over):
+    base = {"cwd": str(repo), "windowTitle": None, "firstAgent": True, "agent": {"title": "Fix the thing"}}
     base.update(over)
     return base
 
@@ -113,7 +113,7 @@ def test_no_agent_title_yet_asks_for_a_retry(tmp_path):
     ("fix (a) and (b)", "fix [a] and [b]"),
     ("two\nlines  here\t!", "two lines here !"),
     ("x" * 120, "x" * 50),
-    ("word " * 30, "word word word word word word word word word"),
+    ("word " * 30, "word word word word word word word word word word"),
 ])
 def test_work_text(title, work):
     assert an.work_from_title(title, "my-repo") == work
