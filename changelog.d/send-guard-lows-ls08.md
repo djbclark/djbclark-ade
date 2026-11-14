@@ -1,0 +1,3 @@
+### Fixed
+
+- `libexec/agent-bin/paseo` (follow-up to #711): a call with a `daemon` word runs the real paseo without the three `ADE_PASEO_SHIM_*` counters, so the hop count no longer grows across daemon generations until every call exits 127; the exit-code and helper header lines name the 32-hop cap and the helper-only `ADE_REAL_PASEO`. `archived_send_gate`: a redirect after `--` is skipped like one before it, an ANSI-C id list split by `\x0a`, `\u000a` or `\012` is judged, and the surviving mutants of the #711 review (hop cap 32, fd skip bounds) have tests; the quoted `'>'` and `2 >x` reads are documented. (#PRNUM)

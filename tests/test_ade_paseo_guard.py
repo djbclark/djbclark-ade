@@ -27,7 +27,8 @@ HELPER = ROOT / "bin" / "ade-paseo-guard"
 FAKE = """#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
-rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH")}
+rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH"),
+       "hops": os.environ.get("ADE_PASEO_SHIM_HOPS"), "pid": os.environ.get("ADE_PASEO_SHIM_PID")}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -533,6 +534,34 @@ def test_a_wrapper_that_forks_before_the_next_shim_still_stops(sw, tmp_path, bod
 
 def last_depth(sw):
     return json.loads(sw.log.read_text().splitlines()[-1])["depth"]
+
+
+def last_rec(sw):
+    return json.loads(sw.log.read_text().splitlines()[-1])
+
+
+def test_the_hop_cap_is_exactly_32(sw):
+    """ls-08 B2: kills `-gt 32` -> `-ge 32` and -> `-gt 64`."""
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "31"}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["hops"] == "32"
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "32"}, timeout=30)
+    assert p.returncode == 127 and "33 hops" in p.stderr and len(sw.calls()) == 1
+
+
+@pytest.mark.parametrize("args", [("daemon", "restart"), ("-o", "json", "daemon", "start"), ("agent", "send", "x", "daemon")])
+def test_a_daemon_command_gets_no_counters(sw, args):
+    """ls-08 B1: a daemon started through the shim hands its environment to every agent; HOPS must not grow per generation."""
+    sw.live(**{"x": False})
+    p = sw.run(*args, env={"ADE_PASEO_SHIM_HOPS": "31", "ADE_PASEO_SHIM_DEPTH": "3", "ADE_PASEO_SHIM_PID": str(os.getpid())}, timeout=30)
+    assert p.returncode == 0
+    r = last_rec(sw)
+    assert r["hops"] is None and r["depth"] is None and r["pid"] is None  # also on the send path through the helper
+
+
+def test_a_command_without_daemon_keeps_the_counters_for_the_real_paseo(sw):
+    sw.run("ls", timeout=30)
+    r = last_rec(sw)
+    assert r["hops"] == "1" and r["depth"] == "1" and r["pid"]  # a real paseo that is itself a wrapper still meets the cap
 
 
 def test_a_counter_left_by_a_daemon_parent_is_not_a_loop(sw):

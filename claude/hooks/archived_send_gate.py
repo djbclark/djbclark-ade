@@ -160,6 +160,22 @@ SHELL_BODY = re.compile(r"(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")")  # a 
 IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)+")
 
 
+ANSI_ESCAPE = re.compile(r"\\(?:(\\)|([ntrvf])|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|([0-7]{1,3}))")
+
+
+def ansi_blanks(body: str) -> str:
+    """`body` of a `$'...'` with each escape that bash turns into a blank (`\\n`, `\\t`, `\\x0a`, `\\u000a`, `\\012`, ...) replaced by a
+    space; `\\\\` stays a backslash, so `\\\\n` is no blank."""
+    def blank(m: re.Match) -> str:
+        if m.group(1):
+            return m.group(0)
+        if m.group(2):
+            return " "
+        code = int(m.group(3) or m.group(4) or m.group(5), 16 if (m.group(3) or m.group(4)) else 8)
+        return " " if chr(code % 256 if m.group(5) else code).isspace() else m.group(0)
+    return ANSI_ESCAPE.sub(blank, body)
+
+
 def _mask(text: str) -> str:
     out, word = [], []
     first, runner = "", False  # the first word of this simple command; has a runner word or flag come before the string?
@@ -176,7 +192,7 @@ def _mask(text: str) -> str:
             if j >= n:
                 return text
             body = text[i + 1:j]
-            ids_body = re.sub(r"\\[ntr]", " ", body) if ansi else body  # a backslash-n in `$'...'` is a blank
+            ids_body = ansi_blanks(body) if ansi else body  # a backslash-n, `\\x0a` or `\\012` in `$'...'` is a blank
             cur = "" if quoted_word else "".join(word)
             runs = ((runner or Path(cur).name in RUNNERS or RUN_FLAG.fullmatch(cur) is not None)
                     and Path(first or cur).name not in NO_RUN)
@@ -294,6 +310,13 @@ def _daemon_option(word: str) -> bool:
 REDIRECT = re.compile(r"&?[<>]+[&|]?")  # `>`, `>>`, `<<<`, `>&`, `&>`, `>|`: the lexer splits them from their operand
 
 
+def _after_redirect(args: list[str], j: int) -> int | None:
+    """Index after the redirect that starts at `args[j]` (an optional one or two digit fd number, the operator and its operand: the
+    operand is a file or text, never an option or the agent); None when none starts there."""
+    k = j + 1 if re.fullmatch(r"\d{1,2}", args[j]) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]) else j  # `2>x`: the lexer leaves the fd number behind
+    return k + 2 if REDIRECT.fullmatch(args[k]) else None
+
+
 def _scan(args: list[str]) -> tuple[int | None, bool]:
     """(index of the agent word, whether a daemon selector was seen) in the arguments after `send`. Value options are skipped with
     their values; the first word after `--` is the agent when none came before it and the rest is message text. The whole option
@@ -301,17 +324,19 @@ def _scan(args: list[str]) -> tuple[int | None, bool]:
     target, j = None, 0
     while j < len(args):
         a = args[j]
-        if re.fullmatch(r"\d{1,2}", a) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]):  # `2>x`: the lexer leaves the fd number behind
-            j += 1
-            continue
-        if REDIRECT.fullmatch(a):  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`: the operand is a file or text, not an option or the agent
-            j += 2
+        after = _after_redirect(args, j)  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`, `paseo send 2>x A`
+        if after is not None:
+            j = after
             continue
         if _daemon_option(a):
             return None, True
         if a == "--":
-            if target is None and j + 1 < len(args):
-                target = j + 1
+            k = j + 1  # the shell still takes redirects after `--` (`paseo send -- 2>x A`): the first word that is none is the agent
+            while target is None and k < len(args):
+                after = _after_redirect(args, k)
+                if after is None:
+                    target = k
+                k = k + 1 if after is None else after
             break
         if a in VALUE_FLAGS or _takes_value(a):
             j += 2

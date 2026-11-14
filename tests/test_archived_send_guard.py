@@ -238,6 +238,12 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f'xargs -n1 paseo send <<< "{A} {B}"', []),  # the here-string is not an agent
     (f"paseo send --no-wait {A} hi 2>&1", [(A, None)]),
     (f"paseo send >&2 {A} hi", [(A, None)]),  # ls-07 r1 R1: `>&` is one operator
+    (f"paseo send 10>/dev/null {A} hi", [(A, None)]),  # ls-08 B2: kills `\\d{1,2}` -> `\\d`
+    ("paseo send 2", [("2", None)]),  # kills "no `j + 1 < len(args)` bound" (an IndexError)
+    (f"paseo send -- 2>x {A} hi", [(A, None)]),  # ls-08 B4: the shell takes a redirect after `--` too
+    (f"paseo send -- >x {A} hi", [(A, None)]),
+    (f"paseo send -- 1>&2 {A} hi", [(A, None)]),
+    (f"paseo send -- {A} >x hi", [(A, None)]),
     (f"paseo send 2>/dev/null {A} hi", [(A, None)]),  # the fd number the lexer leaves before `>` is no agent
     (f"paseo send 1>out {A} hi", [(A, None)]),
     (f"paseo send &>/dev/null {A} hi", [(A, None)]),
@@ -439,6 +445,13 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f'xargs -n1 paseo send <<< "{A} {B}"', [A, B]),  # ls-07: a here-string is no agent, so the ids in it are judged
     (f"osascript 'do shell script \"paseo send {A} hi\"'", [A]),  # kills "drop osascript from RUNNERS" (no `-e` here)
     (f"printf '%s\\n' $'{A}\\t{B}' | xargs -n1 paseo send", [A, B]),  # kills "[ntr] -> n"
+    (f"printf '%s\\n' $'{A}\\x0a{B}' | xargs -n1 paseo send", [A, B]),  # ls-08 B5: `\\x0a`, `\\012`, `\\u000a` are blanks too
+    (f"printf '%s\\n' $'{A}\\012{B}' | xargs -n1 paseo send", [A, B]),
+    (f"printf '%s\\n' $'{A}\\12' | xargs -n1 paseo send", [A]),  # a short octal escape at the end of the body (`\\12{B}` would read `\\121`)
+    (f"printf '%s\\n' $'{A}\\u000a{B}' | xargs -n1 paseo send", [A, B]),
+    (f"printf '%s\\n' $'{A}\\x20{B}' | xargs -n1 paseo send", [A, B]),
+    (f"printf '%s\\n' $'took over from {A}\\x0a' | xargs -n1 paseo send", []),  # not an id list: still masked
+    (f"printf '%s\\n' $'{A}\\\\n{B}' | xargs -n1 paseo send", []),  # an escaped backslash then `n` is no blank
     (f"echo 'x'; eval'paseo send {A} hi'", [A]),  # kills "no quoted_word reset" (a glued string after a runner word)
     (f"rg -e 'paseo send {A}' notes.md; paseo send \"$X\" hi", []),  # kills "drop rg from NO_RUN"
     (f"mawk 'BEGIN{{system(\"paseo send {A} hi\")}}'", [A]),  # kills "drop gawk/mawk from RUNNERS"

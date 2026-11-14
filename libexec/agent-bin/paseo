@@ -33,7 +33,8 @@
 # FAILS OPEN: no python3, a missing helper or any error inside it runs the real paseo with a one-line note on stderr. Only a
 # refusal stops a command. An accident guard, like the hook, not a sandbox.
 #
-# Exit codes: 4 refused (nothing sent); 127 no real paseo found or re-entered more than 8 times; every other code is the real paseo's.
+# Exit codes: 4 refused (nothing sent); 127 no real paseo found, or re-entered more than 8 times (an exec chain) or through more than 32 hops;
+# every other code is the real paseo's.
 # Environment: ADE_REAL_PASEO (the real paseo; skips the PATH search; the shim passes it only to its helper), ADE_PYTHON (default python3),
 # ADE_ALLOW_ARCHIVED_SEND=<full id> (operator: resume one archived agent), ADE_ALLOW_REPLACED_SEND=<full id> (operator: send to
 # a replaced agent that is still live), ADE_SEND_GUARD_LOG (override log; default ~/.local/state/djbclark-ade/send-guard-overrides.jsonl).
@@ -101,10 +102,15 @@ if [ -z "$real" ]; then
   exit 127
 fi
 
-# 1: no `send` word: nothing to judge
+# 1: no `send` word: nothing to judge. A `daemon` word: the real paseo may start a daemon that hands its environment to every agent it
+# spawns, so it gets no counters (HOPS would grow by one per daemon generation until every shimmed paseo call exits 127: ls-08 B1).
+# A message that merely contains the word `daemon` loses the loop cap for that one call: harmless, the cap only ends a wrapper loop.
 has_send=0
 for a in "$@"; do
-  if [ "$a" = send ]; then has_send=1; break; fi
+  case "$a" in
+    send) has_send=1 ;;
+    daemon) unset ADE_PASEO_SHIM_DEPTH ADE_PASEO_SHIM_PID ADE_PASEO_SHIM_HOPS ;;
+  esac
 done
 if [ "$has_send" = 0 ]; then
   exec "$real" "$@"
