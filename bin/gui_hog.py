@@ -49,18 +49,22 @@ HARD_BUNDLE_IDS = frozenset({"com.apple.dock", "com.apple.loginwindow", "com.app
                              "com.apple.controlcenter", "com.apple.windowmanager", "com.apple.windowserver",
                              DIALOG_BUNDLE_ID.lower()})
 HARD_PATH_PREFIXES = ("/System", "/usr")
-HARD_EXE_NAMES = frozenset({"windowserver", "loginwindow", "dock", "finder", "ade-gui-hog"})   # real executables; load-watch and bg are scripts, matched by argv in group_apps
+HARD_EXE_NAMES = frozenset({"windowserver", "loginwindow", "dock", "finder", "ade-gui-hog"})   # real executables; `bg` is a script, matched by argv in group_apps (with the agent CLIs)
 SHELLS = frozenset({"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh", "login"})
 GUI_TYPES = ("Foreground", "UIElement")
 
 
 # ---- untrusted text (J3) -----------------------------------------------------------------------------------------
 _DROP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})   # controls, ALL format characters (bidi, zero-width, TAG, soft hyphen), surrogates, private, unassigned, line/paragraph separators
-_FILLERS = frozenset("\u034f\u115f\u1160\u3164\uffa0")   # invisible, but not in a dropped category
+_FILLERS = frozenset("\u034f\u115f\u1160\u3164\uffa0\u17b4\u17b5\u180b\u180c\u180d\u180f\u2800")   # invisible, but not in a dropped category
+
+
+def _smuggler(ch):   # variation selectors: invisible after any base character, a known channel for hidden bytes
+    return "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef"
 
 
 def _markish(ch):
-    return unicodedata.category(ch).startswith("M") or "︀" <= ch <= "️" or "\U0001f3fb" <= ch <= "\U0001f3ff"
+    return unicodedata.category(ch).startswith("M") or "\ufe00" <= ch <= "\ufe0f" or "\U0001f3fb" <= ch <= "\U0001f3ff"
 
 
 def clean(text, limit=60):
@@ -68,7 +72,7 @@ def clean(text, limit=60):
     surrogate, private-use and unassigned character, line and paragraph separator and invisible filler removed, then clipped to `limit` characters. The cut backs off any combining mark, so it
     never leaves half of a cluster (an approximation of a grapheme-cluster cut: ZWJ is removed, so a ZWJ emoji
     sequence degrades to its parts)."""
-    s = "".join(ch for ch in str(text) if unicodedata.category(ch) not in _DROP_CATEGORIES and ch not in _FILLERS)
+    s = "".join(ch for ch in str(text) if unicodedata.category(ch) not in _DROP_CATEGORIES and ch not in _FILLERS and not _smuggler(ch))
     if len(s) <= limit:
         return s
     cut = limit
@@ -574,7 +578,7 @@ def window_update(st, t, apps, total_cores, cfg):
             item.append(flag)
         row[a["id"]] = item
     prev = st.get("apps") if isinstance(st.get("apps"), list) else []
-    keep = [x for x in prev if isinstance(x, dict) and _fin(x.get("t")) and x["t"] >= t - tr["window_s"] and x["t"] <= t]
+    keep = [x for x in prev if isinstance(x, dict) and isinstance(x.get("a"), dict) and _fin(x.get("t")) and x["t"] >= t - tr["window_s"] and x["t"] <= t]
     keep.append({"t": t, "cpu": round(total_cores, 2), "a": row})
     st["apps"] = keep
     meta = st.get("app_meta") if isinstance(st.get("app_meta"), dict) else {}

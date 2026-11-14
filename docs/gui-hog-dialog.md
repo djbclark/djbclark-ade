@@ -551,7 +551,7 @@ a hold's pid is bounded, its `updated` must be finite and not in the future, and
 control, format, surrogate, private-use and unassigned code point plus the invisible filler letters. Agent CLIs are recognised by their argv heads (`node /x/claude`, a version-named
 binary), not only the kernel exe. A process running an app's own in-bundle binary under a shell, pty, held caller or agent CLI (headless Chrome under a test run) is a build, not the app.
 A hold also records the caller's pid (`LW_ADMIT_CALLER_PID`, else the parent), so an app started under the real caller is excluded. Corrupt `state.json` sections heal on the next tick; a snooze
-never outlasts `snooze_s` and a `last_shown` in the future is ignored.
+never outlasts `snooze_s` and a `last_shown` in the future is ignored. Round 2 added: variation selectors and a few more invisible fillers are dropped by `clean`; a window entry without a sample dict is dropped; a non-ASCII digit in `LW_ADMIT_CALLER_PID` is ignored.
 
 M3. **Measured 2026-11-14 (M1 Pro, 10 cores).** `lsappinfo list` takes about 0.2 s of wall time with no CPU to speak of; a full `load-watch sample` ran in 0.65 s at load 57.
 `state.json` with the app window was 4 KB with 8 apps stored.

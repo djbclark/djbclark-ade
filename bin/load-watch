@@ -2633,7 +2633,7 @@ def admit_caller_pid():
     """The pid of whoever called `admit` (the process whose build the hold registry names): LW_ADMIT_CALLER_PID when a supervising parent set it
     (the supervised copy's own parent is the deadline wrapper), else the parent. 0 when unknown."""
     v = os.environ.get("LW_ADMIT_CALLER_PID", "").strip()
-    if v.isdigit() and len(v) < 10:
+    if v.isascii() and v.isdigit() and len(v) < 10:
         return int(v)
     try:
         return os.getppid()
@@ -2932,7 +2932,10 @@ def _cmd_admit(a):
     if getattr(a, "supervise", False) and a.wait > 0:
         if caller:
             os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
-        os.environ.setdefault("LW_ADMIT_CALLER_PID", str(admit_caller_pid()))   # likewise for the hold registry's caller pid
+        try:
+            os.environ.setdefault("LW_ADMIT_CALLER_PID", str(admit_caller_pid()))   # likewise for the hold registry's caller pid
+        except Exception:  # noqa: BLE001 - the registry never changes admit's exit code
+            pass
         rc = self_deadline(a, poll)
         if rc is not None:
             return rc

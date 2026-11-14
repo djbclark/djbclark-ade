@@ -48,7 +48,7 @@ def test_clean_strips_controls_bidi_zero_width_and_separators():
 
 
 @pytest.mark.parametrize("ch", ["\U000e0049", "\u2060", "\u00ad", "\u180e", "\ufff9", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0",
-                                "\u200f", "\u061c", "\ue000", "\x7f", "\x85"])
+                                "\u200f", "\u061c", "\ue000", "\x7f", "\x85", "\ufe0f", "\ufe01", "\U000e0100", "\u17b4", "\u180b", "\u2800"])
 def test_clean_strips_invisible_and_filler_characters(ch):
     assert gh.clean(f"ab{ch}cd") == "abcd" and gh.clean(ch * 5) == ""
 
@@ -440,6 +440,9 @@ def test_a_fifo_a_symlink_a_huge_pid_and_nan_in_the_held_directory_never_hang_or
     secret = tmp_path / "secret"
     secret.write_text("keep me")
     (d / "8-S1.json").symlink_to(secret)
+    real = d / "real-hold.txt"                                                    # a valid, fresh hold of a live pid, reached only through a symlink
+    real.write_text(json.dumps({"v": 1, "pid": os.getpid(), "start": "S1", "updated": NOW, "refused_since": NOW, "refused": ["load"]}))
+    (d / f"{os.getpid()}-S1.json").symlink_to(real)
     (d / "9-S1.json").write_text(json.dumps({"v": 1, "pid": 10 ** 30, "start": "S1", "updated": NOW, "refused_since": NOW, "refused": ["load"]}))
     (d / "10-S1.json").write_text('{"v": 1, "pid": 10, "start": "S1", "updated": NaN, "refused_since": NaN, "refused": ["load"]}')
     (d / "11-S1.json").write_text(json.dumps({"v": 1, "pid": 11, "start": "S1", "updated": NOW + 10 ** 6, "refused_since": NOW, "refused": ["load"]}))
@@ -610,6 +613,20 @@ def test_the_hold_names_the_caller_pid_and_a_supervising_parent_can_override_it(
     assert run2.lw.admit_caller_pid() == os.getppid()
 
 
+def test_the_supervised_copy_inherits_the_callers_pid_and_a_bad_value_never_raises(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, wall0=NOW, LW_FAKE_LOAD1="0.1")
+    monkeypatch.setenv("LW_ADMIT_CALLER_PID", "1")
+    monkeypatch.delenv("LW_ADMIT_CALLER_PID")                 # absent now, and removed again at teardown whatever admit sets
+    got = []
+    monkeypatch.setattr(run.lw, "self_deadline", lambda a, poll: got.append(os.environ.get("LW_ADMIT_CALLER_PID")) or 0)
+    rc, _rec, _ = run.lw.cmd_admit(__import__("argparse").Namespace(wait=60.0, max_per_core=2.0, json=True, supervise=True)), None, None
+    capsys.readouterr()
+    assert rc == 0 and got == [str(os.getppid())]
+    for bad in ("\u00b2", "\u0661\u0662", "x", "9" * 40, "-3"):
+        monkeypatch.setenv("LW_ADMIT_CALLER_PID", bad)
+        assert run.lw.admit_caller_pid() == os.getppid()
+
+
 def test_a_broken_gui_hog_module_changes_neither_the_verdict_nor_the_exit_code(monkeypatch, tmp_path, capsys):
     base = Run(monkeypatch, tmp_path / "a", wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
     rc0, rec0, _ = base(capsys, wait=60.0)
@@ -764,12 +781,23 @@ def test_tick_needs_a_hold_of_three_minutes_a_relievable_gate_and_enough_app_use
 
 def test_apps_under_the_callers_of_a_waiting_admit_are_excluded(tmp_path):
     w = World(tmp_path)
-    w.table["700"] = (1, ME, 0.5, "bg")
+    w.table["700"] = (1, ME, 0.5, "make -j8")     # a caller no argv rule would recognise: only the hold's caller_pid names it
     w.table["800"] = (700, ME, 3.0, "/Applications/Hog.app/Contents/MacOS/hog")
-    w.exe["700"] = "/bin/bash"
+    w.exe["700"] = "/usr/bin/make"
     gh.hold_write(w.state, os.getpid(), "S1", "bg", NOW - 400, ["pageins"], NOW, 15, caller_pid=700)   # the admit's pid is not the caller's
     d = w.tick(NOW)
     assert not d["show"] and d["reason"] == "below-threshold"
+    other = World(tmp_path / "other")
+    other.table["700"], other.table["800"], other.exe["700"] = w.table["700"], w.table["800"], "/usr/bin/make"
+    gh.hold_write(other.state, os.getpid(), "S1", "bg", NOW - 400, ["pageins"], NOW, 15)                  # no caller_pid: the app counts
+    assert other.tick(NOW)["show"]
+
+
+def test_a_caller_pid_of_one_or_out_of_range_is_dropped(tmp_path):
+    for cp in (1, 0, 2 ** 31, -5):
+        gh.hold_write(tmp_path, os.getpid(), "S1", "bg", NOW - 400, ["load"], NOW, 15, caller_pid=cp)
+        [h] = gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1")
+        assert "caller_pid" not in h or h["caller_pid"] is None
 
 
 @pytest.mark.parametrize("key,bad", [("apps", {"x": 1}), ("apps", "text"), ("app_meta", []), ("gui_hog", []), ("gui_hog", "x"), ("apps", [None, 3, "a"])])
@@ -779,6 +807,13 @@ def test_corrupt_state_heals_instead_of_killing_every_tick(tmp_path, key, bad):
     w.st[key] = bad
     assert w.tick(NOW)["show"]
     assert isinstance(w.st["apps"], list) and isinstance(w.st["gui_hog"], dict) and isinstance(w.st["app_meta"], dict)
+
+
+def test_window_entries_without_a_sample_dict_are_dropped_not_fatal(tmp_path):
+    w = World(tmp_path)
+    w.hold(NOW)
+    w.st["apps"] = [{"t": NOW - 10, "a": 5}, {"t": NOW - 10}, {"t": NOW - 10, "a": None, "cpu": 1}]
+    assert w.tick(NOW)["show"] and all(isinstance(x["a"], dict) for x in w.st["apps"])
 
 
 def test_a_huge_snooze_is_clamped_and_a_future_last_shown_is_ignored(tmp_path):

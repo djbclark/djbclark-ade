@@ -1,7 +1,7 @@
 # GUI-hog dialog (docs/gui-hog-dialog.md; PR 3a = data and dry-run trigger, no window yet).
 # Read by bin/gui_hog.py. ~/.config/load-watch/gui-hog.toml may ADD to [protected], never remove from it or from the
 # hard floor in code (pid 1 and other users, WindowServer, Dock, loginwindow, Finder, SystemUIServer, Control Center,
-# WindowManager, anything under /System or /usr, the dialog itself, load-watch and bg). LW_GUI_HOG=0 turns the
+# WindowManager, anything under /System or /usr, the dialog itself; `bg` and agent CLIs are builds, matched by argv, not apps). LW_GUI_HOG=0 turns the
 # whole thing off (no app window, no trigger).
 
 [trigger]
