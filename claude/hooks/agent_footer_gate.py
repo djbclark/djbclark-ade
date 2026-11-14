@@ -43,7 +43,8 @@ _MD = r"[*_`]*"                                      # markdown around a label: 
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?" + _MD + r"\s*(?:is|:|=)" + _MD + r"\s*`?" + _LEFT
                              + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the prompt's OWN `Report path:` / `Report file:` line (at the start of a line), as opposed to a peer's `Worker report: ...`
-# At most 3 spaces of indent: 4+ spaces or a tab is a markdown code block, i.e. pasted text, not this prompt's own label. A list
+# At most 3 spaces of indent: 4+ spaces or a tab is a markdown code block, i.e. pasted text, not this prompt's own label
+# (accepted trade-off, adversary r1 B3: a `Report path:` line indented as a list continuation falls to the labelled tier). A list
 # marker may be `1.`, `1)`, `-`, `*` or the operator's own `A1.` / `A1a.` / `B2)` labels (lw-01 follow-up, ec-01 E2b).
 REPORT_OWN = re.compile(r"(?im)^ {0,3}(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD + r"[ \t]*(?:is|:|=)"
                         + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
@@ -81,13 +82,28 @@ def slug(text):
     return s or "subagent"
 
 
-_PASTED_FENCE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$")     # a closed fenced code block
-_PASTED_QUOTE = re.compile(r"(?m)^[ \t]*>.*$")                                  # a quoted line
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")          # a CommonMark code fence line (opener or closer)
+_QUOTE_LINE = re.compile(r"^[ \t]*>")                            # a quoted line
 
 
 def _outside_pasted(prompt):
-    """The prompt without its fenced code blocks and `>` quoted lines."""
-    return _PASTED_QUOTE.sub("", _PASTED_FENCE.sub("", prompt))
+    """The prompt without its closed fenced code blocks and `>` quoted lines (CommonMark fences: a backtick fence's info
+    string has no backtick; the closer is the same character, at least as long, with nothing after it). One linear pass,
+    never a regex that rescans to the end of the prompt for every opener; an opener with no closer is plain text."""
+    out, fence, held = [], None, []
+    for line in prompt.split("\n"):
+        m = _FENCE_LINE.match(line)
+        if fence is None:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence, held = (m.group(1)[0], len(m.group(1))), [line]
+            elif not _QUOTE_LINE.match(line):
+                out.append(line)
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and not m.group(2).strip():
+            fence, held = None, []
+        else:
+            held.append(line)
+    out.extend(ln for ln in held if not _QUOTE_LINE.match(ln))
+    return "\n".join(out)
 
 
 def named_report(prompt):
@@ -96,13 +112,15 @@ def named_report(prompt):
     peer's `Worker report:` listed first was taken as this launch's report). A path whose
     .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
     background got that path), so it is never reused."""
-    # Text pasted into the prompt (a fenced block, a `>` quote) is a peer's brief, not this launch's own: look past it first
-    # (ec-01 E2c: a peer brief's `Report path:` line, fenced or quoted, won over or made ambiguous the brief's own); a
-    # prompt that names a report only inside such text still gets that path, as before.
-    for text in (_outside_pasted(prompt), prompt):
-        own = list(dict.fromkeys(REPORT_OWN.findall(text)))     # the prompt's own `Report path:` beats a peer's labelled one
-        labelled = own or list(dict.fromkeys(REPORT_LABELLED.findall(text)))
-        paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(text)))
+    # Text pasted into the prompt (a fenced block, a `>` quote, a 4-space indent) is a peer's brief, not this launch's own
+    # (ec-01 E2c). Tier-major order (adversary r1 B1): the tiers run on the text outside pasted blocks first, then the whole
+    # prompt, and a bare mention of some other report in prose never outranks a `Report path:` / labelled line, whichever
+    # text it is in; a brief that names a report only inside pasted text still gets that path, as before.
+    outside = _outside_pasted(prompt)
+    paths = []
+    for text, rx in ((outside, REPORT_OWN), (outside, REPORT_LABELLED), (prompt, REPORT_OWN), (prompt, REPORT_LABELLED),
+                     (outside, REPORT_IN_PROMPT), (prompt, REPORT_IN_PROMPT)):
+        paths = list(dict.fromkeys(rx.findall(text)))
         if paths:
             break
     if len(paths) != 1:

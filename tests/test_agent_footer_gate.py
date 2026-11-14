@@ -409,3 +409,71 @@ def test_a_brief_that_is_wholly_fenced_still_names_its_report(tmp_path):
     own.write_text("x")
     out = run({"description": "Adv", "prompt": f"```\nReport path: {own}\n```\nreview it"}, env=footer_env(tmp_path))
     assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
+
+
+def _own_report_of(tmp_path, prompt):
+    """The report path the hook puts in the footer of `prompt` (the launch is allowed), or the deny reason."""
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    return out["updatedInput"]["prompt"].split("Delivery contract", 1)[1]
+
+
+def test_a_fenced_own_report_path_beats_a_bare_mention_in_prose(tmp_path):
+    """Adversary r1 B1 (P1): the own `Report path:` line inside a fence, a peer's report merely mentioned outside it."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Review the worker's output at {peer}.\nYour own:\n```\nReport path: {own}\n```\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_quoted_own_report_path_beats_a_bare_mention_in_prose(tmp_path):
+    """Adversary r1 B1 (P2)."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"> Report path: {own}\nThe worker wrote {peer}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_an_inline_triple_backtick_line_does_not_open_a_fence(tmp_path):
+    """Adversary r1 B2 (P4): a line of inline code that starts with three backticks is not a fence opener."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    prompt = f"```git``` commands below\nReport path: {own}\n```\npeer brief:\nReport path: {peer}\n```\n"
+    # no fence opens at the first line, so the one that opens at the lone ``` closes nothing: both labels stay (ambiguous)
+    assert str(peer) not in _own_report_of(tmp_path, prompt)
+
+
+def test_a_longer_fence_wraps_a_shorter_one_and_the_closer_takes_no_info_string(tmp_path):
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    wrapped = f"Report path: {own}\n````\n```\nReport path: {peer}\n```\nReport path: {peer}\n````\nreview it"
+    assert f"report: {own}" in _own_report_of(tmp_path, wrapped)
+    # "```text" is not a closer: the fence never closes, so it is plain text and the two own lines are ambiguous (the hook's own
+    # derived path), never the peer's
+    unclosed_by_info = f"Report path: {own}\n```\npeer brief\nReport path: {peer}\n```text\nreview it"
+    foot = _own_report_of(tmp_path, unclosed_by_info)
+    assert str(peer) not in foot and f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in foot
+
+
+def test_an_unclosed_fence_is_plain_text(tmp_path):
+    """An opener with no closer swallows nothing: the own path after it is still found (and the prompt is scanned once)."""
+    own = tmp_path / "adv-report.md"
+    assert f"report: {own}" in _own_report_of(tmp_path, f"```\nReport path: {own}\nreview it")
+
+
+def test_an_unclosed_fence_is_plain_text_even_with_a_peer_label_before_it(tmp_path):
+    """The lines after an opener with no closer count as outside text: the own path there beats a peer's labelled report."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Worker report: {peer}\n```\nReport path: {own}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_long_prompt_of_unclosed_openers_is_fast(tmp_path):
+    import time
+    own = tmp_path / "adv-report.md"
+    prompt = "```a\n" * 60000 + f"Report path: {own}\n"
+    t0 = time.monotonic()
+    assert f"report: {own}" in _own_report_of(tmp_path, prompt)
+    assert time.monotonic() - t0 < 10
+

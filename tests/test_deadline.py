@@ -351,11 +351,19 @@ def test_install_agents_auto_looks_for_paseo_on_the_job_path(env, tmp_path):
     fk = _fake_sched(tmp_path)
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
     assert "--no-agents" in r.stdout and "paseo not found" in r.stderr
+    # a paseo in a directory only the plist's PATH names proves the job PATH is what is searched (adversary r1 B4c) ...
+    fake = tmp_path / "emptybin/paseo"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
+    assert "--no-agents" not in r.stdout and f"paseo found at {fake}" in r.stderr
+    # ... and ~/.local/bin, which the job PATH always gets first, is searched too
+    fake.unlink()
     (tmp_path / "home/.local/bin").mkdir(parents=True)
     (tmp_path / "home/.local/bin/paseo").write_text("#!/bin/sh\n")
     (tmp_path / "home/.local/bin/paseo").chmod(0o755)
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
-    assert "--no-agents" not in r.stdout and "paseo found at" in r.stderr
+    assert "--no-agents" not in r.stdout and "paseo found at" in r.stderr and ".local/bin/paseo" in r.stderr
 
 
 def test_install_systemd_writes_units_and_activates(env, tmp_path):

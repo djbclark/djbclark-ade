@@ -19,7 +19,7 @@ from test_git_guard_live_use import rig  # noqa: E402,F401  (a repo, a linked wo
 
 BIN = Path(__file__).resolve().parent.parent / "bin"
 TOOLS = ("review-pr", "ade-merge-ready")
-REFUSAL_TAG = re.compile(r"REFUSED .*?\[([^\]]+)\]")
+REFUSAL_TAG = re.compile(r"REFUSED `.*?` \[([^\]]+)\]")   # `REFUSED `<command>` [rule]`: a `[` in the command cannot be taken for the rule
 
 
 def keep_rules(tool: str) -> tuple[str, ...]:
@@ -60,6 +60,12 @@ def test_the_routine_force_refusal_is_not_a_keep_tag(tmp_path, state, tool):
     other = tmp_path / "W2"
     run(state, ["worktree", "add", "-q", "-b", "w2", str(other)], repo)
     (other / "f").write_text("dirty\n")
-    p = run(state, ["worktree", "remove", "--force", str(other)], repo, who="B")
+    # ADE_LSOF=false: the live-process check runs before the --force rule; keep it off the host's real process table
+    p = run(state, ["worktree", "remove", "--force", str(other)], repo, who="B", ADE_LSOF="/usr/bin/false")
     assert p.returncode == 77, p.stderr
     assert printed_tag(p.stderr) not in keep_rules(tool)
+
+
+def test_the_tag_is_the_bracket_after_the_displayed_command_not_one_inside_it():
+    err = "ade-git-guard: REFUSED `git worktree remove /x[1]/w` [worktree remove: live process] in /y\n"
+    assert printed_tag(err) == "[worktree remove: live process]"
