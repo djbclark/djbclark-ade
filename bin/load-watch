@@ -171,7 +171,7 @@ above the boost line (--boost-per-core, 4.0), an unreadable memory or agent coun
 machine-wide (LW_STARVE_MIN_GAP_S, 0 = no limit; starve.json in the state dir, replaced atomically under a flock; the claim is written only
 once the forced admit's agent reservation, when --max-agents asks for one, has been recorded). It prints
 `admit ok forced=starved waited_s=N overrode=reason,reason ...` (JSON: forced, overrode) and exits 0; a forced admit under --max-agents still
-records its reservation. `--refused-since EPOCH` (2026-11-14; integer UTC epoch seconds, plain digits; env LW_REFUSED_SINCE is the fallback and the FLAG WINS, even a bad one; meaningful only with --wait above 0, with `--wait 0` it is accepted and ignored): the caller says its soft-gate hold began at EPOCH, so the valve's clock starts at max(EPOCH, now - LW_STARVE_REFUSED_SINCE_MAX_S) (cap 3600 s, 0 = no credit) instead of at this call's first refusal: the credit is `now - EPOCH` seconds, spent on the FIRST unbroken run of refusals only (a clean reading spends it, the next refusal starts a fresh run). An EPOCH in the future or one that is not plain digits is ignored with a one-line stderr note, never an error (exit 2 stays for the other usage errors). Nothing else changes: hard gates never yield, one forced admit per LW_STARVE_MIN_GAP_S machine-wide, the claim and its clock read under the flock. It grants no privilege beyond the cap: any local caller can already take the valve after LW_STARVE_SOFT_S of its own hold, so a stale or hostile EPOCH buys at most the cap, and the valve was never a security boundary. The result and `--json` gain `refused_since` (the epoch the clock started from, after the cap; the forced text line ends its first words with `refused_since=N`) and so does the admit-log line; `waited_s` stays this call's own wait. A caller that sends it to a load-watch from before this change gets exit 2 (unrecognized argument): see skills/fan-out and docs/orchestration-practices.md. The LW_* knobs (LW_STARVE_SOFT_S, LW_STARVE_MIN_GAP_S, LW_STARVE_REFUSED_SINCE_MAX_S, LW_REFUSED_SINCE, LW_MAX_SWAPINS_S, LW_SWAPINS_CORROBORATED_S, LW_ADMIT_LOG, LW_ADMIT_CALLER) are read from `admit`'s own environment, so a caller that scrubs LW_* variables before it runs `admit` gets the defaults (valve on at 300 s / 120 s). Admit tuning log (2026-11-14): every `admit` call appends one JSON line (UTC time, verdict ok/hot/forced, the
+records its reservation. `--refused-since EPOCH` (2026-11-14; integer UTC epoch seconds, plain digits; env LW_REFUSED_SINCE is the fallback and the FLAG WINS, even a bad one; meaningful only with --wait above 0, with `--wait 0` it is accepted and ignored): the caller says its soft-gate hold began at EPOCH, so the valve's clock starts at max(EPOCH, now - LW_STARVE_REFUSED_SINCE_MAX_S) (cap 3600 s, 0 = no credit) instead of at this call's first refusal: the credit is `now - EPOCH` seconds, spent on the FIRST unbroken run of refusals only (a clean reading spends it, the next refusal starts a fresh run). An EPOCH in the future or one that is not plain digits is ignored with a one-line stderr note, never an error (exit 2 stays for the other usage errors; a value that starts with a dash is safest as `--refused-since=VALUE`, since argparse takes `-x` as an option). Pass it per call, inline (`LW_REFUSED_SINCE=N load-watch admit ...` or the flag), never `export` it: an EPOCH older than the cap is not stale, it earns the full cap, so an exported one would force every later soft refusal of every child. Nothing else changes: hard gates never yield, one forced admit per LW_STARVE_MIN_GAP_S machine-wide, the claim and its clock read under the flock. It grants no privilege beyond the cap: any local caller can already take the valve after LW_STARVE_SOFT_S of its own hold, so a stale or hostile EPOCH buys at most the cap, and the valve was never a security boundary. The result and `--json` gain `refused_since` (the epoch the clock started from, after the cap, only when the credited run is the one that ended the call: a clean reading in between drops it; the forced text line ends its first words with `refused_since=N`) and so does the admit-log line; `waited_s` stays this call's own wait. A caller that sends it to a load-watch from before this change gets exit 2 (unrecognized argument): see skills/fan-out and docs/orchestration-practices.md. The LW_* knobs (LW_STARVE_SOFT_S, LW_STARVE_MIN_GAP_S, LW_STARVE_REFUSED_SINCE_MAX_S, LW_REFUSED_SINCE, LW_MAX_SWAPINS_S, LW_SWAPINS_CORROBORATED_S, LW_ADMIT_LOG, LW_ADMIT_CALLER) are read from `admit`'s own environment, so a caller that scrubs LW_* variables before it runs `admit` gets the defaults (valve on at 300 s / 120 s). Admit tuning log (2026-11-14): every `admit` call appends one JSON line (UTC time, verdict ok/hot/forced, the
 refused or overridden gates, load1, per_core, churn, pageins, swapins, free_mb, agents, the limits used, waited_s, the caller's program) to
 LW_ADMIT_LOG (default admit-log.jsonl in the state dir; a relative path is relative to the state dir; `off`, 0, false or no disables;
 only a plain program name is recorded as the caller), rotated at 5 MB to one `.1` file; a log failure never changes the
@@ -183,7 +183,7 @@ a faked load leaves the readings it does not fake healthy: churn 0, 8192 MB free
 LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
 that is not a dict with numeric `t` and `hot_since` counts as no state. Non-finite --wait or --max-per-core: exit 2.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot). `release RESERVATION` (2026-11-14): 0 released,
-66 (EX_NOINPUT) no such reservation (already released or expired: harmless, the launch went ahead), 1 the reservations file could not be locked or written (the
+66 (EX_NOINPUT) no such reservation (released more than 30 s ago, or expired: harmless; a second release inside the 30 s grace still reads 0), 1 the reservations file could not be locked or written (the
 reservation stays until LW_RESERVE_S; the launcher may retry or ignore it). `renew` of an unknown id still exits 1.
 """
 import argparse
@@ -2296,7 +2296,7 @@ def release_reservation_status(rid):
         t = now()
         rows, hit = [], False
         for x in _res_read():
-            if x["id"] == rid:
+            if x["id"] == rid and x["until"] > t:   # an expired row not yet pruned is "no such reservation"
                 hit, x = True, {"id": rid, "until": min(x["until"], t + RELEASE_GRACE_S)}
             if x["until"] > t:
                 rows.append(x)
@@ -2464,7 +2464,7 @@ def parse_refused_since(raw, t, cap):
     if epoch is None:
         return None, f"load-watch admit: ignoring --refused-since {text[:40]!r}: not an integer epoch in seconds"
     if epoch > t:
-        return None, f"load-watch admit: ignoring --refused-since {epoch}: it is in the future"
+        return None, f"load-watch admit: ignoring --refused-since {str(epoch)[:40]}: it is in the future"
     floor = t - cap
     return (max(epoch, floor), None)
 
@@ -2827,8 +2827,8 @@ def cmd_admit(a):
     start, polls, next_note = mono(), 0, 60.0
     refused_since, forced = None, None   # waited-seconds when the current unbroken run of refusals began; the overridden refusals
     # --refused-since (flag wins over LW_REFUSED_SINCE, even a bad flag): credit = seconds of hold the caller reports before this call, at most
-    # STARVE_REFUSED_SINCE_MAX_S. Only the FIRST unbroken run of refusals gets it; a clean reading spends it. Meaningless with --wait 0 (no valve).
-    credit, since_epoch = 0.0, None
+    # STARVE_REFUSED_SINCE_MAX_S. Only the FIRST unbroken run of refusals gets it (spent when that run starts). Meaningless with --wait 0 (no valve).
+    credit, since_epoch, used_since = 0.0, None, None   # used_since: the epoch actually credited to a refusal (what the record and log show: the credited run must be the one that ends the call)
     raw_since = getattr(a, "refused_since", None)
     if raw_since is None:
         raw_since = os.environ.get("LW_REFUSED_SINCE", "").strip() or None
@@ -2847,7 +2847,7 @@ def cmd_admit(a):
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
             # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
-            refused_since, credit = None, 0.0   # a clean reading breaks the unbroken run of refusals, whatever the re-read says
+            refused_since, used_since = None, None   # a clean reading breaks the unbroken run of refusals (and so the credited run), whatever the re-read says
             left = a.wait - waited
             if left > 0:
                 nap(min(random.uniform(lo, hi), left))
@@ -2866,9 +2866,14 @@ def cmd_admit(a):
         # Starvation valve (2026-11-14): only a waiting caller (`--wait S`; the clock is per call, so bg, which calls `--wait CHUNK`, gets it only after 300 s inside one chunk; a bare check reports the truth),
         # refused without a break for STARVE_SOFT_S, with only SOFT gates refusing, and at most one per STARVE_MIN_GAP_S machine-wide.
         if not refused:
-            refused_since, credit = None, 0.0
+            refused_since = None
         elif refused_since is None:
+            # a new unbroken run starts. The caller's credit is spent here, once: the FIRST refusal of the call is the only run it can
+            # extend (a clean reading before any refusal admits at once, and after a refusal the clean-reading branch above is the only way
+            # back to this line, by which time the credit is already zero)
             refused_since, credit = waited - credit, 0.0
+            if used_since is None and since_epoch is not None and polls == 1:
+                used_since = since_epoch
         def reserve_forced():   # the forced admit still counts as one agent, like any admission under the cap; a failure refuses (hard)
             if not reserve_on:
                 return True
@@ -2896,7 +2901,7 @@ def cmd_admit(a):
             next_note += 60.0
         dl_beat()
         nap(max(0.0, min(poll, a.wait - waited)))
-    rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for, overrode=forced, refused_since=since_epoch)
+    rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for, overrode=forced, refused_since=used_since)
     print(json.dumps(rec) if a.json else admit_line(rec), flush=True)
     admit_log(rec, lim, caller, a.wait)
     return 0 if rec["status"] == "ok" else EX_TEMPFAIL
