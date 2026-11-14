@@ -77,19 +77,20 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    (`~/.paseo/agents/*/ID.json`, which archived agents keep) carries the label `ade.kind=external-review` (the stable marker; `paseo ls`
    and `paseo agent inspect` expose no labels, so the hook reads the record), or its id is in `config/peer-trust.toml` `[sensitive]`
    `ids`, or a case-insensitive `title_patterns` regular expression (default `injection`, `triage`, `review-pr`, `pr-review`,
-   `adversary`, `gh-watch`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
+   `adversary`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
    record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
    sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
-   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label, the fleet's gh
-   watcher lives outside this repo, and the PR Radar plugin launches reviewers of outside PRs and issues with no label field
-   (`bin/pr-radar-route` returns provider, model, thinking, mode and reason only); neither sets it yet (the watcher needs the operator's yes,
-   AGENTS.md order 11; PR Radar needs an upstream launch field, order 8); "that agent" is the SENDER only, so a receiving session
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; no launcher for the
+   fleet's gh watcher exists (it starts no Paseo agent, so nothing there sets the label and its title is not a pattern); and the PR Radar plugin
+   launches reviewers of outside PRs and issues with no label field (`bin/pr-radar-route` returns provider, model, thinking, mode and reason
+   only; the upstream field is proposed in omercnet/paseo-plugins#619). So no launcher sets the label today; a `paseo run` launch of such an
+   agent appends `--label ade.kind=external-review` last, because `paseo run` keeps the last `--label` for a duplicate key; "that agent" is the SENDER only, so a receiving session
    that is itself an injection-triage agent gets no extra protection from this hook. Also: the sender id is self-stamped
    (the CLI takes it from the sender's own `PASEO_AGENT_ID` and the server stamps it unchecked), so the exception is best-effort framing, not a
    barrier: a steered agent can rename itself (the label is the durable marker), rewrite its own record, start an unlabelled child, send
    with a made-up id (which lands in rule 3, believed) or send with no source. A remote external reviewer carries no title or local
    record, so only a config `ids` entry marks it. The first readable record for an id wins, so a duplicate record can hide the label
-   (none exist today). The default patterns also match internal workers (`review PR ... injection gate`, `gh-watch-gate`,
+   (none exist today). The default patterns also match internal workers (`review PR ... injection gate`,
    `review-pr636`): their messages read as not believed automatically (fail-safe); wiring the label lets the patterns be narrowed. An unreadable or
    invalid config (including absurdly nested TOML) falls back to the default patterns; so does valid TOML that leaves nobody to
    match (no ids and no usable pattern); an invalid pattern is skipped; only the first 256 characters of a title are matched.

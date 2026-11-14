@@ -85,7 +85,7 @@ SAFE_SERVER = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 # external-security-sensitive senders; config/peer-trust.toml [sensitive] replaces these
 DEFAULT_SENSITIVE_IDS = ()
 DEFAULT_SENSITIVE_PATTERNS = (
-    "injection", "triage", "review-pr", "pr-review", "adversary", "gh-watch",
+    "injection", "triage", "review-pr", "pr-review", "adversary",
 )
 SENSITIVE_LABEL = ("ade.kind", "external-review")  # a Paseo agent label; preferred over any title
 MAX_RECORD = 2 * 1024 * 1024
