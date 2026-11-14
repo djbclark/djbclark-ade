@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -73,6 +74,10 @@ SKIP_CLASSES = ("helper",)
 
 class Refused(Exception):
     pass
+
+
+class ExcludeRefused(Refused):
+    """The exclude list could not be read or parsed: a prune run that cannot tell what is protected does nothing more."""
 
 
 # ----------------------------------------------------------------------------------------------- paseo plumbing
@@ -1085,7 +1090,9 @@ PRUNE_MIN_IDLE = 300  # seconds an idle helper must have been quiet: Baton reads
 ARCHIVE_TIMEOUT = 30
 ORPHAN_GRACE = 1800  # seconds an orphan's agent must have been archived AND quiet before its process is actionable
 MAX_KILLS = 10       # provider processes signalled per run (their graft children ride along); the rest wait for the next run
-PS_BIN = os.environ.get("ADE_HELPER_PRUNE_PS") or "/bin/ps"  # absolute: a `ps` earlier on PATH must not decide which pids are signalled
+# absolute: a `ps` earlier on PATH must not decide which pids are signalled. The test stand-in `ADE_HELPER_PRUNE_PS` is honoured only
+# with `ADE_HELPER_PRUNE_TEST=1` also set, so a stray variable in a job's environment cannot choose the process table.
+PS_BIN = (os.environ.get("ADE_HELPER_PRUNE_PS") if os.environ.get("ADE_HELPER_PRUNE_TEST") == "1" else None) or "/bin/ps"
 
 
 def prune_log_path() -> Path:
@@ -1111,13 +1118,13 @@ def load_excludes(cli: list[str] | tuple = ()) -> set[str]:
     except FileNotFoundError:
         return ids
     except (OSError, UnicodeDecodeError) as e:
-        raise Refused(f"cannot read {p}: {clean(str(e), 120)}")
+        raise ExcludeRefused(f"cannot read {p}: {clean(str(e), 120)}")
     for n, line in enumerate(text.splitlines(), 1):
         line = line.split("#", 1)[0].strip().lower()
         if not line:
             continue
         if not UUID_RE.fullmatch(line):
-            raise Refused(f"{p}:{n}: not a full agent id")
+            raise ExcludeRefused(f"{p}:{n}: not a full agent id")
         ids.add(line)
     return ids
 
@@ -1190,6 +1197,9 @@ def prune_plan(min_idle: float, now: float, exclude_cli: list[str] | tuple = ())
     baton = baton_entries()
     excludes = load_excludes(exclude_cli)
     me = os.environ.get("PASEO_AGENT_ID", "")
+    # Paseo cascades an archive to the agents labelled with this one as their parent: never archive a helper that has a live child.
+    with_children = {d["labels"][PARENT_LABEL] for d in recs.values() if not d.get("archivedAt") and isinstance(d.get("labels"), dict)
+                     and isinstance(d["labels"].get(PARENT_LABEL), str)}
     selected: list[dict] = []
     skipped: list[dict] = []
     errors: list[dict] = []
@@ -1234,6 +1244,10 @@ def prune_plan(min_idle: float, now: float, exclude_cli: list[str] | tuple = ())
             skip("activity-unreadable")
         elif now - act < min_idle:
             skip("recently-active", f"{int(now - act)}s < {int(min_idle)}s")
+        elif aid in with_children:
+            skip("has-children", "an unarchived agent names this helper as its paseo.parent-agent-id: archiving would cascade to it")
+        elif unreadable_records:
+            skip("children-unproven", "an agent record could not be read, so a child cannot be ruled out")
         else:
             prec = recs.get(parent)
             lp = live_by_id.get(parent)
@@ -1284,13 +1298,103 @@ def ps_rows(pid: int | None = None) -> list[dict]:
     return rows
 
 
+CALLER_RE = re.compile(r"callerAgentId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+
+def argv_tokens(cmd: str) -> list[str] | None:
+    """`ps` prints argv joined by spaces. Split it on whitespace, but keep a JSON object or array (a token that starts with `{`
+    or `[`, or `--flag={`) whole, so text inside an argument's JSON value is never read as a flag. Unbalanced brackets: None."""
+    toks, i, n = [], 0, len(cmd)
+    while i < n:
+        if cmd[i].isspace():
+            i += 1
+            continue
+        j = i
+        while j < n and not cmd[j].isspace():
+            if cmd[j] in "{[" and (j == i or cmd[j - 1] == "="):
+                depth, instr, esc = 0, False, False
+                while j < n:
+                    ch = cmd[j]
+                    j += 1
+                    if instr:
+                        if esc:
+                            esc = False
+                        elif ch == "\\":
+                            esc = True
+                        elif ch == '"':
+                            instr = False
+                    elif ch == '"':
+                        instr, esc = True, False
+                    elif ch in "{[":
+                        depth += 1
+                    elif ch in "}]":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                else:
+                    return None
+            else:
+                j += 1
+        toks.append(cmd[i:j])
+        i = j
+    return toks
+
+
 def provider_session(row: dict) -> str | None:
-    """The session id of a `claude` provider process (first word's basename is claude, `--resume`/`--session-id` in argv)."""
+    """The session id of a `claude` provider process, taken only from a real `--resume`/`--session-id` argument (never a substring
+    inside another argument's value, such as a `--settings` JSON) and only when exactly one such flag is present anywhere."""
     words = row["command"].split()
-    if not words or os.path.basename(words[0]) != "claude":
+    toks = argv_tokens(row["command"])
+    if not words or os.path.basename(words[0]) != "claude" or not toks:
         return None
-    m = SESSION_RE.search(row["command"])
-    return m[1] if m else None
+    found = []
+    for i, t in enumerate(toks[1:], 1):
+        m = re.fullmatch(r"--(?:resume|session-id)=(" + UUID_RE.pattern + ")", t)
+        if m:
+            found.append(m[1])
+        elif t in ("--resume", "--session-id") and i + 1 < len(toks) and UUID_RE.fullmatch(toks[i + 1]):
+            found.append(toks[i + 1])
+    return found[0] if len(found) == 1 and len(SESSION_RE.findall(row["command"])) == 1 else None
+
+
+def provider_callers(row: dict) -> list[str]:
+    """The `callerAgentId=<uuid>` values in the provider's `--mcp-config` argument: only the uuid is kept (that argument carries a
+    Bearer token, which is never stored, logged or printed). A `callerAgentId=` anywhere else in argv adds an empty entry, so the
+    caller is then not exactly one id."""
+    toks = argv_tokens(row["command"]) or []
+    out: list[str] = []
+    for i, t in enumerate(toks):
+        if t == "--mcp-config" and i + 1 < len(toks):
+            out += CALLER_RE.findall(toks[i + 1])
+        elif t.startswith("--mcp-config="):
+            out += CALLER_RE.findall(t)
+    if row["command"].count("callerAgentId=") != len(out):
+        out.append("")
+    return out
+
+
+def paseo_pid() -> int | None:
+    """The Paseo supervisor's pid from `$PASEO_HOME/paseo.pid` (JSON with `pid`), or None."""
+    try:
+        v = json.loads((paseo_home() / "paseo.pid").read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return v if isinstance(v, int) and v > 1 else None
+
+
+def is_daemon_row(r: dict, sup: int | None) -> bool:
+    """The Paseo daemon, found structurally: a process titled exactly `Paseo Daemon` that is the supervisor named in paseo.pid or
+    is that supervisor's direct child. Any other process with that title (a dev daemon under another home) is not it."""
+    return sup is not None and r["command"].split() == ["Paseo", "Daemon"] and sup in (r["pid"], r["ppid"])
+
+
+def daemon_pids(rows: list[dict]) -> set[int]:
+    sup = paseo_pid()
+    return {r["pid"] for r in rows if is_daemon_row(r, sup)}
+
+
+def is_daemon_pid(pid: int) -> bool:
+    return any(r["pid"] == pid and is_daemon_row(r, paseo_pid()) for r in ps_rows(pid))
 
 
 def is_graft_mcp(row: dict) -> bool:
@@ -1359,6 +1463,8 @@ def orphan_plan(excludes: set[str], now: float | None = None, grace: float = ORP
     for r in rows:
         kids.setdefault(r["ppid"], []).append(r)
     mine, me = own_tree(rows), os.environ.get("PASEO_AGENT_ID", "")
+    daemons = daemon_pids(rows)
+    unreadable = sum(1 for d in agent_state_files() if d.get("_bad"))   # same cached read as `recs` above
     out = {"orphans": [], "orphan_skipped": [], "unmapped": [], "provider_live": 0, "deferred": [], "kill_plan": {}}
     for r in rows:
         sid = provider_session(r)
@@ -1370,13 +1476,20 @@ def orphan_plan(excludes: set[str], now: float | None = None, grace: float = ORP
             out["unmapped"].append({**base, "reason": "not-paseo-launched"})
         elif len(owners) != 1:
             out["unmapped"].append({**base, "reason": "no-agent-record" if not owners else "ambiguous-session"})
+        elif r["ppid"] not in daemons:   # an Agent-SDK host also runs `claude --input-format stream-json --resume`: only the Paseo daemon's children are ours
+            out["unmapped"].append({**base, "reason": "not-paseo-parent"})
         else:
-            aid = next(iter(owners))
-            orphan_one(out, r, base, aid, by_id[aid], kids, mine, me, excludes)
-    return kill_budget(out, by_id, time.time() if now is None else now, grace, max_kills)
+            aid, callers = next(iter(owners)), provider_callers(r)
+            if not callers:
+                out["unmapped"].append({**base, "reason": "no-caller"})
+            elif callers != [aid]:
+                out["unmapped"].append({**base, "reason": "caller-mismatch"})
+            else:
+                orphan_one(out, r, base, aid, by_id[aid], kids, mine, me, excludes)
+    return kill_budget(out, by_id, time.time() if now is None else now, grace, max_kills, unreadable)
 
 
-def kill_budget(out: dict, by_id: dict, now: float, grace: float, max_kills: int) -> dict:
+def kill_budget(out: dict, by_id: dict, now: float, grace: float, max_kills: int, unreadable: int = 0) -> dict:
     """Split the orphans into this run's kill plan and the deferred rest. An orphan is actionable only when its agent was
     archived at least `grace` seconds ago (last activity when `archivedAt` does not parse) AND the agent record shows no activity
     newer than `grace` (unparsable: fail closed); younger ones are `grace`. At most `max_kills` provider processes are
@@ -1384,6 +1497,9 @@ def kill_budget(out: dict, by_id: dict, now: float, grace: float, max_kills: int
     actionable, deferred = [], []
     for o in sorted(out["orphans"], key=lambda x: x["pid"]):
         rec = by_id[o["agent"]]
+        if unreadable:   # an unreadable record could be the live owner of this session: defer every orphan
+            deferred.append({**o, "reason": "records-unreadable", "detail": f"{unreadable} agent record(s) could not be read"})
+            continue
         arch, act = iso_epoch(rec.get("archivedAt")), iso_epoch(rec.get("lastActivityAt"))
         ref = arch if arch is not None else act
         if ref is None or act is None:
@@ -1395,6 +1511,7 @@ def kill_budget(out: dict, by_id: dict, now: float, grace: float, max_kills: int
     capped = actionable[max(0, max_kills):]
     deferred += [{**o, "reason": "kill-cap", "detail": f"over --max-kills {max_kills}"} for o in capped]
     out["kill_plan"] = {"found": len(out["orphans"]), "actionable": len(actionable) - len(capped), "deferred_grace": sum(d["reason"] == "grace" for d in deferred),
+                        "deferred_unreadable": sum(d["reason"] == "records-unreadable" for d in deferred), "records_unreadable": unreadable,
                         "deferred_cap": len(capped), "max_kills": max_kills, "orphan_grace_s": int(grace)}
     out["orphans"] = actionable[:max(0, max_kills)]
     out["deferred"] = deferred
@@ -1419,7 +1536,7 @@ def orphan_one(out: dict, r: dict, base: dict, aid: str, rec: dict, kids: dict, 
         cs = sorted(kids.get(r["pid"], []), key=lambda c: c["pid"])
         row["children"] = [{"pid": c["pid"], "ppid": c["ppid"], "started": c["lstart"], "rss_kb": c["rss_kb"]}
                            for c in cs if is_graft_mcp(c) and c["pid"] not in mine]
-        row["other_children"] = [{"pid": c["pid"], "command": clean(c["command"], 80)} for c in cs if not is_graft_mcp(c)]
+        row["other_children"] = [{"pid": c["pid"], "command": clean(os.path.basename((c["command"].split() or [""])[0]), 60)} for c in cs if not is_graft_mcp(c)]   # basename only: argv can hold a token
         out["orphans"].append(row)
 
 
@@ -1435,6 +1552,10 @@ def kill_guarded(pid: int, ppid: int, started: str, session: str | None, agent: 
         entry["skipped"] = "start-time-changed"
     elif role == "provider" and provider_session(now[0]) != session:
         entry["skipped"] = "session-changed"
+    elif role == "provider" and (now[0]["ppid"] != ppid or not is_daemon_pid(ppid)):
+        entry["skipped"] = "not-paseo-parent"
+    elif role == "provider" and provider_callers(now[0]) != [agent]:
+        entry["skipped"] = "caller-changed"
     elif role == "graft-child" and (now[0]["ppid"] != ppid or not is_graft_mcp(now[0])):
         entry["skipped"] = "not-the-same-child"
     else:
@@ -1469,10 +1590,10 @@ def prune(apply_: bool, min_idle: float = PRUNE_MIN_IDLE, exclude_cli: list[str]
         try:
             orph = orphan_plan(load_excludes(exclude_cli), time.time(), grace, max_kills)
             summary.update({k: orph[k] for k in ("orphans", "orphan_skipped", "unmapped", "provider_live", "deferred", "kill_plan")})
+        except ExcludeRefused:
+            raise
         except Refused as e:
             orph = None
-            if "exclude" in str(e):
-                raise
             summary["errors"].append({"id": "", "what": f"orphan scan skipped: {clean(str(e), 120)}"})
         if apply_ and first["selected"]:
             again = {r["id"] for r in prune_plan(min_idle, time.time(), exclude_cli)["selected"]}  # re-read right before acting
@@ -1480,7 +1601,12 @@ def prune(apply_: bool, min_idle: float = PRUNE_MIN_IDLE, exclude_cli: list[str]
                 if row["id"] not in again:
                     summary["skipped"].append({**row, "reason": "changed-before-archive", "detail": "no longer selected on the re-read"})
                     continue
-                if row["id"] in load_excludes(exclude_cli):   # the list is re-read once more, right before each archive
+                try:
+                    protected = row["id"] in load_excludes(exclude_cli)   # the list is re-read once more, right before each archive
+                except ExcludeRefused as e:
+                    summary["errors"].append({"id": row["id"], "what": f"exclude list unreadable, no further archive: {clean(str(e), 120)}"})
+                    break
+                if protected:
                     summary["skipped"].append({**row, "reason": "excluded", "detail": "added to the exclude list before the archive"})
                     continue
                 if not helper_still_idle(row["id"]):   # status and permissions re-read right before this archive
@@ -1523,8 +1649,12 @@ def kill_orphans(summary: dict, planned: list[dict], exclude_cli, max_kills: int
         summary["errors"].append({"id": "", "what": f"orphan re-read failed, nothing killed: {clean(str(e), 120)}"})
         return
     for o in planned:
-        if (o["pid"], o["started"], o["session"]) not in fresh or o["agent"] in load_excludes(exclude_cli) \
-                or not agent_archived_closed(o["agent"]):
+        try:
+            protected = o["agent"] in load_excludes(exclude_cli)
+        except ExcludeRefused as e:   # fail closed without a traceback: nothing further is killed
+            summary["errors"].append({"id": o["agent"], "what": f"exclude list unreadable, no further kill: {clean(str(e), 120)}"})
+            return
+        if (o["pid"], o["started"], o["session"]) not in fresh or protected or not agent_archived_closed(o["agent"]):
             summary["orphan_skipped"].append({**o, "reason": "changed-before-kill"})
             continue
         targets = [(c["pid"], c["ppid"], c["started"], None, c["rss_kb"], "graft-child") for c in o["children"]]
@@ -1591,8 +1721,8 @@ def nonneg_float(v: str) -> float:
         n = float(v)
     except ValueError:
         n = -1.0
-    if not n >= 0:
-        raise argparse.ArgumentTypeError("a non-negative number is required")
+    if not (math.isfinite(n) and n >= 0):
+        raise argparse.ArgumentTypeError("a finite non-negative number is required")
     return n
 
 
@@ -1606,7 +1736,7 @@ def main_prune(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="ade-tidy prune", description="archive finished Baton [Handoff writer] helpers and report or stop orphan provider processes of archived agents, machine-wide")
     p.add_argument("--apply", action="store_true", help="act (default: observe only)")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--min-idle", type=float, default=PRUNE_MIN_IDLE, help="seconds a helper must have been idle (default 300)")
+    p.add_argument("--min-idle", type=nonneg_float, default=PRUNE_MIN_IDLE, help="seconds a helper must have been idle (default 300)")
     p.add_argument("--exclude", action="append", default=[], type=full_id, metavar="ID", help="never touch this agent (repeatable; also the exclude file)")
     p.add_argument("--max-kills", type=nonneg_int, default=MAX_KILLS, help="provider processes signalled per run, graft children ride along (default 10); the rest are deferred: kill-cap")
     p.add_argument("--orphan-grace", type=nonneg_float, default=ORPHAN_GRACE, help="seconds an orphan's agent must have been archived and quiet (default 1800); younger: deferred: grace")

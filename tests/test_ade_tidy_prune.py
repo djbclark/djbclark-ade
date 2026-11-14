@@ -73,6 +73,9 @@ print("\\n".join(rows))
 '''
 
 
+SUP, DAEMON = 39999, 40000   # the Paseo supervisor (named in paseo.pid) and its `Paseo Daemon` child
+
+
 def uid(n: int) -> str:
     return f"{n:08d}-0000-0000-0000-000000000000"
 
@@ -93,9 +96,11 @@ class Env:
         ps.write_text(PS_STUB)
         ps.chmod(0o755)
         self.data["ps"] = []
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "paseo.pid").write_text(json.dumps({"pid": SUP, "startedAt": "2026-11-12T12:28:22.483Z"}))
         for k, v in {"PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}", "FAKE_DATA": str(self.data_path),
                      "FAKE_CALLS": str(self.calls_path), "PASEO_HOME": str(self.home),
-                     "ADE_HELPER_PRUNE_LOG": str(self.log), "ADE_HELPER_PRUNE_PS": str(ps),
+                     "ADE_HELPER_PRUNE_LOG": str(self.log), "ADE_HELPER_PRUNE_PS": str(ps), "ADE_HELPER_PRUNE_TEST": "1",
                      "ADE_HELPER_PRUNE_EXCLUDE": str(tmp_path / "state/helper-prune.exclude")}.items():
             monkeypatch.setenv(k, v)
         monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
@@ -439,8 +444,15 @@ def psl(pid, ppid, cmd, lstart=T0, rss=129200):
     return f"{pid:>7} {ppid:>7} {lstart} {rss:>8} {cmd}"
 
 
-def provider_cmd(sid=SESS):
-    return f"/Users/x/.local/bin/claude {FLAGS} --resume={sid}"
+TOKEN = "Bearer s3cr3t-token-value"
+
+
+def provider_cmd(sid=SESS, caller=None, extra=""):
+    """A Paseo-launched provider's argv as `ps` prints it: the MCP config JSON carries callerAgentId and a Bearer token."""
+    caller = uid(70) if caller is None else caller
+    mcp = ('{"mcpServers":{"paseo":{"type":"http","url":"http://127.0.0.1:7263/mcp/agents?callerAgentId=' + caller +
+           '","headers":{"Authorization":"' + TOKEN + '"}}}}') if caller else '{"mcpServers":{}}'
+    return f"/Users/x/.local/bin/claude {FLAGS} --mcp-config {mcp} --resume={sid}{extra}"
 
 
 def orphan_world(env, archived=True, last_status="closed", inspect=True, n=70, sess=SESS, prov=PROV, kid=KID, age=7200, active_ago=None):
@@ -459,8 +471,8 @@ def orphan_world(env, archived=True, last_status="closed", inspect=True, n=70, s
     if inspect:
         inspects[aid] = {"Id": aid, "Archived": archived, "Status": last_status, "PendingPermissions": []}
     if not env.data["ps"]:
-        env.data["ps"] = [psl(1, 0, "/sbin/launchd", rss=100), psl(40000, 1, "/Applications/Paseo daemon", rss=500)]
-    env.data["ps"] += [psl(prov, 40000, provider_cmd(sess)), psl(kid, prov, "node /Users/x/.local/bin/graft mcp", T0, 3904)]
+        env.data["ps"] = [psl(1, 0, "/sbin/launchd", rss=100), psl(SUP, 1, "Paseo Supervisor   ", rss=500), psl(DAEMON, SUP, "Paseo Daemon   ", rss=500)]
+    env.data["ps"] += [psl(prov, DAEMON, provider_cmd(sess, aid)), psl(kid, prov, "node /Users/x/.local/bin/graft mcp", T0, 3904)]
     return aid
 
 
@@ -664,7 +676,9 @@ def test_grace_defers_a_recently_archived_orphan(env, mod, kills):
     s = mod.prune(True, 300)
     assert kills == [] and s["orphans"] == [] and [(d["pid"], d["reason"]) for d in s["deferred"]] == [(PROV, "grace")]
     assert s["kill_plan"]["deferred_grace"] == 1 and s["kill_plan"]["actionable"] == 0
-    assert [k[0] for k in (kills if mod.prune(True, 300, (), 10, 300) else [])] == [KID, PROV]   # a shorter grace admits it
+    s2 = mod.prune(True, 300, (), 10, 300)   # a shorter grace admits it
+    assert s2["deferred"] == []
+    assert [k[0] for k in kills] == [KID, PROV]
 
 
 def test_quiet_gate_defers_an_orphan_with_recent_activity(env, mod, kills):
@@ -691,7 +705,8 @@ def test_kill_cap_defers_the_rest_and_the_next_run_picks_them_up(env, mod, kills
     s = mod.prune(True, 300, (), 2, 1800)
     assert [k[0] for k in kills] == [KID, PROV, KID + 10, PROV + 10]       # two providers, each child first
     assert [(d["pid"], d["reason"]) for d in s["deferred"]] == [(PROV + 20, "kill-cap")]
-    assert s["kill_plan"] == {"found": 3, "actionable": 2, "deferred_grace": 0, "deferred_cap": 1, "max_kills": 2, "orphan_grace_s": 1800}
+    assert s["kill_plan"] == {"found": 3, "actionable": 2, "deferred_grace": 0, "deferred_cap": 1, "deferred_unreadable": 0,
+                              "records_unreadable": 0, "max_kills": 2, "orphan_grace_s": 1800}
     assert s["counts"]["killed"] == 4 and s["counts"]["deferred"] == 1     # providers and graft children are both counted as signalled
     kills.clear()
     env.data["ps"] = [x for x in env.data["ps"] if x.split()[0] not in map(str, (PROV, KID, PROV + 10, KID + 10))]   # they exited
@@ -797,6 +812,19 @@ def test_human_output_strips_control_characters(env):
     assert "no-parent" in r.stdout and "\x1b" not in r.stdout and "\x07" not in r.stdout
 
 
+def load_fresh(name):
+    loader = importlib.machinery.SourceFileLoader(name, str(SCRIPT))
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(m)
+    return m
+
+
+def test_ps_stand_in_needs_the_test_flag_too(env, monkeypatch):
+    assert load_fresh("ps_with_flag").PS_BIN == os.environ["ADE_HELPER_PRUNE_PS"]
+    monkeypatch.delenv("ADE_HELPER_PRUNE_TEST")
+    assert load_fresh("ps_without_flag").PS_BIN == "/bin/ps"
+
+
 def test_ps_is_called_by_absolute_path(env, monkeypatch):
     monkeypatch.delenv("ADE_HELPER_PRUNE_PS")
     loader = importlib.machinery.SourceFileLoader("ade_tidy_ps_default", str(SCRIPT))
@@ -808,3 +836,241 @@ def test_ps_is_called_by_absolute_path(env, monkeypatch):
     m.ps_rows()
     m.ps_rows(123)
     assert [a[0] for a in seen] == ["/bin/ps", "/bin/ps"]
+
+
+# ----------------------------------------------------------------------------------------------- round 4
+
+def world_with(env, **kw):
+    aid = orphan_world(env, **kw)
+    env.data_path.write_text(json.dumps(env.data))
+    return aid
+
+
+def set_provider(env, cmd=None, ppid=DAEMON, pid=PROV):
+    """Replace the provider's process row (and re-parent its child) in the fake table."""
+    env.data["ps"] = [x for x in env.data["ps"] if x.split()[0] != str(pid)] + [psl(pid, ppid, cmd or provider_cmd(SESS, uid(70)))]
+    env.data_path.write_text(json.dumps(env.data))
+
+
+def unmapped_reasons(s):
+    return [(u["pid"], u["reason"]) for u in s["unmapped"]]
+
+
+def test_sdk_host_stream_json_resume_with_a_non_daemon_parent_is_unmapped(env, mod, kills):
+    orphan_world(env)
+    set_provider(env, ppid=777)                           # an Agent-SDK host (or a shell), not the Paseo daemon
+    s = mod.prune(True, 300)
+    assert kills == [] and s["orphans"] == [] and unmapped_reasons(s) == [(PROV, "not-paseo-parent")]
+
+
+def test_a_dev_daemon_under_another_home_is_not_the_daemon(env, mod, kills):
+    orphan_world(env)
+    env.data["ps"] += [psl(50000, 1, "Paseo Supervisor   "), psl(50001, 50000, "Paseo Daemon   ")]   # not the supervisor in paseo.pid
+    set_provider(env, ppid=50001)
+    s = mod.prune(True, 300)
+    assert kills == [] and unmapped_reasons(s) == [(PROV, "not-paseo-parent")]
+
+
+def test_a_process_titled_like_the_daemon_with_another_parent_is_not_the_daemon(env, mod, kills):
+    orphan_world(env)
+    env.data["ps"] += [psl(50001, 1, "Paseo Daemon   ")]    # right title, but neither the supervisor nor its child
+    set_provider(env, ppid=50001)
+    assert unmapped_reasons(mod.prune(True, 300)) == [(PROV, "not-paseo-parent")] and kills == []
+
+
+def test_missing_paseo_pid_file_means_no_daemon_and_nothing_is_killed(env, mod, kills):
+    orphan_world(env)
+    (env.home / "paseo.pid").unlink()
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and unmapped_reasons(s) == [(PROV, "not-paseo-parent")]
+
+
+def test_missing_caller_agent_id_is_unmapped(env, mod, kills):
+    orphan_world(env)
+    set_provider(env, provider_cmd(SESS, caller=""))
+    s = mod.prune(True, 300)
+    assert kills == [] and unmapped_reasons(s) == [(PROV, "no-caller")]
+
+
+@pytest.mark.parametrize("cmd", [lambda: provider_cmd(SESS, uid(99)),
+                                 lambda: provider_cmd(SESS, uid(70), extra=f" --append-system-prompt callerAgentId={uid(70)}"),
+                                 lambda: provider_cmd(SESS, uid(70)).replace("--resume", "--mcp-config " + '{"x":"callerAgentId=' + uid(70) + '"} --resume')])
+def test_a_different_or_repeated_caller_agent_id_is_unmapped(env, mod, kills, cmd):
+    orphan_world(env)
+    set_provider(env, cmd())
+    s = mod.prune(True, 300)
+    assert kills == [] and unmapped_reasons(s) == [(PROV, "caller-mismatch")]
+
+
+def test_session_flag_inside_a_settings_json_does_not_map(env, mod, kills):
+    orphan_world(env)
+    decoy = '--settings {"hooks":{"x":"echo --resume=' + SESS + ' done"}}'
+    live_cmd = f"/Users/x/.local/bin/claude {FLAGS} --mcp-config " + '{"u":"?callerAgentId=' + uid(70) + '"} ' + decoy   # no real session flag at all
+    set_provider(env, live_cmd)
+    s = mod.prune(True, 300)
+    assert kills == [] and s["unmapped"] == [] and s["orphans"] == [] and s["orphan_skipped"] == []
+    assert mod.provider_session({"command": live_cmd}) is None
+    both = provider_cmd(SESS, uid(70)) + " " + decoy                                    # a real flag plus a decoy: ambiguous, not acted on
+    assert mod.provider_session({"command": both}) is None
+    assert mod.provider_session({"command": provider_cmd(SESS, uid(70))}) == SESS       # and the plain case still maps
+    assert mod.provider_session({"command": provider_cmd(SESS, uid(70)).replace("--resume=", "--resume ")}) == SESS
+
+
+def test_argv_tokens_keeps_json_whole_and_fails_closed_when_unbalanced(mod):
+    assert mod.argv_tokens('claude --s {"a":"x \\" y {"} --t=[1, 2] z') == ["claude", "--s", '{"a":"x \\" y {"}', "--t=[1, 2]", "z"]
+    assert mod.argv_tokens('claude --s {"a": 1') is None
+
+
+def test_caller_changed_or_parent_changed_before_the_signal_is_not_killed(env, mod, kills):
+    orphan_world(env)
+    env.data["ps_recheck"] = {str(PROV): psl(PROV, DAEMON, provider_cmd(SESS, uid(99))),
+                              str(KID): psl(KID, PROV, "node /Users/x/.local/bin/graft mcp", T0, 3904)}
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert PROV not in [k[0] for k in kills] and "caller-changed" in [x.get("skipped") for x in env.log_lines()]
+    env.data["ps_recheck"] = {str(PROV): psl(PROV, 777, provider_cmd(SESS, uid(70)))}
+    env.data_path.write_text(json.dumps(env.data))
+    kills.clear()
+    mod.prune(True, 300)
+    assert PROV not in [k[0] for k in kills] and "not-paseo-parent" in [x.get("skipped") for x in env.log_lines()]
+
+
+def test_the_daemon_changed_before_the_signal_is_not_killed(env, mod, kills):
+    orphan_world(env)
+    env.data["ps_recheck"] = {str(DAEMON): psl(DAEMON, 1, "Paseo Daemon   ")}   # the pid now belongs to a process outside the supervisor
+    env.data_path.write_text(json.dumps(env.data))
+    mod.prune(True, 300)
+    assert PROV not in [k[0] for k in kills] and "not-paseo-parent" in [x.get("skipped") for x in env.log_lines()]
+
+
+def test_bearer_token_never_appears_in_any_output_or_log(env):
+    orphan_world(env)
+    set_provider(env, ppid=777)                                            # an unmapped row, so argv is closest to the output
+    for args in ((), ("--apply",)):
+        r = env.run(*(a for a in args if a != "--apply"), apply=bool(args))
+        assert TOKEN not in r.stdout + r.stderr and "s3cr3t" not in r.stdout + r.stderr
+    assert not env.log.exists() or "s3cr3t" not in env.log.read_text()
+
+
+@pytest.mark.parametrize("flag,val", [("--min-idle", "-1"), ("--min-idle", "nan"), ("--min-idle", "inf"), ("--min-idle", "-1e9"),
+                                      ("--orphan-grace", "inf"), ("--orphan-grace", "nan"), ("--orphan-grace", "-5")])
+def test_non_finite_and_negative_numbers_are_a_usage_error(env, flag, val):
+    r = env.run(flag, val)
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+
+
+def test_unreadable_record_defers_every_orphan(env, mod, kills):
+    three_orphans(env)
+    (env.home / "agents/proj/broken.json").write_text("{not json")
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and s["orphans"] == [] and {d["reason"] for d in s["deferred"]} == {"records-unreadable"} and len(s["deferred"]) == 3
+    assert s["kill_plan"]["records_unreadable"] == 1 and s["kill_plan"]["deferred_unreadable"] == 3 and s["kill_plan"]["actionable"] == 0
+
+
+def test_bad_exclude_file_without_the_word_exclude_in_its_path_still_refuses(env, mod, kills, monkeypatch, tmp_path):
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    bad = tmp_path / "protect.txt"
+    bad.write_text("not-a-uuid\n")
+    monkeypatch.setenv("ADE_HELPER_PRUNE_EXCLUDE", str(bad))
+    with pytest.raises(mod.ExcludeRefused):
+        mod.prune(True, 300)
+    assert kills == []
+    r = env.run()
+    assert r.returncode == 1 and "Traceback" not in r.stderr
+
+
+def test_exclude_file_breaking_between_plan_and_kill_stops_without_a_traceback(env, mod, kills, monkeypatch, tmp_path):
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    ex = tmp_path / "protect.txt"
+    monkeypatch.setenv("ADE_HELPER_PRUNE_EXCLUDE", str(ex))
+    real, n = mod.load_excludes, []
+
+    def breaking(cli=()):
+        n.append(1)
+        if len(n) == 4:   # helper plan, orphan plan, the kill-time re-plan, then the per-orphan read
+            raise mod.ExcludeRefused("cannot read protect.txt")
+        return real(cli)
+
+    monkeypatch.setattr(mod, "load_excludes", breaking)
+    s = mod.prune(True, 300)
+    assert kills == [] and [e["what"].startswith("exclude list unreadable") for e in s["errors"]] == [True]
+
+
+def test_helper_with_an_unarchived_child_is_never_archived(env):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    env.agent(uid(40), "child work", labels={"paseo.parent-agent-id": h})
+    s = env.go(apply=True)
+    assert reasons(s)[h] == "has-children" and env.archives() == []
+
+
+def test_helper_whose_children_are_all_archived_is_archived(env):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    env.record(uid(40), {"paseo.parent-agent-id": h}, archived=True)
+    s = env.go(apply=True)
+    assert env.archives() == [h] and s["counts"]["archived"] == 1
+
+
+def test_helper_is_not_archived_when_a_record_is_unreadable(env):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    (env.home / "agents/proj/broken.json").write_text("{not json")
+    s = env.go(apply=True)
+    assert reasons(s)[h] == "children-unproven" and env.archives() == []
+
+
+def test_other_children_print_only_the_basename_of_argv0(env):
+    aid = orphan_world(env)
+    env.data["ps"].append(psl(4000103, PROV, "/usr/bin/curl -H Authorization: Bearer s3cr3t https://x"))
+    s = env.go()
+    (o,) = s["orphans"]
+    assert o["other_children"] == [{"pid": 4000103, "command": "curl"}] and "s3cr3t" not in json.dumps(s)
+
+
+def test_provider_parented_by_the_supervisor_itself_is_not_the_daemons_child(env, mod, kills):
+    orphan_world(env)
+    set_provider(env, ppid=SUP)                       # the supervisor is named in paseo.pid, but it is not titled `Paseo Daemon`
+    s = mod.prune(True, 300)
+    assert kills == [] and unmapped_reasons(s) == [(PROV, "not-paseo-parent")]
+
+
+def test_exclude_file_breaking_before_a_helper_archive_stops_without_a_traceback(env, mod, monkeypatch, tmp_path):
+    p = env.parent(1, archived=True)
+    env.helper(10, p)
+    env.helper(11, p)
+    env.data_path.write_text(json.dumps(env.data))
+    monkeypatch.setenv("ADE_HELPER_PRUNE_EXCLUDE", str(tmp_path / "protect.txt"))
+    real, n = mod.load_excludes, []
+
+    def breaking(cli=()):
+        n.append(1)
+        if len(n) == 4:   # helper plan, orphan plan, the re-read plan, then the per-archive read
+            raise mod.ExcludeRefused("cannot read protect.txt")
+        return real(cli)
+
+    monkeypatch.setattr(mod, "load_excludes", breaking)
+    s = mod.prune(True, 300)
+    assert env.archives() == [] and [e["what"].startswith("exclude list unreadable") for e in s["errors"]] == [True]
+
+
+def test_exclude_file_breaking_at_the_orphan_scan_refuses_the_run(env, mod, kills, monkeypatch, tmp_path):
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    monkeypatch.setenv("ADE_HELPER_PRUNE_EXCLUDE", str(tmp_path / "protect.txt"))
+    real, n = mod.load_excludes, []
+
+    def breaking(cli=()):
+        n.append(1)
+        if len(n) == 2:   # the helper plan read it fine; the orphan scan's read fails
+            raise mod.ExcludeRefused("cannot read protect.txt")
+        return real(cli)
+
+    monkeypatch.setattr(mod, "load_excludes", breaking)
+    with pytest.raises(mod.ExcludeRefused):   # not downgraded to "orphan scan skipped"
+        mod.prune(True, 300)
+    assert kills == []
