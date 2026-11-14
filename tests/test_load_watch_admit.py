@@ -226,7 +226,7 @@ def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
     rec = json.loads(admit(tmp_path, "--json", load1=CORES * 1.9, **calm).stdout)
     assert rec["status"] == "ok" and rec["max_per_core"] == 4.0
     assert admit(tmp_path, load1=CORES * 4.1, **calm).returncode == 75  # still above the boosted limit
-    # a caller that passes the base explicitly (bg does, 2.5 since 2026-11-01) still gets the boost
+    # a caller that passes the base explicitly (bg does: 3.0 since 2026-11-14, 2.5 from 2026-11-01) still gets the boost
     assert admit(tmp_path, "--max-per-core", "2.5", load1=CORES * 3.9, **calm).returncode == 0
 
 
