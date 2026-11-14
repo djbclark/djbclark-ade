@@ -387,7 +387,7 @@ def test_audit_rows_record_tool_name_and_rule_but_no_arguments(tmp_path):
     rows_ = audit_rows(tmp_path)
     assert [(r['request'], r['decision'], r['tool'], r['rule']) for r in rows_] == [
         ('a', 'allow-attempt', 'Bash', None), ('a', 'allowed', 'Bash', None),
-        ('b', 'skip', 'mcp__paseo__send_agent_prompt', 'mcp-hold:send_agent_prompt'),
+        ('b', 'skip', 'mcp__paseo__send_agent_prompt', 'hold:send_agent_prompt'),
         ('c', 'skip', 'AskUserQuestion', 'stem:question'), ('d', 'skip', 'Pi select', 'ui-token:select'),
         ('e', 'skip', '<redacted>', None), ('f', 'allow-attempt', '<redacted>', None), ('f', 'allowed', '<redacted>', None)]
     assert [r['reason'] for r in rows_ if r['decision'] == 'skip'] == ['operator-question'] * 3 + ['outside-scope']
@@ -428,3 +428,53 @@ def test_false_positive_and_question_names_end_to_end(tmp_path):
     skipped = [r for r in audit_rows(tmp_path) if r['decision'] == 'skip']
     assert [r['request'] for r in skipped] == [f'q{i:02d}' for i in range(len(STILL_QUESTIONS))]
     assert all(r['rule'] for r in skipped)
+
+
+# Round 2 (lead's re-review of 9ddda3ec): tools that act on another agent's cards, mode or turn are held under ANY prefix.
+HELD = ['paseo_respond_to_permission', 'paseo_set_agent_mode', 'paseo_send_agent_prompt', 'paseo_update_agent',
+        'mcp__paseo__update_agent', 'mcp__paseo__send_terminal_keys', 'mcp__paseo__cancel_agent', 'mcp__paseo__kill_agent',
+        'mcp__paseo__archive_agent', 'mcp__paseo__create_schedule', 'mcp__paseo__create_heartbeat',
+        'mcp__paseo__respondToPermission', 'mcp__paseo___respond_to_permission', 'mcp__paseo__respond_to_permission ',
+        'mcp__paseo__RESPOND_TO_PERMISSION', 'respond-to-permission', 'Paseo Respond To Permission', 'paseo_sendTerminalKeys']
+NOT_HELD = ['mcp__paseo__create_agent', 'mcp__paseo__list_agents', 'mcp__paseo__update_schedule', 'paseo_echo_context',
+            'mcp__paseo__get_agent_status', 'paseo_list_agents', 'Bash', 'mcp__paseo__browser_select']
+
+
+def test_hold_tools_match_by_trailing_words_under_any_prefix():
+    module = runpy.run_path(str(SCRIPT))
+    for name in HELD:
+        rule = module['classify']({'name': name})
+        assert rule and (rule.startswith('hold:') or rule.startswith('token:')), (name, rule)
+    for name in ['paseo_respond_to_permission', 'paseo_update_agent', 'mcp__paseo__update_agent', 'mcp__paseo__kill_agent',
+                 'mcp__paseo__respondToPermission', 'mcp__paseo___respond_to_permission', 'mcp__paseo__respond_to_permission ']:
+        assert module['classify']({'name': name}).startswith('hold:'), name
+    for name in NOT_HELD:
+        assert module['classify']({'name': name}) is None, name
+
+
+def test_held_tools_never_approved_end_to_end_for_each_classified_provider(tmp_path):
+    for i, prov in enumerate(['claude/x', 'opencode/x', 'codex/x']):
+        d = tmp_path / f'p{i}'
+        d.mkdir()
+        reqs = [req(OTHER, f'h{j:02d}', n) for j, n in enumerate(HELD)] + [req(OTHER, 'ok', 'paseo_echo_context')]
+        result, calls = run_fake(d, {'requests': reqs, 'local': [OTHER], 'providers': {OTHER: prov}}, '--all-local')
+        assert result.returncode == 0, result.stderr
+        assert [c[3] for c in allows(calls)] == ['ok']
+
+
+def test_credential_looking_names_are_redacted_in_the_log(tmp_path):
+    module = runpy.run_path(str(SCRIPT))
+    for name in ['ghp_' + 'A' * 36, 'gho_abcdef', 'github_pat_11ABC', 'sk-proj-abc123', 'xoxb-12345', 'mcp__x__' + 'a1B2' * 10,
+                 'deadbeef' * 5, 'a' * 33]:
+        assert module['tool_name']({'name': name}, 'claude') == '<redacted>', name
+    for name in ['Bash', 'Task-x', 'mcp__plugin_figma_figma__get_design_context', 'mcp__ask-thing', 'TaskStop', 'Pi select']:
+        assert module['tool_name']({'name': name}, 'claude') == name, name
+    secret = 'ghp_' + 'Z' * 36
+    result, calls = run_fake(tmp_path, {'requests': [req(OTHER, 'c', secret)], 'local': [OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert secret not in (tmp_path / 'audit.jsonl').read_text()
+    assert [r['tool'] for r in audit_rows(tmp_path)] == ['<redacted>'] * 2
+
+
+def test_unused_max_tool_constant_is_gone():
+    assert 'MAX_TOOL' not in runpy.run_path(str(SCRIPT))

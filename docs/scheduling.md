@@ -424,12 +424,14 @@ elicitation word, or a missing name): it is logged `skip` / `operator-question` 
 (2026-11-14: `Task`, `TaskStop`, `task_user` are tools, `ask_user` is not; the long stems `question`, `elicit`, `exitplan`,
 `planapproval`, `switchmode`, `userinput`… still match inside a run-together or all-caps name). A well-formed
 `mcp__<server>__<tool>` name is a third-party tool prompt: only a tool that is itself a question or elicitation stays pending, so
-`browser_select`, `ask_gemini` and `create_agent` are approved. MCP tools that act on another agent's cards or mode
-(`respond_to_permission`, `set_agent_mode`, `send_agent_prompt`; rule `mcp-hold:<tool>`) stay pending too, and so does
-`EnterPlanMode` (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
-provider is classified and the name is an identifier, because ACP titles are free text and can be command lines; never
+`browser_select`, `ask_gemini` and `create_agent` are approved. Tools that act on another agent's cards, mode or turn are held under any prefix
+(`mcp__paseo__x`, OpenCode's `paseo_x`; case-folded, camelCase split, trailing words): `respond_to_permission`,
+`set_agent_mode`, `update_agent`, `send_agent_prompt`, `send_terminal_keys`, `cancel_agent`, `kill_agent`, `archive_agent`,
+`create_schedule`, `create_heartbeat` (rule `hold:<tool>`; an explicit hold list, not an allowlist, so unknown tools stay approvable).
+`EnterPlanMode` stays pending too (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
+provider is classified and the name is an identifier that does not look like a credential, because ACP titles are free text and can be command lines; never
 arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
-`mcp-hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
+`hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
 tool prompt), so a skipped request can be told apart from a misclassified one. The check is a
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is

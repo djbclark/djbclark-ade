@@ -68,13 +68,19 @@ TOKENS = {"ask", "plan", "mode", "prompt", "dialog", "approval", "approve", "cho
 UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods
 # `mcp__<server>__<tool>` is a third-party MCP tool the model calls: approving it runs the tool and answers no
 # question or plan, so only the STEMS (a tool that is itself a question or elicitation) keep it pending; the
-# generic TOKENS and UI_TOKENS ("browser_select", "ask_gemini") do not. MCP tools that act on ANOTHER agent's
-# pending cards or mode stay pending too (adversary review of #662): respond_to_permission answers a card,
-# set_agent_mode can widen an agent to bypassPermissions, and send_agent_prompt / a steer denies every pending
-# question and plan approval of its target.
-MCP_HOLD_TOOLS = {"respond_to_permission", "set_agent_mode", "send_agent_prompt"}
-MAX_TOOL = 200
+# generic TOKENS and UI_TOKENS ("browser_select", "ask_gemini") do not.
+# HOLD_TOOLS is an explicit hold list, not an allowlist (the operator wants no prompts, so unknown tools stay
+# approvable): tools that act on ANOTHER agent's pending cards, mode or turn, or defer a prompt. A held tool is
+# found by its trailing words under ANY prefix (OpenCode asks as `<server>_<tool>`, Claude as `mcp__<server>__<tool>`),
+# case-folded and camelCase-split. respond_to_permission answers a card; set_agent_mode and update_agent (modeId)
+# can widen an agent to bypassPermissions; send_agent_prompt or a steer denies every pending question and plan of
+# its target; send_terminal_keys types into a TUI prompt; cancel/kill/archive_agent abort the turn that holds a
+# card; create_schedule and create_heartbeat are deferred prompts.
+HOLD_TOOLS = ("respond_to_permission", "set_agent_mode", "update_agent", "send_agent_prompt", "send_terminal_keys",
+              "cancel_agent", "kill_agent", "archive_agent", "create_schedule", "create_heartbeat")
 TOOL_SHAPE = re.compile(r"[A-Za-z][A-Za-z0-9_.:\-]{0,159}( [a-z_]{1,32})?")  # an identifier or "Pi method", never a command line
+# A logged name that looks like a credential is redacted: a known token prefix at a name start/separator, or a long run.
+CREDENTIAL = re.compile(r"(?:^|[_\-\s])(?:gh[pousr]_|github_pat_|sk-|xox[a-z]-)|[A-Za-z0-9+/=]{32,}")
 
 
 def words(name):
@@ -90,7 +96,7 @@ def tool_name(row, provider=None):
     name = row.get("name") if isinstance(row, dict) else None
     if not isinstance(name, str):
         return None
-    if provider not in CLASSIFIED_PROVIDERS or not TOOL_SHAPE.fullmatch(name):
+    if provider not in CLASSIFIED_PROVIDERS or not TOOL_SHAPE.fullmatch(name) or CREDENTIAL.search(name):
         return "<redacted>"
     return name
 
@@ -117,9 +123,12 @@ def classify(row):
     for stem in STEMS:
         if any(compact.startswith(stem, at) for at in starts) if stem in WORD_START_STEMS else stem in compact:
             return f"stem:{stem}"
+    for held in HOLD_TOOLS:
+        held_words = held.split("_")
+        if parts[-len(held_words):] == held_words:
+            return f"hold:{held}"
     if is_mcp_tool(name):
-        hold = name.split("__")[-1].lower().replace("-", "_")
-        return f"mcp-hold:{hold}" if hold in MCP_HOLD_TOOLS else None
+        return None
     if name.startswith("mcp__"):
         return "malformed-mcp-name"  # server or tool segment missing: not a name Paseo's providers emit
     for token in parts:
