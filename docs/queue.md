@@ -78,7 +78,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     `research_check.py claims`. Lives in `skills/research`.
 22. **Ingest web-interface AI conversations** (Gemini, Grok web; 2026-08-23) into the memory system: not started.
 23. **Dynamic model and effort adjustment by token efficiency** (2026-08-23): not started; the Jev effort nudge that
-    approached it was deleted (E2). Lives in `skills/model-routing` B.
+    approached it was deleted (E2). Lives in `skills/model-routing` B. Price input: item 36.
 24. **S1 Phase B adapters** (hindsight, 2026-08-23; status 2026-11-10): the Claude tail and checkpoint
     adapter onward; site-djbclark's `bin/hindsight_s1.py` (order 11). Docs/status open as #478
     (`docs/history/s1-phaseb-status-2026-11-10.md`). Drop or grant after an operator Phase-B decision under
@@ -128,6 +128,15 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     incomplete"). `context-budget` was created by hand that day (`paseo schedule create`, id c98b8f3c, operator yes), so
     the ledger does not own it. Next: a Paseo-schedule admission adapter (or record manual create as the path and let
     reconcile adopt a matching live row). Lives in `bin/ade_sched.py` (`JobAdmission`, admit factory), `docs/scheduling.md`.
+36. **Model prices from models.dev** (operator, 2026-11-14): install the `~/src/paseo-plugins/model-pricing` Paseo
+    plugin (sidebar price table; reads [models.dev](https://models.dev) and OpenRouter, no keys) and feed the same
+    catalog into routing. Today `bin/route_agent.py` routes on quota headroom and quality rank only; no per-token
+    price enters it. Use list price where it is the real cost: API-billed pools (Bedrock, OpenRouter, Cursor
+    Cloud API price, Claude API credits via Pi, OpenCode Go), the dollar side of item 23's token-efficiency
+    measure, and `aiuse` cost estimates. Subscription pools (Claude, Codex, Antigravity) keep quota headroom as the
+    constraint, list price only a tie-break. models.dev is community data: cache it with its fetch date, bound
+    sanity (drop a price that moves >5x between fetches), never fail a route on a missing row. Next: install the
+    plugin (operator asked), then a design note in `docs/model-routing.md` and a `route_agent.py` price reader.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
