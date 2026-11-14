@@ -289,18 +289,27 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     # One WORKERS window per (lead, repo): a typo guards only against a second window for the SAME repo. A launch for a repo the
     # lead has no window for mints one (2026-11-14, tendcf lead 698fa914: a libntech worker was refused for a cfengine-core window
     # and had to run in it). A window whose repo cannot be read still counts, and `repo` None keeps every owned window counting.
-    def same(r: dict) -> bool:  # names compare without case (`--repo CFEngine-core` is the repo `cfengine-core`)
+    def by_name(r: dict) -> bool:  # names compare without case (`--repo CFEngine-core` is the repo `cfengine-core`)
         theirs = own_repo.get(r.get("workspaceId"))
-        if theirs is None or theirs.casefold() == (repo or "").casefold():
-            return True
-        # the same checkout under another name (a window named with a `--repo` alias): one window per repo, whatever it is called
-        wc = own_cwd.get(r.get("workspaceId"))
-        return bool(cwd and wc and os.path.isdir(wc) and wsn.primary_checkout_of(wc) == wsn.primary_checkout_of(cwd))
-    same_repo = [r for r in owned_own if repo is None or same(r)]
-    if middle is not None and not hits and same_repo:
-        ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in same_repo)
-        raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
-                      "use that --window-middle (or none), not a second window")
+        return theirs is None or theirs.casefold() == (repo or "").casefold()
+
+    if middle is not None and not hits and owned_own:  # computed only when the guard can fire: it runs git for a window of another name
+        mine_co = wsn.primary_checkout_of(cwd) if cwd else None
+        if mine_co and os.path.realpath(wsn._git(mine_co, "rev-parse", "--show-toplevel") or "/nonexistent") != mine_co:
+            mine_co = None  # not a git toplevel (a scratch directory, `~`): it names no repo, so nothing aliases to it
+
+        def by_checkout(r: dict) -> bool:
+            # the same git checkout under another name (a window named with a `--repo` alias): one window per repo, whatever it is called
+            wc = own_cwd.get(r.get("workspaceId"))
+            return bool(mine_co and wc and os.path.isdir(wc) and wsn.primary_checkout_of(wc) == mine_co)
+        same_repo = [r for r in owned_own if repo is None or by_name(r) or by_checkout(r)]
+        if same_repo:
+            ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in same_repo)
+            hint = "use that --window-middle (or none), not a second window"
+            if repo is not None and not any(by_name(r) for r in same_repo):
+                hint = (f"it is the same checkout as --cwd, so a window for {repo} needs --cwd that repo's own checkout; "
+                        "otherwise use that --window-middle (or none), not a second window")
+            raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; {hint}")
     if len(hits) > 1:  # a duplicate unclaimed name must not lock the lead out of its own window
         own_hits = [h for h in hits if h[1] is not None or h[0].get("workspaceId") in members]
         if len(own_hits) == 1:
@@ -532,7 +541,7 @@ def add_footer(rest: list[str]) -> list[str]:
 
 def names_path(brief: str, paths: list[str]) -> bool:
     """True when the brief carries one of `paths` as a whole absolute path (not a prefix of a longer name); every path passed is already absolute."""
-    return any(re.search(r"(?<![\w/.-])" + re.escape(p.rstrip("/")) + r"(?![\w-]|\.[\w-])", brief) for p in paths)
+    return any(re.search(r"(?<![\w/.-])" + re.escape(p.rstrip("/")) + r"(?![\w-]|\.[\w-])", brief) for p in paths if p)
 
 
 def launch(opts, rest: list[str]) -> int:
@@ -590,12 +599,19 @@ def launch(opts, rest: list[str]) -> int:
         # The caller asked for a directory (--cwd) or is standing in a linked worktree (no --cwd): the worker still starts in
         # eff_cwd, so the same checks and reports apply to both (2026-11-14, lead review of #709: the implicit case was silent).
         requested = bool(opts.cwd) or (win is None and not main_place and eff_cwd != cwd and wsn.linked_worktree(cwd))
-        if eff_cwd != cwd and requested and not main_place and not names_path(
-                brief, [cwd, os.path.abspath(os.path.expanduser(opts.cwd or cwd))]):
-            # the worker starts in eff_cwd, the shared primary checkout where nothing may be edited: its brief must name the worktree
-            raise Refused(f"the worker would start in {eff_cwd} (the repo's primary checkout), not --cwd {cwd}, and the brief does "
-                          f"not name {cwd}{'' if opts.cwd else ' (the directory you ran from)'}: put that worktree in the brief as an absolute path so every repository operation runs "
-                          "there (docs/workspace-layout.md item 5), then launch again")
+        if eff_cwd != cwd and requested and not main_place:
+            top = wsn._git(cwd, "rev-parse", "--show-toplevel")  # --cwd may be a subdirectory of the worktree the brief names
+            if not names_path(brief, [cwd, os.path.abspath(os.path.expanduser(opts.cwd or cwd)), os.path.realpath(top) if top else ""]):
+                # the worker starts in eff_cwd, the shared primary checkout where nothing may be edited: its brief must name the worktree
+                if opts.cwd:
+                    raise Refused(f"the worker would start in {eff_cwd} (the repo's primary checkout), not --cwd {cwd}, and the brief "
+                                  f"does not name {cwd}: put that worktree in the brief as an absolute path so every repository "
+                                  "operation runs there (docs/workspace-layout.md item 5), then launch again")
+                # no --cwd: `cwd` is only where the lead stands, usually its own claimed worktree: never advise handing it over
+                raise Refused(f"you gave no --cwd and stand in linked worktree {cwd}: the worker would start in {eff_cwd} (the repo's "
+                              "primary checkout), and the brief does not name this worktree. Pass --cwd <the worker's own worktree> "
+                              "and name it in the brief by absolute path, or run from the primary checkout "
+                              "(docs/workspace-layout.md item 5). Never hand a worker the worktree you are working in")
         if rename_to:  # retroactive migration of a legacy name; the window id does not change
             if any(r["name"] == rename_to for r in list_windows() if r.get("workspaceId") != win.get("workspaceId")):
                 raise Refused(f"cannot rename legacy window {win['name']!r} to {rename_to!r}: another window already has that "

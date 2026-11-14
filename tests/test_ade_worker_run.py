@@ -1602,7 +1602,9 @@ def test_no_cwd_from_a_linked_worktree_is_checked_like_an_explicit_cwd(env, tmp_
     """Lead review of #709, B1: standing in a worktree and giving no --cwd must not silently start the worker in the primary checkout."""
     main, wt = make_repo(tmp_path)
     r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", "just do it")
-    assert r.returncode == 1 and "brief" in r.stderr and "ran from" in r.stderr and not placed(env)
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    # round 4, D1: the remedy must never tell the lead to hand over the worktree it stands in
+    assert "--cwd" in r.stderr and "put that worktree" not in r.stderr and "Never hand a worker the worktree you" in r.stderr
     r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
@@ -1619,6 +1621,39 @@ def test_no_cwd_from_a_linked_worktree_is_checked_like_an_explicit_cwd(env, tmp_
     own(LEAD)
     r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 1 and "started in" in r.stderr and "stopped (interrupted" in r.stderr
+
+
+def test_the_explicit_cwd_refusal_still_says_to_put_the_worktree_in_the_brief(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt, brief="no path")
+    assert r.returncode == 1 and "put that worktree in the brief" in r.stderr and "you gave no --cwd" not in r.stderr
+
+
+def test_a_subdirectory_of_the_worktree_accepts_a_brief_naming_the_worktree(env, tmp_path):
+    """Round 4, E1: --cwd <wt>/sub, brief names <wt>: the worktree is named."""
+    main, wt = make_repo(tmp_path)
+    (wt / "sub").mkdir()
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt / "sub"), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_directory_that_is_no_git_checkout_never_aliases_two_repos(env, tmp_path):
+    """Round 4, E2a: two --repo names minted from one scratch directory are two repos, not a typo."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS alpha (Wave 1)", "cwd": str(scratch)}]
+    own(LEAD, "wks_a")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "beta", "--window-middle", "Wave 1", "--cwd", str(scratch), "--", "--no-wait", "go")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_checkout_match_under_another_name_says_to_pass_the_other_repos_cwd(env, tmp_path):
+    """Round 4, E2b: --repo libntech from inside the cfengine-core checkout is refused with the right remedy."""
+    core, _ = make_repo(tmp_path, "cfengine-core")
+    env.data["workspaces"] = [{"workspaceId": "wks_core", "name": "WORKERS cfengine-core (Wave 1)", "cwd": os.path.realpath(core)}]
+    own(LEAD, "wks_core")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "Wave 2", "--cwd", str(core), "--", "--no-wait", "go")
+    assert r.returncode == 1 and "second window" in r.stderr and "that repo's own checkout" in r.stderr
 
 
 def test_a_window_named_with_a_repo_alias_still_counts_for_the_same_checkout(env, tmp_path):
