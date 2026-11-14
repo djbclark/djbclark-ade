@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse (Bash): deny five shell mistakes that recur, and warn on a sixth (2026-10-18).
+"""PreToolUse (Bash): deny six shell mistakes that recur, and warn on two more (2026-10-18).
 
 1. Bare `sed` (deny). On this Mac it is BSD sed; GNU `gsed` is the rule (2026-10-15: a BSD
    `sed -i` broke an edit; home CLAUDE.md item 1). An explicit `/usr/bin/sed` is a deliberate
@@ -30,6 +30,15 @@
    every shell in it. The command word `open` or `/usr/bin/open` (any pipeline segment, past
    VAR=x, `env`, `sudo`, `xargs`, `timeout`) is denied and bin/open-clean is named. `env -i ...
    open` and `open-clean` pass; so do `xdg-open`, `opencode`, `open` as an argument or in quotes.
+
+7. `gh run watch` / `gh pr checks --watch` (deny, 2026-11-14) and a parallel `gh` fan-out
+   (warning). Every agent shares one GitHub token with a 5000/h REST quota; four `gh run watch`
+   at gh's default 3 s interval emptied it from 10:22Z to 11:22Z and stopped every agent's gh
+   work (docs/dispatch-footer.md item 20 says "never wait on CI" and did not stop it). The
+   command word `gh` (past VAR=x, wrappers, `timeout N`, `bg`, `rtk`, `do`/`then`, and the body
+   of `bash -c '...'`) with `run watch`, or `pr checks` plus `--watch`, is denied unless
+   it carries `--interval`/`-i` of 60 or more (quota-safe: about 2-3 calls a minute; the lead's
+   documented CI wait). `xargs -P N` / `parallel` around `gh` calls only warns.
 
 Words inside quotes, heredoc bodies and comments do not count. Fails open on any parse error.
 The tool table is separate from bin/gnu-tools-check's, which flags every long option on its
@@ -386,6 +395,146 @@ def bare_open(stage: str) -> bool:
     return False
 
 
+GH_WATCH_MIN_INTERVAL = 60  # seconds; None would make every watcher a denial
+# Words that only introduce the next command (or wrap it with options of their own).
+SHELL_KW = frozenset({"do", "then", "else", "elif", "if", "while", "until"})
+EXTRA_WRAP = frozenset({"rtk", "bg", "setsid", "caffeinate", "stdbuf", "ionice", "chronic",
+                        "unbuffer"})
+GH_WATCH_REASON = (
+    "Never watch CI with `{what}` (docs/dispatch-footer.md item 20: never wait on CI). Every "
+    "agent shares one GitHub token with a 5000/h REST quota; on 2026-11-14 four `gh run watch` "
+    "at gh's default 3 s interval emptied it from 10:22Z to 11:22Z and blocked every agent's gh "
+    "work, and a watcher also keeps you busy and deaf to the lead's messages. Instead: report "
+    "\"CI running\" with the run URL and end the turn; or one-shot `gh run view RUN --json "
+    "status,conclusion`; or a background loop that sleeps 60 s or more between one-shot checks. "
+    "The lead's single watcher passes with `--interval 60` (or more)."
+)
+GH_FANOUT_WARNING = (
+    "Parallel `gh` calls (`xargs -P` / `parallel`) draw on the one 5000/h REST quota every agent "
+    "shares (2026-11-14: it hit 0 for an hour). A script making more than ~200 GitHub API calls "
+    "first reads `gh api rate_limit`, paces itself, stops at remaining < 500 and batches with "
+    "GraphQL (docs/dispatch-footer.md item 26)."
+)
+GH_FANOUT_CMD = re.compile(r"\bgh\s+(?:(?:-R|--repo)\s+\S+\s+)?"
+                           r"(?:api|pr|run|issue|repo|search|release|workflow)\b")
+SHELL_C = re.compile(
+    r"""(?:^|[;&|(\n{]|\$\()\s*(?:[\w=./-]+\s+){0,4}(?:ba|z|da)?sh\s+"""
+    r"""(?:-[A-Za-z]+\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
+
+
+def _drop_heredocs(c: str) -> str:
+    """The command without heredoc bodies (their text is data, not commands)."""
+    out, lines, i = [], c.split("\n"), 0
+    while i < len(lines):
+        out.append(lines[i])
+        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[i])
+        if m:
+            i += 1
+            while i < len(lines) and lines[i].strip() != m.group(1):
+                i += 1
+        i += 1
+    return "\n".join(out)
+
+
+def gh_args(stage: str) -> list[str] | None:
+    """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
+    `rtk`, `do`/`then`), else None."""
+    for _ in range(8):
+        head, rest = command_word(stage)
+        base = os.path.basename(head)
+        if base in SHELL_KW or base in EXTRA_WRAP:
+            while base in EXTRA_WRAP and rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            stage = " ".join(rest)
+            continue
+        return rest if base == "gh" else None
+    return None
+
+
+def gh_watch(args: list[str]) -> str | None:
+    """The command text when `gh ARGS` is `run watch` or `pr checks --watch` without a
+    `--interval` of GH_WATCH_MIN_INTERVAL or more, else None."""
+    pos: list[str] = []
+    i = 0
+    while i < len(args) and len(pos) < 2:
+        a = args[i]
+        if a == "--":
+            return None
+        if a in ("-R", "--repo"):
+            i += 1
+        elif not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    rest = args[i:]
+    if "--" in rest:
+        rest = rest[:rest.index("--")]
+    if pos == ["run", "watch"]:
+        what = "gh run watch"
+    elif pos == ["pr", "checks"] and any(
+            a == "--watch" or (a.startswith("--watch=") and a[8:].lower() not in
+                               ("false", "f", "0")) for a in rest):
+        what = "gh pr checks --watch"
+    else:
+        return None
+    interval = None
+    j = 0
+    while j < len(rest):
+        a = rest[j]
+        val = None
+        if a in ("-i", "--interval"):
+            val = rest[j + 1] if j + 1 < len(rest) else ""
+            j += 1
+        elif a.startswith("--interval="):
+            val = a[11:]
+        elif a.startswith("-i") and not a.startswith("--"):
+            val = a[2:].lstrip("=")
+        if val is not None:
+            interval = val
+        j += 1
+    if GH_WATCH_MIN_INTERVAL is not None and interval is not None and \
+            re.fullmatch(r"\d+", interval) and int(interval) >= GH_WATCH_MIN_INTERVAL:
+        return None
+    return GH_WATCH_REASON.format(what=what)
+
+
+def gh_watch_in(text: str, depth: int = 0) -> str | None:
+    """A gh-watch denial for any stage of `text`, looking inside `bash -c '...'` bodies."""
+    plain = strip_literals(text)
+    for view in command_views(plain):
+        for pipeline in re.split(r"&&|\|\||;|\n|&", view):
+            for stage in re.split(r"\|&?", pipeline):
+                args = gh_args(stage)
+                reason = gh_watch(args) if args is not None else None
+                if reason:
+                    return reason
+    if depth < 3:
+        for m in SHELL_C.finditer(_drop_heredocs(text)):
+            reason = gh_watch_in(m.group(1)[1:-1], depth + 1)
+            if reason:
+                return reason
+    return None
+
+
+def xargs_parallel(xa: list[str]) -> bool:
+    """True when xargs options ask for more than one process (`-P 0` is unlimited)."""
+    i = 0
+    while i < len(xa):
+        a = xa[i]
+        if a == "--" or not a.startswith("-") or a == "-":
+            break
+        val = None
+        if a in ("-P", "--max-procs"):
+            val = xa[i + 1] if i + 1 < len(xa) else None
+        elif a.startswith("--max-procs="):
+            val = a[12:]
+        elif a.startswith("-P") and not a.startswith("--"):
+            val = a[2:]
+        if val is not None and val != "1":
+            return True
+        i += 2 if a in XARGS_ARG or a in XARGS_LONG_ARG else 1
+    return False
+
+
 def gnu_reason(tool: str, flag: str, via_xargs: bool = False) -> str:
     where = f"xargs {tool}" if via_xargs else tool
     g = "gxargs" if tool == "xargs" else f"g{tool}"
@@ -463,8 +612,12 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     hd = unterminated_heredoc_reason(cmd)
     if hd:
         return hd, None
+    gh = gh_watch_in(cmd)
+    if gh:
+        return gh, None
     plain = strip_literals(cmd)
     warn = None
+    fanout = False
     for view in command_views(plain):
         # control operators split pipelines; the pipe splits stages
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
@@ -484,6 +637,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                     return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
                                       and tool != "xargs"), None
                 xa = xargs_args(stage)
+                if xargs_parallel(xa) or command_word(stage)[0] in ("parallel", "gparallel"):
+                    fanout = True
                 flag = gnu_only("xargs", xa) if xa else None
                 if flag:
                     return gnu_reason("xargs", flag), None
@@ -495,6 +650,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                                 "(this Mac's timestamp is global), so it proves nothing about a "
                                 "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
                                 "it ignores the cache without clearing it.")
+    if fanout and GH_FANOUT_CMD.search(_drop_heredocs(cmd)):
+        warn = (warn + " " if warn else "") + GH_FANOUT_WARNING
     # the pipe-status check reads the whole command, substitutions and all, as it always did
     # (2026-11-02, Codex review of PR 254: no exemption and no trimming here)
     # control operators split pipelines; keep each operator to know what reads the status

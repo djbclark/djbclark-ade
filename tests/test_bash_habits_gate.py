@@ -409,3 +409,114 @@ def test_garbage_input_fails_open():
     r = subprocess.run([sys.executable, str(HOOK)], input="not json", capture_output=True,
                        text=True, timeout=30)
     assert (r.returncode, r.stdout) == (0, "")
+
+
+# --- gh watchers (2026-11-14: four `gh run watch` at 3 s emptied the shared 5000/h quota) ---
+
+@pytest.mark.parametrize("command", [
+    "gh run watch 123",
+    "gh run watch",
+    "gh run watch 123 --exit-status",
+    "gh run watch 123 -i 30",                           # below 60 s
+    "gh run watch 123 --interval 59",
+    "gh run watch 123 --interval=5",
+    "gh run watch 123 --interval $SECS",                # not provably >= 60
+    "gh pr checks 5 --watch",
+    "gh pr checks --watch --required",
+    "gh pr checks --watch 5 -R o/r",
+    "gh pr checks 5 --watch --interval 10",
+    "gh pr checks 5 --watch=true",
+    "gh -R o/r run watch 123",
+    "gh --repo o/r pr checks 5 --watch",
+    "git push && gh run watch 9 --exit-status",
+    "git push; gh run watch 9",
+    "(gh run watch 9)",
+    "gh run watch 9 &",
+    "echo go | gh run watch 9",
+    "x=$(gh run watch 9)",
+    "gh run watch $(gh run list -L1 --json databaseId --jq '.[0].databaseId')",
+    "timeout 600 gh run watch 9",
+    "GH_TOKEN=x gh run watch 9",
+    "env GH_PAGER= gh pr checks 5 --watch",
+    "nohup gh run watch 9 > w.log 2>&1 &",
+    "/opt/homebrew/bin/gh run watch 9",
+    "~/ops/site-private-djbclark/bin/bg gh run watch 9",
+    "rtk gh run watch 9",
+    "if true; then gh run watch 9; fi",
+    "while true; do gh pr checks 5 --watch; done",
+    "bash -c 'gh run watch 9'",
+    "bash -lc \"gh run watch 9 --exit-status\"",
+    "timeout 9 sh -c 'sleep 1; gh pr checks 5 --watch'",
+    "sudo bash -c 'bash -c \"gh run watch 9\"'",
+    "ls | xargs -n1 gh run watch",
+])
+def test_gh_watchers_are_denied(command):
+    out = run(command)
+    assert out and out.get("permissionDecision") == "deny", command
+    reason = out["permissionDecisionReason"]
+    assert "item 20" in reason and "5000/h" in reason and "2026-11-14" in reason
+    assert "gh run view RUN --json status,conclusion" in reason and "60 s" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "gh run watch 9 --interval 60",                     # the lead's quota-safe single watcher
+    "gh run watch 9 -i 120 --exit-status",
+    "gh run watch 9 -i=90",
+    "gh pr checks 5 --watch --required --interval 60",
+    "gh pr checks 5 --watch -i 60",
+    "gh run view 9 --json status,conclusion",           # the one-shot
+    "gh run view 9 --exit-status",
+    "gh run list -L 5",
+    "gh pr checks 5",                                   # one-shot, no --watch
+    "gh pr checks 5 --required --json name,state",
+    "gh pr checks 5 --watch=false",
+    "gh pr checks 5 --web",
+    "gh pr view 5 --json statusCheckRollup",
+    "gh api rate_limit --jq .resources.core",
+    "gh workflow run ci.yml",                           # `run` here is not `gh run`
+    "echo 'gh run watch 9' > note.txt",                 # quoted: documentation, not a command
+    "echo \"gh pr checks 5 --watch\"",
+    "cat <<'EOF' > f\ngh run watch 9\nEOF",             # heredoc body
+    "cat <<EOF > f\nbash -c 'gh run watch 9'\nEOF",
+    "rg -n 'gh run watch' docs/",
+    "echo \"bash -c 'gh run watch 9'\"",
+    "ls  # gh run watch 9 later",
+    "git commit -m 'never gh run watch'",
+    "echo gh-run-watch",
+    "ghr run watch 9",                                  # another tool
+    "bash -c 'gh run view 9 --json status'",
+    "until gh run view 9 --json conclusion --jq .conclusion | rg -q .; do sleep 60; done",
+])
+def test_gh_one_shots_and_mentions_pass(command):
+    assert not denied(command), command
+
+
+def test_gh_watch_denial_is_one_rule_among_the_others_and_names_nothing_ran():
+    out = run("echo earlier; gh run watch 9")
+    assert out["permissionDecision"] == "deny"
+    assert out["permissionDecisionReason"].startswith("NOTHING in this command ran")
+
+
+@pytest.mark.parametrize("command", [
+    "gh api repos/o/r/pulls --paginate | jq -r '.[].number' | xargs -P 6 -I{} gh api repos/o/r/pulls/{}",
+    "printf '%s\\n' 1 2 3 | xargs -P4 -n1 gh pr view",
+    "seq 300 | xargs --max-procs=8 -I{} gh api issues/{}",
+    "seq 300 | xargs -P 0 -I{} sh -c 'gh api issues/{}'",
+    "seq 300 | parallel -j6 gh api issues/{}",
+])
+def test_parallel_gh_fanout_warns_without_denying(command):
+    out = run(command)
+    assert out and "permissionDecision" not in out, command
+    assert "rate_limit" in out["additionalContext"] and "remaining < 500" in out["additionalContext"]
+
+
+@pytest.mark.parametrize("command", [
+    "seq 3 | xargs -n1 gh api issues/1",                # serial
+    "seq 3 | xargs -P 1 -I{} gh api issues/{}",
+    "seq 3 | xargs -P 6 -I{} echo {}",                  # parallel, but no gh
+    "gh api rate_limit",
+    "cat <<'EOF' > f\nxargs -P 6 gh api x\nEOF",        # heredoc body
+])
+def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
+    out = run(command)
+    assert not out or "rate_limit" not in out.get("additionalContext", ""), command

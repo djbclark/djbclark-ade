@@ -84,7 +84,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
       hence **malformed**. Masking never repairs JSON.
 
    After a body edit (a body edit is not a Tests run) re-run the gate with `gh workflow run adversary-marker.yml -f pr=N`;
-   wait with `gh pr checks N --watch --required`. Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`,
+   wait with `gh pr checks N --watch --required --interval 60`. Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`,
    so the head reviewed is the head merged. Remove the worktree and delete the branch only after `gh pr view N --json state`
    reads `MERGED`, never chained after the merge with `;`: a refused merge (a conflict, a moved head)
    followed by deleting the head branch closes the PR (PR 172, 2026-10-31).

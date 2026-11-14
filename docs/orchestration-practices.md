@@ -206,7 +206,12 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    runs, where its log is, what to check next) and let the result wake you.
 6. **Never wait on CI** (`gh pr checks --watch`, `gh run watch`). Report
    "CI running" with the run URL and stop: the lead reads CI, and its wait command is
-   `gh pr checks PR --watch --required` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
+   `gh pr checks PR --watch --required --interval 60` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
+   `claude/hooks/bash_habits_gate.py` enforces this since 2026-11-14 ([docs/bash-habits-gate.md](bash-habits-gate.md)):
+   `gh run watch` and `gh pr checks --watch` are denied unless the command carries `--interval`/`-i` of 60 or more. Why: all agents
+   share one GitHub token with a 5000/h REST quota; four `gh run watch` at gh's default 3 s interval emptied it from 10:22Z to
+   11:22Z on 2026-11-14 and blocked every agent's gh work. At 60 s a watcher costs a few calls a minute; a worker still must not
+   park on one (rule 5).
 7. **One progress line per round in a fix-and-review loop**: the head sha and
    the finding count (`round 3: head 1a2b3c4, 2 findings`). A long serial
    loop that prints nothing looks the same as a hang to a human reading the
@@ -217,6 +222,11 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    before sending; do not treat a busy non-steerable target or a pending card as delivered.
    The asks / questions-please plugins are the operator's inbox. Report the message as
    held behind a card and move on; do not retry or poll it.
+9. **Bulk GitHub API calls are budgeted (2026-11-14).** Any script that makes more than ~200 GitHub API calls first reads
+   `gh api rate_limit`, paces itself (no more than a few concurrent calls, no `xargs -P`/thread fan-out in the thousands) and
+   stops at `remaining < 500`; prefer one GraphQL query that batches many objects to one REST call each. The gate warns on
+   `xargs -P`/`parallel` around `gh` calls. A second contributor to the 2026-11-14 outage was a lead's inventory script
+   that fanned out thousands of `gh api` calls on 6 threads with no `rate_limit` check.
 
 ## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-09)
 
