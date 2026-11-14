@@ -937,6 +937,10 @@ def test_json_without_error_or_code_is_unknown_not_refused(setup, stream):
     ('sessionvalue', 'set-cookie: session=sessionvalue; Path=/'),
     ('hunter2', "password: 'hunter2'"),
     ('hunter2', 'credentials=hunter2'),
+    ('hunter2', 'PASEO_DAEMON_PASSWORD=hunter2'),
+    ('abc123', 'GITHUB_TOKEN=abc123'),
+    ('zzz', 'MY_API_KEY: zzz'),
+    ('abc12345', 'Authorization Bearer abc12345'),
 ])
 def test_scrub_covers_these_secret_shapes(secret, text):
     out = ss.bounded(text, 512)
@@ -966,3 +970,32 @@ def test_agent_id_regex_is_bounded_as_an_id(message, other):
     got = ss.Service.archive_other_agent(error, PRED)
     # 'acceded' is seven hex-looking letters: a false positive that still only refuses, never archives
     assert got == other or (message.startswith('Agent acceded') and got == 'acceded')
+
+
+@pytest.mark.parametrize('text', [
+    'Password required for daemon', 'secretspec run', 'token expired for this session',
+    '{"error": {"code": "TOKEN_EXPIRED", "message": "retry"}}', 'task-sk-1 and disk-sk-2', 'my-sk-3',
+])
+def test_scrub_leaves_prose_codes_and_hyphenated_words_alone(text):
+    assert ss.bounded(text, 512) == text
+
+
+def test_sk_token_still_redacted_at_a_word_start():
+    out = ss.bounded('task-sk-1 then sk-ant-abc123 and (sk-live9)', 512)
+    assert out == 'task-sk-1 then [redacted] and ([redacted])'
+
+
+def test_code_is_validated_not_scrubbed():
+    assert ss.parse_envelope(envelope('TOKEN_EXPIRED', 'retry')) == ('TOKEN_EXPIRED', 'retry')
+    assert ss.parse_envelope(envelope('bad code!', 'm')) == ('INVALID_CODE', 'm')
+    assert ss.parse_envelope(envelope('X' * 65, 'm'))[0] == 'INVALID_CODE'
+    assert ss.parse_envelope(envelope('', 'm'))[0] is None
+
+
+def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
+    service, native, _ = setup
+    native.archive_result = (1, '', envelope('TOKEN_EXPIRED', 'login again'))
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    assert caught.value.info['code'] == 'TOKEN_EXPIRED'
+    assert caught.value.info['stderr_tail'] == envelope('TOKEN_EXPIRED', 'login again')

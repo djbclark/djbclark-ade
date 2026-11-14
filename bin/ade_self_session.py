@@ -45,13 +45,17 @@ MESSAGE_LIMIT = 300
 STDERR_CAP = 64 * 1024
 _KEYWORDS = (r'(?:token|secret|password|passwd|authorization|bearer|api[_-]?key|access[_-]?key|private[_-]?key'
              r'|credential)\w*')
-# keyword, optional quote/separator, optional scheme word, then a quoted string (escapes honoured,
-# whole string redacted) or a bare run of non-space characters
-_SECRETISH = re.compile(r'(?i)(\b' + _KEYWORDS + r'["\']?\s*[:=]?\s*(?:(?:basic|bearer|token)\s+)?)'
-                        r'(?:"(?:\\.|[^"\\\n])*"?|\'(?:\\.|[^\'\\\n])*\'?|[^\s"\',}]+)')
+# A keyword (an env-var prefix such as GITHUB_ or PASEO_DAEMON_ still counts: no letter or digit before it),
+# an explicit `:` or `=` (so prose like "Password required" and codes like TOKEN_EXPIRED survive), an optional
+# scheme word, then a quoted string (escapes honoured, redacted whole) or a bare run of non-space characters.
+_VALUE = r'(?:"(?:\\.|[^"\\\n])*"?|\'(?:\\.|[^\'\\\n])*\'?|[^\s"\',}]+)'
+_SECRETISH = re.compile(r'(?i)((?<![A-Za-z0-9])' + _KEYWORDS + r'["\']?\s*[:=]\s*(?:(?:basic|bearer|token)\s+)?)'
+                        + _VALUE)
+_BEARER = re.compile(r'(?i)((?<![A-Za-z0-9])bearer\s+)[^\s"\',}]+')
 _COOKIE = re.compile(r'(?i)(\b(?:set-)?cookie\w*["\']?\s*[:=]\s*)[^\n]+')
 _URL_USERINFO = re.compile(r'(://[^/\s:@]+:)[^@\s/]+@')
-_BARE_TOKEN = re.compile(r'\b(?:gh[pousr]_|github_pat_|sk-|xox[bpars]-)[A-Za-z0-9_-]+|\bAKIA[0-9A-Z]{16}\b')
+_BARE_TOKEN = re.compile(r'(?<![A-Za-z0-9_-])(?:gh[pousr]_|github_pat_|sk-|xox[bpars]-)[A-Za-z0-9_-]+'
+                         r'|\bAKIA[0-9A-Z]{16}\b')
 
 
 def bounded(text, limit):
@@ -60,6 +64,7 @@ def bounded(text, limit):
     text = _URL_USERINFO.sub(lambda m: m.group(1) + '[redacted]@', text)
     text = _BARE_TOKEN.sub('[redacted]', text)
     text = _COOKIE.sub(lambda m: m.group(1) + '[redacted]', text)
+    text = _BEARER.sub(lambda m: m.group(1) + '[redacted]', text)
     text = _SECRETISH.sub(lambda m: m.group(1) + '[redacted]', text).strip()
     return text if len(text) <= limit else '...' + text[-(limit - 3):]
 
@@ -87,7 +92,11 @@ def parse_envelope(*streams):
                 code, message = error.get('code'), error.get('message')
             else:
                 code, message = data.get('code'), error if isinstance(error, str) else data.get('message')
-            code = bounded(code, 64) if isinstance(code, str) and code else None
+            # A code is validated, never scrubbed: scrubbing mangled TOKEN_EXPIRED.
+            if isinstance(code, str) and code:
+                code = code if re.fullmatch(r'[A-Z0-9_]{1,64}', code) else 'INVALID_CODE'
+            else:
+                code = None
             return code, bounded(message, MESSAGE_LIMIT) if isinstance(message, str) else None
     return None
 

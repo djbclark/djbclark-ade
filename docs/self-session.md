@@ -127,7 +127,7 @@ values, `Authorization` schemes, quoted multi-word values, URL userinfo and bare
 stays only for a timeout (`TIMEOUT`), an OS error (`OSERROR`) and a nonzero exit whose
 stdout and stderr both hold no Paseo error envelope (a JSON object with an `error` or
 `code` key; any other JSON, such as a receipt or a log line, proves no refusal); those still
-keep `rc` and the tail. Only the last 64 KiB of stderr is read. `agent send`
+keep `rc` and the tail. Only the last 64 KiB of stderr is read. The envelope `code` is validated (`[A-Z0-9_]{1,64}`, else `INVALID_CODE`), never scrubbed; the scrub needs `:` or `=` before a bare value, so prose such as "Password required" and codes such as `TOKEN_EXPIRED` survive. `agent send`
 exit 5 stays a queued receipt. After a later success (`reconcile` to `awaiting-ack`,
 `finish` to `archived`) the earlier reason moves to `resolved_native_error`.
 `creation-unknown` and `archive-unknown` are diagnosable from the record file alone.
