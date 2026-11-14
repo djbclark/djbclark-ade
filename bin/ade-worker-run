@@ -10,6 +10,10 @@
 Window names (operator ruling 2026-11-13; bin/ade_ws_names.py): `<KIND> <repo> (<work>)`, KIND MAIN, WORKERS or USER;
 the lead id is NOT in a window name (it stays in the tab name and the ade.lead label). <repo> is --repo, else the repo
 of --cwd (the main checkout's name, also from a linked worktree); <work> is --window-middle.
+--cwd must be the directory of the window the worker is placed in (`paseo run --workspace` ignores it, getpaseo/paseo#9699):
+a different --cwd is refused before anything is renamed or launched; after every launch with --cwd the agent's Cwd is read
+back (`paseo agent inspect`) and a mismatch stops the fresh worker (`paseo agent stop`, an interrupt, not an archive) and is reported (the agent
+is named; an unreadable answer never blocks).
 
 Launch: strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every paseo call and finds the lead's WORKERS
 window in `paseo workspace ls --json`: by exact name `WORKERS <repo> (<work>)` when --window-middle is given, else the
@@ -533,6 +537,14 @@ def launch(opts, rest: list[str]) -> int:
             found = find_window(lead, repo, opts.window_middle, bool(opts.repo))
             win, rename_to = (found.row, found.rename_to) if found else (None, None)
             adopt = bool(found and not found.owned)  # an unclaimed, empty window of this exact name: recorded once the launch succeeds
+        if win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
+            # `paseo run --workspace` takes the agent's cwd from the workspace and ignores --cwd (getpaseo/paseo#9699): a worker
+            # started here would silently run in the window's directory, not the claimed worktree the caller named.
+            raise Refused(f"window {row_wks(win)} ({win['name']}) runs in {win['cwd']}, but --cwd is {cwd}: paseo ignores --cwd "
+                          f"when it places an agent in an existing window, so the worker would start in {win['cwd']}. Pass "
+                          f"--cwd {win['cwd']} (or none) and give the worktree {cwd} as an absolute path in the brief "
+                          "(docs/workspace-layout.md item 5: a window's cwd is its primary checkout, the writer works in the "
+                          "claimed worktree by absolute paths)")
         if rename_to:  # retroactive migration of a legacy name; the window id does not change
             if any(r["name"] == rename_to for r in list_windows() if r.get("workspaceId") != win.get("workspaceId")):
                 raise Refused(f"cannot rename legacy window {win['name']!r} to {rename_to!r}: another window already has that "
@@ -576,6 +588,14 @@ def launch(opts, rest: list[str]) -> int:
                 register_window(lead, wks)  # the window is this lead's from the moment it exists
                 run_ok(["workspace", "rename", wks, wname])
             run_ok(["agent", "update", agent_id, "--name", tab])
+            if opts.cwd:  # paseo drops --cwd in an existing window and from inside an agent (getpaseo/paseo#9699): check where it landed
+                got = agent_cwd(agent_id)
+                if got and os.path.realpath(got) != cwd:
+                    stopped = stop_agent(agent_id)  # a fresh worker has done no work yet; running its brief in the wrong checkout is the harm
+                    again = ("relaunch with the window's own --cwd" if win is not None else
+                             "relaunch from a directory that is the work's own worktree (paseo dropped --cwd for the new window)")
+                    raise Refused(f"the worker started in {got}, not --cwd {cwd} (paseo ignored --cwd); it was "
+                                  f"{'stopped (interrupted, not archived)' if stopped else 'NOT stopped: stop or archive it now'}; {again}")
         except (Refused, OSError) as e:
             raise Refused(f"{e} (agent {agent_id} was launched; fix its placement by hand)")
     finally:
@@ -605,6 +625,25 @@ def resolve_window_id(win: dict | None, result: dict, err: str, agent_id: str) -
     if len(found) != 1:
         raise Refused(f"the launch's window id is ambiguous: {sorted(found)}")
     return found.pop()
+
+
+def stop_agent(agent_id: str) -> bool:
+    """Interrupt a worker that started in the wrong directory (`paseo agent stop`, a no-op when it is idle). True when it succeeded."""
+    try:
+        rc, _, _ = paseo(["agent", "stop", agent_id])
+    except Refused:
+        return False
+    return rc == 0
+
+
+def agent_cwd(agent_id: str) -> str | None:
+    """The `Cwd` of a launched agent, None when paseo cannot say (never blocks a launch that already happened)."""
+    try:
+        rc, out, _ = paseo(["agent", "inspect", agent_id, "--json"])
+        got = json.loads(out).get("Cwd") if rc == 0 else None
+    except (Refused, ValueError, AttributeError):  # a timeout or unreadable answer: the launch stands
+        return None
+    return got if isinstance(got, str) and got else None
 
 
 def run_ok(args: list[str]) -> None:

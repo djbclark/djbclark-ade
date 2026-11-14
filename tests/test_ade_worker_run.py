@@ -37,6 +37,12 @@ elif a[:2] == ["workspace", "archive"]:
     pass
 elif a[:2] == ["agent", "update"]:
     pass
+elif a[:2] == ["agent", "stop"]:
+    sys.exit(d.get("stop_rc", 0))
+elif a[:2] == ["agent", "inspect"]:
+    if "inspect_cwd" not in d or d.get("inspect_rc"):
+        sys.exit(d.get("inspect_rc") or 1)
+    print(json.dumps({"Id": a[2], "Cwd": d["inspect_cwd"]}))
 elif a[0] == "run":
     if "--new-workspace" in a:
         d["workspaces"].append({"workspaceId": d["created_id"], "name": "master", "cwd": a[a.index("--cwd") + 1]})
@@ -89,9 +95,9 @@ class Env:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"id": agent_id, "workspaceId": workspace_id, "labels": labels or {}}))
 
-    def run(self, *args):
+    def run(self, *args, cwd=None):
         self.flush()
-        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd)
 
     def calls(self):
         if not self.calls_path.exists():
@@ -121,7 +127,7 @@ def test_first_launch_creates_and_renames(env):
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert run[run.index("--cwd") + 1] == os.path.realpath("/repo")
     assert run[-1] == f"BRIEF TEXT\n\n{FOOTER_LINE}" and "--provider" in run
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"]]
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
     update = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["agent", "update"])
@@ -510,7 +516,7 @@ def test_legacy_window_matched_and_renamed_before_launch(env, legacy):
     env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": legacy, "cwd": "/repo"}]
     r = launch(env, "beta")
     assert r.returncode == 0, r.stderr
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"]]  # rename first (2nd ls: name-free check)
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"], ["agent", "inspect"]]  # rename first (2nd ls: name-free check)
     assert rename_calls(env) == [["workspace", "rename", "wks_old1", WIN]]  # `repo ` prefix of the middle is folded into KIND repo
     run = run_argv(env)
     assert run[run.index("--workspace") + 1] == "wks_old1" and "--new-workspace" not in run
@@ -702,8 +708,8 @@ def main_env(env):
     return env
 
 
-def interactive(env, *extra, slice_name="op1"):
-    return env.run("--lead", LEAD, "--slice", slice_name, *extra, "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+def interactive(env, *extra, slice_name="op1", cwd=None):
+    return env.run("--lead", LEAD, "--slice", slice_name, *extra, "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF", cwd=cwd)
 
 
 @pytest.mark.parametrize("flag", [["--placement", "main"], ["--interactive"]])
@@ -843,11 +849,29 @@ def test_footer_refuses_when_the_last_argument_is_not_the_brief(env, rest):
     assert r.returncode == 1 and "brief" in r.stderr and not env.calls()
 
 
-def test_interactive_legacy_main_migration_uses_the_windows_own_repo_not_the_callers_cwd(main_env):  # F4
+def test_interactive_legacy_main_migration_uses_the_windows_own_repo(main_env):  # F4
     main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
-    r = interactive(main_env, "--interactive", "--cwd", "/elsewhere/other-repo")
+    r = interactive(main_env, "--interactive", "--cwd", "/somewhere/djbclark-ade")
     assert r.returncode == 0, r.stderr
     assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
+
+
+def test_interactive_legacy_main_migration_without_cwd_takes_the_windows_repo_not_the_callers(main_env, tmp_path):  # F4, kept
+    """No --cwd: the caller's own directory (here a repo named other-repo) is not checked against the window, so the rename must
+    still use the window's repo. Kills `repo or wsn.repo_of(row["cwd"])` in main_target (the caller's repo winning)."""
+    main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
+    elsewhere = tmp_path / "other-repo"
+    elsewhere.mkdir()
+    r = interactive(main_env, "--interactive", cwd=elsewhere)
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
+
+
+def test_interactive_with_a_cwd_other_than_the_windows_is_refused_before_any_rename(main_env):  # ls-05 (was F4's other repo)
+    main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
+    r = interactive(main_env, "--interactive", "--cwd", "/elsewhere/other-repo")
+    assert r.returncode == 1 and "runs in /somewhere/djbclark-ade" in r.stderr
+    assert not rename_calls(main_env)
 
 
 @pytest.mark.parametrize("rest", [["--no-wait", "BRIEF", "--image", "/tmp/x.png"], ["--no-wait", "BRIEF", "--base", "main"],
@@ -1225,3 +1249,72 @@ def test_an_unbuildable_predecessor_window_for_other_work_does_not_block_new_wor
     r = launch(env)
     assert r.returncode == 0, r.stderr
     assert placed(env)
+
+
+def test_a_cwd_other_than_the_windows_is_refused_not_silently_dropped(env):
+    """`paseo run --workspace` ignores --cwd (getpaseo/paseo#9699): the worker would start in the window's directory."""
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_win1")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "runs in /repo" in r.stderr and "/repo-claimed-wt" in r.stderr
+    assert not placed(env)
+
+
+def test_the_windows_own_directory_as_cwd_still_launches(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_win1")
+    r = launch(env)  # --cwd /repo
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--cwd") + 1] == "/repo"
+
+
+def test_a_new_window_takes_the_callers_cwd(env):
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local" and run[run.index("--cwd") + 1] == "/repo-claimed-wt"
+
+
+def test_a_window_without_a_known_directory_is_checked_after_the_launch(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN}]
+    own(LEAD, "wks_win1")
+    env.data["inspect_cwd"] = "/repo-main"
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "started in /repo-main" in r.stderr and "was launched" in r.stderr
+    assert "stopped (interrupted" in r.stderr and ["agent", "stop", AGENT] in [c["argv"] for c in env.calls()]  # not left running
+    env.data["stop_rc"] = 1  # the stop itself failed: say so, the worker is still running
+    r = env.run("--lead", LEAD, "--slice", "s1", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "NOT stopped" in r.stderr
+    del env.data["stop_rc"]
+    env.data["inspect_cwd"] = "/repo-claimed-wt"
+    r = env.run("--lead", LEAD, "--slice", "s2", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+    del env.data["inspect_cwd"]  # paseo cannot say: the launch stands
+    r = env.run("--lead", LEAD, "--slice", "s3", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_new_window_is_verified_too_and_a_dropped_cwd_is_reported(env):
+    env.data["inspect_cwd"] = "/Users/someone"  # what paseo did with --cwd /repo
+    r = launch(env)
+    assert r.returncode == 1 and "started in /Users/someone" in r.stderr and "was launched" in r.stderr
+    assert "stopped (interrupted" in r.stderr and "dropped --cwd for the new window" in r.stderr
+
+
+def test_a_symlinked_window_cwd_with_a_trailing_slash_matches_the_real_directory(env, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": f"{link}/"}]
+    env.data["inspect_cwd"] = str(link)  # paseo reports the symlink path
+    own(LEAD, "wks_win1")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(real), "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+
+
+def test_an_unreadable_inspect_never_fails_a_good_launch(env):
+    env.data["inspect_rc"] = 1
+    r = launch(env)
+    assert r.returncode == 0, r.stderr

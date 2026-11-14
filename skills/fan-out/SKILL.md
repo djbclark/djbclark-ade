@@ -89,7 +89,7 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    worktree; `<work>`: `--window-middle`; without `--window-middle`, the one WORKERS window holding a live agent labelled
    `ade.lead=<LEAD>`). Two matches, or a match holding a live agent labelled for another lead, are refused. A legacy window
    of this lead (`workers <middle> <LEAD>`, `WORKERS <middle> <LEAD>`) is renamed to the current form first (same window id).
-   It passes `--workspace` of the window plus `--cwd` (the window's own). With no window yet, the first launch mints one
+   It passes `--workspace` of the window plus `--cwd` (the window's own: a different `--cwd` is refused, because Paseo ignores it with `--workspace`, getpaseo/paseo#9699; the launched agent's `Cwd` is checked afterwards and a worker that landed elsewhere is stopped). With no window yet, the first launch mints one
    (`--new-workspace local --cwd ~/src/<repo>`), reads its id from the launch (JSON `workspaceId` if paseo prints one, else the
    single `Created workspace wks_… - <name>` stderr line, cross-checked with the agent's state file; absent or ambiguous
    fails closed and names the launched agent) and renames it `WORKERS <repo> (<work>)`. `--window-middle` is required on the first
