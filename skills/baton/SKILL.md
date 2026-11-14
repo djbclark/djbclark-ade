@@ -36,7 +36,7 @@ archive, keep working); never write another handoff automatically.
 A `/baton` can arrive as a successor's first prompt, a dispatched slice's brief,
 or an explicit operator resume request. Treat all three alike for reading.
 For a self-session transaction, read the preserved checkpoint/record, acknowledge
-it with `accept`, wait for predecessor idle, then retire it with `finish`.
+it with `accept`, then retire it with `finish` (it waits, bounded, for a stable-idle predecessor).
 For an agent-run fallback, follow the same document's C1 acknowledgement and
 verified idle-only archive checks. Reconcile claim ownership before writes;
 then tell siblings your new id. A partial-transfer brief keeps its predecessor
