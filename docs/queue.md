@@ -137,6 +137,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     constraint, list price only a tie-break. models.dev is community data: cache it with its fetch date, bound
     sanity (drop a price that moves >5x between fetches), never fail a route on a missing row. Next: install the
     plugin (operator asked), then a design note in `docs/model-routing.md` and a `route_agent.py` price reader.
+37. **Refresh `agents/claude/settings.json.tmpl` from the live `~/.claude/settings.json`** (operator, 2026-11-14, ec-01): item 9 is one known difference between them and `ade-install doctor` / `just install-doctor` is the detector. Next: diff the two, move each live registration worth keeping into the template (no secret-bearing keys), leave the live file alone (order 11), re-run the doctor.
+38. **PR 687 nit: `bin/ade-worker-run` compares `--cwd` paths exactly** (operator, 2026-11-14, ec-01; PR 687 / ls-05, merged): the window check and the post-launch `Cwd` check use `os.path.realpath(a) != os.path.realpath(b)` (`bin/ade-worker-run` near lines 540 and 593), which neither expands a leading `~` in `--cwd` nor ignores case on macOS's case-insensitive volume. Next: `expanduser` the option and compare with `os.path.samefile` (else `normcase`d realpaths), with a test for `~` and a case-differing spelling.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 

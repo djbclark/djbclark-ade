@@ -43,7 +43,9 @@ _MD = r"[*_`]*"                                      # markdown around a label: 
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?" + _MD + r"\s*(?:is|:|=)" + _MD + r"\s*`?" + _LEFT
                              + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the prompt's OWN `Report path:` / `Report file:` line (at the start of a line), as opposed to a peer's `Worker report: ...`
-REPORT_OWN = re.compile(r"(?im)^[ \t]*(?:(?:\d+[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD + r"[ \t]*(?:is|:|=)"
+# At most 3 spaces of indent: 4+ spaces or a tab is a markdown code block, i.e. pasted text, not this prompt's own label. A list
+# marker may be `1.`, `1)`, `-`, `*` or the operator's own `A1.` / `A1a.` / `B2)` labels (lw-01 follow-up, ec-01 E2b).
+REPORT_OWN = re.compile(r"(?im)^ {0,3}(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD + r"[ \t]*(?:is|:|=)"
                         + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
 FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
@@ -79,15 +81,30 @@ def slug(text):
     return s or "subagent"
 
 
+_PASTED_FENCE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$")     # a closed fenced code block
+_PASTED_QUOTE = re.compile(r"(?m)^[ \t]*>.*$")                                  # a quoted line
+
+
+def _outside_pasted(prompt):
+    """The prompt without its fenced code blocks and `>` quoted lines."""
+    return _PASTED_QUOTE.sub("", _PASTED_FENCE.sub("", prompt))
+
+
 def named_report(prompt):
     """The report path the prompt itself gives: its own `Report path:` line, else the only labelled one, else the only one
     it mentions; two different labelled paths with no `Report path:` of its own give None (lw-01, #691 review B1: a
     peer's `Worker report:` listed first was taken as this launch's report). A path whose
     .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
     background got that path), so it is never reused."""
-    own = list(dict.fromkeys(REPORT_OWN.findall(prompt)))       # the prompt's own `Report path:` beats a peer's labelled one
-    labelled = own or list(dict.fromkeys(REPORT_LABELLED.findall(prompt)))
-    paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(prompt)))
+    # Text pasted into the prompt (a fenced block, a `>` quote) is a peer's brief, not this launch's own: look past it first
+    # (ec-01 E2c: a peer brief's `Report path:` line, fenced or quoted, won over or made ambiguous the brief's own); a
+    # prompt that names a report only inside such text still gets that path, as before.
+    for text in (_outside_pasted(prompt), prompt):
+        own = list(dict.fromkeys(REPORT_OWN.findall(text)))     # the prompt's own `Report path:` beats a peer's labelled one
+        labelled = own or list(dict.fromkeys(REPORT_LABELLED.findall(text)))
+        paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(text)))
+        if paths:
+            break
     if len(paths) != 1:
         return None         # none, or two different ones with no `Report path:` of its own: the hook derives its own path
     return None if Path(paths[0] + ".done").exists() else paths[0]

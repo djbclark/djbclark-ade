@@ -340,6 +340,14 @@ def test_install_agents_off_adds_no_agents_to_execstart(env, tmp_path):
 
 def test_install_agents_auto_looks_for_paseo_on_the_job_path(env, tmp_path):
     ade = _mk_ade(tmp_path)
+    # Hermetic: the shipped plist's PATH names /opt/homebrew/bin and /usr/local/bin, where a developer's real `paseo` may live
+    # (this test failed on a Mac with /opt/homebrew/bin/paseo). Pin the copied plist's PATH to the fake home and an empty dir.
+    plist = ade / "config/launchd/com.djbclark.deadline-sweep.plist"
+    text = plist.read_text()
+    shipped = "__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    assert shipped in text, "the shipped plist PATH changed: update this test's pin"
+    (tmp_path / "emptybin").mkdir()
+    plist.write_text(text.replace(shipped, f"__HOME__/.local/bin:{tmp_path / 'emptybin'}"))
     fk = _fake_sched(tmp_path)
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
     assert "--no-agents" in r.stdout and "paseo not found" in r.stderr

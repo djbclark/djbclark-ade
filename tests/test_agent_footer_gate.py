@@ -338,7 +338,8 @@ def test_an_indented_or_quoted_relaunch_reason_does_not_count(tmp_path, prompt):
 
 
 @pytest.mark.parametrize("label", ["Report path:", "**Report path:**", "- **Report path:**", "1. Report path:", "`Report path:`",
-                                   "Report  path:", "Report file:", "report path ="])
+                                   "Report  path:", "Report file:", "report path =",
+                                   "A1. Report path:", "A1a. **Report path:**", "B2) Report path:"])
 def test_the_own_report_path_is_found_through_markdown_and_list_markers(tmp_path, label):
     """lw-01 (#691 review B1, adversary r1 A2): the common spellings of the label still beat a peer's labelled report."""
     peer = tmp_path / "unit-x-report.md"
@@ -365,3 +366,46 @@ def test_a_quoted_peer_label_does_not_compete_with_the_own_report_path(tmp_path)
     out = run({"description": "Adv", "prompt": f"> Report path: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
     assert "permissionDecision" not in out, out
     assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "```text"])
+def test_a_report_path_inside_a_pasted_peer_brief_does_not_displace_the_own_one(tmp_path, fence):
+    """ec-01 E2c: a peer's brief pasted into this prompt carries its own column-0 `Report path:` line; it must not make the
+    prompt's own path ambiguous (the hook then derived a different path) or win over it."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    close = fence[:3]
+    prompt = f"Report path: {own}\nThe peer's brief, for context:\n{fence}\nReport path: {peer}\nWorker report: {peer}\n{close}\nreview it"
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+    assert str(peer) not in out["updatedInput"]["prompt"].split("Delivery contract", 1)[1]
+
+
+def test_a_pasted_peer_brief_before_a_report_label_that_is_not_report_path_does_not_win(tmp_path):
+    """The own path is only `Report: <path>` (a labelled path, not the `Report path:` form): a pasted brief's `Report path:` line must not outrank it."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    prompt = f"```\nReport path: {peer}\n```\nReport: {own}\nreview it"
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+def test_an_indented_code_block_label_is_not_the_own_report_path(tmp_path):
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    out = run({"description": "Adv", "prompt": f"    Report path: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+def test_a_brief_that_is_wholly_fenced_still_names_its_report(tmp_path):
+    """Nothing outside the fence names a report: the path inside it is still taken (the pre-ec-01 behaviour)."""
+    own = tmp_path / "adv-report.md"
+    own.write_text("x")
+    out = run({"description": "Adv", "prompt": f"```\nReport path: {own}\n```\nreview it"}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
