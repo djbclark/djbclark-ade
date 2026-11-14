@@ -43,6 +43,9 @@ class Native:
                            'Cwd': str(root), 'Mode': 'bypassPermissions', 'ParentAgentId': None,
                            'AvailableModes': [{'id': 'bypassPermissions', 'label': 'Bypass'}]}}
         self.labelled = []
+        self.labels = {}            # 'key=value' -> ids carrying it (every label but ade.handoff, which `labelled` serves)
+        self.updates = []           # argv tails of `agent update`
+        self.update_result = None   # (returncode, stdout, stderr) replacing the `agent update` answer
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
@@ -69,14 +72,32 @@ class Native:
             self.rows[SUCC] = {**self.rows[PRED], 'Id': SUCC, 'Status': 'running',
                                'Mode': args[args.index('--mode') + 1]}
             self.labelled = [{'id': SUCC}]
+            title = next((a.split('=', 1)[1] for a in args if a.startswith('--title=')), None)
+            if title is not None:
+                self.rows[SUCC]['Name'] = title
+            for i, a in enumerate(args):
+                if a == '--label' and not args[i + 1].startswith('ade.handoff='):
+                    self.labels.setdefault(args[i + 1], set()).add(SUCC)
             if self.create_error:
                 raise self.create_error
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
             # `ls -a` adds includeBackground; a plain `ls -g` (what archive resolves from) hides it
-            data = self.labelled if '--label' in args else [
+            label = args[args.index('--label') + 1] if '--label' in args else None
+            data = [{'id': i} for i in sorted(self.labels.get(label, ()))] if (
+                label and not label.startswith('ade.handoff=')) else self.labelled if label else [
                 {'id': k} for k in self.rows
                 if k not in self.unlisted and (k not in self.background or '-a' in args)]
+        elif args[:2] == ['agent', 'update']:
+            self.updates.append(args[2:])
+            if self.update_result is not None:
+                return subprocess.CompletedProcess(argv, *self.update_result)
+            for i, a in enumerate(args):
+                if a.startswith('--name='):
+                    self.rows[args[2]]['Name'] = a.split('=', 1)[1]
+                elif a == '--label':
+                    self.labels.setdefault(args[i + 1], set()).add(args[2])
+            data = {'agentId': args[2]}
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
@@ -877,8 +898,9 @@ def test_predecessor_missing_from_listing_refuses_before_any_archive(setup):
 def test_predecessor_in_listing_is_archived_as_before(setup):
     service, native, path = finished_up_to_archive(setup)
     assert service.finish(path)['status'] == 'archived' and native.archived == 1
-    listing = [a for a, k in native.calls if a[4:6] == ['agent', 'ls']]
-    assert listing and '--label' not in listing[0] and '-a' not in listing[0]  # exactly archive's list
+    # the identity readback (st-01) also lists, but only ever with --label; archive's own list has none
+    listing = [a for a, k in native.calls if a[4:6] == ['agent', 'ls'] and '--label' not in a]
+    assert listing and '-a' not in listing[0]  # exactly archive's list
 
 
 def test_predecessor_only_in_the_background_listing_is_refused(setup):
@@ -999,3 +1021,166 @@ def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
         service.native('agent', 'archive', PRED)
     assert caught.value.info['code'] == 'TOKEN_EXPIRED'
     assert caught.value.info['stderr_tail'] == envelope('TOKEN_EXPIRED', 'login again')
+
+
+# st-01 (2026-11-14): the successor keeps the predecessor's title and chain labels, so `paseo ls` finds a chain's lead.
+
+def run_call(native):
+    return next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+
+
+def run_labels(call):
+    return [call[i + 1] for i, a in enumerate(call) if a == '--label']
+
+
+def settle(service, native, record, path):
+    """accept, then finish: the whole successor side of a handoff."""
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    return service.finish(path)
+
+
+def test_successor_keeps_predecessor_title_and_chain_labels_through_accept_and_finish(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Lead tendcf (cfengine)'
+    service.env['PASEO_AGENT_ID'] = PRED
+    record = service.handoff(checkpoint, quiesced=True, requested_role='tendcf-lead')
+    path = Path(record['record'])
+    call = run_call(native)
+    assert '--title=Lead tendcf (cfengine)' in call and call.index('--title=Lead tendcf (cfengine)') < call.index('--')
+    assert run_labels(call) == ['ade.handoff=' + record['token'], 'ade.chain=' + PRED,
+                                'ade.predecessor=' + PRED, 'ade.role=tendcf-lead']
+    assert native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
+    assert record['identity'] == {
+        'title': 'Lead tendcf (cfengine)', 'title_source': 'predecessor-name', 'role_source': 'requested',
+        'labels': {'ade.chain': PRED, 'ade.predecessor': PRED, 'ade.role': 'tendcf-lead'},
+        'checks': {'create': 'requested'}}
+    accepted = accept(service, record, path)
+    assert accepted['identity']['checks']['accept'] == 'ok' and native.updates == []
+    native.rows[PRED]['Status'] = 'idle'
+    finished = service.finish(path)
+    assert finished['status'] == 'archived' and finished['identity']['checks']['finish'] == 'ok'
+    assert native.updates == [] and native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
+    assert json.loads(path.read_text()) == finished
+
+
+def test_predecessor_without_a_role_label_still_gets_predecessor_and_chain_labels(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Lead plain'
+    record = service.handoff(checkpoint, quiesced=True)
+    assert run_labels(run_call(native))[1:] == ['ade.chain=' + PRED, 'ade.predecessor=' + PRED]
+    assert record['identity']['labels'] == {'ade.chain': PRED, 'ade.predecessor': PRED}
+    assert record['identity']['role_source'] is None
+    assert settle(service, native, record, Path(record['record']))['identity']['checks'] == {
+        'create': 'requested', 'accept': 'ok', 'finish': 'ok'}
+
+
+def test_chain_record_supplies_title_chain_and_role_when_the_name_is_a_bootstrap_title(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Self-handoff 9f2c: checkpoint ack and accept'
+    service.state.mkdir(mode=0o700, parents=True)
+    earlier = {'kind': 'handoff', 'home': str(service.home), 'predecessor': OTHER, 'successor': PRED,
+               'identity': {'title': 'Lead tendcf', 'labels': {'ade.chain': OTHER, 'ade.predecessor': OTHER,
+                                                               'ade.role': 'tendcf-lead'}}}
+    (service.state / ('handoff-' + OTHER + '.json')).write_text(json.dumps(earlier))
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['identity']['title'] == 'Lead tendcf' and record['identity']['title_source'] == 'chain-record'
+    assert record['identity']['labels'] == {'ade.chain': OTHER, 'ade.predecessor': PRED,
+                                            'ade.role': 'tendcf-lead'}
+    assert record['identity']['role_source'] == 'chain-record'
+
+
+@pytest.mark.parametrize('name', ['Self-handoff abc: checkpoint ack and accept',
+                                  'Self-handoff acknowledgement for session cd5df8af', '-', None])
+def test_no_usable_name_and_no_chain_record_gets_a_derived_title(setup, name):
+    service, native, checkpoint = setup
+    if name is not None:
+        native.rows[PRED]['Name'] = name
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['identity']['title'] == 'Lead (successor of 11111111)'
+    assert record['identity']['title_source'] == 'derived'
+    assert '--title=Lead (successor of 11111111)' in run_call(native)
+
+
+def test_requested_title_wins_and_is_normalised(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Lead other'
+    record = service.handoff(checkpoint, quiesced=True, requested_title='  -Lead\ttendcf\n' + 'x' * 300)
+    title = record['identity']['title']
+    assert title.startswith('-Lead tendcf x') and len(title) == 200 and record['identity']['title_source'] == 'requested'
+    assert '--title=' + title in run_call(native)  # `--title=` keeps a leading dash from reading as a flag
+
+
+@pytest.mark.parametrize('kwargs', [{'requested_role': 'bad role'}, {'requested_role': 'a,b=c'},
+                                    {'requested_role': ''}, {'requested_title': '   '}])
+def test_invalid_title_or_role_is_refused_before_any_intent(setup, kwargs):
+    service, native, checkpoint = setup
+    with pytest.raises(ss.SessionError):
+        service.handoff(checkpoint, quiesced=True, **kwargs)
+    assert native.created == 0 and not list(service.state.glob('handoff-*.json'))
+
+
+def test_accept_repairs_a_retitled_and_unlabelled_successor(setup):
+    service, native, record, path = start(setup)
+    native.rows[SUCC]['Name'] = 'Self-handoff x: checkpoint ack and accept'
+    native.labels.clear()
+    accepted = accept(service, record, path)
+    assert accepted['identity']['checks']['accept'] == 'repaired'
+    assert len(native.updates) == 1 and native.updates[0][0] == SUCC
+    assert '--name=' + record['identity']['title'] in native.updates[0]
+    assert [native.updates[0][i + 1] for i, a in enumerate(native.updates[0]) if a == '--label'] == [
+        'ade.chain=' + PRED, 'ade.predecessor=' + PRED]
+    assert native.rows[SUCC]['Name'] == record['identity']['title']
+
+
+def test_finish_repairs_a_successor_paseo_retitled_after_accept(setup):
+    service, native, record, path = start(setup)
+    accept(service, record, path)
+    native.rows[SUCC]['Name'] = 'retitled by something'
+    native.rows[PRED]['Status'] = 'idle'
+    finished = service.finish(path)
+    assert finished['identity']['checks'] == {'create': 'requested', 'accept': 'ok', 'finish': 'repaired'}
+    assert native.rows[SUCC]['Name'] == record['identity']['title']
+    assert [u[1] for u in native.updates] == ['--name=' + record['identity']['title']]  # labels were intact
+
+
+def test_a_paseo_refusal_to_rename_is_recorded_and_not_fatal_then_resolved(setup):
+    service, native, record, path = start(setup)
+    native.rows[SUCC]['Name'] = 'retitled'
+    native.update_result = (1, '', envelope('AGENT_NOT_FOUND', 'Agent not found'))
+    accepted = accept(service, record, path)
+    assert accepted['status'] == 'acknowledged' and accepted['ack']['agent_id'] == SUCC
+    identity = accepted['identity']
+    assert identity['checks']['accept'] == 'failed'
+    assert identity['error']['stage'] == 'accept'
+    assert identity['error']['native_error']['op'] == 'agent update'
+    assert identity['error']['native_error']['code'] == 'AGENT_NOT_FOUND'
+    assert json.loads(path.read_text())['identity']['error'] == identity['error']
+    native.rows[PRED]['Status'] = 'idle'
+    still = service.finish(path)  # still refused: finish archives anyway, the failure stays on the record
+    assert still['status'] == 'archived' and still['identity']['checks']['finish'] == 'failed'
+    assert native.archived == 1
+
+
+def test_a_later_successful_check_keeps_the_earlier_refusal_as_history(setup):
+    service, native, record, path = start(setup)
+    native.rows[SUCC]['Name'] = 'retitled'
+    native.update_result = (1, '', envelope('INVALID_NAME', 'nope'))
+    accept(service, record, path)
+    native.update_result = None
+    native.rows[PRED]['Status'] = 'idle'
+    finished = service.finish(path)
+    identity = finished['identity']
+    assert 'error' not in identity and identity['resolved_error']['native_error']['code'] == 'INVALID_NAME'
+    assert identity['checks']['finish'] == 'repaired' and native.rows[SUCC]['Name'] == identity['title']
+
+
+def test_a_record_from_before_st01_has_no_identity_and_is_left_alone(setup):
+    service, native, record, path = start(setup)
+    old = json.loads(path.read_text())
+    del old['identity']
+    path.write_text(json.dumps(old))
+    native.rows[SUCC]['Name'] = 'whatever it was called'
+    finished = settle(service, native, old, path)
+    assert finished['status'] == 'archived' and 'identity' not in finished
+    assert native.updates == []

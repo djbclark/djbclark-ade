@@ -134,6 +134,26 @@ def thinking_ident(value: str) -> str:
 # Predecessor values that mean "no explicit level": the successor gets today's default.
 NO_INHERITED_THINKING = ('', '-', 'auto', 'default')
 
+# Successor identity (st-01, 2026-11-14): the successor keeps the predecessor's title and chain labels so
+# `paseo ls` still names the chain's current lead. Paseo's CLI cannot read labels back (`agent inspect` shows
+# the name and parent only, `agent ls` rows carry no labels), so they are carried through our own records.
+BOOTSTRAP_TITLE = re.compile(r'Self-handoff\b')  # the prompt-derived title of a successor created before st-01
+ROLE_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+TITLE_LIMIT = 200  # Paseo's MAX_EXPLICIT_AGENT_TITLE_CHARS
+
+
+def role_ident(value):
+    if not isinstance(value, str) or ROLE_RE.fullmatch(value) is None:
+        raise SessionError('a role label (letters, digits, _ . -; at most 64) is required')
+    return value
+
+
+def title_ident(value):
+    text = ' '.join(''.join(c if c.isprintable() else ' ' for c in str(value)).split())
+    if not text:
+        raise SessionError('a nonempty title is required')
+    return text[:TITLE_LIMIT].rstrip()
+
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -345,9 +365,12 @@ class Service:
             raise SessionError('successor unattended mode not verified')
         return row
 
-    def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None):
+    def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
+                requested_title=None, requested_role=None):
         predecessor = self.actor()
         explicit_thinking = None if requested_thinking is None else thinking_ident(requested_thinking)
+        explicit_title = None if requested_title is None else title_ident(requested_title)
+        explicit_role = None if requested_role is None else role_ident(requested_role)
         with self.transaction('handoff-' + predecessor) as (path, existing):
             if existing:
                 if (not isinstance(existing, dict) or existing.get('home') != str(self.home)
@@ -385,9 +408,10 @@ class Service:
                 if isinstance(inherited, str) and inherited not in NO_INHERITED_THINKING:
                     with contextlib.suppress(SessionError):
                         thinking = thinking_ident(inherited)
+            identity = self.plan_identity(source, predecessor, explicit_title, explicit_role)
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
-            record = {'schema_version': 1, 'kind': 'handoff', 'token': token,
+            record = {'schema_version': 1, 'kind': 'handoff', 'token': token, 'identity': identity,
                       'predecessor': predecessor, 'successor': None, 'home': str(self.home),
                       'cwd': cwd, 'workspace': workspace, 'workspace_placement': placement,
                       'provider': source['Provider'],
@@ -420,7 +444,9 @@ class Service:
                 result = self.native('agent', 'run', *where, '--cwd', cwd,
                                      '--provider', source['Provider'] + '/' + source['Model'],
                                      '--mode', plan['mode_id'], *thinking_args, '--no-wait', '--label',
-                                     'ade.handoff=' + token, '--', prompt, detached=True)
+                                     'ade.handoff=' + token, '--title=' + identity['title'],
+                                     *(a for k, v in identity['labels'].items() for a in ('--label', f'{k}={v}')),
+                                     '--', prompt, detached=True)
                 if not isinstance(result, dict):
                     raise SessionError('malformed creation receipt')
                 record['successor'] = ident(result.get('agentId', ''))
@@ -431,6 +457,87 @@ class Service:
                 return record
             self.save(path, record)
             return record
+
+    def chain_identity(self, agent):
+        """The `identity` block of the record that made `agent` a successor on this daemon home, else None."""
+        for path in sorted(self.state.glob('handoff-*.json')):
+            try:
+                rec = json.loads(read_regular(path, 262144))
+            except (OSError, ValueError, SessionError):
+                continue
+            if (isinstance(rec, dict) and rec.get('home') == str(self.home) and rec.get('kind') == 'handoff'
+                    and rec.get('successor') == agent and isinstance(rec.get('identity'), dict)):
+                return rec['identity']
+        return None
+
+    def plan_identity(self, source, predecessor, requested_title=None, requested_role=None):
+        """Title and labels the successor takes over, with where each came from (recorded, never secret).
+
+        Title: --title, else the predecessor's live name, else the title its own handoff record carried (its
+        name is still the prompt-derived bootstrap one), else a derived `Lead (successor of <id8>)`.
+        Labels: `ade.predecessor`; `ade.chain` (the first lead's id, carried from the predecessor's record,
+        else the predecessor itself); `ade.role` from --role or the predecessor's record.
+        """
+        prior = self.chain_identity(predecessor) or {}
+        prior_labels = prior.get('labels') if isinstance(prior.get('labels'), dict) else {}
+        name = source.get('Name')
+        name = name.strip() if isinstance(name, str) else ''
+        live = name if name not in ('', '-') and BOOTSTRAP_TITLE.match(name) is None else None
+        carried = prior.get('title') if isinstance(prior.get('title'), str) and prior['title'].strip() else None
+        derived = f'Lead (successor of {predecessor[:8]})'
+        title, title_source = next((t, s) for t, s in (
+            (requested_title, 'requested'), (live, 'predecessor-name'), (carried, 'chain-record'),
+            (derived, 'derived')) if t)
+        labels = {}
+        chain = prior_labels.get('ade.chain')
+        try:
+            chain = ident(chain)
+        except SessionError:
+            chain = predecessor
+        labels['ade.chain'] = chain
+        labels['ade.predecessor'] = predecessor
+        role_source = 'requested' if requested_role else 'chain-record'
+        role = requested_role or prior_labels.get('ade.role')
+        try:
+            labels['ade.role'] = role_ident(role)
+        except SessionError:
+            role_source = None
+        return {'title': title_ident(title), 'title_source': title_source, 'role_source': role_source,
+                'labels': labels, 'checks': {'create': 'requested'}}
+
+    def reassert_identity(self, record, stage):
+        """Re-apply the recorded title and labels when the successor lost them; a refusal is recorded, not fatal.
+
+        Paseo keeps an explicit `--title` through the first prompt (create-agent-title.ts), so this is a
+        readback and a repair, not the primary route. Labels are read back with `agent ls --label K=V`
+        (the only label readback Paseo's CLI has); `agent update` merges labels, never replaces them.
+        A record from before st-01 has no `identity` and is left alone.
+        """
+        identity = record.get('identity')
+        if not isinstance(identity, dict) or not isinstance(record.get('successor'), str):
+            return
+        successor = record['successor']
+        checks = identity.setdefault('checks', {})
+        try:
+            args = []
+            row = self.inspect(successor)
+            if row.get('Name') != identity['title']:
+                args.append('--name=' + identity['title'])
+            for key, value in identity['labels'].items():
+                rows = self.native('agent', 'ls', '-a', '-g', '--label', f'{key}={value}')
+                if not isinstance(rows, list) or not any(isinstance(r, dict) and r.get('id') == successor
+                                                         for r in rows):
+                    args += ['--label', f'{key}={value}']
+            if args:
+                self.native('agent', 'update', successor, *args)
+                checks[stage] = 'repaired'
+            else:
+                checks[stage] = 'ok'
+            if 'error' in identity:
+                identity['resolved_error'] = identity.pop('error')
+        except SessionError as error:
+            checks[stage] = 'failed'
+            identity['error'] = {'stage': stage, 'native_error': native_error_record('agent update', error)}
 
     def load_record(self, path):
         if path.parent.resolve() != self.state:
@@ -481,6 +588,7 @@ class Service:
                 raise SessionError('transaction is not awaiting acknowledgement')
             record['ack'] = safe_ack
             record['status'] = 'acknowledged'
+            self.reassert_identity(record, 'accept')
             self.save(target, record)
             return record
 
@@ -545,6 +653,7 @@ class Service:
                 predecessor = self.inspect(record['predecessor'])
                 if predecessor.get('Archived') is not True:
                     raise SessionError('archive unconfirmed; preserve transaction and inspect before retry')
+            self.reassert_identity(record, 'finish')
             record['status'] = 'archived'
             self.resolve_native_error(record)
             self.save(target, record)
