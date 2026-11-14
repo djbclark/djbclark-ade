@@ -348,7 +348,8 @@ def test_log_off_writes_nothing(tmp_path):
 def test_a_log_failure_never_changes_the_verdict_or_the_exit_code(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    for bad in (str(blocker / "sub" / "log.jsonl"), str(tmp_path)):   # a path under a file; a directory
+    (tmp_path / "d" / "dir").mkdir(parents=True)
+    for bad in (str(blocker / "sub" / "log.jsonl"), str(tmp_path / "d" / "dir")):   # a path under a file; a directory
         ok = admit(tmp_path, "--json", LW_FAKE_LOAD1="0.1", LW_ADMIT_LOG=bad)
         assert ok.returncode == 0 and json.loads(ok.stdout)["status"] == "ok", (bad, ok.stderr)
         hot = admit(tmp_path, "--json", LW_FAKE_LOAD1=str(CORES * 9), LW_ADMIT_LOG=bad)
@@ -372,7 +373,7 @@ def test_the_log_rotates_at_the_cap_keeping_one_old_file(monkeypatch, tmp_path):
 
 def test_the_default_log_is_in_the_state_dir(tmp_path):
     e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "s"), LW_FAKE_LOAD1="0.1", LW_RESERVE_S="0", LW_ADMIT_CALLER="x")
-    e.pop("LW_ADMIT_LOG")
+    e.pop("LW_ADMIT_LOG", None)
     assert subprocess.run([sys.executable, str(LW), "admit"], capture_output=True, text=True, env=e, timeout=30).returncode == 0
     assert len((tmp_path / "s" / "admit-log.jsonl").read_text().splitlines()) == 1
 
@@ -398,3 +399,84 @@ def test_admit_log_summary(tmp_path):
     assert bad.returncode == 2
     e["LW_ADMIT_LOG"] = str(tmp_path / "empty.jsonl")
     assert subprocess.run([sys.executable, str(LW), "admit-log", "summary"], capture_output=True, text=True, env=e, timeout=30).returncode == 1
+
+
+# --- adversary round 1 (2026-11-14) --------------------------------------------------------------------------------------------------------
+
+def test_a_forced_admit_whose_reservation_fails_is_refused_and_spends_no_claim(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, LW_FAKE_LOAD1=0.1, LW_FAKE_AGENTS=30)
+    monkeypatch.setattr(run.lw, "ADMIT_RESERVE_S", 1200.0)
+    monkeypatch.setattr(run.lw, "_res_locked", lambda fn: None)   # the reservation lock cannot be taken
+    rc, rec, _ = run(capsys, wait=600.0, max_agents=20)
+    assert rc == 75 and rec["status"] == "hot" and "forced" not in rec and "agents_reserve_failed" in rec["refused"]
+    assert not (run.state / "starve.json").exists()
+    monkeypatch.undo()   # nothing is left claimed: with the reservation working the very same wait is forced
+    run2 = Run(monkeypatch, tmp_path / "again", LW_FAKE_LOAD1=0.1, LW_FAKE_AGENTS=30)
+    monkeypatch.setattr(run2.lw, "ADMIT_RESERVE_S", 1200.0)
+    assert run2(capsys, wait=600.0, max_agents=20)[1]["forced"] == "starved"
+
+
+def test_a_clean_reading_breaks_the_unbroken_run_of_refusals(monkeypatch, tmp_path, capsys):
+    hot, cool = CORES * 3.0, 0.1
+    loads = ",".join([str(hot)] * 10 + [str(cool)] + [str(hot)])   # hot until 150 s, one clean read, then hot again
+    run = Run(monkeypatch, tmp_path, LW_FAKE_LOAD1=loads, LW_FAKE_CHURN=40000)
+    rc, rec, _ = run(capsys, wait=900.0)
+    assert rc == 0 and rec["forced"] == "starved" and rec["waited_s"] == 450   # 150 s + a fresh 300 s, not 300 s from the start
+
+
+def test_the_caller_is_a_plain_program_name_never_a_secret(monkeypatch, tmp_path):
+    lw = load_module(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(lw.os, "getppid", lambda: 4194000)   # no /proc entry: the `ps` path
+
+    def ps(out):
+        monkeypatch.setattr(lw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
+        return lw.admit_caller()
+    assert ps("/bin/bash /opt/x/bg --flag\n") == "bg"
+    assert ps("/usr/bin/python3 -u /x/dispatch.py run\n") == "dispatch.py"
+    assert ps("/usr/local/bin/acp-dispatch run\n") == "acp-dispatch"
+    assert ps("sh -c GH_TOKEN=ghp_secret load-watch admit && make\n") == "sh"
+    assert ps("sh /x/GH_TOKEN=ghp_secret\n") == "sh"
+    assert ps("/weird/na=me arg\n") == ""
+    assert ps("") == ""
+    monkeypatch.setenv("LW_ADMIT_CALLER", "bg")
+    assert lw.admit_caller() == "bg"
+    monkeypatch.setenv("LW_ADMIT_CALLER", "GH_TOKEN=ghp_secret")
+    assert lw.admit_caller() == ""
+
+
+def test_a_relative_log_path_is_the_state_dirs_not_the_cwd_and_zero_means_off(tmp_path):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "s"), LW_FAKE_LOAD1="0.1", LW_RESERVE_S="0", LW_ADMIT_LOG="mylog.jsonl")
+    assert subprocess.run([sys.executable, str(LW), "admit"], capture_output=True, text=True, env=e, cwd=cwd, timeout=30).returncode == 0
+    assert (tmp_path / "s" / "mylog.jsonl").exists() and not list(cwd.iterdir())
+    for off in ("0", "false", "no"):
+        e["LW_ADMIT_LOG"] = off
+        assert subprocess.run([sys.executable, str(LW), "admit"], capture_output=True, text=True, env=e, cwd=cwd, timeout=30).returncode == 0
+    assert not list(cwd.iterdir()) and not (tmp_path / "s" / "0").exists()
+
+
+def test_a_log_fifo_with_no_reader_never_hangs_admit(tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    r = admit(tmp_path, LW_FAKE_LOAD1="0.1", LW_ADMIT_LOG=str(fifo))   # the helper's 30 s timeout is the hang detector
+    assert r.returncode == 0 and r.stdout.startswith("admit ok")
+
+
+def test_the_verdict_is_printed_even_if_the_entry_builder_raises(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, LW_FAKE_LOAD1="0.1")
+    monkeypatch.setattr(run.lw, "admit_log_entry", lambda *a, **k: 1 / 0)
+    assert run(capsys, wait=0.0)[1]["status"] == "ok"
+
+
+def test_admit_log_summary_survives_a_corrupt_log(tmp_path):
+    log = tmp_path / "log.jsonl"
+    t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    good = json.dumps({"t": t, "verdict": "ok", "refused": [], "free_mb": 5, "wait_s": 0})
+    bad = [json.dumps({"t": t, "verdict": "hot", "refused": 5}), json.dumps({"t": t, "verdict": ["x"], "refused": []}),
+           json.dumps({"t": t, "verdict": "hot", "refused": [["y"]]}), "[1, 2]", "null"]
+    log.write_bytes(("\n".join([good] + bad) + "\n").encode() + b"\xff\xfe not utf-8\n")
+    e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "s"), LW_ADMIT_LOG=str(log))
+    r = subprocess.run([sys.executable, str(LW), "admit-log", "summary"], capture_output=True, text=True, env=e, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "1 calls" in r.stdout and "ok=1" in r.stdout and "--wait 0" in r.stdout
