@@ -156,7 +156,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    worker ends turn immediately after sending; (b) atomic `<done>.ack` disk artifact. Unique msg-id allows deduplication.
    A local Claude Code session outside Paseo is reached with `ListAgents` + `SendMessage` (docs/orchestration-practices.md
    5a item 6, 2026-11-14). Address a lead by its current id (its takeover message, the succession ledger followed from the
-   last id you knew, never its newest file, or the last `LEAD <id> took over` line of its run log) and send only after `paseo agent inspect <id> --json` reads
+   last id you knew, never its newest file, or the last `LEAD <id> took over` line of a run log it named) and send only after `paseo agent inspect <id> --json` reads
    `Archived: false`: a message un-archives an ex-lead (5a item 7, 2026-11-14).
 
 11. **djbclark-ade is the lead's project; ask before changing code anywhere else** (operator, 2026-10-30: "You should ask me before you make changes to any code not

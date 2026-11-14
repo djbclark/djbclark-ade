@@ -282,7 +282,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    folder: every lead chain on the machine shares it, so the newest record can name another repo's live lead; (c) when
    the lead keeps a run log and gave you its path, the id on the last `LEAD <id> took over` line (other ids in that
    log are ex-leads, unaccepted successors and workers). Before sending, `paseo agent inspect <id> --json` must read
-   `Archived: false`; `Archived: true` means stop and look up the successor. Plain `paseo send` does not refuse an
+   `Archived: false`; `Archived: true` means stop and look up the successor; if no record links further, ask the operator. Plain `paseo send` does not refuse an
    archived agent: a message un-archives it, and the resurrected ex-lead then competes with its successor (2026-11-14:
    ex-lead 994234ba was resurrected twice by other repos' leads). A handoff can still land between the inspect and the
    send; if it does, tell the successor (it re-archives the ex-lead) and re-send to it.
