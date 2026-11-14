@@ -20,8 +20,9 @@ Run it from a checkout of the repository, after the push has landed. It
      external-security-critical input; docs/slim/audit-walk-decisions-2026-11-12.md section 8):
        restricted  `--mode review`: Read/Grep/Glob confined to the worktree, no commands (docs/review-boundary.md)
        yolo        `--mode trusted --trusted-author OWNER`: bypassPermissions with Bash; ONLY for a PR whose GitHub
-                   author is the operator's login AND numeric user id (`gh api users/LOGIN`) and the operator pushed this head (the
-                   merge gate's `head_pusher_check`: the newest ref update of the PR branch, from the activity API); --allow-untrusted
+                   author record (`gh api repos/R/pulls/N`) is the operator's login AND numeric user id and the operator pushed this head directly
+                   (the merge gate's `head_pusher_check`: the newest ref update of the PR branch, from the activity API, is a push,
+                   force-push or branch creation by the operator, not the merge of a child PR); --allow-untrusted
                    and the authenticated-user rule never enable it; a head someone else pushed is reviewed restricted
        auto        (default) yolo for such an operator-authored and operator-pushed PR, else restricted
      The mode used is filed as `runtime` in the result.
@@ -34,8 +35,8 @@ Run it from a checkout of the repository, after the push has landed. It
      findings stay unresolved until --retry --resolve-finding ID. Only timeouts trigger --replacement-model;
      partial evidence is preserved per attempt (docs/review-boundary.md).
   7. removes the worktree. It never posts anything to GitHub. Under owner-trust policy (PR #484,
-     docs/review-boundary.md), owner-authored PRs succeed the adversary-marker check without needing
-     an APPROVE marker pasted (keep the printed marker for the local record; do not paste into the body
+     docs/review-boundary.md), owner-authored PRs whose head the operator pushed succeed the adversary-marker check
+     without needing an APPROVE marker pasted (anyone else's push makes it an outside PR: the operator's marker comment) (keep the printed marker for the local record; do not paste into the body
      just to satisfy the gate). On an outside PR, paste the marker into an owner issue comment (not the body),
      then run `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads it.
 
@@ -173,17 +174,21 @@ class _GhGet:
             raise self.marker.ApiError(f"gh api {path}: unreadable answer ({type(e).__name__})") from e
 
 
-def operator_pushed_head(marker, repo: str, author: str, head: str, doc: dict) -> tuple[bool, str]:
-    """(ok, why not): the PR author is the operator by login AND numeric id, and the newest ref update of the PR branch is
-    this head, pushed by the operator (the gate's `head_pusher_check`). Anything unknown fails closed."""
+def operator_pushed_head(marker, repo: str, pr: int, head: str, doc: dict) -> tuple[bool, str]:
+    """(ok, why not): the PR's own author record (`GET repos/R/pulls/N`, `.user`, the same fact as the gate's GraphQL
+    `author { ... on User { databaseId } }`) is the operator by login AND numeric id, and the newest ref update of the PR
+    branch is a direct push of this head by the operator (the gate's `head_pusher_check`, narrowed to DIRECT_PUSHES: this
+    decision grants a model Bash, so a head that arrived by merging a child PR is not enough). Anything unknown fails closed."""
+    api = _GhGet(marker)
     try:
-        r = run(["gh", "api", f"users/{author}", "--jq", ".id"], timeout=GH_TIMEOUT)
-        uid = int(r.stdout.strip()) if r.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError, ValueError):
-        uid = None
-    if marker.trusted_owner_user_state(author, uid) != "owner":
-        return False, f"the author's user id is not the operator's pinned id ({uid})"
-    return marker.head_pusher_check(_GhGet(marker), repo, head, doc.get("headRefName"), doc.get("isCrossRepository") is not False)
+        pull = api.get(f"repos/{repo}/pulls/{pr}")
+    except (marker.ApiError, ValueError) as e:
+        return False, f"the PR's author record could not be read ({e})"
+    user = pull.get("user") if isinstance(pull, dict) else None
+    if not isinstance(user, dict) or user.get("type") != "User" or marker.trusted_owner_user_state(user.get("login"), user.get("id")) != "owner":
+        return False, "the PR's author record is not the operator's pinned login and user id"
+    return marker.head_pusher_check(api, repo, head, doc.get("headRefName"), doc.get("isCrossRepository") is not False,
+                                    allowed=marker.DIRECT_PUSHES)
 
 
 def marker_reads_back(line: str, head: str, verdict: str) -> bool:
@@ -381,7 +386,7 @@ def review_attempt(argv: list[str]) -> int:
     elif a.runtime == "restricted":
         yolo_ok, why_not = False, "--runtime restricted"     # asked for: no need to read the history
     else:
-        yolo_ok, why_not = operator_pushed_head(marker, repo, author, head, doc)
+        yolo_ok, why_not = operator_pushed_head(marker, repo, a.pr, head, doc)
     if a.runtime == "yolo" and not yolo_ok:
         note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored and pushed (this one: {author or '(unknown)'!r}: "
              f"{why_not}); use --runtime restricted")
