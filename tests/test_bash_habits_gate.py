@@ -409,3 +409,262 @@ def test_garbage_input_fails_open():
     r = subprocess.run([sys.executable, str(HOOK)], input="not json", capture_output=True,
                        text=True, timeout=30)
     assert (r.returncode, r.stdout) == (0, "")
+
+
+# --- gh watchers (2026-11-14: four `gh run watch` at 3 s emptied the shared 5000/h quota) ---
+
+@pytest.mark.parametrize("command", [
+    "gh run watch 123",
+    "gh run watch",
+    "gh run watch 123 --exit-status",
+    "gh run watch 123 -i 30",                           # below 60 s
+    "gh run watch 123 --interval 59",
+    "gh run watch 123 --interval=5",
+    "gh run watch 123 --interval $SECS",                # not provably >= 60
+    "gh pr checks 5 --watch",
+    "gh pr checks --watch --required",
+    "gh pr checks --watch 5 -R o/r",
+    "gh pr checks 5 --watch --interval 10",
+    "gh pr checks 5 --watch=true",
+    "gh -R o/r run watch 123",
+    "gh --repo o/r pr checks 5 --watch",
+    "git push && gh run watch 9 --exit-status",
+    "git push; gh run watch 9",
+    "(gh run watch 9)",
+    "gh run watch 9 &",
+    "echo go | gh run watch 9",
+    "x=$(gh run watch 9)",
+    "gh run watch $(gh run list -L1 --json databaseId --jq '.[0].databaseId')",
+    "timeout 600 gh run watch 9",
+    "GH_TOKEN=x gh run watch 9",
+    "env GH_PAGER= gh pr checks 5 --watch",
+    "nohup gh run watch 9 > w.log 2>&1 &",
+    "/opt/homebrew/bin/gh run watch 9",
+    "~/ops/site-private-djbclark/bin/bg gh run watch 9",
+    "rtk gh run watch 9",
+    "if true; then gh run watch 9; fi",
+    "while true; do gh pr checks 5 --watch; done",
+    "bash -c 'gh run watch 9'",
+    "bash -lc \"gh run watch 9 --exit-status\"",
+    "timeout 9 sh -c 'sleep 1; gh pr checks 5 --watch'",
+    "sudo bash -c 'bash -c \"gh run watch 9\"'",
+    "ls | xargs -n1 gh run watch",
+])
+def test_gh_watchers_are_denied(command):
+    out = run(command)
+    assert out and out.get("permissionDecision") == "deny", command
+    reason = out["permissionDecisionReason"]
+    assert "item 20" in reason and "5000/h" in reason and "2026-11-14" in reason
+    assert "gh run view RUN --json status,conclusion" in reason and "60 s" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "gh run watch 9 --interval 60",                     # the lead's quota-safe single watcher
+    "gh run watch 9 -i 120 --exit-status",
+    "gh run watch 9 -i=90",
+    "gh pr checks 5 --watch --required --interval 60",
+    "gh pr checks 5 --watch -i 60",
+    "gh run view 9 --json status,conclusion",           # the one-shot
+    "gh run view 9 --exit-status",
+    "gh run list -L 5",
+    "gh pr checks 5",                                   # one-shot, no --watch
+    "gh pr checks 5 --required --json name,state",
+    "gh pr checks 5 --watch=false",
+    "gh pr checks 5 --web",
+    "gh pr view 5 --json statusCheckRollup",
+    "gh api rate_limit --jq .resources.core",
+    "gh workflow run ci.yml",                           # `run` here is not `gh run`
+    "echo 'gh run watch 9' > note.txt",                 # quoted: documentation, not a command
+    "echo \"gh pr checks 5 --watch\"",
+    "cat <<'EOF' > f\ngh run watch 9\nEOF",             # heredoc body
+    "cat <<EOF > f\nbash -c 'gh run watch 9'\nEOF",
+    "rg -n 'gh run watch' docs/",
+    "echo \"bash -c 'gh run watch 9'\"",
+    "ls  # gh run watch 9 later",
+    "git commit -m 'never gh run watch'",
+    "echo gh-run-watch",
+    "ghr run watch 9",                                  # another tool
+    "bash -c 'gh run view 9 --json status'",
+    "until gh run view 9 --json conclusion --jq .conclusion | rg -q .; do sleep 60; done",
+])
+def test_gh_one_shots_and_mentions_pass(command):
+    assert not denied(command), command
+
+
+def test_gh_watch_denial_is_one_rule_among_the_others_and_names_nothing_ran():
+    out = run("echo earlier; gh run watch 9")
+    assert out["permissionDecision"] == "deny"
+    assert out["permissionDecisionReason"].startswith("NOTHING in this command ran")
+
+
+@pytest.mark.parametrize("command", [
+    "gh api repos/o/r/pulls --paginate | jq -r '.[].number' | xargs -P 6 -I{} gh api repos/o/r/pulls/{}",
+    "printf '%s\\n' 1 2 3 | xargs -P4 -n1 gh pr view",
+    "seq 300 | xargs --max-procs=8 -I{} gh api issues/{}",
+    "seq 300 | xargs -P 0 -I{} sh -c 'gh api issues/{}'",
+    "seq 300 | parallel -j6 gh api issues/{}",
+])
+def test_parallel_gh_fanout_warns_without_denying(command):
+    out = run(command)
+    assert out and "permissionDecision" not in out, command
+    assert "rate_limit" in out["additionalContext"] and "remaining < 500" in out["additionalContext"]
+
+
+@pytest.mark.parametrize("command", [
+    "seq 3 | xargs -n1 gh api issues/1",                # serial
+    "seq 3 | xargs -P 1 -I{} gh api issues/{}",
+    "seq 3 | xargs -P 6 -I{} echo {}",                  # parallel, but no gh
+    "gh api rate_limit",
+    "cat <<'EOF' > f\nxargs -P 6 gh api x\nEOF",        # heredoc body
+])
+def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
+    out = run(command)
+    assert not out or "rate_limit" not in out.get("additionalContext", ""), command
+
+
+# adversary round 1 on PR 672 (docs paths, quoting, int parsing)
+
+@pytest.mark.parametrize("command", [
+    "deadline run --budget 20m --owner x -- gh pr checks 123 --watch --required",   # B1
+    "deadline run --budget 20m -- gh run watch 9",
+    "bin/gh-pr-checks 123 --watch --required",                                      # B2
+    "~/src/djbclark-ade/bin/gh-pr-checks --budget 5m 123 --watch",
+    "gh-pr-checks --no-deadline 123 --watch --interval 10",
+    "gh run watch 9 --interval 060",                                                # octal in pflag
+    "gh run watch 9 --interval 0x3c",
+    "gh run watch 9 --interval " + "9" * 5000 + "x",                               # B5 fails closed
+    "bin/gh-pr-checks -- 123 --watch",                                              # N2
+    "bin/gh-pr-checks --budget 5m -- 123 --watch --required",
+    "gh-pr-checks --no-deadline -- 5 --watch",
+    "echo \"$(bash -c 'gh run watch 9')\"",                                         # N3
+    "out=\"$(sh -c 'gh pr checks 5 --watch')\"",
+    "echo it\\'s; bash -c 'gh run watch 9'",                                        # N4
+    "# don't spam the API\nbash -c 'gh run watch 9'",
+    "true;# don't spam\nbash -c 'gh run watch 9'",                                  # R2b
+    "cat <<'EOF' | bash\ngh run watch 9\nEOF",                                      # N7
+    "/bin/bash -c 'gh run watch 9'",                                                # B7a
+    "bash -o pipefail -c 'gh run watch 9'",                                         # B7b
+    "bash --norc -c 'gh run watch 9'",
+    "ls | xargs -I{} sh -c 'gh run watch {}'",                                      # B7c
+    "bash <<'EOF'\ngh run watch 9\nEOF",                                            # B7d
+    "sh <<EOF\ngh pr checks 5 --watch\nEOF",
+    "gh run watch 9 --interval \"30\"",
+])
+def test_adversary_round1_watchers_are_denied(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "deadline run --budget 20m --owner x -- gh pr checks 123 --watch --required --interval 60",
+    "bin/gh-pr-checks 123 --watch --required --interval 60",
+    "bin/gh-pr-checks 123 --required",
+    "deadline start review-123 --budget 2h --owner x",
+    "gh run watch 9 --interval \"60\"",                                             # B4
+    "gh run watch 9 -i '120'",
+    "gh run watch 9 --interval=\"90\"",
+    "git commit -m \"deny watchers (bash -c 'gh run watch 9') too\"",              # B3
+    "gh pr create --title x --body \"covers wrappers; sh -c 'gh pr checks 5 --watch'\"",
+    "cat <<'EOF' > f\nbash <<X\ngh run watch 9\nX\nEOF",
+    "bash <<'EOF'\ngh run view 9 --json status\nEOF",
+    "gh pr create --title x --body \"Fixes \\`bin/gh-pr-checks\\`; (bash -c 'gh run watch 9') is denied\"",  # R1
+    "git commit -m \"a \\$( b; bash -c 'gh run watch 9' c\"",
+    "gh pr comment 5 --body \"Fixed in $(git rev-parse HEAD); bash -c 'gh run watch 9' is now denied\"",
+])
+def test_adversary_round1_false_positives_and_documented_forms_pass(command):
+    assert not denied(command), command
+
+
+def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
+    import time
+    for cmd in ("gh run watch 9 --interval " + "9" * 5000,            # int() limit: no crash
+                "bash " + "--a " * 60 + "x",                           # SHELL_C must not backtrack
+                "git commit -m \"; bash " + "--no-verify " * 60 + " done\""):
+        t0 = time.monotonic()
+        out = run(cmd)
+        assert time.monotonic() - t0 < 5, cmd[:40]
+        assert not out or out.get("permissionDecision") != "deny" or "gh run watch" in cmd
+
+
+# gw-02: lead adversary on e7ce14b9 (substitutions, `)#`, timing, continuation, sudo -u)
+
+@pytest.mark.parametrize("command", [
+    "out=\"$(gh pr checks 5 --watch)\"",                                            # B1
+    "echo \"status: $(gh run watch 9 --exit-status)\"",
+    "echo \"`gh run watch 9`\"",
+    "echo `gh run watch 9`",
+    "echo `bash -c 'gh run watch 9'`",
+    "echo \"\\` `bash -c 'gh run watch 9'`\"",
+    "x=\"$(echo \"$(gh run watch 9)\")\"",                                           # nested
+    "echo \"$(cd \"$d\"; bash -c 'gh run watch 9')\"",                              # R2a
+    "echo $(true)#\"\n\" ; bash -c 'gh run watch 9'",                                # B2
+    "cat <(true)#\"\n\" ; bash -c 'gh run watch 9'",
+    "gh run \\\nwatch 9",                                                           # B5
+    "gh pr checks 5 \\\n  --watch",
+    "sudo -u x gh run watch 9",
+    "sudo -n -u root -H gh pr checks 5 --watch",
+    "x=\"$(echo \"it's\")$(gh run watch 9)\"",                                       # C1
+    "echo \"$(echo \"it's\")\" && echo \"`gh run watch 9`\"",
+    "echo \"$(printf \"%s'\" a) $(gh pr checks 5 --watch)\"",
+    "x=\"$(:)\"" + "\"$(:)\"" * 150 + "\"$(gh run watch 9)\"",                       # C2: no cap
+    "echo " + "`:`" * 150 + "`gh run watch 9`",
+    ": \\\\\ngh run watch 9",                                                       # C3
+    "echo done\\\\\ngh run watch 9",
+    "cat <<'EOF'\nx \\\nEOF\ngh run watch 9",
+    "x\n" + " \n" * 3000 + "bash -c 'gh run watch 9'",                              # C6a
+    "echo \"it's done\"; gh run watch 9; echo 'ok'",                                 # F1
+    "git commit -m \"fix: don't block\" && gh run watch 9 && echo 'merged'",
+    "git push && echo \"PR's up\"\ngh pr checks 5 --watch\necho 'done'",
+    "x=\"$(echo \"it's\")\"; gh run watch 9",                                        # G1
+    "gh pr comment 5 --body \"$(printf \"Don't merge\")\"; gh run watch 9",
+    "echo \"`echo \"it's\"`\"; gh run watch 9",
+    "printf $'it\\'s\\n'; gh run watch 9",
+    "x=\"$(echo \"it's\")\"; sed -i x f",
+    "gh pr comment 5 --body \"$(printf \"Don't merge\")\"; grep -r x .",
+    "printf $'it\\'s\\n'; sed -i x f",
+    "# don't\ngh run watch 9\necho 'x'",
+    "bash \\\n<<'EOF'\ngh run watch 9\nEOF",                                         # F2
+    "bash -s \\\n  <<'EOF'\ngh run watch 9\nEOF",
+    "cat <<'EOF' | \\\nbash\ngh run watch 9\nEOF",
+])
+def test_gw02_hidden_watchers_are_denied(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "echo \"\\$(gh run watch 9)\"",                                                 # escaped: text
+    "echo \"\\`gh run watch 9\\`\"",
+    "echo '$(gh run watch 9)'",
+    "echo '`gh run watch 9`'",
+    "echo $(true)#\" ; bash -c 'gh run watch 9' ; echo \"",                         # B2 reverse
+    "# $(gh run watch 9)\necho hi",
+    "out=\"$(gh run view 9 --json status)\"",
+    "echo `gh run list -L 3`",
+    "sudo -u x gh run view 9",
+    "gh run \\\nview 9",
+    "x=\"$(gh api rate_limit --jq .resources.core.remaining)\"",
+    "git commit -m \"$(printf '%s\\n' 'gate: `gh run watch` denied')\"",              # C1 reverse
+    "echo \"$(echo '$(gh run watch 9)')\"",
+    "echo \"$(echo \"don't\") ok\"",
+    "printf '%s\\n' \"it's\" '$(gh run watch 9)'",                                    # F1 reverse
+    "git commit -m \"it's\" -m 'see $(gh run watch 9)'",
+    "true;# see 'a | sed -i x f'",                                                      # G2
+    "git merge x | tail -2;# $?",
+])
+def test_gw02_prose_and_one_shots_pass(command):
+    assert not denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "x\n" + "\n" * 20000 + "y",                      # quadratic in the newline run at 12f56273
+    "x\n" + " \n" * 15000 + "y",
+    "x=\"$(echo \"" * 50 + ")\"" * 50,               # deep nesting: bodies must not overlap
+    "$(" * 100000,
+    "echo \"" + "$(" * 100000,
+    "`" * 100001,
+    "echo foo \\\n" * 20000 + "x",                                                  # F3
+    "a\\\n" * 100000,
+])
+def test_long_newline_runs_stay_fast(command):
+    r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
+    assert r.returncode == 0, r.stderr

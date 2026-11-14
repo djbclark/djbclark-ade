@@ -168,4 +168,4 @@ if [ -z "$run_id" ] || [ "$run_id" = null ]; then
   exit 1
 fi
 echo "watching run $run_id"
-timeout 480 gh run watch "$run_id" -R "$repo" --exit-status
+timeout 480 gh run watch "$run_id" -R "$repo" --exit-status --interval 60
