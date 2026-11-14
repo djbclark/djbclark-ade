@@ -1029,11 +1029,12 @@ def test_label_queries_stay_bounded_on_a_long_chain(env):
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--workspace") + 1] == "wks_win1"
-    assert registry(LEAD) == set()  # owned through the oldest predecessor's record, not adopted by name and re-recorded
+    # owned through the oldest predecessor's record, not adopted by name and re-recorded (a mutant reading registries of the
+    # bounded ids alone would adopt the window and write LEAD's own record)
+    assert registry(LEAD) == set()
     label_calls = [c["argv"] for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
     assert 1 <= len(label_calls) <= 9  # the lead plus the 8 nearest predecessors, however long the chain
-    # owned (not merely adopted by name): archive-window refuses a window nothing shows is the lead's, and finds this one
-    # only through the oldest predecessor's record (a mutant reading registries of the bounded ids alone fails here)
+    # archive-window refuses a window nothing shows is the lead's: it must find this one owned (through the oldest record)
     env.data["agents"] = []
     r = archive(env, "--dry-run")
     assert r.returncode == 0, r.stderr
