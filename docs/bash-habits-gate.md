@@ -22,7 +22,8 @@ a few calls a minute, and it is the lead's documented CI wait; the gate cannot c
 rule 20 (never park an agent on one) stays a rule. `xargs -P N` / `parallel` around `gh` calls only **warns** (budget in
 dispatch-footer item 26). Also unwrapped: `deadline run ... -- gh ...`, `bin/gh-pr-checks`, and a heredoc fed to a shell. Not detected: a watcher
 started from a script or inline Python, `ssh host <<EOF`, `bash -c $'...'`, a shell with more than four words before it
-(`deadline run --on-expire kill -- bash -c ...`), a `sh -c` inside `"$(cd "$d"; ...)"` (nested quotes), `$'..\\'..'`, `eval`, `\\gh`, an alias, flags before the subcommand, wrapper options with values
+(`deadline run --on-expire kill -- bash -c ...`), `$'..\\'..'`, a quoted command word (`gh run 'watch'`, `"gh" run watch`), `timeout -k 10 600 gh ...` (options with values),
+a heredoc delimiter with non-word characters (`<<'X-Y'`), `eval`, `\\gh`, an alias, flags before the subcommand, wrapper options with values
 (`nice -n 10 gh`, `env -u X gh`), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
 loop that sleeps under 60 s). Known false positives (deny side): a `bash <<EOF` line, or `bash -c 'gh run watch N'` after a live `$(` in a double-quoted
 message, and `| sh` inside a comment after a data heredoc. The 5000/h quota counts REST and GraphQL separately (`gh pr checks` reads GraphQL).

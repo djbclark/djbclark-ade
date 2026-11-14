@@ -492,13 +492,13 @@ def _closing_paren(text: str, i: int) -> int:
     return n
 
 
-def live_bodies(text: str, limit: int = 100) -> list[str]:
+def live_bodies(text: str) -> list[str]:
     """Bodies of the `$(...)` and backtick substitutions bash runs: in double quotes and out of
     them, not in single quotes, comments or after a backslash. `strip_literals` blanks a double-quoted
     string whole, so command_views never sees a substitution there, and it does not split backticks."""
     out: list[str] = []
     i, n, dq = 0, len(text), False
-    while i < n and len(out) < limit:
+    while i < n:
         ch = text[i]
         if ch == "\\":
             i += 2
@@ -523,10 +523,34 @@ def live_bodies(text: str, limit: int = 100) -> list[str]:
         elif ch == "$" and text[i + 1:i + 2] == "(":
             end = _closing_paren(text, i + 2)
             out.append(text[i + 2:end])
-            i += 2                                    # a nested substitution is found by the recursion
+            i = end + 1                               # its inside is scanned fresh, by the recursion
         else:
             i += 1
     return out
+
+
+def _join_continuations(c: str) -> str:
+    """Join backslash-newline pairs (an odd run of backslashes), outside heredoc bodies."""
+    out, lines, i = [], c.split("\n"), 0
+    pending = ""
+    while i < len(lines):
+        line = pending + lines[i]
+        pending = ""
+        if re.search(r"(?<!\\)(?:\\\\)*\\$", line) and i + 1 < len(lines):
+            pending = line[:-1]
+            i += 1
+            continue
+        out.append(line)
+        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if m:                                         # copy the body untouched, delimiter included
+            i += 1
+            while i < len(lines) and lines[i].strip() != m.group(1):
+                out.append(lines[i])
+                i += 1
+            if i < len(lines):
+                out.append(lines[i])
+        i += 1
+    return "\n".join(out)
 
 
 def _drop_heredocs(c: str) -> str:
@@ -624,7 +648,9 @@ def gh_watch(args: list[str]) -> str | None:
 def gh_watch_in(text: str, depth: int = 0) -> str | None:
     """A gh-watch denial for any stage of `text`, looking inside `bash -c '...'` bodies and
     heredocs fed to a shell."""
-    text = QUOTED_NUMBER.sub(r"\2", text.replace("\\\n", ""))  # `--interval "60"` is 60; `\<nl>` joins
+    orig = QUOTED_NUMBER.sub(r"\2", text)           # `--interval "60"` is 60
+    # a backslash-newline joins lines (an odd run of backslashes only), but not inside a heredoc body
+    text = _join_continuations(orig)
     plain = strip_literals(text)
     for view in command_views(plain):
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
@@ -647,7 +673,7 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
             reason = gh_watch_in(m.group(2)[1:-1], depth + 1)
             if reason:
                 return reason
-        lines = text.split("\n")
+        lines = orig.split("\n")
         n = 0
         while n < len(lines):
             fed = (SHELL_HEREDOC.search(lines[n]) or SHELL_PIPED_HEREDOC.search(lines[n])) \

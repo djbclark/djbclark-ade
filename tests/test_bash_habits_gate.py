@@ -602,6 +602,15 @@ def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
     "gh pr checks 5 \\\n  --watch",
     "sudo -u x gh run watch 9",
     "sudo -n -u root -H gh pr checks 5 --watch",
+    "x=\"$(echo \"it's\")$(gh run watch 9)\"",                                       # C1
+    "echo \"$(echo \"it's\")\" && echo \"`gh run watch 9`\"",
+    "echo \"$(printf \"%s'\" a) $(gh pr checks 5 --watch)\"",
+    "x=\"$(:)\"" + "\"$(:)\"" * 150 + "\"$(gh run watch 9)\"",                       # C2: no cap
+    "echo " + "`:`" * 150 + "`gh run watch 9`",
+    ": \\\\\ngh run watch 9",                                                       # C3
+    "echo done\\\\\ngh run watch 9",
+    "cat <<'EOF'\nx \\\nEOF\ngh run watch 9",
+    "x\n" + " \n" * 3000 + "bash -c 'gh run watch 9'",                              # C6a
 ])
 def test_gw02_hidden_watchers_are_denied(command):
     assert denied(command), command
@@ -619,6 +628,9 @@ def test_gw02_hidden_watchers_are_denied(command):
     "sudo -u x gh run view 9",
     "gh run \\\nview 9",
     "x=\"$(gh api rate_limit --jq .resources.core.remaining)\"",
+    "git commit -m \"$(printf '%s\\n' 'gate: `gh run watch` denied')\"",              # C1 reverse
+    "echo \"$(echo '$(gh run watch 9)')\"",
+    "echo \"$(echo \"don't\") ok\"",
 ])
 def test_gw02_prose_and_one_shots_pass(command):
     assert not denied(command), command
@@ -626,9 +638,13 @@ def test_gw02_prose_and_one_shots_pass(command):
 
 @pytest.mark.parametrize("command", [
     "x\n" + "\n" * 20000 + "y",                      # quadratic in the newline run at 12f56273
-    "x\n" + " \n" * 10000 + "y",
+    "x\n" + " \n" * 15000 + "y",
+    "x=\"$(echo \"" * 50 + ")\"" * 50,               # deep nesting: bodies must not overlap
+    "$(" * 100000,
+    "echo \"" + "$(" * 100000,
+    "`" * 100001,
 ])
 def test_long_newline_runs_stay_fast(command):
     r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
-    assert r.returncode == 0
+    assert r.returncode == 0, r.stderr
