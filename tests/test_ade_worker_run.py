@@ -1088,6 +1088,7 @@ def test_a_successor_opens_a_new_window_for_new_work_beside_inherited_ones(env):
     run = placed(env)[0]
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert json.loads(r.stdout)["windowName"] == WIN
+    assert registry(LEAD) == {json.loads(r.stdout)["workspaceId"]} and registry(PRED1) == {"wks_old0", "wks_old1", "wks_old2"}
 
 
 def test_a_lead_with_its_own_window_still_refuses_a_second_one_for_a_typo(env):
@@ -1112,3 +1113,52 @@ def test_without_a_middle_two_windows_of_the_same_repo_are_still_ambiguous(env):
     r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
     assert r.returncode == 1 and "2 windows match" in r.stderr and "--window-middle" in r.stderr
     assert not placed(env)
+
+
+def test_a_wrong_repo_never_picks_an_inherited_legacy_window(env):
+    """The repo of a legacy window is its cwd's, never the --repo argument: a typo refuses instead of taking it."""
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [
+        {"workspaceId": "wks_mine", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/elsewhere/foo"}]
+    own(LEAD, "wks_mine")
+    for cmd in (("archive-window", "--lead", LEAD, "--repo", "baz", "--dry-run"),
+                ("--lead", LEAD, "--slice", "s", "--repo", "baz", "--", "--no-wait", "B")):
+        r = env.run(*cmd)
+        assert r.returncode == 1 and "2 windows match" in r.stderr, (cmd, r.stderr)
+    assert not placed(env)
+
+
+def test_a_legacy_window_is_picked_by_its_cwds_repo(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [
+        {"workspaceId": "wks_mine", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/elsewhere/foo"}]
+    own(LEAD, "wks_mine")
+    r = env.run("archive-window", "--lead", LEAD, "--repo", "foo", "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "wks_leg" in r.stdout and "wks_mine" not in r.stdout
+
+
+def test_archive_window_narrows_by_repo_and_refuses_when_ambiguous(env):
+    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS other (Old B)")
+    r = env.run("archive-window", "--lead", LEAD, "--repo", "other", "--dry-run")
+    assert r.returncode == 0 and "wks_old1" in r.stdout, r.stderr
+    r = env.run("archive-window", "--lead", LEAD, "--repo", "nothere", "--dry-run")
+    assert r.returncode == 1 and "2 windows match" in r.stderr
+
+
+def test_with_a_middle_the_repo_narrowing_never_promotes_an_unowned_name_match(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [
+        {"workspaceId": "wks_u", "name": "WORKERS repo (M)", "cwd": "/repo"},  # no record, no label: owned=False
+        {"workspaceId": "wks_l1", "name": f"workers M {PRED1}", "cwd": "/x/one"},
+        {"workspaceId": "wks_l2", "name": f"workers M {PRED1}", "cwd": "/x/two"}]
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "M", "--cwd", "/repo", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "3 windows match" in r.stderr and not placed(env)
+
+
+def test_a_lead_whose_own_window_has_a_legacy_name_still_refuses_a_typo(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/repo"}]
+    r = launch(env)  # --window-middle "Wave 7": the lead's own (legacy) window is Wave 6
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr

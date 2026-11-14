@@ -13,7 +13,9 @@ of --cwd (the main checkout's name, also from a linked worktree); <work> is --wi
 
 Launch: strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every paseo call and finds the lead's WORKERS
 window in `paseo workspace ls --json`: by exact name `WORKERS <repo> (<work>)` when --window-middle is given, else the
-one WORKERS window the lead owns. Ownership is evidence, never the name: the lead's window record
+one WORKERS window the lead owns (several: `--repo`, or the repo of --cwd / the current directory, narrows them to that repo's
+windows; one is used, several refuse). A `--window-middle` that names nothing opens a new window unless the lead itself placed
+another (a typo guard); windows only a predecessor placed do not count. Ownership is evidence, never the name: the lead's window record
 ($ADE_WORKER_RUN_STATE/<lead id>.windows.json, written when this tool mints or migrates a window, or adopts an empty
 unclaimed one after a successful launch), a live agent labelled ade.lead=<lead>, or the lead id in a legacy name. Refused:
 two matches; a window registered to another lead or holding any agent (closed included) labelled for another lead; adopting
@@ -165,11 +167,6 @@ def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
     return out
 
 
-def lead_member_windows(leads: list[str]) -> set[str]:
-    """Window ids that hold a live agent labelled ade.lead=<one of leads> (from its state file)."""
-    return set().union(*member_windows_by_lead(leads).values())
-
-
 def foreign_agents(wks: str, lead: str) -> list[str]:
     """Agents in window `wks` (closed ones too: a closed worker still says whose window it was) labelled
     ade.lead=<another lead> (not this lead or one it replaced)."""
@@ -267,8 +264,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 new, err = None, e
             if middle is None or (new is not None and wsn.parse(new).work == middle):
                 hits.append((row, new, err))
-    # Windows only a predecessor placed are inherited, not "this lead's other window": a successor may not archive them, so
-    # new work gets a new window (2026-11-14, lead 8dcd57f4 stuck with four inherited windows).
+    # Windows only a predecessor placed are inherited, not windows this lead placed, so they do not trigger the typo guard: new
+    # work gets a new window (2026-11-14, lead 8dcd57f4 stuck with four inherited windows). A window becomes the lead's own while
+    # one of its live workers sits in it (labelled[lead]) and is inherited again when that worker closes.
     if middle is not None and not hits and owned_own:
         ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in owned_own)
         raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
@@ -277,10 +275,12 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         own_hits = [h for h in hits if h[1] is not None or h[0].get("workspaceId") in members]
         if len(own_hits) == 1:
             hits = own_hits
-    if len(hits) > 1 and repo:  # several owned windows: the one for this repo, when exactly one is
-        def hit_repo(h):
-            p = wsn.parse(h[0]["name"]) or (wsn.parse(h[1]) if h[1] else None)
-            return p.repo if p else None
+    if len(hits) > 1 and repo and middle is None:  # several owned windows, no work named: the one(s) of this repo
+        def hit_repo(h):  # a repo known from evidence: the name, else (a legacy window) its cwd; never the argument itself
+            cur = wsn.parse(h[0]["name"])
+            if cur:
+                return cur.repo
+            return wsn.repo_of(h[0]["cwd"]) if h[0].get("cwd") else None
         for_repo = [h for h in hits if hit_repo(h) == repo]
         if for_repo:  # one match picks it; several are still ambiguous, but only among this repo's windows
             hits = for_repo

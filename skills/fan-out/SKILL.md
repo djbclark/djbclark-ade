@@ -94,7 +94,7 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    single `Created workspace wks_… - <name>` stderr line, cross-checked with the agent's state file; absent or ambiguous
    fails closed and names the launched agent) and renames it `WORKERS <repo> (<work>)`. `--window-middle` is required on the first
    launch (no default) and `--cwd ~/src/<repo>` should be passed (default: the current directory); a later `--window-middle`
-   that names no window while the lead has another is refused, never a second window.
+   that names no window while the lead itself placed another is refused, never a second window (windows inherited from a handed-off predecessor do not count: new work opens a new one).
 2. It adds `--label ade.lead=<LEAD>` and `--label slice=<NAME>` itself (so do not pass them, nor `--workspace`,
    `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
    `worker <NAME> <LEAD>` with `paseo agent update`, and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
