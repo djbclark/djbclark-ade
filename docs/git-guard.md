@@ -310,8 +310,9 @@ Evaluated in order; the module docstring has every form.
    exclusion (a guard that cannot look must not stop `git worktree remove`; so a same-uid agent that sets `ADE_LSOF` or a tiny
    `ADE_LSOF_TIMEOUT` skips the check silently: it is a seatbelt, like item 13); a timed-out open-file walk leaves the cwd answer standing. `--force` does not bypass it
    (that flag is about a dirty tree); `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` for that one call, or the operator's
-   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does; either allows the live-process rule only: `--force` on an
-   unclaimed worktree is still refused, and a pending `hook-config-unknown` refusal still wins over the override. `worktree move` and `prune` are not checked (a move keeps
+   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does. The env var allows the live-process rule only: `--force` on an
+   unclaimed worktree is still refused, and a pending `hook-config-unknown` refusal still wins over it; the operator override
+   allows the whole call, as everywhere (below). `worktree move` and `prune` are not checked (a move keeps
    the directory's inode; prune only touches a directory that is already gone). Order: inside rule 5's target loop, after the
    foreign-claim refusal and before the `--force`-without-claim one. `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` is logged to guard.log as an
    `override` (the stderr line names it). The match is case-insensitive on macOS (lsof prints the on-disk case). Tests: `tests/test_git_guard_live_use.py`

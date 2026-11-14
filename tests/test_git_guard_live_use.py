@@ -114,6 +114,17 @@ def test_the_env_override_does_not_open_the_force_rule(rig):
     assert rig.wt.is_dir()
 
 
+def test_the_env_override_does_not_hide_a_broken_config_refusal(rig, tmp_path):
+    """Adversary r3: a pending `hook-config-unknown` refusal wins over an allowed (overridden) live-process decision."""
+    bad = tmp_path / "badconfig"
+    bad.write_text("[core\nbroken = \n")
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_ALLOW_LIVE_WORKTREE_REMOVE="1",
+                   GIT_CONFIG_GLOBAL=str(bad))
+    assert p.returncode == 77, p.stderr
+    assert "hook-config-unknown" in p.stderr
+    assert rig.wt.is_dir()
+
+
 def test_the_env_override_with_a_claim_of_mine_still_removes_with_force(rig):
     """A claimed-by-me tree has no --force refusal, so the override plus --force goes through (the owner chose both)."""
     claim(rig.wt, cid="B", branch="wbranch")
