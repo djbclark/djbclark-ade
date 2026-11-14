@@ -41,7 +41,8 @@ archive-window: `paseo workspace archive` only when the preconditions of docs/wo
 live agent labelled ade.lead=<lead> is closed, or idle with --idle-handled; no other live agent in the window;
 the window is this lead's WORKERS window, current or legacy name); otherwise it lists the blockers and archives nothing.
 A live agent labelled ade.placement=main in another window (a MAIN tab) is not a blocker. Without --window-middle it
-finds the window by the lead's window record or labelled agents.
+finds the window by the lead's window record or labelled agents; an explicit --repo narrows several owned windows to
+that repo's (a derived repo never does there).
 
 Exit 0: done; 1: refused or paseo failed (message on stderr; an agent already launched is named); 2: usage.
 See docs/workspace-layout.md "Worker placement" and skills/fan-out section 3.

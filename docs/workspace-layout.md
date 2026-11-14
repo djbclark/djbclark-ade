@@ -65,7 +65,7 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    another lead, is refused, as are two matching windows. A name match with no evidence either way may be adopted by a launch only when no agent in it (any status)
    is unlabelled for this lead, and is recorded only after that launch succeeded; it is **never archived** before that. A window
    made by hand is unrecorded, so a lead that wants it archivable by the helper launches into it first while it is empty. A legacy window is renamed only if its new name is free, after its ownership
-   is recorded. A `--window-middle` that matches nothing while the lead itself placed another window is refused (never a second window); windows only a predecessor placed (inherited through a handoff) do not count, so a successor opens a new window for new work, and with no `--window-middle` `--repo` (or the repo of `--cwd`) narrows several owned windows to that repo's.
+   is recorded. A `--window-middle` that matches nothing while the lead itself placed another window is refused (never a second window); windows only a predecessor placed (inherited through a handoff) do not count, so a successor opens a new window for new work, and with no `--window-middle` `--repo` (or the repo of `--cwd`, else the current directory) narrows several owned windows to that repo's.
 2. **Why one window:** a top-level `paseo run` with the agent environment stripped (`skills/fan-out` section 3) creates a new
    "master" window per launch, because its cwd is the repo's `master` checkout; 11 piled up on 2026-11-13 and archiving an
    agent does not remove its window.

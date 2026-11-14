@@ -1162,3 +1162,11 @@ def test_a_lead_whose_own_window_has_a_legacy_name_still_refuses_a_typo(env):
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/repo"}]
     r = launch(env)  # --window-middle "Wave 7": the lead's own (legacy) window is Wave 6
     assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+
+
+def test_a_successor_with_only_an_inherited_legacy_window_opens_a_new_one_for_new_work(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/repo"}]
+    r = launch(env)  # --window-middle "Wave 7": new work, the predecessor's legacy window is not this lead's own
+    assert r.returncode == 0, r.stderr
+    assert registry(LEAD) and "wks_leg" not in registry(LEAD)
