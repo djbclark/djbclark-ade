@@ -61,6 +61,7 @@ import glob
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -330,18 +331,23 @@ def agent_record(sender):
     offline source. Anything unreadable gives ("", {}).
     """
     try:
-        for path in glob.glob(os.path.join(os.path.expanduser("~"), ".paseo", "agents", "*", sender + ".json")):
-            if os.path.getsize(path) > MAX_RECORD:
-                continue
+        paths = glob.glob(os.path.join(os.path.expanduser("~"), ".paseo", "agents", "*", sender + ".json"))
+    except OSError:
+        return "", {}
+    for path in paths:
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_RECORD:
+                continue  # a FIFO, device or symlink must never be opened (a read could block forever)
             with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+                data = json.loads(fh.read(MAX_RECORD))
             if not isinstance(data, dict) or str(data.get("id") or sender) != sender:
                 continue
             labels = data.get("labels")
             labels = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
             return str(data.get("title") or ""), labels
-    except (OSError, ValueError):
-        pass
+        except (OSError, ValueError):
+            continue  # one bad record does not hide the next
     return "", {}
 
 

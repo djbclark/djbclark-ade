@@ -12,7 +12,7 @@
 # source-agent-title, the title in that record, or the name `paseo ls -g --json` lists for it). Bare
 # "review" is deliberately not a pattern: repair workers carry it. Launchers do not set the label yet.
 # An unreadable or invalid file, or one that leaves nobody to match (no ids, no usable pattern), falls back
-# to the same two title patterns, so the exception cannot vanish. Python before 3.11 cannot read this file
+# to the built-in title patterns (the list below), so the exception cannot vanish. Python before 3.11 cannot read this file
 # (no tomllib): the defaults apply and `ids` are ignored.
 [sensitive]
 ids = []

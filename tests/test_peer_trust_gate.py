@@ -487,3 +487,27 @@ def test_unreadable_or_foreign_agent_records_are_ignored(box, raw):
     path.mkdir(parents=True)
     (path / f"{FAKE}.json").write_text(raw)
     assert "external-security-sensitive" not in context(box({"prompt": block(source=FAKE)}))
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink_to_zero"])
+def test_non_regular_agent_record_cannot_stall_the_hook(tmp_path, kind):
+    # a FIFO or a symlink to /dev/zero at the record path would block or eat memory if opened
+    folder = tmp_path / ".paseo/agents/slug"
+    folder.mkdir(parents=True)
+    path = folder / f"{FAKE}.json"
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.symlink_to("/dev/zero")
+    payload = {"session_id": "s3", "hook_event_name": "UserPromptSubmit", "prompt": block(source=FAKE)}
+    proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True,
+                          text=True, timeout=20, env={"HOME": str(tmp_path), "PATH": str(tmp_path)})
+    assert proc.returncode == 0
+    assert "could not be read" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_bad_record_does_not_hide_the_next_one(box):
+    write_record(box.home, FAKE, labels={"ade.kind": "code"}, folder="a-bad")
+    (box.home / ".paseo/agents/a-bad" / f"{FAKE}.json").write_text("not json")
+    write_record(box.home, FAKE, labels={"ade.kind": "external-review"}, folder="z-good")
+    assert "external-security-sensitive" in context(box({"prompt": block(source=FAKE)}))
