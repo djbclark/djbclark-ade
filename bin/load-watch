@@ -2266,6 +2266,18 @@ def agent_reserve(cap, live, ttl, force=False):
     return out if out is not None else ("agents_reserve_failed", None)
 
 
+def drop_reservation(rid):
+    """Delete reservation `rid` outright (not the RELEASE_GRACE_S shortening): a forced admit whose claim could not be written."""
+    def work():
+        try:
+            _res_write([x for x in _res_read() if x["id"] != rid])
+        except OSError:
+            return False
+        return True
+
+    return bool(_res_locked(work)) if rid else False
+
+
 def release_reservation(rid):
     """Shorten reservation `rid` to RELEASE_GRACE_S from now (its agent is spawned, or the launch was refused): the live
     count takes over, and the grace covers the seconds before `paseo ls` shows the new agent. True when it was found."""
@@ -2379,12 +2391,13 @@ def hard_refusals(refused, per_core, m, lim, hard_load):
     return hard
 
 
-def starve_claim(t, min_gap, before=None):
+def starve_claim(t, min_gap, before=None, undo=None):
     """True when this caller may force ONE admit at time `t`: at most one per `min_gap` seconds machine-wide (0: no limit). starve.json
     ({"last_forced_t"}) is read and replaced (temp file, os.replace) under an exclusive flock, so two waiters that starve in the same
     second cannot both pass. `before()` (the forced admit's agent reservation) runs under that lock once the gap allows, and the claim
-    is written only when it returns true: a reservation that fails never spends the machine-wide gap. A lock or state that cannot be
-    taken or written means no (fail toward waiting)."""
+    is written only when it returns true: a reservation that fails never spends the machine-wide gap, and a claim that cannot be
+    written calls `undo()` (drop that reservation) so nothing leaks per poll. A lock or state that cannot be taken or written means
+    no (fail toward waiting)."""
     try:
         import fcntl
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2399,8 +2412,17 @@ def starve_claim(t, min_gap, before=None):
             if before is not None and not before():
                 return False
             tmp = STATE_DIR / f"starve.json.tmp{os.getpid()}"
-            tmp.write_text(json.dumps({"last_forced_t": t}))
-            tmp.replace(STATE_DIR / "starve.json")
+            try:
+                tmp.write_text(json.dumps({"last_forced_t": t}))
+                tmp.replace(STATE_DIR / "starve.json")
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                if undo is not None and before is not None:
+                    undo()
+                return False
             return True
     except (ImportError, OSError):
         return False
@@ -2516,7 +2538,7 @@ _INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "env", "python", "python
 
 
 def admit_log_path():
-    """The log file: LW_ADMIT_LOG, `off` (any case) = none, default admit-log.jsonl in the state dir."""
+    """The log file: LW_ADMIT_LOG (`off` in any case, 0, false or no = none; a relative path is the state dir's), default admit-log.jsonl in the state dir."""
     v = os.environ.get("LW_ADMIT_LOG", "").strip()
     if v.lower() in ("off", "0", "false", "no"):
         return None
@@ -2542,9 +2564,16 @@ def admit_caller():
             return ""
         name = os.path.basename(words[0])
         if name in _INTERPRETERS:
+            opts = []
+            for w in words[1:]:
+                if not w.startswith("-"):
+                    break
+                opts.append(w)
             script = next((os.path.basename(w) for w in words[1:] if not w.startswith("-")), name)
-            # `sh -c 'TOKEN=x cmd'` and the like: only a plain program name is logged, never a word that could carry a secret
-            if "-c" not in words[1:3] and _CALLER_OK.match(script):
+            # `sh -c 'TOKEN=x cmd'`, `bash -lc ...`, `perl -e ...`: the next word is code, not a script: keep the interpreter name.
+            # Only a plain program name is logged, never a word that could carry a secret.
+            inline = any(re.fullmatch(r"-[A-Za-z]*[ce][A-Za-z]*", o) for o in opts)
+            if not inline and _CALLER_OK.match(script):
                 name = script
         return name if _CALLER_OK.match(name) else ""
     except Exception:
@@ -2598,7 +2627,8 @@ def admit_log_append(entry):
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK, 0o600)   # a FIFO with no reader must not hang admit
         try:
             if stat.S_ISREG(os.fstat(fd).st_mode):
-                os.write(fd, data)
+                while data:   # a short write (full disk) must not leave a torn line that swallows the next one
+                    data = data[os.write(fd, data):]
         finally:
             os.close(fd)
     except Exception:
@@ -2615,7 +2645,7 @@ def cmd_admit_log(a):
     last N days of the log (and its .1 file)."""
     path = admit_log_path()
     if path is None:
-        print("admit log is off (LW_ADMIT_LOG=off)")
+        print(f"admit log is off (LW_ADMIT_LOG={os.environ.get('LW_ADMIT_LOG', '').strip()})")
         return 1
     if not math.isfinite(a.days) or a.days <= 0:
         print("load-watch admit-log: --days must be a number above 0", file=sys.stderr)
@@ -2631,7 +2661,7 @@ def cmd_admit_log(a):
             try:
                 r = json.loads(ln)
                 t = calendar.timegm(time.strptime(r["t"], "%Y-%m-%dT%H:%M:%SZ"))
-            except (ValueError, KeyError, TypeError, AttributeError):
+            except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
                 continue
             ref = r.get("refused", [])
             if isinstance(r, dict) and t >= cutoff and isinstance(r.get("verdict"), str) \
@@ -2742,7 +2772,8 @@ def cmd_admit(a):
 
     caller = admit_caller()
     if getattr(a, "supervise", False) and a.wait > 0:
-        os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
+        if caller:
+            os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
         rc = self_deadline(a, poll)
         if rc is not None:
             return rc
@@ -2772,7 +2803,7 @@ def cmd_admit(a):
                 refused = admit_refusals(per_core, limit, m, lim)
             else:
                 m["reservation"] = rid
-        # Starvation valve (2026-11-14): only a waiting caller (`--wait S`, the mode bg polls in; a bare check reports the truth),
+        # Starvation valve (2026-11-14): only a waiting caller (`--wait S`: acp-dispatch; bg polls with --wait 0 and gets none; a bare check reports the truth),
         # refused without a break for STARVE_SOFT_S, with only SOFT gates refusing, and at most one per STARVE_MIN_GAP_S machine-wide.
         if not refused:
             refused_since = None
@@ -2788,7 +2819,8 @@ def cmd_admit(a):
             m["reservation"] = rid
             return True
         if (refused and a.wait > 0 and STARVE_SOFT_S > 0 and waited - refused_since >= STARVE_SOFT_S
-                and not hard_refusals(refused, per_core, m, lim, hard_load) and starve_claim(now(), STARVE_MIN_GAP_S, reserve_forced)):
+                and not hard_refusals(refused, per_core, m, lim, hard_load) and starve_claim(now(), STARVE_MIN_GAP_S, reserve_forced,
+                                 lambda: drop_reservation(m.pop("reservation", None)))):
             forced = list(refused)
             break
         if not refused or waited >= a.wait:

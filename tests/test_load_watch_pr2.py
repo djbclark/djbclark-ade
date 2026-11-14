@@ -436,6 +436,9 @@ def test_the_caller_is_a_plain_program_name_never_a_secret(monkeypatch, tmp_path
     assert ps("/usr/local/bin/acp-dispatch run\n") == "acp-dispatch"
     assert ps("sh -c GH_TOKEN=ghp_secret load-watch admit && make\n") == "sh"
     assert ps("sh /x/GH_TOKEN=ghp_secret\n") == "sh"
+    for inline in ("bash -lc GH_TOKEN=ghp_secret make", "sh -ec ghp_barewordsecret", "bash --norc --noprofile -c ghp_barewordsecret",
+                   "perl -e ghp_barewordsecret", "/usr/bin/env bash -c ghp_barewordsecret"):
+        assert ps(inline + "\n") in ("bash", "sh", "perl", "env"), inline
     assert ps("/weird/na=me arg\n") == ""
     assert ps("") == ""
     monkeypatch.setenv("LW_ADMIT_CALLER", "bg")
@@ -480,3 +483,15 @@ def test_admit_log_summary_survives_a_corrupt_log(tmp_path):
     r = subprocess.run([sys.executable, str(LW), "admit-log", "summary"], capture_output=True, text=True, env=e, timeout=30)
     assert r.returncode == 0, r.stderr
     assert "1 calls" in r.stdout and "ok=1" in r.stdout and "--wait 0" in r.stdout
+
+
+def test_a_claim_that_cannot_be_written_drops_its_forced_reservation(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, LW_FAKE_LOAD1=0.1, LW_FAKE_AGENTS=30)
+    monkeypatch.setattr(run.lw, "ADMIT_RESERVE_S", 1200.0)
+    (run.state).mkdir(parents=True)
+    (run.state / "starve.json").mkdir()   # the claim's os.replace fails (a directory in the way)
+    rc, rec, _ = run(capsys, wait=600.0, max_agents=20)
+    assert rc == 75 and rec["status"] == "hot" and "forced" not in rec
+    rows = json.loads((run.state / "agent-reservations.json").read_text())["r"]
+    assert [r for r in rows if r["until"] > run.wall0] == []   # about 20 polls tried; none left a reservation behind
+    assert not list(run.state.glob("starve.json.tmp*"))
