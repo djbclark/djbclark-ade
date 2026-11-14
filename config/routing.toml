@@ -128,13 +128,15 @@ suggest_better_delta = 3
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15).
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
 # ACP_OPERATOR_APPROVED=<agent>. omp left this list on 2026-10-19 (its Claude API credits are a
-# normal tier). route_agent never discovers a name listed here.
+# normal tier). route_agent never discovers a name listed here. The ACP_OPERATOR_APPROVED check that lived in
+# bin/acp-dispatch / tools/acp-run left with them (2026-11-14): `never_route` is what still keeps hermes out.
 operator_gated = ["hermes"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
-# ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
+# ACP_OPERATOR_APPROVED=fable-xhigh. NOT ENFORCED since 2026-11-14 (the gate was bin/acp-dispatch's gate_policy); it is an
+# instruction, and `policy --md` only prints it. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
-# (operator 2026-10-18; route-override does not skip this). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
+# (operator 2026-10-18; route-override did not skip this; the `--kind frontier` check left with bin/acp-dispatch, 2026-11-14, so route_agent's planner is the only gate). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 # Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on

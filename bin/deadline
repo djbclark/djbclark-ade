@@ -47,7 +47,7 @@ This is the interim piece; the plan's B9 launchd watchdog is meant to absorb it,
 
 Records: one JSON file per name in ~/.local/state/deadlines/ (DEADLINE_STATE_DIR overrides), written atomically; new fields are
 read with .get. A record is enforced against the process START TIME recorded at registration, so a recycled pid is never signalled.
-Test hooks: DEADLINE_NOW (epoch seconds), DEADLINE_RELAY, DEADLINE_HERMES_PING, DEADLINE_ACP_DISPATCH, DEADLINE_PASEO,
+Test hooks: DEADLINE_NOW (epoch seconds), DEADLINE_RELAY, DEADLINE_HERMES_PING, DEADLINE_PASEO,
 DEADLINE_SETTLE_S (wait after a signal), DEADLINE_RUN_POLL (run loop tick), DEADLINE_AGENT_IDLE (default 30m),
 DEADLINE_AGENT_SCAN_EVERY (default 5m), DEADLINE_AGENT_REALERT (default 1h).
 """

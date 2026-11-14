@@ -103,8 +103,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
    `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
-   or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). `bin/ade-worker-run`
-   and the Agent-tool footer hook (`claude/hooks/agent_footer_gate.py`) fill and append it.
+   or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). The Agent-tool footer hook
+   (`claude/hooks/agent_footer_gate.py`) fills it; `bin/ade-worker-run` appends one pointer line to the brief.
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
 and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.

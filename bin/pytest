@@ -3,7 +3,7 @@
 
 The bare `python3` on this machine has no pytest (2026-10-28: the third session in a row to hit
 "No module named pytest" and to rediscover the `uv run --with` incantation from an old handoff). CI
-runs `uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest
+runs `uv run --with pytest --with pyyaml python -m pytest
 tests/ -q`; this wrapper is that command, so `tests/test_bin_pytest.py` fails when the two drift.
 
 It is named `pytest` on purpose: `bg` recognises a test run by the command's basename (`pytest`, or `-m pytest`),
@@ -23,7 +23,7 @@ import shlex
 import sys
 from pathlib import Path
 
-DEPS = ["pytest", "pyyaml", "agent-client-protocol>=0.9,<1.0"]
+DEPS = ["pytest", "pyyaml"]
 ROOT = Path(os.path.realpath(__file__)).parent.parent
 
 

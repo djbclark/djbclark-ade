@@ -60,8 +60,7 @@ What an attacker would want, in order of damage:
 2. **Code execution as the operator.** (2026-10-20 snapshot; since 2026-11-06 agents run as Paseo agents in their
    provider's mode, `--perm` best effort outside `bin/review-launch`.) Live launches are `paseo run` (or
    `Choice.dispatch` → for Pi, native `paseo run --provider pi/…`). The deleted `tools/acp-run` path (gone 2026-11-14) ran every agent yolo by default (operator 2026-10-14); its `--perm
-   read-only` / `--perm deny` modes went with it, and `bin/review-launch` is the restricted-Claude path now. Both perm modes are reserved for a
-   security-sensitive slice (4.1). The proposal says an unattended builder has the daemon user's credentials and
+   read-only` / `--perm deny` modes went with it, and `bin/review-launch` is the restricted-Claude path now (4.1). The proposal says an unattended builder has the daemon user's credentials and
    that scrubbed pastures and config stripping are reliability switches, not a boundary (proposal 10, risk 12).
 3. **GitHub write access** through the operator's `gh` login: push to this public repo, open and merge
    PRs. Merged code is code the operator's machine then runs (4.6).

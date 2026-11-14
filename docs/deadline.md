@@ -24,7 +24,7 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 ```
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
-only, nothing killed), `relay` (kill, then tell the owner through native sourceless `paseo send` with inspect/steer/status gates — or `DEADLINE_RELAY` / the Wave 6 shim while it remains — with the name, budget, overrun and checkpoint). `reroute:RECORD`
+only, nothing killed), `relay` (kill, then tell the owner through native sourceless `paseo send` with inspect/steer/status gates — or the `DEADLINE_RELAY` test hook — with the name, budget, overrun and checkpoint). `reroute:RECORD`
 was retired on 2026-11-07 (slim-down E7; the dispatch shim had no `reroute`, and it was deleted 2026-11-14): `start` and `run` refuse it with exit 2 pointing at `relay`,
 whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
 dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".

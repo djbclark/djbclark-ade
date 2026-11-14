@@ -30,9 +30,10 @@ threshold from this file or any other.
 | A3. **Sonnet 5.5** | audits, deletions, inventories, everyday code from a clear brief, a pipeline-only lead | `medium` (`high` where verification matters) |
 | A4. **Haiku 5.5** | mechanical work: lookups, classification, extraction, reformatting | `low` |
 
-A5. Fable is a frontier model: a dispatched Fable slice is `--kind frontier` (and a `--frontier-reason` for judged
-use, section D), an advisor unless `ACP_OPERATOR_APPROVED=frontier-exec`, and Fable at `xhigh`/`max` through
-native `paseo run` needs `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable is a **sublimit** (at most 50%) of the shared Claude
+A5. Fable is a frontier model: a dispatched Fable slice is a `frontier` kind (judged use, section D), an advisor
+(never an exec role without the operator's yes), and Fable at `xhigh`/`max` needs the operator's approval. These are
+instructions, **not enforced by code since 2026-11-14**: the `--kind frontier` / `--frontier-reason` / `--role exec` flags and the
+`ACP_OPERATOR_APPROVED=fable-xhigh|frontier-exec` checks lived in the dispatch shim's `gate_policy` (deleted 2026-11-14); native `paseo run` never checked them. Fable is a **sublimit** (at most 50%) of the shared Claude
 weekly window, not a separate allowance: every Fable run bills the 5-hour and weekly windows too.
 A6. **Fable leads are allowed for now (operator 2026-11-07).** The one switch is `fable_lead = true` in the `[lead]` table
 of `config/routing.toml`; set it to `false` (or delete the line) to restore the 2026-10-23 rule, never a Fable lead (Fable
@@ -110,8 +111,7 @@ D2. **Start cheap, climb on a verified failure** (operator 2026-10-18): mechanic
 one rung at a time, never straight to frontier; `research` climbs to judgment. Re-dispatch the failed slice on the
 next rung with its report and diff.
 D3. **Frontier allowance** (`docs/gates.md`; standing since 2026-10-27): you MAY use Fable or `gpt-6-astra` where you
-judge it significantly better than Opus 5.5, with a one-line reason (`paseo run … --label ade.kind=frontier` plus a
-`--frontier-reason "10-200 chars"` grant where the admit path still asks; Agent tool: a `frontier-reason: …` line in the prompt), within the per-wave caps and the Agent-tool
+judge it significantly better than Opus 5.5, with a one-line reason (`paseo run … --label ade.kind=frontier`; Agent tool: a `frontier-reason: …` line in the prompt, which the hook checks), within the per-wave caps and the Agent-tool
 daily cap. For claude it needs a fresh, known Claude reading (aiuse or `paseo usage ls`) with the tightest window and
 the Fable cap above their floors; stale, unknown or short means the closed rules (one frontier slice per pool per wave,
 an Agent-tool Fable call asks).

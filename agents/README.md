@@ -56,8 +56,8 @@ read-back through the installed `codex app-server` (no model call).
    Table headers may have trailing TOML comments; their comments remain hidden in the diff.
     Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
    A running Codex keeps the policy it started with; only sessions started after the change see it.
-4. Detached fallback. Native `paseo run` already drops the four owner
-   ids (the deleted `acp-run` / relay deliverer did too). A headless command started any other way from a Codex tool (for example `codex exec` or a worker script outside
+4. Detached fallback. A native Paseo agent is a daemon child and gets the daemon's environment, not the caller's (the deleted `acp-run` / relay deliverer scrubbed the four owner
+   ids explicitly). A headless command started any other way from a Codex tool (for example `codex exec` or a worker script outside
    ACP) inherits the whole Codex environment (including the six Herdr names), so it must clear the owner ids itself:
    `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID COMMAND`. `HERDR_SOCKET_PATH` and
    `HERDR_BIN_PATH` are service routing, not identity, and may stay.
