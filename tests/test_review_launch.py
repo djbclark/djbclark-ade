@@ -801,8 +801,8 @@ def prw(tmp_path: Path) -> PrWorld:
 def test_review_pr_reviews_the_exact_head_in_a_clean_worktree_and_prints_the_marker(prw):
     r = prw.review()
     assert r.returncode == 0, r.stderr
-    marker = r.stdout.strip()
-    assert marker == '<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"%s"} -->' % prw.pr_head
+    marker = '<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"%s"} -->' % prw.pr_head
+    assert r.stdout.strip() == "```\n" + marker + "\n```"   # printed inside a fence, never as a raw line
     v = adversary_marker.adversary_verdict(marker, prw.pr_head)
     assert adversary_marker.outcome(v) == "approve"
     (call,) = prw.launches()

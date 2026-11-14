@@ -46,7 +46,8 @@ For each request:
    You never edit, commit or push, and **neither does the teammate who gets your reply write a live APPROVE
    marker into a PR body or comment** (AGENTS.md "Code review" item 1; docs/code-review.md rules 1 and 14: the
    merge gate counts a live APPROVE as the owner's, and `gh` here is the owner; `claude/hooks/adversary_marker_gate.py`
-   denies it). So put the marker in your reply **inside a fenced block** (a ``` fence on its own lines), with the real
+   denies it). So put the marker in your reply **and in every report file you write inside a fenced block** (a ``` fence on its own
+   lines; never a raw marker line anywhere, since a report that holds one is a live marker to copy), with the real
    40-hex head, so the verdict stays machine-readable in the report. **Only the operator applies a live marker** (an owner
    comment, `bin/ade-merge-ready approve-post`), or an agent the operator explicitly tells to; no teammate does it on its
    own, through `gh` or through that tool. The teammate's PR body states your verdict as prose (quote it as prose, never
