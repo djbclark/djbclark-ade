@@ -520,3 +520,43 @@ def test_parallel_gh_fanout_warns_without_denying(command):
 def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
     out = run(command)
     assert not out or "rate_limit" not in out.get("additionalContext", ""), command
+
+
+# adversary round 1 on PR 672 (docs paths, quoting, int parsing)
+
+@pytest.mark.parametrize("command", [
+    "deadline run --budget 20m --owner x -- gh pr checks 123 --watch --required",   # B1
+    "deadline run --budget 20m -- gh run watch 9",
+    "bin/gh-pr-checks 123 --watch --required",                                      # B2
+    "~/src/djbclark-ade/bin/gh-pr-checks --budget 5m 123 --watch",
+    "gh-pr-checks --no-deadline 123 --watch --interval 10",
+    "gh run watch 9 --interval 060",                                                # octal in pflag
+    "gh run watch 9 --interval 0x3c",
+    "gh run watch 9 --interval " + "9" * 5000 + "x",                               # B5 fails closed
+    "/bin/bash -c 'gh run watch 9'",                                                # B7a
+    "bash -o pipefail -c 'gh run watch 9'",                                         # B7b
+    "bash --norc -c 'gh run watch 9'",
+    "ls | xargs -I{} sh -c 'gh run watch {}'",                                      # B7c
+    "bash <<'EOF'\ngh run watch 9\nEOF",                                            # B7d
+    "sh <<EOF\ngh pr checks 5 --watch\nEOF",
+    "gh run watch 9 --interval \"30\"",
+])
+def test_adversary_round1_watchers_are_denied(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "deadline run --budget 20m --owner x -- gh pr checks 123 --watch --required --interval 60",
+    "bin/gh-pr-checks 123 --watch --required --interval 60",
+    "bin/gh-pr-checks 123 --required",
+    "deadline start review-123 --budget 2h --owner x",
+    "gh run watch 9 --interval \"60\"",                                             # B4
+    "gh run watch 9 -i '120'",
+    "gh run watch 9 --interval=\"90\"",
+    "git commit -m \"deny watchers (bash -c 'gh run watch 9') too\"",              # B3
+    "gh pr create --title x --body \"covers wrappers; sh -c 'gh pr checks 5 --watch'\"",
+    "cat <<'EOF' > f\nbash <<X\ngh run watch 9\nX\nEOF",
+    "bash <<'EOF'\ngh run view 9 --json status\nEOF",
+])
+def test_adversary_round1_false_positives_and_documented_forms_pass(command):
+    assert not denied(command), command

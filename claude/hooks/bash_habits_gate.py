@@ -402,7 +402,8 @@ EXTRA_WRAP = frozenset({"rtk", "bg", "setsid", "caffeinate", "stdbuf", "ionice",
                         "unbuffer"})
 GH_WATCH_REASON = (
     "Never watch CI with `{what}` (docs/dispatch-footer.md item 20: never wait on CI). Every "
-    "agent shares one GitHub token with a 5000/h REST quota; on 2026-11-14 four `gh run watch` "
+    "agent shares one GitHub token with a 5000/h API quota (REST and GraphQL are counted "
+    "separately); on 2026-11-14 four `gh run watch` "
     "at gh's default 3 s interval emptied it from 10:22Z to 11:22Z and blocked every agent's gh "
     "work, and a watcher also keeps you busy and deaf to the lead's messages. Instead: report "
     "\"CI running\" with the run URL and end the turn; or one-shot `gh run view RUN --json "
@@ -410,7 +411,7 @@ GH_WATCH_REASON = (
     "The lead's single watcher passes with `--interval 60` (or more)."
 )
 GH_FANOUT_WARNING = (
-    "Parallel `gh` calls (`xargs -P` / `parallel`) draw on the one 5000/h REST quota every agent "
+    "Parallel `gh` calls (`xargs -P` / `parallel`) draw on the one 5000/h API quota every agent "
     "shares (2026-11-14: it hit 0 for an hour). A script making more than ~200 GitHub API calls "
     "first reads `gh api rate_limit`, paces itself, stops at remaining < 500 and batches with "
     "GraphQL (docs/dispatch-footer.md item 26)."
@@ -418,8 +419,13 @@ GH_FANOUT_WARNING = (
 GH_FANOUT_CMD = re.compile(r"\bgh\s+(?:(?:-R|--repo)\s+\S+\s+)?"
                            r"(?:api|pr|run|issue|repo|search|release|workflow)\b")
 SHELL_C = re.compile(
-    r"""(?:^|[;&|(\n{]|\$\()\s*(?:[\w=./-]+\s+){0,4}(?:ba|z|da)?sh\s+"""
-    r"""(?:-[A-Za-z]+\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
+    r"""(?:^|[;&|(\n{]|\$\()\s*(?:[\w=./{}%-]+\s+){0,4}(?P<sh>(?:[\w./-]*/)?(?:ba|z|da)?sh)\s+"""
+    r"""(?:--?[\w-]+(?:\s+\w+)?\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
+SHELL_HEREDOC = re.compile(
+    r"""(?:^|[;&|(]|&&)\s*(?:[\w=./-]+\s+){0,3}(?:[\w./-]*/)?(?:ba|z|da)?sh\b[^<\n]*<<-?\s*"""
+    r"""['"]?(\w+)['"]?""")
+QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
 
 
 def _drop_heredocs(c: str) -> str:
@@ -442,6 +448,18 @@ def gh_args(stage: str) -> list[str] | None:
     for _ in range(8):
         head, rest = command_word(stage)
         base = os.path.basename(head)
+        if base == "deadline" and "--" in rest:       # `deadline run ... -- gh ...`
+            stage = " ".join(rest[rest.index("--") + 1:])
+            continue
+        if base == "gh-pr-checks":                    # bin/gh-pr-checks forwards to `gh pr checks`
+            fwd, k = [], 0
+            while k < len(rest):
+                if rest[k] == "--budget":
+                    k += 1
+                elif rest[k] != "--no-deadline" and not rest[k].startswith("--budget="):
+                    fwd.append(rest[k])
+                k += 1
+            return ["pr", "checks"] + fwd
         if base in SHELL_KW or base in EXTRA_WRAP:
             while base in EXTRA_WRAP and rest and rest[0].startswith("-"):
                 rest = rest[1:]
@@ -492,13 +510,16 @@ def gh_watch(args: list[str]) -> str | None:
             interval = val
         j += 1
     if GH_WATCH_MIN_INTERVAL is not None and interval is not None and \
-            re.fullmatch(r"\d+", interval) and int(interval) >= GH_WATCH_MIN_INTERVAL:
+            re.fullmatch(r"[1-9][0-9]{0,8}", interval) and \
+            int(interval) >= GH_WATCH_MIN_INTERVAL:
         return None
     return GH_WATCH_REASON.format(what=what)
 
 
 def gh_watch_in(text: str, depth: int = 0) -> str | None:
-    """A gh-watch denial for any stage of `text`, looking inside `bash -c '...'` bodies."""
+    """A gh-watch denial for any stage of `text`, looking inside `bash -c '...'` bodies and
+    heredocs fed to a shell."""
+    text = QUOTED_NUMBER.sub(r"\2", text)           # `--interval "60"` is 60
     plain = strip_literals(text)
     for view in command_views(plain):
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
@@ -508,8 +529,28 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
                 if reason:
                     return reason
     if depth < 3:
-        for m in SHELL_C.finditer(_drop_heredocs(text)):
-            reason = gh_watch_in(m.group(1)[1:-1], depth + 1)
+        raw = _drop_heredocs(text)
+        quoted = [(q.start(), q.end()) for q in QUOTED.finditer(raw)]
+        for m in SHELL_C.finditer(raw):
+            if any(a <= m.start("sh") < b for a, b in quoted):
+                continue                              # `sh -c` written inside a quoted string
+            reason = gh_watch_in(m.group(2)[1:-1], depth + 1)
+            if reason:
+                return reason
+        lines = text.split("\n")
+        n = 0
+        while n < len(lines):
+            fed = SHELL_HEREDOC.search(lines[n])
+            m = fed or re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[n])
+            n += 1
+            if not m:
+                continue
+            body = []                                 # a heredoc not fed to a shell is data
+            while n < len(lines) and lines[n].strip() != m.group(1):
+                body.append(lines[n])
+                n += 1
+            n += 1
+            reason = gh_watch_in("\n".join(body), depth + 1) if fed else None
             if reason:
                 return reason
     return None

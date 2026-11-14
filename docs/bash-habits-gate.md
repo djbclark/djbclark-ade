@@ -19,4 +19,7 @@ with the run URL and end the turn, one-shot `gh run view RUN --json status,concl
 or more between one-shot checks. A watcher with `--interval`/`-i` of 60 or more passes (`GH_WATCH_MIN_INTERVAL`): it costs
 a few calls a minute, and it is the lead's documented CI wait; the gate cannot count concurrent watchers across commands, so
 rule 20 (never park an agent on one) stays a rule. `xargs -P N` / `parallel` around `gh` calls only **warns** (budget in
-dispatch-footer item 26). Not detected: a watcher started from a script or inline Python.
+dispatch-footer item 26). Also unwrapped: `deadline run ... -- gh ...`, `bin/gh-pr-checks`, and a heredoc fed to a shell. Not detected: a watcher
+started from a script or inline Python, `eval`, `\\gh`, an alias, flags before the subcommand, wrapper options with values
+(`nice -n 10 gh`, `env -u X gh`), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
+loop that sleeps under 60 s). The 5000/h quota counts REST and GraphQL separately (`gh pr checks` reads GraphQL).

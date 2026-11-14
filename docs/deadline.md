@@ -12,7 +12,7 @@ a lead blocked in a wait). A deadline names the maximum, an owner who is told wh
 ## Commands (`bin/deadline`; `deadline --help` is the reference)
 
 ```sh
-bin/gh-pr-checks 123 --watch --required                                                     # self-registers (default budget 20m); or:
+bin/gh-pr-checks 123 --watch --required --interval 60                                      # self-registers (default budget 20m); or:
 deadline run --budget 20m --owner "$PASEO_AGENT_ID" -- gh pr checks 123 --watch --required --interval 60  # register, run, deregister (raw gh)
 deadline start review-123 --budget 2h --owner "$PASEO_AGENT_ID" --on-expire relay          # a wait with no process to kill
 deadline beat review-123 --checkpoint /abs/path/state.json                                  # heartbeat + latest checkpoint
