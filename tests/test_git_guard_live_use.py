@@ -106,6 +106,22 @@ def test_the_env_override_allows_it(rig):
     assert not rig.wt.exists()
 
 
+def test_the_env_override_does_not_open_the_force_rule(rig):
+    """Adversary r2 BLOCK: the override allows the live-process rule only; `--force` on an unclaimed tree is still refused."""
+    p = rig.remove("--force", cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_ALLOW_LIVE_WORKTREE_REMOVE="1")
+    assert p.returncode == 77, p.stderr
+    assert "worktree remove --force" in p.stderr
+    assert rig.wt.is_dir()
+
+
+def test_the_env_override_with_a_claim_of_mine_still_removes_with_force(rig):
+    """A claimed-by-me tree has no --force refusal, so the override plus --force goes through (the owner chose both)."""
+    claim(rig.wt, cid="B", branch="wbranch")
+    p = rig.remove("--force", cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_ALLOW_LIVE_WORKTREE_REMOVE="1")
+    assert p.returncode == 0, p.stderr
+    assert not rig.wt.exists()
+
+
 def test_the_operator_override_allows_it_and_logs(rig):
     p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ACP_OPERATOR_APPROVED="git-guard")
     assert p.returncode == 0 and "allowed" in p.stderr

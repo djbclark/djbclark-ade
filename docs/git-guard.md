@@ -306,10 +306,12 @@ Evaluated in order; the module docstring has every form.
    leaves that process in a deleted directory (site-public-djbclark-orchard-wt, orphan claude PID 10129). The guard asks
    `lsof` (one all-process cwd listing, then `lsof +D <target>` for open files, 6 s each, `$ADE_LSOF_TIMEOUT`) and refuses
    with every pid, command and cwd or file (first 8, then a count). The caller's own process chain (the shim, the agent that
-   ran it) is not "another user". **Fails open** when `lsof` is missing, fails or times out (a guard that cannot look must
-   not stop `git worktree remove`); a timed-out open-file walk leaves the cwd answer standing. `--force` does not bypass it
+   ran it) is not "another user". **Fails open** when `lsof` is missing, fails or times out, or when `ps` cannot list processes for the caller-chain
+   exclusion (a guard that cannot look must not stop `git worktree remove`; so a same-uid agent that sets `ADE_LSOF` or a tiny
+   `ADE_LSOF_TIMEOUT` skips the check silently: it is a seatbelt, like item 13); a timed-out open-file walk leaves the cwd answer standing. `--force` does not bypass it
    (that flag is about a dirty tree); `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` for that one call, or the operator's
-   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does. `worktree move` and `prune` are not checked (a move keeps
+   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does; either allows the live-process rule only: `--force` on an
+   unclaimed worktree is still refused, and a pending `hook-config-unknown` refusal still wins over the override. `worktree move` and `prune` are not checked (a move keeps
    the directory's inode; prune only touches a directory that is already gone). Order: inside rule 5's target loop, after the
    foreign-claim refusal and before the `--force`-without-claim one. `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` is logged to guard.log as an
    `override` (the stderr line names it). The match is case-insensitive on macOS (lsof prints the on-disk case). Tests: `tests/test_git_guard_live_use.py`
@@ -373,10 +375,6 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     git dir or the common dir recorded in the claim) is a design call for the operator.
 13. **Same-uid forgery of the hook's own inputs:** `ADE_REAL_GIT`, `ADE_PYTHON`, `ADE_HOOK_GIT_PID` (see the fail-open and
     `pack-refs` paragraphs).
-15. **Worktree removal that does not go through the shim (2026-11-14):** `rm -rf` and `git worktree prune`, Paseo's own worktree
-    archive (the daemon's git), a human shell, and the in-repo fallbacks `bin/review-pr` and `bin/ade-merge-ready`, which
-    `shutil.rmtree` a worktree after a failed `git worktree remove --force` (so an exit-77 refusal for a live process still ends
-    in a deleted directory there; queue follow-up). The live-process check (shim rule 6) covers only `git worktree remove`.
 14. **Output files written into an unclaimed checkout (replayed 2026-10-25 at ac2fc56 for Codex threads on f6fd689 and
     fdaad51; closed 2026-11-09):** the output-file rules went with O2 because no hook sees a worktree file write, so an
     agent's `git stash show -p --output=f` (also `--output=f` without `-p`, with `stash@{0}`), `git format-patch -1 -o .`
@@ -402,6 +400,10 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     git writes into `format.outputDirectory`. Still out of reach by design: a shell redirect
     (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`, and the bash fast
     path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
+15. **Worktree removal that does not go through the shim (2026-11-14):** `rm -rf` and `git worktree prune`, Paseo's own worktree
+    archive (the daemon's git), a human shell, and the in-repo fallbacks `bin/review-pr` and `bin/ade-merge-ready`, which
+    `shutil.rmtree` a worktree after a failed `git worktree remove --force` (so an exit-77 refusal for a live process still ends
+    in a deleted directory there; queue follow-up). The live-process check (shim rule 6) covers only `git worktree remove`.
 
 ## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 

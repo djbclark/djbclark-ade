@@ -1940,6 +1940,7 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
         verb = args[0]
         s = scan(args[1:], value_long={"expire", "reason"}, danger={"force"})
         force = bool(s.shorts & {"f"} or s.longs & {"force"})
+        pending: Optional[Decision] = None
         targets: list[Path] = []
         if verb in ("remove", "move") and s.pos:
             targets = _worktree_targets(call, ws0, s.pos[0])
@@ -1951,12 +1952,16 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
                                 "ask the owner (a Paseo agent: `paseo send --json --no-wait OWNER --prompt '…'`) to remove it; read-only `git worktree list` is fine")
             live = _live_use_decision(verb, t, c, os.environ if env is None else env)
-            if live is not None:
+            if live is not None and not live.allowed:
                 return live
+            if live is not None and pending is None:
+                pending = live      # the override allows the live-process rule only: the rules below still apply (r2)
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
                                 "", "nobody; the target has no active claim of yours")
+        if pending is not None:
+            return pending
     names: list[str] = []
     if sub == "branch":
         # Only a rename's or copy's DESTINATION: the files backend never tells the reference-transaction hook about it (a
@@ -2344,8 +2349,8 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                             "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
         deny = _target_decision(call, wss, ident, env)
-    if deny is None and unknown is not None:
-        deny = unknown
+    if unknown is not None and (deny is None or deny.allowed):
+        deny = unknown      # an allowed (overridden) decision never hides a fail-closed config refusal
     ws_any = next((w for w in wss if w is not None), None)
     call.ws = ws_any
     if deny is None:
