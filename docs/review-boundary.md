@@ -3,7 +3,7 @@
 2026-11-06 (slim-down E8, `docs/slim/PLAN.md` E8 as amended by `docs/slim/research/wave4-2026-11-06.md`). Two pieces replace
 the PR waiter and the Codex local review: **`bin/review-launch`**, the only way Claude is launched for a review, and the
 **`adversary-marker` Action**, which turns [docs/code-review.md](code-review.md) rule 1's marker into a required
-check. Waiting is `gh pr checks PR --watch --required`. The scripts' docstrings are the full reference; this page
+check. Waiting is `gh pr checks PR --watch --required --interval 60` (the shared GitHub quota, below). The scripts' docstrings are the full reference; this page
 is the summary. The reviewer checklist (rules 1–12) lives in [code-review.md](code-review.md); AGENTS.md keeps a
 short pointer and the machine-readable marker requirement.
 
@@ -127,7 +127,7 @@ herdr, which mangles `<!-- … -->`), then:
 
 ```sh
 gh workflow run adversary-marker.yml -f pr=N      # outside tip: a comment edit is not a Tests run
-gh pr checks N --watch --required                 # wait for Tests and the marker
+gh pr checks N --watch --required --interval 60   # wait for Tests and the marker
 bin/ade-merge-ready merge-now --prs N --yes       # preferred; refuses unless adversary-marker success
 ```
 
