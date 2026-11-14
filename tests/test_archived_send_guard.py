@@ -200,6 +200,19 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f'git commit -m "see $(paseo send {A} hi) ok" && paseo send {B} x', [(A, None), (B, None)]),  # the quote reopens after
     (f"x=$(paseo send -- {A} hi)", [(A, None)]),
     (f"(paseo send {A} hi)", [(A, None)]),
+    (f"echo `date`#x; paseo send {A} hi", [(A, None)]),  # a # glued to the end of a substitution is part of its word
+    (f"echo $(date)#x; paseo send {A} hi", [(A, None)]),
+    (f"echo $((1+2))#x; paseo send {A} hi", [(A, None)]),
+    (f"gh browse $(git rev-parse HEAD)#L10; paseo send {A} done", [(A, None)]),
+    (f"echo 'a'#x; paseo send {A} hi", [(A, None)]),  # and one glued to a closing quote
+    (f"echo x\n# don't\npaseo send {A} hi", [(A, None)]),  # a comment after a newline, with a quote in it
+    (f"x=$(# don't\npaseo send {A} hi)", [(A, None)]),  # a comment right after `$(`
+    (f'x="$(# don\'t\npaseo send {A} hi)"', [(A, None)]),
+    (f"(# don't\npaseo send {A} hi)", [(A, None)]),  # and after a bare `(`
+    (f"echo a|# don't\npaseo send {A} hi", [(A, None)]),  # and after a pipe
+    (f"echo \"$( (true) )'\" ; paseo send {A} x", [(A, None)]),  # a subshell inside a substitution inside quotes
+    (f'echo "$(echo $(date) ; paseo send {A} x)"', [(A, None)]),  # a nested substitution
+    (f'echo "$( (true) ; paseo send {A} x)"', [(A, None)]),
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -344,6 +357,22 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done', [A]),  # a target in a shell variable
     (f"for id in {A} {B}; do paseo send --no-wait \"$id\" hi; done", [A, B]),
     (f"echo {A} | xargs -I{{}} paseo send {{}} hi", [A]),
+    (f"eval 'paseo send {A} hi'", [A]),  # a string run by a word the parser does not recurse into
+    (f'eval "paseo send {A} hi"', [A]),
+    (f"watch -n 60 'paseo send {A} hi'", [A]),
+    (f"su bb -c 'paseo send {A} hi'", [A]),
+    (f"flock /tmp/l -c 'paseo send {A} hi'", [A]),
+    (f"fish -c 'paseo send {A} hi'", [A]),
+    (f"nix-shell --run 'paseo send {A} hi'", [A]),
+    (f"echo $'it\\'s'; paseo send {A} hi; echo 'done'", [A]),  # an ANSI-C quote with a quote after it on the line
+    (f"echo it\\'s; paseo send {A} hi; ls 'x' \\", [A]),  # an escaped quote, then a lone trailing backslash
+    (f"LEAD={A}; echo don\\'t; paseo send \"$LEAD\" hi; echo 'x'", [A]),
+    (f'LEAD="{A}"; paseo send "$LEAD" x', [A]),  # a quoted id has no blank: not message text
+    (f'x="$((paseo send {A} hi) )"', [A]),  # `$((` that is a subshell in a substitution: stays text in the parser, the backstop sees it
+    (f'echo "$(paseo send "$LEAD" x)"; LEAD={A}', [A]),
+    (f"paseo send -- {B} ok # was paseo send {A}", []),  # a comment is not judged
+    (f'paseo send {B} "a \\" b"; LEAD={A}; paseo send "$LEAD" x', [A]),  # an escaped quote does not end the masked string early
+    (f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"', [B]),  # the quoted message's ids are text
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
@@ -374,7 +403,7 @@ def test_a_backstop_denial_is_worded_for_the_backstop_not_as_a_resend(world):
     write_link(world.state, world.home, A, B)
     world.live(**{A: False, B: False})
     reason = denial(run_hook(world, "Bash", {"command": f"paseo send -- {B} ok; echo took over from {A}; ls \\"}))
-    assert "could not parse" in reason and A in reason and "Re-send" not in reason
+    assert "could not parse" in reason and A in reason and "Re-send" not in reason and f"send to {B}." in reason
     plain = denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))  # the parser's own denial keeps its text
     assert "Re-send to" in plain and "could not parse" not in plain
 
@@ -387,14 +416,17 @@ def test_a_backstop_denial_for_an_archived_id_names_the_override_free_exits(worl
     assert run_hook(world, "Bash", {"command": f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'}) is None
 
 
-def test_the_backstop_skips_the_senders_own_id(world):
-    """A command the parser cannot follow (a trailing backslash) that carries the sender's own id as text (`ack <own id>`)."""
+def test_a_takeover_notice_sent_to_a_shell_variable_is_not_denied_for_the_replaced_id_in_its_text(world):
     write_link(world.state, world.home, A, B)
     world.live(**{A: False, B: False})
-    cmd = f"paseo send --json --no-wait -- {B} --prompt ok; echo ack {A}; ls \\"
-    assert run_hook(world, "Bash", {"command": cmd}, env={**world.env, "PASEO_AGENT_ID": A}) is None
-    assert "could not parse" in denial(run_hook(world, "Bash", {"command": cmd}))  # any other sender: the backstop judges A
-    assert run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env={**world.env, "PASEO_AGENT_ID": A})  # a target is still judged
+    cmd = f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"'
+    assert run_hook(world, "Bash", {"command": cmd}) is None
+
+
+def test_the_backstop_judges_a_send_run_by_eval(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    assert B in denial(run_hook(world, "Bash", {"command": f"eval 'paseo send {A} hi'"}))
 
 
 def test_a_code_span_in_a_single_quoted_message_is_not_a_send(world):

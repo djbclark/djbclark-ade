@@ -16,7 +16,6 @@ Block form: stdout JSON permissionDecision "deny" and exit 0 (same as upstream_r
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import re
 import shlex
@@ -60,15 +59,17 @@ def strip_heredocs(command: str) -> str:
 
 def strip_comments(text: str) -> str:
     """The command as one logical line per simple command, without shell comments, and with command substitutions turned into
-    separators. A `#` that starts a word outside quotes runs to the end of its line; a `#` inside a word (a URL fragment) or a
-    quote is text. `\\`+newline is a line continuation (removed outside quotes and inside double quotes, as the shell does). A
-    newline outside quotes becomes ` ; ` (a command separator); inside quotes it stays. `$(` and a backtick start a command
-    outside quotes and inside double quotes, where the quote is closed around the body and reopened after it (`"a $(b) c"` ->
-    `"a " ; b ; " c"`); inside single quotes they are text (a markdown `code span` in a message is not a command). (shlex's own
-    comment handling cuts at any `#`, so it is switched off.)"""
+    separators. A `#` that starts a word outside quotes runs to the end of its line; a `#` inside a word (a URL fragment, or
+    glued to the end of a `$(...)`/backtick) or a quote is text. `\\`+newline is a line continuation (removed outside quotes and
+    inside double quotes, as the shell does). A newline outside quotes becomes ` ; ` (a command separator); inside quotes it
+    stays. `$(` and a backtick start a command outside quotes and inside double quotes, where the quote is closed around the
+    body and reopened after it (`"a $(b) c"` -> `"a " ; b ; " c"`); inside single quotes they are text (a markdown `code span`
+    in a message is not a command). (shlex's own comment handling cuts at any `#`, so it is switched off.)"""
     out, quote, i, n = [], None, 0, len(text)
     word_start = True  # the last thing emitted ended a word (blank, separator, newline), so a `#` here starts a comment
-    stack: list[str] = []  # open `(`/`$(` outside quotes ("p"); a `$(` ("d") or backtick ("b") opened inside double quotes
+    # open substitutions and groups: "p" a bare `(`; "s" a `$(` outside quotes; "a" each `(` of `$((`; "u" a backtick outside quotes; "d" a `$(` and "b" a
+    # backtick opened inside double quotes (the quote is reopened when they close)
+    stack: list[str] = []
     while i < n:
         c = text[i]
         if quote == "'":
@@ -108,32 +109,86 @@ def strip_comments(text: str) -> str:
             if stack and stack[-1] == "b":  # the end of a backtick body that began inside double quotes: reopen the quote
                 stack.pop()
                 out.append(' ; "')
-                quote = '"'
-            else:
+                quote, word_start = '"', False
+            elif stack and stack[-1] == "u":  # the end of a backtick body outside quotes: the next `#` is glued to its word
+                stack.pop()
                 out.append(" ; ")
-            word_start = True
+                word_start = False
+            else:
+                stack.append("u")
+                out.append(" ; ")
+                word_start = True
         elif c == "$" and text.startswith("$(", i) and not text.startswith("$((", i):
             out.append(" ; ")
-            stack.append("p")
+            stack.append("s")
             word_start = True
             i += 1
-        elif c == "(" or c == ")":
-            if c == "(":
-                stack.append("p")
-                out.append(c)
-            elif stack and stack[-1] == "d":  # the `)` that ends a `$(` begun inside double quotes: reopen the quote
-                stack.pop()
+        elif c == "$" and text.startswith("$((", i):  # arithmetic: `$((1+2))#x` is one word
+            out.append("$((")
+            stack += ["a", "a"]
+            word_start = False
+            i += 2
+        elif c == "(":
+            stack.append("p")
+            out.append(c)
+            word_start = True
+        elif c == ")":
+            top = stack.pop() if stack else "p"
+            if top == "d":  # the `)` that ends a `$(` begun inside double quotes: reopen the quote
                 out.append(' ; "')
-                quote = '"'
+                quote, word_start = '"', False
             else:
-                if stack and stack[-1] == "p":
-                    stack.pop()
                 out.append(c)
-            word_start = quote is None
+                word_start = top not in ("s", "a")  # after `$(...)` or `$((...))` a `#` is part of the same word; after `( )` it starts a comment
         else:
             out.append(c)
             word_start = c in " \t;&|()"
         i += 1
+    return "".join(out)
+
+
+RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at"}  # words that run a string argument
+RUN_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*|--command|--run")  # `-c`, `-lc`, `--run`: the next word is a command string
+
+
+def mask_literals(text: str) -> str:
+    """`text` (already through strip_comments) with each quoted string that is message text blanked to `''`. A string stays when
+    it has no blank in it (a quoted id), contains a `$(` or backtick (a real substitution), or follows a word that runs a
+    string (`eval`, `watch`, `-c`, `--run`: `eval 'paseo send A hi'` is a send). An unbalanced quote means the structure is
+    unclear: nothing is masked. `$'...'` is read with its backslash escapes."""
+    out, words, word = [], [], []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"" or (c == "$" and text.startswith("$'", i)):
+            start, ansi = i, c == "$"
+            i += ansi
+            q, j = text[i], i + 1
+            while j < n and text[j] != q:
+                j += 2 if text[j] == "\\" and (q == '"' or ansi) else 1
+            if j >= n:
+                return text
+            body = text[i + 1:j]
+            runs = any(Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) for w in words + ["".join(word)])
+            keep = runs or not re.search(r"\s", body) or (q == '"' and ("$(" in body or "`" in body))
+            out.append(text[start:j + 1] if keep else "''")
+            word.append("Q")
+            i = j + 1
+        elif c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            word.append("Q")
+            i += 2
+        else:
+            if c.isspace() or c in ";&|()":
+                if word:
+                    words.append("".join(word))
+                    word.clear()
+                if c in ";&|()":
+                    words.clear()
+            else:
+                word.append(c)
+            out.append(c)
+            i += 1
     return "".join(out)
 
 
@@ -209,24 +264,24 @@ def _target(args: list[str]) -> str | None:
     return None
 
 
-QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")  # a quoted string (after strip_comments: only literal text is left in quotes)
 SEND_WORD = re.compile(r"\bpaseo\b(?:\s+[^\s;&|]+){0,4}?\s+send\b")
 UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 
 
 def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
-    """The parser cannot follow every shell form (a send inside "$(...)" in double quotes, a lone trailing backslash, an
-    escaped space before a `#`...). When the command text (heredoc bodies aside) names more `paseo ... send` than the parser
-    found targets for, every full agent id written in the command is judged too (at most 5): a false denial needs an archived
-    agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form nobody listed."""
+    """The parser cannot follow every shell form (a lone trailing backslash, an ANSI-C quote, a target the shell builds, a string
+    run by `eval` or `watch`). When the command text (heredoc bodies and quoted message text aside) names more `paseo ... send`
+    than the parser found judgeable targets for, every full agent id written in the command is judged too (at most 5): a false
+    denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form
+    nobody listed."""
     text = strip_heredocs(command)
     judged = [t for t, _ in found if t and not any(c in t for c in SHELL_BUILT)]  # `$LEAD`, `{}`, `$id` are never judged
-    bare = QUOTED.sub("''", strip_comments(text))  # a `paseo send` inside a quoted message (a `code span`) is text, not a send
+    bare = mask_literals(strip_comments(text))  # a `paseo send` or an id inside a quoted message (a `code span`) is text
     if len(SEND_WORD.findall(bare)) <= len(judged):
         return []
-    seen = {t for t, _ in found} | {os.environ.get("PASEO_AGENT_ID", "")}  # the sender's own id (`ack <id>` text) is no target
+    seen = {t for t, _ in found}
     out: list[tuple[str, str | None]] = []
-    for u in dict.fromkeys(UUID.findall(text)):
+    for u in dict.fromkeys(UUID.findall(bare)):
         if u not in seen and len(out) < 5:
             out.append((u, u if f"{ALLOW_VAR}={u}" in text else None))
     return out
