@@ -16,7 +16,7 @@ tool describes the surface as it was.
   `bin/web-get`, `bin/ade-scan-state`, `bin/pr-wait`, `bin/local-review`, the quota guard and fleet governor, the
   watch family, session-finder's launcher and fleet, the pi subagent extension, and every retired TUI's adapter.
 * **Entry points today**: (a) native `paseo run` (live ops; the launch line from `route_agent.py` `Choice.dispatch`,
-  which for Pi is `paseo run --provider pi/… --no-wait`) behind `load-watch admit` and the frontier allowance; (b)
+  which for Pi is `paseo run --provider pi/… --no-wait`) behind `load-watch admit` (a caller instruction since 2026-11-14, not code) and the frontier allowance; (b)
   native `paseo send --json` for agent-to-agent messages (standing order 10; ask for `ack <your id>`); (c)
   `bin/review-launch` and `bin/review-pr`, the only way a review model is launched: read-only tools confined to a
   clean worktree at the exact head, no MCP, no hooks, secret paths denied, a tripwire (exit 77) on the first step
@@ -77,7 +77,7 @@ What an attacker would want, in order of damage:
    monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down. Native `paseo run` starts a daemon child and submits
    no launchd job (the `acp-dispatch` shim, deleted 2026-11-14, did the same).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
-   (`load-watch admit` before `paseo run`; load reached 230 on 2026-10-12).
+   (`load-watch admit` before `paseo run`, an instruction to the launcher since 2026-11-14; load reached 230 on 2026-10-12).
 
 ## 2. Trust boundaries and actors
 
@@ -103,7 +103,7 @@ What an attacker would want, in order of damage:
    daemon child).
 3. **`acp-run --verify CMD`** (removed 2026-11-14 with `tools/acp-run`): the one deliberate shell path is gone. Native `paseo run` has
    no equivalent verify flag.
-4. **Load gate.** Live ops call `load-watch admit --wait N --json` before `paseo run` (since PR 7, 2026-10-20;
+4. **Load gate.** Live ops call `load-watch admit --wait N --json` before `paseo run` (an instruction to the caller since 2026-11-14: `ade-worker-run` and `Choice.dispatch` do not call it; since PR 7, 2026-10-20;
    `machine_overloaded()` went with the E6
    rewrite, 2026-11-06). Exit 75 refuses (admit's own exit 2 too). The gate fails open by design: a missing or
    crashed load-watch, a timeout, any other exit, or exit 0 with output it cannot parse starts the slice anyway
@@ -271,8 +271,8 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   committed and pushed under it. It was off the live dispatch path since 2026-11-06 (acp-dispatch launched `paseo
   run`), and `acp-run` itself is gone now. Nothing in `bin/ade-git-guard`, `libexec/git-hooks/*` or `claude/hooks/`
   checks the committer. An agent, or injected content it reads, can set a repo-local `user.name`/`user.email` and
-  push under a third party's name to the operator's public repos. Accepted under the internal-trust ruling
-  (section 5 item 9), recorded so no one assumes the control exists; a port to the ade ref hooks is queue Carried 1c.
+  push under a third party's name to the operator's public repos. Not yet ruled on by the operator (the
+  internal-trust ruling of section 5 item 9 covers peer messages, not injected content), recorded so no one assumes the control exists; a port to the ade ref hooks is queue Carried 1c.
 
 ### 4.4 A cloud agent pushes where it should not, or opens a PR
 
@@ -340,7 +340,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.10 Denial of the operator's machine
 
-* **Control.** Live ops call `load-watch admit` before starting a slice; `load-watch`
+* **Control.** Live ops call `load-watch admit` before starting a slice (an instruction to the caller, not code, since 2026-11-14; `docs/slim/log.md`, Lost on purpose); `load-watch`
   finds the session behind sustained load and steers it with `paseo send` to move heavy work to CI; `ci-only`
   makes `bg` refuse local builds (`bin/load-watch` header). The pre-shim overload hold
   (`machine_overloaded()` / `wait_for_capacity`, up to 900 s) and the dispatcher's own auto-resume (capped at

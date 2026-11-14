@@ -153,7 +153,7 @@ union of that list and every spelling/alias of each tiered vendor's frontier rol
 
 ## H. Reasons kept from the earlier matrix
 
-H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only as the `frontier` kind (`route_agent.py plan`), capped per wave, and in-flight slices reserve their estimated quota per service.
+H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only as the `frontier` kind (`route_agent.py plan`), capped per plan, and in-flight slices reserved their estimated quota per service (acp-dispatch, gone 2026-11-14; now re-plan before each launch, model-routing D5).
 H2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
 adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is

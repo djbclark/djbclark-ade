@@ -17,9 +17,6 @@ for _var in ("TMPDIR", "TEMP", "TMP"):
         del os.environ[_var]
 tempfile.tempdir = None
 
-# acp-dispatch's load gate (`load-watch admit`, 2026-10-19) waits up to 30 min on a hot host and refuses with 75.
-# Tests must not depend on the host's load: test_acp_dispatch.py turns it on per test with a fake load-watch.
-os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "0" must not turn the real 30-min gate on
 # bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
 # every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
 # Unconditional: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.

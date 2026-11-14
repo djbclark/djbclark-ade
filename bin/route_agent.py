@@ -32,7 +32,7 @@ as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
 `ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s;
-`load_snapshot(bypass_memo=True)` skips the memo (acp-dispatch's post-wait plenty-gate looks).
+`load_snapshot(bypass_memo=True)` skips the memo (the deleted acp-dispatch's post-wait plenty-gate looked).
 
 **Paseo is the second quota source and the registry (2026-11-07, slim-down E7).** `paseo usage ls --json`
 (`usage_from_paseo`) gives one report per `sourceId`: a report whose `status` is `available` contributes its
@@ -208,7 +208,7 @@ class Service:
     # The Paseo provider (the acp-dispatch agent name) when it differs from the pool name
     # (opencode-go -> opencode, cursor-auto -> cursor, ...).
     agent: str = ""
-    # kind -> "<model> [--effort LEVEL]" to pass to acp-dispatch.
+    # kind -> "<model> [--effort LEVEL]" to pass to the launcher (`paseo run`; acp-dispatch, which took it, was deleted 2026-11-14).
     # Ids as `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`).
     models: dict[str, str] = field(default_factory=dict)
     # A reserve pool's hard floor: never route to it with less than this much
@@ -225,7 +225,7 @@ class Service:
     # grant_waste() measures the balance against an even spend over the period instead.
     grant_days: int = 0
     # Name of a readiness probe in READY_PROBES. A service whose probe fails is skipped by
-    # route() for every kind that goes through acp-dispatch (not `api-only`, which is the
+    # route() for every kind that goes through `paseo run` (not `api-only`, which is the
     # caller's own API call), so the router never hands out a slice that cannot start.
     ready_probe: str = ""
     # Name of another service whose aiuse row this one draws on (cursor-cloud bills at API
@@ -237,7 +237,7 @@ class Service:
     plenty_kinds: tuple[str, ...] = ()
     # Services this one is a FALLBACK behind (Gemini 4 Argon behind codex and claude, operator 2026-10-31): it is used
     # only while at least ONE named service is short (not usable: see pool_usable), never while all of them could take
-    # the kind, whatever its score. route() and acp-dispatch apply the same predicate (`fallback_block`). A per-wave
+    # the kind, whatever its score. route() applies this predicate (`fallback_block`); acp-dispatch, deleted 2026-11-14, once applied it too, so no launcher re-checks it now. A per-wave
     # cap or an `exclude` does not make a named service short. A fallback with no fresh reading fails closed.
     fallback_after: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
@@ -658,7 +658,7 @@ def policy_markdown() -> str:
                     cell += f" `{model}`"
                 cells.append(cell)
         lines.append(f"| {s.name} | " + " | ".join(cells) + " |")
-    lines += ["", "## Pools", "", "| service | Paseo provider (acp-dispatch agent) | billing | note |", "|---|---|---|---|"]
+    lines += ["", "## Pools", "", "| service | Paseo provider (agent) | billing | note |", "|---|---|---|---|"]
     for s in SERVICES:
         agent = "`cursor-cloud launch` (not a Paseo provider)" if s.acp_agent == "cursor-cloud" else (
             "none (API pool)" if s.access == "api" else s.acp_agent)
@@ -1848,7 +1848,7 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
 
     A cap above the closed per-wave (ade_gates.FRONTIER_DEFAULTS, 1) is the standing allowance (gates.toml, docs/gates.md), and it holds only
     while that allowance's own checks pass (2026-10-27, adversary round 1 P1): the family's `*_judged` key at 1 or more, and
-    `ade_gates.judged_pool_block` (the one copy acp-dispatch's grant uses) empty: for claude the merged snapshot's Claude reading
+    `ade_gates.judged_pool_block` (the one copy; acp-dispatch's grant, deleted 2026-11-14, used it too) empty: for claude the merged snapshot's Claude reading
     (`claude_quota_state`: aiuse and `paseo usage ls`) under 30 minutes old, its tightest window at least frontier1_window_min_left
     and the Fable cap at least frontier1_min_left, so a missing, stale or unknown reading (a Paseo report that is not `available`)
     falls back to the closed cap; for any other pool its reading in `quota` at least frontier2_min_left. Otherwise the closed per-wave."""
@@ -2241,14 +2241,14 @@ def estimate_floor(svc: Service, kind: str, info: dict[str, Any], repo: str | No
 
 
 def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: float = 15.0, repo: str | None = None) -> bool:
-    """Would acp-dispatch admit a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor, and
-    for EVERY service and kind (floor or none, measured or not) the same fit acp-dispatch applies: each window's measured
+    """Would the deleted acp-dispatch have admitted a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor, and
+    for EVERY service and kind (floor or none, measured or not) the same fit acp-dispatch applied (history, 2026-11-14): each window's measured
     estimate against that window's own remaining when a window estimate applies, else the scalar estimate against the tightest
     window. Both callers use the same rows, filters, floor lookup and arithmetic (`kind_rows`, `estimate_floor`,
     `estimate_from_history`, `estimate_windows_from_rows`, `window_fit`); there is no early return for a service without a
     floor, so measured history binds an unfloored pool too. Unmeasured, the planner's estimate is acp-dispatch's smallest
     brief-size default (3%, raised to the floor): it has no brief. A task's own history is invisible to the planner (a slice
-    sent from a task with 3+ own measured slices can be estimated differently), as is a slice's in-flight reservation. The
+    sent from a task with 3+ own measured slices can be estimated differently), as was a slice's in-flight reservation (acp-dispatch's, now gone). The
     verdict also assumes the slice is routed with the model and effort `plan` prints (`models.KIND`, `--effort high`): a
     dispatch without `--effort` filters the history on no effort and can read other rows (2026-11-01 live: median 12 and a
     5-hour estimate of 100, against 2 and 73), so route with the effort `plan` prints."""
@@ -2288,7 +2288,7 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
                    min_headroom: float = 15.0, repo: str | None = None) -> str | None:
     """Why `svc`, a fallback (`fallback_after`), may not take `kind` now: every service it sits behind is usable. None when it
     may (some pool it sits behind is short, or it is no fallback). The one predicate of the planner (`route`) and of
-    acp-dispatch's fallback-only enforcement. `services` maps names to the services that exist (default: the whole policy,
+    (history) acp-dispatch's fallback-only enforcement, deleted 2026-11-14. `services` maps names to the services that exist (default: the whole policy,
     a name not in it counts as short)."""
     if not svc.fallback_after:
         return None

@@ -171,7 +171,7 @@ claude = 8.0
 # (a worktree such as ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
 # The override REPLACES the `SERVICE:frontier` floor and is also its CAP: a measured median (3+ comparable slices) still
 # wins over the default floor everywhere, but here the estimate never exceeds 20 (a median of 70 is read as 20, a median
-# of 2 stays 2), for the scalar estimate, each window's estimate, the in-flight reservation and the fallback predicate.
+# of 2 stays 2), for the scalar estimate, each window's estimate, (until 2026-11-14) acp-dispatch's in-flight reservation and the fallback predicate.
 # Every other repository keeps the floors above. Accepted risk (adversary 2026-11-01 F4): the key is the NAME only, so any
 # checkout named tendcf or nix2cf gets it; the effect is quota policy on this machine, nothing more.
 [dispatch.repo_overrides.tendcf.estimate_floor]
@@ -293,10 +293,10 @@ access = "cli-only"
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
-# dispatcher (native `paseo run`; the Wave 6 shims were deleted 2026-11-14) also reserves in-flight
-# estimates per service. max_parallel = 1 keeps one codex slice per wave.
+# dispatcher (acp-dispatch, deleted 2026-11-14) also reserved in-flight estimates per service; nothing does now,
+# so re-plan before each launch (skills/model-routing D5). max_parallel = 1 keeps one codex slice per `plan`.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
-# and the in-flight rule await re-calibration from `route_agent.py calibrate`.
+# and the lost in-flight rule await re-calibration from `route_agent.py calibrate`.
 plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
 models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
 
