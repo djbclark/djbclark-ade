@@ -117,6 +117,38 @@ FIND_BAD = frozenset({"-printf", "-fprint", "-fprint0", "-fprintf", "-fls", "-re
                       "-daystart", "-warn", "-nowarn", "-context", "-used"})
 
 
+def _blank_quotes(s: str) -> str:
+    """Blank quoted strings in one left-to-right scan: an apostrophe inside "..." is text (two
+    regexes paired it with the next real `'` and hid every command between them), a backslash
+    escapes the next character, and a comment is kept for the comment pass."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\":
+            out.append(s[i:i + 2])
+            i += 2
+        elif ch == "#" and (i == 0 or s[i - 1].isspace() or s[i - 1] in ";&|("):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            out.append(s[i:j])
+            i = j
+        elif ch == "'":
+            j = s.find("'", i + 1)
+            j = n if j < 0 else j
+            out.append("''")
+            i = j + 1
+        elif ch == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            out.append(f'"{RC}"' if "$?" in s[i:j] else '""')
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def strip_literals(c: str) -> str:
     """Drop heredoc bodies, quoted strings and comments; a quoted `$?` leaves a marker."""
     out, lines, i = [], c.split("\n"), 0
@@ -129,8 +161,7 @@ def strip_literals(c: str) -> str:
                 i += 1
         i += 1
     s = "\n".join(out)
-    s = re.sub(r"'[^']*'", "''", s)
-    s = re.sub(r'"[^"]*"', lambda m: f'"{RC}"' if "$?" in m.group(0) else '""', s)
+    s = _blank_quotes(s)
     s = s.replace("$?", RC)
     s = re.sub(r"(?m)(^|\s)#.*$", r"\1", s)
     # `|&` is a pipe, and redirections are not control operators
@@ -532,14 +563,14 @@ def live_bodies(text: str) -> list[str]:
 def _join_continuations(c: str) -> str:
     """Join backslash-newline pairs (an odd run of backslashes), outside heredoc bodies."""
     out, lines, i = [], c.split("\n"), 0
-    pending = ""
+    pending: list[str] = []
     while i < len(lines):
-        line = pending + lines[i]
-        pending = ""
-        if re.search(r"(?<!\\)(?:\\\\)*\\$", line) and i + 1 < len(lines):
-            pending = line[:-1]
+        if i + 1 < len(lines) and re.search(r"(?<!\\)(?:\\\\)*\\$", lines[i]):
+            pending.append(lines[i][:-1])
             i += 1
             continue
+        line = "".join(pending) + lines[i]
+        pending = []
         out.append(line)
         m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
         if m:                                         # copy the body untouched, delimiter included
@@ -550,6 +581,8 @@ def _join_continuations(c: str) -> str:
             if i < len(lines):
                 out.append(lines[i])
         i += 1
+    if pending:
+        out.append("".join(pending))
     return "\n".join(out)
 
 
@@ -673,7 +706,7 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
             reason = gh_watch_in(m.group(2)[1:-1], depth + 1)
             if reason:
                 return reason
-        lines = orig.split("\n")
+        lines = text.split("\n")                    # joined lines; heredoc bodies untouched
         n = 0
         while n < len(lines):
             fed = (SHELL_HEREDOC.search(lines[n]) or SHELL_PIPED_HEREDOC.search(lines[n])) \

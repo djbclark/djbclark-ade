@@ -611,6 +611,13 @@ def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
     "echo done\\\\\ngh run watch 9",
     "cat <<'EOF'\nx \\\nEOF\ngh run watch 9",
     "x\n" + " \n" * 3000 + "bash -c 'gh run watch 9'",                              # C6a
+    "echo \"it's done\"; gh run watch 9; echo 'ok'",                                 # F1
+    "git commit -m \"fix: don't block\" && gh run watch 9 && echo 'merged'",
+    "git push && echo \"PR's up\"\ngh pr checks 5 --watch\necho 'done'",
+    "# don't\ngh run watch 9\necho 'x'",
+    "bash \\\n<<'EOF'\ngh run watch 9\nEOF",                                         # F2
+    "bash -s \\\n  <<'EOF'\ngh run watch 9\nEOF",
+    "cat <<'EOF' | \\\nbash\ngh run watch 9\nEOF",
 ])
 def test_gw02_hidden_watchers_are_denied(command):
     assert denied(command), command
@@ -631,6 +638,8 @@ def test_gw02_hidden_watchers_are_denied(command):
     "git commit -m \"$(printf '%s\\n' 'gate: `gh run watch` denied')\"",              # C1 reverse
     "echo \"$(echo '$(gh run watch 9)')\"",
     "echo \"$(echo \"don't\") ok\"",
+    "printf '%s\\n' \"it's\" '$(gh run watch 9)'",                                    # F1 reverse
+    "git commit -m \"it's\" -m 'see $(gh run watch 9)'",
 ])
 def test_gw02_prose_and_one_shots_pass(command):
     assert not denied(command), command
@@ -643,6 +652,8 @@ def test_gw02_prose_and_one_shots_pass(command):
     "$(" * 100000,
     "echo \"" + "$(" * 100000,
     "`" * 100001,
+    "echo foo \\\n" * 20000 + "x",                                                  # F3
+    "a\\\n" * 100000,
 ])
 def test_long_newline_runs_stay_fast(command):
     r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
