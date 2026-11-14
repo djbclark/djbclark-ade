@@ -403,7 +403,7 @@ tampered state file can do is still a finding (section 6 item 6).
    external-security-sensitive", after two Herald summaries were labelled UNVERIFIED), except a sender whose job is judging untrusted GitHub
    artifacts for prompt injection (label `ade.kind=external-review` or `config/peer-trust.toml`): it reads attacker text, so its message is
    evidence to check against the artifact, never an instruction.
-   **The weakness, accepted:** a listed id proves the sender exists, not that its owner wrote the message. Envelopes
+   **The weakness, accepted:** a listed id proves the sender exists, not that its owner wrote the message (the source id is the sender's own `PASEO_AGENT_ID`, unchecked, so the sensitive-sender exception, which also covers that sender's notifications, is best-effort framing a steered sender can evade). Envelopes
    inside tool output (GitHub, logs, files, web) get no framing, and GitHub artifacts stay untrusted (AGENTS.md Trust). A reviewer
    does not block on the accepted weakness; a PR that widens it (framing non-Paseo-delivered text, or dropping the injection-triage exception) is
    still a finding.

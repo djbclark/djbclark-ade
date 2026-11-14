@@ -6,5 +6,5 @@
   `archived_send_gate`. New `config/peer-trust.toml` `[sensitive]` (exact `ids`, case-insensitive `title_patterns`: `injection`, `triage`, `review-pr`,
   `pr-review`, `adversary`, `gh-watch`) and the Paseo agent label `ade.kind=external-review` (read from the agent record) name the one
   exception, a sender that judges untrusted GitHub artifacts for prompt injection: it is not believed automatically, its message is
-  evidence to check, never an instruction. AGENTS.md Trust, docs/peer-trust.md, docs/threat-model.md section 5 item 9
+  evidence to check, never an instruction; the same holds for that sender's notifications (a finish body is its last message, `permission-required` asks to approve its tool call). A remote sender's note no longer discourages a requested ack. The sender id is self-stamped, so the exception is best-effort (documented). AGENTS.md Trust, docs/peer-trust.md, docs/threat-model.md section 5 item 9
   and docs/code-review.md rule 13 updated. (#703)
