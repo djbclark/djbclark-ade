@@ -33,6 +33,7 @@ class Native:
         self.archive_error = None
         self.run_result = None      # (returncode, stdout, stderr) replacing the `agent run` answer
         self.archive_result = None  # same, for `agent archive`
+        self.background = set()     # ids in a background workspace: shown by `ls -a` only
         self.unlisted = set()       # ids missing from `agent ls -a -g` (workspace deleted, paseo#9668)
         self.workspaces = [{'workspaceId': WS, 'project': 'p', 'name': 'MAIN p (w)', 'cwd': str(root)}]
         self.head = HEAD
@@ -72,8 +73,10 @@ class Native:
                 raise self.create_error
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
+            # `ls -a` adds includeBackground; a plain `ls -g` (what archive resolves from) hides it
             data = self.labelled if '--label' in args else [
-                {'id': k} for k in self.rows if k not in self.unlisted]
+                {'id': k} for k in self.rows
+                if k not in self.unlisted and (k not in self.background or '-a' in args)]
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
@@ -859,7 +862,7 @@ def test_archive_error_naming_the_predecessor_prefix_is_not_a_mismatch(setup):
 def test_predecessor_missing_from_listing_refuses_before_any_archive(setup):
     service, native, path = finished_up_to_archive(setup)
     native.unlisted = {PRED}
-    with pytest.raises(ss.SessionError, match=r'absent from `paseo ls -a -g --json`.*9668.*archive_agent') as caught:
+    with pytest.raises(ss.SessionError, match=r'absent from `paseo ls -g --json`.*9668.*archive_agent') as caught:
         service.finish(path)
     assert 'nothing archived' in str(caught.value)
     assert native.archived == 0
@@ -874,5 +877,92 @@ def test_predecessor_missing_from_listing_refuses_before_any_archive(setup):
 def test_predecessor_in_listing_is_archived_as_before(setup):
     service, native, path = finished_up_to_archive(setup)
     assert service.finish(path)['status'] == 'archived' and native.archived == 1
-    listing = [a for a, k in native.calls if a[4:7] == ['agent', 'ls', '-a']]
-    assert listing and '--label' not in listing[0]
+    listing = [a for a, k in native.calls if a[4:6] == ['agent', 'ls']]
+    assert listing and '--label' not in listing[0] and '-a' not in listing[0]  # exactly archive's list
+
+
+def test_predecessor_only_in_the_background_listing_is_refused(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.background = {PRED}  # `agent ls -a -g` would show it; archive's own list would not
+    with pytest.raises(ss.SessionError, match=r'absent from `paseo ls -g --json`'):
+        service.finish(path)
+    assert native.archived == 0
+    assert json.loads(path.read_text())['native_error']['code'] == 'LISTING_GAP'
+
+
+def test_archive_receipt_naming_another_agent_is_reported_and_not_retried(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (0, json.dumps({'agentId': OTHER, 'status': 'archived'}), '')
+    with pytest.raises(ss.SessionError, match=OTHER) as caught:
+        service.finish(path)
+    assert 'archived a different agent' in str(caught.value) and 'archive_agent' in str(caught.value)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'ARCHIVED_OTHER_AGENT'
+    assert OTHER in saved['native_error']['message'] and native.archived == 1
+
+
+@pytest.mark.parametrize('receipt', [[], {'status': 'archived'}, {'agentId': 7}, {'agentId': ''}])
+def test_archive_receipt_without_an_agent_id_is_not_trusted(setup, receipt):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (0, json.dumps(receipt), '')
+    with pytest.raises(ss.SessionError, match='names no agent'):
+        service.finish(path)
+    assert json.loads(path.read_text())['native_error']['code'] == 'ARCHIVE_RECEIPT_UNREADABLE'
+    assert native.archived == 1
+
+
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+def test_json_without_error_or_code_is_unknown_not_refused(setup, stream):
+    service, native, _ = setup
+    receipt = json.dumps({'agentId': SUCC, 'status': 'running'})
+    native.archive_result = (1, receipt, '') if stream == 'stdout' else (1, '', receipt)
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    assert caught.value.outcome == 'unknown'
+    assert ss.parse_envelope(receipt) is None and ss.parse_envelope('{"code": "X"}') == ('X', None)
+
+
+@pytest.mark.parametrize('secret, text', [
+    ('dXNlcjpwYXNz', 'Authorization: Basic dXNlcjpwYXNz'),
+    ('def ghi', '{"token": "abc def ghi"}'),
+    ('q', '{"password":"p\\"q"}'),
+    ('s3cret', 'GET https://user:s3cret@host.example/x failed'),
+    ('ghp_abcdefghij0123456789', 'saw ghp_abcdefghij0123456789 in env'),
+    ('gho_abcdefghij0123456789', 'gho_abcdefghij0123456789'),
+    ('sk-ant-abc123-xyz', 'key sk-ant-abc123-xyz rejected'),
+    ('AKIAIOSFODNN7EXAMPLE', 'id AKIAIOSFODNN7EXAMPLE'),
+    ('abc999', 'access_key=abc999'),
+    ('abc999', 'private-key: abc999'),
+    ('sessionvalue', 'Cookie: session=sessionvalue; other=zz'),
+    ('sessionvalue', 'set-cookie: session=sessionvalue; Path=/'),
+    ('hunter2', "password: 'hunter2'"),
+    ('hunter2', 'credentials=hunter2'),
+])
+def test_scrub_covers_these_secret_shapes(secret, text):
+    out = ss.bounded(text, 512)
+    assert secret not in out and '[redacted]' in out
+
+
+def test_scrub_keeps_ordinary_text_and_caps_length():
+    assert ss.bounded('Agent not found: ' + PRED, 512) == 'Agent not found: ' + PRED
+    assert len(ss.bounded('x' * 10000, 100)) == 100
+
+
+def test_stderr_is_capped_before_parsing(setup):
+    service, native, _ = setup
+    native.archive_result = (1, '', 'y' * (4 * ss.STDERR_CAP) + '\n' + envelope('LATE', 'tail kept'))
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    assert caught.value.info['code'] == 'LATE'
+
+
+@pytest.mark.parametrize('message, other', [
+    ('Agent decade is busy', None), ('Agent acceded is busy', None), ('Agent c9a97e5 is already archived', 'c9a97e5'),
+    ('Agent c9a97e5d-4a92-4646-a016-53032146d0a1 is archived', 'c9a97e5d-4a92-4646-a016-53032146d0a1'),
+    ('Agent c9a97e5xyz is archived', None), ('Agent 1111111 is already archived', None),
+])
+def test_agent_id_regex_is_bounded_as_an_id(message, other):
+    error = ss.NativeError('x', {'message': message}, 'refused')
+    got = ss.Service.archive_other_agent(error, PRED)
+    # 'acceded' is seven hex-looking letters: a false positive that still only refuses, never archives
+    assert got == other or (message.startswith('Agent acceded') and got == 'acceded')

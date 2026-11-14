@@ -42,13 +42,24 @@ class NativeError(SessionError):
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
-_SECRETISH = re.compile(r'(?i)((?:token|secret|password|passwd|authorization|bearer|api[_-]?key)'
-                        r'["\']?\s*[:=]?\s*["\']?(?:bearer\s+)?)[^\s"\',}]+')
+STDERR_CAP = 64 * 1024
+_KEYWORDS = (r'(?:token|secret|password|passwd|authorization|bearer|api[_-]?key|access[_-]?key|private[_-]?key'
+             r'|credential)\w*')
+# keyword, optional quote/separator, optional scheme word, then a quoted string (escapes honoured,
+# whole string redacted) or a bare run of non-space characters
+_SECRETISH = re.compile(r'(?i)(\b' + _KEYWORDS + r'["\']?\s*[:=]?\s*(?:(?:basic|bearer|token)\s+)?)'
+                        r'(?:"(?:\\.|[^"\\\n])*"?|\'(?:\\.|[^\'\\\n])*\'?|[^\s"\',}]+)')
+_COOKIE = re.compile(r'(?i)(\b(?:set-)?cookie\w*["\']?\s*[:=]\s*)[^\n]+')
+_URL_USERINFO = re.compile(r'(://[^/\s:@]+:)[^@\s/]+@')
+_BARE_TOKEN = re.compile(r'\b(?:gh[pousr]_|github_pat_|sk-|xox[bpars]-)[A-Za-z0-9_-]+|\bAKIA[0-9A-Z]{16}\b')
 
 
 def bounded(text, limit):
     """Printable, secret-scrubbed tail of text, at most `limit` characters."""
-    text = ''.join(c if c.isprintable() or c in '\n\t' else '?' for c in str(text or ''))
+    text = ''.join(c if c.isprintable() or c in '\n\t' else '?' for c in str(text or '')[-STDERR_CAP:])
+    text = _URL_USERINFO.sub(lambda m: m.group(1) + '[redacted]@', text)
+    text = _BARE_TOKEN.sub('[redacted]', text)
+    text = _COOKIE.sub(lambda m: m.group(1) + '[redacted]', text)
     text = _SECRETISH.sub(lambda m: m.group(1) + '[redacted]', text).strip()
     return text if len(text) <= limit else '...' + text[-(limit - 3):]
 
@@ -56,8 +67,9 @@ def bounded(text, limit):
 def parse_envelope(*streams):
     """(code, message) from Paseo's `{"error": {"code", "message"}}` envelope in any stream.
 
-    Whole-stream JSON first, then the last line that is a JSON object. None when no stream
-    carries a JSON object.
+    Whole-stream JSON first, then the last line that is a JSON object. Only an object with an
+    `error` or `code` key counts as Paseo's error envelope; any other JSON (a receipt, a log
+    line) is not proof of a refusal, so None (outcome unknown) when no stream has one.
     """
     for text in streams:
         text = (text or '').strip()
@@ -68,7 +80,7 @@ def parse_envelope(*streams):
                 data = json.loads(candidate)
             except ValueError:
                 continue
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not ('error' in data or 'code' in data):
                 continue
             error = data.get('error')
             if isinstance(error, dict):
@@ -177,7 +189,7 @@ class Service:
         except OSError as error:
             raise failure('unknown', f'native {op} could not run ({type(error).__name__}); outcome unknown; '
                           'inspect before retry', 'OSERROR', type(error).__name__, None) from None
-        stdout, stderr = result.stdout or '', result.stderr or ''
+        stdout, stderr = result.stdout or '', (result.stderr or '')[-STDERR_CAP:]
         if len(stdout) > 16 * 1024 * 1024:
             raise SessionError('native response too large; inspect before retry')
         rc = result.returncode
@@ -202,7 +214,10 @@ class Service:
         return ident(self.env.get('PASEO_AGENT_ID', ''))
 
     def listed(self, agent):
-        rows = self.native('agent', 'ls', '-a', '-g')
+        # Exactly the listing `agent archive` resolves ids from: no `-a`, which adds includeBackground
+        # (archive fetches only includeArchived), so a background-workspace agent would pass here yet be
+        # invisible to archive's resolver, which then falls back to a title match (adversary H1, 2026-11-14).
+        rows = self.native('agent', 'ls', '-g')
         if not isinstance(rows, list):
             raise SessionError('native agent listing unavailable')
         return any(isinstance(r, dict) and r.get('id') == agent for r in rows)
@@ -480,17 +495,17 @@ class Service:
                     # paseo#9668: `agent archive ID` resolves client-side from this listing and, when ID is
                     # missing (its workspace deleted), falls back to a partial title match: a live worker.
                     record['native_error'] = {'op': 'agent ls', 'code': 'LISTING_GAP', 'rc': 0, 'stderr_tail': '',
-                                              'message': 'predecessor absent from paseo ls -a -g --json'}
+                                              'message': 'predecessor absent from paseo ls -g --json'}
                     self.save(target, record)
                     raise SessionError(
-                        f'predecessor {record["predecessor"]} is absent from `paseo ls -a -g --json` (its workspace '
-                        'may be deleted; archive resolves ids from that listing and can fall back to a partial title '
+                        f'predecessor {record["predecessor"]} is absent from `paseo ls -g --json` (its workspace '
+                        'may be deleted or a background workspace; archive resolves ids from that listing and can fall back to a partial title '
                         'match, getpaseo/paseo#9668); nothing archived; archive by exact id via the Paseo MCP '
                         'archive_agent, verify with `paseo agent inspect`, then re-run finish')
                 record['status'] = 'archive-unknown'
                 self.save(target, record)
                 try:
-                    self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
+                    receipt = self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
                 except SessionError as error:
                     # No automatic retry, no --force, no workspace archive: keep the reason in the record.
                     record['native_error'] = native_error_record('agent archive', error)
@@ -502,6 +517,22 @@ class Service:
                             f'{record["predecessor"]} via the Paseo MCP archive_agent, verify with `paseo agent '
                             'inspect`, then re-run finish') from None
                     raise
+                archived_id = receipt.get('agentId') if isinstance(receipt, dict) else None
+                if archived_id != record['predecessor']:
+                    # The CLI names the agent it archived: a different one is a live agent gone wrong.
+                    named = bounded(archived_id, 64) if isinstance(archived_id, str) and archived_id else None
+                    record['native_error'] = {
+                        'op': 'agent archive', 'rc': 0, 'stderr_tail': '',
+                        'code': 'ARCHIVED_OTHER_AGENT' if named else 'ARCHIVE_RECEIPT_UNREADABLE',
+                        'message': f'archive receipt named agent {named}' if named else 'archive receipt names no agent'}
+                    self.save(target, record)
+                    if named:
+                        raise SessionError(
+                            f'Paseo archived a different agent {named}; unarchive it, then archive '
+                            f'{record["predecessor"]} by exact id via the Paseo MCP archive_agent, verify with '
+                            '`paseo agent inspect`, then re-run finish; no retry made')
+                    raise SessionError('archive receipt names no agent; preserve the transaction and inspect '
+                                       'both agents before any retry')
                 predecessor = self.inspect(record['predecessor'])
                 if predecessor.get('Archived') is not True:
                     raise SessionError('archive unconfirmed; preserve transaction and inspect before retry')
@@ -519,7 +550,9 @@ class Service:
         """
         if not isinstance(error, NativeError):
             return None
-        named = re.search(r'\bAgent\s+([0-9a-f][0-9a-f-]{5,35})\b', error.info.get('message') or '', re.IGNORECASE)
+        # Paseo prints `agentId.slice(0, 7)`; a full UUID is accepted too. Bounded as an id, not a word.
+        named = re.search(r'\bAgent\s+([0-9a-f]{7}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+                          r'(?![0-9A-Za-z_-])', error.info.get('message') or '', re.IGNORECASE)
         if named and not predecessor.lower().startswith(named.group(1).lower()):
             return named.group(1)
         return None
