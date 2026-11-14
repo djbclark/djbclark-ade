@@ -20,7 +20,7 @@ NanoNets/Graft issue URLs redirect there).
 |---|---|---|---|
 | 1 | graft statusline empty-but-built | already-filed (fixed) | [Trail-Code#185](https://github.com/trailhq/Trail-Code/issues/185) CLOSED; verified fixed 2026-10-24 |
 | 2 | hindsight undocumented config keys | already-filed (fixed) | [hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735) CLOSED |
-| — | graft `build` edits tracked `.gitignore` | ready-to-file | residual only: no switch for `ensureBuildConfigIgnored` (`/.graft/`); main case has `GRAFT_NO_GITIGNORE=1` / `--no-gitignore` |
+| — | graft `build` edits tracked `.gitignore` | ready-to-file | residual only: no switch for `ensureBuildConfigIgnored` (`/.graft/`); main case has `GRAFT_NO_GITIGNORE=1` / `--no-gitignore`; `.ignore` is committed (2026-11-14) |
 | 3 | orca CLI structural-reorg parity | already-filed | [orca#23272](https://github.com/stablyai/orca/issues/23272) OPEN; **historical for ADE** (Orca left 2026-10-31) |
 | 4 | orca worktree sleep CLI evidence comment | blocked | target [orca#22571](https://github.com/stablyai/orca/issues/22571) OPEN; ADE no longer uses Orca — do not post unless operator wants it for upstream goodwill |
 | 5 | herdr idle sleep/wake Discussion | already-filed | [herdr#631 comment](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271); herdr left ADE 2026-10-31 |
@@ -171,10 +171,12 @@ the repo's local excludes:
 
 ```bash
 git checkout -- .gitignore
-printf '\n/graft/\n/.ignore\n' >> .git/info/exclude
+printf '\n/graft/\n' >> "$(git rev-parse --git-path info/exclude)"   # works in a linked worktree too
+git add .ignore   # commit it: portable (operator ruling 2026-11-14, below); not in a fork
 ```
 
-Applied to `~/.hermes/hermes-agent` and all three `~/ops` repos. Re-apply
+Applied to `~/.hermes/hermes-agent` and all three `~/ops` repos. `/.ignore` left the excludes of
+`site-public-djbclark`, `site-private-djbclark` and `stayturgid` on 2026-11-14. `~/.hermes/hermes-agent` keeps excluding it: a fork keeps its upstream's layout. Re-apply
 after any `graft build` in a new repo — or check `git status` afterwards,
 which is the cheap habit.
 
@@ -195,7 +197,13 @@ modifies `.gitignore`; with the variable set it does not. The variable does not
 cover `ensureBuildConfigIgnored` (`/.graft/`, written when a persisted build
 option is saved): that one has no switch in 0.23.0.
 
-**Open question to add when filing: should `.ignore` be committed?**
+**Answered locally 2026-11-14: commit `.ignore`** (operator: commit graft files usable by other people, i.e. with no
+`/Users/djbclark` in them; ignore the rest; AGENTS.md "Graft files in git"; forks excepted). Applied: `cfengine-all` 7f31545,
+`site-public-djbclark` 6040584, `site-private-djbclark` 50ad061, `stayturgid` 40dd22f; `djbclark-ade` already did (`df8c0860`). The history
+below is kept. Upstream, ask for the missing `/.graft/` switch, and ask graft to document that committing `.ignore` is
+intended.
+
+**Former open question: should `.ignore` be committed?**
 (2026-11-14, operator: "add this to the previous graft question".) The
 `.ignore` graft drops (`!graft/`, `graft/.cache/`, `graft/.graph/`) lets
 ripgrep search the gitignored `graft/` index, so search depends on it. It
@@ -205,9 +213,8 @@ rebuilt by `graft build`), but it only helps a clone that also runs graft. Our
 repos already disagree, all with the identical file: `djbclark-ade` commits it
 (`df8c0860`, 2026-08-23), while `site-public-djbclark`, `site-private-djbclark`
 and `cfengine-all` leave it untracked. The recipe above excludes `/.ignore`,
-which hides it instead. Ask upstream which is intended (and say so in graft's
-docs), and for a switch that skips writing it, like `--no-gitignore`. Until
-then, leave existing untracked copies as they are.
+which hid it instead (fixed 2026-11-14). ~~Until then, leave existing untracked copies as they are.~~ Superseded by
+the 2026-11-14 ruling.
 
 ## 3. orca — CLI parity for structural reorg (filed 2026-09-26)
 

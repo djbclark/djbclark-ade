@@ -191,6 +191,17 @@ When asked for an ELI5 or a plain-language explanation, load [skills/eli5/SKILL.
 STE-based rules (not full STE), short active sentences, one everyday analogy with its limits, then the real terms,
 checked against the real system. Standing order 5 still applies: label headings and items (`A.`, `A1`).
 
+## Graft files in git (operator, 2026-11-14; every repo except forks)
+
+Operator: "I want to have checked into github and have not ignored the graft files if they would be useable by other
+people (eg they do not have Users/djbclark embedded in them). If they would not be useful, git ignore all of them."
+So: **commit `.ignore`** (portable, no local paths; it re-admits `graft/` to ripgrep), and keep it out of
+`.git/info/exclude`. **Keep `/graft/` gitignored**: `graft/.cache/` embeds `/Users/djbclark` and per-session state.
+The cards, `INDEX.md` and `.graph/` carry no local paths but are rebuilt by every `graft build`, so committing them
+would churn every commit and conflict across worktrees: the lead's reading, put to the operator 2026-11-14. **A fork
+keeps its upstream's layout** (`~/CLAUDE.md` item 20): commit nothing graft writes there; exclude both. The upstream
+papercut draft: [docs/upstream-issues.md](docs/upstream-issues.md).
+
 <!-- graft:start -->
 ## Graft — repo context graph
 
