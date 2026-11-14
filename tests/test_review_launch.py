@@ -1134,6 +1134,8 @@ def test_review_pr_trust_follows_the_operators_login_when_the_org_owns_the_repos
     assert (argv_val(argv, "--permission-mode") == "bypassPermissions") == (runtime == "yolo")
     if runtime == "yolo":
         assert w.filed()["author"] == "djbclark"
+        out = (Path(w.filed()["evidence_dir"]) / "launcher.stdout").read_text().strip().splitlines()[-1]
+        assert json.loads(out)["trusted_author"] == "djbclark", "the launcher records the operator, not the repo owner"
     assert w.review("--runtime", "yolo").returncode == (0 if runtime == "yolo" else 2)
 
 

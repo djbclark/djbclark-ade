@@ -17,11 +17,14 @@ counts: an App or `[bot]` of a similar name does not.
 Artifacts whose author GitHub reports as that login (including Cloud Agents under it) are ours.
 
 **Two limits this rule does not remove (adversary review of #670, 2026-11-14).** (a) Owner trust follows the PR *author*, not who
-pushed its head: once the repo is in the `frdminc` org, anyone with write access to it (the org's second member `technoeuphora`, or
-an installed App with `contents: write`) can push to a branch of an open `djbclark` PR and the gate approves it with no marker. So
-the move is conditional on a written precondition, checked by the operator: org base permission `read` or `none`, no `write` or
-`admin` grant on this repository to anyone but `djbclark`, and the org's apps limited to selected repositories (docs/threat-model.md;
-a gate that requires a marker when a head commit's committer is not `djbclark` is possible but forgeable, so advisory only).
+pushed its head: anyone with write access to the repository (today: an App with `contents: write` selected for it, or a deploy
+key; after the move also the `frdminc` org's second member `technoeuphora`, and any org owner, whose admin comes with the role) can
+push to a branch of an open `djbclark` PR and the gate approves it with no marker. So the move is conditional on a written
+precondition, checked by the operator: `djbclark` is the only org **owner** (every other member has the member role), org base
+permission `read` or `none`, no `write` or `admin` grant on this repository to anyone but `djbclark`, no App installation or deploy
+key with write access to it except ones that act only for `djbclark`, and the org's other apps limited to selected repositories
+(docs/threat-model.md). A later gate could require a marker when the last pusher (the `synchronize` event's GitHub-attested
+`sender`; the committer field is forgeable) is not `djbclark`; not built.
 (b) Trust is the login *string*: renaming the `djbclark` account would hand its owner trust to whoever registers the freed name.
 Never rename it; pinning the user's immutable id in `TRUSTED_OWNER_LOGINS` is the fix if that ever has to change.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
