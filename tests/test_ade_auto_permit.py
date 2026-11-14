@@ -586,3 +586,19 @@ def test_label_queries_are_bounded_on_a_long_chain_and_a_cycle_is_audited(tmp_pa
     log = io.StringIO()
     assert module['lead_lineage'](ids[0], log) == (ids[0], {ids[0]}, [ids[0]])
     assert "succession-ledger-inconsistent" in log.getvalue()
+
+
+def test_the_sweep_asks_for_at_most_ten_labels_on_a_long_chain(tmp_path, monkeypatch):
+    ids = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(1, 31)]
+    ledger, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    ledger.mkdir()
+    for pred, nxt in zip(ids, ids[1:]):
+        (ledger / f"handoff-{pred}.json").write_text(json.dumps(
+            {"kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home.resolve()), "status": "archived",
+             "ack": {"agent_id": nxt}}))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(ledger))
+    monkeypatch.setenv("PASEO_HOME", str(home))
+    result, calls = run_fake(tmp_path, {'requests': []}, '--lead', ids[0])  # argparse: the last --lead wins
+    assert result.returncode == 0, result.stderr
+    labelled = [c for c in calls if c[:3] == ['ls', '-a', '-g'] and '--label' in c]
+    assert len(labelled) == 10 and labelled[0][-1] == f'ade.lead={ids[0]}'

@@ -440,7 +440,7 @@ card/mode/turn MCP tools only. `EnterPlanMode` stays pending too (a mode change)
 provider is classified and the name is an identifier that does not look like a credential, because ACP titles are free text and can be command lines; never
 arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
 `hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
-tool prompt), so a skipped request can be told apart from a misclassified one. The check is a
+tool prompt), and, on rows of an agent qualified by an `ade.lead=` label, `via` (that label; added 2026-11-14, so a handed-off lead's lineage is visible), so a skipped request can be told apart from a misclassified one. The check is a
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,

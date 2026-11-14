@@ -597,7 +597,7 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
             if isinstance(r, dict) and isinstance(r.get("id"), str):
                 labelled.setdefault(r["id"], x)
     in_main = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", "ade.placement=main"]) or [])
-               if isinstance(r, dict) and isinstance(r.get("id"), str)} & labelled
+               if isinstance(r, dict) and isinstance(r.get("id"), str)} & set(labelled)
     blockers = []
     for a in live_agents():
         aid, status = a["id"], a.get("status")

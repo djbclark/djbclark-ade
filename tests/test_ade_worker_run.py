@@ -1029,6 +1029,7 @@ def test_label_queries_stay_bounded_on_a_long_chain(env):
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--workspace") + 1] == "wks_win1"
+    assert registry(LEAD) == set()  # owned through the oldest predecessor's record, not adopted by name and re-recorded
     label_calls = [c["argv"] for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
     assert 1 <= len(label_calls) <= 9  # the lead plus the 8 nearest predecessors, however long the chain
     # owned (not merely adopted by name): archive-window refuses a window nothing shows is the lead's, and finds this one
@@ -1049,10 +1050,10 @@ def test_archive_blockers_name_the_matching_label_and_the_bound_is_documented_be
     env.state(near, "wks_win1", {"ade.lead": ids[-2]})
     env.state(far, "wks_other", {"ade.lead": ids[0]})  # 40 handoffs back, in another window: beyond the label bound
     r = archive(env)
-    assert r.returncode == 1 and f"{near}: labelled ade.lead={ids[-2]}, status running" in r.stderr
+    assert r.returncode == 1 and "Traceback" not in r.stderr and f"{near}: labelled ade.lead={ids[-2]}, status running" in r.stderr
     assert far not in r.stderr  # documented bound (docs/self-session.md C0): not asked about, so not a blocker
     env.state(far, "wks_win1", {"ade.lead": ids[0]})  # in the window itself it still blocks, whatever its label
-    assert far in archive(env).stderr
+    assert f"blocker: {far}: other live agent in the window" in archive(env).stderr
 
 
 
