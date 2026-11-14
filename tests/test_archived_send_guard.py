@@ -458,7 +458,8 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"printf '%s\\n' $'{A}\\cJ{B}' | xargs -n1 paseo send", [A, B]),
     (f"printf '%s\\n' $'{A}\\U0000000a{B}' | xargs -n1 paseo send", [A, B]),
     (f"paseo send {A} hi; echo $'\\c\u00df'", []),  # ls-08 r2 B1: `\\c` + `ß` raised a TypeError (the hook then allowed the whole command); the parser finds A, nothing extra
-    (f"printf '%s\\n' $'{A}\\UFFFFFFFF{B}' | xargs -n1 paseo send", []),  # a code point past U+10FFFF is no blank and no crash
+    (f"printf '%s\\n' $'{A}\\UFFFFFFFF{B}' | xargs -n1 paseo send", []),
+    (f"printf '%s\\n' $'{A}\\c\u0149{B}' | xargs -n1 paseo send", []),  # 716b1: bash reads one byte after `\\c`, so a non-ASCII character is no blank  # a code point past U+10FFFF is no blank and no crash
     (f"printf '%s\\n' $'took over from {A}\\x0a' | xargs -n1 paseo send", []),  # not an id list: still masked
     (f"printf '%s\\n' $'{A}\\\\n{B}' | xargs -n1 paseo send", []),  # an escaped backslash then `n` is no blank
     (f"echo 'x'; eval'paseo send {A} hi'", [A]),  # kills "no quoted_word reset" (a glued string after a runner word)
@@ -619,3 +620,15 @@ def test_the_hook_ignores_a_replaced_override_exported_in_its_own_environment(wo
     world.live(**{A: False, B: False})
     env = {**world.env, guard.ALLOW_REPLACED_ENV: A}
     assert B in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))
+
+
+def test_a_backstop_crash_does_not_unjudge_a_send_the_parser_found(monkeypatch, capsys):
+    """716b1 (lead review B2): main() computed the backstop before judging anything, so one exception in it allowed the command."""
+    import io
+    denied = []
+    monkeypatch.setattr(gate, "backstop_targets", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(gate, "judge", lambda target, *a, **k: f"archived {target}" if target == A else None)
+    monkeypatch.setattr(gate, "deny", lambda reason: denied.append(reason))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"tool_name": "Bash", "tool_input": {"command": f"paseo send {A} hi"}})))
+    assert gate.main() == 0
+    assert denied == [f"archived {A}"] and "boom" in capsys.readouterr().err

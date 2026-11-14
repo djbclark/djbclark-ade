@@ -161,7 +161,7 @@ IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 
 
 ANSI_ESCAPE = re.compile(r"\\(?:(?P<bs>\\)|(?P<name>[ntrvf])|x(?P<x>[0-9A-Fa-f]{1,2})|u(?P<u>[0-9A-Fa-f]{1,4})|U(?P<U>[0-9A-Fa-f]{1,8})"
-                         r"|(?P<o>[0-7]{1,3})|c(?P<c>.))", re.S)
+                         r"|(?P<o>[0-7]{1,3})|c(?P<c>[\x00-\x7f]))", re.S)  # `\c` + a non-ASCII character is no escape bash turns into a blank
 BLANKS = " \t\n\r\v\f"  # what splits a word list in a shell (not every character `str.isspace` knows)
 
 
@@ -451,7 +451,10 @@ def main() -> int:
         extra: list[tuple[str, str | None]] = []  # ids the backstop picked out of text the parser could not follow
         if tool == "Bash" and isinstance(tin.get("command"), str):
             found = targets_in_command(tin["command"])
-            extra = backstop_targets(tin["command"], found)
+            try:
+                extra = backstop_targets(tin["command"], found)
+            except Exception as exc:  # noqa: BLE001 - a backstop bug must not un-judge a send the parser found
+                print(f"archived_send_gate: backstop {type(exc).__name__}: {exc}", file=sys.stderr)
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
             found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it

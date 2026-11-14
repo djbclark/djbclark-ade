@@ -64,10 +64,11 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    `paseo` on PATH that is an executable regular file and **not a copy of the shim** (every copy carries a marker line, so two
    checkouts' `libexec/agent-bin` on one PATH, or a symlink to the shim, are skipped; a re-entry counter, `ADE_PASEO_SHIM_DEPTH`, cap 8,
    exits 127 for a wrapper that runs a shim again; it counts only an exec chain, valid when `ADE_PASEO_SHIM_PID` is the shim's own pid or its
-   parent's, so a value a daemon started through the shim hands to its agents counts from zero; a second counter, `ADE_PASEO_SHIM_HOPS`, always inherited,
-   cap 32, ends a wrapper that forks between two shims (`( paseo "$@" )`, `sh -c`, `timeout`); the real paseo's path is named
-   to the helper alone and removed before the helper execs the real paseo; `paseo [global opts] daemon ...` passes no hop count on, because a daemon hands its
-    environment to every agent it spawns and the count would otherwise grow by one per daemon generation until every call exits 127 (if one ever does, `env -u ADE_PASEO_SHIM_HOPS paseo ...` recovers; the depth cap still ends a wrapper that runs a shim again on `daemon ...`, only a wrapper that forks between two shims on a `daemon` command is not stopped by the hop cap), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
+   parent's, so a value a daemon started through the shim hands to its agents counts from zero; a second counter, `ADE_PASEO_SHIM_HOPS`, cap 32,
+   ends a wrapper that forks between two shims (`( paseo "$@" )`, `sh -c`, `timeout`) and is trusted only while `ADE_PASEO_SHIM_HOPS_PID`, the pid of the
+   shim that set it, is alive: in a wrapper loop every earlier shim is a live ancestor, while a daemon started through the shim outlives it, so its agents see a dead
+   pid and count from zero, and no daemon restart can grow the count to the cap (pid reuse can only make a stale count live for a moment); the real paseo's path is named
+   to the helper alone and removed before the helper execs the real paseo), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
    and the helper parses `paseo [global opts] [agent [global opts]] send [opts] TARGET` with the hook's own parser
    (`archived_send_gate.locate_send`, imported, not copied; global options `--json`, `-o/--format X`, `-qo X`, `-q`, `--no-headers`,
    `--no-color` may stand before `agent`, after it and after `send`; an explicit `--host`/`--home` is not judged). Then: `pass` execs the real paseo with the argv as

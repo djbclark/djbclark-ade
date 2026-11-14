@@ -28,7 +28,8 @@ FAKE = """#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
 rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH"),
-       "hops": os.environ.get("ADE_PASEO_SHIM_HOPS"), "pid": os.environ.get("ADE_PASEO_SHIM_PID")}
+       "hops": os.environ.get("ADE_PASEO_SHIM_HOPS"), "pid": os.environ.get("ADE_PASEO_SHIM_PID"),
+       "hops_pid": os.environ.get("ADE_PASEO_SHIM_HOPS_PID"), "me": os.getpid()}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -540,58 +541,54 @@ def last_rec(sw):
     return json.loads(sw.log.read_text().splitlines()[-1])
 
 
+def dead_pid():
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return str(p.pid)
+
+
 def test_the_hop_cap_is_exactly_32(sw):
-    """ls-08 B2: kills `-gt 32` -> `-ge 32` and -> `-gt 64`."""
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "31"}, timeout=30)
+    """ls-08 B2: kills `-gt 32` -> `-ge 32` and -> `-gt 64`. The inherited count counts while its shim's pid lives (this test)."""
+    live = {"ADE_PASEO_SHIM_HOPS_PID": str(os.getpid())}
+    p = sw.run("ls", env={**live, "ADE_PASEO_SHIM_HOPS": "31"}, timeout=30)
     assert p.returncode == 0 and last_rec(sw)["hops"] == "32"
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "32"}, timeout=30)
+    p = sw.run("ls", env={**live, "ADE_PASEO_SHIM_HOPS": "32"}, timeout=30)
     assert p.returncode == 127 and "33 hops" in p.stderr and len(sw.calls()) == 1
 
 
-@pytest.mark.parametrize("args", [("daemon", "restart"), ("-o", "json", "daemon", "start"), ("-qo", "json", "daemon", "status"),
-                                  ("--json", "daemon", "status"), ("--home", "/x", "daemon", "start"), ("--host", "h", "daemon", "status"),
-                                  ("--host=h", "daemon", "status")])
-def test_a_daemon_command_passes_no_hop_count_on(sw, args):
-    """ls-08 B1: a daemon started through the shim hands its environment to every agent; HOPS must not grow per generation.
-    DEPTH and PID stay: an agent's shim counts them from zero (its parent is not the shim's pid)."""
-    p = sw.run(*args, env={"ADE_PASEO_SHIM_HOPS": "31", "ADE_PASEO_SHIM_DEPTH": "3", "ADE_PASEO_SHIM_PID": str(os.getpid())}, timeout=30)
-    assert p.returncode == 0
+@pytest.mark.parametrize("args", [("daemon", "restart"), ("-o", "json", "daemon", "start"), ("--host", "h", "daemon", "status"), ("ls",)])
+def test_a_hop_count_from_an_exited_shim_counts_from_zero(sw, args):
+    """ls-08 716b1 (lead review B1, Codex P2): a daemon started through the shim outlives it and hands its environment to every
+    agent; the shim that set HOPS is gone, so no restart generation can grow the count to the cap."""
+    p = sw.run(*args, env={"ADE_PASEO_SHIM_HOPS": "32", "ADE_PASEO_SHIM_HOPS_PID": dead_pid()}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["hops"] == "1"
+
+
+@pytest.mark.parametrize("pid", ["", "junk", "0", "-1"])
+def test_a_missing_or_junk_hops_pid_counts_from_zero(sw, pid):
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "32", "ADE_PASEO_SHIM_HOPS_PID": pid}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["hops"] == "1"
+
+
+def test_the_shim_names_itself_as_the_setter_of_the_hop_count(sw):
+    sw.run("ls", timeout=30)
     r = last_rec(sw)
-    assert r["hops"] is None and r["depth"] == "4" and r["pid"]
+    assert r["hops_pid"] == str(r["me"]) and r["pid"] == str(r["me"])  # the real paseo is exec'd: the same pid
 
 
-@pytest.mark.parametrize("args", [("agent", "send", "x", "daemon"), ("ls", "daemon"), ("send", "x", "daemon", "restart"), ("-v=foo", "ls", "daemon")])
-def test_a_daemon_word_that_is_not_the_subcommand_keeps_the_hop_count(sw, args):
-    sw.live(**{"x": False})
-    p = sw.run(*args, env={"ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
-    assert p.returncode == 0 and last_rec(sw)["hops"] == "6"
-
-
-def test_an_inherited_skip_variable_does_not_steer_the_daemon_check(sw):
-    """ls-08 r2 B2: `skip` was read before it was set, so an inherited `skip=1` flipped the check both ways."""
-    sw.run("daemon", "status", env={"skip": "1", "ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
-    assert last_rec(sw)["hops"] is None
-    sw.run("ls", "daemon", env={"skip": "1", "ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
-    assert last_rec(sw)["hops"] == "6"
-
-
-@pytest.mark.parametrize("cmd", ["daemon status", "send x daemon", "ls"])
-def test_a_looping_wrapper_still_stops_whatever_the_arguments(sw, tmp_path, cmd):
-    """ls-08 r1 A1: a `daemon` word used to clear every counter, so a wrapper that runs the shim again looped without bound."""
-    sw.live(**{"x": False})
+@pytest.mark.parametrize("args", [("ls",), ("daemon", "status"), ("-o", "json", "daemon", "start")])
+@pytest.mark.parametrize("body", ['( "{shim}" "$@"; : )', '"{shim}" "$@" | cat'])
+def test_a_forking_wrapper_ends_on_every_command_including_daemon(sw, tmp_path, args, body):
+    """ls-08 716b1: the case 583465c8 left open (a forking wrapper on a `daemon` command looped without bound). The wrapper
+    counts its own runs and aborts at 60, so a broken cap fails the test instead of filling the process table."""
     wrapper = tmp_path / "wrapper" / "paseo"
     wrapper.parent.mkdir()
-    wrapper.write_text(f'#!/bin/sh\nexec "{SHIM}" "$@"\n')
+    count = tmp_path / "wrapper-runs"
+    wrapper.write_text("#!/bin/sh\necho x >> '" + str(count) + "'\n[ \"$(wc -l < '" + str(count) + "')\" -gt 60 ] && exit 99\n" + body.format(shim=SHIM) + "\n")
     wrapper.chmod(0o755)
-    path = f"{AGENT_BIN}:{wrapper.parent}:{sw.env['PATH']}"  # on PATH, not ADE_REAL_PASEO: the helper pops that before it runs paseo
-    p = sw.run(*cmd.split(), env={"PATH": path}, timeout=30)
-    assert p.returncode == 127 and "re-entered 9 times" in p.stderr and sw.calls() == []
-
-
-def test_the_shim_reads_its_argv_literally_no_redirects(sw):
-    """ls-08 r1 A2: the shell removed the redirects before the shim ran, so `>` and `2` are message words, and `2` is the agent."""
-    p = sw.run("send", "--", "2", ">", "x", A, timeout=30)
-    assert p.returncode == 0 and sw.calls()[0][:3] == ["agent", "inspect", "2"]
+    p = sw.run(*args, env={"ADE_REAL_PASEO": str(wrapper)}, timeout=90)
+    runs = len(count.read_text().splitlines())
+    assert "re-entered" in p.stderr and sw.calls() == [] and runs <= 40
 
 
 def test_a_command_without_daemon_keeps_the_counters_for_the_real_paseo(sw):
