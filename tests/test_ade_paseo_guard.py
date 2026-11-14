@@ -29,7 +29,7 @@ import json, os, sys
 a = sys.argv[1:]
 rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH"),
        "hops": os.environ.get("ADE_PASEO_SHIM_HOPS"), "pid": os.environ.get("ADE_PASEO_SHIM_PID"),
-       "hops_pid": os.environ.get("ADE_PASEO_SHIM_HOPS_PID"), "me": os.getpid()}
+       "hops_pid": os.environ.get("ADE_PASEO_SHIM_HOPS_PID"), "me": os.getpid(), "total": os.environ.get("ADE_PASEO_SHIM_TOTAL")}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -565,9 +565,34 @@ def test_a_hop_count_from_an_exited_shim_counts_from_zero(sw, args):
 
 
 @pytest.mark.parametrize("pid", ["", "junk", "0", "-1"])
-def test_a_missing_or_junk_hops_pid_counts_from_zero(sw, pid):
+def test_a_dead_hops_pid_is_silent_and_a_missing_or_junk_one_counts_from_zero(sw, pid):
     p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "32", "ADE_PASEO_SHIM_HOPS_PID": pid}, timeout=30)
     assert p.returncode == 0 and last_rec(sw)["hops"] == "1"
+
+
+def test_a_dead_hops_pid_prints_nothing(sw):
+    """716b1 r4 B3: kills dropping the `2> /dev/null` of the `kill -0` (a dead pid would print `kill: No such process`)."""
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_HOPS": "5", "ADE_PASEO_SHIM_HOPS_PID": dead_pid()}, timeout=30)
+    assert p.returncode == 0 and p.stderr == ""
+
+
+@pytest.mark.parametrize("body", ['"{shim}" "$@" &', '( "{shim}" "$@" & )'])
+def test_a_wrapper_that_starts_the_next_shim_in_the_background_ends_at_the_total_cap(sw, tmp_path, body):
+    """716b1 r4 B1: no live ancestor is left, so only the never-reset total (cap 256) ends it. The test starts at 255."""
+    wrapper = tmp_path / "wrapper" / "paseo"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n" + body.format(shim=SHIM) + "\n")
+    wrapper.chmod(0o755)
+    p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper), "ADE_PASEO_SHIM_TOTAL": "254"}, timeout=60)
+    # run() returns when the whole chain has closed the pipes: shim 1 (255) runs the wrapper, shim 2 (256) too, shim 3 (257) stops
+    assert "257 times in total" in p.stderr and sw.calls() == []
+
+
+def test_the_total_cap_is_exactly_256(sw):
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "255"}, timeout=30)
+    assert p.returncode == 0 and json.loads(sw.log.read_text().splitlines()[-1])["total"] == "256"
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256"}, timeout=30)
+    assert p.returncode == 127 and "257 times in total" in p.stderr
 
 
 def test_the_shim_names_itself_as_the_setter_of_the_hop_count(sw):
