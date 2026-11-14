@@ -27,7 +27,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 | Path | What |
 |---|---|
 | `skills/` | the canonical copy of every hand-written skill (edit here, never through a TUI's path); [published roster](https://github.com/djbclark/djbclark-ade/blob/generated-roster/ROSTER.md) |
-| `bin/` | the tools; [published roster](https://github.com/djbclark/djbclark-ade/blob/generated-roster/ROSTER.md). `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim |
+| `bin/` | the tools; [published roster](https://github.com/djbclark/djbclark-ade/blob/generated-roster/ROSTER.md). `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim; `libexec/agent-bin/paseo` is the archived-send guard's `paseo` shim |
 | `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
 | `agents/<tui>/*.tmpl` | live Claude, Codex and Hermes config templates (opencode tmpl is residual packaging); secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
 | `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
