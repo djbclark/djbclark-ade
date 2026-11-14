@@ -74,6 +74,14 @@ mode. It never silently falls back to Always Ask. Unsupported modeless/control
 providers are blocked rather than assigned an invented mode. An explicit
 `--mode plan|read-only|dontAsk` is retained only when the actual catalog supports
 it; this is for operator-requested restrictive work, not the ordinary default.
+The successor's thinking level is set with `--thinking LEVEL` (an identifier such
+as `high`, passed to `agent run --thinking`; a malformed value is refused before
+any native call). Without it the successor inherits the predecessor's own level
+when `agent inspect` reports an explicit one; an unknown, `auto`, `default` or
+unusable source level launches with no flag, as before (2026-11-14: a `high` lead
+had been handed off to an `auto` successor). The level is recorded in the
+transaction record as `thinking`; a duplicate call with a different explicit level
+is refused, never replayed. `compact` has no such option.
 
 Creation is not acceptance. The successor reads the preserved checkpoint and
 transaction, writes its own nonsecret acknowledgement JSON, then runs:

@@ -39,6 +39,18 @@ def workspace_ident(value: str) -> str:
     return value
 
 
+def thinking_ident(value: str) -> str:
+    # A Paseo thinking option ID (observed 2026-11-14: low, medium, high, auto, ultracode);
+    # a conservative identifier shape, since the native catalog decides what exists.
+    if not isinstance(value, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,31}', value) is None:
+        raise SessionError('a thinking level (letters, digits, _ . -; at most 32) is required')
+    return value
+
+
+# Predecessor values that mean "no explicit level": the successor gets today's default.
+NO_INHERITED_THINKING = ('', '-', 'auto', 'default')
+
+
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -210,8 +222,9 @@ class Service:
             raise SessionError('successor unattended mode not verified')
         return row
 
-    def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None):
+    def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None):
         predecessor = self.actor()
+        explicit_thinking = None if requested_thinking is None else thinking_ident(requested_thinking)
         with self.transaction('handoff-' + predecessor) as (path, existing):
             if existing:
                 if (not isinstance(existing, dict) or existing.get('home') != str(self.home)
@@ -220,6 +233,8 @@ class Service:
                 saved = existing.get('mode_plan') if isinstance(existing.get('mode_plan'), dict) else {}
                 if (saved.get('mode_id') if saved.get('status') == 'exempt' else None) != requested_mode:
                     raise SessionError('existing transaction has a different requested mode; no create replayed')
+                if explicit_thinking is not None and existing.get('thinking') != explicit_thinking:
+                    raise SessionError('existing transaction has a different requested thinking level; no create replayed')
                 return existing  # duplicate/ambiguous creation is never replayed
             if not quiesced:
                 raise SessionError('finish other writes/jobs and attest --quiesced first')
@@ -235,12 +250,20 @@ class Service:
                 raise SessionError('concrete predecessor provider/model unavailable')
             workspace = workspace_ident(self.env.get('PASEO_WORKSPACE_ID', ''))
             plan = self.mode_plan(source, requested_mode)
+            thinking = explicit_thinking
+            if thinking is None:
+                # Inherit the predecessor's own level (2026-11-14: a lead at `high` handed off to
+                # a successor at `auto`). Unknown, unusable or `auto` source: launch as before.
+                inherited = source.get('Thinking')
+                if isinstance(inherited, str) and inherited not in NO_INHERITED_THINKING:
+                    with contextlib.suppress(SessionError):
+                        thinking = thinking_ident(inherited)
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
             record = {'schema_version': 1, 'kind': 'handoff', 'token': token,
                       'predecessor': predecessor, 'successor': None, 'home': str(self.home),
                       'cwd': cwd, 'workspace': workspace, 'provider': source['Provider'],
-                      'model': source['Model'], 'mode_plan': plan, 'head': self.git_head(cwd),
+                      'model': source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
             self.save(path, record)  # survives crash before/after unknown native effect
@@ -264,9 +287,10 @@ class Service:
                 'If any check fails, preserve both sessions and report it.'
             )
             try:
+                thinking_args = ('--thinking', thinking) if thinking else ()
                 result = self.native('agent', 'run', '--workspace', workspace, '--cwd', cwd,
                                      '--provider', source['Provider'] + '/' + source['Model'],
-                                     '--mode', plan['mode_id'], '--no-wait', '--label',
+                                     '--mode', plan['mode_id'], *thinking_args, '--no-wait', '--label',
                                      'ade.handoff=' + token, '--', prompt, detached=True)
                 if not isinstance(result, dict):
                     raise SessionError('malformed creation receipt')

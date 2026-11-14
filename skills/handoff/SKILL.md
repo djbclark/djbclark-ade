@@ -16,7 +16,8 @@ Before moving work between computers, read [old way versus new way](../../docs/o
 A local handoff path is not a transferred artifact.
 
 For a whole-session handoff, Step 9 defaults to `~/src/djbclark-ade/bin/ade-self-session
-handoff --checkpoint ABSOLUTE_BRIEF --quiesced` and the
+handoff --checkpoint ABSOLUTE_BRIEF --quiesced` (add `--thinking LEVEL` to set the
+successor's thinking level; without it the successor inherits yours) and the
 [acknowledged successor protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
 If the helper refuses before creation, launch the top-level successor yourself
 with the documented unattended fallback. Verify its acknowledgement and idle-only
