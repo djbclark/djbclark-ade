@@ -20,7 +20,7 @@ with the run URL and end the turn, one-shot `gh run view RUN --json status,concl
 or more between one-shot checks. A watcher with `--interval`/`-i` of 60 or more passes (`GH_WATCH_MIN_INTERVAL`): it costs
 a few calls a minute, and it is the lead's documented CI wait; the gate cannot count concurrent watchers across commands, so
 rule 20 (never park an agent on one) stays a rule. `xargs -P N` / `parallel` around `gh` calls only **warns** (budget in
-dispatch-footer item 26). Also unwrapped: `deadline run ... -- gh ...`, `bin/gh-pr-checks`, and a heredoc fed to a shell. Not detected: a watcher
+dispatch-footer item 26). Also unwrapped: `deadline run ... -- gh ...`, `bin/gh-pr-checks`, and a heredoc fed to a shell. Not detected: a `&>`/`>&` redirection among the words (`gh &>log run watch 9`; strip_literals blanks the operator), a watcher
 started from a script or inline Python, `ssh host <<EOF`, `bash -c $'...'`, a shell with more than four words before it
 (`deadline run --on-expire kill -- bash -c ...`), `$'..\\'..'`, a quoted command word (`gh run 'watch'`, `"gh" run watch`), `timeout -k 10 600 gh ...` (options with values),
 a heredoc delimiter with non-word characters (`<<'X-Y'`), a `<<` that is a here-string, shift or quoted/commented text
