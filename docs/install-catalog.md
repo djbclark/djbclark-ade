@@ -589,6 +589,8 @@ worktree (exit 1 / `blocked`) — run from the primary checkout, or use
 
 Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, resources, skills, and siblings). **macOS host RAM:** `paseo-plugin-resources` chosen, not vitals (`docs/paseo-host-ram-plugins.md`). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
 
+**`paseo-plugin-github-board`** (operator, 2026-11-14): chosen and installed on the Mac (`paseo plugin add gpambrozio/github-board`). It can edit labels and press **Update branch** on GitHub under the `gh` login, so an owner PR's head can be pushed by the operator's account (a merge of the base branch, never a rebase), which the merge gate counts as an owner push.
+
 ## H. Next units
 
 The bounded S3 Just bootstrap and the explicit Python acquisition step above
