@@ -133,7 +133,7 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      file write).
      Also (gg-01, 2026-11-14): `worktree remove` of a directory another live process uses (lsof: cwd, then open files;
      fails open; `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` overrides, `--force` does not) is refused whoever owns it
-     (`worktree remove: live process`).
+     (`worktree remove: live process`; docs/git-guard.md calls it shim rule 6).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
 `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
@@ -173,6 +173,7 @@ import contextlib
 import dataclasses
 import fcntl
 import json
+import math
 import os
 import re
 import shlex
@@ -1793,6 +1794,7 @@ def _output_file_decision(call: GitCall, ident: Optional[str]) -> Optional[Decis
 
 LIVE_USE_ALLOW_ENV = "ADE_ALLOW_LIVE_WORKTREE_REMOVE"   # =1: remove a worktree a live process still uses (the guard's own override)
 LSOF_TIMEOUT = 6.0                                       # seconds per lsof call ($ADE_LSOF_TIMEOUT); a timeout never refuses
+LSOF_TIMEOUT_MAX = 120.0      # an `ADE_LSOF_TIMEOUT` above this is cut to it (a guard is not an unbounded wait)
 LIVE_USE_LIST_MAX = 8
 
 
@@ -1872,9 +1874,11 @@ def _own_pids() -> Optional[set[int]]:
 
 def _lsof_timeout() -> float:
     try:
-        return max(0.1, float(os.environ.get("ADE_LSOF_TIMEOUT") or LSOF_TIMEOUT))
+        v = float(os.environ.get("ADE_LSOF_TIMEOUT") or LSOF_TIMEOUT)
     except ValueError:
         return LSOF_TIMEOUT
+    # inf and nan would make `communicate(timeout=...)` raise OverflowError (lw-01, #693 review L2): the default instead
+    return min(LSOF_TIMEOUT_MAX, max(0.1, v)) if math.isfinite(v) else LSOF_TIMEOUT
 
 
 def live_users_of(target: Path, timeout: Optional[float] = None) -> list[tuple[int, str, str]]:

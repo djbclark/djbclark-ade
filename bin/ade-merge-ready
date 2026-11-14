@@ -112,6 +112,16 @@ try:
 finally:
     sys.path.pop(0)
 
+GUARD_REFUSED = 77   # ade-git-guard's refusal exit (docs/git-guard.md)
+# rule tags of the refusals that mean "leave this directory": a live process uses it, or another agent claims it
+# (the routine `--force`-on-an-unclaimed-tree refusal is not one: this tool's temporary worktree is never claimed)
+GUARD_KEEP_RULES = ("[worktree remove: live process]", "[worktree remove of a claimed workspace]")
+
+
+def _guard_keeps_directory(rm: subprocess.CompletedProcess[str]) -> bool:
+    return rm.returncode == GUARD_REFUSED and any(t in (rm.stderr or "") for t in GUARD_KEEP_RULES)
+
+
 MARKER_RE = re.compile(
     r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
     re.DOTALL,
@@ -1499,8 +1509,14 @@ def stack_rebase_prs(
             row["status"] = "rebased"
             results.append(row)
         finally:
-            _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
-            if os.path.isdir(wt):
+            rm = _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
+            if _guard_keeps_directory(rm):
+                # ade-git-guard refused for a live process or another agent's claim: leave the directory and say so
+                # (deleting it behind the refusal is what the guard prevents); any other failure still cleans up
+                print(f"ade-merge-ready: git worktree remove refused by the git guard; leaving {wt} in place: "
+                      f"{(rm.stderr or '').strip()[:300]}", file=sys.stderr)
+                row["worktree_left"] = wt
+            elif os.path.isdir(wt):
                 shutil.rmtree(wt, ignore_errors=True)
     return results
 

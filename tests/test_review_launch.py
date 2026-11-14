@@ -818,6 +818,45 @@ def test_review_pr_reviews_the_exact_head_in_a_clean_worktree_and_prints_the_mar
     assert (prw.state / f"djbclark__djbclark-ade-pr7-{prw.pr_head}.json").stat().st_mode & 0o777 == 0o600
 
 
+LIVE = "REFUSED git worktree remove [worktree remove: live process]"
+CLAIMED = "REFUSED git worktree remove [worktree remove of a claimed workspace]"
+FORCE_RULE = "REFUSED git worktree remove [worktree remove --force] nobody; the target has no active claim of yours"
+
+
+def _git_that_fails_the_worktree_remove(prw, rc: int, text: str = "failed") -> None:
+    """A `git` ahead of the real one on PATH: `worktree remove` prints `text` and exits `rc` (77 is ade-git-guard's refusal)."""
+    real = shutil.which("git")
+    (prw.bin / "git").write_text(
+        f'#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = remove ]; then echo "{text}" >&2; exit {rc}; fi\n'
+        f'exec "{real}" "$@"\n')
+    (prw.bin / "git").chmod(0o755)
+
+
+@pytest.mark.parametrize("text", [LIVE, CLAIMED])
+def test_review_pr_leaves_the_worktree_when_the_git_guard_refuses_its_removal(prw, text):
+    """lw-01 (#693 review L5): a live process or another agent's claim (exit 77) is not answered by rmtree."""
+    _git_that_fails_the_worktree_remove(prw, 77, text)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert Path(call["cwd"]).is_dir(), "the guard's refusal must leave the directory in place"
+    assert "refused by the git guard" in r.stderr and call["cwd"] in r.stderr
+    assert prw.filed()["worktree_left"] == call["cwd"]
+
+
+@pytest.mark.parametrize("rc,text", [(1, "failed"), (77, FORCE_RULE)])
+def test_review_pr_still_removes_its_worktree_when_the_failure_is_not_a_live_process_or_a_claim(prw, rc, text):
+    """The guard's routine `--force`-on-an-unclaimed-tree refusal (77) hits this tool's own never-claimed temporary
+    worktree on every run under the shim: that one is still cleaned up (adversary r1 of #701, A1)."""
+    _git_that_fails_the_worktree_remove(prw, rc, text)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert not Path(call["cwd"]).exists()
+    assert "worktree_left" not in prw.filed()
+    assert git("worktree", "list", cwd=prw.clone).count("\n") == 0, "pruned too"
+
+
 def test_review_pr_runs_the_launcher_in_review_mode_with_the_review_schema_and_head(prw):
     prw.review("--runtime", "restricted")
     argv = prw.launches()[0]["argv"]
