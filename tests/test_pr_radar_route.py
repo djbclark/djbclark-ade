@@ -129,6 +129,8 @@ def test_empty_or_odd_stdin_routes_code(rig, payload):
     ("bare", "bare"),
     ("  frdminc/tendcf  ", "tendcf"),
     ("a/b/c", "c"),
+    ("owner/.github", ".github"),
+    ("owner/a-b", "a-b"),
 ])
 def test_repo_extraction(rig, repository, repo):
     proc, argvs = rig({"pr": {"repository": repository}})
@@ -138,6 +140,7 @@ def test_repo_extraction(rig, repository, repo):
 
 @pytest.mark.parametrize("repository", [
     "", "   ", "owner/", "owner/a b", "owner/a;b", "owner/$(x)", "owner/a`b`", "owner/ünï", "owner/a\nb", "owner/a=b",
+    "owner/-x", "owner/--kind", "--json",
     None, ["a/b"], {"a": "b"}, False,
 ])
 def test_repo_rejected(rig, repository):

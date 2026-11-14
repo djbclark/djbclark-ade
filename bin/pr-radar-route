@@ -36,7 +36,7 @@ from pathlib import Path
 
 ROUTER_TIMEOUT_SECONDS = 25
 MAX_STDIN_BYTES = 8 * 1024 * 1024
-SANE_REPO = re.compile(r"[a-z0-9._-]+", re.ASCII)
+SANE_REPO = re.compile(r"[a-z0-9._][a-z0-9._-]*", re.ASCII)  # no leading "-": route_agent's argparse would read it as an option
 
 
 class RouteFailure(Exception):
@@ -67,7 +67,7 @@ def pick_kind(payload: dict) -> str:
 
 
 def pick_repo(payload: dict) -> str:
-    """The bare lowercase repo name of `owner/name`; "" (so no --repo) when absent or outside [a-z0-9._-]."""
+    """The bare lowercase repo name of `owner/name`; "" (so no --repo) when absent, outside [a-z0-9._-] or starting with "-"."""
     repo = str(_pr(payload).get("repository") or "").strip()
     if "/" in repo:
         repo = repo.rsplit("/", 1)[-1]

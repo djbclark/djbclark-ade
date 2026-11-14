@@ -40,7 +40,7 @@ implementation**: pr-radar's `examples/pr-radar-route.py` is a synced copy of th
 (stdlib only, no ADE imports, so it runs from either place). The PR-signal to kind mapping lives in `pick_kind` (operator
 ruling 2026-11-14): `reviewRequestedFromMe` or `isSecurity` is `judgment`, `authorKind == "bot"` is `bulk`, everything
 else (Issues-tab items included) is `code`. It runs `route_agent.py route --kind K [--repo NAME] --json`, 25 s timeout
-(`NAME` is the bare lowercase repo name, dropped when outside `[a-z0-9._-]`), and prints `{provider, model,
+(`NAME` is the bare lowercase repo name, dropped when outside `[a-z0-9._-]` or starting with `-`), and prints `{provider, model,
 thinkingOptionId, modeId, reason}` parsed from the routed `dispatch` line; `modeId` stays as routed (yolo for every PR, bot
 and non-owner authors included) and `contextMode`/`profileName` are never set. Router choice: `$PR_RADAR_ROUTE_AGENT`
 (tests), else the sibling `route_agent.py` when the script's parent has `config/routing.toml` (an ADE checkout or
