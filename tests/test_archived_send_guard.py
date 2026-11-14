@@ -314,3 +314,25 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     world.live(**{A: True, B: False})
     assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": A, "prompt": "hi", "serverId": "self"})
     assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": STRANGER, "prompt": "hi", "serverId": "remote"}) is None
+
+
+@pytest.mark.parametrize("command,expected", [
+    (f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"; echo "$st"', [A]),
+    (f'echo "result: $(paseo send {A} hi)"', [A]),
+    (f"paseo send {A} hi; ls \\", [A]),  # a lone trailing backslash: shlex fails, the backstop judges the id
+    (f"echo a\\ #x; paseo send {A} hi", [A]),  # an escaped space before a `#` is not a comment
+    (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
+    (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
+    (f'echo "$(paseo send {A} x)" "$(paseo send {B} y)"', [A, B]),
+])
+def test_backstop_judges_ids_in_a_command_the_parser_could_not_follow(command, expected):
+    found = gate.targets_in_command(command)
+    assert [t for t, _ in gate.backstop_targets(command, found)] == expected
+
+
+def test_the_hook_denies_a_send_hidden_in_a_quoted_substitution(world):
+    world.live(**{A: True})  # True = archived
+    reason = denial(run_hook(world, "Bash", {"command": f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"'}))
+    assert A in reason or "archived" in reason
+    world.live(**{A: False})
+    assert run_hook(world, "Bash", {"command": f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"'}) is None

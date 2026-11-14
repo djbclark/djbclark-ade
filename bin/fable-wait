@@ -496,7 +496,7 @@ _IMPORT_WARNED = False
 def current_lead(lead: str) -> str:
     """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
     its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed here, and then
-    `archived_lead` (ls-02) refuses a cyclic one: nothing is delivered to it."""
+    `guarded_lead` (ls-02) refuses a cyclic one: nothing is delivered to it."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -560,6 +560,8 @@ def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
         ok = status in ("sent", "completed")
         report["leads"][lead] = {"status": status or f"no status (exit {rc})", "items": [i["id"] for i in its],
                                  "error": None if ok else (err.strip()[:200] or None)}
+        if target != lead:
+            report["leads"][lead]["sent_to"] = target  # audited: a lead filed by prefix or replaced went to its successor
         failed += 0 if ok else 1
     return failed
 

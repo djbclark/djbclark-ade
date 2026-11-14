@@ -58,6 +58,9 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    un-archive, so the guard's probe is safe.
 5. The hook strips shell comments (a `#` that starts a word, outside quotes) before it looks for a send, so a leading comment
    line never hides a later send; a heredoc fed to a shell (`bash <<EOF`) is still not parsed, nor are the shell's rarer quoting forms (`$'it\'s'`, a ` #` inside `${x:- #y}`): such a line may hide a later send on it.
+   **Backstop:** when the command text names more `paseo ... send` than the parser found targets for (a send inside
+   `"$(...)"`, a lone trailing backslash, an escaped space before a `#`), every full agent id written in the command is judged
+   too (at most 5). A false denial needs an archived agent's id in a command that mentions `paseo send`.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).

@@ -168,6 +168,26 @@ def _target(args: list[str]) -> str | None:
     return None
 
 
+SEND_WORD = re.compile(r"\bpaseo\b(?:\s+[^\s;&|]+){0,4}?\s+send\b")
+UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+
+
+def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+    """The parser cannot follow every shell form (a send inside "$(...)" in double quotes, a lone trailing backslash, an
+    escaped space before a `#`...). When the command text (heredoc bodies aside) names more `paseo ... send` than the parser
+    found targets for, every full agent id written in the command is judged too (at most 5): a false denial needs an archived
+    agent's id in a command that mentions `paseo send`, a missed send needs a form nobody listed."""
+    text = strip_heredocs(command)
+    if len(SEND_WORD.findall(text)) <= len(found):
+        return []
+    seen = {t for t, _ in found}
+    out: list[tuple[str, str | None]] = []
+    for u in dict.fromkeys(UUID.findall(text)):
+        if u not in seen and len(out) < 5:
+            out.append((u, u if f"{ALLOW_VAR}={u}" in text else None))
+    return out
+
+
 def judge(target: str, allow: str | None) -> str | None:
     """A denial reason, or None to allow."""
     if not target or any(c in target for c in "$`*?[{~"):
@@ -191,6 +211,7 @@ def main() -> int:
         found: list[tuple[str, str | None]] = []
         if tool == "Bash" and isinstance(tin.get("command"), str):
             found = targets_in_command(tin["command"])
+            found += backstop_targets(tin["command"], found)
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
             found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it
