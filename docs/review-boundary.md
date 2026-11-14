@@ -341,11 +341,13 @@ A missing file (HTTP 404) is no override; any other failure, or a file that does
 
 **Findings and triage** (the exact rules are in `bin/review_bots.py` and `docs/code-review.md` rule 9): an unresolved
 review thread whose first comment is the bot's (or, for a bot with `thread_markers`, that carries one), or the bot's latest
-top-level review body / issue comment matching its patterns. Triaged = the thread is resolved, or a later reply authored by
+top-level review body / issue comment matching its patterns. Triaged = the thread is resolved **by `djbclark`** (a resolve by the PR author, another writer or the bot itself, which auto-resolves, does not count), or a later reply (created after the bot's last edit of its finding) authored by
 `djbclark`'s GitHub User account (login and pinned id; a bot, the PR author, a lookalike or a renamed account never
 counts) starts with `fixed` / `wontfix` / `won't fix` / `not a bug` / `not an issue` / `by design` / `deferred` and a
 reason of at least three characters; a top-level finding needs a later issue comment from that account with a line
-`triage <id|all>: <verdict> <reason>`.
+`triage <id|all>: <verdict> <reason>`. An owner comment that someone else last edited (a writer or an App can edit another user's comment) is not a triage.
+
+**Trust root.** The default list is read from the checkout that runs the tool: run `ade-merge-ready` from master or the installed copy, never from the PR's own worktree. An override's regex patterns may not contain a quantified group (backtracking guard); `--merged-limit` is capped at 40 PRs (about 5 GraphQL calls each).
 
 **Pending bots.** The tool never sleeps. A listed bot whose check run on the exact head is not completed and started less
 than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the next `classify` sees the result. A running check

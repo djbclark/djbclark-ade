@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -55,7 +56,7 @@ BODY_SCAN_MAX = 50_000        # regexes run on at most this many characters of a
 GH_TIMEOUT = 120
 PENDING_MAX_RANGE = (1, 240)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
-REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+REPO_RE = re.compile(r"^(?!\.{1,2}/)[\w.-]+/(?!\.{1,2}$)[\w.-]+$")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩]")
 
@@ -133,11 +134,18 @@ def _strs(value: Any, where: str) -> tuple[str, ...]:
     return tuple(_str(v, f"{where}[{i}]") for i, v in enumerate(value))
 
 
-def _patterns(value: Any, where: str) -> tuple[re.Pattern[str], ...]:
+_QUANTIFIED_GROUP = re.compile(r"\)\s*[*+?{]")
+
+
+def _patterns(value: Any, where: str, strict: bool = False) -> tuple[re.Pattern[str], ...]:
+    """Compile regexes. `strict` (a per-repo override, text we do not control) refuses a quantified group,
+    the shape of catastrophic backtracking, because the pattern runs on up to 50k characters of bot text."""
     out = []
     for i, s in enumerate(_strs(value, where)):
         if len(s) > 300:
             raise ConfigError(f"{where}[{i}]: pattern longer than 300 characters")
+        if strict and _QUANTIFIED_GROUP.search(s):
+            raise ConfigError(f"{where}[{i}]: a quantified group is refused in an override pattern (backtracking)")
         try:
             out.append(re.compile(s))
         except re.error as e:
@@ -145,7 +153,7 @@ def _patterns(value: Any, where: str) -> tuple[re.Pattern[str], ...]:
     return tuple(out)
 
 
-def _parse_bot(raw: Any, where: str) -> Bot:
+def _parse_bot(raw: Any, where: str, strict: bool = False) -> Bot:
     t = _table(raw, BOT_REQUIRED | BOT_OPTIONAL, BOT_REQUIRED, where)
     bid = _str(t["id"], f"{where}.id")
     if not ID_RE.fullmatch(bid):
@@ -160,8 +168,8 @@ def _parse_bot(raw: Any, where: str) -> Bot:
         rest_login=rest,
         graphql_login=gql,
         thread_markers=_strs(t.get("thread_markers", []), f"{where}.thread_markers"),
-        review_body_patterns=_patterns(t.get("review_body_patterns", []), f"{where}.review_body_patterns"),
-        issue_comment_patterns=_patterns(t.get("issue_comment_patterns", []), f"{where}.issue_comment_patterns"),
+        review_body_patterns=_patterns(t.get("review_body_patterns", []), f"{where}.review_body_patterns", strict),
+        issue_comment_patterns=_patterns(t.get("issue_comment_patterns", []), f"{where}.issue_comment_patterns", strict),
         check_names=_strs(t.get("check_names", []), f"{where}.check_names"),
         check_apps=_strs(t.get("check_apps", []), f"{where}.check_apps"),
         source=_str(t["source"], f"{where}.source") if "source" in t else "",
@@ -224,7 +232,7 @@ def apply_override(cfg: Config, text: str, where: str = OVERRIDE_PATH) -> Config
     raw_add = doc.get("add", [])
     if not isinstance(raw_add, list):
         raise ConfigError(f"{where}: [[add]] must be an array of tables")
-    added = [_parse_bot(b, f"{where} add[{i}]") for i, b in enumerate(raw_add)]
+    added = [_parse_bot(b, f"{where} add[{i}]", True) for i, b in enumerate(raw_add)]
     kept = [b for b in cfg.bots if b.id not in set(drop)]
     merged = tuple(kept + added)
     _unique(merged, where)
@@ -245,7 +253,7 @@ def fetch_override_text(gh: GhRunner, repo: str) -> str | None:
     try:
         out = gh("api", f"repos/{repo}/contents/{OVERRIDE_PATH}")
     except GhError as e:
-        if "HTTP 404" in str(e) or "Not Found" in str(e):
+        if "HTTP 404" in str(e):
             return None
         raise
     try:
@@ -305,13 +313,28 @@ def is_owner_actor(actor: Any) -> bool:
 
 # ---------------------------------------------------------------- text helpers (bot text is data)
 
+def clean(text: str) -> str:
+    """Drop every control and format character (ANSI escapes, bidi marks, zero-width): Unicode categories Cc and Cf."""
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
+
+
 def title_of(body: str) -> str:
     """First non-empty line, control characters stripped, truncated; never the full bot text."""
     for line in (body or "").splitlines():
-        s = _CTRL_RE.sub("", line).strip()
+        s = clean(line).strip()
         if s:
             return s[:TITLE_MAX]
     return ""
+
+
+def owner_triage_author(c: dict[str, Any]) -> bool:
+    """The comment is the operator's AND no one else edited it: a writer or an App can edit another user's comment, so
+    an edited comment counts only when its last editor is the operator too (unknown editor = not a triage)."""
+    if not is_owner_actor(c.get("author")):
+        return False
+    if not c.get("lastEditedAt"):
+        return True
+    return is_owner_actor(c.get("editor"))
 
 
 def _triage_line(body: str) -> bool:
@@ -348,14 +371,29 @@ def _edited(node: dict[str, Any], where: str) -> dt.datetime:
 # ---------------------------------------------------------------- gh (read-only)
 
 def assert_read_only_gh_argv(args: tuple[str, ...] | list[str]) -> None:
-    """Refuse argv that could mutate GitHub (defence in depth for this report-only module)."""
+    """Refuse argv that could mutate GitHub (defence in depth for this report-only module): only `gh api`, only GET
+    (`-f`/`-F` make gh POST, so they are allowed for `graphql` queries only), no `--input`, no `@file` values."""
     if not args or args[0] != "api":
         raise GhError("refusing a gh command that is not `gh api`")
+    graphql = len(args) > 1 and args[1] == "graphql"
     for i, a in enumerate(args):
-        if a in ("-X", "--method") and i + 1 < len(args) and args[i + 1].upper() in _FORBIDDEN_METHODS:
-            raise GhError(f"refusing mutating HTTP method in gh argv: {args[i + 1]}")
-        if isinstance(a, str) and a.startswith("query=") and re.search(r"(?i)\bmutation\b", a):
+        if not isinstance(a, str):
+            raise GhError("refusing a non-string gh argument")
+        low = a.lower()
+        if low in ("-x", "--method") and i + 1 < len(args) and str(args[i + 1]).upper() != "GET":
+            raise GhError(f"refusing non-GET HTTP method in gh argv: {args[i + 1]}")
+        if (low.startswith("-x") and low != "-x" and low[2:].upper() != "GET") or (
+            low.startswith("--method=") and low[9:].upper() != "GET"
+        ):
+            raise GhError(f"refusing non-GET HTTP method in gh argv: {a}")
+        if low == "--input" or low.startswith("--input="):
+            raise GhError("refusing --input in gh argv")
+        if low in ("-f", "-F".lower(), "--field", "--raw-field") and not graphql:
+            raise GhError("refusing a request body field on a non-graphql gh api call (it would POST)")
+        if a.startswith("query=") and re.search(r"(?i)\bmutation\b", a):
             raise GhError("refusing GraphQL mutation in gh argv")
+        if "=@" in a and (i > 0 and args[i - 1] in ("-f", "-F", "--field", "--raw-field")):
+            raise GhError("refusing an @file request value in gh argv")
 
 
 def make_gh(gh_bin: str = "gh") -> GhRunner:
@@ -393,12 +431,14 @@ def parse_pages(text: str) -> list[Any]:
 
 
 ACTOR = "author{__typename login ... on User{databaseId}}"
+EDITOR = "editor{__typename login ... on User{databaseId}}"
 THREAD_FIELDS = (
-    "isResolved isOutdated comments(first:100){pageInfo{hasNextPage} nodes{databaseId createdAt lastEditedAt "
-    f"body path line url originalCommit{{oid}} {ACTOR}}}}}"
+    f"isResolved isOutdated resolvedBy{{__typename login ... on User{{databaseId}}}} "
+    "comments(first:100){pageInfo{hasNextPage} nodes{databaseId createdAt lastEditedAt "
+    f"body path line url originalCommit{{oid}} {EDITOR} {ACTOR}}}}}"
 )
 REVIEW_FIELDS = f"databaseId state body createdAt lastEditedAt url commit{{oid}} {ACTOR}"
-COMMENT_FIELDS = f"databaseId createdAt lastEditedAt body url {ACTOR}"
+COMMENT_FIELDS = f"databaseId createdAt lastEditedAt body url {EDITOR} {ACTOR}"
 PR_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
     "pullRequest(number:$number){number title state merged headRefOid baseRefName url}}}"
@@ -502,15 +542,23 @@ def _thread_findings(threads: list[dict[str, Any]], bots: tuple[Bot, ...], repo:
             continue
         bot, ai = hit
         anchor = cs[ai]
-        resolved = bool(t.get("isResolved"))
+        # `isResolved` counts only when the operator resolved it: a PR author, a writer or the bot itself (which
+        # auto-resolves from model output that can carry injected PR text) can click Resolve too.
+        resolved = bool(t.get("isResolved")) and is_owner_actor(t.get("resolvedBy"))
+        floor = _edited(anchor, f"PR#{pr} thread")
         reply = next(
-            (c for c in cs[ai + 1:] if is_owner_actor(c.get("author")) and _triage_line(c.get("body") or "")), None
+            (
+                c for c in cs[ai + 1:]
+                if owner_triage_author(c) and _triage_line(c.get("body") or "")
+                and _ts(c.get("createdAt"), f"PR#{pr} reply") > floor
+            ),
+            None,
         )
         status = "resolved" if resolved else ("triaged" if reply is not None else "untriaged")
         cid = anchor.get("databaseId")
         found.append({
             "bot": bot.id, "kind": "thread", "id": cid, "status": status,
-            "path": anchor.get("path"), "line": anchor.get("line"),
+            "path": clean(str(anchor.get("path") or "")) or None, "line": anchor.get("line"),
             "commit": (anchor.get("originalCommit") or {}).get("oid"),
             "outdated": bool(t.get("isOutdated")),
             "title": title_of(anchor.get("body") or ""),
@@ -543,7 +591,7 @@ def _top_findings(
         cid = latest.get("databaseId")
         triaged = False
         for c in issue_comments:
-            if not is_owner_actor(c.get("author")) or _edited(c, f"PR#{pr} comment") <= at:
+            if not owner_triage_author(c) or _ts(c.get("createdAt"), f"PR#{pr} comment") <= at:
                 continue
             refs = _top_triage_refs(c.get("body") or "")
             if "all" in refs or str(cid) in refs:
@@ -601,8 +649,8 @@ def evaluate(
     """The gate verdict for one PR: state is `untriaged` | `pending` | `clear`. Raises ConfigError / GhError (fail closed)."""
     if not REPO_RE.fullmatch(repo):
         raise GhError(f"bad repo {repo!r}")
+    meta = fetch_pr(gh, repo, pr)       # first: a repo we cannot read must fail here, not read as "no override" (404)
     cfg = config or effective_config(gh, repo, config_path, use_override=use_override)
-    meta = fetch_pr(gh, repo, pr)
     bots = cfg.bots
     findings: list[dict[str, Any]] = []
     if bots:

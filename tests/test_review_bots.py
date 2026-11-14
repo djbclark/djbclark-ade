@@ -45,17 +45,27 @@ CODEX = bot("chatgpt-codex-connector")
 COMMENT_ID = iter(range(1000, 100000))
 
 
-def comment(author: dict, body: str, *, at: str = "2026-11-14T20:00:00Z", **kw) -> dict:
+CLOCK = iter(range(1, 10**6))
+
+
+def tick() -> str:
+    """Each default-timed comment is a second later than the one built before it (a reply follows its finding)."""
+    t = dt.datetime(2026, 11, 14, 20, 0, 0, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=next(CLOCK))
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def comment(author: dict, body: str, *, at: str | None = None, **kw) -> dict:
     return {
-        "databaseId": next(COMMENT_ID), "createdAt": at, "lastEditedAt": None, "body": body,
+        "databaseId": next(COMMENT_ID), "createdAt": at or tick(), "lastEditedAt": None, "body": body,
         "path": kw.get("path", "bin/x.py"), "line": 7, "url": "https://github.com/o/r/pull/9#discussion_r1",
         "originalCommit": {"oid": HEAD}, "author": author,
     }
 
 
-def thread(comments: list[dict], *, resolved: bool = False, outdated: bool = False, more: bool = False) -> dict:
+def thread(comments: list[dict], *, resolved: bool = False, outdated: bool = False, more: bool = False,
+           resolved_by: dict | None = OWNER) -> dict:
     return {
-        "isResolved": resolved, "isOutdated": outdated,
+        "isResolved": resolved, "isOutdated": outdated, "resolvedBy": resolved_by if resolved else None,
         "comments": {"pageInfo": {"hasNextPage": more}, "nodes": comments},
     }
 
@@ -553,6 +563,12 @@ with open(log, "a") as f:
     f.write(" ".join(argv)[:400] + "\\n")
 def out(x):
     sys.stdout.write(x if isinstance(x, str) else json.dumps(x))
+def gate_head(world):
+    n = int(open(log + ".p").read() or 0) if os.path.exists(log + ".p") else 0
+    open(log + ".p", "w").write(str(n + 1))
+    if n >= world.get("late_head_after", 10**9):
+        return world["late_head"]
+    return world.get("gate_head", world["prs"][0]["headRefOid"])
 def conn(field, nodes):
     return {"data": {"repository": {"pullRequest": {field: {
         "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}}
@@ -584,7 +600,7 @@ elif argv[:2] == ["api", "graphql"]:
         out(conn("comments", world.get("comments", [])))
     else:
         out({"data": {"repository": {"pullRequest": {"number": 600, "title": "t", "state": "OPEN", "merged": False,
-             "headRefOid": world.get("gate_head", world["prs"][0]["headRefOid"]), "baseRefName": "master", "url": "u"}}}})
+             "headRefOid": gate_head(world), "baseRefName": "master", "url": "u"}}}})
 else:
     sys.stderr.write("unexpected: " + " ".join(argv) + "\\n"); sys.exit(99)
 '''
@@ -701,3 +717,114 @@ def test_only_merge_now_candidates_pay_for_the_bot_calls(tmp_path: Path) -> None
     merge_world(tmp_path, checks="pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n")
     assert row_of(tmp_path)["class"] == "needs_approve"
     assert "graphql" not in (tmp_path / "gh.log").read_text()
+
+
+# ------------------------------------------------------------------ adversary r1 repairs (PR 713)
+
+def edited(c: dict, by: dict | None, at: str = "2026-11-14T22:30:00Z") -> dict:
+    return {**c, "lastEditedAt": at, "editor": by}
+
+
+@pytest.mark.parametrize("resolver", [
+    {"__typename": "User", "login": "pr-author", "databaseId": 77},      # the PR author clicked Resolve
+    {"__typename": "Bot", "login": "coderabbitai"},                       # the bot resolved its own thread
+    None,                                                                 # unknown resolver: fail closed
+    {"__typename": "User", "login": "djbclark", "databaseId": 999},       # a different account took the name
+])
+def test_a_thread_resolved_by_anyone_but_the_operator_is_still_untriaged(resolver) -> None:
+    v = evaluate(FakeGh(threads=[thread([comment(CODERABBIT, "x")], resolved=True, resolved_by=resolver)]))
+    assert statuses(v) == ["untriaged"] and v["state"] == "untriaged"
+
+
+def test_a_thread_resolved_by_the_operator_is_clear() -> None:
+    v = evaluate(FakeGh(threads=[thread([comment(CODERABBIT, "x")], resolved=True, resolved_by=OWNER)]))
+    assert statuses(v) == ["resolved"] and v["state"] == "clear"
+
+
+APP = {"__typename": "Bot", "login": "cursor"}
+
+
+@pytest.mark.parametrize("editor", [APP, {"__typename": "User", "login": "writer", "databaseId": 4}, None])
+def test_an_owner_reply_edited_by_someone_else_does_not_triage(editor) -> None:
+    forged = edited(comment(OWNER, "Fixed in abc1234"), editor)
+    assert statuses(evaluate(FakeGh(threads=[thread([comment(CODERABBIT, "x"), forged])]))) == ["untriaged"]
+    r = review(CODERABBIT, "Actionable comments posted: 2", at="2026-11-14T20:00:00Z")
+    forged_top = edited(issue_comment(OWNER, "triage all: wontfix pre-existing", at="2026-11-14T21:00:00Z"), editor)
+    assert statuses(evaluate(FakeGh(reviews=[r], comments=[forged_top]))) == ["untriaged"]
+
+
+def test_an_owner_reply_edited_by_the_owner_still_triages() -> None:
+    finding = comment(CODERABBIT, "x")
+    mine = edited(comment(OWNER, "Fixed in abc1234"), OWNER)       # built after the finding: a later reply
+    assert statuses(evaluate(FakeGh(threads=[thread([finding, mine])]))) == ["triaged"]
+
+
+def test_top_level_triage_is_timed_by_creation_not_by_an_owner_edit() -> None:
+    r = review(CODERABBIT, "Actionable comments posted: 2", at="2026-11-14T20:00:00Z")
+    old = edited(issue_comment(OWNER, "triage all: wontfix tracked elsewhere", at="2026-11-14T19:00:00Z"),
+                 OWNER, at="2026-11-14T23:00:00Z")      # created before the finding, typo-fixed after it
+    assert statuses(evaluate(FakeGh(reviews=[r], comments=[old]))) == ["untriaged"]
+
+
+def test_a_bot_edit_of_its_finding_after_the_owner_reply_reopens_it() -> None:
+    anchor = {**comment(CODERABBIT, "x", at="2026-11-14T20:00:00Z"), "lastEditedAt": "2026-11-14T23:00:00Z"}
+    reply = comment(OWNER, "Fixed in abc1234", at="2026-11-14T21:00:00Z")
+    assert statuses(evaluate(FakeGh(threads=[thread([anchor, reply])]))) == ["untriaged"]
+
+
+def test_the_last_marker_comment_is_the_anchor_and_a_reply_before_it_is_stale() -> None:
+    m = "\n<!-- codex-code-review-finding:v1 -->"
+    first, reply, again = comment(CODEX, "P1 a" + m), comment(OWNER, "Fixed in abc1234"), comment(CODEX, "P1 again" + m)
+    assert statuses(evaluate(FakeGh(threads=[thread([first, reply, again])]))) == ["untriaged"]
+    first, again, reply = comment(CODEX, "P1 a" + m), comment(CODEX, "P1 again" + m), comment(OWNER, "Fixed in abc1234")
+    assert statuses(evaluate(FakeGh(threads=[thread([first, again, reply])]))) == ["triaged"]
+
+
+def test_a_running_check_with_no_date_blocks_rather_than_guesses() -> None:
+    v = evaluate(FakeGh(checks=[{"name": "CodeRabbit", "status": "in_progress", "app": {"slug": "x"}}]))
+    assert v["state"] == "pending"
+
+
+def test_override_patterns_with_a_quantified_group_are_refused() -> None:
+    bad = ('[meta]\nschema = 1\n[[add]]\nid = "r"\nname = "R"\nrest_login = "r[bot]"\ngraphql_login = "r"\n'
+           'review_body_patterns = ["(a+)+$"]\n')
+    with pytest.raises(rb.ConfigError, match="backtracking"):
+        rb.apply_override(rb.load_default_config(), bad)
+
+
+def test_a_404_that_is_not_http_404_and_an_unreadable_repo_are_not_read_as_no_override() -> None:
+    with pytest.raises(rb.GhError):
+        rb.fetch_override_text(FakeGh(override_error="gh: Not Found"), "o/r")
+
+    class Gone(FakeGh):
+        def __call__(self, *args):
+            if args[1] == "graphql":
+                raise rb.GhError("gh api graphql: rc=1 Could not resolve to a Repository")
+            return super().__call__(*args)
+    with pytest.raises(rb.GhError):
+        evaluate(Gone())
+
+
+def test_terminal_escapes_in_a_path_are_stripped() -> None:
+    c = comment(CODERABBIT, "x", path="a\x1b[31m\u202eb.py\u2060")
+    f = evaluate(FakeGh(threads=[thread([c])]))["findings"][0]
+    assert f["path"] == "a[31mb.py"
+
+
+@pytest.mark.parametrize("argv", [
+    ("api", "--method=POST", "repos/o/r"), ("api", "-XPOST", "repos/o/r"), ("api", "--input", "f", "repos/o/r"),
+    ("api", "-f", "body=x", "repos/o/r/issues/1/comments"), ("api", "graphql", "-F", "query=@file"),
+])
+def test_read_only_guard_covers_method_forms_input_and_fields(argv) -> None:
+    with pytest.raises(rb.GhError):
+        rb.assert_read_only_gh_argv(argv)
+
+
+def test_repo_names_with_dot_segments_are_refused() -> None:
+    assert not rb.REPO_RE.fullmatch("../r") and not rb.REPO_RE.fullmatch("o/..") and rb.REPO_RE.fullmatch("o/r.x")
+
+
+def test_merge_now_refuses_when_the_head_moves_between_classify_and_merge(tmp_path: Path) -> None:
+    merge_world(tmp_path, late_head_after=1, late_head="d" * 40)
+    r = mr(tmp_path, "merge-now", "--prs", "600", "--yes")
+    assert r.returncode == 2 and "refuse merge" in r.stderr and "pr merge" not in (tmp_path / "gh.log").read_text()

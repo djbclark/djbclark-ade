@@ -31,7 +31,7 @@ finally:
 
 TOOL = "review-bot-findings"
 DEFAULT_REPO = "djbclark/djbclark-ade"
-MAX_MERGED = 100
+MAX_MERGED = 40       # about 5 GraphQL calls per PR (AGENTS rule 26: budget bulk API use)
 MERGED_QUERY = (
     "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){"
     "pullRequests(states:MERGED,orderBy:{field:MERGED_AT,direction:DESC},first:$first){nodes{number}}}}"
