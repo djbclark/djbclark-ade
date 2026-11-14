@@ -43,7 +43,7 @@ class NativeError(SessionError):
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
 _SECRETISH = re.compile(r'(?i)((?:token|secret|password|passwd|authorization|bearer|api[_-]?key)'
-                        r'["\']?\s*[:=]?\s*["\']?)[^\s"\',}]+')
+                        r'["\']?\s*[:=]?\s*["\']?(?:bearer\s+)?)[^\s"\',}]+')
 
 
 def bounded(text, limit):
@@ -200,6 +200,12 @@ class Service:
 
     def actor(self):
         return ident(self.env.get('PASEO_AGENT_ID', ''))
+
+    def listed(self, agent):
+        rows = self.native('agent', 'ls', '-a', '-g')
+        if not isinstance(rows, list):
+            raise SessionError('native agent listing unavailable')
+        return any(isinstance(r, dict) and r.get('id') == agent for r in rows)
 
     def workspace_exists(self, workspace):
         rows = self.native('workspace', 'ls')  # a failure here is before any intent: nothing sent
@@ -470,6 +476,17 @@ class Service:
             if predecessor.get('Archived') is not True:
                 if predecessor.get('Status') != 'idle' or predecessor.get('PendingPermissions') != []:
                     raise SessionError('predecessor must be idle without permission waits; never force archive')
+                if not self.listed(record['predecessor']):
+                    # paseo#9668: `agent archive ID` resolves client-side from this listing and, when ID is
+                    # missing (its workspace deleted), falls back to a partial title match: a live worker.
+                    record['native_error'] = {'op': 'agent ls', 'code': 'LISTING_GAP', 'rc': 0, 'stderr_tail': '',
+                                              'message': 'predecessor absent from paseo ls -a -g --json'}
+                    self.save(target, record)
+                    raise SessionError(
+                        f'predecessor {record["predecessor"]} is absent from `paseo ls -a -g --json` (its workspace '
+                        'may be deleted; archive resolves ids from that listing and can fall back to a partial title '
+                        'match, getpaseo/paseo#9668); nothing archived; archive by exact id via the Paseo MCP '
+                        'archive_agent, verify with `paseo agent inspect`, then re-run finish')
                 record['status'] = 'archive-unknown'
                 self.save(target, record)
                 try:

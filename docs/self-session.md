@@ -137,6 +137,13 @@ new-local` (`existing` otherwise; `workspace` keeps the predecessor's id). The c
 `accept` and `finish` run do not compare workspaces. It is a decision, not a fallback to hide:
 the record and this section say so.
 
+Before `finish` calls `agent archive` it requires the exact predecessor id in `paseo ls -a -g
+--json`. Paseo's CLI resolves the id client-side from that listing; an agent whose workspace was
+deleted is missing from it, and the CLI then falls back to a unique partial *title* match, which can
+be the lead's live worker (`worker <slice> <lead id>`; [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668),
+[docs/workspace-layout.md](workspace-layout.md)). When the id is absent `finish` refuses with a
+`LISTING_GAP` `native_error`, archives nothing and points at the manual fallback (b) below.
+
 `finish` archive failures are never retried and never forced. When the archive error
 names an agent id that is not the predecessor's (prefix compare; 2026-11-14: `paseo agent
 archive FULL_UUID` answered `AGENT_ALREADY_ARCHIVED` for `c9a97e5`, a different agent, while

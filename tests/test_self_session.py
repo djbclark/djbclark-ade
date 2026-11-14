@@ -33,6 +33,7 @@ class Native:
         self.archive_error = None
         self.run_result = None      # (returncode, stdout, stderr) replacing the `agent run` answer
         self.archive_result = None  # same, for `agent archive`
+        self.unlisted = set()       # ids missing from `agent ls -a -g` (workspace deleted, paseo#9668)
         self.workspaces = [{'workspaceId': WS, 'project': 'p', 'name': 'MAIN p (w)', 'cwd': str(root)}]
         self.head = HEAD
         self.git_result = None  # (returncode, stdout, stderr) overriding the default git answer
@@ -71,7 +72,8 @@ class Native:
                 raise self.create_error
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
-            data = self.labelled
+            data = self.labelled if '--label' in args else [
+                {'id': k} for k in self.rows if k not in self.unlisted]
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
@@ -852,3 +854,25 @@ def test_archive_error_naming_the_predecessor_prefix_is_not_a_mismatch(setup):
     with pytest.raises(ss.NativeError) as caught:
         service.finish(path)
     assert 'different agent' not in str(caught.value)
+
+
+def test_predecessor_missing_from_listing_refuses_before_any_archive(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.unlisted = {PRED}
+    with pytest.raises(ss.SessionError, match=r'absent from `paseo ls -a -g --json`.*9668.*archive_agent') as caught:
+        service.finish(path)
+    assert 'nothing archived' in str(caught.value)
+    assert native.archived == 0
+    assert not any(a[4:6] == ['agent', 'archive'] for a, k in native.calls)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'acknowledged' and saved['native_error']['code'] == 'LISTING_GAP'
+    # once the listing shows it again (or the operator archived it by exact id), finish proceeds
+    native.unlisted = set()
+    assert service.finish(path)['status'] == 'archived' and native.archived == 1
+
+
+def test_predecessor_in_listing_is_archived_as_before(setup):
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['status'] == 'archived' and native.archived == 1
+    listing = [a for a, k in native.calls if a[4:7] == ['agent', 'ls', '-a']]
+    assert listing and '--label' not in listing[0]

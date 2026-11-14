@@ -120,6 +120,7 @@ workers only; operator-requested ones are tabs in the lead's MAIN window again (
 - Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<task worktree>"`.
 - Agent title: `paseo agent update "$PASEO_AGENT_ID" --name "<name>"` (read in the Paseo 0.15.3 source,
   `packages/cli/src/commands/agent/index.ts`, 2026-11-06; run against 0.16.0-beta.2 on 2026-11-13), or set it at launch with `paseo run --title T`.
+- **Name collision (2026-11-14, [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668)):** `paseo agent archive ID` resolves client-side from the listing, and an agent whose workspace was deleted is missing from it; the CLI then falls back to a unique partial *title* match, and a worker tab is named `worker <slice> <lead id>`, so a lead's full id can resolve to (and archive) its live worker. `ade-self-session finish` therefore checks the predecessor is in `paseo ls -a -g --json` before archiving (`docs/self-session.md` C0).
 
 ## Tidying (2026-11-13)
 
