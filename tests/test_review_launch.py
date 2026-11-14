@@ -729,9 +729,14 @@ if a[:2] == ["pr", "view"]:
 if a[:2] == ["api", "user"]:
     print(s.get("me", "djbclark")); sys.exit(0)
 if len(a) == 2 and a[0] == "api" and "/pulls/" in a[1]:
+    if s.get("pulls_rc"):
+        sys.stderr.write("HTTP 502\n"); sys.exit(1)
+    if "pulls_raw" in s:
+        print(s["pulls_raw"]); sys.exit(0)
     login = s["view"]["author"]["login"]
     ids = {"djbclark": 131936, **s.get("user_ids", {})}
-    print(json.dumps({"user": {"login": login, "type": s.get("author_type", "User"), "id": ids.get(login.lower())}})); sys.exit(0)
+    user = {"login": login, "type": s.get("author_type", "User"), "id": ids.get(login.lower()), **s.get("pulls_user", {})}
+    print(json.dumps({"user": user})); sys.exit(0)
 if len(a) == 2 and a[0] == "api" and "/activity?" in a[1]:
     if s.get("activity_rc"):
         sys.stderr.write("HTTP 500\n"); sys.exit(1)
@@ -893,8 +898,7 @@ def test_review_pr_never_calls_gh_to_post(prw):
     for line in (prw.tmp / "gh.log").read_text().splitlines():
         argv = json.loads(line)
         assert (argv[:2] in (["pr", "view"], ["api", "user"])
-                or (argv[0] == "api" and argv[1].startswith("repos/") and len(argv) == 2)
-                or False), argv
+                or (argv[0] == "api" and argv[1].startswith("repos/") and len(argv) == 2)), argv
 
 
 # ---- E8 review repairs (2026-11-07) -------------------------------------------------------------------------
@@ -1183,6 +1187,13 @@ def _view(prw, **extra):
     ("the author's user id is not the pinned one", lambda p: {"user_ids": {"djbclark": 424242}}),
     ("the author's user id cannot be read", lambda p: {"user_ids": {"djbclark": None}}),
     ("the author record is not a User", lambda p: {"author_type": "Bot"}),
+    ("the PR's own record cannot be read", lambda p: {"pulls_rc": 1}),
+    ("the PR's own record is not json", lambda p: {"pulls_raw": "not json"}),
+    ("the PR's own record is a list", lambda p: {"pulls_raw": "[]"}),
+    ("the PR's own record has no user", lambda p: {"pulls_raw": "{}"}),
+    ("the PR's own record has a user that is not an object", lambda p: {"pulls_raw": json.dumps({"user": "x"})}),
+    ("the PR's own record names another login, with the operator's id", lambda p: {"pulls_user": {"login": "someoneelse", "id": 131936}}),
+    ("the PR's own record has no login", lambda p: {"pulls_user": {"login": None, "id": 131936}}),
     ("a child PR was merged into the branch", lambda p: {"activity": [_push(p, activity_type="pr_merge")]}),
     ("a merge queue merged into the branch", lambda p: {"activity": [_push(p, activity_type="merge_queue_merge")]}),
 ])

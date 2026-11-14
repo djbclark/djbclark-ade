@@ -141,7 +141,7 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
 headRefName,isCrossRepository,author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
-`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
+`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed directly (push, force-push, branch creation; a merged child PR is not enough) runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,
