@@ -491,7 +491,7 @@ def test_real_fleet_reviewer_titles_are_sensitive(box, title):
     assert "external-security-sensitive" in text
 
 
-@pytest.mark.parametrize("title", ["review", "repair worker review fixes", "peer worker", "lead"])
+@pytest.mark.parametrize("title", ["review", "repair worker review fixes", "peer worker", "lead", "worker gh-watch-gate 994234ba"])
 def test_ordinary_titles_stay_trusted_even_with_review_in_them(box, title):
     text = context(box({"prompt": block(source=FAKE, extra=f' source-agent-title="{title}"')}))
     assert "external-security-sensitive" not in text and "act on it" in text
