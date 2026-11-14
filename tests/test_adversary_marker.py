@@ -1130,18 +1130,26 @@ def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
         "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc,
-        "author": {"__typename": author_type, "login": author},
+        "author": {"__typename": author_type, "login": author, "databaseId": user_id(author)},
         "editor": {"login": editor} if editor else None, "lastEditedAt": EDITED_AT if editor else None}}}}
 
 
 EDITED_AT = "2026-11-07T12:00:00Z"
 
 
+OPERATOR_ID = adversary_marker.TRUSTED_OWNER_USER_IDS["djbclark"]
+
+
+def user_id(login: str) -> int:
+    """GitHub's numeric id of LOGIN in these fixtures: the operator's real, pinned one, anyone else's an arbitrary one."""
+    return OPERATOR_ID if login.lower() == "djbclark" else 1000 + sum(map(ord, login))
+
+
 def actor(login: str | None) -> dict | None:
     """A GraphQL Actor: a `Bot` for an `[bot]` login, a `User` otherwise, None for a ghost."""
     if not login:
         return None
-    return {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login}
+    return {"__typename": "Bot" if login.endswith("[bot]") else "User", "login": login, "databaseId": user_id(login)}
 
 
 def comment(body: str, login: str = "djbclark", app: object = None, cid: int = 1, editor: str | None = None,
@@ -1189,12 +1197,29 @@ def gql_comment_pages(n: int, comments: list, per_page: int = 100, total: int | 
     return out
 
 
+def run_entry(event: str = "pull_request", login: str = "djbclark", head: str = H1, kind: str = "User",
+              uid: int | None = None) -> dict:
+    """One workflow run of the head, as `GET actions/runs?head_sha=` lists it."""
+    return {"id": 1, "event": event, "head_sha": head,
+            "actor": {"login": login, "type": kind, "id": user_id(login) if uid is None else uid}}
+
+
+def runs_key(head: str, page: int = 1) -> str:
+    return f"GET repos/{REPO_A}/actions/runs?head_sha={head}&per_page=100&page={page}"
+
+
+def runs_answer(runs: list, total: int | None = None) -> dict:
+    return {"json": {"total_count": len(runs) if total is None else total, "workflow_runs": runs}}
+
+
 def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None,
-          comments: list | None = None, **trust) -> dict:
+          comments: list | None = None, runs: list | dict | None = None, **trust) -> dict:
     """Canned answers for PR N: the REST first read, the GraphQL second read (the same PR unless `second`) and its
     issue comments (none unless `comments`), through GraphQL and REST alike."""
+    runs = [run_entry(head=head)] if runs is None else runs      # the head was pushed by the operator unless a test says otherwise
     return {f"GET repos/{REPO_A}/pulls/{n}": [pr_doc(head, body, state)],
             f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)],
+            runs_key(head): [runs if isinstance(runs, dict) else runs_answer(runs)],
             **rest_comment_pages(n, comments or []), **gql_comment_pages(n, comments or [])}
 
 
@@ -1767,7 +1792,7 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { __typename login }", "editor { login }", "lastEditedAt",
+    for field in ("headRefOid", "body", "authorAssociation", "author { __typename login ... on User { databaseId } }", "editor { login }", "lastEditedAt",
                   "state"):
         assert field in q, field
     # GitHub's schema has no `lastEditedBy` (2026-11-07): asking for it fails every read.
@@ -2002,8 +2027,8 @@ def test_b1_a_failing_graphql_comment_read_posts_nothing():
 
 def test_b1_the_comment_query_asks_for_the_attribution_fields():
     q = adversary_marker.COMMENTS_QUERY
-    for field in ("fullDatabaseId", "body", "author { __typename login }", "editor { __typename login }",
-                  "lastEditedAt", "includesCreatedEdit", "userContentEdits(first: 100)", "totalCount",
+    for field in ("fullDatabaseId", "body", "author { __typename login ... on User { databaseId } }",
+                  "editor { __typename login ... on User { databaseId } }", "lastEditedAt", "includesCreatedEdit", "userContentEdits(first: 100)", "totalCount",
                   "pageInfo { hasNextPage endCursor }", "after: $cursor"):
         assert field in q, field
 
@@ -2011,7 +2036,8 @@ def test_b1_the_comment_query_asks_for_the_attribution_fields():
 def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
     second = {"json": {"repository": {"pullRequest": {
         "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
-        "author": {"__typename": "User", "login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
+        "author": {"__typename": "User", "login": "djbclark", "databaseId": OPERATOR_ID}, "editor": None,
+        "lastEditedAt": EDITED_AT}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
     assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
 
@@ -2175,3 +2201,121 @@ def test_the_operators_approve_comment_survives_no_edit_by_anyone_else(repo, edi
 def test_an_app_editing_an_outside_body_cannot_approve_it(repo):
     res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), author="stranger", assoc="NONE", editor="cursor"))
     assert res["outcome"] == "outside", res
+
+
+# ---- N1: owner trust also needs the head pushed by the operator; N2: the operator is pinned by user id (2026-11-14) ----
+
+def _ow(repo, runs, **kw):
+    res, api = judge_in(repo, 7, serve(7, "## Summary\n", runs=runs, **kw))
+    return res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("runs,ok", [
+    ([run_entry()], True),
+    ([run_entry(), run_entry("push")], True),
+    ([run_entry("pull_request", "DJBClark")], True),
+    ([run_entry("pull_request", "technoeuphora")], False),                 # an org member pushed it
+    ([run_entry(), run_entry("push", "technoeuphora")], False),            # pushed by someone else before the PR event
+    ([run_entry("pull_request", "frdminc")], False),
+    ([run_entry("pull_request", "djbclark", kind="Bot")], False),
+    ([run_entry("pull_request", "djbclark", uid=7)], False),               # a different user holds the name now
+    ([run_entry("pull_request", "cursor", kind="Bot")], False),
+    ([], False),                                                           # no run names a pusher: fail closed
+    ([run_entry("push")], False),                                          # a push run but no pull_request run
+    ([run_entry("workflow_dispatch", "technoeuphora"), run_entry()], True),    # other events do not name a pusher
+    ([{"event": "pull_request", "head_sha": H1}], False),                  # no actor
+])
+def test_owner_pr_needs_the_head_pushed_by_the_operator(repo, runs, ok):
+    res = _ow(repo, runs)
+    assert (res["outcome"], res["pusher_ok"]) == (("approve", True) if ok else ("outside", False)), res
+    assert res["owner_pr"] is True
+    if not ok:
+        assert res["status"]["state"] == "failure"
+        assert "not known to be pushed by the operator" in res["detail"] or res["detail"] == "", res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_a_run_of_another_head_does_not_vouch_for_this_head(repo):
+    assert _ow(repo, [run_entry("pull_request", "djbclark", head=H2)])["outcome"] == "outside"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("answer", [{"error": "HTTP 403"}, {"json": []}, {"json": {"workflow_runs": []}},
+                                    {"json": {"total_count": 3, "workflow_runs": [run_entry()]}},
+                                    {"json": {"total_count": 1, "workflow_runs": "x"}}])
+def test_an_unreadable_or_short_runs_list_fails_closed(repo, answer):
+    assert _ow(repo, answer)["outcome"] == "outside"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_runs_are_read_across_pages(repo):
+    page1 = [run_entry("push") for _ in range(100)]
+    answers = serve(7, "## Summary\n", runs=runs_answer(page1, total=101))
+    answers[runs_key(H1, 2)] = [runs_answer([run_entry("pull_request", "technoeuphora")], total=101)]
+    res, _api = judge_in(repo, 7, answers)
+    assert res["outcome"] == "outside", "a later page's actor is judged too"
+    answers[runs_key(H1, 2)] = [runs_answer([run_entry("pull_request")], total=101)]
+    assert judge_in(repo, 7, answers)[0]["outcome"] == "approve"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_the_operators_own_comment_still_approves_an_owner_pr_with_an_unknown_pusher(repo):
+    c = comment(marker("APPROVE", H1), login="djbclark")
+    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", runs=[run_entry("pull_request", "technoeuphora")], comments=[c]))
+    assert res["outcome"] == "approve" and res["where"] == "owner comment", res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_a_body_approve_on_an_owner_pr_does_not_count_when_the_pusher_is_not_the_operator(repo):
+    res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), runs=[run_entry("pull_request", "technoeuphora")]))
+    assert res["outcome"] == "outside", res
+
+
+def test_the_runs_check_only_runs_for_an_owner_pr():
+    res, api = judge_in(REPO_A, 7, serve(7, "outside", author="stranger", assoc="NONE", runs=[]))
+    assert res["outcome"] == "outside" and not [k for k in api.calls if "actions/runs" in k]
+
+
+# N2: the pinned id
+
+def test_the_operator_is_pinned_by_login_and_numeric_id():
+    am = adversary_marker
+    assert am.TRUSTED_OWNER_USER_IDS == {"djbclark": 131936}
+    assert am.trusted_owner_user_state("djbclark", 131936) == "owner"
+    assert am.trusted_owner_user_state("DJBClark", 131936) == "owner"
+    assert am.trusted_owner_user_state("djbclark", 4242) == "other"
+    for bad in (None, "131936", True, 131936.0):
+        assert am.trusted_owner_user_state("djbclark", bad) == "unknown", bad
+    assert am.trusted_owner_user_state("frdminc", 131936) == "other"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("db_id,want", [(OPERATOR_ID, "approve"), (4242, "outside"), (None, "outside")])
+def test_an_owner_pr_needs_the_pinned_user_id(repo, db_id, want):
+    doc = gql_doc(H1, "## Summary\n", author="djbclark")
+    author = doc["json"]["repository"]["pullRequest"]["author"]
+    author.pop("databaseId")
+    if db_id is not None:
+        author["databaseId"] = db_id
+    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", second=doc))
+    assert res["outcome"] == want, res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("db_id,want", [(OPERATOR_ID, "approve"), (4242, "untrusted"), (None, "untrusted")])
+def test_a_comment_approve_needs_the_pinned_user_id(repo, db_id, want):
+    c = comment(marker("APPROVE", H1), login="djbclark")
+    c["_gql"]["author"]["databaseId"] = db_id
+    if db_id is None:
+        c["_gql"]["author"].pop("databaseId")
+    res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
+    assert res["outcome"] == want, res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_an_edit_by_a_user_holding_the_operators_old_login_is_not_the_operators(repo):
+    c = comment(marker("APPROVE", H1), login="djbclark", editor="djbclark")
+    c["_gql"]["editor"]["databaseId"] = 4242
+    res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
+    assert res["outcome"] == "edited", res

@@ -22,7 +22,8 @@ name: Adversary marker
 # a GitHub App). A listed App editing an outside body cannot approve it. A BLOCK naming the head counts in
 # the body or any comment, whoever wrote it.
 #
-# Owner-authored PRs need no marker paste (owner-trust, 2026-11-10). A body/comment edit on an outside PR is
+# Owner-authored PRs need no marker paste (owner-trust, 2026-11-10), provided the operator also pushed the head (every
+# pull_request/push run at the head is theirs, `head_pusher_check`, 2026-11-14) and the author's login and user id match. A body/comment edit on an outside PR is
 # not a Tests run: re-check with `gh workflow run adversary-marker.yml -f pr=N`. A push of this workflow or
 # `bin/adversary_marker.py` to the default branch rejudges every open PR (one marker job per head, same
 # concurrency group as dispatch / workflow_run for that sha), so landing owner-trust flips owner tips green
@@ -88,6 +89,7 @@ jobs:
     permissions:
       pull-requests: read
       contents: read
+      actions: read       # `GET actions/runs?head_sha=`: who pushed the head (owner trust, adversary_marker.head_pusher_check)
     steps:
       - name: Check out the default branch (never the PR)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

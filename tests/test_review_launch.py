@@ -1139,6 +1139,14 @@ def test_review_pr_trust_follows_the_operators_login_when_the_org_owns_the_repos
     assert w.review("--runtime", "yolo").returncode == (0 if runtime == "yolo" else 2)
 
 
+def test_a_bot_author_named_like_the_operator_never_gets_the_yolo_runtime(prw):
+    prw.gh(view={"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
+                 "author": {"login": "djbclark", "is_bot": True}, "state": "OPEN"})
+    assert prw.review().returncode == 0
+    assert argv_val(prw.launches()[-1]["argv"], "--permission-mode") == "default"
+    assert prw.review("--runtime", "yolo").returncode == 2
+
+
 def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_not_owner(prw):
     prw.gh(view={"headRefOid": prw.pr_head, "baseRefOid": prw.base, "baseRefName": "master",
                  "author": {"login": "DJBClark"}, "state": "OPEN"})

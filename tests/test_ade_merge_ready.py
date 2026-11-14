@@ -1927,7 +1927,9 @@ def test_corrupt_state_bytes_never_crash_classify(tmp_path: Path, blob: bytes) -
     assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatched"
 
 
-def _dry_run_world(tmp_path: Path, repo_owner: str, author: str, gh_user: str) -> subprocess.CompletedProcess[str]:
+def _dry_run_world(
+    tmp_path: Path, repo_owner: str, author: str, gh_user: str, is_bot: bool = False
+) -> subprocess.CompletedProcess[str]:
     """approve-post dry-run for one PR whose author is AUTHOR, in a repository owned by REPO_OWNER."""
     head = "e" * 40
     listing = json.dumps(
@@ -1939,7 +1941,7 @@ def _dry_run_world(tmp_path: Path, repo_owner: str, author: str, gh_user: str) -
                 "baseRefName": "master",
                 "mergeable": "MERGEABLE",
                 "headRefName": "cursor/x-f576",
-                "author": {"login": author},
+                "author": {"login": author, "is_bot": is_bot},
             }
         ]
     )
@@ -1986,3 +1988,9 @@ def test_approve_post_refuses_the_repository_owner_account_and_org_members(tmp_p
     r = _dry_run_world(tmp_path, repo_owner, "djbclark", gh_user)
     assert r.returncode == 2
     assert "not the operator's login" in r.stderr
+
+
+def test_a_bot_author_named_like_the_operator_is_not_an_owner_pr(tmp_path: Path) -> None:
+    r = _dry_run_world(tmp_path, "frdminc", "djbclark", "djbclark", is_bot=True)
+    assert r.returncode == 0, r.stderr
+    assert "would body-edit" not in r.stdout and "would comment" in r.stdout, r.stdout

@@ -16,17 +16,23 @@ counts: an App or `[bot]` of a similar name does not.
 
 Artifacts whose author GitHub reports as that login (including Cloud Agents under it) are ours.
 
-**Two limits this rule does not remove (adversary review of #670, 2026-11-14).** (a) Owner trust follows the PR *author*, not who
-pushed its head: anyone with write access to the repository (today: an App with `contents: write` selected for it, or a deploy
-key; after the move also the `frdminc` org's second member `technoeuphora`, and any org owner, whose admin comes with the role) can
-push to a branch of an open `djbclark` PR and the gate approves it with no marker. So the move is conditional on a written
-precondition, checked by the operator: `djbclark` is the only org **owner** (every other member has the member role), org base
-permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to anyone but `djbclark`, no App installation or deploy
-key with write access to it except ones that act only for `djbclark`, and the org's other apps limited to selected repositories
-(docs/threat-model.md). A later gate could require a marker when the last pusher (the `synchronize` event's GitHub-attested
-`sender`; the committer field is forgeable) is not `djbclark`; not built.
-(b) Trust is the login *string*: renaming the `djbclark` account would hand its owner trust to whoever registers the freed name.
-Never rename it; pinning the user's immutable id in `TRUSTED_OWNER_LOGINS` is the fix if that ever has to change.
+**Two limits on owner trust, now enforced in code (#670 review notes N1, N2; 2026-11-14).** (a) *Pusher.* Owner trust used to follow
+the PR *author*, not who pushed its head, so anyone who can push to the branch of an open `djbclark` PR (an org owner, a writer, an
+App with `contents: write`, a deploy key) could change its code and keep it green. `head_pusher_check` in `bin/adversary_marker.py`
+now reads `GET actions/runs?head_sha=HEAD` (the marker job has `actions: read`): every `pull_request` and `push` run at the head must
+have as `actor` the pinned operator `User`, and at least one `pull_request` run must exist. Anything else (another actor, a bot, no
+run because of `[skip ci]` or expiry, an unreadable or short list) fails closed: the PR is judged like an outside PR, so the
+operator's own marker comment approves it (`outside` with "not known to be pushed by the operator"). The check only names the
+*last* pusher: commits an attacker pushed earlier and the operator then pushed on top of are the operator's to vouch for, and a
+branch an attacker pushed with no workflow run before the operator opened the PR is not seen. So the org precondition below stays
+as defense in depth, checked by the operator before the transfer: `djbclark` is the only org **owner**, org base permission
+`read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to anyone but `djbclark`,
+no App installation or deploy key with write access except ones that act only for `djbclark`, other apps on selected
+repositories (docs/threat-model.md). (b) *Login vs id.* Trust used to be the login string, so a renamed or deleted `djbclark`
+would hand owner trust to whoever registered the freed name. `TRUSTED_OWNER_USER_IDS` pins the GitHub numeric user id (131936):
+the PR author, every comment author and every edit actor must match login AND id (GraphQL `... on User { databaseId }`; a missing
+or different id fails closed), as must the run actors. `bin/review-pr` and `bin/ade-merge-ready` (not the gate) compare the
+login only, and now also refuse a `gh` author flagged `is_bot`.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -34,7 +40,7 @@ or checks out anything from a PR; the review model is told that the diff, the bo
 data under review and that it reports only through the schema.
 
 **Owner-authored PRs succeed without an APPROVE marker** (2026-11-10): `decide` returns success when the author is the
-operator's login and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
+operator's login (id-pinned) and the operator pushed the head (see the two limits below) and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
 owner PR still counts when the last editor is the owner or a login in `BODY_TRUSTED_EDITOR_LOGINS` (`cursor` as of
 2026-11-09; absent or malformed editor attribution fails closed for that explicit APPROVE path). **Outside / MEMBER /
 COLLABORATOR PRs** still need a live APPROVE in an issue comment the owner posted (not through a GitHub App) that

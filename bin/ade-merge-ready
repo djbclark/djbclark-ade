@@ -281,7 +281,8 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             author = (auth.get("login") or "").strip()
         elif isinstance(auth, str):
             author = auth.strip()
-        owner_pr = is_trusted_owner_login(author)
+        # `gh` marks an App or bot author with `is_bot` (login `app/<slug>`); only a human `User` can be the operator.
+        owner_pr = is_trusted_owner_login(author) and not (isinstance(auth, dict) and auth.get("is_bot"))
         checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
         # gh pr checks exits 1 when any check failed; stdout still usable
         check_text = checks.stdout or ""

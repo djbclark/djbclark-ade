@@ -314,6 +314,7 @@ def review_attempt(argv: list[str]) -> int:
         return EXIT_USAGE
     head, base_sha, base_ref = str(doc.get("headRefOid") or ""), str(doc.get("baseRefOid") or ""), str(doc.get("baseRefName") or "")
     author = str(((doc.get("author") or {}).get("login")) or "")
+    author_is_bot = bool((doc.get("author") or {}).get("is_bot"))      # gh: an App or bot author (login `app/<slug>`)
     if not (re.fullmatch(r"[0-9a-f]{40}", head) and re.fullmatch(r"[0-9a-f]{40}", base_sha) and re.fullmatch(r"[\w./-]+", base_ref)):
         note(f"the PR's head, base or base branch is not usable: {head!r} {base_sha!r} {base_ref!r}")
         return EXIT_USAGE
@@ -337,7 +338,7 @@ def review_attempt(argv: list[str]) -> int:
              "user; its diff and AGENTS.md can steer the reviewing model. --allow-untrusted reviews it anyway")
         return EXIT_USAGE
 
-    owner_authored = marker.is_trusted_owner_login(author)
+    owner_authored = marker.is_trusted_owner_login(author) and not author_is_bot
     if a.runtime == "yolo" and not owner_authored:
         note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored (this one: {author or '(unknown)'!r}); "
              "use --runtime restricted")

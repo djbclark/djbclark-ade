@@ -73,11 +73,25 @@ CONTEXT = "adversary-marker"
 # is not the operator), a fork owner or a transferred-to account gets nothing by owning the repo. Lowercase;
 # compared case-insensitively; only a GraphQL `User` actor counts (an App or bot named the same never does).
 TRUSTED_OWNER_LOGINS = frozenset({"djbclark"})
+# The same user pinned by GitHub's immutable numeric id (`gh api users/djbclark --jq .id`, 2026-11-14): a login is only a
+# name, and a renamed or deleted `djbclark` frees it for someone else, so the gate also needs the id. Both must match.
+TRUSTED_OWNER_USER_IDS = {"djbclark": 131936}
 
 
 def is_trusted_owner_login(login: object) -> bool:
     """True when ``login`` is one of TRUSTED_OWNER_LOGINS (case-insensitive). The repository owner is irrelevant."""
     return isinstance(login, str) and login.strip().lower() in TRUSTED_OWNER_LOGINS
+
+
+def trusted_owner_user_state(login: object, database_id: object) -> str:
+    """'owner' | 'other' | 'unknown' for a User's login and numeric id: the owner only when the login is trusted AND the
+    id is the pinned one; a trusted login with another id is `other` (a different user took the name); one with no
+    usable id is `unknown` (fail closed)."""
+    if not is_trusted_owner_login(login):
+        return "other"
+    if not isinstance(database_id, int) or isinstance(database_id, bool):
+        return "unknown"
+    return "owner" if database_id == TRUSTED_OWNER_USER_IDS[str(login).strip().lower()] else "other"
 
 
 BODY_TRUSTED_EDITOR_LOGINS = frozenset({
@@ -1211,7 +1225,7 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
-            "pullRequest(number: $number) { state headRefOid body authorAssociation author { __typename login } "
+            "pullRequest(number: $number) { state headRefOid body authorAssociation author { __typename login ... on User { databaseId } } "
             "editor { login } lastEditedAt } } }")
 COMMENTS_PER_PAGE = 100
 COMMENT_PAGES_MAX = 30     # 3,000 comments; a PR with more is not read in full, which fails closed
@@ -1223,9 +1237,9 @@ EDITS_MAX = 100            # a comment's edit history read in full; a longer one
 COMMENTS_QUERY = (
     "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { "
     f"pullRequest(number: $number) {{ comments(first: {COMMENTS_PER_PAGE}, after: $cursor) {{ totalCount "
-    "pageInfo { hasNextPage endCursor } nodes { fullDatabaseId body author { __typename login } "
-    "editor { __typename login } lastEditedAt includesCreatedEdit "
-    f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login }} }} }} }} }} }} }} }}")
+    "pageInfo { hasNextPage endCursor } nodes { fullDatabaseId body author { __typename login ... on User { databaseId } } "
+    "editor { __typename login ... on User { databaseId } } lastEditedAt includesCreatedEdit "
+    f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login ... on User {{ databaseId }} }} }} }} }} }} }} }} }}")
 
 
 def body_editor_trusted(editor: str) -> bool:
@@ -1269,7 +1283,9 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor = str(((pr.get("editor") or {}).get("login")) or "")
     if "editor" in pr and pr["editor"] is None and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
         editor = author                       # explicit never-edited shape only; absent/malformed editor is unknown
-    owner_pr = is_trusted_owner_login(author) and (pr.get("author") or {}).get("__typename") == "User"
+    actor_doc = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    owner_pr = (actor_doc.get("__typename") == "User"
+                and trusted_owner_user_state(actor_doc.get("login"), actor_doc.get("databaseId")) == "owner")
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
             "author": author, "editor": editor, "association": str(pr.get("authorAssociation") or "").upper(),
@@ -1309,7 +1325,7 @@ def _actor(a: object) -> tuple[str, str]:
     if not is_trusted_owner_login(login):
         return "other", login
     if a.get("__typename") == "User":
-        return "owner", login
+        return trusted_owner_user_state(login, a.get("databaseId")), login
     return ("unknown" if a.get("__typename") is None else "other"), login
 
 
@@ -1408,7 +1424,9 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
        login; NOT whoever owns the repository): trusted by default
        (operator 2026-11-10: trust what comes only from the owner or AIs they run). No APPROVE marker is required.
        An explicit body APPROVE still counts when the body editor is trusted (owner or BODY_TRUSTED_EDITOR_LOGINS);
-       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed.
+       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed. The author is the
+       pinned operator `User` (login and id), AND the head was pushed by the operator (`head_pusher_check`; an owner PR
+       whose head is not known to be pushed by them is judged like an outside PR, `pr["pusher_ok"]`, fail closed).
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
        it last (a listed App included); only a live APPROVE for this head in a comment by the operator's login, not
        posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
@@ -1427,7 +1445,7 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
     for c, w in judged:
         if w == "malformed":
             return "malformed", "comment", f"malformed marker in comment {c['id']} by {c['author'] or '(ghost)'}"
-    if pr["owner_pr"]:
+    if pr["owner_pr"] and pr.get("pusher_ok") is True:
         if body_word == "approve" and not pr["body_trusted"]:
             return "untrusted", "", f"owner PR body last edited by {pr['editor'] or '(ghost)'}"
         if body_word == "approve":
@@ -1449,9 +1467,64 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
         return "edit-unknown", "", f"owner comment {own[0]['id']} holds an APPROVE but its edit history is unknown"
     if any(w == "approve" for _c, w in judged):
         return "untrusted", "comment", "the only APPROVE comments are not the owner's own (another author, or an App)"
+    if pr["owner_pr"]:
+        return "outside", "", (f"owner PR (author {pr['author']}) whose head is not known to be pushed by the operator: "
+                               f"{pr.get('pusher_detail') or 'not checked'}; an owner comment must approve this head")
     return "outside", "", (f"outside PR (author {pr['author'] or '(ghost)'}): the body's "
                            f"{'APPROVE' if body_word == 'approve' else 'marker'} does not count; "
                            "an owner comment must approve this head")
+
+
+RUN_EVENTS_OF_A_PUSHER = frozenset({"pull_request", "push"})   # the runs a push to the head causes; the pusher is the run's actor
+RUN_PAGES_MAX = 10
+
+
+def head_pusher_check(api, repo: str, head: str) -> tuple[bool, str]:
+    """(ok, why) for owner trust of the head `head`: was it pushed by the operator, the last pusher being what counts?
+
+    Owner trust follows the PR *author*, so anyone who can push to the branch of an open operator PR (an org owner,
+    a writer, an App with `contents: write`, a deploy key) could change its code and keep the owner's PR green
+    (adversary review of #670, N1, 2026-11-14). GitHub attests who caused a workflow run, so the runs at this head
+    answer it: `GET actions/runs?head_sha=HEAD`, every page, and every `pull_request` or `push` run must have as `actor`
+    the pinned operator `User` (login AND id), and at least one `pull_request` run must exist. Anything else fails
+    closed, with the reason: an API error or a short read, no such run (a `[skip ci]` push, runs expired), a run by
+    anyone else (a push before the PR was opened counts too), or an App or bot actor. The operator's own marker comment
+    still approves such a PR (the outside path). Runs are keyed by sha, so a later push by someone else is a new head
+    with its own runs. Not covered: commits an attacker pushed earlier that the operator then pushed on top of (the
+    operator vouches for what they push), and a branch an attacker pushed with no run before the operator opened the
+    PR (docs/review-boundary.md)."""
+    runs: list[dict] = []
+    total = None
+    try:
+        for page in range(1, RUN_PAGES_MAX + 1):
+            doc = api.get(f"repos/{repo}/actions/runs?head_sha={head}&per_page=100&page={page}")
+            batch = doc.get("workflow_runs") if isinstance(doc, dict) else None
+            if (not isinstance(batch, list) or not all(isinstance(r, dict) for r in batch)
+                    or not isinstance(doc.get("total_count"), int) or isinstance(doc.get("total_count"), bool)):
+                return False, "the head's workflow runs could not be read (unexpected shape)"
+            runs.extend(batch)
+            total = doc["total_count"]
+            if len(runs) >= total or not batch:
+                break
+        else:
+            return False, "the head has more workflow runs than are read"
+    except (ApiError, ValueError) as e:
+        return False, f"the head's workflow runs could not be read ({e})"
+    if total is None or len(runs) < total:
+        return False, f"read {len(runs)} of {total} workflow runs at the head"
+    seen_pr = False
+    for r in runs:
+        if r.get("event") not in RUN_EVENTS_OF_A_PUSHER or str(r.get("head_sha") or "").lower() != head.lower():
+            continue
+        a = r.get("actor")
+        who = a.get("login") if isinstance(a, dict) else None
+        if (not isinstance(a, dict) or a.get("type") != "User"
+                or trusted_owner_user_state(a.get("login"), a.get("id")) != "owner"):
+            return False, f"a {r.get('event')} run at this head was caused by {who or '(unknown)'}, not the operator"
+        seen_pr = seen_pr or r.get("event") == "pull_request"
+    if not seen_pr:
+        return False, "no pull_request run at this head names who pushed it"
+    return True, ""
 
 
 def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
@@ -1484,9 +1557,11 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
         comments = _merge_comments(trusted, _pr_comments(api, repo, n))
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"reading the comments failed: {e}"}
+    if pr["owner_pr"]:
+        pr["pusher_ok"], pr["pusher_detail"] = head_pusher_check(api, repo, head)
     word, where, detail = decide(head, pr, comments)
     rec.update(last_editor=pr["editor"], trusted=pr["body_trusted"], author=pr["author"], owner_pr=pr["owner_pr"],
-               comments=len(trusted))
+               pusher_ok=pr.get("pusher_ok"), comments=len(trusted))
     status = {"state": "success" if word == "approve" else "failure", "context": CONTEXT,
               "description": describe(word, head, where)}
     if target_url:
