@@ -102,7 +102,7 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    another window (a MAIN tab) is not a blocker. Otherwise it archives nothing and lists the blockers. It does not look at the window's terminals.
 5. **cwd:** a window's `cwd` is the session directory its first launch gave it (the repo's primary checkout). Later tabs
    launch with `--workspace <wks> --cwd <that same directory>` (with `--workspace`, Paseo takes the agent's cwd from the
-   window). Because that directory is the shared primary checkout, where nothing may be edited (AGENTS.md order 9), each
+   window and ignores `--cwd`, getpaseo/paseo#9699: `ade-worker-run` refuses a different `--cwd` and checks the agent's `Cwd` after launch, stopping a worker that landed elsewhere). Because that directory is the shared primary checkout, where nothing may be edited (AGENTS.md order 9), each
    brief gives the claimed worktree as an absolute path and every writer runs every repository operation there (`git -C
    <worktree>`, absolute file paths); `-C`/`--dir` keeps its session-directory meaning. Tools that infer a target from cwd
    must receive an explicit supported target or not be used. Reports and scratch folders are artifact locations, never

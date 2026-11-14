@@ -1,5 +1,5 @@
 # Machine-readable routing policy. Consumed by bin/route_agent.py and
-# bin/acp-dispatch. Edit here; do not restate the data in Python.
+# (formerly also bin/acp-dispatch). Edit here; do not restate the data in Python.
 # Profiles from docs/model-routing.md "Which AI for which work", rewritten
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.2 and codex's top frontier model (gpt-6-astra today) are reached
@@ -18,7 +18,7 @@
 # Current automatic pools: Claude, Codex, Cursor (vendor Auto, Pi Composer and cloud),
 # Z.ai through Pi, and the gated native Antigravity Argon frontier fallback.
 # Other named rows preserve historical policy or reserved substrate metadata.
-# `models` is the acp-dispatch `--model [--effort L]` suggestion per kind, ids as
+# `models` is the `--model [--effort L]` suggestion per kind (the model `route_agent.py plan` hands the launcher; `acp-dispatch` is gone), ids as
 # `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`);
 # `agent` is the Paseo provider when it differs from the pool name.
 
@@ -128,18 +128,20 @@ suggest_better_delta = 3
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15).
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
 # ACP_OPERATOR_APPROVED=<agent>. omp left this list on 2026-10-19 (its Claude API credits are a
-# normal tier). route_agent never discovers a name listed here.
+# normal tier). route_agent never discovers a name listed here. The ACP_OPERATOR_APPROVED check that lived in
+# bin/acp-dispatch / tools/acp-run left with them (2026-11-14): `never_route` is what still keeps hermes out.
 operator_gated = ["hermes"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
-# ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
+# ACP_OPERATOR_APPROVED=fable-xhigh. NOT ENFORCED since 2026-11-14 (the gate was bin/acp-dispatch's gate_policy); it is an
+# instruction, and `policy --md` only prints it. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
-# (operator 2026-10-18; route-override does not skip this). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
+# (operator 2026-10-18; route-override did not skip this; the `--kind frontier` check left with bin/acp-dispatch, 2026-11-14, so route_agent's planner is the only gate). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
-# Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on
-# purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
-# ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
+# Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
+# `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
+# reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
 inflight_cap = {}
 # Flags a dispatch line needs for the agent to accept the model at all (none since crush retired, 2026-11-06).
 extra = {}
@@ -165,11 +167,11 @@ codex = 10.0
 claude = 8.0
 
 # Repo-scoped override of the floors above (operator djbclark, 2026-11-01: "For tendcf/nix2cf only, allow astra down to a
-# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so a fallback stands in only below that. The repository is the last path part of the `origin` remote of acp-dispatch's -C directory
+# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so a fallback stands in only below that. The repository is the last path part of the `origin` remote of the `-C` directory (the repo the plan is for; acp-dispatch, which passed it, is gone)
 # (a worktree such as ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
 # The override REPLACES the `SERVICE:frontier` floor and is also its CAP: a measured median (3+ comparable slices) still
 # wins over the default floor everywhere, but here the estimate never exceeds 20 (a median of 70 is read as 20, a median
-# of 2 stays 2), for the scalar estimate, each window's estimate, the in-flight reservation and the fallback predicate.
+# of 2 stays 2), for the scalar estimate, each window's estimate, (until 2026-11-14) acp-dispatch's in-flight reservation and the fallback predicate.
 # Every other repository keeps the floors above. Accepted risk (adversary 2026-11-01 F4): the key is the NAME only, so any
 # checkout named tendcf or nix2cf gets it; the effect is quota policy on this machine, nothing more.
 [dispatch.repo_overrides.tendcf.estimate_floor]
@@ -291,10 +293,10 @@ access = "cli-only"
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
-# dispatcher (now native `paseo run`; Wave 6 shims transitional) also reserves in-flight
-# estimates per service. max_parallel = 1 keeps one codex slice per wave.
+# dispatcher (acp-dispatch, deleted 2026-11-14) also reserved in-flight estimates per service; nothing does now,
+# so re-plan before each launch (skills/model-routing D5). max_parallel = 1 keeps one codex slice per `plan`.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
-# and the in-flight rule await re-calibration from `route_agent.py calibrate`.
+# and the lost in-flight rule await re-calibration from `route_agent.py calibrate`.
 plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
 models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
 
@@ -395,11 +397,11 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 
 # The Google AI Pro plan's Gemini 4 Argon window: frontier FALLBACK only (operator 2026-10-31, PR 224). Retired with the
 # agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
-# review route 3 (`acp-dispatch antigravity --model gemini-4-argon --kind frontier`, their AGENTS.md) needs a frontier
-# row: without one the dispatch is refused as ineligible. aiuse reports the window as pool family `gemini_argon`
+# review route 3 (written as `acp-dispatch antigravity --model gemini-4-argon --kind frontier` in their AGENTS.md; the
+# shim is gone, 2026-11-14, and those files still need updating) needs a frontier row: without one `route_agent.py plan` refuses it as ineligible. aiuse reports the window as pool family `gemini_argon`
 # (antigravity/gemini_argon). Used only while codex OR claude is short of quota for `frontier` (`fallback_after`: route()
-# skips it otherwise); a fallback with no fresh reading is never used. The acp-dispatch shim (E6) does not apply the
-# fallback predicate itself: the lead dispatches Argon only when `route_agent.py plan` names it.
+# skips it otherwise); a fallback with no fresh reading is never used. No launcher applies the fallback predicate
+# itself (the acp-dispatch shim that once could is gone): the lead dispatches Argon only when `route_agent.py plan` names it.
 [[service]]
 name = "antigravity-argon"
 cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable)"
@@ -414,7 +416,7 @@ max_parallel = 1
 access = "cli-only"
 agent = "antigravity"
 # Paseo's antigravity provider folds the effort into the model id (`paseo provider models antigravity`: gemini-4-argon-high);
-# the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and acp-dispatch maps a bare one.
+# the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and the deleted acp-dispatch used to map a bare one, so write the full id.
 models = { frontier = "gemini-4-argon-high" }
 
 [[service]]

@@ -1,7 +1,7 @@
 """ade_gates: the frontier-model allowance, from code defaults and config/gates.toml [frontier] (docs/gates.md).
 
-Imported by bin/route_agent.py (the planner's per-wave cap; Wave 6 Choice.dispatch → paseo run / transitional
-shim) and claude/hooks/frontier_agent_gate.py (the Agent-tool hook). The acp-dispatch grant path leaves ~2026-11-20.
+Imported by bin/route_agent.py (the planner's per-wave cap; Choice.dispatch → paseo run) and
+claude/hooks/frontier_agent_gate.py (the Agent-tool hook). The acp-dispatch grant path was deleted 2026-11-14.
 Not a program. Since 2026-11-07 (slim-down E7) this is the
 frontier half only: the Claude quota gates (the fleet governor, the quota guard, the gate profile tool and their
 [governor]/[quota_guard]/[profiles] tables) were deleted, and the Claude reading the allowance needs comes from
@@ -15,7 +15,7 @@ tree still projects legacy `config/gates.toml` (and `GATES_TOML` isolates that d
   load_frontier(now) -> (thresholds, info)                 the effective [frontier] gate
   read_guard_state() -> dict | None                        the Claude reading for the allowance (route_agent.claude_quota_state)
   judged_guard_block(state, t, now) -> str | None          why claude's judged frontier use is not allowed now, or None
-  judged_pool_block(family, t, now, state, remaining)      the same for either family: one copy for acp-dispatch and route_agent
+  judged_pool_block(family, t, now, state, remaining)      the same for either family: one copy for the hook and route_agent
   frontier_reason(text) -> (reason, problem)               a `frontier-reason` line, checked
 
 The code default (FRONTIER_DEFAULTS) is the FAIL-SAFE, all closed: no judged use, one frontier slice per pool per wave,
@@ -186,7 +186,7 @@ def read_guard_state() -> Any:
     """The Claude reading the allowance judges: route_agent.claude_quota_state(), built from the merged quota snapshot
     (`aiuse --available --json` and `paseo usage ls --json`). None when route_agent cannot be imported or the read fails;
     `judged_guard_block` fails closed on None. Kept under its old name (it read the quota guard's state file until
-    2026-11-07) so acp-dispatch and the hook keep their import surface."""
+    2026-11-07) so the hook keeps its import surface."""
     try:
         here = str(Path(__file__).resolve().parent)
         if here not in sys.path:
@@ -232,7 +232,7 @@ def judged_guard_block(state: Any, t: dict[str, float], now: datetime) -> str | 
 def judged_pool_block(family: int, t: dict[str, float], now: datetime, guard_state: Any, remaining: Any) -> str | None:
     """Why the allowance's cap checks fail for frontier `family` (1 claude, 2 codex and the other pools), or None when they pass.
     claude: `judged_guard_block` on the Claude reading. Other pools: the pool reading at least `frontier2_min_left`. One copy for
-    acp-dispatch's grant and route_agent's per-wave cap."""
+    the hook's grant and route_agent's per-wave cap."""
     if family == 1:
         return judged_guard_block(guard_state, t, now)
     floor = t["frontier2_min_left"]

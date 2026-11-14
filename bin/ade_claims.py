@@ -131,6 +131,9 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      `GIT_CONFIG`, which format-patch ignores — else cwd; unresolved config fails closed) when the output target is not
      inside the caller's active claimed workspace (`output-file`); `format-patch --stdout` stays allowed (no worktree
      file write).
+     Also (gg-01, 2026-11-14): `worktree remove` of a directory another live process uses (lsof: cwd, then open files;
+     fails open; `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` overrides, `--force` does not) is refused whoever owns it
+     (`worktree remove: live process`; docs/git-guard.md calls it shim rule 6).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
 `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
@@ -140,7 +143,7 @@ Refusal = exit 77 (EX_NOPERM), a message naming the owner and the safe alternati
 one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged). A refused
 hook shows git's `fatal: ... aborted by the reference-transaction hook` (exit 128) after the same message.
 Operator override: ACP_OPERATOR_APPROVED containing `git-guard` allows the call and logs it (design 5.6's
-ADE_GIT_GUARD_BYPASS was not built; this is the convention the Wave 6 dispatch shim already uses), in the shim and in the hooks.
+ADE_GIT_GUARD_BYPASS was not built; this is the convention the deleted Wave 6 dispatch shim used), in the shim and in the hooks.
 A shim crash fails OPEN (design 5.7, bin/ade-git-guard).
 
 CLI (also the bash-facing API; every subcommand exits 0 ok, 2 usage, 3 id exists, 4 path owned by another owner's
@@ -170,6 +173,7 @@ import contextlib
 import dataclasses
 import fcntl
 import json
+import math
 import os
 import re
 import shlex
@@ -188,7 +192,7 @@ DEFAULT_TTL_H = 72.0
 ROLES = ("lead", "worker", "builder")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDENT_ENV = ("ADE_CLAIM_ID", "CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID")
-OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the Wave 6 dispatch shim
+OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the deleted Wave 6 dispatch shim
 
 
 # --------------------------------------------------------------------------------------------
@@ -1386,6 +1390,7 @@ class Decision:
     claim_id: str = ""
     owner: str = ""
     override: bool = False
+    override_via: str = ""          # what allowed it, for the stderr line (default: the operator override)
     detail: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -1787,7 +1792,148 @@ def _output_file_decision(call: GitCall, ident: Optional[str]) -> Optional[Decis
     return None
 
 
-def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str]) -> Optional[Decision]:
+LIVE_USE_ALLOW_ENV = "ADE_ALLOW_LIVE_WORKTREE_REMOVE"   # =1: remove a worktree a live process still uses (the guard's own override)
+LSOF_TIMEOUT = 6.0                                       # seconds per lsof call ($ADE_LSOF_TIMEOUT); a timeout never refuses
+LSOF_TIMEOUT_MAX = 120.0      # an `ADE_LSOF_TIMEOUT` above this is cut to it (a guard is not an unbounded wait)
+LIVE_USE_LIST_MAX = 8
+
+
+def _lsof_path() -> Optional[str]:
+    """$ADE_LSOF (tests), else the first lsof on PATH or /usr/sbin/lsof; None when there is none (fail open)."""
+    import shutil
+    cand = os.environ.get("ADE_LSOF") or shutil.which("lsof") or "/usr/sbin/lsof"
+    return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
+
+
+def _lsof_records(argv: Sequence[str], timeout: float) -> Optional[list[tuple[int, str, str, str]]]:
+    """Run `lsof ARGV -F pcfn` from `/` (its own cwd never lands in a target) and parse (pid, command, fd, name) rows.
+    None when lsof cannot start, times out (the whole group is killed) or fails; rc 1 is lsof's "nothing found"."""
+    import signal
+    import subprocess
+    exe = _lsof_path()
+    if exe is None:
+        return None
+    try:
+        p = subprocess.Popen([exe, "-nP", "-w", *argv, "-F", "pcfn"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, cwd="/", start_new_session=True)
+    except (OSError, ValueError):
+        return None
+    try:
+        out, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(p.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.communicate(timeout=5)
+        return None
+    if p.returncode not in (0, 1):
+        return None
+    rows: list[tuple[int, str, str, str]] = []
+    pid, cmd, fd = 0, "", ""
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        tag, val = line[:1], line[1:]
+        if tag == "p":
+            pid, cmd, fd = (int(val) if val.isdigit() else 0), "", ""
+        elif tag == "c":
+            cmd = val
+        elif tag == "f":
+            fd = val
+        elif tag == "n" and pid:
+            rows.append((pid, cmd, fd, val))
+    return rows
+
+
+def _own_pids() -> Optional[set[int]]:
+    """This process and its ancestors (the shim, the agent that ran it): the caller is not "another user" of its own
+    worktree. One `ps -A -o pid=,ppid=` under one timeout, walked in memory. None when ps cannot answer: the caller
+    cannot be told from an orphan then, so the check fails open."""
+    import subprocess
+    out = None
+    for exe in ("/bin/ps", "ps"):
+        try:
+            r = subprocess.run([exe, "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10,
+                               stdin=subprocess.DEVNULL, cwd="/")
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            out = r.stdout
+            break
+    if out is None:
+        return None
+    parent: dict[int, int] = {}
+    for line in out.splitlines():
+        bits = line.split()
+        if len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit():
+            parent[int(bits[0])] = int(bits[1])
+    pids, pid = set(), os.getpid()
+    while pid > 1 and pid not in pids and len(pids) < 256:
+        pids.add(pid)
+        pid = parent.get(pid, 0)
+    return pids
+
+
+def _lsof_timeout() -> float:
+    try:
+        v = float(os.environ.get("ADE_LSOF_TIMEOUT") or LSOF_TIMEOUT)
+    except ValueError:
+        return LSOF_TIMEOUT
+    # inf and nan would make `communicate(timeout=...)` raise OverflowError (lw-01, #693 review L2): the default instead
+    return min(LSOF_TIMEOUT_MAX, max(0.1, v)) if math.isfinite(v) else LSOF_TIMEOUT
+
+
+def live_users_of(target: Path, timeout: Optional[float] = None) -> list[tuple[int, str, str]]:
+    """(pid, command, `cwd` or the open file's path) of every OTHER live process whose cwd is inside `target` or that
+    holds a file open there. cwd comes from one all-process lsof (fast); open files from `lsof +D target`, which walks the
+    tree and may time out: then only the cwd answer stands. An lsof that is missing, fails or times out on the cwd call
+    gives [] (fail open: a guard that cannot look must not stop `git worktree remove`)."""
+    timeout = _lsof_timeout() if timeout is None else timeout
+    try:
+        root = str(target.resolve())
+    except OSError:
+        return []
+    cwd_rows = _lsof_records(["-d", "cwd"], timeout)
+    if cwd_rows is None:
+        return []
+    # lsof prints the on-disk case; a worktree registered under another case (APFS is case-insensitive) must still match,
+    # and over-matching is the safe direction. The +D rows are already scoped to `root` by lsof itself (its escaped
+    # spellings of odd bytes would not match a re-filter).
+    fold = (lambda x: x.casefold()) if sys.platform == "darwin" else (lambda x: x)
+    rows = [r for r in cwd_rows if r[2] == "cwd" and _path_inside(fold(root), fold(r[3]))]
+    rows += _lsof_records(["+D", root], timeout) or []
+    own = _own_pids()
+    if own is None:
+        return []
+    seen: dict[int, tuple[str, str]] = {}
+    for pid, cmd, fd, name in rows:
+        if pid not in own and (pid not in seen or fd == "cwd"):
+            seen[pid] = (cmd, "cwd" if fd == "cwd" else name)
+    return [(pid, cmd, what) for pid, (cmd, what) in sorted(seen.items())]
+
+
+def _live_use_decision(verb: str, target: Path, claim: Optional[dict[str, Any]], env: dict[str, str]) -> Optional[Decision]:
+    """`git worktree remove` of a directory another live process still uses (an orphaned agent's cwd, an editor, a dev
+    server): git itself removes it and the process is left in a deleted directory (2026-11-14, site-public-djbclark-
+    orchard-wt, orphan claude PID 10129). Claimed or not, mine or not. `--force` does not bypass it (that flag is
+    about a dirty tree); $ADE_ALLOW_LIVE_WORKTREE_REMOVE=1 or the operator override does."""
+    if verb != "remove" or not target.is_dir():
+        return None
+    users = live_users_of(target)
+    if not users:
+        return None
+    allowed = env.get(LIVE_USE_ALLOW_ENV) == "1"
+    shown = "; ".join(f"pid {pid} {_esc(cmd)} ({_esc(what)})" for pid, cmd, what in users[:LIVE_USE_LIST_MAX])
+    more = f"; and {len(users) - LIVE_USE_LIST_MAX} more" if len(users) > LIVE_USE_LIST_MAX else ""
+    return Decision(allowed, "worktree remove: live process",
+                    f"stop these processes first ({shown}{more}): a Paseo agent is ended with `paseo agent archive <id>`; "
+                    f"then retry. For an orphan the operator has confirmed, {LIVE_USE_ALLOW_ENV}=1 on that one call allows it "
+                    "and is logged (--force does not bypass this; it is about a dirty tree)",
+                    str((claim or {}).get("id") or ""),
+                    owner_label(claim) if claim else "nobody; the target has no active claim of yours",
+                    override=allowed, override_via=f"{LIVE_USE_ALLOW_ENV}=1" if allowed else "")
+
+
+def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str],
+                     env: Optional[dict[str, str]] = None) -> Optional[Decision]:
     """Rule 5: the claim of what the call HITS, not of where it runs."""
     sub, args = call.sub, call.args
     deny = _output_file_decision(call, ident)
@@ -1798,6 +1944,7 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
         verb = args[0]
         s = scan(args[1:], value_long={"expire", "reason"}, danger={"force"})
         force = bool(s.shorts & {"f"} or s.longs & {"force"})
+        pending: Optional[Decision] = None
         targets: list[Path] = []
         if verb in ("remove", "move") and s.pos:
             targets = _worktree_targets(call, ws0, s.pos[0])
@@ -1808,10 +1955,17 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
             if c is not None and not is_mine(c, ident):
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
                                 "ask the owner (a Paseo agent: `paseo send --json --no-wait OWNER --prompt '…'`) to remove it; read-only `git worktree list` is fine")
+            live = _live_use_decision(verb, t, c, os.environ if env is None else env)
+            if live is not None and not live.allowed:
+                return live
+            if live is not None and pending is None:
+                pending = live      # the override allows the live-process rule only: the rules below still apply (r2)
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
                                 "", "nobody; the target has no active claim of yours")
+        if pending is not None:
+            return pending
     names: list[str] = []
     if sub == "branch":
         # Only a rename's or copy's DESTINATION: the files backend never tells the reference-transaction hook about it (a
@@ -2198,9 +2352,9 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                             "git could not say which repository and work tree this call changes (it timed out or "
                             "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
-        deny = _target_decision(call, wss, ident)
-    if deny is None and unknown is not None:
-        deny = unknown
+        deny = _target_decision(call, wss, ident, env)
+    if unknown is not None and (deny is None or deny.allowed):
+        deny = unknown      # an allowed (overridden) decision never hides a fail-closed config refusal
     ws_any = next((w for w in wss if w is not None), None)
     call.ws = ws_any
     if deny is None:
@@ -2297,7 +2451,8 @@ def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) 
     """Log and print a non-plain decision; returns 0 (override) or EXIT_REFUSED."""
     log_event(d, call, extra)
     if d.override:
-        sys.stderr.write(f"ade-git-guard: ACP_OPERATOR_APPROVED={OVERRIDE}: allowed `{_esc(call.display())}` "
+        via = d.override_via or f"ACP_OPERATOR_APPROVED={OVERRIDE}"
+        sys.stderr.write(f"ade-git-guard: {_esc(via)}: allowed `{_esc(call.display())}` "
                          f"[{_esc(d.rule)}] (logged)\n")
         return 0
     sys.stderr.write(refusal_text(d, call))

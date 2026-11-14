@@ -172,12 +172,67 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"paseo --host=other send {A} hi", []),
     (f"paseo send --host=other {A} hi", []),
     (f"paseo send --image a.png {A} hi", [(A, None)]),
+    # global options after the verb and after `agent` too (adversary M1 on #696)
+    (f"paseo send -o json {A} hi", [(A, None)]),
+    (f"paseo send --format json {A} hi", [(A, None)]),
+    (f"paseo send -qo json {A} hi", [(A, None)]),
+    (f"paseo send -ojson {A} hi", [(A, None)]),
+    (f"paseo send --format=json {A} hi", [(A, None)]),
+    (f"paseo agent send -o json {A} hi", [(A, None)]),
+    (f"paseo agent --json send {A} hi", [(A, None)]),
+    (f"paseo agent -o json send {A} hi", [(A, None)]),
+    (f"paseo agent -q send {A}", [(A, None)]),
+    (f"paseo -qo json send {A} hi", [(A, None)]),
+    (f"paseo --json agent -qo json send -- {A} hi", [(A, None)]),
+    (f"paseo send {A} --json hi", [(A, None)]),
+    # an explicit daemon selector anywhere in option position is not judged (adversary L1)
+    (f"paseo send {A} --host vps:6767 hi", []),
+    (f"paseo send {A} hi --home=/x", []),
+    (f"paseo agent --host x send {A} hi", []),
+    (f"paseo agent send {A} --home /x hi", []),
+    (f"paseo send -- {A} --host vps:6767", [(A, None)]),  # after `--` it is message text
     (f"paseo send {A} ADE_ALLOW_ARCHIVED_SEND={A}", [(A, None)]),  # the override is not a word of the message
     (f"paseo send --json --no-wait \\\n  {A} --prompt hi", [(A, None)]),  # a line continuation
     (f"paseo \\\n send {A} hi", [(A, None)]),
     (f"paseo send --no-wait \\\n --prompt \"x\" \\\n {A}", [(A, None)]),
     (f"paseo send {A} \"a \\\nb\"", [(A, None)]),  # a continuation inside double quotes
     (f"bash -c '# c\npaseo send -- {A} hi'", [(A, None)]),  # a comment inside a multi-line -c payload
+    (f"echo a\\ #x; paseo send {A} hi", [(A, None)]),  # an escaped blank before # is text, not a comment start
+    (f"echo \\;#x; paseo send {A} hi", [(A, None)]),  # so is an escaped separator
+    (f"echo foo\\\n#bar; paseo send {A} hi", [(A, None)]),  # and a # right after a continuation: foo#bar
+    (f"echo \"a\"#x; paseo send {A} hi", [(A, None)]),  # and one right after a closing quote
+    (f"echo hi # don't forget\npaseo send -- {A} hi", [(A, None)]),  # a quote inside a real comment does not open a string
+    (f"echo hi;# it's here\npaseo send -- {A} hi", [(A, None)]),
+    (f"echo a \\\n#c\npaseo send -- {A} hi", [(A, None)]),  # a comment after a continued blank ends at its own line
+    (f"paseo send --no-wait -- {B} 'x `paseo send {A}` y'", [(B, None)]),  # a markdown code span in single quotes is text
+    (f"paseo send --no-wait -- {B} 'x $(paseo send {A}) y'", [(B, None)]),
+    (f"paseo send --no-wait -- {B} \"x \\`paseo send {A}\\` y\"", [(B, None)]),  # an escaped backtick in double quotes
+    (f"paseo send --no-wait -- {B} \"n $((1+2)) m\"", [(B, None)]),  # arithmetic, not a command
+    (f"paseo send --no-wait -- {B} --prompt 'Please reply: ack {A}'", [(B, None)]),  # an id inside the message is no target
+    (f"paseo send --no-wait -- {B} --prompt \"LEAD {B} took over from {A}\"", [(B, None)]),
+    (f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"; echo "$st"', [(A, None)]),  # a real one in "..."
+    (f'echo "result: $(paseo send {A} hi)"', [(A, None)]),
+    (f'out="`paseo send {A} hi`"', [(A, None)]),
+    (f'out="$(\npaseo send {A} hi\n)"', [(A, None)]),
+    (f'if [ "$(paseo send --json {A} hi | jq -r .status)" = sent ]; then echo ok; fi', [(A, None)]),
+    (f'echo "a $(echo "b $(paseo send {A} x)")"', [(A, None)]),  # nested substitutions inside double quotes
+    (f'git commit -m "see $(paseo send {A} hi) ok" && paseo send {B} x', [(A, None), (B, None)]),  # the quote reopens after
+    (f"x=$(paseo send -- {A} hi)", [(A, None)]),
+    (f"(paseo send {A} hi)", [(A, None)]),
+    (f"echo `date`#x; paseo send {A} hi", [(A, None)]),  # a # glued to the end of a substitution is part of its word
+    (f"echo $(date)#x; paseo send {A} hi", [(A, None)]),
+    (f"echo $((1+2))#x; paseo send {A} hi", [(A, None)]),
+    (f"gh browse $(git rev-parse HEAD)#L10; paseo send {A} done", [(A, None)]),
+    (f"echo 'a'#x; paseo send {A} hi", [(A, None)]),  # and one glued to a closing quote
+    (f"echo x\n# don't\npaseo send {A} hi", [(A, None)]),  # a comment after a newline, with a quote in it
+    (f"x=$(# don't\npaseo send {A} hi)", [(A, None)]),  # a comment right after `$(`
+    (f'x="$(# don\'t\npaseo send {A} hi)"', [(A, None)]),
+    (f"(# don't\npaseo send {A} hi)", [(A, None)]),  # and after a bare `(`
+    (f"echo a|# don't\npaseo send {A} hi", [(A, None)]),  # and after a pipe
+    (f"case $x in a)# don't\npaseo send {A} hi;; esac", [(A, None)]),  # a `)` with nothing open (a case pattern)
+    (f"echo \"$( (true) )'\" ; paseo send {A} x", [(A, None)]),  # a subshell inside a substitution inside quotes
+    (f'echo "$(echo $(date) ; paseo send {A} x)"', [(A, None)]),  # a nested substitution
+    (f'echo "$( (true) ; paseo send {A} x)"', [(A, None)]),
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -317,13 +372,64 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
 
 
 @pytest.mark.parametrize("command,expected", [
-    (f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"; echo "$st"', [A]),
-    (f'echo "result: $(paseo send {A} hi)"', [A]),
     (f"paseo send {A} hi; ls \\", [A]),  # a lone trailing backslash: shlex fails, the backstop judges the id
-    (f"echo a\\ #x; paseo send {A} hi", [A]),  # an escaped space before a `#` is not a comment
+    (f"echo $'it\\'s'; paseo send {A} hi", [A]),  # an ANSI-C quote closes early: the parser gives up, the backstop judges the id
+    (f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done', [A]),  # a target in a shell variable
+    (f"for id in {A} {B}; do paseo send --no-wait \"$id\" hi; done", [A, B]),
+    (f"echo {A} | xargs -I{{}} paseo send {{}} hi", [A]),
+    (f"eval 'paseo send {A} hi'", [A]),  # a string run by a word the parser does not recurse into
+    (f'eval "paseo send {A} hi"', [A]),
+    (f"watch -n 60 'paseo send {A} hi'", [A]),
+    (f"su bb -c 'paseo send {A} hi'", [A]),
+    (f"flock /tmp/l -c 'paseo send {A} hi'", [A]),
+    (f"fish -c 'paseo send {A} hi'", [A]),
+    (f"nix-shell --run 'paseo send {A} hi'", [A]),
+    (f"echo $'it\\'s'; paseo send {A} hi; echo 'done'", [A]),  # an ANSI-C quote with a quote after it on the line
+    (f"echo it\\'s; paseo send {A} hi; ls 'x' \\", [A]),  # an escaped quote, then a lone trailing backslash
+    (f"LEAD={A}; echo don\\'t; paseo send \"$LEAD\" hi; echo 'x'", [A]),
+    (f'LEAD="{A}"; paseo send "$LEAD" x', [A]),  # a quoted id has no blank: not message text
+    (f'x="$((paseo send {A} hi) )"', [A]),  # `$((` that is a subshell in a substitution: stays text in the parser, the backstop sees it
+    (f'echo "$(paseo send "$LEAD" x)"; LEAD={A}', [A]),
+    (f"paseo send -- {B} ok # was paseo send {A}", []),  # a comment is not judged
+    (f'paseo send {B} "a \\" b"; LEAD={A}; paseo send "$LEAD" x', [A]),  # an escaped quote does not end the masked string early
+    (f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"', [B]),  # the quoted message's ids are text
+    (f"echo 'paseo send {A} hi' | sh", [A]),  # a script fed to a shell on stdin
+    (f"bash <<< 'paseo send {A} hi'", [A]),
+    (f"osascript -e 'do shell script \"paseo send {A} hi\"'", [A]),
+    (f"foo --command 'paseo send {A} hi'", [A]),
+    (f"watch -n1 true; paseo send -- {B} --prompt 'old: paseo send {A} hi'", []),  # the runner word ends with its command
+    (f'NEW={B}; paseo send "$NEW" --prompt "ack:{A}"', [B]),  # an id glued into message text is text; only a lone quoted id counts
+    (f'paseo send --no-wait "${{LEAD:-{A}}}" --prompt done', [A]),  # a parameter expansion with an id default (r3 A1)
+    (f'LEAD="${{LEAD:-{A}}}"; paseo send "$LEAD" hi', [A]),
+    (f'SIBS="{A} {B}"; for id in $SIBS; do paseo send --no-wait "$id" hi; done', [A, B]),  # a quoted list of ids (r3 A4)
+    (f'echo "{A} {B}" | xargs -n1 paseo send --no-wait', [A, B]),
+    (f"echo 'paseo send {A} hi' | $SHELL", [A]),  # r3 A5a
+    (f'echo \'paseo send {A} hi\' | "$SHELL"', [A]),
+    (f"foo --command='paseo send {A} hi'", [A]),  # r3 A5b
+    (f"source <(echo 'paseo send {A} hi')", [A]),  # r3 A5c
+    (f"perl -e 'system(q(paseo send {A} hi))'", [A]),  # kills "drop `e` from RUN_FLAG" (r3 A7)
+    (f"tmux new -d 'paseo send {A} hi'", [A]),  # kills "drop tmux from RUNNERS"
+    (f"nix-shell --run='paseo send {A} hi'", [A]),  # kills "--run(=.*)? -> --run"
+    (f'echo -e "old: paseo send {A}"; paseo send -- {B} hi', []),  # r3 A6: echo's -e takes text
+    (f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send from bash: ack {B}"', []),  # r3 A3
+    (f'git commit -m "fix: paseo send {A} in the sh wrapper"', []),
+    (f"echo 'paseo send {A} hi' | \"sh\"", [A]),  # r4 B1: a quoted shell name
+    (f"echo 'paseo send {A} hi' | \"/bin/bash\"", [A]),
+    (f"echo 'paseo send {A} hi' | '/bin/sh'", [A]),
+    (f"awk 'BEGIN {{ system(\"paseo send {A} hi\") }}'", [A]),  # r4 B2: awk and the GNU stream editor can run a command themselves
+    (f"s" + f"ed -e '1e paseo send {A} hi' f", [A]),
+    (f'printf -e "old: paseo send {A}"; paseo send -- {B} hi', []),  # r4 B6: NO_RUN holds printf and grep
+    (f'grep -e "paseo send {A}" log; paseo send -- {B} hi', []),
+    (f". <(echo 'paseo send {A} hi')", [A]),
+    (f"echo 'paseo send {A} hi' | ${{SHELL}}", [A]),
+    (f'SIBS=" {A} {B}"; for id in $SIBS; do paseo send "$id" hi; done', [A, B]),
+    (f'paseo send -- "$NEW" --prompt "took over from {A}"; ./run.sh', []),  # `.sh` is not a shell word
+    (f'cat bash.log; paseo send -- "$NEW" --prompt "took over from {A}"', []),
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
-    (f'echo "$(paseo send {A} x)" "$(paseo send {B} y)"', [A, B]),
+    (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
+    (f'paseo send --no-wait -- {B} --prompt "answer by paseo send: ack {A}"', []),
+    (f'echo "result: $(paseo send {A} hi)"', []),  # parsed now (the quote closes around the substitution): nothing extra
 ])
 def test_backstop_judges_ids_in_a_command_the_parser_could_not_follow(command, expected):
     found = gate.targets_in_command(command)
@@ -336,3 +442,125 @@ def test_the_hook_denies_a_send_hidden_in_a_quoted_substitution(world):
     assert A in reason or "archived" in reason
     world.live(**{A: False})
     assert run_hook(world, "Bash", {"command": f'st="$(paseo send --json --no-wait {A} --prompt done | jq -r .status)"'}) is None
+
+
+def test_a_takeover_notice_naming_the_replaced_id_in_its_quoted_text_is_allowed(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    notice = f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send: ack {B}"'
+    assert run_hook(world, "Bash", {"command": notice}) is None  # quoted text is no target and no backstop trigger
+
+
+def test_a_backstop_denial_is_worded_for_the_backstop_not_as_a_resend(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    reason = denial(run_hook(world, "Bash", {"command": f"paseo send -- {B} ok; echo took over from {A}; ls \\"}))
+    assert "could not parse" in reason and A in reason and "Re-send" not in reason and f"send to {B}." in reason
+    plain = denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))  # the parser's own denial keeps its text
+    assert "Re-send to" in plain and "could not parse" not in plain
+
+
+def test_a_backstop_denial_for_an_archived_id_names_the_override_free_exits(world):
+    world.live(**{A: True})
+    reason = denial(run_hook(world, "Bash", {"command": f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'}))
+    assert "could not parse" in reason and "archived" in reason
+    world.live(**{A: False})
+    assert run_hook(world, "Bash", {"command": f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'}) is None
+
+
+def test_a_takeover_notice_sent_to_a_shell_variable_is_not_denied_for_the_replaced_id_in_its_text(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    cmd = f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"'
+    assert run_hook(world, "Bash", {"command": cmd}) is None
+
+
+def test_a_takeover_notice_mentioning_bash_is_allowed(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    notice = f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send from bash: ack {B}"'
+    assert run_hook(world, "Bash", {"command": notice}) is None  # a shell word inside message text does not unmask it
+
+
+def test_the_backstop_scan_is_linear_on_a_long_command_without_blanks():
+    """r3 A2: a `(?:\\S*/)?` prefix in SHELL_WORD made this take ~15 s at 150 KB."""
+    import time
+    blob = "echo '" + "x" * 300_000 + "' > f; paseo send -- " + A
+    t0 = time.monotonic()  # only the backstop is timed: the shlex pass in targets_in_command is not what r3 A2 measured
+    gate.backstop_targets(blob, [(A, None)])
+    gate.backstop_targets("echo '" + "x" * 300_000 + "' > f", [])  # no `paseo`: returns at once
+    many = "paseo send x; " + "echo 'a b' " * 4000  # r4 B4: every quoted string used to rescan its whole command
+    gate.backstop_targets(many, [])
+    assert time.monotonic() - t0 < 1.0
+
+
+def test_the_backstop_judges_a_send_run_by_eval(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    assert B in denial(run_hook(world, "Bash", {"command": f"eval 'paseo send {A} hi'"}))
+
+
+def test_a_code_span_in_a_single_quoted_message_is_not_a_send(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    cmd = f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'"
+    assert run_hook(world, "Bash", {"command": cmd}) is None
+
+
+# --- ADE_ALLOW_REPLACED_SEND (ls-06) ---------------------------------------------------------------------------------
+
+def test_the_replaced_override_is_read_from_the_assignment_before_the_command_only():
+    hits = gate.targets_in_command(f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} msg; paseo send {B} ADE_ALLOW_REPLACED_SEND={B}")
+    assert hits == [(A, None), (B, None)] and [h.replaced for h in hits] == [A, None]  # a word of the message is no override
+    both = gate.targets_in_command(f"env ADE_ALLOW_ARCHIVED_SEND={A} ADE_ALLOW_REPLACED_SEND={A} paseo send {A} hi")
+    assert both == [(A, A)] and both[0].replaced == A
+
+
+def test_hook_lets_an_operator_override_send_to_a_live_replaced_agent(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    log = world.state.parent / "overrides.jsonl"
+    env = {**world.env, guard.LOG_ENV: str(log)}
+    assert B in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))
+    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"}, env=env) is None
+    assert json.loads(log.read_text())["successor"] == B  # the use is logged
+    for wrong in ("1", B, A[:8]):
+        assert B in denial(run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={wrong} paseo send -- {A} hi"}, env=env))
+    assert B in denial(run_hook(world, "Bash", {"command": f"ADE_ALLOW_ARCHIVED_SEND={A} paseo send -- {A} hi"}, env=env))  # the other override is no cover
+
+
+def test_hook_replaced_override_needs_a_live_target_and_a_sound_ledger(world):
+    write_link(world.state, world.home, A, B)
+    cmd = f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"
+    world.live(**{A: True, B: False})  # replaced and archived: still redirected
+    assert B in denial(run_hook(world, "Bash", {"command": cmd}))
+    write_link(world.state, world.home, B, A)  # a cycle
+    world.live(**{A: False, B: False})
+    assert "inconsistent" in denial(run_hook(world, "Bash", {"command": cmd}))
+
+
+def test_hook_backstop_never_takes_the_replaced_override_from_text(world):
+    """adversary L3 on #696: a non-exported assignment, or the variable named in the quoted message, is no override."""
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    for cmd in (f'ADE_ALLOW_REPLACED_SEND={A} LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done',
+                f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt "next time use ADE_ALLOW_REPLACED_SEND={A}"'):
+        assert "could not parse" in denial(run_hook(world, "Bash", {"command": cmd}))
+    found = gate.targets_in_command(f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt "use ADE_ALLOW_REPLACED_SEND={A}"')
+    assert gate.backstop_targets(f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt x ADE_ALLOW_REPLACED_SEND={A}', found)[0].replaced is None
+
+
+def test_a_hook_override_use_is_logged_as_a_precheck(world, tmp_path):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    log = tmp_path / "log.jsonl"
+    env = {**world.env, guard.LOG_ENV: str(log)}
+    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"}, env=env) is None
+    assert json.loads(log.read_text())["source"] == "hook-precheck"
+
+
+def test_the_hook_ignores_a_replaced_override_exported_in_its_own_environment(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    env = {**world.env, guard.ALLOW_REPLACED_ENV: A}
+    assert B in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))

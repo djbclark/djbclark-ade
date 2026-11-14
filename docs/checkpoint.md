@@ -46,8 +46,8 @@ workflow service for this feature. LangGraph/Temporal are useful design referenc
 only if a later measured need for durable multi-step workflows outweighs its operation and integration cost.
 The issue comment's hosted trace product is not selected: traces alone do not preserve artifacts.
 
-B2. Interim work does not extend `acp-dispatch` (since 2026-11-07 a one-cycle shim over `paseo run`, removed with
-`tools/acp-run` in Wave 6's follow-up PR; D5 is superseded); any interim writer or reader is a Paseo plugin or a
+B2. Interim work does not extend `acp-dispatch` (since 2026-11-07 a one-cycle shim over `paseo run`, deleted with
+`tools/acp-run` 2026-11-14; D5 is superseded); any interim writer or reader is a Paseo plugin or a
 `paseo run` wrapper sharing the same versioned recovery contract. Do not build a second scheduler or add an
 `acp-checkpoint` launcher. Capture is default-on for unattended and scheduled jobs after acceptance;
 automatic retry remains separately gated. Top-level sessions get passive capture without enrollment
@@ -136,7 +136,7 @@ Retain recovery evidence until the report is read and work is preserved; publish
 | D1 / provider probe owner | Matrix of installed version, native transcript persistence, session identity, load/resume, tool events and background-process visibility; worker, schedule and top-level cases. | Isolated crash probes prove each capability; missing coverage is explicit. No claim of universal recovery. |
 | D2 / G1 owner | Versioned record, durable artifact generations, passive top-level capture, reconciliation and bounded recovery. Interim work is a Paseo plugin or `paseo run` wrapper on this contract (the dispatcher is a one-cycle shim since 2026-11-07). | C1–C5 invariants and failure matrix below pass; otherwise retain manual recovery and alert-only behavior for that path. |
 | D3 / canary owner | One interrupted workflow with verified artifacts and receipts, repeated on supported provider paths. | Report checkpoint age, recovered artifacts, repeated work, detection/recovery latency and uncertainty; validate the five-minute target before setting defaults. |
-| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Legacy records are read-only evidence (`acp-dispatch check`); no resumer remains (E6 retired `resume` on 2026-11-07 after the C7 drain found no unfinished record), and the shim leaves in Wave 6's follow-up PR. |
+| D5 / migration owner | Legacy record import with preserved task/session/attempt lineage and drained pending resumes. | Legacy records are read-only evidence (the `acp-dispatch check` command left with the shim 2026-11-14); no resumer remains (E6 retired `resume` on 2026-11-07 after the C7 drain found no unfinished record). |
 | D7 / documentation owner | Retire legacy implementation references; retain this contract and its evidence in the current architecture. | No stale skill promises that handoff or transcript resume alone supplies crash recovery. |
 
 E1. Failure matrix: SIGKILL before first summary; kill after an edit but before report update;

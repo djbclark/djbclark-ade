@@ -424,3 +424,124 @@ def test_send_to_an_archived_requester_is_blocked_exit_4(monkeypatch, capsys):
     monkeypatch.setattr(mod, "run_send", lambda argv: pytest.fail("nothing may be sent to an archived requester"))
     assert mod.main(["--send", "--requester", REQUESTER, "--title", "t", "--status", "DONE", "--sender", SENDER]) == 4
     assert "BLOCKED" in capsys.readouterr().err
+
+
+# --- gs-01 (2026-11-14): `gh run list --commit <short sha>` prints [] with exit 0; only the full SHA matches ---------------
+FULL = "5a2228d" + "0123456789abcdef0123456789abcdef0"  # 40 hex digits, short form 5a2228d
+assert len(FULL) == 40
+
+
+def _fake_rev_parse(table):
+    calls = []
+
+    def fake(sha, cwd=None):
+        calls.append((sha, cwd))
+        return table.get(sha)
+    fake.calls = calls
+    return fake
+
+
+@pytest.mark.parametrize("hint,expected", [
+    ("find runs: gh run list --commit 5a2228d", f"find runs: gh run list --commit {FULL}"),
+    ("gh run list --commit=5a2228d", f"gh run list --commit={FULL}"),
+    ("gh run list -c 5a2228d", f"gh run list -c {FULL}"),
+    ("gh run list --commit '5a2228d'", f"gh run list --commit '{FULL}'"),
+    ('gh run list --commit "5A2228D"', f'gh run list --commit "{FULL}"'),
+    ("gh run list --branch feat/x --limit 3 --commit 5a2228d --json url", f"gh run list --branch feat/x --limit 3 --commit {FULL} --json url"),
+    ("gh run list --commit 5a2228d; gh run list -c 5a2228d", f"gh run list --commit {FULL}; gh run list -c {FULL}"),
+    ("gh run ls --commit 5a2228d", f"gh run ls --commit {FULL}"),
+    ("gh run list -c=5a2228d", f"gh run list -c={FULL}"),
+    ("gh run list -c5a2228d", f"gh run list -c{FULL}"),
+    ("gh run list --commit 5a22", f"gh run list --commit {FULL}"),
+], ids=["--commit", "--commit=", "-c", "single quotes", "upper case", "other flags around", "two hints", "ls alias", "-c=",
+        "-cSHA", "4 digits"])
+def test_a_short_sha_in_a_gh_run_list_hint_is_expanded(monkeypatch, hint, expected):
+    fake = _fake_rev_parse({"5a2228d": FULL, "5A2228D": FULL, "5a22": FULL})
+    monkeypatch.setattr(mod, "_rev_parse", fake)
+    assert mod.full_run_list_sha(hint) == expected
+    text = mod.build_message(title="gs-01", detail=f"CI running; {hint}", report=None, sender=SENDER, msg_id=TEST_MSG_ID)
+    assert FULL in text and "5a2228d," not in text
+
+
+@pytest.mark.parametrize("hint", [
+    f"gh run list --commit {FULL}",
+    "gh run list --branch feat/x",
+    "gh run list --commit HEAD",
+    "gh run list --workflow 5a2228d",
+    "git show 5a2228d",
+    "gh run view 5a2228d",
+    "fixed in 5a2228d and gh run list --branch b",
+    "gh run list --commit 5a2228dxyz",
+    "gh run list --commit abc",
+    "gh run list --cache 5a2228d",
+    "other-tool --commit 5a2228d",
+    "gh run list --workflow build-c 5a2228d",
+    "gh run view --commit 5a2228d",
+    "gh run listx --commit 5a2228d",
+    "gh run list --branch b | xargs foo --commit dead",
+    "gh run list --branch b; bash -c face",
+    "gh run list --branch b && other --commit dead",
+    "gh run list --commit 5a2228d_x",
+], ids=["full sha", "branch", "HEAD", "other flag value", "git show", "gh run view", "sha outside a hint", "not hex", "3 digits", "--cache",
+        "other tool", "-c after a word char", "gh run view --commit", "gh run listx", "pipe", "semicolon", "and", "word char tail"])
+def test_other_text_is_left_alone_and_git_is_not_asked(monkeypatch, hint):
+    fake = _fake_rev_parse({})
+    monkeypatch.setattr(mod, "_rev_parse", fake)
+    assert mod.full_run_list_sha(hint) == hint
+    assert fake.calls == []
+
+
+def test_a_short_sha_that_names_no_commit_is_refused(monkeypatch, capsys):
+    monkeypatch.setattr(mod, "_rev_parse", _fake_rev_parse({}))
+    with pytest.raises(ValueError, match=r"full 40-character SHA.*--branch"):
+        mod.build_message(title="gs-01", detail="CI running; gh run list --commit 5a2228d", report=None,
+                          sender=SENDER, msg_id=TEST_MSG_ID)
+    rc = mod.main(["--print", "--requester", REQUESTER, "--title", "gs-01", "--status",
+                   "CI running; gh run list --commit 5a2228d", "--sender", SENDER])
+    assert rc == 2 and "5a2228d" in capsys.readouterr().err
+
+
+def test_title_is_checked_too(monkeypatch):
+    monkeypatch.setattr(mod, "_rev_parse", _fake_rev_parse({"5a2228d": FULL}))
+    text = mod.build_message(title="gh run list --commit 5a2228d", detail="DONE", report=None, sender=SENDER,
+                             msg_id=TEST_MSG_ID)
+    assert FULL in text
+
+
+def test_oversize_title_or_detail_is_refused_before_any_scan():
+    with pytest.raises(ValueError, match="at most"):
+        mod.build_message(title="t", detail="gh run list " * 500, report=None, sender=SENDER, msg_id=TEST_MSG_ID)
+    with pytest.raises(ValueError, match="at most"):
+        mod.build_message(title="x" * (mod.MAX_FIELD + 1), detail="d", report=None, sender=SENDER, msg_id=TEST_MSG_ID)
+
+
+def test_real_git_expands_and_refuses(tmp_path):
+    def git(*a):
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *a], cwd=tmp_path,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-q", "-m", "x")
+    full = git("rev-parse", "HEAD")
+    # a blob abbreviation is no commit (the ^{commit} peel is what refuses it)
+    (tmp_path / "f.txt").write_text("hello\n")
+    blob = git("hash-object", "-w", "f.txt")
+    with pytest.raises(ValueError, match="full 40-character SHA"):
+        mod.full_run_list_sha(f"gh run list --commit {blob[:8]}", cwd=str(tmp_path))
+    # a branch named like the hex wins in rev-parse; the expansion must not follow it to another commit
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-q", "-m", "y")
+    head = git("rev-parse", "HEAD")
+    git("branch", full[:7], "HEAD")                      # a ref named like the OLD commit's short sha, pointing at the NEW one
+    with pytest.raises(ValueError, match="full 40-character SHA"):
+        mod.full_run_list_sha(f"gh run list --commit {full[:7]}", cwd=str(tmp_path))
+    git("branch", "-D", full[:7])
+    assert head != full
+    assert mod.full_run_list_sha(f"gh run list --commit {full[:7]}", cwd=str(tmp_path)) == f"gh run list --commit {full}"
+    with pytest.raises(ValueError, match="full 40-character SHA"):
+        mod.full_run_list_sha("gh run list --commit deadbeef", cwd=str(tmp_path))
+    with pytest.raises(ValueError):                       # not a git repository at all: refused, never passed on
+        mod.full_run_list_sha(f"gh run list --commit {full[:7]}", cwd=str(tmp_path / "nowhere"))
+
+
+def test_the_footer_names_the_full_sha_rule():
+    text = FOOTER.read_text()
+    assert "FULL 40-character SHA" in text and "gh run list --branch BRANCH" in text and "prints `[]` with exit 0" in text

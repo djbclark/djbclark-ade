@@ -32,7 +32,7 @@ as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
 `ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s;
-`load_snapshot(bypass_memo=True)` skips the memo (acp-dispatch's post-wait plenty-gate looks).
+`load_snapshot(bypass_memo=True)` skips the memo (the deleted acp-dispatch's post-wait plenty-gate looked).
 
 **Paseo is the second quota source and the registry (2026-11-07, slim-down E7).** `paseo usage ls --json`
 (`usage_from_paseo`) gives one report per `sourceId`: a report whose `status` is `available` contributes its
@@ -95,7 +95,7 @@ preferences, because they encode consequences a score cannot see:
 
 Every route comes with a `--model [--effort]` suggestion and the native
 `paseo run --provider …` launch line (`cursor-cloud launch` for the Cursor Cloud row;
-the Wave 6 `acp-dispatch` shim is transitional only);
+the Wave 6 `acp-dispatch` shim was deleted 2026-11-14);
 the context window is the caller's choice (the agent's default unless the slice reads a whole corpus or a
 long log).
 
@@ -132,9 +132,24 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ade_config  # versioned config and isolated legacy routing override
-import ade_gates  # the frontier gate: config/gates.toml [frontier], docs/gates.md
-import model_tiers as _model_tiers  # config/model-tiers.toml roles → ids
+try:
+    import ade_config  # versioned config and isolated legacy routing override
+    import ade_gates  # the frontier gate: config/gates.toml [frontier], docs/gates.md
+    import model_tiers as _model_tiers  # config/model-tiers.toml roles → ids
+except ImportError as _ade_missing:
+    # Not optional: routing is these modules plus config/ (a copy of this file alone, such as pr-radar's
+    # examples/route_agent.py, has neither). Run as a script that is one stderr line and exit 2, not a traceback;
+    # imported by another module the ImportError stays (a caller can catch it). ONLY "a sibling module is absent"
+    # gets the line: an ImportError raised inside our own modules (a renamed name, a broken import in the repo copy)
+    # is a bug and surfaces with its traceback.
+    _here = Path(__file__).resolve().parent
+    if (__name__ != "__main__" or not isinstance(_ade_missing, ModuleNotFoundError)
+            or _ade_missing.name not in ("ade_config", "ade_gates", "model_tiers")
+            or (_here / f"{_ade_missing.name}.py").is_file()):
+        raise
+    sys.stderr.write("route_agent.py: cannot route standalone, the djbclark-ade modules (ade_config, ade_gates, "
+                     f"model_tiers) and config/ are not beside this file ({_ade_missing})\n")
+    raise SystemExit(2) from None
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
@@ -198,7 +213,7 @@ class Service:
     # The Paseo provider (the acp-dispatch agent name) when it differs from the pool name
     # (opencode-go -> opencode, cursor-auto -> cursor, ...).
     agent: str = ""
-    # kind -> "<model> [--effort LEVEL]" to pass to acp-dispatch.
+    # kind -> "<model> [--effort LEVEL]" to pass to the launcher (`paseo run`; acp-dispatch, which took it, was deleted 2026-11-14).
     # Ids as `paseo provider models <agent> --json` lists them (`route_agent.py services --check-models`).
     models: dict[str, str] = field(default_factory=dict)
     # A reserve pool's hard floor: never route to it with less than this much
@@ -215,7 +230,7 @@ class Service:
     # grant_waste() measures the balance against an even spend over the period instead.
     grant_days: int = 0
     # Name of a readiness probe in READY_PROBES. A service whose probe fails is skipped by
-    # route() for every kind that goes through acp-dispatch (not `api-only`, which is the
+    # route() for every kind that goes through `paseo run` (not `api-only`, which is the
     # caller's own API call), so the router never hands out a slice that cannot start.
     ready_probe: str = ""
     # Name of another service whose aiuse row this one draws on (cursor-cloud bills at API
@@ -227,7 +242,7 @@ class Service:
     plenty_kinds: tuple[str, ...] = ()
     # Services this one is a FALLBACK behind (Gemini 4 Argon behind codex and claude, operator 2026-10-31): it is used
     # only while at least ONE named service is short (not usable: see pool_usable), never while all of them could take
-    # the kind, whatever its score. route() and acp-dispatch apply the same predicate (`fallback_block`). A per-wave
+    # the kind, whatever its score. route() applies this predicate (`fallback_block`); acp-dispatch, deleted 2026-11-14, once applied it too, so no launcher re-checks it now. A per-wave
     # cap or an `exclude` does not make a named service short. A fallback with no fresh reading fails closed.
     fallback_after: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
@@ -648,7 +663,7 @@ def policy_markdown() -> str:
                     cell += f" `{model}`"
                 cells.append(cell)
         lines.append(f"| {s.name} | " + " | ".join(cells) + " |")
-    lines += ["", "## Pools", "", "| service | Paseo provider (acp-dispatch agent) | billing | note |", "|---|---|---|---|"]
+    lines += ["", "## Pools", "", "| service | Paseo provider (agent) | billing | note |", "|---|---|---|---|"]
     for s in SERVICES:
         agent = "`cursor-cloud launch` (not a Paseo provider)" if s.acp_agent == "cursor-cloud" else (
             "none (API pool)" if s.access == "api" else s.acp_agent)
@@ -816,10 +831,22 @@ def _clean_age(value: Any) -> float | None:
 
 
 def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
-    """Per-key tighter of two sublimit maps (a cap never loosens by merge order)."""
+    """Per-key tighter of two sublimit/window maps (a cap never loosens by merge order). A known reading beats an unknown
+    (None) one, as `remaining` does when accounts are folded: an unmeasured account adds no headroom to the pool figure."""
     out = dict(a or {})
     for k, v in (b or {}).items():
         out[k] = _tighter(out.get(k), v) if k in out else v
+    return out
+
+
+def _merge_windows(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-window fold of two ACCOUNTS of one pool: the tighter known reading, but a window either account could not
+    measure stays None (unlike `_merge_caps`, which `_merge_pool` still uses to fold two sources of one pool). `plenty_remaining` reads one None window as "the gate cannot say every
+    window has PLENTY_MIN left", so an unmeasured second account keeps the pool closed instead of the measured one
+    opening it while Paseo may launch on the unmeasured one (fail closed on unknown quota, 2026-11-14)."""
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        out[k] = None if k in out and (out[k] is None or v is None) else (_tighter(out[k], v) if k in out else v)
     return out
 
 
@@ -954,10 +981,14 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
 def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str, Any]:
     """Fold aiuse account rows (snapshot accounts or `--available` rows) into per-service pools."""
     providers: dict[str, Any] = {}
+    unmeasured: set[str] = set()                    # providers with an account that lists no applicable window
+    n_accounts: dict[str, int] = {}
+    key_provider: dict[str, str] = {}               # pool key -> the provider whose accounts built it
     for acct in accounts:
         name = acct.get("provider")
         if not name or acct.get("error"):
             continue
+        n_accounts[name] = n_accounts.get(name, 0) + 1
 
         # Account freshness: use account's age_seconds or collected_at
         acct_age = None
@@ -1026,6 +1057,9 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             per_key[key] = (worst, detail, sublimits, bind)
 
         if not per_key:
+            # an account that lists no window for any pool of its provider is unmeasured; once a second account of the
+            # provider exists the pools get one None window below, so the measured one cannot open them alone
+            unmeasured.add(name)
             per_key[name] = (None, {}, {}, {})
         # Shared parent windows can tighten a matched child, never create one.
         for w in acct.get("windows") or []:
@@ -1063,16 +1097,30 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 worst = prior_rem
                 bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                   "window_minutes")}
+            key_provider[key] = name
             providers[key] = {
                 "remaining": None if worst is None else round(float(worst), 1),
-                "windows": detail, "sublimits": sublimits, "age_s": acct_age,
+                # several accounts: every account's windows and model sublimits survive; per window the tighter known
+                # reading, a window either account could not measure stays None (`_merge_windows`); sublimits keep
+                # known-beats-unknown
+                "windows": _merge_windows(prior.get("windows"), detail),
+                "sublimits": _merge_caps(prior.get("sublimits"), sublimits),
+                "age_s": acct_age,
                 "billing_kind": acct.get("billing_kind"),
                 "pace_ratio": bind.get("pace_ratio"),
                 "resets_at": bind.get("resets_at"),
                 "window_minutes": bind.get("window_minutes"),
             }
-            if sub_resets.get(key):
-                providers[key]["sublimit_resets"] = dict(sub_resets[key])
+            resets = _later_resets(prior.get("sublimit_resets"), sub_resets.get(key))
+            if resets:
+                providers[key]["sublimit_resets"] = resets
+    for key, entry in providers.items():
+        # Two or more accounts of a provider and one of them lists no window: that account is unmeasured, so its
+        # provider's pools stay unknown for the plenty gate (`plenty_remaining`) instead of opening on the other account
+        # alone. A single such account needs nothing (its `remaining` is None); the pool keys of a family the other
+        # account lacks are not marked.
+        if key_provider.get(key) in unmeasured and n_accounts[key_provider[key]] >= 2:
+            entry["windows"] = {**entry["windows"], "(no window)": None}
     return providers
 
 
@@ -1833,7 +1881,7 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
 
     A cap above the closed per-wave (ade_gates.FRONTIER_DEFAULTS, 1) is the standing allowance (gates.toml, docs/gates.md), and it holds only
     while that allowance's own checks pass (2026-10-27, adversary round 1 P1): the family's `*_judged` key at 1 or more, and
-    `ade_gates.judged_pool_block` (the one copy acp-dispatch's grant uses) empty: for claude the merged snapshot's Claude reading
+    `ade_gates.judged_pool_block` (the one copy; acp-dispatch's grant, deleted 2026-11-14, used it too) empty: for claude the merged snapshot's Claude reading
     (`claude_quota_state`: aiuse and `paseo usage ls`) under 30 minutes old, its tightest window at least frontier1_window_min_left
     and the Fable cap at least frontier1_min_left, so a missing, stale or unknown reading (a Paseo report that is not `available`)
     falls back to the closed cap; for any other pool its reading in `quota` at least frontier2_min_left. Otherwise the closed per-wave."""
@@ -1862,7 +1910,7 @@ class Choice:
 
     @property
     def dispatch(self) -> str:
-        """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
+        """Launch template: native `paseo run` (Wave 6; the acp-dispatch shim was deleted 2026-11-14).
         Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
         agent = self.service.acp_agent
         mode = DISPATCH_MODES.get(agent)
@@ -2226,14 +2274,14 @@ def estimate_floor(svc: Service, kind: str, info: dict[str, Any], repo: str | No
 
 
 def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: float = 15.0, repo: str | None = None) -> bool:
-    """Would acp-dispatch admit a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor, and
-    for EVERY service and kind (floor or none, measured or not) the same fit acp-dispatch applies: each window's measured
+    """Would the deleted acp-dispatch have admitted a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor, and
+    for EVERY service and kind (floor or none, measured or not) the same fit acp-dispatch applied (history, 2026-11-14): each window's measured
     estimate against that window's own remaining when a window estimate applies, else the scalar estimate against the tightest
     window. Both callers use the same rows, filters, floor lookup and arithmetic (`kind_rows`, `estimate_floor`,
     `estimate_from_history`, `estimate_windows_from_rows`, `window_fit`); there is no early return for a service without a
     floor, so measured history binds an unfloored pool too. Unmeasured, the planner's estimate is acp-dispatch's smallest
     brief-size default (3%, raised to the floor): it has no brief. A task's own history is invisible to the planner (a slice
-    sent from a task with 3+ own measured slices can be estimated differently), as is a slice's in-flight reservation. The
+    sent from a task with 3+ own measured slices can be estimated differently), as was a slice's in-flight reservation (acp-dispatch's, now gone). The
     verdict also assumes the slice is routed with the model and effort `plan` prints (`models.KIND`, `--effort high`): a
     dispatch without `--effort` filters the history on no effort and can read other rows (2026-11-01 live: median 12 and a
     5-hour estimate of 100, against 2 and 73), so route with the effort `plan` prints."""
@@ -2273,7 +2321,7 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
                    min_headroom: float = 15.0, repo: str | None = None) -> str | None:
     """Why `svc`, a fallback (`fallback_after`), may not take `kind` now: every service it sits behind is usable. None when it
     may (some pool it sits behind is short, or it is no fallback). The one predicate of the planner (`route`) and of
-    acp-dispatch's fallback-only enforcement. `services` maps names to the services that exist (default: the whole policy,
+    (history) acp-dispatch's fallback-only enforcement, deleted 2026-11-14. `services` maps names to the services that exist (default: the whole policy,
     a name not in it counts as short)."""
     if not svc.fallback_after:
         return None
@@ -2283,8 +2331,7 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
     if len(ok) < len(svc.fallback_after):
         return None
     return (f"{svc.name} is a fallback behind {', '.join(svc.fallback_after)} (operator 2026-10-31) and "
-            f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota, or "
-            f"ACP_OPERATOR_APPROVED=route-override")
+            f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota")
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,

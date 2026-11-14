@@ -186,8 +186,7 @@ loops.
 ### Messaging: use Hermes (operator decision, 2026-08-23)
 
 **Default to `hermes` for operator-facing platform messaging** (Discord, Signal, …; agent-to-agent messages go by
-native `paseo send --json` with a named ack, standing order 10, never through this bridge; `skills/session-finder/relay.py`
-is a one-cycle Wave 6 shim over that path until deletion, soft deadline 2026-11-20). Beeper Desktop is often not
+native `paseo send --json` with a named ack, standing order 10, never through this bridge; the `relay.py` shim over that path was deleted 2026-11-14). Beeper Desktop is often not
 running, and the operator uses it only occasionally — so it is not a
 dependable path for an agent. Reach for it only when the operator explicitly
 asks, or when you need cross-network *search* that Hermes cannot do and you

@@ -2216,6 +2216,8 @@ def _ow(repo, acts, **kw):
     ([act_entry()], True),
     ([act_entry(type_="force_push")], True),
     ([act_entry(type_="branch_creation")], True),
+    ([act_entry(type_="pr_merge")], True),                                 # the gate takes every ref update; bin/review-pr takes direct pushes only
+    ([act_entry(type_="merge_queue_merge")], True),
     ([act_entry(), act_entry("technoeuphora", after="9" * 40)], True),     # an older update by someone else is history
     ([act_entry("DJBClark")], True),
     ([act_entry("technoeuphora")], False),                                 # an org member pushed it

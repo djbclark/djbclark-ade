@@ -668,3 +668,121 @@ def test_long_newline_runs_stay_fast(command):
     r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
     assert r.returncode == 0, r.stderr
+
+
+# gw-03: lead review Lows on #672 (rtk proxy, env/nice options)
+
+@pytest.mark.parametrize("command", [
+    "sudo -u gh gh run watch 9",                                # option value named gh (adv8 R1)
+    "sudo -D /x/gh gh run watch 9",
+    "env -u gh gh run watch 9",
+    "env -C /opt/gh gh run watch 9",
+    "env --chdir /opt/gh gh run watch 9",
+    "nice -n 5 env -C /x/gh gh run watch 9",
+    "sudo -u gh env -i gh run watch 9",
+    "bash -c 'env -u gh gh run watch 9'",
+    "deadline run gh --budget 10m -- env -i gh run watch 9",
+    "sudo -u me gh-pr-checks 5 --watch",                        # wrapper options before bin/gh-pr-checks (adv8 R2)
+    "env -i bin/gh-pr-checks 5 --watch",
+    "nice -n 5 bin/gh-pr-checks 5 --watch",
+    "env -u X ~/src/djbclark-ade/bin/gh-pr-checks 5 --watch",
+])
+def test_gw03_option_value_named_gh_and_wrapped_gh_pr_checks(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u gh gh run watch 9 -i 60",
+    "env -C /opt/gh gh run watch 9 --interval 60",
+    "sudo -u me gh-pr-checks 5 --watch --interval 60",
+    "sudo -u gh gh run view 9",
+])
+def test_gw03_option_value_named_gh_compliant_passes(command):
+    assert not denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "rtk proxy gh run watch 9",
+    "rtk proxy gh pr checks 5 --watch",
+    "env -i HOME=$HOME PATH=$PATH gh run watch 9",
+    "env -u FOO gh run watch 9",
+    "env -i -u FOO BAR=1 gh pr checks 5 --watch",
+    "nice -n 10 gh run watch 9",
+    "nice -10 gh run watch 9",
+    "gh pr checks fix-env --watch --required",                  # branch named like a wrapper
+    "gh pr checks env --watch",
+    "gh run watch 9 -R o/sudo",
+    "sudo env -i HOME=$HOME gh run watch 9",
+])
+def test_gw03_wrapper_options_do_not_hide_a_watcher(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "rtk proxy gh run view 9 --json status",
+    "env -i HOME=$HOME gh run view 9",
+    "env -u FOO gh run watch 9 --interval 60",
+    "nice -n 10 gh run list -L 3",
+    "echo env -i gh run watch 9",
+    "echo 'rtk proxy gh run watch 9'",
+    "gh run watch 9 -R o/env -i 60",                            # compliant watcher, repo named env
+    "gh run watch 9 -R o/nice -i 60",
+    "gh pr checks nice --watch -i 60",
+])
+def test_gw03_wrapper_one_shots_and_prose_pass(command):
+    assert not denied(command), command
+
+
+# ---- gw-04: lows from the lead review of #684 ----
+
+@pytest.mark.parametrize("command", [
+    'env -i "PATH=$PATH" gh run watch 9',                       # B1: quoted assignment after env
+    "env -i 'HOME=/x' gh run watch 9",
+    'sudo "FOO=1" gh run watch 9',
+    'env -i "A=1" "B=2" gh pr checks 5 --watch',
+    "env -iu FOO gh run watch 9",                               # B2: combined short options ending in a value option
+    "sudo -Hu me gh run watch 9",
+    "sudo -iu me gh run watch 9",
+    "nice --adjustment 5 gh run watch 9",
+    "command -p gh run watch 9",                                # B3
+    "exec -a x gh run watch 9",
+    "gh>log run watch 9",                                       # B4: redirection glued to the command word
+    "env -i gh>log run watch 9",
+    "gh >log run watch 9",
+    "gh 2>/dev/null run watch 9",
+    "gh > log run watch 9",                                     # operator and target are separate words
+    "gh 2> err run watch 9",
+    "X=/gh Y=/gh Z=/gh env -i gh run watch 9",                  # B5: the real gh is the 4th candidate
+    "env -C /a/gh -C /b/gh -C /c/gh env -i gh run watch 9",
+    'env -i A=1 "B=$X" gh run watch 9',                         # lw-01: an unquoted assignment before a quoted one
+    'sudo A=1 "B=2" gh run watch 9',
+    'env -i HOME=$HOME "PATH=$PATH" gh run watch 9',
+    "gh <in run watch 9",                                       # lw-01: input redirection forms of REDIRECT_WORD
+    "gh<in run watch 9",
+    "gh <<<x run watch 9",
+    "gh <&3 run watch 9",
+])
+def test_gw04_lead_review_lows_are_denied(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    'env -i "PATH=$PATH" gh run watch 9 -i 60',
+    'env -i "PATH=$PATH" gh run view 9',
+    'env -i "PATH=$PATH" echo gh run watch 9',
+    "env -iu FOO gh run view 9",
+    "sudo -Hu me gh run watch 9 --interval 60",
+    "nice --adjustment 5 gh run list -L 3",
+    "command -v gh",
+    "command -p gh run list",
+    "exec -a x gh run view 9",
+    "gh>log run view 9",
+    "gh run view 9 2>&1 >out",
+    "gh > log run view 9",
+    'env -i A=1 "B=$X" gh run watch 9 -i 60',                   # lw-01
+    'env -i A=1 "B=$X" gh run view 9',
+    "gh run view 9 <in",
+    "gh <in run view 9",
+])
+def test_gw04_lead_review_lows_compliant_and_one_shots_pass(command):
+    assert not denied(command), command

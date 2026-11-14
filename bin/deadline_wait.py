@@ -1,7 +1,7 @@
 """deadline_wait: how a long WAITER registers its own deadline (docs/deadline.md, "Waiters register themselves").
 
 Used by `bin/load-watch admit --wait` (the PR waiter that also used it was removed 2026-11-06, slim-down E8;
-`bin/acp-dispatch-wait` is DELETE with the acp-dispatch shim in the Wave 6 follow-up — not a live caller).
+`bin/acp-dispatch-wait` was deleted 2026-11-14 with the acp-dispatch shim).
 A waiter holds no work (it only
 polls), so the action on expiry is `kill` of its own process group: nothing is lost, and the caller just sees exit 124.
 

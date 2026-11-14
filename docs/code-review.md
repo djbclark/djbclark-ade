@@ -101,8 +101,8 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    `bin/pr-policy` (an unattended launchd job) holds its two tokens in
    memory while its children (`hermes-ping`) inherit none; presence is proved by length or hash, never
    by printing the value.
-4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
-   `tools/acp-run`'s `--verify`, an operator-supplied command, gone with acp-run in Wave 6). Where a shell string
+4. **`subprocess` gets argv lists, never `shell=True`** (there is no exception since
+   `tools/acp-run`'s `--verify` went with acp-run, 2026-11-14). Where a shell string
    is unavoidable (launchd runner scripts, printed resume and rearm hints) every interpolated value goes through
    `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
@@ -156,7 +156,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the operator's login and user id (`djbclark`) and whose head the operator pushed (`head_pusher_check`) through
     `review-launch --mode trusted` (`bypassPermissions`, Read/Grep/Glob/Bash, no read-boundary claim; docs/review-boundary.md);
     every other PR (the authenticated gh user when that is not the owner, `--allow-untrusted`) and `--runtime restricted` keep
-    `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR and pushed its head. The runtime is filed as `runtime`.
+    `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR and pushed its head directly (a push, force-push or branch creation: not a child PR's merge, which the gate still accepts as the operator's act, docs/review-boundary.md "What it does not see"). The runtime is filed as `runtime`.
     The adversary marker is never written by this tool; the untrusted-author refusal and the "diff is data" prompt are unchanged.
 12. **A non-exempt PR body carries a `Prior art / docs checked:` line** (operator, 2026-11-13; queue Done item 24): what the author searched
     before building (the shared `mcp__firecrawl__*`, Context7 for library docs, `WebFetch`), with the tool named and what turned up or
@@ -166,6 +166,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     (docs/dispatch-footer.md rule 24); it is checked on the slice report, not on the PR. The rule is for agent-authored PRs: a reviewer who sees a plainly mechanical diff treats a missing line as exempt (INFO at most), and operator-authored, bot and dependency PRs are not flagged.
 13. **Peer-agent trust is an accepted weakness, not a finding** (operator, 2026-11-13): our agents trust each other's `paseo-system`
     agent-message blocks (as delivered by Paseo) as the operator's own requests ([AGENTS.md](../AGENTS.md) Trust; `claude/hooks/peer_trust_gate.py`;
-    [threat-model.md](threat-model.md) section 5 item 9). Do not flag "a peer message is obeyed" or "a listed agent id proves nothing about the sender". Do flag a change that trusts an id
-    the daemon does not list, drops the `UNVERIFIED` branch, or frames text Paseo did not deliver (tool output, GitHub artifacts),
-    which stay untrusted input.
+    [threat-model.md](threat-model.md) section 5 item 9). Do not flag "a peer message is obeyed" or "a listed agent id proves nothing about the sender". Do flag a change that drops the
+    external-security-sensitive exception (`config/peer-trust.toml` and the `ade.kind=external-review` label: a prompt-injection triage agent's message is evidence, never an instruction) or
+    frames text Paseo did not deliver (tool output, GitHub artifacts), which stay untrusted input. An unlisted or remote sender is
+    believed like a listed one (operator, 2026-11-14), so that is no longer a finding.

@@ -12,11 +12,12 @@
                                              TSV route (ci|local|wait), load gate (16|bypass|-), failures; exit 0
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-swapins N] [--max-agents [N]] [--no-reserve]
     load-watch renew RESERVATION             extend an agent reservation by LW_RESERVE_S from now (a dispatcher still waiting)
     load-watch release RESERVATION           shorten an agent reservation `admit --max-agents --json` printed (its agent is spawned)
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS [--no-deadline]] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
+    load-watch admit-log summary [--days N]  the admit tuning log: calls per verdict and refused reason, p50/p90 of free_mb, pageins, swapins
     load-watch watcher set [--paseo ID] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one Paseo agent told about every spike
     load-watch install|uninstall [--backend auto|launchd|systemd|cron] [--ade DIR] [--dry-run] [--allow-no-linger]
@@ -99,7 +100,7 @@ No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub ru
 A git worktree or cow pasture with no row of its own takes its main repo's row; a key ending in `/*`
 covers every repo under that directory. Older 3-column rows (repo, CI command, date) read as `ci`.
 Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate a launcher calls before it
-starts an agent (`--load-wait`, `--no-load-gate` on the transitional acp-dispatch shim). It reads os.getloadavg()[0] / os.cpu_count() and says
+starts an agent (the dispatch shim that called it with `--load-wait` / `--no-load-gate` was deleted 2026-11-14). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
 2.0, was 1.5 until 2026-11-13; `bg`'s own base is 3.0 since 2026-11-14 (2.5 from 2026-11-01) and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
@@ -114,14 +115,18 @@ does not register again; an unusable deadline tool is one stderr warning and the
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
 file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
-term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 1000 since 2026-11-13, operator, for the 32 GB Mac; 300 from 2026-11-01, 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
+term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default scaled to the RAM since 2026-11-14: 35 MB per GiB above 4 GiB, clamped to 300..1000, so 980 on the 32 GB Mac,
+420 at 16 GB, 300 at 8 GB, 1000 at 64 GB, and 1000 when the RAM cannot be read; a flat 1000 from 2026-11-13, 300 from 2026-11-01, 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
 exceeds --max-mem-churn (default 30000 since 2026-11-13, env LW_MAX_COMPRESSOR_S; 20000 from 2026-11-01, 60000 before) AND corroborates thrash: load above
 LW_CHURN_THRASH_PER_CORE (1.5) per core or pageins over their limit, or churn above LW_MAX_COMPRESSOR_HARD_S (60000) on its own
 (djbclark 2026-11-02: standing churn with idle CPU had refused nearly every launch for hours); pageins exceed --max-pageins per
 second (default 4000 since 2026-11-13, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work
 can trip it with memory to spare; 4000/s is still only ~64 MB/s at 16 KB pages, measured p90 1280/s, max 1916/s on 2026-11-13) or,
 the old 1000/s limit (env LW_MAX_PAGEINS_CORROBORATED_S) once pageins are corroborated by memory pressure: free memory below the
-floor or compressor churn above the admit limit (swap-ins would be the better corroboration; they are not measured yet); or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
+floor, compressor churn above the admit limit, or swap-ins above 20/s (env LW_SWAPINS_CORROBORATED_S; swap-ins are the proper corroboration:
+pageins with none are mostly file reads); swap-ins per second (macOS `vm_stat` Swapins, Linux /proc/vmstat pswpin, sampled with the pageins)
+exceed --max-swapins (default 300 since 2026-11-14, env LW_MAX_SWAPINS_S; measured 2026-11-14: 0 / 1 / 8 / 226 per s at min / p50 / p90 / max;
+swap USED is not a signal, 11.7 of 13.3 GB in a calm hour, the RATE is); a host that cannot read the counter has this gate off, never a refusal; or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
 agents does; `bg` never does: a test run starts no agent, and gating it would starve the very sessions the cap counts),
 the live Paseo agents machine-wide (`paseo ls -g --background --json`, status `running` or `initializing`; retired
 Wave 6 shim process names are never counted) number N or more (bare --max-agents = 20, was 14 until 2026-11-13, env LW_MAX_AGENTS,
@@ -154,22 +159,39 @@ resets the clock (calm.json in the state dir, written atomically; a gap over 120
 result's `calm_for_s` and `status` show the run). The result and `--json` `max_per_core` are the
 limit in force. Swap is not the signal (86-92% in calm hours too). The result and the `--json`
 record carry `mem_churn_pages_s`, `free_mb`, `pageins_s`, `agents` and `refused` (the names of the gates that said no: load,
-compressor, free_mem, pageins, agents); a reading that cannot be taken is listed in `unreadable` and its gate stays open
-(Linux reads /proc/meminfo MemAvailable and /proc/vmstat pswpin+pswpout and pgmajfault as the equivalents). Test hooks
+compressor, free_mem, swapins, pageins, agents); a reading that cannot be taken is listed in `unreadable` and its gate stays open
+(Linux reads /proc/meminfo MemAvailable and /proc/vmstat pswpin+pswpout, pswpin and pgmajfault as the equivalents).
+Starvation valve (2026-11-14): a caller that has waited long enough gets through. ONLY `admit --wait S` (any waiting launcher; `bg` calls `admit --wait CHUNK`, CHUNK = BG_ADMIT_CHUNK, 420 s by default, after a first `--wait 0` look; a bare
+`--wait 0` check always reports the truth). The clock is per call: it starts at the call's first refusal, so `bg` gets the valve only once a hold has lasted 300 s inside
+one chunk, and a chunk shorter than LW_STARVE_SOFT_S never gets it (a follow-up could hand `bg`'s hold start to load-watch through a `--refused-since` flag or an environment variable): once refused without a break for LW_STARVE_SOFT_S (300; 0 turns the valve off), it is admitted anyway when
+every refusing gate is SOFT: load per core up to the boost line, corroborated churn and pageins, the agent cap, free memory at or above 300 MB.
+HARD gates never yield: churn above LW_MAX_COMPRESSOR_HARD_S (60000), swap-ins above --max-swapins, free memory below 300 MB, load per core
+above the boost line (--boost-per-core, 4.0), an unreadable memory or agent count. At most one forced admit per LW_STARVE_MIN_GAP_S (120)
+machine-wide (LW_STARVE_MIN_GAP_S, 0 = no limit; starve.json in the state dir, replaced atomically under a flock; the claim is written only
+once the forced admit's agent reservation, when --max-agents asks for one, has been recorded). It prints
+`admit ok forced=starved waited_s=N overrode=reason,reason ...` (JSON: forced, overrode) and exits 0; a forced admit under --max-agents still
+records its reservation. The LW_* knobs (LW_STARVE_SOFT_S, LW_STARVE_MIN_GAP_S, LW_MAX_SWAPINS_S, LW_SWAPINS_CORROBORATED_S, LW_ADMIT_LOG, LW_ADMIT_CALLER) are read from `admit`'s own environment, so a caller that scrubs LW_* variables before it runs `admit` gets the defaults (valve on at 300 s / 120 s). Admit tuning log (2026-11-14): every `admit` call appends one JSON line (UTC time, verdict ok/hot/forced, the
+refused or overridden gates, load1, per_core, churn, pageins, swapins, free_mb, agents, the limits used, waited_s, the caller's program) to
+LW_ADMIT_LOG (default admit-log.jsonl in the state dir; a relative path is relative to the state dir; `off`, 0, false or no disables;
+only a plain program name is recorded as the caller), rotated at 5 MB to one `.1` file; a log failure never changes the
+verdict or the exit code (a waiter killed by its deadline logs refused=deadline). `admit-log summary [--days N]` (default 7) prints the
+counts per verdict and per refused reason and the p50/p90 of free_mb, pageins and swapins: the data the limits are tuned from. Test hooks
 (a dispatcher that starts agents should scrub them from the environment it gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll
-with the last value repeating), LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS (the same for each reading;
-a faked load leaves the readings it does not fake healthy: churn 0, 8192 MB free, 0 pageins, 0 agents),
+with the last value repeating), LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_SWAPINS, LW_FAKE_AGENTS (the same for each reading;
+a faked load leaves the readings it does not fake healthy: churn 0, 8192 MB free, 0 pageins, 0 swap-ins, 0 agents),
 LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
 that is not a dict with numeric `t` and `hot_since` counts as no state. Non-finite --wait or --max-per-core: exit 2.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot).
 """
 import argparse
+import calendar
 import json
 import math
 import os
 import random
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -197,6 +219,15 @@ BGRUN = []  # commands runnable at background priority this sample
 
 def now():
     return time.time()
+
+
+def mono():
+    """The monotonic clock `admit` waits by, and `nap` its sleep: module-level so a test can drive a wait without sleeping."""
+    return time.monotonic()
+
+
+def nap(s):
+    time.sleep(s)
 
 
 def stamp(t=None):
@@ -1836,18 +1867,70 @@ def _env_float(name, default, lo=0.0):
 # 2026-11-13 retune for the 32 GB, 10-core (8P+2E) Mac (operator-approved; measured that day: churn p50 7.3k, p90 13k, max 25k pages/s;
 # pageins p50 689, p90 1280, max 1916/s; swap-ins ~0/s): churn limit 20000 -> 30000 (hard line 60000 kept), pageins 1000 -> 4000/s
 # (the 1000 limit remains only when corroborated), free floor 300 -> 1000 MB, admit base 1.5 -> 2.0 per core, agent cap 14 -> 20.
+# 2026-11-14 (PR 2 of 3): swap-ins gate, RAM-scaled free floor, starvation valve, admit tuning log (below and the module docstring).
 ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 30000.0, 1.0)
 # Churn over ADMIT_CHURN_PAGES_S refuses only with corroboration (djbclark 2026-11-02, after standing 30-65k churn with idle CPU
 # refused nearly every launch for hours): load per core above ADMIT_CHURN_THRASH_PER_CORE or pageins over their limit; churn above
 # ADMIT_CHURN_HARD_PAGES_S (the pre-2026-11-01 limit) refuses on its own.
 ADMIT_CHURN_THRASH_PER_CORE = _env_float("LW_CHURN_THRASH_PER_CORE", 1.5, 0.0)
 ADMIT_CHURN_HARD_PAGES_S = _env_float("LW_MAX_COMPRESSOR_HARD_S", 60000.0, 1.0)
-ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 1000.0)  # 300 from djbclark 2026-11-01 (available-memory measure, PR 230); 1000 on 2026-11-13 for 32 GB
+ADMIT_HARD_FREE_MB = 300.0  # below this available memory the starvation valve never overrides the free-memory gate
+FREE_FLOOR_MIN_MB, FREE_FLOOR_MAX_MB = 300.0, 1000.0
+
+
+def scaled_min_free_mb(ram_mb):
+    """The default free-memory floor for a host with `ram_mb` MB of RAM (2026-11-14, PR 2 of the retune): 35 MB per GiB above 4 GiB
+    (3.5% of the RAM above 4 GiB), clamped to 300..1000 MB: 32 GB gives 980, 16 GB 420, 8 GB and below 300, 64 GB 1000. A RAM size
+    that could not be read (None, zero, not finite) gives 1000, the 2026-11-13 flat value tuned for the 32 GB Mac."""
+    if not isinstance(ram_mb, (int, float)) or isinstance(ram_mb, bool) or not math.isfinite(ram_mb) or ram_mb <= 0:
+        return FREE_FLOOR_MAX_MB
+    return min(FREE_FLOOR_MAX_MB, max(FREE_FLOOR_MIN_MB, 35.0 * (ram_mb / 1024.0 - 4.0)))
+
+
+def physical_ram_mb():
+    """Physical RAM in MB, or None when no source answers (the floor then falls back to 1000). os.sysconf first (no fork: this runs at
+    import, in every load-watch process); then Linux /proc/meminfo MemTotal; then macOS `sysctl -n hw.memsize` (argv list, 5 s)."""
+    try:
+        mb = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1048576
+        if mb > 0:
+            return mb
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        m = re.search(r"^MemTotal:\s+(\d+) kB", Path("/proc/meminfo").read_text(), re.M)
+        if m:
+            return int(m.group(1)) / 1024
+    except (OSError, ValueError):
+        pass
+    try:
+        r = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            return int(r.stdout.strip()) / 1048576
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+# 300 from djbclark 2026-11-01 (available-memory measure, PR 230); a flat 1000 on 2026-11-13 for the 32 GB Mac; scaled with the RAM since
+# 2026-11-14 (scaled_min_free_mb: 980 here). LW_MIN_FREE_MB and --min-free-mb override.
+ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", scaled_min_free_mb(physical_ram_mb()))
 ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 4000.0, 1.0)  # was 1000 until 2026-11-13: refuses on its own
-# The old 1000/s line still refuses, but only corroborated by memory pressure: free memory below the floor or compressor churn above the
-# admit limit. Swap-ins are the proper corroboration (page-ins with no swap-ins are mostly file reads); they are not measured yet (a later
-# change adds that gate), so the two readings we have stand in. admit_refusals uses min(this, the --max-pageins limit).
+# The old 1000/s line still refuses, but only corroborated by memory pressure: free memory below the floor, compressor churn above the
+# admit limit, or (2026-11-14) swap-ins above ADMIT_SWAPINS_CORROBORATED_S. Swap-ins are the proper corroboration (page-ins with no
+# swap-ins are mostly file reads). admit_refusals uses min(this, the --max-pageins limit).
 ADMIT_PAGEINS_CORROBORATED_S = _env_float("LW_MAX_PAGEINS_CORROBORATED_S", 1000.0, 1.0)
+# Swap-ins per second (2026-11-14, measured on the 32 GB Mac: 0 / 1 / 8 / 226 per s at min / p50 / p90 / max; swap USED was 11.7 of 13.3 GB
+# in a calm hour, so the RATE is the signal): above ADMIT_SWAPINS_S refuses on its own (a HARD gate, the starvation valve never overrides it);
+# above the low corroborating line, with page-ins over their corroborated line, it also refuses. A host that cannot read the counter has the
+# gate off.
+ADMIT_SWAPINS_S = _env_float("LW_MAX_SWAPINS_S", 300.0, 1.0)
+ADMIT_SWAPINS_CORROBORATED_S = _env_float("LW_SWAPINS_CORROBORATED_S", 20.0, 1.0)
+# Starvation valve (2026-11-14), `admit --wait` only (a waiting launcher; bg calls `admit --wait CHUNK`, and the clock is per call, so bg gets the valve only after 300 s inside one chunk): a caller refused continuously for
+# LW_STARVE_SOFT_S (300; 0 = valve off) gets through when every refusing gate is soft, at most once per LW_STARVE_MIN_GAP_S (120; 0 = no
+# limit) machine-wide (starve.json, flock).
+STARVE_SOFT_S = _env_float("LW_STARVE_SOFT_S", 300.0)
+STARVE_MIN_GAP_S = _env_float("LW_STARVE_MIN_GAP_S", 120.0)
+ADMIT_LOG_MAX_BYTES = 5 * 1024 * 1024
 ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 20, 0))  # 0 = no cap
 ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' deltas are the per-second rates
 # Calm boost (operator 2026-10-25, "make the change" after a load of 12-14 with no UI lag): while the compressor is
@@ -1894,9 +1977,9 @@ def _fake_churn():
 
 
 def _fake_memory():
-    """LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS (tests): each a number or a comma list, one per poll, last repeating."""
+    """LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_SWAPINS, LW_FAKE_AGENTS (tests): each a number or a comma list, one per poll, last repeating."""
     return {k: _fake_list(env) for k, env in (("free_mb", "LW_FAKE_FREE_MB"), ("pageins_s", "LW_FAKE_PAGEINS"),
-                                              ("agents", "LW_FAKE_AGENTS"))}
+                                              ("swapins_s", "LW_FAKE_SWAPINS"), ("agents", "LW_FAKE_AGENTS"))}
 
 
 class ReadFailed(Exception):
@@ -1906,14 +1989,15 @@ class ReadFailed(Exception):
 
 
 def _vm_stat_snapshot():
-    """{free_mb, compress, pageins} from macOS `vm_stat`. free_mb is memory available WITHOUT compressing or swapping:
+    """{free_mb, compress, pageins, swapins} from macOS `vm_stat`. free_mb is memory available WITHOUT compressing or swapping:
     Pages free + File-backed pages + Pages purgeable. File-backed pages (file cache, speculative included) are dropped at no
     cost, like Linux MemAvailable's file-LRU term; purgeable (volatile) pages are discarded rather than compressed. Inactive
     pages are NOT counted: the inactive queue also holds anonymous memory, which can only be reclaimed by compressing or
     swapping it (adversary F1 on PR 230: >= 968 MB of inactive pages were anonymous). A vm_stat without `File-backed pages`
     falls back to free + speculative (conservative). Why not free + speculative alone: macOS keeps spare memory as file cache,
     so that read 82 MB on an idle Mac on 2026-11-01 and the 600 MB floor refused every launch for ~1.5 h.
-    compress = Compressions + Decompressions, cumulative pages. None when there is no `vm_stat` binary; ReadFailed when it
+    compress = Compressions + Decompressions, cumulative pages. swapins = the cumulative `Swapins` page count (None when this vm_stat
+    prints none: that gate is then off, never a refusal). None when there is no `vm_stat` binary; ReadFailed when it
     exists and fails."""
     try:
         r = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
@@ -1925,7 +2009,7 @@ def _vm_stat_snapshot():
         raise ReadFailed(f"vm_stat exited {r.returncode}")
     out = r.stdout
     v = {m.group(1): int(m.group(2)) for m in
-         re.finditer(r"^(Pages free|Pages speculative|File-backed pages|Pages purgeable|Pageins|Compressions|Decompressions):\s+(\d+)",
+         re.finditer(r"^(Pages free|Pages speculative|File-backed pages|Pages purgeable|Pageins|Swapins|Compressions|Decompressions):\s+(\d+)",
                      out, re.M)}
     ps = re.search(r"page size of (\d+) bytes", out)
     try:
@@ -1939,13 +2023,13 @@ def _vm_stat_snapshot():
     else:
         avail = v["Pages free"] + v.get("Pages speculative", 0)
     return {"free_mb": avail * page / 1048576,
-            "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"]}
+            "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"], "swapins": v.get("Swapins")}
 
 
 def _proc_snapshot():
     """The Linux equivalents (2026-11-01, uncalibrated: swap pages/s against a line set for the macOS compressor, so
     that gate rarely trips there; pgmajfault counts faults): free = MemAvailable (else MemFree) in /proc/meminfo,
-    compress = pswpin + pswpout and pageins = pgmajfault in /proc/vmstat. None when /proc/meminfo does not exist;
+    compress = pswpin + pswpout, swapins = pswpin and pageins = pgmajfault in /proc/vmstat. None when /proc/meminfo does not exist;
     ReadFailed when it exists and cannot be read or parsed."""
     try:
         meminfo = Path("/proc/meminfo").read_text()
@@ -1962,7 +2046,7 @@ def _proc_snapshot():
     free_kb = mem.get("MemAvailable", mem.get("MemFree"))
     if free_kb is None or not all(k in vm for k in ("pswpin", "pswpout", "pgmajfault")):
         raise ReadFailed("/proc counters missing")
-    return {"free_mb": free_kb / 1024, "compress": vm["pswpin"] + vm["pswpout"], "pageins": vm["pgmajfault"]}
+    return {"free_mb": free_kb / 1024, "compress": vm["pswpin"] + vm["pswpout"], "pageins": vm["pgmajfault"], "swapins": vm["pswpin"]}
 
 
 def vm_snapshot():
@@ -2015,7 +2099,7 @@ def count_agents():
 
 
 def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
-    """One memory reading: {churn, free_mb, pageins_s, agents}, each None when it cannot be read (said so in the
+    """One memory reading: {churn, free_mb, pageins_s, swapins_s, agents}, each None when it cannot be read (said so in the
     record, never guessed). Real mode reads vm_stat twice ADMIT_MEM_WINDOW_S apart. Test hooks: tests that fake the
     load (or any reading) get a healthy default for the readings they do not fake, so a busy host cannot change
     their answer."""
@@ -2024,8 +2108,9 @@ def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
 
     if fake_load or fake_churn or any(fake_mem.values()):
         return {"churn": pick(fake_churn, 0.0), "free_mb": pick(fake_mem["free_mb"], 8192.0),
-                "pageins_s": pick(fake_mem["pageins_s"], 0.0), "agents": int(pick(fake_mem["agents"], 0)), "failed": set()}
-    m = {"churn": None, "free_mb": None, "pageins_s": None, "agents": None, "failed": set()}
+                "pageins_s": pick(fake_mem["pageins_s"], 0.0), "swapins_s": pick(fake_mem["swapins_s"], 0.0),
+                "agents": int(pick(fake_mem["agents"], 0)), "failed": set()}
+    m = {"churn": None, "free_mb": None, "pageins_s": None, "swapins_s": None, "agents": None, "failed": set()}
     if max_agents:  # the cap gates only callers that START agents; everyone else skips the paseo ls
         try:
             m["agents"] = count_agents()
@@ -2034,15 +2119,18 @@ def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
     try:
         a = vm_snapshot()
         if a is not None:
-            t0 = time.monotonic()
-            time.sleep(ADMIT_MEM_WINDOW_S)
+            t0 = mono()
+            nap(ADMIT_MEM_WINDOW_S)
             b = vm_snapshot()
             if b is None:
                 raise ReadFailed("second vm sample missing")
-            dt = time.monotonic() - t0
+            dt = mono() - t0
             dt = dt if dt > 0 else ADMIT_MEM_WINDOW_S
             m.update(churn=max(0.0, (b["compress"] - a["compress"]) / dt), free_mb=b["free_mb"],
                      pageins_s=max(0.0, (b["pageins"] - a["pageins"]) / dt))
+            sa, sb = a.get("swapins"), b.get("swapins")
+            if isinstance(sa, int) and isinstance(sb, int):   # a counter that is missing or went backwards leaves the swap-ins gate off
+                m["swapins_s"] = max(0.0, (sb - sa) / dt) if sb >= sa else None
     except ReadFailed:
         m["failed"].add("memory")
     return m
@@ -2153,19 +2241,20 @@ def _res_write(rows):
     tmp.replace(STATE_DIR / "agent-reservations.json")
 
 
-def agent_reserve(cap, live, ttl):
+def agent_reserve(cap, live, ttl, force=False):
     """Atomically admit one more agent: under an flock, count the live Paseo agents (`live`: a number, or a
     callable re-read inside the lock) plus the unexpired reservations; at or above `cap` it refuses, else it records
     a reservation. Returns (None, id) when reserved, else (refusal name, None): `agents`, `agents_unreadable` when
-    `paseo ls` fails, `agents_reserve_failed` when the state cannot be written or locked (fail toward waiting)."""
+    `paseo ls` fails, `agents_reserve_failed` when the state cannot be written or locked (fail toward waiting).
+    `force` (a starvation-valve admit, which already overrode the cap) records the reservation without the count or the cap test."""
     def work():
         try:
-            n = live() if callable(live) else live
+            n = 0 if force else (live() if callable(live) else live)
         except ReadFailed:
             return "agents_unreadable", None
         t = now()
         keep = [x for x in _res_read() if x["until"] > t]
-        if (n or 0) + len(keep) >= cap:
+        if not force and (n or 0) + len(keep) >= cap:
             return "agents", None
         rid = f"{os.getpid()}-{int(t * 1000)}-{random.randrange(1 << 32):08x}"
         try:
@@ -2176,6 +2265,18 @@ def agent_reserve(cap, live, ttl):
 
     out = _res_locked(work)
     return out if out is not None else ("agents_reserve_failed", None)
+
+
+def drop_reservation(rid):
+    """Delete reservation `rid` outright (not the RELEASE_GRACE_S shortening): a forced admit whose claim could not be written."""
+    def work():
+        try:
+            _res_write([x for x in _res_read() if x["id"] != rid])
+        except OSError:
+            return False
+        return True
+
+    return bool(_res_locked(work)) if rid else False
 
 
 def release_reservation(rid):
@@ -2233,7 +2334,7 @@ def cmd_release(a):
 
 
 def admit_refusals(per_core, limit, m, lim):
-    """Names of the gates that refuse: load, compressor, free_mem, pageins, agents, and `memory_unreadable` /
+    """Names of the gates that refuse: load, compressor, free_mem, swapins, pageins, agents, and `memory_unreadable` /
     `agents_unreadable` (vm_stat or ps exists but the read failed or timed out: that is likeliest exactly when the
     machine is starving, so it refuses). A reading whose tool is absent altogether (None, no failure) never
     refuses; it is reported as `unreadable`. The agent cap 0 is off."""
@@ -2249,10 +2350,16 @@ def admit_refusals(per_core, limit, m, lim):
             out.append("compressor")
     if m["free_mb"] is not None and m["free_mb"] < lim["min_free_mb"]:
         out.append("free_mem")
+    # Swap-ins (2026-11-14): over the limit refuses alone (a hard gate). A reading that is None (no counter) leaves it open.
+    swap = m.get("swapins_s")
+    max_swap = lim.get("max_swapins", ADMIT_SWAPINS_S)
+    if swap is not None and swap > max_swap:
+        out.append("swapins")
     # Pageins: over the admit limit refuses alone; over the lower corroborated line (1000/s) only with memory pressure (2026-11-13):
-    # free memory below the floor or churn above its admit limit.
+    # free memory below the floor, churn above its admit limit, or (2026-11-14) swap-ins above their low corroborating line.
     if m["pageins_s"] is not None:
-        pressure = ("free_mem" in out) or (m["churn"] is not None and m["churn"] > lim["churn"])
+        pressure = (("free_mem" in out) or (m["churn"] is not None and m["churn"] > lim["churn"])
+                    or (swap is not None and swap > min(lim.get("swapins_corroborated", ADMIT_SWAPINS_CORROBORATED_S), max_swap)))
         if m["pageins_s"] > lim["max_pageins"] or (pressure and m["pageins_s"] > min(lim.get("pageins_corroborated", ADMIT_PAGEINS_CORROBORATED_S), lim["max_pageins"])):
             out.append("pageins")
     if lim["max_agents"] and m["agents"] is not None and m["agents"] + m.get("reserved", 0) >= lim["max_agents"]:
@@ -2265,13 +2372,79 @@ def admit_refusals(per_core, limit, m, lim):
     return out
 
 
-def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
-    """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh."""
+def hard_refusals(refused, per_core, m, lim, hard_load):
+    """The names in `refused` the starvation valve never overrides: swap-ins over their limit, compressor churn over the hard line,
+    available memory under ADMIT_HARD_FREE_MB, load per core over `hard_load` (the boost line), and every name that is not a plain
+    soft gate (`memory_unreadable`, `agents_unreadable`, `agents_reserve_failed`, anything new): an unknown refusal fails toward
+    waiting. Soft: load up to hard_load, corroborated churn, pageins, agents, free memory above the hard minimum."""
+    hard = []
+    for r in refused:
+        if r == "load":
+            is_hard = per_core > hard_load
+        elif r == "compressor":
+            is_hard = m["churn"] is not None and m["churn"] > lim.get("churn_hard", max(ADMIT_CHURN_HARD_PAGES_S, lim["churn"]))
+        elif r == "free_mem":
+            is_hard = m["free_mb"] is not None and m["free_mb"] < ADMIT_HARD_FREE_MB
+        else:
+            is_hard = r not in ("pageins", "agents")
+        if is_hard:
+            hard.append(r)
+    return hard
+
+
+def starve_claim(min_gap, before=None, undo=None, t=None):
+    """True when this caller may force ONE admit: at most one per `min_gap` seconds machine-wide (0: no limit). starve.json
+    ({"last_forced_t"}) is read and replaced (temp file, os.replace) under an exclusive flock, so two waiters that starve in the same
+    second cannot both pass. The time is read AFTER the lock is taken (`t` is a test override): a waiter that read its clock before
+    waiting for the lock cannot slip in with an earlier time, and a stored time within `min_gap` on either side blocks (|t - last|), so
+    only a clock stepped back by more than the gap unblocks. `before()` (the forced admit's agent reservation) runs under that lock once the gap allows, and the claim
+    is written only when it returns true: a reservation that fails never spends the machine-wide gap, and a claim that cannot be
+    written calls `undo()` (drop that reservation) so nothing leaks per poll. A lock or state that cannot be taken or written means
+    no (fail toward waiting)."""
+    try:
+        import fcntl
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_DIR / "starve.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if t is None:
+                t = now()
+            try:
+                last = json.loads((STATE_DIR / "starve.json").read_text()).get("last_forced_t")
+            except (OSError, ValueError, AttributeError):
+                last = None
+            if _num(last) and abs(t - last) < min_gap:
+                return False
+            if before is not None and not before():
+                return False
+            tmp = STATE_DIR / f"starve.json.tmp{os.getpid()}"
+            try:
+                tmp.write_text(json.dumps({"last_forced_t": t}))
+                tmp.replace(STATE_DIR / "starve.json")
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                if undo is not None and before is not None:
+                    undo()
+                return False
+            return True
+    except (ImportError, OSError):
+        return False
+
+
+def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None, overrode=None):
+    """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh. `overrode` (the starvation valve
+    let this caller through): the soft refusals it overrode; the record is `ok` with forced=starved and overrode=[...]."""
     refused = admit_refusals(per_core, limit, m, lim)
-    rec = {"status": "hot" if refused else "ok", "load1": round(load1, 2),
+    held = bool(refused) and overrode is None
+    rec = {"status": "hot" if held else "ok", "load1": round(load1, 2),
            "per_core": round(per_core, 2), "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
-    if refused:
+    if held:
         rec["refused"] = refused
+    if overrode is not None:
+        rec["forced"] = "starved"
+        rec["overrode"] = list(overrode)
     if m["churn"] is not None:
         rec["mem_churn_pages_s"] = int(m["churn"])
         rec["max_mem_churn_pages_s"] = lim["churn"]
@@ -2283,11 +2456,14 @@ def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
         rec["max_pageins_s"] = lim["max_pageins"]
         if "pageins" in refused and m["pageins_s"] <= lim["max_pageins"]:  # the corroborated line decided: report it, not the admit limit
             rec["max_pageins_s"] = min(lim.get("pageins_corroborated", ADMIT_PAGEINS_CORROBORATED_S), lim["max_pageins"])
+    if m.get("swapins_s") is not None:
+        rec["swapins_s"] = int(m["swapins_s"])
+        rec["max_swapins_s"] = lim.get("max_swapins", ADMIT_SWAPINS_S)
     if m["agents"] is not None:
         rec["agents"] = m["agents"]
         if m.get("reserved"):
             rec["reserved"] = m["reserved"]
-    if m.get("reservation") and not refused:
+    if m.get("reservation") and not held:
         rec["reservation"] = m["reservation"]
     rec["max_agents"] = lim["max_agents"]
     cap_on = bool(lim["max_agents"])
@@ -2322,13 +2498,18 @@ def watcher_fields():
 
 
 def admit_line(rec):
-    line = f"admit {rec['status']} load1={rec['load1']:g} per_core={rec['per_core']:.2f} cores={rec['cores']}"
+    line = f"admit {rec['status']}"
+    if rec.get("forced"):   # the starvation valve: the documented first words, then the usual readings
+        line += f" forced={rec['forced']} waited_s={rec['waited_s']} overrode={','.join(rec['overrode'])}"
+    line += f" load1={rec['load1']:g} per_core={rec['per_core']:.2f} cores={rec['cores']}"
     if "mem_churn_pages_s" in rec:
         line += f" mem_churn={rec['mem_churn_pages_s']}"
     if "free_mb" in rec:
         line += f" free_mb={rec['free_mb']}"
     if "pageins_s" in rec:
         line += f" pageins={rec['pageins_s']}"
+    if "swapins_s" in rec:
+        line += f" swapins={rec['swapins_s']}"
     if "agents" in rec:
         line += f" agents={rec['agents']}"
     if "unreadable" in rec:
@@ -2343,15 +2524,171 @@ def admit_line(rec):
             line += f" min_free_mb={rec['min_free_mb']:g}"
         if "pageins" in rec["refused"]:
             line += f" max_pageins={rec['max_pageins_s']:g}"
+        if "swapins" in rec["refused"]:
+            line += f" max_swapins={rec['max_swapins_s']:g}"
         if "agents" in rec["refused"]:
             line += f" max_agents={rec['max_agents']}"
     if rec.get("reservation"):
         line += f" reservation={rec['reservation']} (release it: load-watch release {rec['reservation']}; --no-reserve to only check)"
     if "hot_for_s" in rec:
         line += f" streak={rec['streak']} hot_for_s={rec['hot_for_s']}"
-    if rec["waited_s"]:
+    if rec["waited_s"] and not rec.get("forced"):
         line += f" waited_s={rec['waited_s']}"
     return line
+
+
+# --- admit tuning log (2026-11-14): one JSON line per `admit` call, the data the limits are tuned from -----------------------------------
+_CALLER_OK = re.compile(r"[A-Za-z0-9._+-]{1,80}\Z")
+_INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "env", "python", "python3", "uv", "node", "perl", "ruby"})
+
+
+def admit_log_path():
+    """The log file: LW_ADMIT_LOG (`off` in any case, 0, false or no = none; a relative path is the state dir's), default admit-log.jsonl in the state dir."""
+    v = os.environ.get("LW_ADMIT_LOG", "").strip()
+    if v.lower() in ("off", "0", "false", "no"):
+        return None
+    p = Path(v).expanduser() if v else Path("admit-log.jsonl")
+    return p if p.is_absolute() else STATE_DIR / p   # never relative to the caller's cwd (bg runs in the repo under test)
+
+
+def admit_caller():
+    """The parent process's program, or "" when it is not cheaply known: LW_ADMIT_CALLER (a caller may name itself), else the first word
+    of the parent's command line (`ps`, 2 s cap; /proc on Linux), with an interpreter replaced by the script it runs (`bash /x/bg` -> bg)."""
+    v = os.environ.get("LW_ADMIT_CALLER", "").strip()
+    if v:
+        return v if _CALLER_OK.match(v) else ""
+    try:
+        ppid = os.getppid()
+        try:
+            words = Path(f"/proc/{ppid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+        except OSError:
+            r = subprocess.run(["ps", "-o", "args=", "-p", str(ppid)], capture_output=True, text=True, timeout=2)
+            words = r.stdout.split() if r.returncode == 0 else []
+        words = [w for w in words if w]
+        if not words:
+            return ""
+        name = os.path.basename(words[0])
+        if name in _INTERPRETERS:
+            opts = []
+            for w in words[1:]:
+                if not w.startswith("-"):
+                    break
+                opts.append(w)
+            script = next((os.path.basename(w) for w in words[1:] if not w.startswith("-")), name)
+            # `sh -c 'TOKEN=x cmd'`, `bash -lc ...`, `perl -e ...`: the next word is code, not a script: keep the interpreter name.
+            # Only a plain program name is logged, never a word that could carry a secret.
+            inline = any(re.fullmatch(r"-[A-Za-z]*[ce][A-Za-z]*", o) for o in opts)
+            if not inline and _CALLER_OK.match(script):
+                name = script
+        return name if _CALLER_OK.match(name) else ""
+    except Exception:
+        return ""
+
+
+def admit_log_entry(rec, lim, caller="", wait=0.0):
+    """The log line for one admit result `rec` (admit_record): verdict ok / hot / forced, the refused (or overridden) gate names, the
+    readings it saw and the limits it used."""
+    verdict = "forced" if rec.get("forced") else rec["status"]
+    e = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now())), "verdict": verdict,
+         "refused": list(rec.get("overrode") or rec.get("refused") or []), "load1": rec.get("load1"), "per_core": rec.get("per_core"),
+         "cores": rec.get("cores"), "churn": rec.get("mem_churn_pages_s"), "pageins": rec.get("pageins_s"),
+         "swapins": rec.get("swapins_s"), "free_mb": rec.get("free_mb"), "agents": rec.get("agents"),
+         "limits": {"per_core": rec.get("max_per_core"), "churn": lim.get("churn"), "free_mb": lim.get("min_free_mb"),
+                    "pageins": lim.get("max_pageins"), "swapins": lim.get("max_swapins"), "agents": lim.get("max_agents")},
+         "waited_s": rec.get("waited_s"), "wait_s": wait, "caller": caller}
+    return e
+
+
+def admit_log(rec, lim, caller, wait):
+    """Log one admit result; never raises (the entry is built inside the try too)."""
+    try:
+        admit_log_append(admit_log_entry(rec, lim, caller, wait))
+    except Exception:
+        pass
+
+
+def admit_log_append(entry):
+    """Append one JSON line to the admit log; rotate at ADMIT_LOG_MAX_BYTES to `<log>.1` (the one older file kept). Best effort by
+    contract: a log failure never changes admit's verdict or exit code (every error is swallowed)."""
+    try:
+        path = admit_log_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = (json.dumps(entry, separators=(",", ":"), default=str) + "\n").encode()
+        try:
+            import fcntl
+            lock = open(str(path) + ".lock", "a")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)   # contended: skip the rotation check, still append
+                if path.stat().st_size >= ADMIT_LOG_MAX_BYTES:
+                    os.replace(path, path.with_name(path.name + ".1"))
+            except OSError:
+                pass
+            finally:
+                lock.close()
+        except (ImportError, OSError):
+            pass
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK, 0o600)   # a FIFO with no reader must not hang admit
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                while data:   # a short write (full disk) must not leave a torn line that swallows the next one
+                    data = data[os.write(fd, data):]
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def _pct(vals, q):
+    """The q-quantile (0..1) of a sorted list by nearest rank, None when it is empty."""
+    return vals[min(len(vals) - 1, max(0, round(q * (len(vals) - 1))))] if vals else None
+
+
+def cmd_admit_log(a):
+    """`admit-log summary [--days N]`: counts per verdict and per refused reason, and p50 / p90 of free_mb, pageins and swapins, over the
+    last N days of the log (and its .1 file)."""
+    path = admit_log_path()
+    if path is None:
+        print(f"admit log is off (LW_ADMIT_LOG={os.environ.get('LW_ADMIT_LOG', '').strip()})")
+        return 1
+    if not math.isfinite(a.days) or a.days <= 0:
+        print("load-watch admit-log: --days must be a number above 0", file=sys.stderr)
+        return 2
+    cutoff = now() - a.days * 86400
+    rows = []
+    for f in (path.with_name(path.name + ".1"), path):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        for ln in text.splitlines():
+            try:
+                r = json.loads(ln)
+                t = calendar.timegm(time.strptime(r["t"], "%Y-%m-%dT%H:%M:%SZ"))
+            except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                continue
+            ref = r.get("refused", [])
+            if isinstance(r, dict) and t >= cutoff and isinstance(r.get("verdict"), str) \
+                    and isinstance(ref, list) and all(isinstance(x, str) for x in ref):
+                rows.append(r)
+    if not rows:
+        print(f"no admit calls in the last {a.days:g} days ({path})")
+        return 1
+    verdicts, reasons = {}, {}
+    for r in rows:
+        verdicts[r.get("verdict")] = verdicts.get(r.get("verdict"), 0) + 1
+        for x in r.get("refused") or []:
+            reasons[x] = reasons.get(x, 0) + 1
+    print(f"admit log {path}: {len(rows)} calls in the last {a.days:g} days")
+    polls = sum(1 for r in rows if not r.get("wait_s"))
+    print(f"calls with --wait 0 (a pure check, such as bg's first look before it holds with --wait CHUNK): {polls} of {len(rows)}")
+    print("verdicts: " + " ".join(f"{k}={v}" for k, v in sorted(verdicts.items(), key=lambda kv: str(kv[0]))))
+    print("refused/overrode reasons: " + (" ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])) or "none"))
+    for key in ("free_mb", "pageins", "swapins"):
+        vals = sorted(x[key] for x in rows if isinstance(x.get(key), (int, float)) and not isinstance(x.get(key), bool))
+        print(f"{key}: n={len(vals)}" + (f" p50={_pct(vals, 0.5):g} p90={_pct(vals, 0.9):g}" if vals else " (no readings)"))
+    return 0
 
 
 _DW = None   # the deadline_wait module once self_deadline() imported it
@@ -2376,6 +2713,8 @@ def self_deadline(a, poll):
             "load-watch admit", deadline_wait.safe_name("admit-wait", os.getpid()), deadline_wait.budget_for(a.wait, 1800),
             max(300.0, 4 * poll + 120), str(Path(__file__).resolve()), sys.argv[1:], opt_out=a.no_deadline)
         if rc == 124:   # stopped by its deadline: the load never fell within the wait. Callers fail OPEN on an unknown exit, so answer 75
+            admit_log_append({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now())), "verdict": "hot", "refused": ["deadline"],
+                              "waited_s": int(a.wait), "wait_s": a.wait, "caller": admit_caller()})
             print("load-watch admit: the wait's deadline expired; answering 75 (still too hot, nothing admitted)", file=sys.stderr)
             return EX_TEMPFAIL
         return rc
@@ -2387,12 +2726,13 @@ def self_deadline(a, poll):
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
     lim = {"churn": getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S), "min_free_mb": getattr(a, "min_free_mb", ADMIT_MIN_FREE_MB),
-           "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_agents": getattr(a, "max_agents", 0)}
+           "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_swapins": getattr(a, "max_swapins", ADMIT_SWAPINS_S),
+           "swapins_corroborated": ADMIT_SWAPINS_CORROBORATED_S, "max_agents": getattr(a, "max_agents", 0)}
     if (not (math.isfinite(a.wait) and math.isfinite(a.max_per_core) and all(math.isfinite(v) for v in lim.values()))
-            or a.wait < 0 or a.max_per_core <= 0 or lim["churn"] <= 0 or lim["max_pageins"] <= 0
+            or a.wait < 0 or a.max_per_core <= 0 or lim["churn"] <= 0 or lim["max_pageins"] <= 0 or lim["max_swapins"] <= 0
             or lim["min_free_mb"] < 0 or lim["max_agents"] < 0):
-        print("load-watch admit: --wait must be a finite number, 0 or more, --max-per-core, --max-mem-churn and "
-              "--max-pageins finite and above 0, --min-free-mb and --max-agents 0 or more", file=sys.stderr)
+        print("load-watch admit: --wait must be a finite number, 0 or more, --max-per-core, --max-mem-churn, "
+              "--max-pageins and --max-swapins finite and above 0, --min-free-mb and --max-agents 0 or more", file=sys.stderr)
         return 2
     try:
         lo, hi = (float(x) for x in os.environ.get("LW_ADMIT_STAGGER_S", "5,30").split(","))
@@ -2402,7 +2742,7 @@ def cmd_admit(a):
                 and all(math.isfinite(x) for x in fake + fake_churn + sum(fake_mem.values(), []))):
             raise ValueError("out of range")
     except ValueError:
-        print("load-watch admit: bad LW_FAKE_LOAD1, LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS, "
+        print("load-watch admit: bad LW_FAKE_LOAD1, LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_SWAPINS, LW_FAKE_AGENTS, "
               "LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger 0 <= min <= max <= 60)", file=sys.stderr)
         return 2
     poll = max(1.0, poll)  # never a busy loop on a machine that is already hot
@@ -2412,6 +2752,7 @@ def cmd_admit(a):
         print("load-watch admit: --boost-per-core and --boost-max-churn must be finite (0 turns the boost off)",
               file=sys.stderr)
         return 2
+    hard_load = max(boost, a.max_per_core)  # the boost line: above it the starvation valve never lets a caller through
     if fake and not fake_churn:
         boost = 0  # a faked load with no faked churn reads churn 0 (not a measurement): never boosts
     measured = not fake or bool(fake_churn) or any(fake_mem.values())  # a defaulted fake reading is not an observation
@@ -2434,25 +2775,30 @@ def cmd_admit(a):
                             boost, boost_churn)
         return load1, cores, per_core, m, limit, calm_for
 
+    caller = admit_caller()
     if getattr(a, "supervise", False) and a.wait > 0:
+        if caller:
+            os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
         rc = self_deadline(a, poll)
         if rc is not None:
             return rc
-    start, polls, next_note = time.monotonic(), 0, 60.0
+    start, polls, next_note = mono(), 0, 60.0
+    refused_since, forced = None, None   # waited-seconds when the current unbroken run of refusals began; the overridden refusals
     while True:
         load1, cores, per_core, m, limit, calm_for = read(polls)
         polls += 1
-        waited = time.monotonic() - start
+        waited = mono() - start
         if not admit_refusals(per_core, limit, m, lim) and polls > 1:
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
             # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
+            refused_since = None   # a clean reading breaks the unbroken run of refusals, whatever the re-read says
             left = a.wait - waited
             if left > 0:
-                time.sleep(min(random.uniform(lo, hi), left))
+                nap(min(random.uniform(lo, hi), left))
             load1, cores, per_core, m, limit, calm_for = read(polls)
             polls += 1
-            waited = time.monotonic() - start
+            waited = mono() - start
         refused = admit_refusals(per_core, limit, m, lim)
         if not refused and reserve_on:
             live = m["agents"] if (fake or fake_churn or any(fake_mem.values())) else count_agents
@@ -2462,6 +2808,26 @@ def cmd_admit(a):
                 refused = admit_refusals(per_core, limit, m, lim)
             else:
                 m["reservation"] = rid
+        # Starvation valve (2026-11-14): only a waiting caller (`--wait S`; the clock is per call, so bg, which calls `--wait CHUNK`, gets it only after 300 s inside one chunk; a bare check reports the truth),
+        # refused without a break for STARVE_SOFT_S, with only SOFT gates refusing, and at most one per STARVE_MIN_GAP_S machine-wide.
+        if not refused:
+            refused_since = None
+        elif refused_since is None:
+            refused_since = waited
+        def reserve_forced():   # the forced admit still counts as one agent, like any admission under the cap; a failure refuses (hard)
+            if not reserve_on:
+                return True
+            why, rid = agent_reserve(lim["max_agents"], 0, ADMIT_RESERVE_S, force=True)
+            if why:
+                m["extra"] = [why]
+                return False
+            m["reservation"] = rid
+            return True
+        if (refused and a.wait > 0 and STARVE_SOFT_S > 0 and waited - refused_since >= STARVE_SOFT_S
+                and not hard_refusals(refused, per_core, m, lim, hard_load) and starve_claim(STARVE_MIN_GAP_S, reserve_forced,
+                                 lambda: drop_reservation(m.pop("reservation", None)))):
+            forced = list(refused)
+            break
         if not refused or waited >= a.wait:
             break
         if waited >= next_note:
@@ -2469,13 +2835,15 @@ def cmd_admit(a):
                   + (f" mem_churn={m['churn']:.0f} (limit {lim['churn']:g})" if m["churn"] is not None else "")
                   + (f" free_mb={m['free_mb']:.0f} (floor {lim['min_free_mb']:g})" if m["free_mb"] is not None else "")
                   + (f" pageins={m['pageins_s']:.0f} (limit {lim['max_pageins']:g})" if m["pageins_s"] is not None else "")
+                  + (f" swapins={m['swapins_s']:.0f} (limit {lim['max_swapins']:g})" if m.get("swapins_s") is not None else "")
                   + (f" agents={m['agents']} (cap {lim['max_agents']})" if m["agents"] is not None else "")
                   + f", {int(waited)}s of {a.wait:g}s", file=sys.stderr)
             next_note += 60.0
         dl_beat()
-        time.sleep(max(0.0, min(poll, a.wait - waited)))
-    rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for)
-    print(json.dumps(rec) if a.json else admit_line(rec))
+        nap(max(0.0, min(poll, a.wait - waited)))
+    rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for, overrode=forced)
+    print(json.dumps(rec) if a.json else admit_line(rec), flush=True)
+    admit_log(rec, lim, caller, a.wait)
     return 0 if rec["status"] == "ok" else EX_TEMPFAIL
 
 
@@ -2542,11 +2910,17 @@ def main(supervise=False):
                    help=f"and compressor churn (pages compressed + decompressed per second, sampled over ~{ADMIT_MEM_WINDOW_S:g} s) "
                         f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; 20000 from 2026-11-01 to 2026-11-13, 60000 before)")
     p.add_argument("--min-free-mb", type=float, default=ADMIT_MIN_FREE_MB, metavar="N",
-                   help=f"and available memory (free + file-backed + purgeable pages on macOS, MemAvailable on Linux) is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
+                   help=f"and available memory (free + file-backed + purgeable pages on macOS, MemAvailable on Linux) is at least N MB (default {ADMIT_MIN_FREE_MB:g} here: "
+                        f"35 MB per GiB of RAM above 4 GiB, clamped to 300..1000, 1000 when the RAM cannot be read; env LW_MIN_FREE_MB)")
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
                    help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S). A lower line, "
                         f"{ADMIT_PAGEINS_CORROBORATED_S:g}/s (env LW_MAX_PAGEINS_CORROBORATED_S), also refuses, but only when free memory "
-                        f"is below the floor or compressor churn is above its admit limit")
+                        f"is below the floor, compressor churn is above its admit limit, or swap-ins are above "
+                        f"{ADMIT_SWAPINS_CORROBORATED_S:g}/s (env LW_SWAPINS_CORROBORATED_S)")
+    p.add_argument("--max-swapins", type=float, default=ADMIT_SWAPINS_S, metavar="N",
+                   help=f"and swap-ins per second (vm_stat Swapins, /proc/vmstat pswpin) are at most N (default {ADMIT_SWAPINS_S:g}, env "
+                        f"LW_MAX_SWAPINS_S; a host that cannot read the counter has this gate off). Swap-ins above "
+                        f"{ADMIT_SWAPINS_CORROBORATED_S:g}/s (env LW_SWAPINS_CORROBORATED_S) also corroborate the lower pageins line")
     p.add_argument("--max-agents", type=int, nargs="?", const=ADMIT_MAX_AGENTS, default=0, metavar="N",
                    help=f"and fewer than N live Paseo agents (`paseo ls -g --background --json`, status running or "
                         f"initializing) are alive machine-wide. OFF unless given (0 = off), because only a caller that "
@@ -2567,6 +2941,9 @@ def main(supervise=False):
                    help="with --wait: do not register the wait with bin/deadline (default: admit-wait-<pid>, budget min(--wait, 30 min) + 60 s, "
                         "owner $PASEO_AGENT_ID, heartbeat per poll; on expiry the waiter's own process group is killed and admit answers 75)")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("admit-log", help="the admit tuning log (one JSON line per admit call)")
+    p.add_argument("op", choices=["summary"])
+    p.add_argument("--days", type=float, default=7.0, metavar="N", help="summarize the last N days (default 7)")
     p = sub.add_parser("watcher", help="the one Paseo agent that hears about every spike")
     p.add_argument("op", choices=["set", "show", "clear", "test"])
     p.add_argument("target", nargs="?", help="clear: only if it is this target; test: the text to send")
@@ -2589,7 +2966,7 @@ def main(supervise=False):
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "release": cmd_release, "renew": cmd_renew, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "admit-log": cmd_admit_log, "release": cmd_release, "renew": cmd_renew, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":

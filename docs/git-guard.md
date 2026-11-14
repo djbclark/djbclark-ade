@@ -264,8 +264,8 @@ Evaluated in order; the module docstring has every form.
    overwrite an existing tip without `-f`); force/delete/move/copy `branch` forms still are. An ade-stub `hooksPath`
    stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
-   `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
+   hooks fail open**. **acp-run's own config pairs (2026-10-30; `tools/acp-run` was deleted 2026-11-14, so this allowance is dead code kept until a follow-up removes it, `docs/queue.md` Carried 1):** while
+   `acp-run` launched agents it put two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
    `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
    (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
    per-key rule exempts exactly those two pairs from environment configuration (PARAMETERS or legacy COUNT pairs; command value
@@ -301,6 +301,25 @@ Evaluated in order; the module docstring has every form.
    (and plain `format-patch`, whose default is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config,
    else cwd) when the output target is not inside the caller's active claimed workspace (`output-file`, 2026-11-09;
    `format-patch --stdout` allowed; unresolved `format.outputDirectory` fails closed).
+6. **`worktree remove` of a directory another live process uses (`worktree remove: live process`, 2026-11-14, gg-01):**
+   claimed or not, yours or not. git removes a worktree whose cwd an orphaned agent, editor or dev server still holds and
+   leaves that process in a deleted directory (site-public-djbclark-orchard-wt, orphan claude PID 10129). The guard asks
+   `lsof` (one all-process cwd listing, then `lsof +D <target>` for open files, 6 s each, `$ADE_LSOF_TIMEOUT`; inf, nan and junk read as 6 s, anything above 120 s is cut to it) and refuses
+   with every pid, command and cwd or file (first 8, then a count). The caller's own process chain (the shim, the agent that
+   ran it) is not "another user". **Fails open** when `lsof` is missing, fails or times out, or when `ps` cannot list processes for the caller-chain
+   exclusion (a guard that cannot look must not stop `git worktree remove`; so a same-uid agent that sets `ADE_LSOF` or a tiny
+   `ADE_LSOF_TIMEOUT` skips the check silently: it is a seatbelt, like item 13); a timed-out open-file walk leaves the cwd answer standing. `--force` does not bypass it
+   (that flag is about a dirty tree); `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` for that one call, or the operator's
+   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does. The env var allows the live-process rule only: `--force` on an
+   unclaimed worktree is still refused, and a pending `hook-config-unknown` refusal still wins over it; the operator override
+   allows the whole call, as everywhere (below). A path lsof spells differently from the resolved one (control or non-ASCII bytes in the worktree's path, under some
+   locales) is not matched in the cwd listing, so such a worktree is protected only by the `+D` open-file walk; on a very large
+   tree that walk can hit its 6 s bound, and the check then fails open (lw-01, #693 review L3: documented, not bounded
+   further). The module docstring files this rule as an "Also" under its item 4. `worktree move` and `prune` are not checked (a move keeps
+   the directory's inode; prune only touches a directory that is already gone). Order: inside rule 5's target loop, after the
+   foreign-claim refusal and before the `--force`-without-claim one. `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` is logged to guard.log as an
+   `override` (the stderr line names it). The match is case-insensitive on macOS (lsof prints the on-disk case). Tests: `tests/test_git_guard_live_use.py`
+   (fake lsof via `$ADE_LSOF`, plus one real-lsof test with a real child process).
 
 **Removed in O2 (replaced by the hooks):** the fetch/pull/remote-update dry-run preflight, the push dry-run preflight, the
 `update-ref`, `branch -d|-D|-f`, `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file
@@ -385,6 +404,14 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     git writes into `format.outputDirectory`. Still out of reach by design: a shell redirect
     (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`, and the bash fast
     path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
+15. **Worktree removal that does not go through the shim (2026-11-14):** `rm -rf` and `git worktree prune`, Paseo's own worktree
+    archive (the daemon's git), and a human shell. The in-repo callers `bin/review-pr` and `bin/ade-merge-ready` used to
+    `shutil.rmtree` a worktree after any failed `git worktree remove --force`; since lw-01 a refusal that names a live process
+    (`[worktree remove: live process]`) or another agent's claim (`[worktree remove of a claimed workspace]`) leaves the
+    directory in place, reports it on stderr and records `worktree_left` in their result. Any other failure still cleans up,
+    including the guard's routine `--force`-on-an-unclaimed-tree refusal (`[worktree remove --force]`, also exit 77): these
+    tools never claim their own temporary worktree, so under the shim that refusal is their normal case. The live-process
+    check (shim rule 6) covers only `git worktree remove`.
 
 ## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 
@@ -398,12 +425,11 @@ paseo send --json --no-wait OWNER --prompt '…'
 
 (positional id + `--prompt`; ask for `ack <your id>` and prove delivery per AGENTS.md order 10). To edit elsewhere, make
 your own workspace (`paseo run --new-workspace worktree …`), never borrow a claimed one. The one-cycle shim
-`skills/session-finder/relay.py` (over `paseo send`) remains until Wave 6 deletion (soft deadline 2026-11-20;
-[docs/slim/PLAN.md](slim/PLAN.md) F) — do not start new call sites on it. Code refusal strings are the twin of this
+`skills/session-finder/relay.py` (over `paseo send`) was deleted 2026-11-14 ([docs/slim/PLAN.md](slim/PLAN.md) F). Code refusal strings are the twin of this
 teaching ([#338](https://github.com/djbclark/djbclark-ade/pull/338)).
 
-The operator allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the same env name the transitional
-`bin/acp-dispatch` shim historically used; Wave 6 deletes that shim after one live cycle), in the shim and the hooks
+The operator allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the same env name the deleted
+`bin/acp-dispatch` shim used), in the shim and the hooks
 alike. Other environment: `ADE_REAL_GIT` (skip the PATH search), `ADE_PYTHON` (default `python3`), `ADE_STATE_DIR`.
 
 The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
@@ -412,7 +438,7 @@ The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside 
 `macos: true` dispatch or a local run on the Mac.
 
 On 2026-10-30 `acp-run` began shell-quoting the identity hook command and checking inherited hook pairs before treating
-a nested launch as guarded (kept as history while `tools/acp-run` remains; Wave 6 removes it with the dispatch shim). A
+a nested launch as guarded (history: `tools/acp-run` was deleted 2026-11-14 with the dispatch shim). A
 marker whose PARAMETERS transport was stripped is repaired.
 
 ## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)

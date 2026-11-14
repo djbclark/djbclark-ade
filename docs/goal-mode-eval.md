@@ -57,7 +57,7 @@ collisions with an in-flight turn. Paste those facts back into Carried #1 / this
 
 ### C1. What ADE already does (paseo + fan-out)
 
-1. Macro graph: `skills/fan-out` + `paseo run` / `acp-dispatch` shim; briefs with acceptance check and
+1. Macro graph: `skills/fan-out` + `paseo run` (the `acp-dispatch` shim is deleted); briefs with acceptance check and
    delivery footer (`docs/dispatch-footer.md`: report ends `DONE` / `BLOCKED:`, then `.done`).
 2. Failure: classify by exit code; **three attempts per slice, then stop** (`docs/orchestration-practices.md`
    §5); load gate before start; `deadline` + `bg` for long work.

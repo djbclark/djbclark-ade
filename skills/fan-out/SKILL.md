@@ -2,7 +2,7 @@
 name: fan-out
 description: >-
   Slice parallel work, assign owners and verify reports. Prefer native Paseo agent/workspace
-  operations; Wave 6 dispatch shims are transitional only. Use for "fan this out",
+  operations (the Wave 6 dispatch shims were deleted 2026-11-14). Use for "fan this out",
   "parallelize this", or an explicit delegation request. Select the destination host for remote work.
 ---
 
@@ -53,18 +53,31 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
 the brief) while its Paseo session sits in the lead's WORKERS window (below).
-After `route_agent.py plan` / `route` and `~/src/djbclark-ade/bin/load-watch admit` (machine capacity — not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs; exit 75 = refused, wait before launching):
+Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
+(N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
+exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
+and it records a reservation: once the agent has spawned, or the launch failed, run `~/src/djbclark-ade/bin/load-watch release <reservation>` (the `reservation` field of the JSON; exit 1 for an unknown id is harmless; a launcher that is the only dispatcher on the machine
+may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
+(one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
+and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
+the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
+# Before EACH launch: ~/src/djbclark-ade/bin/load-watch admit --wait 420 --max-agents --json   (exit 0 only; keep .reservation)
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
   --provider PROVIDER/MODEL --no-wait --mode FULL_ACCESS_MODE \
   --label ade.kind=KIND --label ade.name=NAME --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
+# Then (also if the launch failed): ~/src/djbclark-ade/bin/load-watch release <reservation>
 # ade-worker-run adds the placement (WORKERS window), --label ade.lead=LEAD and --label slice=NAME (below); by hand that is
 # `paseo run … --workspace wks_… --cwd ~/src/<repo> --label ade.lead=LEAD`, or --new-workspace local on the first launch
 ```
+
+A worker that judges untrusted GitHub artifacts for prompt injection (injection triage, reading an outside PR, issue or comment) takes
+`--label ade.kind=external-review` as its `ade.kind` (set it, replacing the dispatch's own value when it has one; never a second label): the peer-trust hook then frames its messages and notifications as evidence, not instruction
+(docs/orchestration-practices.md section 3).
 
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
 top-level worker the lead starts with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`:
@@ -89,7 +102,7 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    worktree; `<work>`: `--window-middle`; without `--window-middle`, the one WORKERS window holding a live agent labelled
    `ade.lead=<LEAD>`). Two matches, or a match holding a live agent labelled for another lead, are refused. A legacy window
    of this lead (`workers <middle> <LEAD>`, `WORKERS <middle> <LEAD>`) is renamed to the current form first (same window id).
-   It passes `--workspace` of the window plus `--cwd` (the window's own). With no window yet, the first launch mints one
+   It passes `--workspace` of the window plus `--cwd` (the window's own: a different `--cwd` is refused, because Paseo ignores it with `--workspace`, getpaseo/paseo#9699; the launched agent's `Cwd` is checked afterwards and a worker that landed elsewhere is stopped). With no window yet, the first launch mints one
    (`--new-workspace local --cwd ~/src/<repo>`), reads its id from the launch (JSON `workspaceId` if paseo prints one, else the
    single `Created workspace wks_… - <name>` stderr line, cross-checked with the agent's state file; absent or ambiguous
    fails closed and names the launched agent) and renames it `WORKERS <repo> (<work>)`. `--window-middle` is required on the first

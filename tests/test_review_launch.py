@@ -728,12 +728,15 @@ if a[:2] == ["pr", "view"]:
     print(json.dumps({k: x for k, x in v.items() if x != "__absent__"})); sys.exit(0)
 if a[:2] == ["api", "user"]:
     print(s.get("me", "djbclark")); sys.exit(0)
-if len(a) >= 2 and a[0] == "api" and a[1].startswith("users/"):
-    login = a[1].split("/", 1)[1].lower()
+if len(a) == 2 and a[0] == "api" and "/pulls/" in a[1]:
+    if s.get("pulls_rc"):
+        sys.stderr.write("HTTP 502\n"); sys.exit(1)
+    if "pulls_raw" in s:
+        print(s["pulls_raw"]); sys.exit(0)
+    login = s["view"]["author"]["login"]
     ids = {"djbclark": 131936, **s.get("user_ids", {})}
-    if ids.get(login) is None:
-        sys.stderr.write("not found\n"); sys.exit(1)
-    print(ids[login]); sys.exit(0)
+    user = {"login": login, "type": s.get("author_type", "User"), "id": ids.get(login.lower()), **s.get("pulls_user", {})}
+    print(json.dumps({"user": user})); sys.exit(0)
 if len(a) == 2 and a[0] == "api" and "/activity?" in a[1]:
     if s.get("activity_rc"):
         sys.stderr.write("HTTP 500\n"); sys.exit(1)
@@ -813,6 +816,45 @@ def test_review_pr_reviews_the_exact_head_in_a_clean_worktree_and_prints_the_mar
     doc = prw.filed()
     assert doc["verdict"] == "APPROVE" and doc["marker"] == marker and doc["base_sha"] == prw.base
     assert (prw.state / f"djbclark__djbclark-ade-pr7-{prw.pr_head}.json").stat().st_mode & 0o777 == 0o600
+
+
+LIVE = "REFUSED git worktree remove [worktree remove: live process]"
+CLAIMED = "REFUSED git worktree remove [worktree remove of a claimed workspace]"
+FORCE_RULE = "REFUSED git worktree remove [worktree remove --force] nobody; the target has no active claim of yours"
+
+
+def _git_that_fails_the_worktree_remove(prw, rc: int, text: str = "failed") -> None:
+    """A `git` ahead of the real one on PATH: `worktree remove` prints `text` and exits `rc` (77 is ade-git-guard's refusal)."""
+    real = shutil.which("git")
+    (prw.bin / "git").write_text(
+        f'#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = remove ]; then echo "{text}" >&2; exit {rc}; fi\n'
+        f'exec "{real}" "$@"\n')
+    (prw.bin / "git").chmod(0o755)
+
+
+@pytest.mark.parametrize("text", [LIVE, CLAIMED])
+def test_review_pr_leaves_the_worktree_when_the_git_guard_refuses_its_removal(prw, text):
+    """lw-01 (#693 review L5): a live process or another agent's claim (exit 77) is not answered by rmtree."""
+    _git_that_fails_the_worktree_remove(prw, 77, text)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert Path(call["cwd"]).is_dir(), "the guard's refusal must leave the directory in place"
+    assert "refused by the git guard" in r.stderr and call["cwd"] in r.stderr
+    assert prw.filed()["worktree_left"] == call["cwd"]
+
+
+@pytest.mark.parametrize("rc,text", [(1, "failed"), (77, FORCE_RULE)])
+def test_review_pr_still_removes_its_worktree_when_the_failure_is_not_a_live_process_or_a_claim(prw, rc, text):
+    """The guard's routine `--force`-on-an-unclaimed-tree refusal (77) hits this tool's own never-claimed temporary
+    worktree on every run under the shim: that one is still cleaned up (adversary r1 of #701, A1)."""
+    _git_that_fails_the_worktree_remove(prw, rc, text)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert not Path(call["cwd"]).exists()
+    assert "worktree_left" not in prw.filed()
+    assert git("worktree", "list", cwd=prw.clone).count("\n") == 0, "pruned too"
 
 
 def test_review_pr_runs_the_launcher_in_review_mode_with_the_review_schema_and_head(prw):
@@ -895,8 +937,7 @@ def test_review_pr_never_calls_gh_to_post(prw):
     for line in (prw.tmp / "gh.log").read_text().splitlines():
         argv = json.loads(line)
         assert (argv[:2] in (["pr", "view"], ["api", "user"])
-                or (argv[0] == "api" and argv[1].startswith("repos/") and len(argv) == 2)
-                or (argv[0] == "api" and argv[1].startswith("users/") and argv[2:] == ["--jq", ".id"])), argv
+                or (argv[0] == "api" and argv[1].startswith("repos/") and len(argv) == 2)), argv
 
 
 # ---- E8 review repairs (2026-11-07) -------------------------------------------------------------------------
@@ -1184,6 +1225,16 @@ def _view(prw, **extra):
     ("history unreadable", lambda p: {"activity_rc": 1}),
     ("the author's user id is not the pinned one", lambda p: {"user_ids": {"djbclark": 424242}}),
     ("the author's user id cannot be read", lambda p: {"user_ids": {"djbclark": None}}),
+    ("the author record is not a User", lambda p: {"author_type": "Bot"}),
+    ("the PR's own record cannot be read", lambda p: {"pulls_rc": 1}),
+    ("the PR's own record is not json", lambda p: {"pulls_raw": "not json"}),
+    ("the PR's own record is a list", lambda p: {"pulls_raw": "[]"}),
+    ("the PR's own record has no user", lambda p: {"pulls_raw": "{}"}),
+    ("the PR's own record has a user that is not an object", lambda p: {"pulls_raw": json.dumps({"user": "x"})}),
+    ("the PR's own record names another login, with the operator's id", lambda p: {"pulls_user": {"login": "someoneelse", "id": 131936}}),
+    ("the PR's own record has no login", lambda p: {"pulls_user": {"login": None, "id": 131936}}),
+    ("a child PR was merged into the branch", lambda p: {"activity": [_push(p, activity_type="pr_merge")]}),
+    ("a merge queue merged into the branch", lambda p: {"activity": [_push(p, activity_type="merge_queue_merge")]}),
 ])
 def test_review_pr_gives_the_operators_pr_the_yolo_runtime_only_when_the_operator_pushed_the_head(prw, what, gh_kw):
     prw.gh(view=_view(prw), **gh_kw(prw))
@@ -1209,7 +1260,7 @@ def test_review_pr_asked_for_restricted_does_not_read_the_branch_history(prw):
     r = prw.review("--runtime", "restricted")
     assert r.returncode == 0 and "runtime restricted" not in r.stderr, r.stderr
     log = [json.loads(line) for line in (prw.tmp / "gh.log").read_text().splitlines()]
-    assert not [a for a in log if a[:1] == ["api"] and "/activity" in a[1]] and not [a for a in log if a[:2] == ["api", "users/djbclark"]]
+    assert not [a for a in log if a[:1] == ["api"] and "/activity" in a[1]] and not [a for a in log if a[:1] == ["api"] and "/pulls/" in a[1]]
 
 
 @pytest.mark.parametrize("cross", [True, None, "__absent__"])
@@ -1238,7 +1289,7 @@ def test_review_pr_reads_the_branch_history_of_the_repository_it_reviews(tmp_pat
     assert argv_val(w.launches()[0]["argv"], "--permission-mode") == "bypassPermissions"
     log = [json.loads(line) for line in (w.tmp / "gh.log").read_text().splitlines()]
     assert ["api", f"repos/{repo_owner}/djbclark-ade/activity?ref=refs/heads/feature&direction=desc&per_page=1"] in log
-    assert ["api", "users/djbclark", "--jq", ".id"] in log
+    assert ["api", f"repos/{repo_owner}/djbclark-ade/pulls/7"] in log
 
 
 def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_not_owner(prw):

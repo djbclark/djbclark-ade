@@ -6,8 +6,7 @@
 Forwards every argument to `gh pr checks` (GH_BIN, default `gh`). When `--watch` is present and
 DEADLINE_NAME is unset, re-runs this wrapper under `deadline run` (name `gh-pr-checks-<pid>`,
 default budget 20m, `--on-expire kill`, no heartbeat: gh does not beat). The supervisor forwards
-SIGTERM/SIGINT/SIGHUP once to that `deadline run` (same pattern as `deadline_wait.supervised` /
-`acp-dispatch-wait`); a missing or unusable deadline tool, or a refuse/crash before the supervised
+SIGTERM/SIGINT/SIGHUP once to that `deadline run` (same pattern as `deadline_wait.supervised`); a missing or unusable deadline tool, or a refuse/crash before the supervised
 copy touches the start mark, is one stderr warning and the watch continues unregistered (docs/
 deadline.md "Never costs the wait"). `--no-deadline` opts out. A non-watch call never registers.
 """

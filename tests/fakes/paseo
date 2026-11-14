@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A fake `paseo` (0.15.3 shapes, read from getpaseo/paseo 9f68af0) for tests/test_acp_dispatch.py and the dialogue test.
+"""A fake `paseo` (0.15.3 shapes, read from getpaseo/paseo 9f68af0) for the route_agent and dialogue tests (it was written for the deleted tests/test_acp_dispatch.py).
 
 State lives in $FAKE_PASEO_STATE (agents.json, calls.jsonl), under an flock so a burst of parallel launches is
 counted exactly. Knobs (all optional):

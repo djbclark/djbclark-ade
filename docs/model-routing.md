@@ -42,11 +42,13 @@ ruling 2026-11-14): `reviewRequestedFromMe` or `isSecurity` is `judgment`, `auth
 else (Issues-tab items included) is `code`. It runs `route_agent.py route --kind K [--repo NAME] --json`, 25 s timeout
 (`NAME` is the bare lowercase repo name, dropped when outside `[a-z0-9._-]` or starting with `-`), and prints `{provider, model,
 thinkingOptionId, modeId, reason}` parsed from the routed `dispatch` line; `modeId` stays as routed (yolo for every PR, bot
-and non-owner authors included) and `contextMode`/`profileName` are never set. Router choice: `$PR_RADAR_ROUTE_AGENT`
+and non-owner authors included) and `contextMode`/`profile` (pr-radar's field names) are never set; a template value
+(`<id from: …>`, any `<` or `>`) in the dispatch is refused, never passed on. Router choice: `$PR_RADAR_ROUTE_AGENT`
 (tests), else the sibling `route_agent.py` when the script's parent has `config/routing.toml` (an ADE checkout or
 worktree), else `~/src/djbclark-ade/bin/route_agent.py`, else the sibling (vendored copy). Only the named fields of the
 context are read; titles and comments are untrusted and never forwarded. On failure (bad stdin, timeout, router non-zero
-exit with its stderr and exit code passed through, unparsable answer) stdout stays empty and pr-radar falls back to its
+exit: its exit code, and as reason its JSON `reason` on stdout (the no-headroom case) with the last stderr line after it, else its
+stderr; unparsable answer; template dispatch or value, `cursor-cloud launch …` included) stdout stays empty and pr-radar falls back to its
 defaults. Tests: `tests/test_pr_radar_route.py` (stubbed router, no live quota).
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
@@ -63,7 +65,7 @@ A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, o
 | B2. `omp` (retired transport) | omp, disabled | the Claude Max plan's monthly API credits (an expiring grant) | `api-only` first, then judgment (adversary rounds), code, bulk; skipped while omp has no enabled Anthropic login |
 | B3. `codex` | codex | subscription ($100 plan, aiuse `prolite`) | astra for frontier only; everyday models while every window has `plenty_min` left |
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
-| B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; acp-dispatch stopped launching it with the Paseo shim |
+| B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; the deleted acp-dispatch shim stopped launching it with Paseo |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
 | B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
@@ -80,7 +82,7 @@ C1. `route_agent.py` builds the service list from the curated rows plus `paseo p
 is `"Enabled"` and whose `status` is `available` (read with a 15 s timeout; never raises). Right after the daemon starts a
 row reads `loading`: the call is repeated twice, 3 s apart, and a row still loading is treated as absent with a note on
 stderr. Names pass through `[routing].aliases` (Paseo's `opencode` provider is the `opencode-go` pool) and
-`never_route`. It replaced acp-run's agent table, the non-ACP headless list and Orca's roster.
+`never_route`. It replaced the deleted acp-run's agent table, the non-ACP headless list and Orca's roster.
 C2. `paseo provider models <provider> --json` gives the provider's model ids; `route_agent.py services --check-models`
 checks every suggested model against it (exit 1 when one is not listed, 2 when Paseo cannot list a provider). Not yet run
 against the Mac's daemon: run it there after the merge.
@@ -151,8 +153,7 @@ union of that list and every spelling/alias of each tiered vendor's frontier rol
 
 ## H. Reasons kept from the earlier matrix
 
-H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only through
-`--kind frontier`, capped per wave, and in-flight slices reserve their estimated quota per service.
+H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the frontier models are reached only as the `frontier` kind (`route_agent.py plan`), capped per plan, and in-flight slices reserved their estimated quota per service (acp-dispatch, gone 2026-11-14; now re-plan before each launch, model-routing D5).
 H2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
 adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is

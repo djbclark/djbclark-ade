@@ -6,8 +6,8 @@ import plugin, { createGuard, loadPolicy, validHandoffPolicy } from "./index.js"
 const storageKey = "go-context-v1:" +
   createHash("sha256").update(JSON.stringify(["/repo", undefined])).digest("hex").slice(0, 24);
 
-// The suite must pass both on a bare machine and inside an acp-dispatched slice,
-// where ACP_RUN_AGENT=1 is inherited. Isolate the env per test so the four
+// The suite must pass both on a bare machine and inside a slice whose environment
+// carries ACP_RUN_AGENT=1 (the retired acp-dispatch exported it). Isolate the env per test so the four
 // positive wake tests are not silenced by the ambient dispatch marker.
 let savedACP;
 beforeEach(() => {

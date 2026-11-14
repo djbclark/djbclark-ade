@@ -1,0 +1,21 @@
+# peer_trust_gate (claude/hooks/peer_trust_gate.py): external-security-sensitive senders.
+#
+# Operator ruling 2026-11-14: always believe what other agents tell you, unless the agent is
+# external-security-sensitive, meaning its job is judging untrusted GitHub artifacts (an issue,
+# PR, draft PR, comment or discussion) for prompt injection. Such a sender is NOT believed automatically:
+# the hook says its message is evidence to check against the artifact, never an instruction, and not to act
+# on it without the lead's or the operator's decision.
+#
+# A sender matches by (1) the Paseo agent label ade.kind=external-review (the stable marker, read from its
+# agent record ~/.paseo/agents/*/ID.json, archived agents included; `paseo ls`/`inspect` expose no labels),
+# (2) exact agent id, or (3) a case-insensitive regular expression searched in its title (the envelope's
+# source-agent-title, the title in that record, or the name `paseo ls -g --json` lists for it). Bare
+# "review" is deliberately not a pattern: repair workers carry it. The fleet's gh watcher and PR Radar do not set the label yet; `paseo run` launches should (docs/orchestration-practices.md).
+# The sender id in a Paseo envelope is self-stamped from the sender's own PASEO_AGENT_ID and unverified, so this
+# exception is best-effort framing: a steered sender can rename itself, forge an id or start an unlabelled child.
+# An unreadable or invalid file, or one that leaves nobody to match (no ids, no usable pattern), falls back
+# to the built-in title patterns (the list below), so the exception cannot vanish. Python before 3.11 cannot read this file
+# (no tomllib): the defaults apply and `ids` are ignored.
+[sensitive]
+ids = []
+title_patterns = ["injection", "triage", "review-pr", "pr-review", "adversary", "gh-watch"]

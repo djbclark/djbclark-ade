@@ -41,7 +41,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the transitional `acp-dispatch` shim leaves ~2026-11-20). | "fan this out", "split this across agents". |
+| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the `acp-dispatch` shim was deleted 2026-11-14). | "fan this out", "split this across agents". |
 | `tidy` | Tidies one repo's Paseo agents and windows with `bin/ade-tidy` (observe-only; `--apply` acts): reconnects agents with no proven contact (one plain send, once an hour), lists workers waiting on the lead and agents waiting on the operator, renames windows to `MAIN\|WORKERS\|USER <repo> (<current work>)`, reports tabs in the wrong window (Paseo has no move), archives finished workers and empty windows (2026-11-13); `bin/ade-tidy prune` archives finished Baton `[Handoff writer]` helpers machine-wide (2026-11-14). | `/tidy`; "tidy the workspaces", "reconnect the agents", "any workers waiting on me". |
 | `model-routing` | The Claude tier for a role, effort, which pool takes a slice (`route_agent.py plan`), reading quota (aiuse, `paseo usage ls`), the frontier allowance, fallback chains (effort-routing and fallback-chains folded in, 2026-11-07). | Before a multi-agent run or when a quota window is tight. |
 | `watch` | Low-token terminal load inspection, memory churn check, and incident triage (`/watch load`, `/watch`, `/loadwatch`). | `/watch load`, "check load", "triage load spikes". |
@@ -58,14 +58,14 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | `oc-go-key` | **Retired OpenCode path (Pi sole-TUI 2026-11-09).** Historically recovered a session stopped by "Go usage limit exceeded": read which OpenCode Go account served this Mac, swapped the credential (`oc-go-key use <label>`), resumed the turn. Keep for archive/history only; not a live Pi or Paseo recovery path. | Legacy OpenCode Go-limit recovery only. |
 | `paseo-screen` | DEPRECATED 2026-11-13 (plugin disabled, "super-buggy"): the route for Paseo GUI checks is headless Playwright against the daemon web UI; safety rules inside. | `/paseo-screen`; "take a screenshot of the screen". |
 | `ingest-web-ai` | Design + offline normalizer for Gemini/Grok (and similar) web chats into ADE memory (Carried #23). No live scrape, no credentials, no S1 writes. | `/ingest-web-ai`; "normalize a Gemini export". Doc: `docs/ingest-web-ai.md`. |
+| `eli5` | Rules for an ELI5 or plain-language explanation: STE-based writing rules (not full STE), a fixed structure (core idea, everyday analogy and where it breaks, how it works, term map), and an accuracy check against the real system (2026-11-14). | `/eli5`; "ELI5", "explain like I'm five", "explain simply", "for a non-expert". |
 | `tell-chief-of-staff` | Pointer (2026-11-06): messaging the Grok Bot "Chief of Staff" lives in the peer-link repository. | "tell grok", "tell Chief of Staff". |
 | `tell-coding-bot` | Pointer (2026-11-06): the Grok Bot "Coding" sender lives in the peer-link repository (do not restore `bin/coding-bot` here; retired ade PR #269 demanual: `docs/history/coding-bot-peer-link-2026-11-10.md`). | "tell the Coding bot". |
 
 `skills/session-finder/` was restored 2026-11-08 for Pi-first transcript history search (`session-history.py`;
 data only — it does not launch retired clients). `skills/watch/` (with `/loadwatch` alias) was restored 2026-11-11
 (#539) for low-token terminal load inspection, memory churn check, and incident triage, superseding its earlier
-slim-down deletion. The one-cycle relay shim `relay.py` over `paseo send` remains until
-2026-11-20; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
+slim-down deletion. The one-cycle relay shim `relay.py` over `paseo send` was deleted 2026-11-14; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are installed from Paseo (`npx skills
 add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
 

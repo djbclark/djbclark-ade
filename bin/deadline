@@ -47,7 +47,7 @@ This is the interim piece; the plan's B9 launchd watchdog is meant to absorb it,
 
 Records: one JSON file per name in ~/.local/state/deadlines/ (DEADLINE_STATE_DIR overrides), written atomically; new fields are
 read with .get. A record is enforced against the process START TIME recorded at registration, so a recycled pid is never signalled.
-Test hooks: DEADLINE_NOW (epoch seconds), DEADLINE_RELAY, DEADLINE_HERMES_PING, DEADLINE_ACP_DISPATCH, DEADLINE_PASEO,
+Test hooks: DEADLINE_NOW (epoch seconds), DEADLINE_RELAY, DEADLINE_HERMES_PING, DEADLINE_PASEO,
 DEADLINE_SETTLE_S (wait after a signal), DEADLINE_RUN_POLL (run loop tick), DEADLINE_AGENT_IDLE (default 30m),
 DEADLINE_AGENT_SCAN_EVERY (default 5m), DEADLINE_AGENT_REALERT (default 1h).
 """
@@ -433,12 +433,10 @@ def hermes_ping(msg: str) -> str:
     return f"ping rc={rc}"
 
 
-# Sourceless-send contract (same as the Wave 6 relay shim until that shim is deleted).
+# Sourceless-send contract (the contract the deleted Wave 6 relay shim had).
 _DELIVERED = ("sent", "completed")
 _SENDABLE = ("idle", "running", "closed")
 _STEER_PROVIDERS = ("claude", "codex", "opencode", "omp", "pi")
-# Path split so LIVE_RE inventory ignores this transitional DEADLINE_RELAY hook (Wave 6).
-_RELAY_SHIM_REL = "skills/session-finder/" + "relay.py"
 
 
 def _send_status(obj: object) -> str:
@@ -482,16 +480,15 @@ def _paseo_json(*args: str, timeout: float = 30) -> tuple[int, object | None, st
 
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
-    """Send to the owner. Default (2026-11-09, Wave 6): native sourceless `paseo send` matching the shim contract:
+    """Send to the owner. Default (2026-11-09, Wave 6): native sourceless `paseo send` (the contract the deleted relay shim had):
     inspect for pending cards / non-steerable runs, `--behavior steer` (default without PASEO_AGENT_ID is interrupt),
     and delivery only when JSON `.status` is `sent`/`completed` (`paseo send` exits 0 for every status).
 
-    `DEADLINE_RELAY` (tests / transitional) still invokes the Wave 6 shim with `ID --message-file -` until
-    that shim is deleted (docs/slim/wave6-follow-up.md)."""
+    `DEADLINE_RELAY` (a test hook) names a stand-in program run as `PROGRAM ID --message-file -`."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
     if os.environ.get("DEADLINE_RELAY"):
-        argv = tool("DEADLINE_RELAY", _RELAY_SHIM_REL) + [owner, "--message-file", "-"]
+        argv = tool("DEADLINE_RELAY", "DEADLINE_RELAY") + [owner, "--message-file", "-"]
         try:
             r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90, env=clean_env())
         except subprocess.TimeoutExpired:
@@ -501,7 +498,7 @@ def relay_rc(owner: str, text: str) -> tuple[int, str]:
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
 
-    # Native path: same gates as the Wave 6 relay shim (threat-model: sourceless send clears pending permissions).
+    # Native path: same gates as the deleted Wave 6 relay shim (threat-model: sourceless send clears pending permissions).
     try:  # ls-02: an owner replaced by a self-handoff is told through its successor (an archived one is refused below)
         sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
         import ade_send_guard  # noqa: PLC0415
