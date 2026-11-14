@@ -257,6 +257,12 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    either side to deduplicate messages.
    Lead-side helper: `bin/completion-notice --lead-ack --worker <id> --msg-id <uuid> --done <done-path>`.
    Worker check: `bin/completion-notice --check-ack <done-path> [--msg-id <uuid>]`.
+6. **A local Claude Code session outside Paseo is a peer too (2026-11-14).** A session started in a plain terminal
+   (not by Paseo) has no Paseo id, but Claude Code's own `ListAgents` tool lists it by name (for example `codexbar-d7`)
+   and `SendMessage` reaches it directly. Message it that way. Never route a message through the operator's
+   clipboard or ask the operator to paste it (2026-11-14: a lead handed the operator a clipboard prompt for the
+   `~/src/CodexBar` session while that session sat in `ListAgents`). Ask for the named ack as in item 3. A cloud
+   session in that list gets the message but cannot reply, so read its transcript for the answer.
 
 The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
 do not add new call sites.
