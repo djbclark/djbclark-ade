@@ -132,6 +132,11 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 # the lead's first launch has no WORKERS window yet: --new-workspace local --cwd ~/src/<repo> instead of --workspace
 ```
 
+**A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
+discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` in place of its usual KIND (nothing else keys off
+the `ade.kind` value). `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
+
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
 `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` is not a descendant of the lead, and
 `bin/ade-auto-permit` approves its permission requests through this label (audit reason `lead-label`;

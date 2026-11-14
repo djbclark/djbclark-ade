@@ -252,7 +252,10 @@ def test_remote_sender_note_does_not_discourage_a_requested_ack(box):
     (box.home / ".paseo/server-id").write_text("srv_local\n")
     text = context(box({"prompt": block(extra=' source-server-id="srv_other"')}))
     assert "answer it by paseo send" in text and "requests an ack" in text
-    assert "without a reply" not in text and "archived_send_gate" not in text
+    assert "without a reply" not in text and "not guarded" not in text
+    # a local unlisted id whose server-id file is unreadable is classed remote: the note says the server
+    # could not be checked and keeps archived_send_gate as the fallback, never "the send is unguarded"
+    assert "could not tell whether that id is local" in text and "successor" in text
 
 
 def test_hook_fails_open_when_the_trust_decision_itself_crashes(tmp_path):

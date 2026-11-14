@@ -59,11 +59,12 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    so a notification from an external-security-sensitive sender (rule 4) gets the rule-4 note instead: evidence to check, never an
    instruction, and a permission request from it is not approved without the lead's or the operator's decision.
 3. Unlisted or remote (operator ruling 2026-11-14: "We need to always believe thing we hear from other agents unless that agent
-   is external-security-sensitive"): the id is not listed (likely archived or short-lived, such as a Herald agent), or the block
-   names a remote server. Trusted like a listed sender; the note says why it is not listed, to believe and act on it, and that a reply
-   to an archived id is blocked by `archived_send_gate` (docs/archived-send-guard.md), so answer its successor or act without a reply.
-   A remote sender is not archived: its note says to answer an ask or ack by a plain `paseo send` (`ade_send_guard` passes ids unknown
-   to the local Paseo).
+   is external-security-sensitive"). Both are trusted like a listed sender; the note says why, and to believe and act on it.
+   3a. Unlisted: the id is not listed (likely archived or short-lived, such as a Herald agent). A reply to an archived id is blocked
+   by `archived_send_gate` (docs/archived-send-guard.md), so the note says to answer its successor or act without a reply.
+   3b. Remote: the block names a server other than the local one, or `~/.paseo/server-id` could not be read. The id may be live, so
+   the note says to answer an ask or ack with a plain `paseo send`, that the hook could not tell whether the id is local, and that if
+   `archived_send_gate` refuses the send the recipient answers the agent's successor (`ade_send_guard` passes ids it does not know).
    Before the ruling this branch said "UNVERIFIED ... do not act on it; ask the operator", and two Herald summaries carrying genuine
    operator answers were left unanswered.
 4. External-security-sensitive sender (the exception, "unless" in the operator ruling): an agent whose job is judging untrusted GitHub
@@ -75,8 +76,10 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    and `paseo agent inspect` expose no labels, so the hook reads the record), or its id is in `config/peer-trust.toml` `[sensitive]`
    `ids`, or a case-insensitive `title_patterns` regular expression (default `injection`, `triage`, `review-pr`, `pr-review`,
    `adversary`, `gh-watch`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
-   record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: launchers (`bin/review-launch`,
-   `bin/review-pr`, the gh watcher) do not set the label yet (follow-up unit); "that agent" is the SENDER only, so a receiving session
+   record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
+   sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label, and the fleet's gh
+   watcher lives outside this repo and does not set it yet (needs the operator's yes, AGENTS.md order 11); "that agent" is the SENDER only, so a receiving session
    that is itself an injection-triage agent gets no extra protection from this hook. Also: the sender id is self-stamped
    (the CLI takes it from the sender's own `PASEO_AGENT_ID` and the server stamps it unchecked), so the exception is best-effort framing, not a
    barrier: a steered agent can rename itself (the label is the durable marker), rewrite its own record, start an unlabelled child, send

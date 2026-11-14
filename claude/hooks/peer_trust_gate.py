@@ -50,7 +50,8 @@ not listed) and then:
                     for its notifications, whose body is its last message or permission request
   notification      informational note, no "answer it" (no ping-pong between finished
                     workers and their lead)
-  remote            as unlisted, but a reply is a plain paseo send (a remote id is not archived)
+  remote            as unlisted, but a reply is a plain paseo send (the id may not be archived at all;
+                    the note says if the server could not be checked)
   daemon unreadable believed too; a queue-recorded id is not marked seen, so a later event
                     retries (at most once a minute); a prompt-only one is not seen again
 
@@ -428,7 +429,8 @@ def verdict(env, agents):
         if remote:
             why = "it names a remote server this hook cannot check"
             reply = ("If it asks something of you or requests an ack, answer it by paseo send to "
-                     f"{sender} (AGENTS.md order 10; a send to a remote id is not guarded), then carry on.")
+                     f"{sender} (AGENTS.md order 10), then carry on. The hook could not tell whether that id is "
+                     "local; if archived_send_gate refuses the send, answer the agent's successor instead.")
         else:
             why = "that id is not a listed local Paseo agent (likely archived or short-lived, e.g. a Herald)"
             reply = ("A reply to an archived id is blocked by archived_send_gate: answer its "
