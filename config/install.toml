@@ -588,6 +588,18 @@ probe = "UNKNOWN"
 platforms = ["mac", "linux"]
 
 [[component]]
+id = "paseo-plugin-github-board"
+class = "offered"
+chosen = true
+summary = "GitHub sidebar board: your issues, draft/open PRs and discussions; send a card to a new agent (gpambrozio/github-board)"
+source = "https://paseo.sh/plugins/gpambrozio/github-board"
+install = "UNKNOWN"
+update = "UNKNOWN"
+probe = "UNKNOWN"
+platforms = ["mac", "linux"]
+notes = "2026-11-14: operator chose it; installed on the Mac by `paseo plugin add gpambrozio/github-board` (0.11.0, running). No paseo_plugin key, like the other offered plugin rows (doctor: unknown; apply: blocked; nothing runs): with one, a chosen row fails doctor wherever the plugin is absent. Writes to GitHub with the gh login; see docs/install-catalog.md section G."
+
+[[component]]
 id = "paseo-plugin-skills"
 class = "offered"
 chosen = true
