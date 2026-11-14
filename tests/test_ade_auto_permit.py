@@ -480,8 +480,9 @@ def test_unused_max_tool_constant_is_gone():
     assert 'MAX_TOOL' not in runpy.run_path(str(SCRIPT))
 
 
-# All 41 tools Paseo registers (packages/server/src/server/agent/tools/paseo-tools.ts, 2026-11-14), each held or approved on
-# purpose; a new Paseo tool must be added here, so it cannot slip in unclassified.
+# The 41 core tools Paseo registers (packages/server/src/server/agent/tools/paseo-tools.ts, 2026-11-14), each held or approved
+# on purpose, plus its 22 conditional browser tools (browser-tools/tools.ts), all approved. A hand list: a new Paseo tool
+# is approved until it is added here and to HOLD_TOOLS.
 PASEO_HELD = ['archive_agent', 'archive_workspace', 'cancel_agent', 'create_heartbeat', 'create_schedule', 'kill_agent',
               'kill_terminal', 'respond_to_permission', 'resume_schedule', 'run_schedule_once', 'send_agent_prompt',
               'send_terminal_keys', 'set_agent_mode', 'update_agent', 'update_schedule']
@@ -501,6 +502,24 @@ def test_every_paseo_tool_is_classified_in_each_naming_scheme():
     for tool in PASEO_APPROVED:
         for name in (f'mcp__paseo__{tool}', f'paseo_{tool}', f'paseo-host_{tool}', f'mcp__paseo-host__{tool}'):
             assert module['classify']({'name': name}) is None, name
+
+
+PASEO_BROWSER = ['list_tabs', 'new_tab', 'snapshot', 'click', 'fill', 'wait', 'type', 'keypress', 'navigate', 'screenshot',
+                 'upload', 'select', 'drag', 'logs', 'evaluate', 'scroll', 'resize', 'close_tab', 'back', 'forward', 'reload', 'hover']
+
+
+def test_paseo_browser_tools_are_approved_on_purpose():
+    assert len(PASEO_BROWSER) == 22
+    module = runpy.run_path(str(SCRIPT))
+    for tool in PASEO_BROWSER:
+        assert module['classify']({'name': f'mcp__paseo__browser_{tool}'}) is None, tool
+    # OpenCode's `paseo_browser_select` is held only by the Pi/OMP `select` word, which fails closed.
+    assert module['classify']({'name': 'paseo_browser_select'}) == 'ui-token:select'
+
+
+def test_plan_mode_stem_catches_a_run_together_mcp_tool():
+    module = runpy.run_path(str(SCRIPT))
+    assert module['classify']({'name': 'mcp__x__set_plan_mode'}) == 'stem:planmode'
 
 
 def test_hold_matches_suffixed_pluralised_and_run_together_variants():

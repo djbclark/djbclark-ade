@@ -77,9 +77,11 @@ UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI meth
 # send_agent_prompt or a steer denies every pending question and plan of its target; send_terminal_keys types into
 # a TUI prompt and kill_terminal destroys it; cancel/kill/archive_agent and archive_workspace abort the turns that
 # hold cards; create/update_schedule, run_schedule_once, resume_schedule and create_heartbeat set, fire or re-arm
-# deferred prompts and modes. Every one of Paseo's 41 MCP tools is classified in the tests. `create_agent` stays
-# approvable on purpose (the ADE's fan-out needs it; operator trust ruling 2026-11-13). A shell `paseo` command run
-# through Bash is approved like any other Bash.
+# deferred prompts and modes. The tests classify Paseo's 41 core MCP tools and its 22 conditional browser tools (a hand
+# list, not read from Paseo's source: a new Paseo tool is approved until added). `create_agent` and `stop_workspace_script`
+# stay approvable on purpose (fan-out needs the first; a stopped dev server answers no card; operator trust ruling
+# 2026-11-13). A shell `paseo` command run through Bash, or Paseo's browser tools driving the daemon web UI, are approved
+# like any other tool: the hold covers Paseo's card/mode/turn MCP tools only.
 HOLD_TOOLS = ("respond_to_permission", "set_agent_mode", "update_agent", "send_agent_prompt", "send_terminal_keys",
               "kill_terminal", "cancel_agent", "kill_agent", "archive_agent", "archive_workspace", "create_schedule",
               "update_schedule", "run_schedule_once", "resume_schedule", "create_heartbeat")

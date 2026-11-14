@@ -429,8 +429,10 @@ elicitation word, or a missing name): it is logged `skip` / `operator-question` 
 `set_agent_mode`, `update_agent`, `send_agent_prompt`, `send_terminal_keys`, `kill_terminal`, `cancel_agent`, `kill_agent`,
 `archive_agent`, `archive_workspace`, `create_schedule`, `update_schedule`, `run_schedule_once`, `resume_schedule`,
 `create_heartbeat` (rule `hold:<tool>`; an explicit hold list, not an allowlist, so unknown tools stay approvable; tests classify
-all 41 Paseo MCP tools). `create_agent` stays approved on purpose (fan-out needs it; peer-trust ruling 2026-11-13), and a shell
-`paseo` command run through Bash is approved like any other Bash, so the hold covers the MCP route only. `EnterPlanMode` stays pending too (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
+Paseo's 41 core and 22 conditional browser MCP tools by hand, so a new Paseo tool is approved until added). `create_agent` stays
+approved on purpose (fan-out needs it, and its `labels`/`modeId` can widen a new agent's scope; peer-trust ruling 2026-11-13), as are
+`stop_workspace_script`, Paseo's browser tools and a shell `paseo` command run through Bash: the hold covers Paseo's
+card/mode/turn MCP tools only. `EnterPlanMode` stays pending too (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
 provider is classified and the name is an identifier that does not look like a credential, because ACP titles are free text and can be command lines; never
 arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
 `hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
