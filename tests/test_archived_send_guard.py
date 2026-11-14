@@ -157,6 +157,22 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"jq . <<< hello\npaseo send -- {A} hi", [(A, None)]),  # a here-string is not a heredoc
     (f"echo $((1<<n))\npaseo send -- {A} hi", [(A, None)]),
     (f"echo 'use <<EOF here'\npaseo send -- {A} hi", [(A, None)]),  # no terminator: the whole command is judged
+    (f"# tell the lead\npaseo send --json --no-wait {A} --prompt 'done'", [(A, None)]),  # a comment line hid the send
+    (f"cd /repo  # go there\npaseo send -- {A} hi", [(A, None)]),
+    (f"echo x # c\npaseo send -- {A} hi", [(A, None)]),
+    (f"gh pr view https://github.com/x/y/pull/1#issuecomment-2 && paseo send -- {A} hi", [(A, None)]),  # # inside a word
+    (f"paseo send -- {A} 'fix #12 now'", [(A, None)]),  # # inside quotes is text
+    (f"paseo send -- {A} \"a\n# not a comment\"\npaseo send -- {B} x", [(A, None), (B, None)]),
+    (f"paseo send -- {A} hi # trailing note", [(A, None)]),
+    (f"timeout 30 bash -c 'paseo send -- {A} hi'", [(A, None)]),  # a wrapper in front of the shell
+    (f"env -u PASEO_AGENT_ID bash -lc 'paseo send -- {A} hi'", [(A, None)]),
+    (f"sudo -u bb bash -c 'paseo send -- {A} hi'", [(A, None)]),
+    (f"paseo --json send {A} hi", [(A, None)]),  # a global option before the verb
+    (f"paseo -o json agent send {A} hi", [(A, None)]),
+    (f"paseo --host=other send {A} hi", []),
+    (f"paseo send --host=other {A} hi", []),
+    (f"paseo send --image a.png {A} hi", [(A, None)]),
+    (f"paseo send {A} ADE_ALLOW_ARCHIVED_SEND={A}", [(A, None)]),  # the override is not a word of the message
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -230,6 +246,35 @@ def test_cli_prints_the_decision_and_exits_4_for_a_refusal(world):
     proc = subprocess.run([sys.executable, str(ROOT / "bin" / "ade_send_guard.py"), A], capture_output=True, text=True,
                           env=world.env, timeout=30, check=False)
     assert proc.returncode == guard.EXIT_REFUSED and json.loads(proc.stdout)["action"] == guard.REFUSE
+
+
+def test_shell_reparsing_stops_at_depth_3():
+    import shlex
+    cmd = f"paseo send -- {A} hi"
+    for _ in range(3):
+        cmd = "bash -c " + shlex.quote(cmd)
+    assert gate.targets_in_command(cmd) == [(A, None)]  # three levels are looked into
+    assert gate.targets_in_command("bash -c " + shlex.quote(cmd)) == []  # the fourth is not
+
+
+def test_cli_exits_3_for_a_redirect_and_0_for_a_live_agent(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    run = lambda t: subprocess.run([sys.executable, str(ROOT / "bin" / "ade_send_guard.py"), t], capture_output=True, text=True,
+                                   env=world.env, timeout=30, check=False)
+    proc = run(A)
+    assert proc.returncode == guard.EXIT_REDIRECT and json.loads(proc.stdout)["target"] == B
+    assert run(B).returncode == 0
+
+
+def test_a_record_without_an_archived_field_fails_open(world):
+    assert guard.decide(A, lambda _: {"Id": A}, state_dir=world.state, home=world.home).action == guard.PASS
+
+
+def test_the_hook_ignores_an_override_exported_in_its_own_environment(world):
+    world.live(**{A: True})
+    env = {**world.env, guard.ALLOW_ENV: A}
+    assert denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))
 
 
 def test_the_override_must_name_the_archived_agent(world):

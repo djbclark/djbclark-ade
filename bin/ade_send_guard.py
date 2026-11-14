@@ -33,6 +33,7 @@ import ade_lead_succession as succ  # noqa: E402
 PASS, REDIRECT, REFUSE = "pass", "redirect", "refuse"
 ALLOW_ENV = "ADE_ALLOW_ARCHIVED_SEND"  # =<the agent's full id> in a command's environment: one deliberate resume of it
 EXIT_REFUSED = 4  # the ADE report class for "blocked"
+EXIT_REDIRECT = 3  # send to the decision's target, not to the one asked for
 
 
 @dataclass(frozen=True)
@@ -106,14 +107,14 @@ def guard(target: str, paseo: str = "paseo", env=None, **kw) -> Decision:
 
 
 def main(argv=None) -> int:
-    """`python3 ade_send_guard.py TARGET`: print the decision as JSON; exit 0 pass/redirect, 4 refuse."""
+    """`python3 ade_send_guard.py TARGET`: print the decision as JSON; exit 0 pass, 3 redirect (send to `.target`), 4 refuse."""
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1 or args[0].startswith("-"):
         print("usage: ade-send-guard TARGET", file=sys.stderr)
         return 2
     d = guard(args[0])
     print(json.dumps(d.as_dict()))
-    return EXIT_REFUSED if d.action == REFUSE else 0
+    return EXIT_REFUSED if d.action == REFUSE else EXIT_REDIRECT if d.action == REDIRECT else 0
 
 
 if __name__ == "__main__":

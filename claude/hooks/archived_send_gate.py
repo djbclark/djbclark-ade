@@ -56,12 +56,43 @@ def strip_heredocs(command: str) -> str:
     return "\n".join(out)
 
 
+def strip_comments(text: str) -> str:
+    """The text without shell comments: a `#` that starts a word outside quotes runs to the end of its line. A `#` inside a
+    word (a URL fragment) or a quote is text. (shlex's own comment handling cuts at any `#`, so it is switched off.)"""
+    out, quote, i, n = [], None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                i += 1
+                out.append(text[i])
+            elif c == quote:
+                quote = None
+        elif c == "\\" and i + 1 < n:
+            out.append(c)
+            i += 1
+            out.append(text[i])
+        elif c in "'\"":
+            quote = c
+            out.append(c)
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
     """[(target, allow)] for every `paseo [agent] send` found in a shell command line. `allow` is the value of an
     ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None."""
-    text = strip_heredocs(command).replace("\n", " ; ").replace("`", " ; ").replace("$(", " ; ")
+    text = strip_comments(strip_heredocs(command)).replace("\n", " ; ").replace("`", " ; ").replace("$(", " ; ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # comments were removed above, with the shell's rule
     try:
         tokens = list(lexer)
     except ValueError:
@@ -82,21 +113,27 @@ def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
     sudo, xargs, `{`, `if`, `!`) need no special case; `sh -c STRING` is parsed again."""
     if not words or Path(words[0]).name in NO_RUN:
         return []
-    allow = next((w.split("=", 1)[1] for w in words if w.startswith(ALLOW_VAR + "=")), None)
     found: list[tuple[str, str | None]] = []
-    cflag = next((i for i, w in enumerate(words) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", w)), None)  # -c, -lc, -ec ...
-    if depth < 3 and Path(words[0]).name in SHELLS and cflag is not None and cflag + 1 < len(words):
-        found.extend(targets_in_command(words[cflag + 1], depth + 1))
+    shell = next((i for i, w in enumerate(words) if Path(w).name in SHELLS), None)  # behind a wrapper too: timeout 30 bash -c
+    if depth < 3 and shell is not None:
+        cflag = next((i for i in range(shell + 1, len(words)) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", words[i])), None)
+        if cflag is not None and cflag + 1 < len(words):  # -c, -lc, -ec ...
+            found.extend(targets_in_command(words[cflag + 1], depth + 1))
     for i, w in enumerate(words):
         if Path(w).name != "paseo":
             continue
         rest = words[i + 1:]
+        while rest and rest[0].startswith("-"):  # a global option before the verb: paseo --json send, paseo -o json send
+            if rest[0] in OTHER_DAEMON or rest[0].startswith(("--host=", "--home=")):
+                return found
+            rest = rest[2:] if rest[0] in {"-o", "--format"} else rest[1:]
         if rest[:1] == ["agent"]:
             rest = rest[1:]
         if rest[:1] != ["send"]:
             continue
         target = _target(rest[1:])
-        if target:
+        if target:  # an override counts only as an assignment before the command, never as a word of the message
+            allow = next((x.split("=", 1)[1] for x in words[:i] if x.startswith(ALLOW_VAR + "=")), None)
             found.append((target, allow))
         break
     return found

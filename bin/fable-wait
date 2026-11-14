@@ -527,7 +527,8 @@ def archived_lead(lead, paseo):
         d = ade_send_guard.guard(lead, paseo=paseo[0])
     except Exception:  # noqa: BLE001
         return None
-    return d.reason if d.action == ade_send_guard.REFUSE else None
+    # a redirect here means current_lead() and the guard disagree about the ledger: send to neither
+    return d.reason if d.action in (ade_send_guard.REFUSE, ade_send_guard.REDIRECT) else None
 
 
 def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:

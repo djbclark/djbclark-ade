@@ -26,7 +26,7 @@ guarded path at all (message its successor). Only an agent that was
 **handed off** has a successor; a finished worker that `ade-tidy` archived is plain archived, so a send to it is refused
 until the override is given (it is a resurrection, which the operator must mean).
 
-CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exits 4 for `refuse`, 0 otherwise.
+CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exits 4 for `refuse`, 3 for `redirect` (send to the printed `target`, never to the one you asked for: `guard X && paseo send X` stops), 0 for `pass`.
 
 ## Who calls it
 
@@ -53,6 +53,11 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    is allowed (the send then reports its own error).
 2. A send from a script or a TUI without the hook is not stopped; only the in-repo senders above call the guard.
 3. A send racing a `finish` can still reach the predecessor; the next send is redirected.
-4. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo issue, linked in the PR).
+4. Only a **send** is guarded. Paseo also un-archives on `paseo agent reload`, a resume request and an import
+   (`agent-prompt.ts`, `session.ts` resume/refresh handlers); none of those is checked here. `paseo agent inspect` itself does not
+   un-archive, so the guard's probe is safe.
+5. The hook strips shell comments (a `#` that starts a word, outside quotes) before it looks for a send, so a leading comment
+   line never hides a later send; a heredoc fed to a shell (`bash <<EOF`) is still not parsed.
+6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).
