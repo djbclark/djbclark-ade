@@ -37,7 +37,7 @@ Run it from a checkout of the repository, after the push has landed. It
   7. removes the worktree. It never posts anything to GitHub. Under owner-trust policy (PR #484,
      docs/review-boundary.md), owner-authored PRs whose head the operator pushed succeed the adversary-marker check
      without needing an APPROVE marker pasted (anyone else's push makes it an outside PR: the operator's marker comment) (keep the printed marker for the local record; do not paste into the body
-     just to satisfy the gate). On an outside PR, paste the marker into an owner issue comment (not the body),
+     just to satisfy the gate). On an outside PR, the operator (never an agent) pastes the marker into an owner issue comment (not the body),
      then run `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads it.
 
 Exit: 0 APPROVE, 1 BLOCK, 2 usage / no such PR / not a checkout of that repository / an untrusted author /

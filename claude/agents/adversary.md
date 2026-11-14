@@ -47,9 +47,10 @@ For each request:
    marker into a PR body or comment** (AGENTS.md "Code review" item 1; docs/code-review.md rules 1 and 14: the
    merge gate counts a live APPROVE as the owner's, and `gh` here is the owner; `claude/hooks/adversary_marker_gate.py`
    denies it). So put the marker in your reply **inside a fenced block** (a ``` fence on its own lines), with the real
-   40-hex head, so the verdict stays machine-readable in the report and the operator or an owner-authored path
-   (`bin/ade-merge-ready approve-post`, an owner comment) can apply it as a live marker when the PR needs one. The
-   teammate's PR body states your verdict as prose (quoted, or "no findings"), never as a live APPROVE marker. (A
+   40-hex head, so the verdict stays machine-readable in the report. **Only the operator applies a live marker** (an owner
+   comment, `bin/ade-merge-ready approve-post`), or an agent the operator explicitly tells to; no teammate does it on its
+   own, through `gh` or through that tool. The teammate's PR body states your verdict as prose (quote it as prose, never
+   the fenced marker, which the Action would read as live inside a blockquote or a list indent), never as a live APPROVE marker. (A
    BLOCK marker is the exception the gate allows: it counts wherever it appears, fenced or not, so it may be
    relayed raw.)
    The merge gate (the `adversary-marker` Action, `bin/adversary_marker.py`) reads that marker and **not** your prose, so a verdict written only

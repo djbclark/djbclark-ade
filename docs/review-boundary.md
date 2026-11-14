@@ -147,7 +147,7 @@ its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `conf
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,
 3 failed, 77 tripwire, 124 timeout. It never posts. On an **owner-authored** PR the gate already succeeds without pasting
 (owner-trust, 2026-11-10); keep the printed marker for the local record — do not paste it into the PR body just to
-satisfy the gate. On an **outside** PR, paste the marker into an owner issue comment (not the body; never through
+satisfy the gate. On an **outside** PR, the operator (never an agent: `claude/hooks/adversary_marker_gate.py`) pastes the marker into an owner issue comment (not the body; never through
 herdr, which mangles `<!-- … -->`), then:
 
 ```sh
