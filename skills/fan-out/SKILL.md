@@ -143,7 +143,8 @@ Verify returned `cwd` and `workspaceId` against the assignment before treating a
 For a review slice: Claude runs through `bin/review-launch` (the enforced review boundary; `--mode trusted`, YOLO, only for work the
 repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12). A direct trusted launch needs all of
 `--trusted-author <owner's GitHub login> --head <40-hex sha> --schema config/review-schema.json -C <clean worktree>`, else it
-refuses with exit 2; give each attempt a fresh `--evidence-dir`. Every other agent
+refuses with exit 2; give each attempt a fresh `--evidence-dir`. Never use it for input the repository owner did not author: the
+launcher does not check the login, it only records it. Every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
 The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
