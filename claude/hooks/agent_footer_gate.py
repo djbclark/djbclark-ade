@@ -37,10 +37,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FOOTER = _REPO_ROOT / "docs" / "dispatch-footer.md"
 _HOME_FOOTER = Path.home() / "src/djbclark-ade/docs/dispatch-footer.md"
 _END = r"(?!\w|\.(?:done|inbox|replies)\b)"      # not the middle of `X-report.md.done`
-REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)" + _END)
-REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)" + _END)
+_LEFT = r"(?<![\w.~$@+/-])"                          # a `~/x`, `$HOME/x` or relative path is not an absolute one
+REPORT_IN_PROMPT = re.compile(_LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
+REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
-FOOTER_DELIVERY = re.compile(r"deliverable to `(/[\w.@~+/-]+-report\.md)`")
+FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 DENY_REASON = (
@@ -98,7 +99,7 @@ def report_path(data, tool_input):
 def relaunch_reason(prompt):
     m = RELAUNCH_TOKEN.search(prompt)
     why = m.group(1).strip() if m else ""
-    return None if why in ("", "<why>") else why        # the template's own placeholder is not a reason
+    return None if re.fullmatch(r"(?i)(?:<\s*why\s*>)?", why) else why    # the template's placeholder is not a reason
 
 
 def unfinished_report(data, tool_input, has_footer):
@@ -108,7 +109,8 @@ def unfinished_report(data, tool_input, has_footer):
     try:
         prompt = str(tool_input.get("prompt") or "")
         if has_footer:
-            paths = set(REPORT_LABELLED.findall(prompt)) | set(FOOTER_DELIVERY.findall(prompt))
+            paths = {x for x in set(REPORT_LABELLED.findall(prompt)) | set(FOOTER_DELIVERY.findall(prompt))
+                     if not Path(x + ".done").exists()}      # a finished background report is not this launch's
             path = next(iter(paths)) if len(paths) == 1 else None      # two different paths: ambiguous, skip
         else:
             path = report_path(data, tool_input)

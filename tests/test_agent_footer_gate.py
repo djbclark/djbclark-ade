@@ -232,3 +232,49 @@ def test_the_templates_own_placeholder_is_not_a_relaunch_reason(tmp_path):
     stub_report(tmp_path)
     out = run({"description": "Lead adversary review PR 684", "prompt": "x\nRelaunch-reason: <why>"}, env=footer_env(tmp_path))
     assert out["permissionDecision"] == "deny"
+
+
+def test_a_finished_background_report_does_not_make_the_footer_prompt_ambiguous(tmp_path):
+    """adv12 F1: finished background + the unfinished delivery path = one candidate, so the relaunch is denied."""
+    env = dict(os.environ, AGENT_FOOTER_FILE=str(REPO_FOOTER), AGENT_FOOTER_REPORT_DIR=str(tmp_path / "reports"))
+    first = run({"description": "Review", "prompt": "review it"}, env=env)
+    report = tmp_path / "reports" / "s1" / "review-report.md"
+    report.write_text("STATUS: working\n")
+    bg = tmp_path / "slice-report.md"
+    bg.write_text("done")
+    (tmp_path / "slice-report.md.done").write_text("")
+    out = run({"description": "Review", "prompt": f"Background report: {bg}\n" + first["updatedInput"]["prompt"]}, env=env)
+    assert out["permissionDecision"] == "deny"
+
+
+def test_inbox_and_replies_suffixes_are_not_the_report_and_relative_paths_are_skipped(tmp_path):
+    f = tmp_path / "own-report.md"
+    f.write_text("x")
+    env = footer_env(tmp_path)
+    foot = "## Delivery contract (shared footer)\n"
+    for suffix in (".inbox.md", ".replies.md"):
+        assert run({"description": "Own", "prompt": f"report: {f}{suffix}\n{foot}"}, env=env) is None, suffix
+    assert run({"description": "Own", "prompt": f"Report path: ~/own-report.md\n{foot}"}, env=env) is None
+    assert run({"description": "Own", "prompt": f"Report path: ./own-report.md\n{foot}"}, env=env) is None
+    for mention in ("~/q-report.md", "$HOME/q-report.md", "./q-report.md"):       # one path each: not `/q-report.md`
+        out = run({"description": "Own", "prompt": f"write {mention} please"}, env=env)
+        assert f"report: {tmp_path / 'reports' / 's1' / 'own-report.md'}\n" in out["updatedInput"]["prompt"], mention
+    # no footer: a punctuation-ended mention still counts as the report path (pre-existing behaviour)
+    out = run({"prompt": f"write {tmp_path / 'fresh-report.md'}."}, env=env)
+    assert f"report: {tmp_path / 'fresh-report.md'}\n" in out["updatedInput"]["prompt"]
+
+
+def test_labelled_path_that_differs_from_the_delivery_path_is_ambiguous_and_skipped(tmp_path):
+    a, b = tmp_path / "a-report.md", tmp_path / "b-report.md"
+    a.write_text("x")
+    b.write_text("x")
+    prompt = f"Report path: {a}\n## Delivery contract (shared footer)\nWrite the full deliverable to `{b}`.\n"
+    assert run({"description": "Two", "prompt": prompt}, env=footer_env(tmp_path)) is None
+
+
+def test_angle_bracket_placeholder_in_any_case_is_not_a_relaunch_reason(tmp_path):
+    stub_report(tmp_path)
+    for reason in ("<why>", "<WHY>", "< why >"):
+        out = run({"description": "Lead adversary review PR 684", "prompt": f"x\nRelaunch-reason: {reason}"},
+                  env=footer_env(tmp_path))
+        assert out["permissionDecision"] == "deny", reason

@@ -234,7 +234,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    `paseo send` the same text (rule 5a, with the ack). A stateless waiter (a `wait-file`, a poll, a one-shot check) may be
    restarted, since it holds no work. `claude/hooks/agent_footer_gate.py` enforces the first case: an Agent launch whose
    report path already exists without its `.done` is denied; a deliberate fresh start adds a prompt line
-   `Relaunch-reason: <why>` (allowed, logged to `<report dir>/<session>/relaunch.log`); a finished report carries its `.done`.
+   `Relaunch-reason: <why>` (allowed, logged to `<report dir>/<session>/relaunch.log`); a finished report carries its `.done`. Not checked (the guard skips, the launch proceeds): a prompt naming two different unfinished report paths, and a `~`, `$HOME`, relative or space-containing report path (only absolute paths are read).
 
 ## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-09)
 
