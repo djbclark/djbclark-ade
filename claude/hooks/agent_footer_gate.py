@@ -109,8 +109,9 @@ def unfinished_report(data, tool_input, has_footer):
     try:
         prompt = str(tool_input.get("prompt") or "")
         if has_footer:
-            paths = {x for x in set(REPORT_LABELLED.findall(prompt)) | set(FOOTER_DELIVERY.findall(prompt))
-                     if not Path(x + ".done").exists()}      # a finished background report is not this launch's
+            labelled = {x for x in set(REPORT_LABELLED.findall(prompt))
+                        if not Path(x + ".done").exists()}      # a finished background report is not this launch's
+            paths = labelled | set(FOOTER_DELIVERY.findall(prompt))   # the delivery line is always this launch's
             path = next(iter(paths)) if len(paths) == 1 else None      # two different paths: ambiguous, skip
         else:
             path = report_path(data, tool_input)

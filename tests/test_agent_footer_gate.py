@@ -278,3 +278,16 @@ def test_angle_bracket_placeholder_in_any_case_is_not_a_relaunch_reason(tmp_path
         out = run({"description": "Lead adversary review PR 684", "prompt": f"x\nRelaunch-reason: {reason}"},
                   env=footer_env(tmp_path))
         assert out["permissionDecision"] == "deny", reason
+
+
+def test_finished_delivery_path_with_an_unfinished_background_report_is_not_denied(tmp_path):
+    """adv13 L1: only labelled paths are filtered by `.done`; the footer's own delivery path always counts."""
+    env = dict(os.environ, AGENT_FOOTER_FILE=str(REPO_FOOTER), AGENT_FOOTER_REPORT_DIR=str(tmp_path / "reports"))
+    first = run({"description": "Review", "prompt": "review it"}, env=env)
+    report = tmp_path / "reports" / "s1" / "review-report.md"
+    report.write_text("done")
+    (tmp_path / "reports" / "s1" / "review-report.md.done").write_text("")
+    bg = tmp_path / "other-report.md"
+    bg.write_text("STATUS: working\n")                           # another agent's unfinished report, named as background
+    out = run({"description": "Review", "prompt": f"Background report: {bg}\n" + first["updatedInput"]["prompt"]}, env=env)
+    assert out is None
