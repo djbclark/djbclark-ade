@@ -541,7 +541,7 @@ class Service:
         log = git('log', '--format=%h %s', '-n', str(DRIFT_COMMITS + 1), f'{recorded}..{current}', '--')
         listed = log is not None and log.returncode == 0
         lines = (log.stdout or '').splitlines() if listed else []
-        drift = {'to': current, 'commits': [bounded(x[:120], 120) for x in lines[:DRIFT_COMMITS]],
+        drift = {'to': current, 'commits': [bounded(x[:4096], 4096)[:120] for x in lines[:DRIFT_COMMITS]],
                  'more': len(lines) > DRIFT_COMMITS}
         if not listed:
             drift['log_unavailable'] = True  # proven descendant, but `git log` failed: not "no commits"
@@ -620,7 +620,9 @@ class Service:
                     return call(*args)
                 except IdleTimeout:
                     raise
-                except SessionError as error:
+                except (SessionError, OSError, ValueError, KeyError, TypeError) as error:
+                    # also a deleted checkpoint (OSError) or a hand-edited record (KeyError): the CLI prints only a
+                    # generic line for those, so the record must carry the reason
                     record['native_error'] = native_error_record('finish', error)
                     self.save(target, record)
                     raise

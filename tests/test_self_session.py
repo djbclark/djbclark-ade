@@ -1410,3 +1410,26 @@ def test_listing_failure_after_a_refusal_replaces_the_stale_reason(setup):
     saved = json.loads(path.read_text())
     assert saved['native_error']['op'] == 'agent ls' and saved['native_error']['code'] == 'OSERROR'  # not AGENT_RUNNING
     assert len(archive_calls(native)) == 1
+
+
+def test_scrubbing_a_commit_line_never_costs_it_its_sha(setup):
+    # the redaction lengthens the line past 120; the head of the line (the sha) must still be what is kept
+    service, native, path = moved(setup, ancestor_rc=0, git_log='abcdef0 ' + 'y' * 100 + ' token=a\n')
+    line = service.finish(path)['head_advanced']['commits'][0]
+    assert line.startswith('abcdef0 y') and len(line) <= 120 and not line.startswith('...')
+
+
+def test_a_non_session_failure_after_a_refusal_is_recorded_too(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    native.archive_queue = [RUNNING]
+    def remove(now):
+        if now >= 50:
+            Path(record['checkpoint']).unlink(missing_ok=True)
+        return 'idle'
+    native.status_at = remove
+    with pytest.raises(OSError):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'finish' and saved['native_error']['code'] is None
+    assert 'AGENT_RUNNING' not in json.dumps(saved['native_error'])
