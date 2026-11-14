@@ -1389,6 +1389,7 @@ class Decision:
     claim_id: str = ""
     owner: str = ""
     override: bool = False
+    override_via: str = ""          # what allowed it, for the stderr line (default: the operator override)
     detail: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -1840,23 +1841,32 @@ def _lsof_records(argv: Sequence[str], timeout: float) -> Optional[list[tuple[in
     return rows
 
 
-def _own_pids() -> set[int]:
+def _own_pids() -> Optional[set[int]]:
     """This process and its ancestors (the shim, the agent that ran it): the caller is not "another user" of its own
-    worktree. Read from `ps`; a failure leaves what was found."""
+    worktree. One `ps -A -o pid=,ppid=` under one timeout, walked in memory. None when ps cannot answer: the caller
+    cannot be told from an orphan then, so the check fails open."""
     import subprocess
-    pids, pid = set(), os.getpid()
-    for _ in range(64):
-        if pid <= 1 or pid in pids:
-            break
-        pids.add(pid)
+    out = None
+    for exe in ("/bin/ps", "ps"):
         try:
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
-                                 stdin=subprocess.DEVNULL).stdout.strip()
+            r = subprocess.run([exe, "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10,
+                               stdin=subprocess.DEVNULL, cwd="/")
         except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            out = r.stdout
             break
-        if not out.isdigit():
-            break
-        pid = int(out)
+    if out is None:
+        return None
+    parent: dict[int, int] = {}
+    for line in out.splitlines():
+        bits = line.split()
+        if len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit():
+            parent[int(bits[0])] = int(bits[1])
+    pids, pid = set(), os.getpid()
+    while pid > 1 and pid not in pids and len(pids) < 256:
+        pids.add(pid)
+        pid = parent.get(pid, 0)
     return pids
 
 
@@ -1880,10 +1890,15 @@ def live_users_of(target: Path, timeout: Optional[float] = None) -> list[tuple[i
     cwd_rows = _lsof_records(["-d", "cwd"], timeout)
     if cwd_rows is None:
         return []
-    rows = [r for r in cwd_rows if r[2] == "cwd" and _path_inside(root, r[3])]
-    file_rows = _lsof_records(["+D", root], timeout)
-    rows += [(pid, cmd, fd, name) for pid, cmd, fd, name in (file_rows or []) if fd != "cwd" and _path_inside(root, name)]
+    # lsof prints the on-disk case; a worktree registered under another case (APFS is case-insensitive) must still match,
+    # and over-matching is the safe direction. The +D rows are already scoped to `root` by lsof itself (its escaped
+    # spellings of odd bytes would not match a re-filter).
+    fold = (lambda x: x.casefold()) if sys.platform == "darwin" else (lambda x: x)
+    rows = [r for r in cwd_rows if r[2] == "cwd" and _path_inside(fold(root), fold(r[3]))]
+    rows += _lsof_records(["+D", root], timeout) or []
     own = _own_pids()
+    if own is None:
+        return []
     seen: dict[int, tuple[str, str]] = {}
     for pid, cmd, fd, name in rows:
         if pid not in own and (pid not in seen or fd == "cwd"):
@@ -1896,18 +1911,21 @@ def _live_use_decision(verb: str, target: Path, claim: Optional[dict[str, Any]],
     server): git itself removes it and the process is left in a deleted directory (2026-11-14, site-public-djbclark-
     orchard-wt, orphan claude PID 10129). Claimed or not, mine or not. `--force` does not bypass it (that flag is
     about a dirty tree); $ADE_ALLOW_LIVE_WORKTREE_REMOVE=1 or the operator override does."""
-    if verb != "remove" or not target.is_dir() or env.get(LIVE_USE_ALLOW_ENV) == "1":
+    if verb != "remove" or not target.is_dir():
         return None
     users = live_users_of(target)
     if not users:
         return None
+    allowed = env.get(LIVE_USE_ALLOW_ENV) == "1"
     shown = "; ".join(f"pid {pid} {_esc(cmd)} ({_esc(what)})" for pid, cmd, what in users[:LIVE_USE_LIST_MAX])
     more = f"; and {len(users) - LIVE_USE_LIST_MAX} more" if len(users) > LIVE_USE_LIST_MAX else ""
-    return Decision(False, "worktree remove: live process",
-                    f"stop or move these processes first ({shown}{more}), then retry; to remove it anyway set "
-                    f"{LIVE_USE_ALLOW_ENV}=1 for that one call (--force does not bypass this; it is about a dirty tree)",
+    return Decision(allowed, "worktree remove: live process",
+                    f"stop these processes first ({shown}{more}): a Paseo agent is ended with `paseo agent archive <id>`; "
+                    f"then retry. For an orphan the operator has confirmed, {LIVE_USE_ALLOW_ENV}=1 on that one call allows it "
+                    "and is logged (--force does not bypass this; it is about a dirty tree)",
                     str((claim or {}).get("id") or ""),
-                    owner_label(claim) if claim else "nobody; the target has no active claim of yours")
+                    owner_label(claim) if claim else "nobody; the target has no active claim of yours",
+                    override=allowed, override_via=f"{LIVE_USE_ALLOW_ENV}=1" if allowed else "")
 
 
 def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str],
@@ -2424,7 +2442,8 @@ def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) 
     """Log and print a non-plain decision; returns 0 (override) or EXIT_REFUSED."""
     log_event(d, call, extra)
     if d.override:
-        sys.stderr.write(f"ade-git-guard: ACP_OPERATOR_APPROVED={OVERRIDE}: allowed `{_esc(call.display())}` "
+        via = d.override_via or f"ACP_OPERATOR_APPROVED={OVERRIDE}"
+        sys.stderr.write(f"ade-git-guard: {_esc(via)}: allowed `{_esc(call.display())}` "
                          f"[{_esc(d.rule)}] (logged)\n")
         return 0
     sys.stderr.write(refusal_text(d, call))

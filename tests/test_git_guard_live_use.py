@@ -19,12 +19,17 @@ from test_ade_git_guard import claim, guard_log, mk_repo, plain, run, state  # n
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys, time
 mode = os.environ.get("FAKE_LSOF_MODE", "ok")
-if mode == "fail":
+files = "+D" in sys.argv
+if mode == "fail" or (mode == "fail-files" and files):
     sys.exit(2)
-if mode == "hang":
+if mode == "hang" or (mode == "hang-files" and files):
     time.sleep(120)
 key = "FAKE_LSOF_CWD" if "cwd" in sys.argv else "FAKE_LSOF_FILES"
+root = sys.argv[sys.argv.index("+D") + 1] if files else ""
 for pid, cmd, fd, name in json.loads(os.environ.get(key, "[]")):
+    # real lsof scopes +D to the directory itself (and spells odd bytes its own way, so the caller must not re-filter)
+    if files and not os.environ.get("FAKE_LSOF_UNSCOPED") and not (name == root or name.startswith(root + "/")):
+        continue
     print(f"p{pid}\\nc{cmd}\\nf{fd}\\nn{name}")
 '''
 
@@ -163,3 +168,50 @@ def test_real_lsof_sees_a_real_process_cwd(tmp_path, state):
     p = run(state, ["worktree", "remove", str(wt)], repo, who="B")
     assert p.returncode == 0, p.stderr
     assert not wt.exists()
+
+
+@pytest.mark.parametrize("env", [{"FAKE_LSOF_MODE": "fail-files"}, {"FAKE_LSOF_MODE": "hang-files", "ADE_LSOF_TIMEOUT": "1"}])
+def test_a_failed_open_file_walk_leaves_the_cwd_answer_standing(rig, env):
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], **env)
+    assert p.returncode == 77 and "pid 10129" in p.stderr
+    assert rig.wt.is_dir()
+
+
+def test_move_is_not_checked(rig, tmp_path):
+    e = {"ADE_LSOF": str(rig.fake), "FAKE_LSOF_CWD": json.dumps([[10129, "claude", "cwd", str(rig.wt)]])}
+    p = run(rig.state, ["worktree", "move", str(rig.wt), str(tmp_path / "moved")], rig.repo, who="B", **e)
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "moved").is_dir()
+
+
+def test_the_env_override_is_logged_and_named(rig):
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_ALLOW_LIVE_WORKTREE_REMOVE="1")
+    assert p.returncode == 0 and "ADE_ALLOW_LIVE_WORKTREE_REMOVE=1: allowed" in p.stderr
+    assert [(r["outcome"], r["rule"]) for r in guard_log(rig.state)] == [("override", "worktree remove: live process")]
+
+
+def test_the_override_with_nobody_inside_is_silent(rig):
+    p = rig.remove(ADE_ALLOW_LIVE_WORKTREE_REMOVE="1")
+    assert p.returncode == 0 and "allowed" not in p.stderr and guard_log(rig.state) == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="APFS case-insensitivity")
+def test_a_case_different_path_is_still_a_user_on_macos(rig):
+    other_case = str(rig.wt).swapcase()
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", other_case]])
+    assert p.returncode == 77 and "pid 10129" in p.stderr
+
+
+def test_an_open_file_row_whose_path_lsof_spelled_differently_still_counts(rig):
+    """The +D rows are scoped by lsof itself: an escaped spelling of an odd byte in the path must not drop the user."""
+    p = rig.remove(file_users=[[88, "vim", "3r", "/escaped/spelling/f"]], FAKE_LSOF_UNSCOPED="1")
+    assert p.returncode == 77 and "pid 88" in p.stderr
+
+
+def test_a_ps_that_cannot_answer_fails_open(rig, monkeypatch):
+    """Without a process table the caller cannot be told from an orphan: the check allows rather than refuse its own caller."""
+    import ade_claims
+    monkeypatch.setattr(ade_claims, "_own_pids", lambda: None)
+    monkeypatch.setenv("ADE_LSOF", str(rig.fake))
+    monkeypatch.setenv("FAKE_LSOF_CWD", json.dumps([[10129, "claude", "cwd", str(rig.wt)]]))
+    assert ade_claims.live_users_of(rig.wt) == []
