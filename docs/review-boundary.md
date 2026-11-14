@@ -21,7 +21,7 @@ pushed its head: anyone with write access to the repository (today: an App with 
 key; after the move also the `frdminc` org's second member `technoeuphora`, and any org owner, whose admin comes with the role) can
 push to a branch of an open `djbclark` PR and the gate approves it with no marker. So the move is conditional on a written
 precondition, checked by the operator: `djbclark` is the only org **owner** (every other member has the member role), org base
-permission `read` or `none`, no `write` or `admin` grant on this repository to anyone but `djbclark`, no App installation or deploy
+permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to anyone but `djbclark`, no App installation or deploy
 key with write access to it except ones that act only for `djbclark`, and the org's other apps limited to selected repositories
 (docs/threat-model.md). A later gate could require a marker when the last pusher (the `synchronize` event's GitHub-attested
 `sender`; the committer field is forgeable) is not `djbclark`; not built.
