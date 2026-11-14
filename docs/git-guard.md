@@ -301,6 +301,17 @@ Evaluated in order; the module docstring has every form.
    (and plain `format-patch`, whose default is `format.outputDirectory` when set via `-c` / `GIT_CONFIG_*` / repo config,
    else cwd) when the output target is not inside the caller's active claimed workspace (`output-file`, 2026-11-09;
    `format-patch --stdout` allowed; unresolved `format.outputDirectory` fails closed).
+6. **`worktree remove` of a directory another live process uses (`worktree remove: live process`, 2026-11-14, gg-01):**
+   claimed or not, yours or not. git removes a worktree whose cwd an orphaned agent, editor or dev server still holds and
+   leaves that process in a deleted directory (site-public-djbclark-orchard-wt, orphan claude PID 10129). The guard asks
+   `lsof` (one all-process cwd listing, then `lsof +D <target>` for open files, 6 s each, `$ADE_LSOF_TIMEOUT`) and refuses
+   with every pid, command and cwd or file (first 8, then a count). The caller's own process chain (the shim, the agent that
+   ran it) is not "another user". **Fails open** when `lsof` is missing, fails or times out (a guard that cannot look must
+   not stop `git worktree remove`); a timed-out open-file walk leaves the cwd answer standing. `--force` does not bypass it
+   (that flag is about a dirty tree); `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` for that one call, or the operator's
+   `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does. `worktree move` and `prune` are not checked (a move keeps
+   the directory's inode; prune only touches a directory that is already gone). Tests: `tests/test_git_guard_live_use.py`
+   (fake lsof via `$ADE_LSOF`, plus one real-lsof test with a real child process).
 
 **Removed in O2 (replaced by the hooks):** the fetch/pull/remote-update dry-run preflight, the push dry-run preflight, the
 `update-ref`, `branch -d|-D|-f`, `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file

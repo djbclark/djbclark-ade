@@ -131,6 +131,9 @@ GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_W
      `GIT_CONFIG`, which format-patch ignores — else cwd; unresolved config fails closed) when the output target is not
      inside the caller's active claimed workspace (`output-file`); `format-patch --stdout` stays allowed (no worktree
      file write).
+     Also (gg-01, 2026-11-14): `worktree remove` of a directory another live process uses (lsof: cwd, then open files;
+     fails open; `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` overrides, `--force` does not) is refused whoever owns it
+     (`worktree remove: live process`).
   5. In my own claimed workspace everything else is allowed.
 Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
 `checkout -B`, `switch -C` and `worktree add -B` target rules, the broader output-file rules (`bundle create`, `config --file`,
@@ -1787,7 +1790,128 @@ def _output_file_decision(call: GitCall, ident: Optional[str]) -> Optional[Decis
     return None
 
 
-def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str]) -> Optional[Decision]:
+LIVE_USE_ALLOW_ENV = "ADE_ALLOW_LIVE_WORKTREE_REMOVE"   # =1: remove a worktree a live process still uses (the guard's own override)
+LSOF_TIMEOUT = 6.0                                       # seconds per lsof call ($ADE_LSOF_TIMEOUT); a timeout never refuses
+LIVE_USE_LIST_MAX = 8
+
+
+def _lsof_path() -> Optional[str]:
+    """$ADE_LSOF (tests), else the first lsof on PATH or /usr/sbin/lsof; None when there is none (fail open)."""
+    import shutil
+    cand = os.environ.get("ADE_LSOF") or shutil.which("lsof") or "/usr/sbin/lsof"
+    return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
+
+
+def _lsof_records(argv: Sequence[str], timeout: float) -> Optional[list[tuple[int, str, str, str]]]:
+    """Run `lsof ARGV -F pcfn` from `/` (its own cwd never lands in a target) and parse (pid, command, fd, name) rows.
+    None when lsof cannot start, times out (the whole group is killed) or fails; rc 1 is lsof's "nothing found"."""
+    import signal
+    import subprocess
+    exe = _lsof_path()
+    if exe is None:
+        return None
+    try:
+        p = subprocess.Popen([exe, "-nP", "-w", *argv, "-F", "pcfn"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, cwd="/", start_new_session=True)
+    except (OSError, ValueError):
+        return None
+    try:
+        out, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(p.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.communicate(timeout=5)
+        return None
+    if p.returncode not in (0, 1):
+        return None
+    rows: list[tuple[int, str, str, str]] = []
+    pid, cmd, fd = 0, "", ""
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        tag, val = line[:1], line[1:]
+        if tag == "p":
+            pid, cmd, fd = (int(val) if val.isdigit() else 0), "", ""
+        elif tag == "c":
+            cmd = val
+        elif tag == "f":
+            fd = val
+        elif tag == "n" and pid:
+            rows.append((pid, cmd, fd, val))
+    return rows
+
+
+def _own_pids() -> set[int]:
+    """This process and its ancestors (the shim, the agent that ran it): the caller is not "another user" of its own
+    worktree. Read from `ps`; a failure leaves what was found."""
+    import subprocess
+    pids, pid = set(), os.getpid()
+    for _ in range(64):
+        if pid <= 1 or pid in pids:
+            break
+        pids.add(pid)
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                                 stdin=subprocess.DEVNULL).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            break
+        if not out.isdigit():
+            break
+        pid = int(out)
+    return pids
+
+
+def _lsof_timeout() -> float:
+    try:
+        return max(0.1, float(os.environ.get("ADE_LSOF_TIMEOUT") or LSOF_TIMEOUT))
+    except ValueError:
+        return LSOF_TIMEOUT
+
+
+def live_users_of(target: Path, timeout: Optional[float] = None) -> list[tuple[int, str, str]]:
+    """(pid, command, `cwd` or the open file's path) of every OTHER live process whose cwd is inside `target` or that
+    holds a file open there. cwd comes from one all-process lsof (fast); open files from `lsof +D target`, which walks the
+    tree and may time out: then only the cwd answer stands. An lsof that is missing, fails or times out on the cwd call
+    gives [] (fail open: a guard that cannot look must not stop `git worktree remove`)."""
+    timeout = _lsof_timeout() if timeout is None else timeout
+    try:
+        root = str(target.resolve())
+    except OSError:
+        return []
+    cwd_rows = _lsof_records(["-d", "cwd"], timeout)
+    if cwd_rows is None:
+        return []
+    rows = [r for r in cwd_rows if r[2] == "cwd" and _path_inside(root, r[3])]
+    file_rows = _lsof_records(["+D", root], timeout)
+    rows += [(pid, cmd, fd, name) for pid, cmd, fd, name in (file_rows or []) if fd != "cwd" and _path_inside(root, name)]
+    own = _own_pids()
+    seen: dict[int, tuple[str, str]] = {}
+    for pid, cmd, fd, name in rows:
+        if pid not in own and (pid not in seen or fd == "cwd"):
+            seen[pid] = (cmd, "cwd" if fd == "cwd" else name)
+    return [(pid, cmd, what) for pid, (cmd, what) in sorted(seen.items())]
+
+
+def _live_use_decision(verb: str, target: Path, claim: Optional[dict[str, Any]], env: dict[str, str]) -> Optional[Decision]:
+    """`git worktree remove` of a directory another live process still uses (an orphaned agent's cwd, an editor, a dev
+    server): git itself removes it and the process is left in a deleted directory (2026-11-14, site-public-djbclark-
+    orchard-wt, orphan claude PID 10129). Claimed or not, mine or not. `--force` does not bypass it (that flag is
+    about a dirty tree); $ADE_ALLOW_LIVE_WORKTREE_REMOVE=1 or the operator override does."""
+    if verb != "remove" or not target.is_dir() or env.get(LIVE_USE_ALLOW_ENV) == "1":
+        return None
+    users = live_users_of(target)
+    if not users:
+        return None
+    shown = "; ".join(f"pid {pid} {_esc(cmd)} ({_esc(what)})" for pid, cmd, what in users[:LIVE_USE_LIST_MAX])
+    more = f"; and {len(users) - LIVE_USE_LIST_MAX} more" if len(users) > LIVE_USE_LIST_MAX else ""
+    return Decision(False, "worktree remove: live process",
+                    f"stop or move these processes first ({shown}{more}), then retry; to remove it anyway set "
+                    f"{LIVE_USE_ALLOW_ENV}=1 for that one call (--force does not bypass this; it is about a dirty tree)",
+                    str((claim or {}).get("id") or ""),
+                    owner_label(claim) if claim else "nobody; the target has no active claim of yours")
+
+
+def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str],
+                     env: Optional[dict[str, str]] = None) -> Optional[Decision]:
     """Rule 5: the claim of what the call HITS, not of where it runs."""
     sub, args = call.sub, call.args
     deny = _output_file_decision(call, ident)
@@ -1808,6 +1932,9 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
             if c is not None and not is_mine(c, ident):
                 return _foreign(c, f"worktree {verb} of a claimed workspace",
                                 "ask the owner (a Paseo agent: `paseo send --json --no-wait OWNER --prompt '…'`) to remove it; read-only `git worktree list` is fine")
+            live = _live_use_decision(verb, t, c, os.environ if env is None else env)
+            if live is not None:
+                return live
             if verb == "remove" and force and c is None:
                 return Decision(False, "worktree remove --force",
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
@@ -2198,7 +2325,7 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                             "git could not say which repository and work tree this call changes (it timed out or "
                             "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
-        deny = _target_decision(call, wss, ident)
+        deny = _target_decision(call, wss, ident, env)
     if deny is None and unknown is not None:
         deny = unknown
     ws_any = next((w for w in wss if w is not None), None)
