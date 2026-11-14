@@ -75,6 +75,11 @@ def test_skips(tmp_path, over):
     assert an.decide(info(git_repo(tmp_path), **over))["action"] == "skip"
 
 
+def test_not_first_agent_asks_for_a_retry(tmp_path):
+    d = an.decide(info(git_repo(tmp_path), firstAgent=False))
+    assert d["action"] == "skip" and d["retry"] is True
+
+
 def test_null_and_blank_window_title_count_as_default(tmp_path):
     assert an.decide(info(git_repo(tmp_path), windowTitle="  "))["action"] == "rename"  # Paseo trims a title to null; so do we
     assert an.decide(info(git_repo(tmp_path), windowTitle=None))["action"] == "rename"

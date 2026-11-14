@@ -99,7 +99,7 @@ def decide(info: dict) -> dict:
     if window_title and window_title.strip():
         return skip("window already has a title (named on purpose)")  # a blank string is no title, as Paseo itself reads it
     if info.get("firstAgent") is not True:
-        return skip("not the window's first agent")
+        return skip("not the window's first agent", retry=True)  # the first agent may still be unnamed, or archived later
     cwd = info.get("cwd")
     if not isinstance(cwd, str) or not cwd.strip():
         return skip("no cwd")

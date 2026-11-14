@@ -106,10 +106,12 @@ test("a second agent joining an unnamed window does not name it; the earlier age
   const first = agentRec({ id: "first", cwd: gitDir.repo, title: "First job", createdAt: T0 });
   const second = agentRec({ id: "second", cwd: gitDir.repo, title: "Second job", createdAt: T1 });
   const d = fakeDaemon({ agents: [first, second] });
-  const rec = await handleAgentEvent(hookAgent(second), { paseo: d.paseo }, baseDeps());
+  const deps = baseDeps();  // one settled set across both events, as in the running plugin
+  const rec = await handleAgentEvent(hookAgent(second), { paseo: d.paseo }, deps);
   assert.equal(rec.outcome, "skip");
   assert.deepEqual(d.state.titles, []);
-  await handleAgentEvent(hookAgent(first), { paseo: d.paseo }, baseDeps());
+  assert.equal(deps.settled.size, 0);
+  await handleAgentEvent(hookAgent(first), { paseo: d.paseo }, deps);
   assert.deepEqual(d.state.titles, ["MAIN my-repo (First job)"]);
 });
 
