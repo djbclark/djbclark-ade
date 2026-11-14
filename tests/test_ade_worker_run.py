@@ -1025,9 +1025,36 @@ def test_label_queries_stay_bounded_on_a_long_chain(env):
     chain(*ids, LEAD)
     env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
     own(ids[0], "wks_win1")  # the OLDEST predecessor's record is still honoured: registries are file reads
-    assert launch(env).returncode == 0
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_win1"
     label_calls = [c["argv"] for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
     assert 1 <= len(label_calls) <= 9  # the lead plus the 8 nearest predecessors, however long the chain
+    # owned (not merely adopted by name): archive-window refuses a window nothing shows is the lead's, and finds this one
+    # only through the oldest predecessor's record (a mutant reading registries of the bounded ids alone fails here)
+    env.data["agents"] = []
+    r = archive(env, "--dry-run")
+    assert r.returncode == 0, r.stderr
+
+
+def test_archive_blockers_name_the_matching_label_and_the_bound_is_documented_behaviour(env):
+    ids = [f"{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa" for i in range(1, 41)]
+    chain(*ids, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_win1")
+    near, far = WORKER, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    env.data["agents"] = [{"id": near, "status": "running", "labels": {"ade.lead": ids[-2]}},
+                          {"id": far, "status": "running", "labels": {"ade.lead": ids[0]}}]
+    env.state(near, "wks_win1", {"ade.lead": ids[-2]})
+    env.state(far, "wks_other", {"ade.lead": ids[0]})  # 40 handoffs back, in another window: beyond the label bound
+    r = archive(env)
+    assert r.returncode == 1 and f"{near}: labelled ade.lead={ids[-2]}, status running" in r.stderr
+    assert far not in r.stderr  # documented bound (docs/self-session.md C0): not asked about, so not a blocker
+    env.state(far, "wks_win1", {"ade.lead": ids[0]})  # in the window itself it still blocks, whatever its label
+    assert far in archive(env).stderr
+
+
 
 
 def test_archive_window_covers_a_replaced_leads_window_and_clears_its_record(env):

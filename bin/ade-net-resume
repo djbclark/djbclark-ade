@@ -607,8 +607,9 @@ class Scanner:
                     raise ScanError("invalid event history")
                 history.seek(0, 2)
                 if self.resolve_lead() is None:
-                    last = next((e for e in reversed(events) if e.get("action") == "skip-lead-retired"), None)
-                    if not (last and last.get("pinned") == self.pinned and last.get("lead") == self.lead):
+                    last = next((e for e in reversed(events)
+                                 if e.get("action") == "skip-lead-retired" and e.get("pinned") == self.pinned), None)
+                    if not (last and last.get("lead") == self.lead):
                         # once per (pinned, lead) in the ledger: launchd starts a process every minute
                         self.event(history, None, "skip-lead-retired", pinned=self.pinned)
                         print(f"ade-net-resume: lead {self.lead} (pinned {self.pinned}) is archived or unknown and no "

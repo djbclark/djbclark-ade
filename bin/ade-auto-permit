@@ -156,16 +156,19 @@ def operator_question(row):
     return classify(row) is not None
 
 
-def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=None):
+def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=None, via=None):
     # Never record tool arguments, descriptions, stdout or stderr (may contain secrets): `tool` is the row's
     # `name` field only and `rule` is the denylist rule label that matched (None: no rule, a tool prompt).
-    log.write(json.dumps(dict(time=datetime.now(timezone.utc).isoformat(),
-                              decision=decision, reason=reason,
-                              agent=agent, request=request, tool=tool, rule=rule)) + "\n")
+    # `via` (only when set): the `ade.lead=<id>` label that qualified the agent, so an approval shows which lineage member it came from.
+    row = dict(time=datetime.now(timezone.utc).isoformat(), decision=decision, reason=reason,
+               agent=agent, request=request, tool=tool, rule=rule)
+    if via is not None:
+        row["via"] = via
+    log.write(json.dumps(row) + "\n")
     log.flush()
 
 
-LOGGED_LINEAGE = set()  # one audit row per change, not one per 2 s sweep
+LOGGED_LINEAGE = set()  # a broken ledger is audited once per process (--watch); the minute-by-minute job repeats the error row
 
 
 def lead_lineage(lead, log):
@@ -182,10 +185,6 @@ def lead_lineage(lead, log):
             LOGGED_LINEAGE.add(key)
             log_event(log, "error", "succession-ledger-inconsistent", rule=str(exc)[:200])
         return lead, {lead}, [lead]
-    key = (lead, current, len(leads))
-    if leads != {lead} and key not in LOGGED_LINEAGE:
-        LOGGED_LINEAGE.add(key)
-        log_event(log, "lineage", f"current={current} members={len(leads)}")
     return current, leads, queried
 
 
@@ -215,7 +214,7 @@ def descendant(agent, lead, cache):
 def sweep(lead, labels, log, all_local=False):
     current, leads, queried = lead_lineage(lead, log)
     requests = rows(call(["permit", "ls"]))
-    eligible = {}
+    eligible, via = {}, {}
     # This host's daemon only (no --host): remote hosts' agents are never in this list. It also gives each
     # agent's provider, which decides whether its question names are known (CLASSIFIED_PROVIDERS).
     providers = {}
@@ -232,7 +231,9 @@ def sweep(lead, labels, log, all_local=False):
         for row in rows(call(["ls", "-a", "-g", "--label", label])):
             if not isinstance(row, dict) or not identifier(row.get("id")):
                 raise ProbeError("invalid labelled agent")
-            eligible.setdefault(row["id"], reason)
+            if row["id"] not in eligible:
+                eligible[row["id"]] = reason
+                via[row["id"]] = label
     cache, seen, failed = {}, set(), False
     for row in requests:
         if not isinstance(row, dict):
@@ -287,6 +288,8 @@ def sweep(lead, labels, log, all_local=False):
             if reason is None:
                 log_event(log, "skip", "outside-scope", agent, request, **event)
                 continue
+            if reason == "lead-label":
+                event["via"] = via.get(agent)
             # Audit intent BEFORE the only mutation. An audit failure aborts approval.
             log_event(log, "allow-attempt", reason, agent, request, **event)
             response = rows(call(["permit", "allow", agent, request]))

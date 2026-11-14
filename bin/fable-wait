@@ -493,10 +493,13 @@ def ping_text(text: str, report: dict) -> None:
 def current_lead(lead: str) -> str:
     """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
     its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
     try:  # imported here: a copy of this script without its bin/ siblings (the arm-from-a-worktree check) still runs
         import ade_lead_succession as succ
     except ImportError:
+        print(f"fable-wait: ade_lead_succession.py is missing beside this script; delivering to {lead} as filed", file=sys.stderr)
         return lead
     try:
         return succ.effective_lead(lead)

@@ -130,13 +130,17 @@ replaced. Consumers of an old lead id:
    records (`<id>.windows.json`), their `ade.lead=<id>` labelled workers and their legacy window names; those are no longer
    "another lead's". A different live lead is still refused. `archive-window` also clears the archived window from the
    predecessors' records. Registries and ownership use the whole lineage (file reads); `paseo ls --label` is asked about the lead and
-   its 8 nearest predecessors only, so a long chain stays cheap.
+   its 8 nearest predecessors only, so a long chain stays cheap. The bound also applies to `archive-window`'s "every labelled worker is handled"
+   guard (a live worker labelled for a lead nine or more handoffs back, outside the target window, no longer blocks the archive; one
+   inside the window still does) and to window discovery by label alone (a window known only by such a worker, with no record, is not
+   found: pass `--window-middle`). The blocker text names the label that matched.
 2. `bin/ade-net-resume --lead <pinned id>` (the installed launchd job): follows the chain to the current lead, counts
    descendants of any lead in the lineage, and when the chain ends at an archived or unknown lead logs
    `skip-lead-retired` (one ledger row per pinned/current pair, not one per minute), prints one line and exits 0 (was exit 2 every
    minute); a cyclic ledger and a Paseo outage are still exit 2.
 3. `bin/ade-auto-permit --lead <pinned id>`: the sweep covers the `ade.lead=` workers and the descendants of every lead in the
-   lineage (labels asked for the 9 nearest); the audit log records a `lineage` row when it differs from `--lead`.
+   lineage (labels asked for `--lead` and the current lead's 8 nearest predecessors, at most 10 ids); an approval qualified by a label records it as
+   `via` in the audit rows.
 4. `bin/fable-wait fire`: an item filed by a lead that later handed off is sent to the current lead, never to the archived id.
 
 No re-install of a job and no hand edit of a registry is needed after a self-handoff. A job installed with a lead that was

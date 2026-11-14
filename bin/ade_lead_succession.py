@@ -31,7 +31,7 @@ RECENT_PREDECESSORS = 8
 
 
 class SuccessionError(Exception):
-    """A cycle or an over-long chain: the ledger is inconsistent, so nothing is resolved from it."""
+    """A cycle: the ledger is inconsistent, so nothing is resolved from it."""
 
 
 def default_state_dir(env=None) -> Path:

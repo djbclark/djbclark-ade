@@ -591,8 +591,11 @@ def live_agents() -> list[dict]:
 
 
 def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
-    labelled = {r["id"] for x in label_queries(lead) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or [])
-                if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    labelled = {}  # agent id -> the ade.lead=<id> label that matched (the lead or a nearby replaced predecessor)
+    for x in label_queries(lead):
+        for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or []):
+            if isinstance(r, dict) and isinstance(r.get("id"), str):
+                labelled.setdefault(r["id"], x)
     in_main = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", "ade.placement=main"]) or [])
                if isinstance(r, dict) and isinstance(r.get("id"), str)} & labelled
     blockers = []
@@ -610,7 +613,7 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         if aid in labelled:
             if status == "idle" and idle_handled:
                 continue
-            blockers.append(f"{aid}: labelled ade.lead={lead}, status {status}" +
+            blockers.append(f"{aid}: labelled ade.lead={labelled[aid]}, status {status}" +
                             (" (pass --idle-handled once its report is handled)" if status == "idle" else ""))
         elif in_window:
             blockers.append(f"{aid}: other live agent in the window, status {status}")
@@ -642,6 +645,7 @@ def archive_locked(opts) -> int:
                       "so it is not archived")
     if not ((cur and cur.kind == "WORKERS") or (legacy and legacy.kind == "WORKERS" and legacy.lead in lineage(opts.lead))):
         raise Refused(f"window {win['workspaceId']} is not a WORKERS window ({name!r}); a MAIN or USER window is never archived here")
+    mine = sorted(lineage(opts.lead))  # computed before the archive: a ledger gone cyclic meanwhile must not strand the record
     blockers = archive_blockers(opts.lead, win["workspaceId"], opts.idle_handled)
     if blockers:
         for b in blockers:
@@ -651,7 +655,7 @@ def archive_locked(opts) -> int:
         return 1
     if not opts.dry_run:
         run_ok(["workspace", "archive", win["workspaceId"]])
-        for x in sorted(lineage(opts.lead)):  # the window may be recorded under a replaced lead (the global lock is held)
+        for x in mine:  # the window may be recorded under a replaced lead (the global lock is held)
             recorded = read_registry(registry_path(x))
             if win["workspaceId"] in recorded:
                 write_registry(x, recorded - {win["workspaceId"]})

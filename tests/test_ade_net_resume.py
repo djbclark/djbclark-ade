@@ -1138,6 +1138,17 @@ def test_a_new_pinned_or_current_lead_logs_a_new_skip_row(handed_off):
     assert [(r["pinned"], r["lead"]) for r in rows] == [(LEAD, LEAD), (LEAD, NEW_LEAD)]
 
 
+def test_two_pinned_ids_sharing_one_state_dir_each_log_once(handed_off, tmp_path):
+    data, scan, sent, state, ledger, home = handed_off
+    other_pinned = "00000000-0000-0000-0000-00000000000b"
+    data["agents"][other_pinned] = {"Id": other_pinned, "ParentAgentId": None, "Archived": True, "Status": "idle", "Provider": "codex"}
+    for _ in range(3):  # a hand-run `--lead other_pinned` alternating with the installed job
+        assert scan() == 0
+        assert Scanner(other_pinned, state, True).scan() == 0
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert sorted(r["pinned"] for r in rows) == sorted([LEAD, other_pinned])
+
+
 def test_cyclic_ledger_is_an_error_never_a_quiet_retired_skip(handed_off):
     data, scan, sent, state, ledger, home = handed_off
     link(ledger, home, LEAD, NEW_LEAD)

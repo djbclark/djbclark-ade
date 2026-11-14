@@ -557,3 +557,32 @@ def test_a_handed_off_lead_keeps_its_workers_covered(tmp_path, monkeypatch):
     allowed = [c[2] for c in calls if c[:2] == ['permit', 'allow']]
     assert sorted(allowed) == sorted([grandchild, worker])  # the successor itself and a stranger stay excluded
     assert ['ls', '-a', '-g', '--label', f'ade.lead={new}'] in calls and ['ls', '-a', '-g', '--label', f'ade.lead={LEAD}'] in calls
+    audit = [json.loads(x) for x in (tmp_path/'audit.jsonl').read_text().splitlines()]
+    via = {a['agent']: a.get('via') for a in audit if a['decision'] == 'allowed'}
+    assert via == {grandchild: None, worker: f'ade.lead={new}'}  # a label-qualified approval names the lineage member's label
+
+
+def test_label_queries_are_bounded_on_a_long_chain_and_a_cycle_is_audited(tmp_path, monkeypatch):
+    ids = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(1, 31)]
+    ledger, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    ledger.mkdir()
+    for pred, nxt in zip(ids, ids[1:]):
+        (ledger / f"handoff-{pred}.json").write_text(json.dumps(
+            {"kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home.resolve()), "status": "archived",
+             "ack": {"agent_id": nxt}}))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(ledger))
+    monkeypatch.setenv("PASEO_HOME", str(home))
+    module = runpy.run_path(str(SCRIPT))
+    # the pinned (oldest) lead is queried, plus the newest lead and its 8 nearest predecessors: 10 ids, not 30
+    import io
+    current, leads, queried = module['lead_lineage'](ids[0], io.StringIO())
+    assert current == ids[-1] and len(leads) == 30 and len(queried) == 10
+    assert queried[0] == ids[0] and queried[1] == ids[-1] and ids[-9] in queried and ids[-10] not in queried
+    # a cycle narrows to the pinned lead alone and is audited
+    (ledger / f"handoff-{ids[-1]}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": ids[-1], "successor": ids[0], "home": str(home.resolve()), "status": "archived",
+         "ack": {"agent_id": ids[0]}}))
+    module['LOGGED_LINEAGE'].clear()
+    log = io.StringIO()
+    assert module['lead_lineage'](ids[0], log) == (ids[0], {ids[0]}, [ids[0]])
+    assert "succession-ledger-inconsistent" in log.getvalue()
