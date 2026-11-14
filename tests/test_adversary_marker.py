@@ -2337,3 +2337,8 @@ def test_an_edit_by_a_user_holding_the_operators_old_login_is_not_the_operators(
 def test_every_trusted_login_has_a_pinned_id_and_an_unpinned_one_is_unknown():
     assert set(adversary_marker.TRUSTED_OWNER_USER_IDS) == set(adversary_marker.TRUSTED_OWNER_LOGINS)
     assert adversary_marker.trusted_owner_user_state("djbclark", adversary_marker.TRUSTED_OWNER_USER_IDS["djbclark"]) == "owner"
+
+
+def test_a_trusted_login_without_a_pinned_id_is_unknown_not_an_exception(monkeypatch):
+    monkeypatch.setattr(adversary_marker, "TRUSTED_OWNER_LOGINS", frozenset({"djbclark", "x"}))
+    assert adversary_marker.trusted_owner_user_state("x", 1) == "unknown"

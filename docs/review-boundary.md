@@ -27,7 +27,7 @@ closed: the PR is judged like an outside PR, so the operator's own marker commen
 pushed by the operator"). A first version read the workflow runs at the head instead; the adversary showed it misses a push that
 started no run (a push while the PR was closed, a run a writer deleted, a push with a workflow token) once the operator reopens the
 PR and so creates a run of their own, so the ref history is used. What it does not see: attacker commits the operator then pushed
-on top of (the operator vouches for what they push; this includes the operator's own tooling pushing for them: `ade-merge-ready stack-rebase` rebases a PR onto whatever open same-repo PR's head its base field names, and a writer can edit that field, as can GitHub's "Update branch" button), and a deploy key's push, whose reported actor is unconfirmed. So the org
+on top of (the operator vouches for what they push; this includes the operator's own tooling pushing for them: `ade-merge-ready stack-rebase` rebases a PR onto whatever open same-repo PR's head its base field names, and a writer can edit that field, and GitHub's "Update branch" button likewise pulls base content in under the operator's push), and a deploy key's push, whose reported actor is unconfirmed. So the org
 precondition below stays as defense in depth, checked by the operator before the transfer: `djbclark` is the only org **owner**,
 org base permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to
 anyone but `djbclark`, no App installation or deploy key with write access except ones that act only for `djbclark`, other apps

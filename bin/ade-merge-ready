@@ -514,9 +514,10 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
         "(GitHub API, not herdr; outside tips → owner comment)."
     )
     print(
-        "# Owner tips (after #484 on master): no APPROVE paste — Tests / push "
-        "rejudge flips adversary-marker; use merge-now. Outside tips still need "
-        "an owner comment (+ approve-post or dispatch)."
+        "# Owner tips (after #484 on master): no APPROVE paste when the operator "
+        "pushed the head — Tests / push rejudge flips adversary-marker; use "
+        "merge-now. Outside tips, and owner tips whose head a Cloud Agent or App "
+        "pushed, still need an owner comment (+ approve-post or dispatch)."
     )
     for r in rows:
         head = r.get("head") or ""
@@ -927,7 +928,7 @@ def resolve_approve_via(via: str, owner_pr: bool) -> str:
     `auto` is always a comment: an operator comment APPROVE approves an outside PR, and an owner PR the gate does not
     trust (its head was pushed by someone else, e.g. a `cursor[bot]` push) is judged as an outside PR, where a body
     APPROVE never counts (adversary round 2 of #675, M1). On an owner PR whose head the operator pushed the gate
-    approves with no marker, so the comment is harmless there. `owner_pr` is kept for callers and for `--via body`."""
+    approves with no marker, so the comment is harmless there. `owner_pr` is unused now and kept for the call signature."""
     v = (via or "auto").strip().lower()
     if v == "auto":
         return "comment"
@@ -1757,8 +1758,8 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         choices=("auto", "body", "comment"),
         help=(
-            "approve-post: auto=body for owner-authored tips else comment; "
-            "or force body / comment (default auto)"
+            "approve-post: auto=always an issue comment (a body APPROVE never counts once "
+            "someone else pushed the head); or force body / comment (default auto)"
         ),
     )
     ap.add_argument(
