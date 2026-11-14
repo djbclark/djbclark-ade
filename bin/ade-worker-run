@@ -263,11 +263,12 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 new, err = legacy_target(row, legacy, repo, explicit), None
             except Refused as e:
                 new, err = None, e
-            if middle is None or (new is not None and wsn.parse(new).work == middle):
+            names_it = err is not None and (legacy.middle.strip() == middle or legacy.middle.strip().endswith(f" {middle}"))
+            if middle is None or (new is not None and wsn.parse(new).work == middle) or names_it:  # unbuildable but for this work: refuse
                 hits.append((row, new, err))
     # Windows only a predecessor placed are inherited, not windows this lead placed, so they do not trigger the typo guard: new
     # work gets a new window (2026-11-14, lead 8dcd57f4 stuck with four inherited windows). A window becomes the lead's own while
-    # one of its live workers sits in it (labelled[lead]) and is inherited again when that worker closes.
+    # one of its live workers sits in it (labelled[lead]), or from the launch that places a worker in it (register_window below).
     if middle is not None and not hits and owned_own:
         ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in owned_own)
         raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
@@ -567,7 +568,7 @@ def launch(opts, rest: list[str]) -> int:
             raise Refused("paseo run printed an unusable agentId (expected a UUID)")
         try:
             wks = resolve_window_id(win, result, err, agent_id)
-            if adopt:
+            if win is not None:  # a launch into an existing window (inherited, legacy, adopted) makes it this lead's own
                 register_window(lead, wks)
             if win is None:
                 register_window(lead, wks)  # the window is this lead's from the moment it exists

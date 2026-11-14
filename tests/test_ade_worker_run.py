@@ -1025,13 +1025,16 @@ def test_label_queries_stay_bounded_on_a_long_chain(env):
     chain(*ids, LEAD)
     env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
     own(ids[0], "wks_win1")  # the OLDEST predecessor's record is still honoured: registries are file reads
+    # an unlabelled agent in the window: an unclaimed name match would be refused (never adopted), an owned window is not
+    env.data["agents"] = [{"id": "x1", "status": "idle", "labels": {}}]
+    env.state("x1", "wks_win1")
     r = launch(env)
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--workspace") + 1] == "wks_win1"
-    # owned through the oldest predecessor's record, not adopted by name and re-recorded (a mutant reading registries of the
-    # bounded ids alone would adopt the window and write LEAD's own record)
-    assert registry(LEAD) == set()
+    # owned through the oldest predecessor's record, not adopted by name (a mutant reading registries of the bounded ids alone
+    # would refuse: the unlabelled agent makes an unclaimed window unadoptable); the launch records it under LEAD
+    assert registry(LEAD) == {"wks_win1"}
     label_calls = [c["argv"] for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
     assert 1 <= len(label_calls) <= 9  # the lead plus the 8 nearest predecessors, however long the chain
     # archive-window refuses a window nothing shows is the lead's: it must find this one owned (through the oldest record)
@@ -1170,3 +1173,35 @@ def test_a_successor_with_only_an_inherited_legacy_window_opens_a_new_one_for_ne
     r = launch(env)  # --window-middle "Wave 7": new work, the predecessor's legacy window is not this lead's own
     assert r.returncode == 0, r.stderr
     assert registry(LEAD) and "wks_leg" not in registry(LEAD)
+
+
+def test_a_launch_into_an_inherited_window_makes_it_the_successors_own(env):
+    """The typo guard must keep covering a window the successor used, after its worker is archived."""
+    inherited_windows(env, "WORKERS repo (Wave 7)")
+    r = launch(env)  # --window-middle "Wave 7": the inherited window carries that work
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_old0" and "--new-workspace" not in run
+    assert registry(LEAD) == {"wks_old0"} and registry(PRED1) == {"wks_old0"}
+    env.data["agents"] = []  # the worker is archived: only the registry says the window is the lead's
+    r = env.run("--lead", LEAD, "--slice", "beta", "--window-middle", "Wave 7x", "--cwd", "/repo", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_old0" in r.stderr
+
+
+def test_archive_window_without_a_repo_never_picks_a_cwd_less_legacy_window(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [
+        {"workspaceId": "wks_cur", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}"}]  # no cwd: its repo is unknown
+    own(LEAD, "wks_cur")
+    own(PRED1, "wks_leg")
+    r = env.run("archive-window", "--lead", LEAD, "--dry-run")
+    assert r.returncode == 1 and "2 windows match" in r.stderr, r.stderr
+
+
+def test_an_unbuildable_predecessor_window_for_the_same_work_still_refuses_a_new_one(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 7 {PRED1}", "cwd": "/x/bad repo"}]
+    own(PRED1, "wks_leg")
+    r = launch(env)  # --window-middle "Wave 7": the same work, but the window cannot be renamed (repo name invalid)
+    assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
