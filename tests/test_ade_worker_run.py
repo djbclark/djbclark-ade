@@ -1070,3 +1070,45 @@ def test_archive_window_covers_a_replaced_leads_window_and_clears_its_record(env
     assert r.returncode == 0, r.stderr
     assert ["workspace", "archive"] in env.verbs()
     assert registry(PRED1) == set()  # the stale id is gone from the replaced lead's record too
+
+
+# --- ls-03: a successor lead that inherited several predecessor windows is not stuck (2026-11-14) ---------------------------
+
+def inherited_windows(env, *names):
+    """PRED1 -> LEAD handoff; PRED1 owns one window per name; LEAD owns none of its own."""
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": f"wks_old{i}", "name": n, "cwd": "/repo"} for i, n in enumerate(names)]
+    own(PRED1, *[f"wks_old{i}" for i in range(len(names))])
+
+
+def test_a_successor_opens_a_new_window_for_new_work_beside_inherited_ones(env):
+    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS repo (Old B)", "WORKERS other (Old C)")
+    r = launch(env)  # --window-middle "Wave 7": no inherited window carries that work
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
+    assert json.loads(r.stdout)["windowName"] == WIN
+
+
+def test_a_lead_with_its_own_window_still_refuses_a_second_one_for_a_typo(env):
+    inherited_windows(env, "WORKERS repo (Old A)")
+    env.data["workspaces"].append({"workspaceId": "wks_mine", "name": "WORKERS repo (Mine)", "cwd": "/repo"})
+    own(LEAD, "wks_mine")  # the lead placed this one itself: the typo guard applies again
+    r = launch(env)
+    assert r.returncode == 1 and "wks_mine" in r.stderr and "second window" in r.stderr
+    assert "wks_old0" not in r.stderr  # only the lead's own windows are named, not the inherited ones
+
+
+def test_without_a_middle_the_window_of_this_repo_is_picked_when_exactly_one_matches(env):
+    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS other (Old B)", "WORKERS third (Old C)")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_old0"
+
+
+def test_without_a_middle_two_windows_of_the_same_repo_are_still_ambiguous(env):
+    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS repo (Old B)", "WORKERS other (Old C)")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "2 windows match" in r.stderr and "--window-middle" in r.stderr
+    assert not placed(env)
