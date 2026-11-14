@@ -51,7 +51,7 @@ not listed) and then:
   notification      informational note, no "answer it" (no ping-pong between finished
                     workers and their lead)
   remote            as unlisted, but a reply is a plain paseo send (the id may not be archived at all;
-                    the note says if the server could not be checked)
+                    the note says whether the local server id could not be read)
   daemon unreadable believed too; a queue-recorded id is not marked seen, so a later event
                     retries (at most once a minute); a prompt-only one is not seen again
 
@@ -427,7 +427,8 @@ def verdict(env, agents):
     if sender not in agents or remote:
         label = clean(env["title"] or "unnamed")
         if remote:
-            why = "it names a remote server this hook cannot check"
+            why = ("it names a remote server this hook cannot check" if local_id
+                   else "it names a server and ~/.paseo/server-id could not be read to compare it")
             reply = ("If it asks something of you or requests an ack, answer it by paseo send to "
                      f"{sender} (AGENTS.md order 10), then carry on. The hook could not tell whether that id is "
                      "local; if archived_send_gate refuses the send, answer the agent's successor instead.")

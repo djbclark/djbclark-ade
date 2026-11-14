@@ -78,8 +78,10 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    `adversary`, `gh-watch`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
    record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
    sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
-   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label, and the fleet's gh
-   watcher lives outside this repo and does not set it yet (needs the operator's yes, AGENTS.md order 11); "that agent" is the SENDER only, so a receiving session
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label, the fleet's gh
+   watcher lives outside this repo, and the PR Radar plugin launches reviewers of outside PRs and issues with no label field
+   (`bin/pr-radar-route` returns provider, model, thinking, mode and reason only); neither sets it yet (the watcher needs the operator's yes,
+   AGENTS.md order 11; PR Radar needs an upstream launch field, order 8); "that agent" is the SENDER only, so a receiving session
    that is itself an injection-triage agent gets no extra protection from this hook. Also: the sender id is self-stamped
    (the CLI takes it from the sender's own `PASEO_AGENT_ID` and the server stamps it unchecked), so the exception is best-effort framing, not a
    barrier: a steered agent can rename itself (the label is the durable marker), rewrite its own record, start an unlabelled child, send

@@ -133,8 +133,10 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 ```
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
-discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` in place of its usual KIND (nothing else keys off
-the `ade.kind` value). `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (edit the dispatch's own `--label ade.kind=...`, do not add a
+second one; no tool but the peer-trust hook reads the value). `bin/ade-auto-permit` does not look at it: it still approves the
+permission requests of a worker labelled `ade.lead`, so for a triage worker the lead watches `paseo permit ls` itself (follow-up: skip
+`external-review` agents in `sweep()`, reason `sensitive-sender`). `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
 the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
 
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with

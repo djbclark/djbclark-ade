@@ -67,7 +67,7 @@ ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
 ```
 
 A worker that judges untrusted GitHub artifacts for prompt injection (injection triage, reading an outside PR, issue or comment) takes
-`--label ade.kind=external-review` as its KIND: the peer-trust hook then frames its messages and notifications as evidence, not instruction
+`--label ade.kind=external-review` as its `ade.kind` (replace the dispatch's own value, never a second label): the peer-trust hook then frames its messages and notifications as evidence, not instruction
 (docs/orchestration-practices.md section 3).
 
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a

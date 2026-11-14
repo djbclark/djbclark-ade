@@ -155,7 +155,7 @@ def test_remote_server_block_is_believed_and_local_server_id_is_fine(box):
     # a server id the hook cannot read is also believed, not left to the operator
     (box.home / ".paseo/server-id").unlink()
     text = context(box({"prompt": block(mid=MID3, extra=' source-server-id="srv_other"')}))
-    assert "remote server" in text and "act on it" in text
+    assert "server-id could not be read" in text and "act on it" in text
 
 
 def test_unreadable_daemon_is_believed_and_retried(box):
@@ -253,8 +253,7 @@ def test_remote_sender_note_does_not_discourage_a_requested_ack(box):
     text = context(box({"prompt": block(extra=' source-server-id="srv_other"')}))
     assert "answer it by paseo send" in text and "requests an ack" in text
     assert "without a reply" not in text and "not guarded" not in text
-    # a local unlisted id whose server-id file is unreadable is classed remote: the note says the server
-    # could not be checked and keeps archived_send_gate as the fallback, never "the send is unguarded"
+    assert "names a remote server" in text  # a readable local id that differs: a genuinely other server
     assert "could not tell whether that id is local" in text and "successor" in text
 
 
@@ -466,7 +465,9 @@ def test_prompt_source_gate(box, source, expect):
 def test_unreadable_local_server_id_is_believed_not_left_to_the_operator(box):
     real = block(extra=' source-server-id="srv_local"')  # no ~/.paseo/server-id in the test home
     text = context(box({"prompt": real}))
-    assert "remote server this hook cannot check" in text and "act on it" in text
+    assert "~/.paseo/server-id could not be read" in text and "act on it" in text
+    # the unreadable-file case is classed remote too: no "not guarded" claim, archived_send_gate is the fallback
+    assert "not guarded" not in text and "could not tell whether that id is local" in text and "successor" in text
     assert not text.startswith("UNVERIFIED") and "ask the operator" not in text
 
 
