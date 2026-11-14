@@ -34,7 +34,7 @@ anyone but `djbclark`, no App installation or deploy key with write access excep
 on selected repositories (docs/threat-model.md). (b) *Login vs id.* Trust used to be the login string, so a renamed or deleted `djbclark`
 would hand owner trust to whoever registered the freed name. `TRUSTED_OWNER_USER_IDS` pins the GitHub numeric user id (131936):
 the PR author, every comment author and every comment edit actor must match login AND id (GraphQL `... on User { databaseId }`; a missing
-or different id fails closed), as must the pusher. The PR body's last editor is checked by login only: it matters only for a body APPROVE on an owner PR that already passed the author and pusher checks, so it cannot raise trust. `bin/review-pr` gives the full-permission (`yolo`) runtime only when the author is the operator by login AND id (`gh api users/LOGIN`) and the same `head_pusher_check` as the gate passes, else it reviews restricted (`--runtime yolo` is refused with the reason); `bin/ade-merge-ready` (not the gate) compares the login only. Both refuse a `gh` author flagged `is_bot`.
+or different id fails closed), as must the pusher. The PR body's last editor is checked by login only: it matters only for a body APPROVE on an owner PR that already passed the author and pusher checks, so it cannot raise trust. `bin/review-pr` gives the full-permission (`yolo`) runtime only when the author's own record (`gh api repos/R/pulls/N`, `.user`) is the operator by login AND id and the gate's `head_pusher_check` passes narrowed to direct pushes (push, force-push, branch creation: a head that arrived by merging a child PR is not enough), else it reviews restricted (`--runtime yolo` is refused with the reason); `bin/ade-merge-ready` (not the gate) compares the login only. Both refuse a `gh` author flagged `is_bot`.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -70,7 +70,7 @@ review-launch --check [--mode review|read-only] [--allow-web] [--json]
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
 | `read-only` (Claude restricted tools) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
 
-| `trusted` (YOLO, 2026-11-12; `bin/review-pr` for an owner-authored PR) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
+| `trusted` (YOLO, 2026-11-12; `bin/review-pr` for a PR the operator authored and pushed the head of, directly: a push, force-push or branch creation, not a child PR's merge) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
 
 **`trusted` is not a boundary** (operator, 2026-11-12; `docs/slim/audit-walk-decisions-2026-11-12.md` section 8: YOLO is the
 default for ordinary launches and trusted internal reviewers, restricted execution is reserved for external-security-critical
@@ -141,7 +141,7 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
 headRefName,isCrossRepository,author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
-`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
+`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed directly (push, force-push, branch creation; a merged child PR is not enough) runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,

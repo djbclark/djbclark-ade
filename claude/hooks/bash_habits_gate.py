@@ -471,10 +471,16 @@ SHELL_HEREDOC = re.compile(
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
-ENV_OPTS = re.compile(r"(?<![\w./-])env\s+(?:(?:-[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*")
-NICE_OPTS = re.compile(r"(?<![\w./-])nice\s+(?:-n\s+\S+\s+|-\S+\s+)*")
-SUDO_OPTS = re.compile(r"(?<![\w./-])sudo\s+(?:(?:-[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
-                       r"\s+\S+\s+|-\S+\s+)*")
+# `""`/`''` is what strip_literals leaves of a quoted `"VAR=$X"` after env/sudo (a quoted assignment is still an assignment)
+_PLACEHOLDERS = r"(?:(?:\"\"|'')\s+)*"
+ENV_OPTS = re.compile(r"(?<![\w./-])env\s+(?:(?:-[A-Za-z]*[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*"
+                      + _PLACEHOLDERS)
+NICE_OPTS = re.compile(r"(?<![\w./-])nice\s+(?:-n\s+\S+\s+|--adjustment\s+\S+\s+|-\S+\s+)*")
+SUDO_OPTS = re.compile(r"(?<![\w./-])sudo\s+(?:(?:-[A-Za-z]*[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
+                       r"\s+\S+\s+|-\S+\s+)*" + _PLACEHOLDERS)
+COMMAND_OPTS = re.compile(r"(?<![\w./-])(?:command|builtin)\s+(?:-\S+\s+)*")
+EXEC_OPTS = re.compile(r"(?<![\w./-])exec\s+(?:-a\s+\S+\s+|-\S+\s+)*")
+REDIRECT_WORD = re.compile(r"\d*(?:>>?|<<?<?|&>>?|>&|<&)")
 QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
 
 
@@ -616,6 +622,21 @@ def _drop_heredocs(c: str) -> str:
     return "\n".join(out)
 
 
+def _drop_redirections(stage: str) -> list[str]:
+    """The stage's words without redirections (`gh>log run watch 9` is `gh run watch 9`; `2>&1`, `>f`, `> f`)."""
+    w = re.sub(r"(?<=[A-Za-z])(?=[<>])", " ", stage).split()
+    out, i = [], 0
+    while i < len(w):
+        x = w[i]
+        if REDIRECT_WORD.fullmatch(x):
+            i += 2                                  # the operator and its target
+            continue
+        if not REDIRECT_WORD.match(x):
+            out.append(x)
+        i += 1
+    return out
+
+
 def gh_args(stage: str) -> list[list[str]]:
     """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
     `rtk`, `do`/`then`), else []. One entry per reading: a wrapper option's value may itself be
@@ -623,14 +644,17 @@ def gh_args(stage: str) -> list[list[str]]:
     or `gh-pr-checks` is tried as the command word and the caller denies when any reading is a watcher."""
     # `sudo -u USER gh`, `env -i VAR=x gh`, `nice -n 10 gh`: only the words before the candidate
     # (an argument such as `-R o/env` or a branch named `env` must not be read as a wrapper)
-    w = stage.split()
+    w = _drop_redirections(stage)
+    stage = " ".join(w)
     cands = [n for n, x in enumerate(w) if os.path.basename(x) in ("gh", "gh-pr-checks")]
     out: list[list[str]] = []
     for k in cands[:GH_CANDIDATES] or [0]:
         st = stage
         if k:
             pre = " ".join(w[:k]) + " "
-            pre = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", SUDO_OPTS.sub("sudo ", pre)))
+            pre = SUDO_OPTS.sub("sudo ", pre)
+            pre = EXEC_OPTS.sub("exec ", COMMAND_OPTS.sub("command ", pre))
+            pre = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", pre))
             st = pre + " ".join(w[k:])
         out += _gh_args_one(st)
     return out
