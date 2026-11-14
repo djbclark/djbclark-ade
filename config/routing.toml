@@ -181,8 +181,9 @@ claude = 8.0
 # standing rule 3 is Astra, then Fable, then Argon. `route_agent.py plan --kinds frontier --repo tendcf` sorts the pools that
 # already passed every gate (open, fit, Fable window, fallback) by this order, unlisted pools after listed ones, and the score
 # only inside a position; it never admits a closed pool (codex at quota is skipped, the next listed pool leads). A name that
-# is no [[service]] fails the policy load (`route_agent.py` checks the effective config too). Without it the score decides (a claude burn-first bonus can put Fable ahead of a
-# usable Astra).
+# is no [[service]] fails the policy load (`route_agent.py` and `ade-config check` alike, overlays included). Without it the score
+# decides (a claude burn-first bonus can put Fable ahead of a usable Astra). The order does not apply model-family independence:
+# for a Codex-authored slice pass `plan --exclude codex` (tendcf's rule counts only Fable or Argon then).
 [dispatch.repo_overrides.tendcf]
 frontier_order = ["codex", "claude", "antigravity-argon"]
 

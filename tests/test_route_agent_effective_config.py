@@ -278,13 +278,15 @@ def test_unified_policy_keeps_optional_pipeline_effort_default(tree):
 def test_a_bad_frontier_order_in_a_local_overlay_refuses_runtime(tree, text, match):
     """rt-01 adversary M1: the runtime loader (not only `load_policy(path)`) checks a repo's `frontier_order`."""
     root, home = tree
-    local_file(home, text)
-    with pytest.raises(ValueError, match=re.escape(match)):
+    local = local_file(home, text)
+    with pytest.raises(ValueError, match=re.escape(match)) as err:
         router.load_effective_policy(root=root, home=home, environ={})
+    assert str(local) in str(err.value) and "local overlay" in str(err.value)      # rt-02: the message names the overlay
     result = cli(tree, "policy")
     assert result.returncode != 0
     assert not result.stdout
     assert match in result.stderr
+    assert str(local) in result.stderr
 
 
 def test_a_good_frontier_order_in_a_local_overlay_applies_at_runtime(tree):

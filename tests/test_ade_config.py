@@ -356,6 +356,26 @@ def test_selected_legacy_failure_parity(home, synthetic_root, tmp_path, tail):
     assert str(new.value) == str(old.value)
 
 
+@pytest.mark.parametrize("tail", [
+    _LEGACY_SERVICE + '[dispatch.repo_overrides.x]\nfrontier_order = ["nope"]\n',
+    _LEGACY_SERVICE + '[dispatch.repo_overrides.x]\nfrontier_order = ["x", "x"]\n',
+    _LEGACY_SERVICE + '[dispatch.repo_overrides.x]\nfrontier_order = []\n',
+    _LEGACY_SERVICE + '[dispatch.repo_overrides.x]\nfrontier_order = "x"\n',
+    _LEGACY_SERVICE + '[dispatch.repo_overrides.X]\nfrontier_order = ["x"]\n',
+])
+def test_frontier_order_failure_parity(home, synthetic_root, tmp_path, tail):
+    """rt-02: `ade_config.validate_frontier_orders` (router runtime, `ade-config check`) says what route_agent's pure legacy
+    reader says, message for message."""
+    path = tmp_path / "routing-bad.toml"
+    path.write_text(_LEGACY_BASE + tail)
+    with pytest.raises(ValueError) as old:
+        _pure_legacy_reader()(path)
+    eff = ac.load_effective(root=synthetic_root, home=home, environ={"ROUTING_POLICY": str(path)})
+    with pytest.raises(ac.ConfigError) as new:
+        ac.validate_frontier_orders(eff.data, ac.routing_label(eff.provenance))
+    assert str(new.value) == str(old.value)
+
+
 @pytest.mark.parametrize("lead", ['', '[lead]\nmodel="opus"\neffort="high"\npipeline_model="sonnet"\n'])
 def test_selected_legacy_defaults_parity(home, synthetic_root, tmp_path, lead):
     path = tmp_path / "routing-valid.toml"
@@ -571,3 +591,25 @@ def test_r3_disabled_local_never_resolves_probes_or_reads_local_paths(home, synt
                                  include_local=False, environ={})
     assert baseline.data == disabled.data
     assert disabled.provenance['local_config'] is None
+
+
+@pytest.mark.parametrize("order, match", [
+    ('["codexx", "claude"]', "names no known service: ['codexx']"),
+    ('[]', "non-empty array"),
+    ('["codex", "codex"]', "repeats a service"),
+])
+def test_check_refuses_a_bad_frontier_order_in_a_local_overlay_and_names_the_overlay(home, synthetic_root, order, match):
+    """rt-02 (lead review B5/B6 of PR 708): `ade-config check` agrees with the router, and the error names the overlay."""
+    local = _local_write(home, f"[dispatch.repo_overrides.tendcf]\nfrontier_order = {order}\n")
+    errors, effective = ac.check(root=synthetic_root, home=home, environ={})
+    assert effective is None and len(errors) == 1
+    assert match in errors[0]
+    assert str(local) in errors[0] and "local overlay" in errors[0]
+
+
+def test_check_passes_the_shipped_frontier_order_and_a_good_overlay(home, synthetic_root):
+    assert ac.check(root=synthetic_root, home=home, environ={})[0] == []
+    _local_write(home, '[dispatch.repo_overrides.nix2cf]\nfrontier_order = ["claude", "codex"]\n')
+    errors, effective = ac.check(root=synthetic_root, home=home, environ={})
+    assert errors == []
+    assert effective.data["dispatch"]["repo_overrides"]["nix2cf"]["frontier_order"] == ["claude", "codex"]
