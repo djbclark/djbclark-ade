@@ -32,7 +32,7 @@
    open` and `open-clean` pass; so do `xdg-open`, `opencode`, `open` as an argument or in quotes.
 
 7. `gh run watch` / `gh pr checks --watch` (deny, 2026-11-14) and a parallel `gh` fan-out
-   (warning). Every agent shares one GitHub token with a 5000/h REST quota; four `gh run watch`
+   (warning). Every agent shares one GitHub token with a 5000/h API quota (REST and GraphQL are counted separately); four `gh run watch`
    at gh's default 3 s interval emptied it from 10:22Z to 11:22Z and stopped every agent's gh
    work (docs/dispatch-footer.md item 20 says "never wait on CI" and did not stop it). The
    command word `gh` (past VAR=x, wrappers, `timeout N`, `bg`, `rtk`, `do`/`then`, and the body
@@ -426,6 +426,8 @@ SHELL_HEREDOC = re.compile(
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
+SUDO_OPTS = re.compile(r"\bsudo\s+(?:(?:-[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
+                       r"\s+\S+\s+|-\S+\s+)*")
 QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
 
 
@@ -437,7 +439,7 @@ def quoted_spans(text: str) -> list[tuple[int, int, str]]:
         ch = text[i]
         if ch == "\\":
             i += 2
-        elif ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|()<>"):
+        elif ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
             j = text.find("\n", i)
             i = n if j < 0 else j
         elif ch in "'\"":
@@ -462,6 +464,71 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
     return False
 
 
+def _closing_paren(text: str, i: int) -> int:
+    """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
+    depth, j, n = 1, i, len(text)
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "'":
+            k = text.find("'", j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if c == '"':
+            j += 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            j += 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return n
+
+
+def live_bodies(text: str, limit: int = 100) -> list[str]:
+    """Bodies of the `$(...)` and backtick substitutions bash runs: in double quotes and out of
+    them, not in single quotes, comments or after a backslash. `strip_literals` blanks a double-quoted
+    string whole, so command_views never sees a substitution there, and it does not split backticks."""
+    out: list[str] = []
+    i, n, dq = 0, len(text), False
+    while i < n and len(out) < limit:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+        elif not dq and ch == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+        elif not dq and ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
+            k = text.find("\n", i)
+            i = n if k < 0 else k
+        elif ch == '"':
+            dq = not dq
+            i += 1
+        elif ch == "`":
+            j, body = i + 1, []
+            while j < n and text[j] != "`":
+                if text[j] == "\\" and j + 1 < n and text[j + 1] in "\\$`":
+                    j += 1
+                body.append(text[j])
+                j += 1
+            out.append("".join(body))
+            i = j + 1
+        elif ch == "$" and text[i + 1:i + 2] == "(":
+            end = _closing_paren(text, i + 2)
+            out.append(text[i + 2:end])
+            i += 2                                    # a nested substitution is found by the recursion
+        else:
+            i += 1
+    return out
+
+
 def _drop_heredocs(c: str) -> str:
     """The command without heredoc bodies (their text is data, not commands)."""
     out, lines, i = [], c.split("\n"), 0
@@ -479,6 +546,7 @@ def _drop_heredocs(c: str) -> str:
 def gh_args(stage: str) -> list[str] | None:
     """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
     `rtk`, `do`/`then`), else None."""
+    stage = SUDO_OPTS.sub("sudo ", stage)             # `sudo -u USER gh ...`
     for _ in range(8):
         head, rest = command_word(stage)
         base = os.path.basename(head)
@@ -556,7 +624,7 @@ def gh_watch(args: list[str]) -> str | None:
 def gh_watch_in(text: str, depth: int = 0) -> str | None:
     """A gh-watch denial for any stage of `text`, looking inside `bash -c '...'` bodies and
     heredocs fed to a shell."""
-    text = QUOTED_NUMBER.sub(r"\2", text)           # `--interval "60"` is 60
+    text = QUOTED_NUMBER.sub(r"\2", text.replace("\\\n", ""))  # `--interval "60"` is 60; `\<nl>` joins
     plain = strip_literals(text)
     for view in command_views(plain):
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
@@ -565,8 +633,13 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
                 reason = gh_watch(args) if args is not None else None
                 if reason:
                     return reason
+    raw = _drop_heredocs(text)
+    if depth < 4:
+        for body in live_bodies(raw):
+            reason = gh_watch_in(body, depth + 1)
+            if reason:
+                return reason
     if depth < 3:
-        raw = _drop_heredocs(text)
         spans = quoted_spans(raw)
         for m in SHELL_C.finditer(raw):
             if _in_prose(raw, spans, m.start("sh")):

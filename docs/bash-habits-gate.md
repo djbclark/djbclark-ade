@@ -12,7 +12,8 @@ Checks include bare BSD `sed`, recursive `grep`, GNU-only flags on BSD tools
 and pipelines that mistake a filter's status for the producing command's.
 
 **GitHub watchers (2026-11-14).** `gh run watch` and `gh pr checks --watch` are denied (found through `timeout`, `bg`,
-`rtk`, env prefixes, `-R`, `&&`/`;`/subshells, `do`/`then` and the body of `bash -c '...'`; quoted text and heredoc bodies
+`rtk`, `sudo -u X`, env prefixes, `-R`, `&&`/`;`/subshells, `do`/`then`, backslash-newline, `$(...)` and backtick
+substitutions (also inside double quotes) and the body of `bash -c '...'`; quoted text and heredoc bodies
 are data). Why: every agent shares one GitHub token with a 5000/h API quota, and four `gh run watch` at gh's default
 3 s interval emptied it from 10:22Z to 11:22Z. The reason names dispatch-footer item 20 and the alternatives: report "CI running"
 with the run URL and end the turn, one-shot `gh run view RUN --json status,conclusion`, or a background loop sleeping 60 s

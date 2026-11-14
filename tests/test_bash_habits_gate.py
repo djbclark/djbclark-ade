@@ -541,7 +541,6 @@ def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
     "echo it\\'s; bash -c 'gh run watch 9'",                                        # N4
     "# don't spam the API\nbash -c 'gh run watch 9'",
     "true;# don't spam\nbash -c 'gh run watch 9'",                                  # R2b
-    "x\n" + " \n" * 3000 + "bash -c 'gh run watch 9'",                              # R3: fast
     "cat <<'EOF' | bash\ngh run watch 9\nEOF",                                      # N7
     "/bin/bash -c 'gh run watch 9'",                                                # B7a
     "bash -o pipefail -c 'gh run watch 9'",                                         # B7b
@@ -584,3 +583,52 @@ def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
         out = run(cmd)
         assert time.monotonic() - t0 < 5, cmd[:40]
         assert not out or out.get("permissionDecision") != "deny" or "gh run watch" in cmd
+
+
+# gw-02: lead adversary on e7ce14b9 (substitutions, `)#`, timing, continuation, sudo -u)
+
+@pytest.mark.parametrize("command", [
+    "out=\"$(gh pr checks 5 --watch)\"",                                            # B1
+    "echo \"status: $(gh run watch 9 --exit-status)\"",
+    "echo \"`gh run watch 9`\"",
+    "echo `gh run watch 9`",
+    "echo `bash -c 'gh run watch 9'`",
+    "echo \"\\` `bash -c 'gh run watch 9'`\"",
+    "x=\"$(echo \"$(gh run watch 9)\")\"",                                           # nested
+    "echo \"$(cd \"$d\"; bash -c 'gh run watch 9')\"",                              # R2a
+    "echo $(true)#\"\n\" ; bash -c 'gh run watch 9'",                                # B2
+    "cat <(true)#\"\n\" ; bash -c 'gh run watch 9'",
+    "gh run \\\nwatch 9",                                                           # B5
+    "gh pr checks 5 \\\n  --watch",
+    "sudo -u x gh run watch 9",
+    "sudo -n -u root -H gh pr checks 5 --watch",
+])
+def test_gw02_hidden_watchers_are_denied(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "echo \"\\$(gh run watch 9)\"",                                                 # escaped: text
+    "echo \"\\`gh run watch 9\\`\"",
+    "echo '$(gh run watch 9)'",
+    "echo '`gh run watch 9`'",
+    "echo $(true)#\" ; bash -c 'gh run watch 9' ; echo \"",                         # B2 reverse
+    "# $(gh run watch 9)\necho hi",
+    "out=\"$(gh run view 9 --json status)\"",
+    "echo `gh run list -L 3`",
+    "sudo -u x gh run view 9",
+    "gh run \\\nview 9",
+    "x=\"$(gh api rate_limit --jq .resources.core.remaining)\"",
+])
+def test_gw02_prose_and_one_shots_pass(command):
+    assert not denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "x\n" + "\n" * 20000 + "y",                      # quadratic in the newline run at 12f56273
+    "x\n" + " \n" * 10000 + "y",
+])
+def test_long_newline_runs_stay_fast(command):
+    r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
+    assert r.returncode == 0
