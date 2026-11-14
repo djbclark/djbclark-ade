@@ -177,6 +177,23 @@ def test_an_agent_cli_is_recognised_by_its_argv_not_only_by_the_kernel_exe():
     assert group(under, {"500": "/Applications/Evil.app/Contents/MacOS/evil", "50": "/x/2.1.325"})["500"]["excluded"] == "agent-ancestor"
 
 
+def test_a_browser_started_by_an_interpreted_agent_cli_is_excluded():
+    """`node /opt/bin/pi`: the kernel exe is node, only the argv names the agent (a Codex review, 2026-11-14). Same for a `bun`/`python3` launcher."""
+    chrome = "/Applications/Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    for launcher, exe in (("node /opt/bin/pi --yolo", "/usr/local/bin/node"), ("python3 /opt/x/pi", "/usr/bin/python3"),
+                          ("/usr/local/bin/node /opt/bin/pi", "/usr/local/bin/node")):
+        table = tbl((50, 1, ME, 0.1, launcher), (500, 50, ME, 2.0, chrome))
+        ls = [{"name": "Chrome for Testing", "bundle_id": "com.google.chrome.for.testing", "bundle_path": "/Applications/Chrome for Testing.app",
+               "exe": chrome, "pid": 500, "type": "Foreground"}]
+        apps = {a["id"]: a for a in gh.group_apps(table, {}, set(), ls, exe_of=lambda p, e=exe: {"50": e, "500": chrome}.get(str(p)), my_uid=ME,
+                                                  held_pids=(), agent_clis={"claude", "pi"}, cfg=shipped())}
+        assert apps["500"]["excluded"] == "agent-ancestor", launcher
+    plain = tbl((50, 1, ME, 0.1, "node /opt/bin/server"), (500, 50, ME, 2.0, chrome))
+    apps = {a["id"]: a for a in gh.group_apps(plain, {}, set(), ls, exe_of=lambda p: {"50": "/usr/local/bin/node", "500": chrome}.get(str(p)),
+                                              my_uid=ME, held_pids=(), agent_clis={"claude", "pi"}, cfg=shipped())}
+    assert apps["500"]["excluded"] is None
+
+
 def test_a_build_running_the_apps_own_binary_is_not_the_app():
     """Headless Chrome for a test run: its executable lies in Chrome's bundle, but a shell/agent stands between it and the app."""
     ch = "/Applications/Google Chrome.app/Contents"
@@ -359,6 +376,20 @@ def test_window_mean_counts_a_missing_sample_as_zero_and_rss_is_the_latest():
     a2 = dict(a1, cores=3.0, rss_mb=900)
     means = feed({}, [[a1], [], [a1], [a2]])
     assert len(means) == 1 and means[0]["cores_5m"] == pytest.approx((1.0 + 0 + 1.0 + 3.0) / 4) and means[0]["rss_mb"] == 900
+
+
+def test_an_app_absent_from_the_latest_sample_has_no_rss_but_keeps_its_cpu_mean():
+    st = {"apps": [{"t": NOW - 40, "cpu": 1, "a": {"800": [1.0, 3000]}}, {"t": NOW - 20, "cpu": 1, "a": {"800": [1.0, 3000]}},
+                   {"t": NOW, "cpu": 0, "a": {}}],
+          "app_meta": {"800": {"n": "Hog", "b": "com.example.hog", "p": "/Applications/Hog.app"}}}
+    [m] = gh.window_means(st, NOW, cfg())
+    assert m["rss_mb"] == 0 and m["cores_5m"] == pytest.approx(2 / 3)
+    hold_ = [hold(400, refused=("pageins",))]
+    assert not gh.should_show(hold_, gh.window_means(st, NOW, cfg(min_cores=5.0)), NOW, None, None, cfg(min_cores=5.0))["show"]   # an exited 3 GB app no longer shows
+    st["apps"].append({"t": NOW + 20, "cpu": 1, "a": {"800": [0.1, 3000]}})                                                        # back in the newest sample: RSS counts again
+    assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 3000
+    st["apps"].reverse()                                                                                                           # list order is not time order
+    assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 3000
 
 
 def test_window_trims_to_window_s_and_drops_unused_meta():

@@ -595,13 +595,16 @@ def _fin(x):
 
 def window_means(st, t, cfg):
     """[{id, name, bundle_id, bundle_path, cores_5m, rss_mb, protected, hosts_build}] from st["apps"]: cores are the mean over the
-    samples in the window (an app missing from a sample counts 0), RSS is the latest reading."""
+    samples in the window (an app missing from a sample counts 0); RSS is the latest reading, and 0 for an app absent from the latest
+    sample (it has exited: its last reading must not keep the trigger alive until it ages out)."""
     apps = st.get("apps") if isinstance(st.get("apps"), list) else []
     win = [x for x in apps if isinstance(x, dict) and _fin(x.get("t")) and t - cfg["trigger"]["window_s"] <= x["t"] <= t
            and isinstance(x.get("a"), dict)]
     n = len(win)
     if not n:
         return []
+    win.sort(key=lambda x: x["t"])
+    latest = win[-1]["a"]
     meta = st.get("app_meta") if isinstance(st.get("app_meta"), dict) else {}
     sums, last = {}, {}
     for x in win:
@@ -614,7 +617,7 @@ def window_means(st, t, cfg):
         it, m = last[pid], meta.get(pid, {}) if isinstance(meta.get(pid, {}), dict) else {}
         flag = it[2] if len(it) > 2 and isinstance(it[2], int) else 0
         out.append({"id": pid, "name": clean(m.get("n", pid)), "bundle_id": clean(m.get("b", ""), 80), "bundle_path": clean(m.get("p", ""), 120),
-                    "cores_5m": s / n, "rss_mb": it[1], "protected": bool(flag & 1), "hosts_build": bool(flag & 2), "excluded": None})
+                    "cores_5m": s / n, "rss_mb": it[1] if pid in latest else 0, "protected": bool(flag & 1), "hosts_build": bool(flag & 2), "excluded": None})
     out.sort(key=lambda a: -a["cores_5m"])
     return out
 
