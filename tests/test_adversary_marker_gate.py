@@ -218,6 +218,62 @@ def test_operator_escape_hatch_is_the_environment_not_the_command():
     assert run("ADVERSARY_MARKER_GATE_OFF=1 " + cmd)
 
 
+
+PROSE = "The `adversary-verdict` marker is fenced; approve-post is operator-only. See rule 14."
+
+
+@pytest.mark.parametrize("command", [
+    # round 2, B1/B2: prose and development commands that only MENTION a gh write, a marker or the word approve
+    "gh pr edit 724 --body " + q(PROSE),
+    "gh pr edit 724 --body 'See bin/ade-merge-ready approve-post.'",
+    "gh pr comment 724 --body 'Updated docs/code-review.md rule 14 and tests/test_adversary_marker_gate.py (84 tests).'",
+    "rg -n 'gh pr edit' tests/test_adversary_marker_gate.py",
+    "git commit -m 'test: gh pr comment shapes' tests/test_adversary_marker_gate.py",
+    "bin/pytest tests/test_adversary_marker_gate.py -k 'gh api -f'",
+    "git log --grep 'gh pr create' -- bin/adversary_marker.py",
+    "git add tests/test_adversary_marker.py bin/ade-merge-ready && git commit -m fix && gh pr create --title t --body x",
+    "rg -n adversary-verdict docs/code-review.md; gh pr comment 1 --body done",
+    "gh pr edit 724 --body-file docs/code-review.md",
+])
+def test_prose_and_development_commands_pass(command):
+    assert run(command, cwd=ROOT) is None, command
+
+
+def test_a_prose_body_file_that_mentions_the_marker_passes(tmp_path):
+    f = tmp_path / "pr-body.md"
+    f.write_text("## Summary\n\n" + PROSE + "\n\nFenced example:\n\n" + FENCED + "\n")
+    assert run("gh pr edit 724 --body-file %s" % f) is None
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr -R o/r edit 41 --body " + q(APPROVE),
+    "gh pr --repo=o/r comment 41 --body " + q(APPROVE),
+    "gh \\\npr edit 41 --body " + q(APPROVE),
+    "env -u X gh pr edit 41 --body " + q(APPROVE),
+    "pushd sub && gh pr edit 41 --body-file only.md",
+])
+def test_flags_between_group_and_verb_and_pushd_are_seen(live, command):
+    assert run(command, cwd=live), command
+
+
+def test_incidental_files_do_not_spend_the_body_file_budget(live):
+    for i in range(70):
+        (live / ("f%d.txt" % i)).write_text("x")
+    files = " ".join("f%d.txt" % i for i in range(70))
+    assert run("git add %s && gh pr edit 41 --body-file live.md" % files, cwd=live)
+
+
+def test_pathological_inputs_are_bounded(tmp_path):
+    import time
+    big = tmp_path / "big.md"
+    big.write_text("adversary-verdict " * 20000)
+    t = time.time()
+    assert run("gh pr edit 5 --body-file %s" % big) is None                     # no APPROVE: nothing to deny
+    big.write_text("approve " + "<!-- adversary-verdict:v1 { " * 5000)
+    assert run("gh pr edit 5 --body-file %s" % big)                             # too many starts beside APPROVE
+    assert time.time() - t < 12
+
+
 def test_a_command_with_no_gh_write_never_loads_the_checker():
     def boom():
         raise AssertionError("loaded")

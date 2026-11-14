@@ -8,14 +8,17 @@ counts an APPROVE only in an owner-authored PR body or an owner-posted comment, 
 into frdminc/tendcf PR 41). AGENTS.md "Code review" item 1 and docs/code-review.md rule 1 already say agents must not
 write a live APPROVE marker (fenced examples only); this hook enforces it.
 
-Denied: a command that contains a `gh` write and, anywhere in what it sends, a LIVE APPROVE marker.
-  * a `gh` write is `gh pr|issue create|new|edit|comment|review|close|reopen` (also after `-R X`, `command`, `env`,
-    `sudo`, a path, inside `bash -c "..."`, `eval`, `xargs`, or a script heredoc that names it), or `gh api` with a body
-    flag (`-f`/`-F`/`--field`/`--raw-field`/`--input`, attached forms included) at ANY endpoint, graphql too;
-  * "anywhere in what it sends": once a gh write is present, every word of the whole command is scanned (`--body`,
-    `-b`, `-f body=...`, an `echo`/`printf` feeding stdin, a here-string), every heredoc body, and every existing regular
-    file a word names (`--body-file F`, `-F F`, `-F body=@F`, `--input F`, `-T F`, `< F`, `cat F`, `jq --rawfile b F`,
-    `$(cat F)`, `$(< F)`), after any `cd DIR` earlier in the command.
+Denied: a command that runs a `gh` write and sends a LIVE APPROVE marker.
+  * a `gh` write is a simple command (after `;`, `&&`, `|`, `(`, a newline, behind wrappers such as `env`, `command`,
+    `sudo`, `timeout`, `xargs`, assignments, `cd`/`pushd DIR`) whose first two positional words, flags between them
+    allowed (`gh pr -R o/r edit`), are `pr|issue create|new|edit|comment|review|close|reopen`, or `gh api` with a body
+    flag (`-f`/`-F`/`--field`/`--raw-field`/`--input`, attached forms too) at ANY endpoint, graphql included. Code-bearing
+    strings (`bash -c "..."`, `eval "..."`, three levels deep) are read again; a script heredoc that names `gh pr edit`
+    or `gh api -f` counts. A gh word inside a quoted string that is not run (`rg "gh pr edit"`, a commit message) does not;
+  * what it sends: every word of the gh write, the files it names as body operands (`--body-file F`, `-F F`,
+    `-F body=@F`, `--input F`, `-T F`, `$(cat F)`, `$(< F)`, relative to the cwd after `cd`), its `< F` and `<<<` operands,
+    and, from the commands piped into it (`echo M |`, `cat F |`, `jq --rawfile b F |`, `<(cat F)`, `xargs`), their words and
+    the files those words name (40 incidental files at most); heredoc bodies are scanned as their own text.
 
 "Live" is decided by the checker's own parser (`adversary_marker._strip_code`, `_marker_spans`, `MARKER_START_RE`), so what
 this gate lets through is what the Action reads as documentation:
@@ -23,22 +26,22 @@ this gate lets through is what the Action reads as documentation:
             (`"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"`); an APPROVE whose head is the `<...>` placeholder
   denied    a canonical marker whose JSON verdict reads APPROVE (any case) with any other head, a canonical marker
             whose JSON does not parse but mentions APPROVE (a duplicate key, a typo), a near-miss spelling
-            (`adversary_verdict`, `adversary-verdict {`) that mentions APPROVE, and a marker whose JSON the shell would
-            build (`$V`, `$(cat f)`, a backtick) when APPROVE appears anywhere in the scanned text
+            (`adversary_verdict`, `adversary-verdict {`) that mentions APPROVE, and a `<!-- adversary-verdict ... $` /
+            backtick marker (the shell builds its JSON: `$V`, `$(cat f)`) when APPROVE appears in what the gh write sends
 
-Not gated: commands with no `gh` write; `git commit -m`, `curl`, the GitHub MCP, a Python program that calls the API
-with no `gh` word; a body built by a variable (`--body "$BODY"`); `gh pr create --fill*` (the body comes from commit
-messages); markers hidden by obfuscation (`$'\\x3c'`, an escaped file). `bin/ade-merge-ready approve-post` is the operator's
-path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent the operator tells to, runs
-it. An agent that wants the verdict recorded puts the marker in its report inside a fenced block.
+Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
+without naming `gh pr`/`gh api`); a body built by a variable (`--body "$BODY"`, `--body-file "$F"`); `gh pr create --fill*`
+(the body comes from commit messages); a `gh alias`; `git -C DIR`; more than three levels of `bash -c`; obfuscated markers
+(`$'\\x3c'`); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
+approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
+the operator tells to, runs it. An agent that wants the verdict recorded puts the marker in its report inside a fenced block.
 
 Failure modes (stated): fails OPEN, with a one-line stderr diagnostic that a hook on exit 0 does not show, for bad stdin,
-a non-Bash tool, an unreadable, non-regular or over-256 KB file, any internal error, a missing `bin/adversary_marker.py`
-(looked for beside this file's checkout, then `~/src/djbclark-ade/bin`) and a hook timeout (15 s; a pathological body of thousands of
-unclosed marker starts can take seconds). Fails CLOSED where the command cannot be parsed: shlex failure (a stray
-apostrophe) falls back to splitting on the shell operators and also scans the raw command, so a mention of a gh write
-with a live APPROVE still denies. Same shape as archived_send_gate; unlike upstream_review_gate it has no gated target
-to fail closed on.
+a non-Bash tool, an unreadable, non-regular or over-256 KB file, the 600,000-character scan budget, any internal error, a
+missing `bin/adversary_marker.py` (looked for beside this file's checkout, then `~/src/djbclark-ade/bin`) and a hook timeout
+(15 s). A text with more than 100 marker starts is denied if it mentions APPROVE, never parsed (bounded work). Fails CLOSED
+where the command cannot be parsed: shlex failure (a stray apostrophe) splits on the shell operators instead and, when the raw
+text names a gh write anywhere, scans the raw command too. Same shape as archived_send_gate.
 
 Block form: stdout JSON permissionDecision "deny", exit 0. Escape hatch for the operator, in the Claude environment:
 ADVERSARY_MARKER_GATE_OFF=1 (an assignment inside the command is not read). Inert until `~/.claude/hooks/adversary_marker_gate.py`
@@ -58,19 +61,32 @@ HERE = Path(__file__).resolve().parent.parent.parent
 BIN_DIRS = (HERE / "bin", Path.home() / "src" / "djbclark-ade" / "bin")
 MAX_FILE = 262144
 MAX_SHLEX = 100000
-MAX_FILES = 60
+MAX_FILES = 40
+MAX_TEXT = 70000   # GitHub rejects a body or comment over 65,536 characters
+MAX_TOTAL = 600000
+MAX_STARTS = 100
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
 APPROVE_WORD = re.compile(r"approve", re.IGNORECASE)
 CAT_SUB = re.compile(r"""(?:\$\(|`)\s*(?:cat\s+(?:--\s+)?|<\s*)['"]?([^\s()'"`]+)""")
-EXPANDED_MARKER = re.compile(r"adversary[-_ ]?verdict[^>]*[$`]", re.IGNORECASE)
-# `gh [-R X] pr|issue VERB`, or `gh api`: also after quotes/commas (a script's argv list), so `bash -c`, eval, xargs and a
-# heredoc script that names them are seen without being re-parsed
-GH_TEXT = re.compile(r"""(?<![\w.-])gh['",\s]+(?:(?:-R|--repo)[\s=]\S+\s+)?(?:pr|issue)['",\s]+"""
-                     r"""(?:create|new|edit|comment|review|close|reopen)(?![\w-])""")
-GH_API = re.compile(r"""(?<![\w.-])gh['",\s]+(?:(?:-R|--repo)[\s=]\S+\s+)?api(?![\w-])""")
-API_BODY_FLAG = re.compile(r"""(?<![\w-])(?:-[fF]|--field|--raw-field|--input)""")
+EXPANDED_MARKER = re.compile(r"<!--\s*adversary[-_ ]?verdict[^>\n]{0,400}[$`]", re.IGNORECASE)
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+TEXT_VERBS = {"create", "new", "edit", "comment", "review", "close", "reopen"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+WRAPPERS = {"env", "command", "exec", "builtin", "time", "nice", "ionice", "nohup", "setsid", "sudo", "doas", "timeout",
+            "gtimeout", "xargs", "stdbuf", "caffeinate", "rtk", "bg", "ts", "chronic", "flock", "taskpolicy", "arch", "!",
+            "{", "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx", "mise"}
+GH_VALUE_FLAGS = {"-R", "--repo", "--hostname", "-H", "--header", "-X", "--method", "--jq", "-q", "-t", "--template",
+                  "--cache", "-b", "--body", "-F", "--body-file", "-f", "--field", "--raw-field", "--input", "-T",
+                  "--title", "--base", "-B", "--head", "--assignee", "-a", "--label", "-l", "--milestone", "-m",
+                  "--project", "-p", "--reviewer", "--comment", "-c", "--reason", "-r"}
+API_BODY_FLAG = re.compile(r"-[fF]|--field|--raw-field|--input")
+# the loose forms (a script's argv list, an unparseable command): `gh` then a group and a verb, quotes and commas between
+GH_TEXT_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+)*(?:pr|issue)['",\s]+(?:-\S+\s+)*"""
+                           r"""(?:create|new|edit|comment|review|close|reopen)(?![\w-])""")
+GH_API_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+)*api(?![\w-])""")
+API_FLAG_LOOSE = re.compile(r"""(?<![\w-])(?:-[fF]|--field|--raw-field|--input)""")
 
 
 def deny(reason: str) -> None:
@@ -94,6 +110,8 @@ def live_approve(text: str, am) -> str:
     """A reason string when `text` carries a live APPROVE marker the Action could count (or cannot rule out), else ""."""
     if not VERDICT_WORD.search(text):
         return ""
+    if len(VERDICT_WORD.findall(text)) > MAX_STARTS:
+        return "more than %d `adversary-verdict` marker starts" % MAX_STARTS if APPROVE_WORD.search(text) else ""
     stripped = am._strip_code(text)
     spans = am._marker_spans(stripped)
     for _start, js, je in spans:
@@ -122,10 +140,6 @@ def live_approve(text: str, am) -> str:
 
 
 # ---- reading the command ------------------------------------------------------------------------------------------
-
-
-def has_gh_write(command: str) -> bool:
-    return bool(GH_TEXT.search(command)) or bool(GH_API.search(command) and API_BODY_FLAG.search(command))
 
 
 def split_heredocs(command: str):
@@ -183,69 +197,201 @@ def read_file(path: str, cwd: str) -> str:
         return ""
 
 
-def file_candidates(tok: str):
-    """Paths a word may name: itself, the value of `KEY=VALUE`, `@FILE`, `KEY=@FILE`, an attached `-FFILE`/`-fKEY=@FILE`."""
-    out = [tok]
-    for sep in ("=@", "=", "@"):
-        if sep in tok:
-            out.append(tok.split(sep, 1)[1])
-    if re.match(r"-[fFT].", tok):
-        out.append(tok[2:])
-    return [c.lstrip("@") for c in out if c]
+class Pipeline:
+    """The simple commands joined by `|` (and a `<(...)` process substitution with the command it feeds)."""
+
+    def __init__(self):
+        self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
-def collect_texts(command: str, cwd: str, depth: int = 0):
-    """Everything a gh write in `command` may send: heredoc bodies, every word, every file a word names. A word that is
-    itself a command line (`bash -c "..."`, `eval "..."`) is collected again, two levels deep."""
-    cleaned, bodies = split_heredocs(command)
-    tokens, parsed = tokenize(cleaned)
-    texts = list(bodies)
-    if not parsed:
-        texts.append(command)
-        texts += [read_file(m.group(1), cwd) for m in CAT_SUB.finditer(command)]
-    cur, want_dir, files = cwd, False, 0
-    seen = set()
+def split_pipelines(tokens, cwd: str):
+    """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside."""
+    pipes, pipe, seg, cur = [], Pipeline(), None, cwd
+    want_dir = redirect = None
+
+    def new_seg():
+        return {"words": [], "stdin": [], "here": [], "cwd": cur}
+    seg = new_seg()
+
+    def close(same_pipe):
+        nonlocal seg, pipe
+        if seg["words"] or seg["stdin"] or seg["here"]:
+            pipe.segments.append(seg)
+        seg = new_seg()
+        if not same_pipe and pipe.segments:
+            pipes.append(pipe)
+            pipe = Pipeline()
     for tok in tokens:
-        if set(tok) <= set(PUNCT):
+        if tok and set(tok) <= set(PUNCT):
+            if set(tok) <= set("<>") and not tok.startswith("<("):
+                redirect = "stdin" if tok == "<" else "here" if tok == "<<<" else "skip"
+                continue
+            # a boundary: `|` (not `||`) and `<(`/`>(` keep the pipeline, everything else ends it
+            close("|" in tok.replace("||", "") or "<(" in tok or ">(" in tok)
             continue
-        texts.append(tok)
-        texts += [read_file(m.group(1), cur) for m in CAT_SUB.finditer(tok)]
-        if depth < 2 and re.search(r"\s", tok) and len(tok) < MAX_SHLEX:
-            texts += collect_texts(tok, cur, depth + 1)
-        if tok == "cd":
-            want_dir = True
+        if redirect:
+            if redirect in ("stdin", "here"):
+                seg[redirect].append(tok)
+            redirect = None
             continue
         if want_dir:
-            want_dir = False
+            want_dir = None
             if not tok.startswith("-"):
                 nd = Path(os.path.expanduser(tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
+                seg["cwd"] = cur
             continue
-        for cand in file_candidates(tok):
-            key = (cand, cur)
-            if key in seen or files >= MAX_FILES or len(cand) > 4096 or "\n" in cand:
-                continue
-            seen.add(key)
-            content = read_file(cand, cur)
-            if content:
-                files += 1
-                texts.append(content)
-    return texts
+        if not seg["words"] and tok in ("cd", "pushd"):
+            want_dir = True
+            continue
+        seg["words"].append(tok)
+    close(False)
+    return pipes
+
+
+def gh_invocation(words):
+    """(group, verb, args after gh) when the segment runs gh (behind wrappers and assignments), else None."""
+    i = 0
+    while i < len(words) and ASSIGN.match(words[i]):
+        i += 1
+    if i >= len(words):
+        return None
+    if os.path.basename(words[i]) != "gh":
+        if words[i] not in WRAPPERS:
+            return None
+        for j in range(i, min(len(words), i + 14)):
+            if os.path.basename(words[j]) == "gh":
+                i = j
+                break
+        else:
+            return None
+    args = words[i + 1:]
+    pos, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = a in GH_VALUE_FLAGS
+        else:
+            pos.append(a)
+    return (pos[0] if pos else "", pos[1] if len(pos) > 1 else "", args)
+
+
+def is_write(group: str, verb: str, args) -> bool:
+    if group in ("pr", "issue") and verb in TEXT_VERBS:
+        return True
+    return group == "api" and any(API_BODY_FLAG.match(a) for a in args)
+
+
+def operand_files(group: str, args):
+    """Files a gh write reads its text from."""
+    out = []
+    for i, a in enumerate(args):
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a in ("--body-file", "-T", "--template", "--input") or (group in ("pr", "issue") and a == "-F"):
+            out.append(nxt)
+        elif a.startswith(("--body-file=", "--template=", "--input=")):
+            out.append(a.split("=", 1)[1])
+        elif group in ("pr", "issue") and re.match(r"-[FT].", a):
+            out.append(a[2:])
+        if "=@" in a:
+            out.append(a.split("=@", 1)[1])
+        elif a in ("-F", "-f", "--field", "--raw-field") and "=@" in nxt:
+            out.append(nxt.split("=@", 1)[1])
+    return [o for o in out if o and o != "-"]
+
+
+class Scan:
+    """What one command's gh writes send, gathered with a byte budget."""
+
+    def __init__(self):
+        self.texts, self.evidence, self.write, self.budget = [], [], False, MAX_TOTAL
+
+    def add(self, text: str, evidence_only: bool = False):
+        if not text or self.budget <= 0:
+            return
+        text = text[:MAX_TEXT]
+        self.budget -= len(text)
+        (self.evidence if evidence_only else self.texts).append(text)
+
+
+def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
+    cleaned, bodies = split_heredocs(command)
+    tokens, parsed = tokenize(cleaned)
+    if not parsed and (GH_TEXT_LOOSE.search(command) or (GH_API_LOOSE.search(command) and API_FLAG_LOOSE.search(command))):
+        scan.write = True                      # unparseable: fail closed, scan the raw command too
+        scan.add(command)
+    for body in bodies:                        # a script heredoc that names a gh write is one
+        if GH_TEXT_LOOSE.search(body) or (GH_API_LOOSE.search(body) and API_FLAG_LOOSE.search(body)):
+            scan.write = True
+            scan.add(body)
+    for tok in tokens:
+        if ASSIGN.match(tok):
+            scan.add(tok, evidence_only=True)
+    pipes = split_pipelines(tokens, cwd)
+    incidental = 0
+    for pipe in pipes:
+        gh = [(seg, gh_invocation(seg["words"])) for seg in pipe.segments]
+        writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
+        for seg in pipe.segments:              # code-bearing strings are collected again
+            words = seg["words"]
+            for k, w in enumerate(words):
+                code = None
+                if os.path.basename(w) in SHELLS and "-c" in words[k + 1:]:
+                    code = words[words.index("-c", k) + 1:][:1]
+                elif w == "eval":
+                    code = [" ".join(words[k + 1:])]
+                if code and depth < 3:
+                    collect(code[0], seg["cwd"], scan, depth + 1)
+                    break
+        if not writes:
+            continue
+        scan.write = True
+        for seg, g in gh:
+            if g and is_write(g[0], g[1], g[2]):
+                for a in g[2]:
+                    scan.add(a)
+                    for m in CAT_SUB.finditer(a):
+                        scan.add(read_file(m.group(1), seg["cwd"]))
+                for f in operand_files(g[0], g[2]):
+                    scan.add(read_file(f, seg["cwd"]))
+            else:                              # a feeder: echo/printf words, cat F, jq --rawfile b F
+                for w in seg["words"]:
+                    scan.add(w)
+                    for m in CAT_SUB.finditer(w):
+                        scan.add(read_file(m.group(1), seg["cwd"]))
+                    if incidental < MAX_FILES and len(w) < 4096 and "\n" not in w:
+                        content = read_file(w.split("=", 1)[-1] if "=" in w else w, seg["cwd"])
+                        if content:
+                            incidental += 1
+                            scan.add(content)
+            for f in seg["stdin"]:
+                scan.add(read_file(f, seg["cwd"]))
+            for h in seg["here"]:
+                scan.add(h)
+    if scan.write:
+        for body in bodies:
+            scan.add(body)
 
 
 def judge(command: str, cwd: str, am_loader) -> str:
     """The deny reason, or "" to allow. `am_loader` is called only for a command that holds a gh write."""
-    if "gh" not in command or not has_gh_write(command):
+    if "gh" not in command:
+        return ""
+    scan = Scan()
+    collect(command, cwd, scan)
+    if not scan.write:
         return ""
     am = am_loader()
-    texts = collect_texts(command, cwd)
-    for t in texts:
-        found = live_approve(t, am) if t else ""
+    for t in scan.texts:
+        found = live_approve(t, am)
         if found:
             return found
-    joined = "\n".join(texts)
-    if EXPANDED_MARKER.search(joined) and APPROVE_WORD.search(joined):
-        return "an `adversary-verdict` marker built by the shell next to the word APPROVE"
+    evidence = "\n".join(scan.texts + scan.evidence)
+    if APPROVE_WORD.search(evidence):
+        for t in scan.texts:
+            if EXPANDED_MARKER.search(am._strip_code(t)):
+                return "an `adversary-verdict` marker built by the shell next to the word APPROVE"
     return ""
 
 
