@@ -137,6 +137,11 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     constraint, list price only a tie-break. models.dev is community data: cache it with its fetch date, bound
     sanity (drop a price that moves >5x between fetches), never fail a route on a missing row. Next: install the
     plugin (operator asked), then a design note in `docs/model-routing.md` and a `route_agent.py` price reader.
+37. **route_agent rt-01: done 2026-11-14** (PR `route-agent-lows`; the PR 698 review's Lows D1 and D2, and the tendcf lead's ask): `--available` rows
+    of one pool key fold as accounts (`_merge_pool(accounts=True)`, an unknown row adds an `(unmeasured)` None window), an `error` row is an unmeasured account
+    in both folds, and `[dispatch.repo_overrides.REPO] frontier_order` sorts the already-eligible `frontier` pools for `--repo REPO` (tendcf: codex, claude,
+    antigravity-argon; an unknown name fails the policy load). Open: no other repo declares an order (nix2cf has only the floor override); an error row that
+    never clears keeps its provider's pools closed for the plenty gate. Lives in `bin/route_agent.py`, `config/routing.toml`, `skills/model-routing/SKILL.md` D5.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
