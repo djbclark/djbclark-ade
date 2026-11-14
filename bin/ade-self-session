@@ -3,7 +3,8 @@
 
 ade-self-session handoff --checkpoint FILE --quiesced [--thinking LEVEL]
 ade-self-session compact --checkpoint FILE --request-id TOKEN
-ade-self-session status|reconcile|finish --record FILE
+ade-self-session status|reconcile --record FILE
+ade-self-session finish --record FILE [--stable S] [--wait-timeout S] [--poll S]
 ade-self-session accept --record FILE --ack-file FILE
 
 Checkpoint files are nonsecret agent-authored briefings. Creation/send receipts
@@ -19,7 +20,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ade_self_session import Service, SessionError
+from ade_self_session import FINISH_POLL, FINISH_STABLE, FINISH_TIMEOUT, Service, SessionError
 
 
 def main():
@@ -41,8 +42,12 @@ def main():
         q.add_argument('--record', required=True, type=Path)
         if command == 'accept':
             q.add_argument('--ack-file', required=True, type=Path)
+        if command == 'finish':
+            q.add_argument('--stable', type=float, default=FINISH_STABLE, metavar='SECONDS', help='predecessor must stay idle (no permission waits) this long before archive (default %(default)g); 0 = one sample')
+            q.add_argument('--wait-timeout', type=float, default=FINISH_TIMEOUT, metavar='SECONDS', help='overall bound for the waits and AGENT_RUNNING retries (default %(default)g); with --stable 0, 0 = today\'s no-wait refusal')
+            q.add_argument('--poll', type=float, default=FINISH_POLL, metavar='SECONDS', help='seconds between samples (default %(default)g)')
     a = p.parse_args()
-    service = Service(a.state_dir, a.paseo_home)
+    service = Service(a.state_dir, a.paseo_home, progress=lambda message: print(message, file=sys.stderr, flush=True))
     try:
         if a.command == 'handoff':
             result = service.handoff(a.checkpoint, quiesced=a.quiesced, requested_mode=a.mode,
@@ -51,6 +56,8 @@ def main():
             result = service.compact(a.checkpoint, request_id=a.request_id)
         elif a.command == 'accept':
             result = service.accept(a.record, a.ack_file)
+        elif a.command == 'finish':
+            result = service.finish(a.record, stable=a.stable, timeout=a.wait_timeout, poll=a.poll)
         else:
             result = getattr(service, a.command)(a.record)
     except SessionError as error:

@@ -100,11 +100,30 @@ no pending permissions, and effective native mode/catalog readback. It does not
 claim to prove semantic comprehension: the trusted successor explicitly attests
 that it read and accepts the briefing and scope.
 
-The successor must wait until the predecessor finishes its turn, then run:
+The successor runs this once after `accept`; it does the waiting itself (2026-11-14, fw-01):
 
 ```
-bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json
+bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json [--stable S] [--wait-timeout S] [--poll S]
 ```
+
+`finish` samples `agent inspect` of the predecessor every `--poll` seconds (default 5) and archives only after
+it has been `idle` with `PendingPermissions == []` in every sample for `--stable` seconds (default 45; any busy
+sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). One idle sample
+is never enough: peer messages wake a handed-off lead, and a single sample was stale by the time `agent archive`
+ran (2026-11-14 21:02Z: Paseo answered `AGENT_RUNNING`, `finish` failed with `archive-unknown`). The wait is
+read-only: it never forces, never archives a workspace and never sends the predecessor anything, and it holds the
+transaction lock, so a second `finish` on the same record answers "transaction busy". A progress line goes to
+stderr when the observed state changes. `--stable 0 --wait-timeout 0` is the old single-sample behaviour (refuse
+at once unless idle); `--stable` above `--wait-timeout` is refused.
+
+If `agent archive` answers the structured error code `AGENT_RUNNING` (the predecessor began a turn after the last
+sample; nothing was archived), `finish` returns to the stable-idle wait and retries inside the same bound; the
+refusal is kept as `native_error` meanwhile and moves to `resolved_native_error` on success. Classification is
+by the envelope `code`, never by message text. On timeout `finish` raises ("never stayed idle ... both sessions
+preserved"), records `native_error.code = PREDECESSOR_NOT_IDLE`, exits non-zero and keeps the transaction status
+(`archive-unknown` once an archive was attempted, `acknowledged` when the predecessor never became idle); re-run
+`finish` when the predecessor is quiet. Successor, checkpoint and HEAD are checked at the start and again
+immediately before each archive attempt.
 
 Only the acknowledged successor may retire its predecessor. The helper rechecks
 checkpoint/HEAD and mode drift, requires predecessor idle/no pending permissions,
@@ -151,7 +170,7 @@ be the lead's live worker (`worker <slice> <lead id>`; [getpaseo/paseo#9668](htt
 [docs/workspace-layout.md](workspace-layout.md)). When the id is absent `finish` refuses with a
 `LISTING_GAP` `native_error`, archives nothing and points at the manual fallback (b) below.
 
-`finish` archive failures are never retried and never forced. When the archive error
+Except for `AGENT_RUNNING` (above), `finish` archive failures are never retried and never forced. When the archive error
 names an agent id that is not the predecessor's (prefix compare; 2026-11-14: `paseo agent
 archive FULL_UUID` answered `AGENT_ALREADY_ARCHIVED` for `c9a97e5`, a different agent, while
 `agent inspect` of the same id was right) the error reads "Paseo resolved archive to a

@@ -23,8 +23,27 @@ HEAD = 'a' * 40
 NOT_A_REPO = 'fatal: not a git repository (or any of the parent directories): .git\n'
 
 
+class Clock:
+    """Injected time: `sleep` advances `now`, nothing sleeps for real; a runaway wait fails loudly."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds > 0 and self.now < 100000, 'runaway wait'
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class Native:
     def __init__(self, root):
+        self.clock = Clock()
+        self.status_at = None       # callable(now) -> predecessor `Status`, scripting what `agent inspect` reads
+        self.archive_queue = []     # (returncode, stdout, stderr) answers to successive `agent archive` calls
         self.calls = []
         self.created = 0
         self.archived = 0
@@ -62,6 +81,8 @@ class Native:
             data = self.workspaces
         elif args[:2] == ['agent', 'inspect']:
             data = copy.deepcopy(self.rows[args[2]])
+            if args[2] == PRED and self.status_at and not data['Archived']:
+                data['Status'] = self.status_at(self.clock.now)
         elif args[:2] == ['agent', 'run']:
             if self.run_result is not None:
                 return subprocess.CompletedProcess(argv, *self.run_result)
@@ -80,6 +101,8 @@ class Native:
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
+            if self.archive_queue:
+                return subprocess.CompletedProcess(argv, *self.archive_queue.pop(0))
             if self.archive_result is not None:
                 return subprocess.CompletedProcess(argv, *self.archive_result)
             self.rows[PRED]['Archived'] = True
@@ -111,7 +134,8 @@ def setup(tmp_path):
     def verifier(plan, row):
         return {'ok': row['Mode'] == plan['mode_id'], 'reason': 'readback'}
     service = ss.Service(tmp_path / 'state', Path(env['PASEO_HOME']), env=env,
-                         runner=native, planner=planner, verifier=verifier)
+                         runner=native, planner=planner, verifier=verifier,
+                         clock=native.clock, sleep=native.clock.sleep)
     checkpoint = tmp_path / 'brief.md'
     checkpoint.write_text('Goal, existing authority, completed work, next action, dirty-state and ownership notes.\n')
     return service, native, checkpoint
@@ -151,7 +175,7 @@ def test_durable_checkpoint_top_level_creation_and_ack_before_archive(setup):
         service.finish(path)
     record = accept(service, record, path)
     assert record['ack']['agent_id'] == SUCC
-    with pytest.raises(ss.SessionError, match='idle'):
+    with pytest.raises(ss.SessionError, match='never stayed idle'):  # running for the whole bound
         service.finish(path)
     native.rows[PRED]['Status'] = 'idle'
     assert service.finish(path)['status'] == 'archived'
@@ -999,3 +1023,146 @@ def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
         service.native('agent', 'archive', PRED)
     assert caught.value.info['code'] == 'TOKEN_EXPIRED'
     assert caught.value.info['stderr_tail'] == envelope('TOKEN_EXPIRED', 'login again')
+
+
+# --- finish waits for a stable idle predecessor (fw-01, 2026-11-14) ---------------------------------
+
+RUNNING = (1, '', envelope('AGENT_RUNNING', 'Agent 1111111 is running; wait for it to finish'))
+
+
+def archive_calls(native):
+    return [a for a, k in native.calls if a[4:6] == ['agent', 'archive']]
+
+
+def only_reads_and_archive(native):
+    """The wait never forces, never archives a workspace, never sends the predecessor anything."""
+    for argv, _ in native.calls:
+        if argv[0] == 'paseo':
+            assert argv[4:6] in (['agent', 'inspect'], ['agent', 'ls'], ['agent', 'archive'],
+                                 ['provider', 'ls'], ['workspace', 'ls'], ['agent', 'run']), argv
+            assert '--force' not in argv and 'send' not in argv
+
+
+def test_finish_waits_for_a_stable_idle_window_then_archives(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.status_at = lambda now: 'running' if now < 20 else 'idle'
+    saw = []
+    service.progress = saw.append
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+    assert native.clock.now >= 20 + 45  # idle only from t=20, then the whole window
+    assert native.clock.sleeps and all(x <= ss.FINISH_POLL for x in native.clock.sleeps)
+    assert any('not idle' in m for m in saw) and any('stable idle' in m for m in saw)
+    only_reads_and_archive(native)
+
+
+def test_a_busy_sample_restarts_the_window(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.status_at = lambda now: 'running' if 30 <= now < 40 else 'idle'  # idle 30 s, busy 10 s, idle again
+    assert service.finish(path)['status'] == 'archived'
+    assert native.clock.now >= 40 + 45  # the first 30 s of idle did not count
+    assert native.archived == 1
+
+
+def test_pending_permissions_are_not_stable_idle(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['PendingPermissions'] = [{'id': 'p'}]
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=10, timeout=60)
+    assert native.archived == 0 and native.clock.now == 60
+
+
+def test_agent_running_answer_goes_back_to_waiting_then_retries(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # the 2026-11-14 shape: idle for the whole window, a peer message starts a turn, archive is refused
+    native.status_at = lambda now: 'running' if 46 <= now < 70 else 'idle'
+    native.archive_queue = [RUNNING]
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 2
+    assert native.clock.now >= 70 + 45  # a fresh stable window after the refusal
+    done = json.loads(path.read_text())
+    assert done['status'] == 'archived' and 'native_error' not in done
+    assert done['resolved_native_error']['code'] == 'AGENT_RUNNING'
+    only_reads_and_archive(native)
+
+
+def test_timeout_before_any_archive_keeps_both_sessions(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'running'
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*both sessions preserved'):
+        service.finish(path, stable=30, timeout=100, poll=7)  # 7 does not divide 100: the last sleep is clamped
+    assert native.archived == 0 and native.clock.now == 100 and native.clock.sleeps[-1] == 2
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'acknowledged'  # nothing was attempted
+    assert saved['native_error']['code'] == 'PREDECESSOR_NOT_IDLE' and 'never stayed idle' in saved['native_error']['message']
+    only_reads_and_archive(native)
+    # the predecessor goes idle later: a re-run finishes
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+    assert 'native_error' not in json.loads(path.read_text())
+
+
+def test_timeout_after_agent_running_answers_stays_archive_unknown(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 50  # always refused
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*AGENT_RUNNING to \d+ archive'):
+        service.finish(path, stable=20, timeout=100, poll=5)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown'
+    assert saved['native_error']['code'] == 'PREDECESSOR_NOT_IDLE'
+    assert 2 <= native.archived <= 6 and native.clock.now <= 100
+
+
+def test_other_archive_errors_are_not_retried_even_when_the_message_says_running(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # classified by the structured code, not by prose
+    native.archive_queue = [(1, '', envelope('ARCHIVE_FAILED', 'AGENT_RUNNING elsewhere'))]
+    with pytest.raises(ss.NativeError, match='ARCHIVE_FAILED'):
+        service.finish(path)
+    assert native.archived == 1 and json.loads(path.read_text())['native_error']['code'] == 'ARCHIVE_FAILED'
+
+
+def test_agent_running_code_is_retried_whatever_the_message(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [(1, '', envelope('AGENT_RUNNING', 'busy'))]
+    assert service.finish(path)['status'] == 'archived' and native.archived == 2
+
+
+def test_already_archived_predecessor_finishes_at_once(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Archived'] = True
+    native.rows[PRED]['Status'] = 'running'  # irrelevant once archived
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 0 and native.clock.sleeps == []
+
+
+def test_no_wait_flags_keep_the_old_single_sample_behaviour(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'running'
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=0, timeout=0)
+    assert native.clock.sleeps == [] and native.archived == 0
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path, stable=0, timeout=0)['status'] == 'archived' and native.clock.sleeps == []
+
+
+@pytest.mark.parametrize('kw', [{'stable': -1}, {'timeout': 10, 'stable': 11}, {'poll': 0}, {'timeout': float('nan')}])
+def test_nonsense_wait_arguments_are_refused_before_any_native_call(setup, kw):
+    service, native, path = finished_up_to_archive(setup)
+    before = len(native.calls)
+    with pytest.raises(ss.SessionError, match='stable'):
+        service.finish(path, **kw)
+    assert len(native.calls) == before
+
+
+def test_checkpoint_changed_during_the_wait_is_caught_before_archive(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    def flip(now):
+        if now >= 10:
+            Path(record['checkpoint']).write_text('tampered while we waited\n')
+        return 'running' if now < 10 else 'idle'
+    native.status_at = flip
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0

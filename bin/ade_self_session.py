@@ -17,6 +17,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -39,6 +40,21 @@ class NativeError(SessionError):
         self.info = info
         self.outcome = outcome
 
+
+class IdleTimeout(SessionError):
+    """The predecessor never stayed idle for the whole stable window before the overall bound."""
+
+    def __init__(self, text, last):
+        super().__init__(text)
+        self.last = last
+
+
+# `finish` waits for the predecessor to be idle (2026-11-14, fw-01: peer messages wake an old lead, so a single
+# idle sample was stale by the time `agent archive` ran and Paseo answered AGENT_RUNNING).
+FINISH_STABLE = 45.0    # seconds of consecutive idle samples with no permission wait
+FINISH_TIMEOUT = 1500.0  # overall bound, seconds, for the waits and archive retries together
+FINISH_POLL = 5.0       # seconds between samples
+AGENT_RUNNING = 'AGENT_RUNNING'  # Paseo's structured archive refusal for an agent mid-turn; nothing archived
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
@@ -170,13 +186,16 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 class Service:
     def __init__(self, state: Path, home: Path, *, env=None, runner=None,
-                 planner=None, verifier=None):
+                 planner=None, verifier=None, clock=None, sleep=None, progress=None):
         self.state = state.resolve()
         self.home = home.resolve()
         self.env = dict(os.environ if env is None else env)
         self.runner = runner or subprocess.run
         self.planner = planner
         self.verifier = verifier
+        self.clock = clock or time.monotonic  # injected in tests so a wait never sleeps for real
+        self.sleep = sleep or time.sleep
+        self.progress = progress or (lambda message: None)
 
     def native(self, *args, detached=False):
         env = dict(self.env)
@@ -409,7 +428,8 @@ class Service:
                 'transaction record\'s head, which is null (JSON null) when the cwd is not a git repository. Read and confirm the '
                 f'checkpoint and scope yourself, then run {common} accept {record_arg} {ack_arg}. '
                 'If creation receipt is not yet saved, wait and retry accept only. '
-                f'After acknowledgement, let predecessor finish; run {common} finish {record_arg}. '
+                f'After acknowledgement, run {common} finish {record_arg}: it waits (bounded; by default until the predecessor '
+                f'has stayed idle for 45 s, at most 25 min) while the predecessor finishes, so run it once and let it wait. '
                 'Never force/archive a workspace. Continue project work only after finish confirms archived '
                 'and you have reconciled exclusive workspace ownership under the repository rules. '
                 'If any check fails, preserve both sessions and report it.'
@@ -484,7 +504,44 @@ class Service:
             self.save(target, record)
             return record
 
-    def finish(self, path):
+    def check_retirement(self, record):
+        """The successor, checkpoint and HEAD still match the record: asked at the start and again right before every archive."""
+        self.verify_successor(record)
+        if (digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']
+                or self.git_head(record['cwd']) != record['head']):
+            raise SessionError('checkpoint or HEAD changed; preserve predecessor')
+
+    def wait_for_idle(self, agent, deadline, stable, poll):
+        """Inspect `agent` until it is archived, or idle with `PendingPermissions == []` for `stable` seconds.
+
+        Several consecutive samples, never one: any busy sample restarts the window. Read-only (inspect only):
+        the wait never forces anything and never sends the agent a message. IdleTimeout past `deadline`.
+        """
+        since = last = None
+        while True:
+            row = self.inspect(agent)
+            now = self.clock()
+            if row.get('Archived') is True:
+                return row
+            idle = row.get('Status') == 'idle' and row.get('PendingPermissions') == []
+            if idle:
+                since = now if since is None else since
+                if now - since >= stable:
+                    return row
+            else:
+                since = None
+            if idle != last:
+                self.progress(f'predecessor {agent}: ' + (f'idle; waiting for {stable:g} s of stable idle' if idle else
+                              f'not idle (status {row.get("Status")}, {len(row.get("PendingPermissions") or [])} '
+                              'permission wait(s)); waiting'))
+                last = idle
+            if now >= deadline:
+                raise IdleTimeout('predecessor never stayed idle', row)
+            self.sleep(min(poll, deadline - now))
+
+    def finish(self, path, *, stable=FINISH_STABLE, timeout=FINISH_TIMEOUT, poll=FINISH_POLL):
+        if not (0 <= stable <= timeout and poll > 0):
+            raise SessionError('need 0 <= stable <= timeout and poll > 0 (seconds)')
         with self.transaction(self.load_record(path)) as (target, record):
             if not record or record.get('home') != str(self.home):
                 raise SessionError('transaction unavailable on this daemon home')
@@ -492,14 +549,26 @@ class Service:
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
                 return record
-            self.verify_successor(record)
-            if (digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']
-                    or self.git_head(record['cwd']) != record['head']):
-                raise SessionError('checkpoint or HEAD changed; preserve predecessor')
-            predecessor = self.inspect(record['predecessor'])
-            if predecessor.get('Archived') is not True:
-                if predecessor.get('Status') != 'idle' or predecessor.get('PendingPermissions') != []:
-                    raise SessionError('predecessor must be idle without permission waits; never force archive')
+            self.check_retirement(record)
+            deadline = self.clock() + timeout
+            refused_running = 0
+            while True:
+                try:
+                    predecessor = self.wait_for_idle(record['predecessor'], deadline, stable, poll)
+                except IdleTimeout as error:
+                    seen = error.last.get('Status')
+                    message = (f'predecessor {record["predecessor"]} never stayed idle without permission waits for '
+                               f'{stable:g} s within {timeout:g} s (last status {seen}); nothing forced, sent or '
+                               'archived by the wait; both sessions preserved; re-run finish once it is idle')
+                    if refused_running:
+                        message += f' (Paseo answered {AGENT_RUNNING} to {refused_running} archive attempt(s))'
+                    record['native_error'] = {'op': 'agent inspect', 'code': 'PREDECESSOR_NOT_IDLE', 'rc': 0,
+                                              'stderr_tail': '', 'message': bounded(message, MESSAGE_LIMIT)}
+                    self.save(target, record)
+                    raise SessionError(message) from None
+                if predecessor.get('Archived') is True:
+                    break
+                self.check_retirement(record)  # time passed since the check above
                 if not self.listed(record['predecessor']):
                     # paseo#9668: `agent archive ID` resolves client-side from this listing and, when ID is
                     # missing (its workspace deleted), falls back to a partial title match: a live worker.
@@ -516,9 +585,15 @@ class Service:
                 try:
                     receipt = self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
                 except SessionError as error:
-                    # No automatic retry, no --force, no workspace archive: keep the reason in the record.
                     record['native_error'] = native_error_record('agent archive', error)
                     self.save(target, record)
+                    if isinstance(error, NativeError) and error.info.get('code') == AGENT_RUNNING:
+                        # The predecessor started a turn after our last sample (peer messages wake it); Paseo
+                        # archived nothing. Wait for stable idle again, inside the same overall bound.
+                        refused_running += 1
+                        self.progress(f'predecessor {record["predecessor"]}: archive answered {AGENT_RUNNING}; waiting again')
+                        continue
+                    # Every other error: no automatic retry, no --force, no workspace archive; the reason is kept.
                     other = self.archive_other_agent(error, record['predecessor'])
                     if other:
                         raise SessionError(
@@ -545,6 +620,7 @@ class Service:
                 predecessor = self.inspect(record['predecessor'])
                 if predecessor.get('Archived') is not True:
                     raise SessionError('archive unconfirmed; preserve transaction and inspect before retry')
+                break
             record['status'] = 'archived'
             self.resolve_native_error(record)
             self.save(target, record)
