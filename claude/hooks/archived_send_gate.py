@@ -147,17 +147,19 @@ def strip_comments(text: str) -> str:
     return "".join(out)
 
 
-RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at"}  # words that run a string argument
-RUN_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*|--command|--run")  # `-c`, `-lc`, `--run`: the next word is a command string
+RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at", "tmux", "osascript"}  # words that run a string argument
+RUN_FLAG = re.compile(r"-[A-Za-z]*[ce][A-Za-z]*|--command|--run(=.*)?")  # `-c`, `-lc`, `-e`, `--run`: the next word is a command string
+SHELL_WORD = re.compile(r"(?<![\w.-])(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")(?![\w.-])")  # a shell anywhere may read a string from stdin
 
 
 def mask_literals(text: str) -> str:
     """`text` (already through strip_comments) with each quoted string that is message text blanked to `''`. A string stays when
-    it has no blank in it (a quoted id), contains a `$(` or backtick (a real substitution), or follows a word that runs a
-    string (`eval`, `watch`, `-c`, `--run`: `eval 'paseo send A hi'` is a send). An unbalanced quote means the structure is
+    it is a lone id (a quoted id), contains a `$(` or backtick (a real substitution), or follows a word that runs a
+    string (`eval`, `watch`, `-c`, `--run`: `eval 'paseo send A hi'` is a send), or the command names a shell anywhere. An unbalanced quote means the structure is
     unclear: nothing is masked. `$'...'` is read with its backslash escapes."""
     out, words, word = [], [], []
     i, n = 0, len(text)
+    shell_anywhere = bool(SHELL_WORD.search(text))  # `echo 'paseo send A' | sh`, `bash <<< '...'`: any string may be a script
     while i < n:
         c = text[i]
         if c in "'\"" or (c == "$" and text.startswith("$'", i)):
@@ -170,7 +172,8 @@ def mask_literals(text: str) -> str:
                 return text
             body = text[i + 1:j]
             runs = any(Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) for w in words + ["".join(word)])
-            keep = runs or not re.search(r"\s", body) or (q == '"' and ("$(" in body or "`" in body))
+            keep = (runs or shell_anywhere or UUID.fullmatch(body) is not None
+                    or (q == '"' and ("$(" in body or "`" in body)))  # a lone quoted id is a target, not message text
             out.append(text[start:j + 1] if keep else "''")
             word.append("Q")
             i = j + 1

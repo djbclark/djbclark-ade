@@ -63,16 +63,16 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    quoting forms (`$'it\'s'`, a ` #` inside `${x:- #y}`): such a line may hide a later send on it.
    **Backstop:** when the command text, quoted message text aside, names more `paseo ... send` than the parser found judgeable
    targets for (a lone trailing backslash, an ANSI-C quote, a target the shell builds, `"$LEAD"`, `{}`, `$id`, or a string run
-   by `eval`, `watch`, `su -c`, `-c`/`--run`), every full agent id written in the command is judged too (at most 5). Quoted
-   text is blanked when it holds a blank and is not a `$(...)` body or the argument of such a runner, so a `paseo send` or an id
+   by `eval`, `watch`, `su -c`, `-c`/`-e`/`--run`, or any command that names a shell, so `echo '...' | sh` is seen), every full agent id written in the command is judged too (at most 5). Quoted
+   text is blanked unless it is a lone id and is not a `$(...)` body or the argument of such a runner, so a `paseo send` or an id
    inside a message is text. A false denial needs an archived agent's id in a command that mentions `paseo send` outside
    quotes. The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
    Known limits of the backstop (adversary r5, ls-04 r1, accepted): only **full** ids are judged, so a prefix or a name inside
    such a form is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can
    push it out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; a command that merely *talks
    about* `paseo send` unquoted (`rg paseo send`) with an archived agent's id in it is denied; a runner not on the list
-   (`eval watch su fish script parallel ssh at`, `-c`/`--command`/`--run`) that takes a quoted command string is not seen;
-   a `case ... in a) ...` pattern inside a double-quoted `$(...)` (zsh only) desynchronises the parser and hides a send in it.
+   (`eval watch su fish script parallel ssh at tmux osascript`, `-c`/`-e`/`--command`/`--run`) that takes a quoted command string is not seen;
+   a `case ... in a) ...` pattern inside a `$(...)` (zsh only) desynchronises the parser and can hide a send in it or glue a following `#`; a quoted runner word (`'eval' '...'`) is not recognised.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).

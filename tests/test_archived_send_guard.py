@@ -210,6 +210,7 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f'x="$(# don\'t\npaseo send {A} hi)"', [(A, None)]),
     (f"(# don't\npaseo send {A} hi)", [(A, None)]),  # and after a bare `(`
     (f"echo a|# don't\npaseo send {A} hi", [(A, None)]),  # and after a pipe
+    (f"case $x in a)# don't\npaseo send {A} hi;; esac", [(A, None)]),  # a `)` with nothing open (a case pattern)
     (f"echo \"$( (true) )'\" ; paseo send {A} x", [(A, None)]),  # a subshell inside a substitution inside quotes
     (f'echo "$(echo $(date) ; paseo send {A} x)"', [(A, None)]),  # a nested substitution
     (f'echo "$( (true) ; paseo send {A} x)"', [(A, None)]),
@@ -373,6 +374,12 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"paseo send -- {B} ok # was paseo send {A}", []),  # a comment is not judged
     (f'paseo send {B} "a \\" b"; LEAD={A}; paseo send "$LEAD" x', [A]),  # an escaped quote does not end the masked string early
     (f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"', [B]),  # the quoted message's ids are text
+    (f"echo 'paseo send {A} hi' | sh", [A]),  # a script fed to a shell on stdin
+    (f"bash <<< 'paseo send {A} hi'", [A]),
+    (f"osascript -e 'do shell script \"paseo send {A} hi\"'", [A]),
+    (f"foo --command 'paseo send {A} hi'", [A]),
+    (f"watch -n1 true; paseo send -- {B} --prompt 'old: paseo send {A} hi'", []),  # the runner word ends with its command
+    (f'NEW={B}; paseo send "$NEW" --prompt "ack:{A}"', [B]),  # an id glued into message text is text; only a lone quoted id counts
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
