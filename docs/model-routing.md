@@ -42,11 +42,13 @@ ruling 2026-11-14): `reviewRequestedFromMe` or `isSecurity` is `judgment`, `auth
 else (Issues-tab items included) is `code`. It runs `route_agent.py route --kind K [--repo NAME] --json`, 25 s timeout
 (`NAME` is the bare lowercase repo name, dropped when outside `[a-z0-9._-]` or starting with `-`), and prints `{provider, model,
 thinkingOptionId, modeId, reason}` parsed from the routed `dispatch` line; `modeId` stays as routed (yolo for every PR, bot
-and non-owner authors included) and `contextMode`/`profileName` are never set. Router choice: `$PR_RADAR_ROUTE_AGENT`
+and non-owner authors included) and `contextMode`/`profile` (pr-radar's field names) are never set; a template value
+(`<id from: …>`, any `<` or `>`) in the dispatch is refused, never passed on. Router choice: `$PR_RADAR_ROUTE_AGENT`
 (tests), else the sibling `route_agent.py` when the script's parent has `config/routing.toml` (an ADE checkout or
 worktree), else `~/src/djbclark-ade/bin/route_agent.py`, else the sibling (vendored copy). Only the named fields of the
 context are read; titles and comments are untrusted and never forwarded. On failure (bad stdin, timeout, router non-zero
-exit with its stderr and exit code passed through, unparsable answer) stdout stays empty and pr-radar falls back to its
+exit with its exit code and its stderr, else the `reason` of its JSON stdout (the no-headroom case), passed through; unparsable
+answer; template value) stdout stays empty and pr-radar falls back to its
 defaults. Tests: `tests/test_pr_radar_route.py` (stubbed router, no live quota).
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
