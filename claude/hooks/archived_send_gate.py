@@ -175,7 +175,7 @@ def ansi_blanks(body: str) -> str:
         if g["name"]:
             return " "
         if g["c"]:  # `\\cJ`: a control character
-            code = ord(g["c"].upper()) & 0x1F
+            code = ord(g["c"]) & 0x1F  # no .upper(): `ß`.upper() is two characters; `j` and `J` give the same low five bits
         elif g["o"]:
             code = int(g["o"], 8) % 256  # bash keeps the low 8 bits of an octal escape
         else:

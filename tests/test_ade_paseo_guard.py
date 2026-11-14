@@ -549,7 +549,8 @@ def test_the_hop_cap_is_exactly_32(sw):
 
 
 @pytest.mark.parametrize("args", [("daemon", "restart"), ("-o", "json", "daemon", "start"), ("-qo", "json", "daemon", "status"),
-                                  ("--json", "daemon", "status")])
+                                  ("--json", "daemon", "status"), ("--home", "/x", "daemon", "start"), ("--host", "h", "daemon", "status"),
+                                  ("--host=h", "daemon", "status")])
 def test_a_daemon_command_passes_no_hop_count_on(sw, args):
     """ls-08 B1: a daemon started through the shim hands its environment to every agent; HOPS must not grow per generation.
     DEPTH and PID stay: an agent's shim counts them from zero (its parent is not the shim's pid)."""
@@ -559,11 +560,19 @@ def test_a_daemon_command_passes_no_hop_count_on(sw, args):
     assert r["hops"] is None and r["depth"] == "4" and r["pid"]
 
 
-@pytest.mark.parametrize("args", [("agent", "send", "x", "daemon"), ("ls", "daemon"), ("send", "x", "daemon", "restart")])
+@pytest.mark.parametrize("args", [("agent", "send", "x", "daemon"), ("ls", "daemon"), ("send", "x", "daemon", "restart"), ("-v=foo", "ls", "daemon")])
 def test_a_daemon_word_that_is_not_the_subcommand_keeps_the_hop_count(sw, args):
     sw.live(**{"x": False})
     p = sw.run(*args, env={"ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
     assert p.returncode == 0 and last_rec(sw)["hops"] == "6"
+
+
+def test_an_inherited_skip_variable_does_not_steer_the_daemon_check(sw):
+    """ls-08 r2 B2: `skip` was read before it was set, so an inherited `skip=1` flipped the check both ways."""
+    sw.run("daemon", "status", env={"skip": "1", "ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
+    assert last_rec(sw)["hops"] is None
+    sw.run("ls", "daemon", env={"skip": "1", "ADE_PASEO_SHIM_HOPS": "5"}, timeout=30)
+    assert last_rec(sw)["hops"] == "6"
 
 
 @pytest.mark.parametrize("cmd", ["daemon status", "send x daemon", "ls"])

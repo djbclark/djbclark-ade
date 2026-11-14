@@ -457,6 +457,8 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"printf '%s\\n' $'{A}\\x1c{B}' | xargs -n1 paseo send", []),  # str.isspace knows it, a shell does not
     (f"printf '%s\\n' $'{A}\\cJ{B}' | xargs -n1 paseo send", [A, B]),
     (f"printf '%s\\n' $'{A}\\U0000000a{B}' | xargs -n1 paseo send", [A, B]),
+    (f"paseo send {A} hi; echo $'\\c\u00df'", []),  # ls-08 r2 B1: `\\c` + `ß` raised a TypeError (the hook then allowed the whole command); the parser finds A, nothing extra
+    (f"printf '%s\\n' $'{A}\\UFFFFFFFF{B}' | xargs -n1 paseo send", []),  # a code point past U+10FFFF is no blank and no crash
     (f"printf '%s\\n' $'took over from {A}\\x0a' | xargs -n1 paseo send", []),  # not an id list: still masked
     (f"printf '%s\\n' $'{A}\\\\n{B}' | xargs -n1 paseo send", []),  # an escaped backslash then `n` is no blank
     (f"echo 'x'; eval'paseo send {A} hi'", [A]),  # kills "no quoted_word reset" (a glued string after a runner word)

@@ -111,13 +111,14 @@ done
 # stay (an agent's shim counts them from zero: its parent is not this pid); HOPS is dropped, or it would grow by one per daemon generation
 # until every shimmed paseo call exits 127 (ls-08 B1). Only the subcommand counts, never a `daemon` word in a message: a forking wrapper
 # that runs a shim again on `daemon ...` is the one loop the hop cap no longer ends (the depth cap still ends every other wrapper).
+skip=0
 for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "$a" in
-    -o | --format) skip=1; continue ;;
-    -[A-Za-z]*o) skip=1; continue ;;
+    -*=*) continue ;;
+    -o | --format | --host | --home | -[A-Za-z]*o) skip=1; continue ;;
     -*) continue ;;
   esac
-  if [ "${skip:-0}" = 1 ]; then skip=0; continue; fi
   if [ "$a" = daemon ]; then unset ADE_PASEO_SHIM_HOPS; fi
   break
 done
