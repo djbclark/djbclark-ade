@@ -134,11 +134,14 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
 discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (it replaces the dispatch's own `--label ade.kind=...`: `paseo run` keeps the LAST `--label` for a duplicate key, so
-append `--label ade.kind=external-review` last, or drop the other; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
-`sensitive-sender`) lands:** `bin/ade-auto-permit` ignores the label. It approves a triage worker's tool requests whenever the worker is a
-descendant of the lead, carries `ade.lead` or an `--ade-label`, or (the loaded launchd job passes `--all-local`, operator 2026-11-13) is any
-local agent of a classified provider, so within 60 s and before the lead can see the request in `paseo permit ls`. Launch such a worker in a mode
-that needs no approvals (read-only, no Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+append `--label ade.kind=external-review` last, or drop the other; the peer-trust hook and `bin/ade-auto-permit` read the value). **`bin/ade-auto-permit` skips it (PR 710, reason `sensitive-sender`):** an agent carrying the label is never approved in any mode, so its requests stay for the lead
+in `paseo permit ls`, and so is a Paseo descendant whose parent chain passes through one before the lead, unless the child also carries
+`ade.lead=<a lead in the lineage>` or a matching `--ade-label` (labels are checked before ancestry: such a child is approved as `lead-label` / `ade-label`
+whatever its parent, e.g. a plain `paseo run --label ade.lead=<lead>` from the labelled agent). **Limits:** only the label counts (a sender marked by `config/peer-trust.toml` ids or title patterns is still
+approved under the loaded `--all-local` job), no launcher sets the label yet, and a child the labelled agent launches the normal ADE
+way, top-level through `bin/ade-worker-run` (no Paseo parent, labelled `ade.lead=<that agent>` or `ade.lead=<lead>`), is not a
+descendant and is still approved (`lead-label` for `ade.lead=<lead>`; `all-local` for `ade.lead=<that agent>`, under the loaded job). Launch such a worker in a mode that needs no approvals (read-only, no
+Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
 the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
 
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
@@ -147,7 +150,7 @@ the lead framed as evidence to check, never an instruction (docs/peer-trust.md r
 2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
 passes (operator, 2026-11-13), the tool prompts of every local Claude, Codex, OpenCode, Pi and OMP agent are approved
 (reason `all-local`); a question or plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP
-`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a descendant of one is skipped as `sensitive-sender` (only the label counts, and no launcher sets it yet), and agents of
+`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a Paseo descendant of one is skipped as `sensitive-sender` (only the label counts, no launcher sets it yet, and a child that carries `ade.lead=<lead>` or a top-level `ade-worker-run` child of one is still approved, see section 3), and agents of
 any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers) keep their prompts (`unclassified-provider`; the operator's "all local agents" ruling is narrowed for them until Paseo exposes `kind`). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 
