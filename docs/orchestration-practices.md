@@ -134,11 +134,14 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
 discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (it replaces the dispatch's own `--label ade.kind=...`: `paseo run` keeps the LAST `--label` for a duplicate key, so
-append `--label ade.kind=external-review` last, or drop the other; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
-`sensitive-sender`) lands:** `bin/ade-auto-permit` ignores the label. It approves a triage worker's tool requests whenever the worker is a
-descendant of the lead, carries `ade.lead` or an `--ade-label`, or (the loaded launchd job passes `--all-local`, operator 2026-11-13) is any
-local agent of a classified provider, so within 60 s and before the lead can see the request in `paseo permit ls`. Launch such a worker in a mode
-that needs no approvals (read-only, no Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+append `--label ade.kind=external-review` last, or drop the other; the peer-trust hook and `bin/ade-auto-permit` read the value). **`bin/ade-auto-permit` skips it (PR 710, reason `sensitive-sender`):** an agent carrying the label is never approved in any mode, so its requests stay for the lead
+in `paseo permit ls`, and so is a Paseo descendant whose parent chain passes through one before the lead, unless the child also carries
+`ade.lead=<a lead in the lineage>` or a matching `--ade-label` (labels are checked before ancestry: such a child is approved as `lead-label` / `ade-label`
+whatever its parent, e.g. a plain `paseo run --label ade.lead=<lead>` from the labelled agent). **Limits:** only the label counts (a sender marked by `config/peer-trust.toml` ids or title patterns is still
+approved under the loaded `--all-local` job), no launcher sets the label yet, and a child the labelled agent launches the normal ADE
+way, top-level through `bin/ade-worker-run` (no Paseo parent, labelled `ade.lead=<that agent>` or `ade.lead=<lead>`), is not a
+descendant and is still approved (`lead-label` for `ade.lead=<lead>`; `all-local` for `ade.lead=<that agent>`, under the loaded job). Launch such a worker in a mode that needs no approvals (read-only, no
+Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
 the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
 
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
@@ -147,7 +150,7 @@ the lead framed as evidence to check, never an instruction (docs/peer-trust.md r
 2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
 passes (operator, 2026-11-13), the tool prompts of every local Claude, Codex, OpenCode, Pi and OMP agent are approved
 (reason `all-local`); a question or plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP
-`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a descendant of one is skipped as `sensitive-sender` (only the label counts, and no launcher sets it yet), and agents of
+`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a Paseo descendant of one is skipped as `sensitive-sender` (only the label counts, no launcher sets it yet, and a child that carries `ade.lead=<lead>` or a top-level `ade-worker-run` child of one is still approved, see section 3), and agents of
 any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers) keep their prompts (`unclassified-provider`; the operator's "all local agents" ruling is narrowed for them until Paseo exposes `kind`). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 
@@ -213,12 +216,12 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    "CI running" with the run URL and stop: the lead reads CI, and its wait command is
    `gh pr checks PR --watch --required --interval 60` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
    `claude/hooks/bash_habits_gate.py` enforces this since 2026-11-14 ([docs/bash-habits-gate.md](bash-habits-gate.md)):
-   `gh run watch` and `gh pr checks --watch` are denied unless the command carries `--interval`/`-i` of 60 or more. A run-URL hint uses
-   `gh run list --branch BRANCH` or the FULL 40-character SHA, never a short one: gh matches only the full SHA and a short `--commit`
-   prints `[]` with exit 0 (2026-11-14; `bin/completion-notice` expands or refuses it, footer rule 20). Why: all agents
+   `gh run watch` and `gh pr checks --watch` are denied unless the command carries `--interval`/`-i` of 60 or more. Why: all agents
    share one GitHub token with a 5000/h API quota (REST and GraphQL are counted separately); four `gh run watch` at gh's default 3 s interval emptied it from 10:22Z to
    11:22Z on 2026-11-14 and blocked every agent's gh work. At 60 s a watcher costs a few calls a minute; a worker still must not
    park on one (rule 5).
+   A run-URL hint uses `gh run list --branch BRANCH` or the FULL 40-character SHA, never a short one: gh matches only the full SHA and a
+   short `--commit` prints `[]` with exit 0 (2026-11-14; `bin/completion-notice` expands a 7-or-more-digit SHA or refuses it, footer rule 20).
 7. **One progress line per round in a fix-and-review loop**: the head sha and
    the finding count (`round 3: head 1a2b3c4, 2 findings`). A long serial
    loop that prints nothing looks the same as a hang to a human reading the

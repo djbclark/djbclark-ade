@@ -292,8 +292,8 @@ passes it explicitly or checks the successor's level after launch (2026-11-14).
 
 Follow [the native transaction protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
 Creation is pending, not completion: the exact successor reads and acknowledges
-the preserved checkpoint and next action with `accept`, waits for the predecessor to become
-idle, then runs `finish` to verify retirement without `--force`.
+the preserved checkpoint and next action with `accept`, then runs `finish` once: it waits (bounded,
+default 45 s of stable idle, 25 min overall) for the predecessor to be idle and verifies retirement without `--force`.
 Reconcile the exclusive workspace claim before further project writes. End this
 turn after requesting the handoff; stop scheduling project writes.
 

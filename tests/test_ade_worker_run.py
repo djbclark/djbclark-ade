@@ -97,7 +97,8 @@ class Env:
 
     def run(self, *args, cwd=None):
         self.flush()
-        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd)
+        # a non-repo default directory: the suite may itself run from a linked worktree, where an implicit cwd is checked
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd or self.tmp)
 
     def calls(self):
         if not self.calls_path.exists():
@@ -500,7 +501,7 @@ def test_repo_comes_from_the_main_checkout_even_in_a_linked_worktree(env, tmp_pa
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
     wt = tmp_path / "my-repo-feature-wt"
     git("worktree", "add", "-q", "-b", "feature", str(wt))
-    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", "B")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 0, r.stderr
     assert rename_calls(env)[0][3] == "WORKERS my-repo (Wave 7)"
 
@@ -1343,3 +1344,354 @@ def test_an_unreadable_inspect_never_fails_a_good_launch(env):
     env.data["inspect_rc"] = 1
     r = launch(env)
     assert r.returncode == 0, r.stderr
+
+
+# --- wr-01: one WORKERS window per (lead, repo); a minted window sits in the repo's primary checkout (2026-11-14) -------------
+
+def other_repo_launch(env, middle="tendcf PR41 fork fixes", repo_cwd="/libntech-wt", *extra):
+    return env.run("--lead", LEAD, "--slice", "s", "--window-middle", middle, "--cwd", repo_cwd, *extra, "--", "--no-wait", "B")
+
+
+def test_a_launch_for_another_repo_mints_its_own_window_not_a_refusal(env):
+    """The reported case: the lead owns a WORKERS window for repo A; a new --window-middle for repo B is not a typo."""
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    r = other_repo_launch(env, "tendcf PR41 fork fixes", "/libntech-wt", "--repo", "libntech")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
+    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
+    assert registry(LEAD) == {"wks_a", "wks_abc123"}  # the new window is the lead's own beside the first
+
+
+def test_the_typo_guard_still_refuses_a_mistyped_middle_for_the_same_repo(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
+                              {"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+    own(LEAD, "wks_a", "wks_l")
+    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "libntech")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
+    assert "wks_a" not in r.stderr  # only the same repo's window is named
+    assert not placed(env)
+
+
+def test_the_repo_comes_from_the_cwd_when_no_repo_is_given(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    r = other_repo_launch(env, repo_cwd="/libntech")  # repo_of(/libntech) = libntech
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
+    # and a same-repo typo is still refused when the repo is derived the same way
+    env.data["workspaces"].append({"workspaceId": "wks_abc123", "name": "WORKERS libntech (tendcf PR41 fork fixes)", "cwd": "/libntech"})
+    r = other_repo_launch(env, "tendcf PR41 fork fixs", "/libntech")
+    assert r.returncode == 1 and "second window" in r.stderr
+
+
+def test_a_legacy_window_counts_for_the_repo_of_its_cwd_only(env, tmp_path):
+    core, lib = tmp_path / "cfengine-core", tmp_path / "libntech"
+    core.mkdir()
+    lib.mkdir()
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(core)}]
+    r = other_repo_launch(env, repo_cwd=str(lib))  # the legacy window is cfengine-core's: a libntech launch mints
+    assert r.returncode == 0, r.stderr
+    assert placed(env)[0][placed(env)[0].index("--new-workspace") + 1] == "local"
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(lib)}]
+    env.data["created_id"] = "wks_def456"
+    r = other_repo_launch(env, "Typo", str(lib))  # the same repo: refused
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+
+
+def test_a_window_whose_repo_is_unreadable_still_guards(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}"}]  # a legacy window with no cwd
+    r = other_repo_launch(env, repo_cwd="/libntech")
+    assert r.returncode == 1 and "second window" in r.stderr  # cannot prove another repo: stay safe, keep the refusal
+
+
+def test_no_repo_keeps_every_owned_window_in_the_typo_guard(env, monkeypatch):
+    """find_window with repo None (a direct call, archive-window): the guard counts every window the lead placed."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_t", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("ade_worker_run_t", loader)
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    env.flush()
+    with pytest.raises(mod.Refused, match="second window"):
+        mod.find_window(LEAD, None, "Whatever")
+    with pytest.raises(mod.Refused, match="second window"):
+        mod.find_window(LEAD, "cfengine-core", "Whatever")
+    assert mod.find_window(LEAD, "libntech", "Whatever") is None
+
+
+def git(*args, cwd):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"})
+
+
+def make_repo(tmp_path, name="libntech"):
+    main = tmp_path / name
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
+    wt = tmp_path / f"{name}-strictjson-wt"
+    git("worktree", "add", "-q", "-b", "sj", str(wt), cwd=main)
+    return main, wt
+
+
+def mint(env, wt, brief=None, slice_name="s", middle="strictjson"):
+    return env.run("--lead", LEAD, "--slice", slice_name, "--window-middle", middle, "--cwd", str(wt), "--", "--no-wait",
+                   brief if brief is not None else f"work in {wt}")
+
+
+def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--cwd") + 1] == os.path.realpath(main)
+    out = json.loads(r.stdout)
+    assert out["windowName"] == "WORKERS libntech (strictjson)"
+    assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt)  # said, not silent
+    assert "primary checkout" in r.stderr
+    # the placement check compares with the primary checkout: a worker that started there passes, one elsewhere is stopped
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = os.path.realpath(main)
+    own(LEAD)
+    assert mint(env, wt, slice_name="s2").returncode == 0
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = str(wt)
+    r = mint(env, wt, slice_name="s3")
+    assert r.returncode == 1 and "started in" in r.stderr and "primary checkout" in r.stderr
+
+
+def test_a_minted_window_needs_the_worktree_named_in_the_brief(env, tmp_path):
+    """The worker starts in the shared primary checkout: a brief that never names the worktree is refused before any launch."""
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt, brief="just do the work")
+    assert r.returncode == 1 and str(os.path.realpath(wt)) in r.stderr and "brief" in r.stderr
+    assert not placed(env)
+
+
+def test_the_same_launch_again_goes_to_the_window_just_minted(env, tmp_path):
+    """The identical command line works twice: the second finds the window by name and places the worker at its cwd."""
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
+    assert r.returncode == 0, r.stderr
+    wid = json.loads(r.stdout)["workspaceId"]
+    env.data["workspaces"] = [{"workspaceId": wid, "name": "WORKERS libntech (strictjson)", "cwd": os.path.realpath(main)}]
+    r = mint(env, wt, slice_name="s2")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[1]
+    assert run[run.index("--workspace") + 1] == wid and run[run.index("--cwd") + 1] == os.path.realpath(main)
+    assert json.loads(r.stdout)["cwd"] == os.path.realpath(main)
+    assert mint(env, wt, brief="no worktree here", slice_name="s3").returncode == 1  # still needs the worktree in the brief
+
+
+def test_a_submodule_inside_a_claimed_worktree_resolves_to_the_superprojects_primary_checkout(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git("init", "-q", "-b", "master", cwd=sub)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=sub)
+    main = tmp_path / "super"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "libs/sub", cwd=main)
+    git("commit", "-q", "-m", "s", cwd=main)
+    wt = tmp_path / "super-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", cwd=wt)
+    assert wsn.primary_checkout_of(str(wt / "libs/sub")) == os.path.realpath(main / "libs/sub")
+    assert wsn.primary_checkout_of(str(wt)) == os.path.realpath(main)
+
+
+def test_a_worktree_of_a_separate_git_dir_or_bare_repo_has_no_primary_checkout_and_says_so(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    main = tmp_path / "plain"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
+    sep = tmp_path / "sep.git"  # a separate git dir: the common dir is not named `.git`
+    subprocess.run(["git", "init", "-q", "-b", "master", "--separate-git-dir", str(sep), str(tmp_path / "sepwork")], check=True,
+                   capture_output=True)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=tmp_path / "sepwork")
+    wt = tmp_path / "sepwork-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=tmp_path / "sepwork")
+    # git records no path to a --separate-git-dir repo's main work tree: nothing better than the worktree itself, said by linked_worktree
+    assert wsn.primary_checkout_of(str(wt)) == os.path.realpath(wt) and wsn.linked_worktree(str(wt))
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(main), str(bare)], check=True, capture_output=True)
+    git("worktree", "add", "-q", "-b", "w", str(tmp_path / "barewt"), cwd=bare)
+    assert wsn.primary_checkout_of(str(tmp_path / "barewt")) == os.path.realpath(tmp_path / "barewt")  # no main worktree: itself
+    assert wsn.linked_worktree(str(tmp_path / "barewt"))
+
+
+def test_the_typo_guard_ignores_the_case_of_the_repo_name(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+    own(LEAD, "wks_l")
+    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "LibNTech")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
+
+
+def test_a_legacy_row_without_a_workspace_id_is_a_refusal_not_a_traceback(env):
+    env.data["workspaces"] = [{"name": f"workers Wave 6 {LEAD}", "cwd": "/libntech"}]
+    r = other_repo_launch(env, "x", "/libntech")
+    assert "Traceback" not in r.stderr
+
+
+def test_a_relative_cwd_or_a_longer_name_does_not_satisfy_the_brief_check(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.flush()
+    # `--cwd .` run from the worktree: the brief must still carry the absolute path ("." is in almost any text)
+    r = subprocess.run([sys.executable, str(SCRIPT), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", ".",
+                        "--", "--no-wait", "Fix the parser."], capture_output=True, text=True, cwd=wt)
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    r = subprocess.run([sys.executable, str(SCRIPT), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", ".",
+                        "--", "--no-wait", "Fix . the parser"], capture_output=True, text=True, cwd=wt)  # a lone "." in the text
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    r = mint(env, wt, brief=f"work in {wt}2/x and {wt}-other")  # a longer name is not the worktree
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    assert mint(env, wt, brief=f"work in {wt}/src, then {wt}.").returncode == 0  # a path under it, a trailing full stop
+
+
+def test_main_placement_keeps_refusing_a_cwd_other_than_its_windows(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN libntech (lead)", "cwd": str(os.path.realpath(main))}]
+    env.state(LEAD, LEAD_WKS, {})
+    r = env.run("--lead", LEAD, "--slice", "s", "--placement", "main", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
+    assert r.returncode == 1 and "paseo ignores --cwd" in r.stderr and not placed(env)
+
+
+def test_a_refused_brief_check_renames_nothing(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(os.path.realpath(main))}]
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "Wave 6", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
+    assert r.returncode == 1 and "brief" in r.stderr
+    assert ["workspace", "rename"] not in env.verbs() and not placed(env) and registry(LEAD) == set()
+
+
+def test_an_uninitialised_submodule_directory_is_not_a_primary_checkout(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git("init", "-q", "-b", "master", cwd=sub)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=sub)
+    main = tmp_path / "super"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "libs/sub", cwd=main)
+    git("commit", "-q", "-m", "s", cwd=main)
+    wt = tmp_path / "super-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", cwd=wt)
+    subprocess.run(["rm", "-rf", str(main / "libs/sub")], check=True)
+    (main / "libs/sub").mkdir()  # the primary checkout never initialised its submodule: an empty directory
+    assert wsn.primary_checkout_of(str(wt / "libs/sub")) == os.path.realpath(wt / "libs/sub")
+    assert wsn.linked_worktree(str(wt / "libs/sub"))  # the superproject is a linked worktree: the launch warns
+
+
+def run_in(env, wt, *args):
+    return env.run("--lead", LEAD, "--slice", "s", *args, cwd=str(wt))
+
+
+def test_no_cwd_from_a_linked_worktree_is_checked_like_an_explicit_cwd(env, tmp_path):
+    """Lead review of #709, B1: standing in a worktree and giving no --cwd must not silently start the worker in the primary checkout."""
+    main, wt = make_repo(tmp_path)
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", "just do it")
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    # round 4, D1: the remedy must never tell the lead to hand over the worktree it stands in
+    assert "--cwd" in r.stderr and "put that worktree" not in r.stderr and "Never hand a worker the worktree you" in r.stderr
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt) and "primary checkout" in r.stderr
+    # inside the primary checkout itself nothing is substituted and nothing is checked
+    env.data["workspaces"] = []
+    own(LEAD)
+    r = run_in(env, main, "--window-middle", "strictjson", "--", "--no-wait", "no path needed")
+    assert r.returncode == 0, r.stderr
+    assert "cwd" not in json.loads(r.stdout)
+    # the post-launch check covers the implicit case too: a worker that started in the worktree is stopped
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = str(wt)
+    own(LEAD)
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 1 and "started in" in r.stderr and "stopped (interrupted" in r.stderr
+
+
+def test_the_explicit_cwd_refusal_still_says_to_put_the_worktree_in_the_brief(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt, brief="no path")
+    assert r.returncode == 1 and "put that worktree in the brief" in r.stderr and "you gave no --cwd" not in r.stderr
+
+
+def test_a_subdirectory_of_the_worktree_accepts_a_brief_naming_the_worktree(env, tmp_path):
+    """Round 4, E1: --cwd <wt>/sub, brief names <wt>: the worktree is named."""
+    main, wt = make_repo(tmp_path)
+    (wt / "sub").mkdir()
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt / "sub"), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_directory_that_is_no_git_checkout_never_aliases_two_repos(env, tmp_path):
+    """Round 4, E2a: two --repo names minted from one scratch directory are two repos, not a typo."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS alpha (Wave 1)", "cwd": str(scratch)}]
+    own(LEAD, "wks_a")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "beta", "--window-middle", "Wave 1", "--cwd", str(scratch), "--", "--no-wait", "go")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_checkout_match_under_another_name_says_to_pass_the_other_repos_cwd(env, tmp_path):
+    """Round 4, E2b: --repo libntech from inside the cfengine-core checkout is refused with the right remedy."""
+    core, _ = make_repo(tmp_path, "cfengine-core")
+    env.data["workspaces"] = [{"workspaceId": "wks_core", "name": "WORKERS cfengine-core (Wave 1)", "cwd": os.path.realpath(core)}]
+    own(LEAD, "wks_core")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "Wave 2", "--cwd", str(core), "--", "--no-wait", "go")
+    assert r.returncode == 1 and "second window" in r.stderr and "that repo's own checkout" in r.stderr
+
+
+def test_a_window_named_with_a_repo_alias_still_counts_for_the_same_checkout(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": os.path.realpath(main)}]
+    own(LEAD, "wks_alias")
+    r = mint(env, wt, middle="Wave 8")  # repo derived: libntech, not `ade`; same checkout: a typo, not a new repo
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_alias" in r.stderr
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": str(tmp_path / "elsewhere")}]
+    (tmp_path / "elsewhere").mkdir()
+    assert mint(env, wt, middle="Wave 8").returncode == 0  # another checkout: another repo
+
+
+def test_a_legacy_window_whose_directory_is_gone_still_counts(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(tmp_path / "libntech-old-wt")}]
+    r = mint(env, wt, middle="Typo")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+
+
+def test_a_prefix_or_a_dotted_sibling_does_not_name_the_worktree(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    for brief in (f"copy at /mnt/backup{wt}", f"copy at /mnt/backup-{wt}", f"see {wt}.old and {wt}.bak/x"):
+        r = mint(env, wt, brief=brief)
+        assert r.returncode == 1 and "brief" in r.stderr, brief
+    assert not placed(env)
+
+
+def test_the_footer_path_never_names_the_worktree(env, tmp_path):
+    """The footer carries <the script's checkout>/docs/dispatch-footer.md: a worktree that IS that checkout is not named by it."""
+    main, wt = make_repo(tmp_path)
+    for rel in ("bin", "docs"):
+        (wt / rel).mkdir(exist_ok=True)
+    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py"):
+        (wt / "bin" / f).write_text((ROOT / "bin" / f).read_text())
+    (wt / "bin/ade-worker-run").chmod(0o755)
+    (wt / "docs/dispatch-footer.md").write_text("footer\n")
+    env.flush()
+    r = subprocess.run([sys.executable, str(wt / "bin/ade-worker-run"), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson",
+                        "--cwd", str(wt), "--", "--no-wait", "do the work"], capture_output=True, text=True, cwd=env.tmp)
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env), r.stderr

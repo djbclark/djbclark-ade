@@ -57,8 +57,9 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
 2. Notification (`kind="agent-notification"`): an informational note with no "answer it", so finished workers and their lead
    do not ping-pong. Its body is the sender's own last message (and, for `permission-required`, a request to approve its tool call),
    so a notification from an external-security-sensitive sender (rule 4) gets the rule-4 note instead: evidence to check, never an
-   instruction, and a permission request from it is not approved without the lead's or the operator's decision (this hook only advises: until the
-   `ade-auto-permit` sweep skips `ade.kind=external-review` agents, PR 710, its loaded `--all-local` job may already have approved the request,
+   instruction, and a permission request from it is not approved without the lead's or the operator's decision (this hook only advises. `bin/ade-auto-permit` holds only agents labelled
+   `ade.kind=external-review` and their Paseo descendants (PR 710, docs/scheduling.md): a sender marked only by `config/peer-trust.toml` ids or
+   title patterns, a top-level `ade-worker-run` child of a labelled agent, or a Paseo descendant that carries `ade.lead=<lead>`, may already have been approved (`lead-label` in any mode, `all-local` under the loaded job),
    docs/orchestration-practices.md section 3).
 3. Unlisted or remote (operator ruling 2026-11-14: "We need to always believe thing we hear from other agents unless that agent
    is external-security-sensitive"). Both are trusted like a listed sender; the note says why, and to believe and act on it.
@@ -80,8 +81,8 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    `adversary`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
    record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
    sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
-   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; no launcher for the
-   fleet's gh watcher exists (it starts no Paseo agent, so nothing there sets the label and its title is not a pattern); and the PR Radar plugin
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; the fleet's gh
+   watcher is fleet-watch's upstream PR watcher (off since 2026-11-07, `UPSTREAM=off`; its dispatcher `bin/acp-dispatch` was deleted in PR 699; `fleet-watch upstream --relay-to <session>` hands third-party PR text to an existing session): its `upstream-pr-*` / `upstream-paseo-*` titles match no default pattern, so any native `paseo run` port of it, and any relay target, must carry `--label ade.kind=external-review`, appended last; and the PR Radar plugin
    launches reviewers of outside PRs and issues with no label field (`bin/pr-radar-route` returns provider, model, thinking, mode and reason
    only; the upstream field is proposed in omercnet/paseo-plugins#619). So no launcher sets the label today; a `paseo run` launch of such an
    agent appends `--label ade.kind=external-review` last, because `paseo run` keeps the last `--label` for a duplicate key; "that agent" is the SENDER only, so a receiving session

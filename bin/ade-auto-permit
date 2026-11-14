@@ -5,7 +5,7 @@ or plan approval meant for the operator is skipped in any mode (best-effort name
 providers whose question names are known: claude, codex, opencode, pi, omp). An agent labelled
 `ade.kind=external-review` (it judges untrusted GitHub artifacts for prompt injection, so a steered one could ask
 for anything) is never approved in any mode: its requests stay pending for the lead or the operator
-(`sensitive-sender`), and neither is a descendant that has such an agent between it and the lead. Only that
+(`sensitive-sender`), and so is a descendant that has such an agent between it and the lead, unless the child also carries `ade.lead=<a lead in the lineage>` or a matching `--ade-label` (labels are checked before ancestry). Only that
 label counts here: the exact ids and title patterns of config/peer-trust.toml (which claude/hooks/peer_trust_gate.py
 honours) are not read by this job, and launchers do not set the label yet (docs/peer-trust.md rule 4)."""
 import argparse

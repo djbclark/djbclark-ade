@@ -52,9 +52,15 @@ never dispatches for a head whose check failed or is pending, and does not wait:
 the next `classify` / `merge-now` run sees the result. `--no-marker-dispatch`
 turns it off.
 
+**Listed reviewer bots (rb-01, 2026-11-14).** A tip that would be `merge_now` is also read through
+`bin/review_bots.py` (config/review-bots.toml plus the repo's `.github/ade-review-bots.toml` on its default branch):
+an untriaged finding of a listed bot makes it `review_bot_untriaged`, a bot check still running `review_bot_pending`,
+anything it cannot decide `review_bot_unknown`. Only those rows pay the extra API calls, and `merge-now` re-reads the
+gate on the exact head right before `gh pr merge`. `bin/review-bot-findings` lists the findings. Works for any `--repo`.
+
 `merge-now` is the only merge path here: it refuses unless classify is
 `merge_now` (pytest-linux pass **and** adversary-marker success on the tip
-head); dry-run unless `--yes`. Do not raw `gh pr merge` when
+head, and no `review_bot_*` class); dry-run unless `--yes`. Do not raw `gh pr merge` when
 adversary-marker is missing or failing (2026-11-10: #481 was merged that
 way by mistake).
 
@@ -81,6 +87,9 @@ Classes:
   tests_fail      pytest-linux fail
   conflicting     GitHub mergeable == CONFLICTING
   other           anything else
+  review_bot_untriaged  would be merge_now, but a listed reviewer bot's finding is not fixed or answered (rb-01)
+  review_bot_pending    ... a listed bot's check is still running on this head (younger than pending_max_minutes)
+  review_bot_unknown    ... the bot gate could not decide (bad config / override, API failure, head mismatch): fail closed
 
 Exit: 0 always when listing succeeds; 2 usage / gh failure.
 Stdlib only.
@@ -109,6 +118,7 @@ try:
     # "The owner" is the operator's user login, the gate's one list, not whoever owns the repository (which becomes the
     # frdminc org, an account that authors no PR; 2026-11-14).
     from adversary_marker import is_trusted_owner_login
+    import review_bots   # the listed-reviewer-bot must-triage gate (rb-01, 2026-11-14)
 finally:
     sys.path.pop(0)
 
@@ -246,6 +256,35 @@ def head_repository_nwo(pr: dict[str, Any], listing_repo: str) -> str:
     return listing_repo
 
 
+BOT_CLASS = {
+    "untriaged": "review_bot_untriaged",
+    "pending": "review_bot_pending",
+    "unknown": "review_bot_unknown",
+}
+
+
+def review_bot_gate(
+    gh: str, repo: str, number: int, *, config: Any = None
+) -> dict[str, Any]:
+    """The listed-bot gate for one PR: {state: clear|untriaged|pending|unknown, head, untriaged: [...], ...}.
+
+    Any config or API failure is `unknown` (fail closed: a malformed `.github/ade-review-bots.toml` refuses merges
+    until it is fixed). Bot text is data: only titles are carried, never bodies."""
+    try:
+        return review_bots.gate_summary(
+            review_bots.evaluate(review_bots.make_gh(gh), repo, number, config=config)
+        )
+    except review_bots.ConfigError as e:
+        return {"state": "unknown", "reason": f"config: {e}"[:300], "head": "", "pending": [], "notes": [], "untriaged": []}
+    except (review_bots.GhError, subprocess.TimeoutExpired, OSError) as e:
+        return {"state": "unknown", "reason": f"api: {e}"[:300], "head": "", "pending": [], "notes": [], "untriaged": []}
+    except Exception as e:  # noqa: BLE001 - a malformed API answer must not blind the whole listing: this PR is unknown
+        return {
+            "state": "unknown", "reason": review_bots.clean(f"gate error: {type(e).__name__}: {e}")[:300],
+            "head": "", "pending": [], "notes": [], "untriaged": [],
+        }
+
+
 def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     # Open count can exceed 100 (2026-11-10: 151); a hard 100 dropped stack
     # bottoms (#334–#368) from classify/stacks paste output. Cap high enough
@@ -310,6 +349,16 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             adv=adv,
             live_approve=live,
         )
+        # A tip that would merge must also have every listed reviewer bot triaged on its exact head. Only those rows
+        # pay the extra API calls (rule 26: a batch over every open PR would not).
+        bots: dict[str, Any] | None = None
+        if klass == "merge_now":
+            bots = review_bot_gate(gh, repo, n)
+            if bots["state"] in BOT_CLASS:
+                klass = BOT_CLASS[bots["state"]]
+            elif bots.get("head") and bots["head"] != head:
+                klass = "review_bot_unknown"
+                bots = {**bots, "state": "unknown", "reason": "bot gate read a different head than the listing"}
         rows.append(
             {
                 "number": n,
@@ -326,6 +375,7 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
                 "adversary_marker": adv,
                 "live_approve": live,
                 "class": klass,
+                "review_bots": bots,
                 "marker_template": (
                     f'<!-- adversary-verdict:v1 {{"verdict":"APPROVE","head":"{head}"}} -->'
                     if head and SHA40.fullmatch(head)
@@ -489,11 +539,11 @@ def build_named_stacks(
 
 def print_table(rows: list[dict[str, Any]]) -> None:
     print(
-        f"{'N':<5} {'class':<14} {'tests':<10} {'adv':<10} {'approve':<7} {'head':<10} title"
+        f"{'N':<5} {'class':<22} {'tests':<10} {'adv':<10} {'approve':<7} {'head':<10} title"
     )
     for r in rows:
         print(
-            f"{r['number']:<5} {r['class']:<14} {r['pytest_linux']:<10} "
+            f"{r['number']:<5} {r['class']:<22} {r['pytest_linux']:<10} "
             f"{r['adversary_marker']:<10} {str(r['live_approve']):<7} "
             f"{(r['head'] or '')[:7]:<10} {(r['title'] or '')[:48]}"
         )
@@ -869,6 +919,9 @@ CLASS_NAMES = (
     "tests_fail",
     "conflicting",
     "other",
+    "review_bot_untriaged",
+    "review_bot_pending",
+    "review_bot_unknown",
 )
 
 
@@ -1547,6 +1600,16 @@ def merge_now_prs(
         head = r.get("head") or ""
         if not SHA40.fullmatch(head):
             raise RuntimeError(f"#{n} missing 40-hex head — refuse merge")
+        # Re-read the listed-bot gate right before the merge, on the exact head (the classify read may be stale).
+        fresh = review_bot_gate(gh, repo, n)
+        if fresh["state"] != "clear" or fresh.get("head") != head:
+            why = BOT_CLASS.get(fresh["state"], "review_bot_unknown")
+            titles = "; ".join(f"{f['bot']} {f['kind']} {f['id']}: {f['title']}" for f in fresh["untriaged"][:5])
+            raise RuntimeError(
+                f"#{n} class={why} head={head[:12]} (gate read head {str(fresh.get('head'))[:12]}) "
+                f"pending={','.join(fresh['pending']) or '-'} {fresh.get('reason', '')} {titles} — refuse merge "
+                "(triage every listed-bot finding: bin/review-bot-findings --repo REPO --pr N)"
+            )
         if dry_run:
             print(f"would merge #{n} --squash --match-head-commit {head}")
             merged.append(n)

@@ -311,6 +311,37 @@ def validate_legacy_routing_shape(data: dict[str, Any], path: Path) -> None:
                                  + ", ".join(CLAUDE_EFFORT_LEVELS))
 
 
+def validate_frontier_orders(data: dict[str, Any], label: str) -> None:
+    """`[dispatch.repo_overrides.REPO] frontier_order` of the effective routing data: a non-empty list of distinct [[service]]
+    names, REPO lower case (rt-02, 2026-11-14; the same rules and messages as route_agent's `_check_frontier_orders`, which
+    guards the pure legacy file read). `label` names where the data came from, overlay included."""
+    names = {e.get("name") for e in data.get("service") or [] if isinstance(e, dict)}
+    overrides = (data.get("dispatch") or {}).get("repo_overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ConfigError(f"routing policy {label}: [dispatch.repo_overrides] must be a table")
+    for repo, table in overrides.items():
+        order = table.get("frontier_order") if isinstance(table, dict) else None
+        if order is None:
+            continue
+        where = f"routing policy {label}: [dispatch.repo_overrides.{repo}] frontier_order"
+        if repo != str(repo).lower():
+            raise ConfigError(f"{where}: repo keys are lower case (the lookup lower-cases the repository name)")
+        if not (isinstance(order, list) and order and all(isinstance(x, str) for x in order)):
+            raise ConfigError(f"{where} must be a non-empty array of service names, got {order!r}")
+        unknown = [x for x in order if x not in names]
+        if unknown:
+            raise ConfigError(f"{where} names no known service: {unknown} (known: {sorted(n for n in names if n)})")
+        if len(set(order)) != len(order):
+            raise ConfigError(f"{where} repeats a service: {order}")
+
+
+def routing_label(provenance: dict[str, Any]) -> str:
+    """Where the effective routing data came from: the base file, and the local overlay when one merged in."""
+    source = str(provenance.get("routing_source") or "effective config")
+    local = provenance.get("local_config")
+    return f"{source} (+ local overlay {local})" if local else source
+
+
 def load_legacy_routing(path: Path) -> dict[str, Any]:
     data = read_toml(path)
     validate_legacy_routing_shape(data, path)
@@ -997,6 +1028,9 @@ def check(
     home_path = home if home is not None else Path.home()
     try:
         effective = load_effective(root=root, home=home_path, environ=environ)
+        if isinstance(effective.data.get("service"), list):
+            # the merged routing data: an overlay's or a unified base's frontier_order, as the router checks it (rt-02)
+            validate_frontier_orders(effective.data, routing_label(effective.provenance))
     except ConfigError as e:
         return [str(e)], None
     return [], effective
