@@ -668,3 +668,30 @@ def test_long_newline_runs_stay_fast(command):
     r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, timeout=8,
                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
     assert r.returncode == 0, r.stderr
+
+
+# gw-03: lead review Lows on #672 (rtk proxy, env/nice options)
+
+@pytest.mark.parametrize("command", [
+    "rtk proxy gh run watch 9",
+    "rtk proxy gh pr checks 5 --watch",
+    "env -i HOME=$HOME PATH=$PATH gh run watch 9",
+    "env -u FOO gh run watch 9",
+    "env -i -u FOO BAR=1 gh pr checks 5 --watch",
+    "nice -n 10 gh run watch 9",
+    "nice -10 gh run watch 9",
+])
+def test_gw03_wrapper_options_do_not_hide_a_watcher(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "rtk proxy gh run view 9 --json status",
+    "env -i HOME=$HOME gh run view 9",
+    "env -u FOO gh run watch 9 --interval 60",
+    "nice -n 10 gh run list -L 3",
+    "echo env -i gh run watch 9",
+    "echo 'rtk proxy gh run watch 9'",
+])
+def test_gw03_wrapper_one_shots_and_prose_pass(command):
+    assert not denied(command), command

@@ -25,7 +25,8 @@ started from a script or inline Python, `ssh host <<EOF`, `bash -c $'...'`, a sh
 (`deadline run --on-expire kill -- bash -c ...`), `$'..\\'..'`, a quoted command word (`gh run 'watch'`, `"gh" run watch`), `timeout -k 10 600 gh ...` (options with values),
 a heredoc delimiter with non-word characters (`<<'X-Y'`), a `<<` that is a here-string, shift or quoted/commented text
 (it hides the lines after it), substitutions in an unquoted heredoc body, a comment ending in a backslash, a nested `"$(... "x's" ...)"` followed by a single-quoted word (the apostrophe pairs with it), `$(case a in a) ...)`,
-a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before the subcommand, wrapper options with values
-(`nice -n 10 gh`, `env -u X gh`), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
+a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before the subcommand, other wrapper options with values
+(`time -p gh`, `stdbuf -o L gh`), a watcher in a `case` branch (`a) gh run watch 9;;`), a function body (`f() { gh run watch "$1"; }`),
+`parallel gh run watch ::: 1 2` (only the fan-out warning fires), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
 loop that sleeps under 60 s). Known false positives (deny side): a `bash <<EOF` line, or `bash -c 'gh run watch N'` after a live `$(` in a double-quoted
 message, and `| sh` inside a comment after a data heredoc. The 5000/h quota counts REST and GraphQL separately (`gh pr checks` reads GraphQL).

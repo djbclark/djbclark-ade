@@ -470,6 +470,8 @@ SHELL_HEREDOC = re.compile(
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
+ENV_OPTS = re.compile(r"\benv\s+(?:(?:-[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*")
+NICE_OPTS = re.compile(r"\bnice\s+(?:-n\s+\S+\s+|-\S+\s+)*")
 SUDO_OPTS = re.compile(r"\bsudo\s+(?:(?:-[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
                        r"\s+\S+\s+|-\S+\s+)*")
 QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
@@ -617,6 +619,7 @@ def gh_args(stage: str) -> list[str] | None:
     """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
     `rtk`, `do`/`then`), else None."""
     stage = SUDO_OPTS.sub("sudo ", stage)             # `sudo -u USER gh ...`
+    stage = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", stage))  # `env -i VAR=x gh`, `nice -n 10 gh`
     for _ in range(8):
         head, rest = command_word(stage)
         base = os.path.basename(head)
@@ -637,6 +640,8 @@ def gh_args(stage: str) -> list[str] | None:
             return ["pr", "checks"] + fwd
         if base in SHELL_KW or base in EXTRA_WRAP:
             while base in EXTRA_WRAP and rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            if base == "rtk" and rest and rest[0] == "proxy":   # `rtk proxy CMD` runs CMD unfiltered
                 rest = rest[1:]
             stage = " ".join(rest)
             continue
