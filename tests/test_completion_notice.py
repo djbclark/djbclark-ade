@@ -449,9 +449,14 @@ def _fake_rev_parse(table):
     ('gh run list --commit "5A2228D"', f'gh run list --commit "{FULL}"'),
     ("gh run list --branch feat/x --limit 3 --commit 5a2228d --json url", f"gh run list --branch feat/x --limit 3 --commit {FULL} --json url"),
     ("gh run list --commit 5a2228d; gh run list -c 5a2228d", f"gh run list --commit {FULL}; gh run list -c {FULL}"),
-], ids=["--commit", "--commit=", "-c", "single quotes", "upper case", "other flags around", "two hints"])
+    ("gh run ls --commit 5a2228d", f"gh run ls --commit {FULL}"),
+    ("gh run list -c=5a2228d", f"gh run list -c={FULL}"),
+    ("gh run list -c5a2228d", f"gh run list -c{FULL}"),
+    ("gh run list --commit 5a22", f"gh run list --commit {FULL}"),
+], ids=["--commit", "--commit=", "-c", "single quotes", "upper case", "other flags around", "two hints", "ls alias", "-c=",
+        "-cSHA", "4 digits"])
 def test_a_short_sha_in_a_gh_run_list_hint_is_expanded(monkeypatch, hint, expected):
-    fake = _fake_rev_parse({"5a2228d": FULL, "5A2228D": FULL})
+    fake = _fake_rev_parse({"5a2228d": FULL, "5A2228D": FULL, "5a22": FULL})
     monkeypatch.setattr(mod, "_rev_parse", fake)
     assert mod.full_run_list_sha(hint) == expected
     text = mod.build_message(title="gs-01", detail=f"CI running; {hint}", report=None, sender=SENDER, msg_id=TEST_MSG_ID)
@@ -470,7 +475,15 @@ def test_a_short_sha_in_a_gh_run_list_hint_is_expanded(monkeypatch, hint, expect
     "gh run list --commit abc",
     "gh run list --cache 5a2228d",
     "other-tool --commit 5a2228d",
-], ids=["full sha", "branch", "HEAD", "other flag value", "git show", "gh run view", "sha outside a hint", "not hex", "3 digits", "--cache", "other tool"])
+    "gh run list --workflow build-c 5a2228d",
+    "gh run view --commit 5a2228d",
+    "gh run listx --commit 5a2228d",
+    "gh run list --branch b | xargs foo --commit dead",
+    "gh run list --branch b; bash -c face",
+    "gh run list --branch b && other --commit dead",
+    "gh run list --commit 5a2228d_x",
+], ids=["full sha", "branch", "HEAD", "other flag value", "git show", "gh run view", "sha outside a hint", "not hex", "3 digits", "--cache",
+        "other tool", "-c after a word char", "gh run view --commit", "gh run listx", "pipe", "semicolon", "and", "word char tail"])
 def test_other_text_is_left_alone_and_git_is_not_asked(monkeypatch, hint):
     fake = _fake_rev_parse({})
     monkeypatch.setattr(mod, "_rev_parse", fake)
@@ -495,12 +508,33 @@ def test_title_is_checked_too(monkeypatch):
     assert FULL in text
 
 
+def test_oversize_title_or_detail_is_refused_before_any_scan():
+    with pytest.raises(ValueError, match="at most"):
+        mod.build_message(title="t", detail="gh run list " * 500, report=None, sender=SENDER, msg_id=TEST_MSG_ID)
+    with pytest.raises(ValueError, match="at most"):
+        mod.build_message(title="x" * (mod.MAX_FIELD + 1), detail="d", report=None, sender=SENDER, msg_id=TEST_MSG_ID)
+
+
 def test_real_git_expands_and_refuses(tmp_path):
     def git(*a):
-        return subprocess.run(["git", *a], cwd=tmp_path, capture_output=True, text=True, check=True).stdout.strip()
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *a], cwd=tmp_path,
+                              capture_output=True, text=True, check=True).stdout.strip()
     git("init", "-q")
     git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-q", "-m", "x")
     full = git("rev-parse", "HEAD")
+    # a blob abbreviation is no commit (the ^{commit} peel is what refuses it)
+    (tmp_path / "f.txt").write_text("hello\n")
+    blob = git("hash-object", "-w", "f.txt")
+    with pytest.raises(ValueError, match="full 40-character SHA"):
+        mod.full_run_list_sha(f"gh run list --commit {blob[:8]}", cwd=str(tmp_path))
+    # a branch named like the hex wins in rev-parse; the expansion must not follow it to another commit
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-q", "-m", "y")
+    head = git("rev-parse", "HEAD")
+    git("branch", full[:7], "HEAD")                      # a ref named like the OLD commit's short sha, pointing at the NEW one
+    with pytest.raises(ValueError, match="full 40-character SHA"):
+        mod.full_run_list_sha(f"gh run list --commit {full[:7]}", cwd=str(tmp_path))
+    git("branch", "-D", full[:7])
+    assert head != full
     assert mod.full_run_list_sha(f"gh run list --commit {full[:7]}", cwd=str(tmp_path)) == f"gh run list --commit {full}"
     with pytest.raises(ValueError, match="full 40-character SHA"):
         mod.full_run_list_sha("gh run list --commit deadbeef", cwd=str(tmp_path))

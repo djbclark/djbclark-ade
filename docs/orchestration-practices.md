@@ -208,7 +208,9 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    "CI running" with the run URL and stop: the lead reads CI, and its wait command is
    `gh pr checks PR --watch --required --interval 60` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
    `claude/hooks/bash_habits_gate.py` enforces this since 2026-11-14 ([docs/bash-habits-gate.md](bash-habits-gate.md)):
-   `gh run watch` and `gh pr checks --watch` are denied unless the command carries `--interval`/`-i` of 60 or more. Why: all agents
+   `gh run watch` and `gh pr checks --watch` are denied unless the command carries `--interval`/`-i` of 60 or more. A run-URL hint uses
+   `gh run list --branch BRANCH` or the FULL 40-character SHA, never a short one: gh matches only the full SHA and a short `--commit`
+   prints `[]` with exit 0 (2026-11-14; `bin/completion-notice` expands or refuses it, footer rule 20). Why: all agents
    share one GitHub token with a 5000/h API quota (REST and GraphQL are counted separately); four `gh run watch` at gh's default 3 s interval emptied it from 10:22Z to
    11:22Z on 2026-11-14 and blocked every agent's gh work. At 60 s a watcher costs a few calls a minute; a worker still must not
    park on one (rule 5).

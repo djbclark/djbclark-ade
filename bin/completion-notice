@@ -65,12 +65,14 @@ _DONE_LINE = re.compile(
 _ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?$")
 
 
-# `gh run list --commit SHA` (or `-c SHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the full SHA, so the
-# query prints [] and exits 0. 4-39 hex digits not followed by another word character; a full SHA never matches.
+# `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the
+# full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character; a full SHA
+# never matches. The flag must follow `gh run list` in the same shell segment (no `;`, `|` or `&` in between).
 _RUN_LIST_SHORT_SHA = re.compile(
-    r"""(?P<head>\bgh\s+run\s+list\b[^\n]*?(?:--commit(?:=|\s+)|(?<!\S)-c\s+)["']?)"""
-    r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z])"""
+    r"""(?P<head>\bgh\s+run\s+(?:list|ls)\b[^\n;|&]*?(?:--commit(?:=|\s+)|(?<!\S)-c(?:=|\s*))["']?)"""
+    r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z_])"""
 )
+MAX_FIELD = 2000   # the scan is quadratic in a line of repeated `gh run list`; a done notice line is far shorter
 
 
 def _rev_parse(sha: str, cwd: str | None = None) -> str | None:
@@ -81,7 +83,9 @@ def _rev_parse(sha: str, cwd: str | None = None) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     full = r.stdout.strip()
-    return full if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", full) else None
+    # git resolves a ref named like the hex before an object abbreviation: accept only a commit the SHA is a prefix of
+    return (full if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", full)
+            and full.startswith(sha.lower()) else None)
 
 
 def full_run_list_sha(text: str, *, cwd: str | None = None) -> str:
@@ -108,8 +112,11 @@ def build_message(
     """Return the two-line completion message, or raise ValueError when the shape would be invalid.
 
     A short SHA in a `gh run list --commit` hint of the title or detail is expanded (`git rev-parse` in `git_cwd`)."""
-    title = full_run_list_sha(title.strip(), cwd=git_cwd)
-    detail = full_run_list_sha(detail.strip(), cwd=git_cwd)
+    title, detail = title.strip(), detail.strip()
+    if len(title) > MAX_FIELD or len(detail) > MAX_FIELD:
+        raise ValueError(f"title and detail must each be at most {MAX_FIELD} characters")
+    title = full_run_list_sha(title, cwd=git_cwd)
+    detail = full_run_list_sha(detail, cwd=git_cwd)
     sender = sender.strip()
     report_s = report.strip() if report else None
     if not title or "," in title or "\n" in title:
