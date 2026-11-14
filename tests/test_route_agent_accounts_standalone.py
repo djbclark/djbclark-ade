@@ -61,18 +61,37 @@ def test_a_later_account_without_sublimits_does_not_drop_the_earlier_ones():
     assert pool["sublimit_resets"] == {"fable": "2026-11-18T00:00:00+00:00"}
 
 
+KNOWN = {"provider": "claude", "age_seconds": 60,
+         "windows": [_window("weekly", 50), _fable(40, "2026-11-19T00:00:00+00:00")]}
+EXPIRED = {"provider": "claude", "age_seconds": 60, "reading_expired": True,
+           "windows": [_window("weekly", 90), _fable(10, "2026-11-18T00:00:00+00:00")]}
+NO_WINDOW = {"provider": "claude", "age_seconds": 60, "windows": []}
+
+
 @pytest.mark.parametrize("order", [(0, 1), (1, 0)])
-def test_a_known_reading_beats_an_unknown_one_in_either_order(order):
-    """Decision pinned (the same as `remaining` and `_merge_pool`): an account whose reading expired adds no number, and
-    does not blank the other account's windows or Fable cap either."""
-    known = {"provider": "claude", "age_seconds": 60,
-             "windows": [_window("weekly", 50), _fable(40, "2026-11-19T00:00:00+00:00")]}
-    unknown = {"provider": "claude", "age_seconds": 60, "reading_expired": True,
-               "windows": [_window("weekly", 90), _fable(10, "2026-11-18T00:00:00+00:00")]}
-    pool = r._providers_from_accounts([[known, unknown][i] for i in order], 60)["claude"]
+def test_a_known_reading_beats_an_unknown_one_for_remaining_and_the_fable_cap_in_either_order(order):
+    """Decision pinned: an account whose reading expired adds no number to the pool figure (`remaining`, as in
+    `_merge_pool`) and does not blank the other account's Fable cap."""
+    pool = r._providers_from_accounts([[KNOWN, EXPIRED][i] for i in order], 60)["claude"]
     assert pool["remaining"] == 50
-    assert pool["windows"]["weekly"] == 50
     assert pool["sublimits"]["fable"] == 40
+
+
+@pytest.mark.parametrize("second", [EXPIRED, NO_WINDOW], ids=["expired reading", "no window"])
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_an_unmeasured_second_account_keeps_the_pool_closed_for_the_plenty_gate(order, second):
+    """lw-02 (adversary B1 on #688): the pool figure is the measured account's, but a window an account could not
+    measure stays None, so `plenty_remaining` says unknown and the pooled service is not eligible (fail closed on unknown
+    quota). Before, the measured account's windows hid the other account's None and opened the gate."""
+    pool = r._providers_from_accounts([[KNOWN, second][i] for i in order], 60)["claude"]
+    assert pool["remaining"] == 50
+    assert r.plenty_remaining(pool) is None
+
+
+def test_two_measured_accounts_still_open_the_plenty_gate_on_the_tighter_one():
+    other = {"provider": "claude", "age_seconds": 60, "windows": [_window("weekly", 80)]}
+    pool = r._providers_from_accounts([KNOWN, other], 60)["claude"]
+    assert pool["windows"]["weekly"] == 50 and r.plenty_remaining(pool) == 50
 
 
 def _standalone(tmp_path, *args):
@@ -102,3 +121,47 @@ def test_the_repo_copy_still_runs(tmp_path):
                           cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL, env=env)
     assert proc.returncode == 0, proc.stderr
     assert "route" in proc.stdout
+
+
+def _lone_tree(tmp_path, **modules):
+    """route_agent.py plus stand-ins for the sibling modules, each with the given source (a repo copy that is broken)."""
+    d = tmp_path / "tree"
+    d.mkdir()
+    shutil.copy(ROOT / "bin" / "route_agent.py", d / "route_agent.py")
+    for name, src in modules.items():
+        (d / f"{name}.py").write_text(src)
+    return d
+
+
+def _run_script(tmp_path, d):
+    return subprocess.run([sys.executable, "-I", str(d / "route_agent.py"), "route", "--kind", "code", "--json"],
+                          capture_output=True, text=True, env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                          cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL)
+
+
+_NAME_ERROR = "raise ImportError(\"cannot import name 'renamed_fn' from 'model_tiers'\", name='model_tiers')\n"
+
+
+@pytest.mark.parametrize("modules", [
+    {"ade_config": "raise ImportError(\"cannot import name 'renamed_fn' from 'ade_gates'\")\n", "ade_gates": "", "model_tiers": ""},
+    {"ade_config": "import no_such_third_party_package_lw02\n", "ade_gates": "", "model_tiers": ""},
+    {"ade_config": "raise ModuleNotFoundError('x', name='ade_gates')\n", "ade_gates": "", "model_tiers": ""},
+    {"ade_config": _NAME_ERROR},
+], ids=["renamed name", "missing dependency", "sibling present", "ImportError that names an absent sibling"])
+def test_an_import_error_inside_the_repo_copy_surfaces_with_its_traceback(tmp_path, modules):
+    """lw-02 (adversary B2 on #688): only "the sibling modules are not beside this file" (a ModuleNotFoundError that names
+    one of them, whose file is absent) is the one-line exit 2; any other ImportError is a bug and keeps its traceback.
+    The last row is a real `from model_tiers import renamed` error: it carries `name='model_tiers'` too."""
+    d = _lone_tree(tmp_path, **modules)
+    proc = _run_script(tmp_path, d)
+    assert proc.returncode == 1, proc.stderr
+    assert "Traceback" in proc.stderr and "cannot route standalone" not in proc.stderr
+    assert proc.stdout == ""
+
+
+def test_imported_by_another_module_a_lone_copy_still_raises_the_import_error(tmp_path):
+    d = _lone_tree(tmp_path)
+    proc = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(d)!r}); import route_agent"],
+                          capture_output=True, text=True, env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                          cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL)
+    assert proc.returncode == 1 and "ModuleNotFoundError" in proc.stderr and "cannot route standalone" not in proc.stderr

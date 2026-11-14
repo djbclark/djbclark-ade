@@ -139,8 +139,13 @@ try:
 except ImportError as _ade_missing:
     # Not optional: routing is these modules plus config/ (a copy of this file alone, such as pr-radar's
     # examples/route_agent.py, has neither). Run as a script that is one stderr line and exit 2, not a traceback;
-    # imported by another module the ImportError stays (a caller can catch it).
-    if __name__ != "__main__":
+    # imported by another module the ImportError stays (a caller can catch it). ONLY "a sibling module is absent"
+    # gets the line: an ImportError raised inside our own modules (a renamed name, a broken import in the repo copy)
+    # is a bug and surfaces with its traceback.
+    _here = Path(__file__).resolve().parent
+    if (__name__ != "__main__" or not isinstance(_ade_missing, ModuleNotFoundError)
+            or _ade_missing.name not in ("ade_config", "ade_gates", "model_tiers")
+            or (_here / f"{_ade_missing.name}.py").is_file()):
         raise
     sys.stderr.write("route_agent.py: cannot route standalone, the djbclark-ade modules (ade_config, ade_gates, "
                      f"model_tiers) and config/ are not beside this file ({_ade_missing})\n")
@@ -834,6 +839,17 @@ def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str,
     return out
 
 
+def _merge_windows(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-window fold of two ACCOUNTS of one pool: the tighter known reading, but a window either account could not
+    measure stays None (unlike `_merge_caps`). `plenty_remaining` reads one None window as "the gate cannot say every
+    window has PLENTY_MIN left", so an unmeasured second account keeps the pool closed instead of the measured one
+    opening it while Paseo may launch on the unmeasured one (fail closed on unknown quota, 2026-11-14)."""
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        out[k] = None if k in out and (out[k] is None or v is None) else (_tighter(out[k], v) if k in out else v)
+    return out
+
+
 def _reset_epoch(text: Any) -> float | None:
     try:
         stamp = datetime.fromisoformat(str(text))
@@ -1037,7 +1053,9 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             per_key[key] = (worst, detail, sublimits, bind)
 
         if not per_key:
-            per_key[name] = (None, {}, {}, {})
+            # an account that lists no window for this pool is unmeasured: one None window keeps the pool closed
+            # when it is folded with a measured account (`_merge_windows`)
+            per_key[name] = (None, {"(no window)": None}, {}, {})
         # Shared parent windows can tighten a matched child, never create one.
         for w in acct.get("windows") or []:
             parent = w.get("shared_pool_family")
@@ -1077,7 +1095,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             providers[key] = {
                 "remaining": None if worst is None else round(float(worst), 1),
                 # several accounts: every account's windows and model sublimits survive, the tighter reading per key
-                "windows": _merge_caps(prior.get("windows"), detail),
+                "windows": _merge_windows(prior.get("windows"), detail),
                 "sublimits": _merge_caps(prior.get("sublimits"), sublimits),
                 "age_s": acct_age,
                 "billing_kind": acct.get("billing_kind"),
