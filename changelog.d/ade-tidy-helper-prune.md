@@ -1,3 +1,5 @@
 ### Added
 
 - `bin/ade-tidy prune [--apply] [--json] [--min-idle S]`: a machine-wide, observe-by-default prune that archives idle, finished Baton `[Handoff writer]` helpers (title and `baton-writer=1` label; parent archived/closed/gone or handoff provably written; no pending permission; never a lead, MAIN or the caller), one JSON log line per archive in `~/.local/state/ade/helper-prune.log`; `config/launchd/com.djbclark.ade-helper-prune.plist` (every 30 minutes, not installed by merging) and the `ade-helper-prune` inventory row (#690)
+- `ade-tidy prune`: `--exclude ID` and `~/.local/state/ade/helper-prune.exclude` (`ADE_HELPER_PRUNE_EXCLUDE`) name agents it never touches, re-read on every run and again right before each archive or kill (#690)
+- `ade-tidy prune` reports orphan provider processes of archived, closed agents (`orphans[]`, session-id mapping only, unprovable ones `unmapped`) and, with `--apply`, sends SIGTERM by pid to the provider and its direct `graft mcp` children after a pid/start-time/session re-read; one `kind` tagged JSON line per archive or kill in `helper-prune.log` (#690)

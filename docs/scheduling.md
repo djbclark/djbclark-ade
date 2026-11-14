@@ -110,6 +110,27 @@ attempt (`ts`, `helper`, `parent`, `reason`, `rc`, `error` on failure) is append
 (`ADE_HELPER_PRUNE_LOG` overrides). A second run archives nothing new. Exit 0 ok, 1 a paseo call or an archive failed, 2 usage. A `closed`
 helper is skipped (`not-idle`): a daemon restart closes them and they hold no process.
 
+**Exclude list (round 2, 2026-11-14).** `--exclude ID` (repeatable, full uuid) and `~/.local/state/ade/helper-prune.exclude`
+(`ADE_HELPER_PRUNE_EXCLUDE` overrides; one full uuid per line, `#` comments, read afresh on every run) name agents prune never touches:
+skip reason `excluded` for a helper, and an excluded agent's orphan process is skipped too. The list is read when planning, again for
+the re-read plan, and once more right before each archive or kill. A line that is not a full uuid, or an unreadable file, refuses the
+run (exit 1, nothing done): a typo must not silently unprotect an agent.
+
+**Orphan provider processes (round 2, 2026-11-14).** Paseo can leave an archived, closed agent's provider process (and its
+`graft mcp` child) running: on 2026-11-14 the dry run found 45 such `claude` processes (about 5 GB resident). `prune` maps a process to an
+agent only by session id: the record's `runtimeInfo`/`persistence` `sessionId` against `--resume=<id>` / `--session-id <id>` in the
+process argv, and only for a Paseo-launched provider (`--input-format stream-json`); a session with no record, with two records, or a
+terminal `claude --resume` is listed under `unmapped` and never acted on. A process is an **orphan** when its record says archived and
+`lastStatus` closed AND `paseo agent inspect ID --json` says `Archived: true`, `Status: closed`. It is skipped (`orphan_skipped`) when
+the agent is excluded, is the caller, or the pid is in the caller's own process tree (itself, its ancestors, its descendants) or is 1 or
+below; a live agent's process is only counted (`provider_live`). Default and observe: report (`orphans[]` with pid, ppid, start time,
+rss_kb, agent, session, graft `children`, `other_children`). With `--apply`: the whole table is re-read, then per orphan the exclude
+list and inspect are re-checked, and SIGTERM goes by pid (`os.kill`, never `pkill`/`pgrep -f`) to its direct children whose argv is
+exactly `graft mcp` first, then to the provider. Before each signal `ps -o pid=,ppid=,lstart=,rss=,command= -p PID` is re-read and
+the pid, start time and (provider) session id, or (child) parent and `graft mcp` argv, must be unchanged (PID-reuse guard), else
+nothing is sent. Each attempt is a `kind: "process-kill"` line in `helper-prune.log` (`ts, pid, ppid, agent, session, rss_kb, role, rc`,
+`skipped` when the guard held it back); helper archives are `kind: "helper-archive"` lines.
+
 The job is `config/launchd/com.djbclark.ade-helper-prune.plist` (a deterministic script, no model prompt; summary to
 `~/.local/state/ade/helper-prune.out.log`; inventory row `ade-helper-prune`, class `optional`). It is not loaded by merging. After the
 merge, from the canonical checkout (`--ade` stays this checkout):
