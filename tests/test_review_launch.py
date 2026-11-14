@@ -818,6 +818,35 @@ def test_review_pr_reviews_the_exact_head_in_a_clean_worktree_and_prints_the_mar
     assert (prw.state / f"djbclark__djbclark-ade-pr7-{prw.pr_head}.json").stat().st_mode & 0o777 == 0o600
 
 
+def _git_that_fails_the_worktree_remove(prw, rc: int) -> None:
+    """A `git` ahead of the real one on PATH: `worktree remove` exits `rc` (77 is ade-git-guard's refusal)."""
+    real = shutil.which("git")
+    (prw.bin / "git").write_text(
+        f'#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = remove ]; then echo "guard: refused ({rc})" >&2; exit {rc}; fi\n'
+        f'exec "{real}" "$@"\n')
+    (prw.bin / "git").chmod(0o755)
+
+
+def test_review_pr_leaves_the_worktree_when_the_git_guard_refuses_its_removal(prw):
+    """lw-01 (#693 review L5): an exit-77 refusal (a live process uses the directory) is not answered by rmtree."""
+    _git_that_fails_the_worktree_remove(prw, 77)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert Path(call["cwd"]).is_dir(), "the guard's refusal must leave the directory in place"
+    assert "refused by the git guard" in r.stderr and call["cwd"] in r.stderr
+    assert prw.filed()["worktree_left"] == call["cwd"]
+
+
+def test_review_pr_still_removes_the_worktree_when_git_fails_for_another_reason(prw):
+    _git_that_fails_the_worktree_remove(prw, 1)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    (call,) = prw.launches()
+    assert not Path(call["cwd"]).exists()
+    assert "worktree_left" not in prw.filed()
+
+
 def test_review_pr_runs_the_launcher_in_review_mode_with_the_review_schema_and_head(prw):
     prw.review("--runtime", "restricted")
     argv = prw.launches()[0]["argv"]

@@ -754,6 +754,13 @@ def test_gw03_wrapper_one_shots_and_prose_pass(command):
     "gh 2> err run watch 9",
     "X=/gh Y=/gh Z=/gh env -i gh run watch 9",                  # B5: the real gh is the 4th candidate
     "env -C /a/gh -C /b/gh -C /c/gh env -i gh run watch 9",
+    'env -i A=1 "B=$X" gh run watch 9',                         # lw-01: an unquoted assignment before a quoted one
+    'sudo A=1 "B=2" gh run watch 9',
+    'env -i HOME=$HOME "PATH=$PATH" gh run watch 9',
+    "gh <in run watch 9",                                       # lw-01: input redirection forms of REDIRECT_WORD
+    "gh<in run watch 9",
+    "gh <<<x run watch 9",
+    "gh <&3 run watch 9",
 ])
 def test_gw04_lead_review_lows_are_denied(command):
     assert denied(command), command
@@ -772,6 +779,10 @@ def test_gw04_lead_review_lows_are_denied(command):
     "gh>log run view 9",
     "gh run view 9 2>&1 >out",
     "gh > log run view 9",
+    'env -i A=1 "B=$X" gh run watch 9 -i 60',                   # lw-01
+    'env -i A=1 "B=$X" gh run view 9',
+    "gh run view 9 <in",
+    "gh <in run view 9",
 ])
 def test_gw04_lead_review_lows_compliant_and_one_shots_pass(command):
     assert not denied(command), command

@@ -69,6 +69,7 @@ DEFAULT_REPO = "djbclark/djbclark-ade"
 SCHEMA = ROOT / "config" / "review-schema.json"
 INPUT_DIR = ".review-launch"
 EXIT_APPROVE, EXIT_BLOCK, EXIT_USAGE, EXIT_FAILED = 0, 1, 2, 3
+GUARD_REFUSED = 77      # ade-git-guard's refusal exit (docs/git-guard.md): never answered by deleting the directory
 GH_TIMEOUT = 90
 GIT_TIMEOUT = 300
 SCHEMA_VERSION = 1
@@ -495,7 +496,13 @@ def review_attempt(argv: list[str]) -> int:
     finally:
         if added:
             rm = run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
-            if rm.returncode != 0:
+            if rm.returncode == GUARD_REFUSED:
+                # ade-git-guard refused (a live process still uses the directory, or another agent claims it): the
+                # directory stays, and the result says so; deleting it behind the refusal is what the guard prevents
+                note(f"git worktree remove was refused by the git guard; leaving {wt} in place: "
+                     f"{(rm.stderr or '').strip()[:300]}")
+                result["worktree_left"] = str(wt)
+            elif rm.returncode != 0:
                 shutil.rmtree(wt, ignore_errors=True)
                 run(["git", "worktree", "prune"], cwd=root)
     result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

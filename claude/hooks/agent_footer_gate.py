@@ -40,6 +40,9 @@ _END = r"(?!\w|\.(?:done|inbox|replies)\b)"      # not the middle of `X-report.m
 _LEFT = r"(?<![\w.~$@+/-])"                          # a `~/x`, `$HOME/x` or relative path is not an absolute one
 REPORT_IN_PROMPT = re.compile(_LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
+# the prompt's OWN `Report path:` / `Report file:` line (at the start of a line), as opposed to a peer's `Worker report: ...`
+REPORT_OWN = re.compile(r"(?im)^[ \t>*-]*report (?:path|file)[ \t]*(?:is|:|=)[ \t]*`?" + _LEFT
+                        + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
 FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
@@ -51,7 +54,7 @@ DENY_REASON = (
     "again; then read that report file, not the final message.")
 
 
-RELAUNCH_TOKEN = re.compile(r"(?m)^[ \t]*Relaunch-reason:[ \t]*(\S.*)$")
+RELAUNCH_TOKEN = re.compile(r"(?m)^Relaunch-reason:[ \t]*(\S.*)$")    # column 0: an indented line is quoted or pasted text
 RESUME_REASON = (
     "{report} already exists and {report}.done does not: an earlier sub-agent of this session with this report "
     "path did not finish (its process stopped or it is still running). Do not start a new one: resume it with "
@@ -75,13 +78,16 @@ def slug(text):
 
 
 def named_report(prompt):
-    """The report path the prompt itself gives: a labelled one, else the only one it mentions. A path whose
+    """The report path the prompt itself gives: its own `Report path:` line, else the only labelled one, else the only one
+    it mentions; two different labelled paths with no `Report path:` of its own give None (lw-01, #691 review B1: a
+    peer's `Worker report:` listed first was taken as this launch's report). A path whose
     .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
     background got that path), so it is never reused."""
-    labelled = REPORT_LABELLED.findall(prompt)
+    own = list(dict.fromkeys(REPORT_OWN.findall(prompt)))       # the prompt's own `Report path:` beats a peer's labelled one
+    labelled = own or list(dict.fromkeys(REPORT_LABELLED.findall(prompt)))
     paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(prompt)))
-    if len(paths) != 1 and not labelled:
-        return None
+    if len(paths) != 1:
+        return None         # none, or two different ones with no `Report path:` of its own: the hook derives its own path
     return None if Path(paths[0] + ".done").exists() else paths[0]
 
 

@@ -312,7 +312,10 @@ Evaluated in order; the module docstring has every form.
    (that flag is about a dirty tree); `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` for that one call, or the operator's
    `ACP_OPERATOR_APPROVED=git-guard` (logged as an override), does. The env var allows the live-process rule only: `--force` on an
    unclaimed worktree is still refused, and a pending `hook-config-unknown` refusal still wins over it; the operator override
-   allows the whole call, as everywhere (below). `worktree move` and `prune` are not checked (a move keeps
+   allows the whole call, as everywhere (below). A path lsof spells differently from the resolved one (control or non-ASCII bytes in the worktree's path, under some
+   locales) is not matched in the cwd listing, so such a worktree is protected only by the `+D` open-file walk; on a very large
+   tree that walk can hit its 6 s bound, and the check then fails open (lw-01, #693 review L3: documented, not bounded
+   further). The module docstring files this rule as an "Also" under its item 4. `worktree move` and `prune` are not checked (a move keeps
    the directory's inode; prune only touches a directory that is already gone). Order: inside rule 5's target loop, after the
    foreign-claim refusal and before the `--force`-without-claim one. `ADE_ALLOW_LIVE_WORKTREE_REMOVE=1` is logged to guard.log as an
    `override` (the stderr line names it). The match is case-insensitive on macOS (lsof prints the on-disk case). Tests: `tests/test_git_guard_live_use.py`
@@ -402,9 +405,10 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     (`git stash show -p > f`), `bundle create`, `config --file`, `bugreport -o`, `--export-marks`, and the bash fast
     path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
 15. **Worktree removal that does not go through the shim (2026-11-14):** `rm -rf` and `git worktree prune`, Paseo's own worktree
-    archive (the daemon's git), a human shell, and the in-repo fallbacks `bin/review-pr` and `bin/ade-merge-ready`, which
-    `shutil.rmtree` a worktree after a failed `git worktree remove --force` (so an exit-77 refusal for a live process still ends
-    in a deleted directory there; queue follow-up). The live-process check (shim rule 6) covers only `git worktree remove`.
+    archive (the daemon's git), and a human shell. The in-repo callers `bin/review-pr` and `bin/ade-merge-ready` used to
+    `shutil.rmtree` a worktree after a failed `git worktree remove --force`; since lw-01 an exit-77 refusal (a live process, or
+    another agent's claim) leaves the directory in place, reports it on stderr and records `worktree_left` in their result,
+    while any other failure still cleans up. The live-process check (shim rule 6) covers only `git worktree remove`.
 
 ## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 

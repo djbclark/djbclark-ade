@@ -112,6 +112,7 @@ try:
 finally:
     sys.path.pop(0)
 
+GUARD_REFUSED = 77   # ade-git-guard's refusal exit (docs/git-guard.md): never answered by deleting the directory
 MARKER_RE = re.compile(
     r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
     re.DOTALL,
@@ -1499,8 +1500,14 @@ def stack_rebase_prs(
             row["status"] = "rebased"
             results.append(row)
         finally:
-            _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
-            if os.path.isdir(wt):
+            rm = _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
+            if rm.returncode == GUARD_REFUSED:
+                # ade-git-guard refused (a live process still uses the directory, or another agent claims it): leave
+                # the directory and say so; deleting it behind the refusal is what the guard prevents
+                print(f"ade-merge-ready: git worktree remove refused by the git guard; leaving {wt} in place: "
+                      f"{(rm.stderr or '').strip()[:300]}", file=sys.stderr)
+                row["worktree_left"] = wt
+            elif os.path.isdir(wt):
                 shutil.rmtree(wt, ignore_errors=True)
     return results
 

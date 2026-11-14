@@ -471,8 +471,9 @@ SHELL_HEREDOC = re.compile(
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
-# `""`/`''` is what strip_literals leaves of a quoted `"VAR=$X"` after env/sudo (a quoted assignment is still an assignment)
-_PLACEHOLDERS = r"(?:(?:\"\"|'')\s+)*"
+# `""`/`''` is what strip_literals leaves of a quoted `"VAR=$X"` after env/sudo (a quoted assignment is still an assignment);
+# an unquoted `VAR=x` between or before them is skipped too (`env -i A=1 "B=$X" gh ...`: lw-01, #694 review C1)
+_PLACEHOLDERS = r"(?:(?:\"\"|''|\w+=\S*)\s+)*"
 ENV_OPTS = re.compile(r"(?<![\w./-])env\s+(?:(?:-[A-Za-z]*[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*"
                       + _PLACEHOLDERS)
 NICE_OPTS = re.compile(r"(?<![\w./-])nice\s+(?:-n\s+\S+\s+|--adjustment\s+\S+\s+|-\S+\s+)*")

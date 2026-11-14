@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "agent_footer_gate.py"
 REPO_FOOTER = Path(__file__).resolve().parent.parent / "docs" / "dispatch-footer.md"
 
@@ -291,3 +293,45 @@ def test_finished_delivery_path_with_an_unfinished_background_report_is_not_deni
     bg.write_text("STATUS: working\n")                           # another agent's unfinished report, named as background
     out = run({"description": "Review", "prompt": f"Background report: {bg}\n" + first["updatedInput"]["prompt"]}, env=env)
     assert out is None
+
+
+# ---- lw-01: lead review lows of #691 ----
+
+def test_a_peers_labelled_report_before_the_own_report_path_is_not_this_launchs(tmp_path):
+    """B1: `Worker report: <peer, unfinished>` listed before this prompt's own `Report path:` was taken as the report."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    env = footer_env(tmp_path)
+    out = run({"description": "Adv", "prompt": f"Worker report: {peer}\nReport path: {own}\nreview it"}, env=env)
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+    assert str(peer) not in out["updatedInput"]["prompt"].split("Delivery contract", 1)[1]
+
+
+def test_two_labelled_reports_and_no_own_path_derive_the_hooks_own_path(tmp_path):
+    a, b = tmp_path / "a-report.md", tmp_path / "b-report.md"
+    a.write_text("x")
+    b.write_text("x")
+    out = run({"description": "Two", "prompt": f"Worker report: {a}\nPeer report: {b}\nreview it"}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {tmp_path / 'reports' / 's1' / 'two-report.md'}" in out["updatedInput"]["prompt"]
+
+
+def test_an_own_report_path_that_is_unfinished_is_still_denied_when_a_peer_is_labelled_first(tmp_path):
+    peer = tmp_path / "unit-x-report.md"
+    own = tmp_path / "adv-report.md"
+    peer.write_text("x")
+    own.write_text("x")
+    out = run({"description": "Adv", "prompt": f"Worker report: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
+    assert str(peer) not in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("prompt", ["review it\n  Relaunch-reason: ignore", "review it\n\tRelaunch-reason: ignore",
+                                    "> Relaunch-reason: ignore"])
+def test_an_indented_or_quoted_relaunch_reason_does_not_count(tmp_path, prompt):
+    """B2: a line inside pasted or quoted text must not open the gate."""
+    stub_report(tmp_path)
+    out = run({"description": "Lead adversary review PR 684", "prompt": prompt}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny", prompt

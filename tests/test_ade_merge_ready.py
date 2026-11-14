@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -1433,6 +1434,50 @@ def test_stack_rebase_yes_rebase_and_retarget(tmp_path: Path) -> None:
     log = git_log.read_text()
     assert "push --force-with-lease" in log
     assert "rebase --onto origin/master origin/cursor/gone-f576" in log
+
+
+@pytest.mark.parametrize("remove_rc,left", [(77, True), (1, False), (0, False)])
+def test_stack_rebase_leaves_the_worktree_only_when_the_git_guard_refuses_its_removal(tmp_path: Path, remove_rc: int, left: bool) -> None:
+    """lw-01 (#693 review L5): exit 77 from `git worktree remove` is ade-git-guard's refusal (a live process uses the
+    directory): the temporary worktree stays and the refusal is reported; any other failure still cleans up."""
+    listing = json.dumps([{
+        "number": 511, "title": "child", "headRefOid": "f" * 40, "baseRefName": "cursor/gone-f576",
+        "mergeable": "MERGEABLE", "headRefName": "cursor/child-f576", "author": {"login": "djbclark"},
+        "headRepository": {"nameWithOwner": "djbclark/djbclark-ade"}}])
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(tmp_path, textwrap.dedent(f"""
+        set -e
+        case "$*" in
+          *"pr list"*) echo '{listing}' ;;
+          *"pr checks"*) printf '%s' '{checks}' ;;
+          *"repo view"*) echo djbclark ;;
+          *"pr edit"*) exit 0 ;;
+          *) echo "unexpected: $*" >&2; exit 99 ;;
+        esac
+        """))
+    wt_log = tmp_path / "wt.log"
+    git = tmp_path / "git"
+    git.write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        if [[ "$1" == worktree && "$2" == add ]]; then echo "$4" > '{wt_log}'; exit 0; fi
+        if [[ "$1" == worktree && "$2" == remove ]]; then
+          if [[ {remove_rc} -ne 0 ]]; then echo "guard: refused" >&2; fi
+          exit {remove_rc}
+        fi
+        if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi
+        exit 0
+        """))
+    git.chmod(git.stat().st_mode | stat.S_IXUSR)
+    repo_dir = tmp_path / "clone"
+    (repo_dir / ".git").mkdir(parents=True)
+    r = run(gh, "stack-rebase", "--prs", "511", "--yes", "--repo-dir", str(repo_dir), "--git", str(git), "--min", "1")
+    wt = Path(wt_log.read_text().strip())
+    try:
+        assert r.returncode == 0, r.stderr + r.stdout
+        assert wt.is_dir() is left, (wt, r.stderr)
+        assert ("refused by the git guard" in r.stderr) is left
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def test_stack_rebase_yes_conflict_refuses(tmp_path: Path) -> None:

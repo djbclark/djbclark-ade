@@ -133,6 +133,36 @@ def test_the_env_override_with_a_claim_of_mine_still_removes_with_force(rig):
     assert not rig.wt.exists()
 
 
+@pytest.mark.parametrize("value", ["0", "", "true", "yes", "11", " 1"])
+def test_only_exactly_one_is_the_env_override(rig, value):
+    """lw-01 (#693 review L1): a left-over `ADE_ALLOW_LIVE_WORKTREE_REMOVE=0` (or `true`) must not switch the check off."""
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_ALLOW_LIVE_WORKTREE_REMOVE=value)
+    assert p.returncode == 77, p.stderr
+    assert rig.wt.is_dir()
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e999", "abc"])
+def test_a_non_finite_or_junk_lsof_timeout_neither_crashes_nor_skips_the_check(rig, value):
+    """lw-01 (#693 review L2): `inf` used to raise OverflowError out of `communicate`; now the default timeout applies."""
+    p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ADE_LSOF_TIMEOUT=value)
+    assert p.returncode == 77 and "live process" in p.stderr, p.stderr
+    assert "Traceback" not in p.stderr
+    assert rig.wt.is_dir()
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "abc"])
+def test_a_non_finite_lsof_timeout_reads_as_the_default(monkeypatch, value):
+    import ade_claims
+    monkeypatch.setenv("ADE_LSOF_TIMEOUT", value)
+    assert ade_claims._lsof_timeout() == ade_claims.LSOF_TIMEOUT
+
+
+def test_a_huge_lsof_timeout_is_cut(monkeypatch):
+    import ade_claims
+    monkeypatch.setenv("ADE_LSOF_TIMEOUT", "100000")
+    assert ade_claims._lsof_timeout() == ade_claims.LSOF_TIMEOUT_MAX
+
+
 def test_the_operator_override_allows_it_and_logs(rig):
     p = rig.remove(cwd_users=[[10129, "claude", "cwd", str(rig.wt)]], ACP_OPERATOR_APPROVED="git-guard")
     assert p.returncode == 0 and "allowed" in p.stderr
