@@ -140,3 +140,15 @@ def test_defaults_come_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(state))
     monkeypatch.setenv("PASEO_HOME", str(home))
     assert succ.effective_lead(A) == D and succ.lineage(D) == {A, B, C, D}
+
+
+def test_a_group_writable_record_and_a_relative_home_are_no_link(ledger):
+    state, home = ledger
+    write_link(state, home, A, B)
+    assert succ.successor_of(A, state, home) == B
+    os.chmod(state / f"handoff-{A}.json", 0o664)  # planted-record defence: group/world-writable files never count
+    assert succ.successor_of(A, state, home) is None
+    write_link(state, home, C, D, home=".")
+    assert succ.successor_of(C, state, home) is None
+    write_link(state, home, B, C, home=None)  # a missing/non-string home was read as the literal "None" path
+    assert succ.successor_of(B, state, home) is None

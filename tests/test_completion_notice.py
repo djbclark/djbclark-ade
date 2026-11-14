@@ -24,6 +24,13 @@ loader.exec_module(mod)
 
 SENDER = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 REQUESTER = "11111111-2222-3333-4444-555555555555"
+REAL_GUARD_TARGET = mod.guard_target
+
+
+@pytest.fixture(autouse=True)
+def _no_live_paseo_guard(monkeypatch):
+    """The archived-send guard asks the live daemon about the requester: keep every test offline unless it patches the guard."""
+    monkeypatch.setattr(mod, "guard_target", lambda requester, paseo: (requester, None))
 TEST_MSG_ID = "msgid12345"
 
 
@@ -383,3 +390,29 @@ def test_cli_lead_ack_requires_done_before_attempting_delivery(monkeypatch, caps
 
     assert rc == 2
     assert "--done is required for --lead-ack" in capsys.readouterr().err
+
+
+SUCCESSOR = "66666666-7777-8888-9999-000000000000"
+
+
+def _guarded(monkeypatch, action, target, reason=""):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_send_guard
+    monkeypatch.setattr(mod, "guard_target", REAL_GUARD_TARGET)
+    monkeypatch.setattr(ade_send_guard, "guard",
+                        lambda requester, paseo="paseo", **kw: ade_send_guard.Decision(action, target, reason))
+
+
+def test_send_to_a_replaced_requester_goes_to_its_successor(monkeypatch):
+    sent = []
+    _guarded(monkeypatch, "redirect", SUCCESSOR, "replaced")
+    monkeypatch.setattr(mod, "run_send", lambda argv: (sent.append(argv) or 0, json.dumps({"status": "sent"}), ""))
+    assert mod.main(["--send", "--requester", REQUESTER, "--title", "t", "--status", "DONE", "--sender", SENDER]) == 0
+    assert SUCCESSOR in sent[0] and REQUESTER not in sent[0]
+
+
+def test_send_to_an_archived_requester_is_blocked_exit_4(monkeypatch, capsys):
+    _guarded(monkeypatch, "refuse", REQUESTER, "archived")
+    monkeypatch.setattr(mod, "run_send", lambda argv: pytest.fail("nothing may be sent to an archived requester"))
+    assert mod.main(["--send", "--requester", REQUESTER, "--title", "t", "--status", "DONE", "--sender", SENDER]) == 4
+    assert "BLOCKED" in capsys.readouterr().err

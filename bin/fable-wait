@@ -515,6 +515,20 @@ def current_lead(lead: str) -> str:
         return lead
 
 
+def archived_lead(lead, paseo):
+    """The reason `lead` must not be sent to (archived, nothing replaced it), else None. Fails open: a missing module or
+    an unreadable Paseo never blocks a wake (ls-02, bin/ade_send_guard.py)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import ade_send_guard  # noqa: PLC0415 - lazy: this script is copied alone in a test
+        d = ade_send_guard.guard(lead, paseo=paseo[0])
+    except Exception:  # noqa: BLE001
+        return None
+    return d.reason if d.action == ade_send_guard.REFUSE else None
+
+
 def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
     by_lead: dict[str, list[dict]] = {}
     for i in items:
@@ -524,6 +538,11 @@ def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
     for lead, its in sorted(by_lead.items()):
         if paseo is None:
             report["leads"][lead] = {"status": "paseo missing"}
+            failed += 1
+            continue
+        blocked = archived_lead(lead, paseo)
+        if blocked:  # ls-02: a send would un-archive and run it; the items stay open for the next wake
+            report["leads"][lead] = {"status": "refused", "items": [i["id"] for i in its], "error": blocked[:200]}
             failed += 1
             continue
         rc, out, err = run(paseo + ["send", "--json", "--no-wait", "--", lead, message_for(its, wake_id)], 60)

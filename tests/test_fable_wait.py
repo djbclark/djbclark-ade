@@ -422,7 +422,8 @@ def test_fire_spends_no_model_quota_and_starts_no_agent(fw):
     wake = arm(fw)
     due = datetime.fromisoformat(wake["fire_at"]).timestamp()
     fw.run("fire", now=due)
-    verbs = {x[0] for x in fw.calls("paseo")}
+    calls = fw.calls("paseo")
+    verbs = {x[0] for x in calls if x[:2] != ["agent", "inspect"]}                 # `agent inspect` is the archived-send guard (ls-02)
     assert verbs <= {"usage", "send"} and "run" not in verbs                       # it only tells leads; it launches nothing
 
 

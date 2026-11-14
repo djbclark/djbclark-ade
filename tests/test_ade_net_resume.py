@@ -38,7 +38,7 @@ if a[:1] == ['ls']:
         if d.get('ls_all_fail'): sys.exit(1)
     else:
         assert a == ['ls', '-g', '--background', '--json']
-    print(json.dumps([{'id': k, 'status': v['Status']} for k,v in d['agents'].items()]))
+    print(json.dumps([{('agentId' if d.get('ls_no_id') else 'id'): k, 'status': v['Status']} for k,v in d['agents'].items()]))
 elif a[:2] == ['agent', 'inspect']:
     if a[2] in d.get('inspect_fail', []): sys.exit(1)
     print(json.dumps(d['agents'][a[2]]))
@@ -1164,3 +1164,12 @@ def test_unreadable_but_listed_lead_is_an_error_not_a_skip(handed_off):
     with pytest.raises(M["ScanError"], match="unreadable"):
         scan()
     assert not sent.exists() and not (state / "events.jsonl").read_text()
+
+
+def test_a_listing_without_string_ids_is_no_evidence_of_retirement(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    del data["agents"][LEAD]  # unknown to inspect, and the listing (a schema change: rows lack `id`) cannot say it is absent
+    data["ls_no_id"] = True
+    with pytest.raises(M["ScanError"], match="unreadable"):
+        scan()
+    assert not (state / "events.jsonl").read_text()
