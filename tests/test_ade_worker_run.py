@@ -38,8 +38,8 @@ elif a[:2] == ["workspace", "archive"]:
 elif a[:2] == ["agent", "update"]:
     pass
 elif a[:2] == ["agent", "inspect"]:
-    if "inspect_cwd" not in d:
-        sys.exit(1)
+    if "inspect_cwd" not in d or d.get("inspect_rc"):
+        sys.exit(d.get("inspect_rc") or 1)
     print(json.dumps({"Id": a[2], "Cwd": d["inspect_cwd"]}))
 elif a[0] == "run":
     if "--new-workspace" in a:
@@ -1281,3 +1281,21 @@ def test_a_new_window_is_verified_too_and_a_dropped_cwd_is_reported(env):
     env.data["inspect_cwd"] = "/Users/someone"  # what paseo did with --cwd /repo
     r = launch(env)
     assert r.returncode == 1 and "started in /Users/someone" in r.stderr and "was launched" in r.stderr
+
+
+def test_a_symlinked_window_cwd_with_a_trailing_slash_matches_the_real_directory(env, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": f"{link}/"}]
+    env.data["inspect_cwd"] = str(link)  # paseo reports the symlink path
+    own(LEAD, "wks_win1")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(real), "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+
+
+def test_an_unreadable_inspect_never_fails_a_good_launch(env):
+    env.data["inspect_rc"] = 1
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
