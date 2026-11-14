@@ -15,8 +15,8 @@ never passed on):
 stdout, exit 0: one JSON object with any of {provider, model, thinkingOptionId, modeId, reason}. `modeId` stays
 exactly as routed: yolo/bypassPermissions for every PR, bot and non-djbclark authors included (operator ruling
 2026-11-14). `contextMode` and `profile` (PR Radar's launch-profile field) are never set (route_agent picks none).
-A dispatch that is still a template (`<id from: ...>`, `cursor-cloud launch --repo <url>`: any `<` or `>`) is refused,
-never passed on as an override.
+A dispatch with no `--provider` and a `<`/`>` (`cursor-cloud launch --repo <url>`), or a provider, model, thinking or mode
+value with one (`--provider agent/<id from: ...>`), is a template and is refused, never passed on as an override.
 Failure: non-zero exit, a reason on stderr, nothing on stdout; PR Radar then falls back to its own defaults and
 shows the reason. A router that exits non-zero has its exit code returned; the reason is its JSON `reason` on stdout
 (route_agent's "no eligible service with headroom") with the last stderr line after it in parentheses, else its

@@ -39,6 +39,10 @@ if mode == "fail-both":
     print(json.dumps({"reason": "stdout reason"}))
     sys.stderr.write("stderr reason\\n")
     sys.exit(4)
+if mode == "fail-blank-tail":
+    print(json.dumps({"reason": "stdout reason"}))
+    sys.stderr.write("real note\\n   \\n")
+    sys.exit(4)
 if mode == "fail-noise":
     print("not json {")
     sys.exit(2)
@@ -230,6 +234,12 @@ def test_router_stdout_reason_leads_and_the_last_stderr_line_follows(rig):
     proc, _ = rig({"pr": {}}, mode="fail-both")
     assert proc.returncode == 4 and proc.stdout == ""
     assert proc.stderr == "stdout reason (router: stderr reason)\n"
+
+
+def test_a_blank_last_stderr_line_does_not_hide_the_note_before_it(rig):
+    proc, _ = rig({"pr": {}}, mode="fail-blank-tail")
+    assert proc.returncode == 4 and proc.stdout == ""
+    assert proc.stderr == "stdout reason (router: real note)\n"
 
 
 @pytest.mark.parametrize("mode", ["fail-noise", "fail-odd-reason"])
