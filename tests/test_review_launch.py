@@ -1206,7 +1206,8 @@ def test_review_pr_gives_an_unreadable_branch_history_the_restricted_runtime(prw
 
 
 def test_review_pr_asked_for_restricted_does_not_read_the_branch_history(prw):
-    assert prw.review("--runtime", "restricted").returncode == 0
+    r = prw.review("--runtime", "restricted")
+    assert r.returncode == 0 and "runtime restricted" not in r.stderr, r.stderr
     log = [json.loads(line) for line in (prw.tmp / "gh.log").read_text().splitlines()]
     assert not [a for a in log if a[:1] == ["api"] and "/activity" in a[1]] and not [a for a in log if a[:2] == ["api", "users/djbclark"]]
 
