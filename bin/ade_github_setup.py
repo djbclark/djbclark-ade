@@ -174,8 +174,8 @@ def validate_manifest(data: dict[str, Any], *, path: Path | None = None) -> list
     name = data.get("name")
     if name != "ade-merge-gate":
         errors.append(f"{label}: name must be 'ade-merge-gate' (got {name!r})")
-    if data.get("public") is not False:
-        errors.append(f"{label}: public must be false (this-account only)")
+    if data.get("public") is not True:
+        errors.append(f"{label}: public must be true (\"Any account\": installable on the frdminc org, 2026-11-14)")
     url = data.get("url")
     if not isinstance(url, str) or not url.startswith("https://"):
         errors.append(f"{label}: url must be an https homepage string")

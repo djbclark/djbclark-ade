@@ -6,7 +6,7 @@
 
 Run it from a checkout of the repository, after the push has landed. It
   1. reads the PR with `gh pr view PR --repo R --json headRefOid,baseRefOid,baseRefName,author,state`;
-  2. refuses (exit 2) a PR whose author is neither the repository owner nor the authenticated gh user, unless
+  2. refuses (exit 2) a PR whose author is neither the operator's login nor the authenticated gh user, unless
      --allow-untrusted: the reviewed tree and diff are the PR's, and they can try to steer the model
      (Codex Security Review on PR 130; the boundary limits what an injected review can DO, not what it says);
   3. fetches `refs/pull/N/head` and the base branch, pins the base by the SHA GitHub reported, and adds a
@@ -20,7 +20,7 @@ Run it from a checkout of the repository, after the push has landed. It
      external-security-critical input; docs/slim/audit-walk-decisions-2026-11-12.md section 8):
        restricted  `--mode review`: Read/Grep/Glob confined to the worktree, no commands (docs/review-boundary.md)
        yolo        `--mode trusted --trusted-author OWNER`: bypassPermissions with Bash; ONLY for a PR whose GitHub
-                   author is the repository owner (--allow-untrusted and the authenticated-user rule never enable it)
+                   author is the operator's login (--allow-untrusted and the authenticated-user rule never enable it)
        auto        (default) yolo for an owner-authored PR, else restricted
      The mode used is filed as `runtime` in the result.
   6. checks that the verdict names this head, prints the marker (retained for the local record):
@@ -142,14 +142,19 @@ def marker_line(verdict: str, head: str) -> str:
     return "<!-- adversary-verdict:v1 " + json.dumps({"verdict": verdict, "head": head}, separators=(",", ":")) + " -->"
 
 
-def marker_reads_back(line: str, head: str, verdict: str) -> bool:
-    """The merge gate's own parser must read the printed marker as this verdict for this head."""
+def _adversary_marker():
+    """bin/adversary_marker.py, the merge gate's own module: its parser and its one list of the operator's login."""
     sys.path.insert(0, str(HERE))
     try:
         import adversary_marker
     finally:
         sys.path.pop(0)
-    r = adversary_marker.adversary_verdict(line, head)
+    return adversary_marker
+
+
+def marker_reads_back(line: str, head: str, verdict: str) -> bool:
+    """The merge gate's own parser must read the printed marker as this verdict for this head."""
+    r = _adversary_marker().adversary_verdict(line, head)
     return bool(r.get("present") and r.get("matches_head") and r.get("verdict") == verdict and not r.get("malformed"))
 
 
@@ -158,9 +163,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("pr", type=int)
     p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
     p.add_argument("--allow-untrusted", action="store_true",
-                   help="review a PR whose author is neither the repository owner nor the authenticated gh user")
+                   help="review a PR whose author is neither the operator's login nor the authenticated gh user")
     p.add_argument("--runtime", choices=RUNTIMES, default="auto",
-                   help="auto (default): yolo for a PR the repository owner authored, else restricted; "
+                   help="auto (default): yolo for a PR the operator (djbclark) authored, else restricted; "
                         "yolo: refused unless the owner authored it; restricted: Read/Grep/Glob only, always allowed")
     p.add_argument("--retry", action="store_true", help="create another attempt instead of reusing a completed matching review")
     p.add_argument("--replacement-model", action="append", default=[], help="replace a timed-out reviewer with this model (repeatable, ordered)")
@@ -316,7 +321,10 @@ def review_attempt(argv: list[str]) -> int:
         note(f"PR {a.pr} is {doc.get('state')}, not open")
         return EXIT_USAGE
 
-    trusted = {repo.split("/")[0]}
+    # "The owner" is the operator's user login (adversary_marker.TRUSTED_OWNER_LOGINS), not whoever owns the repo:
+    # after the move to the frdminc org the repo owner is an organization that authors no PR (2026-11-14).
+    marker = _adversary_marker()
+    trusted = set(marker.TRUSTED_OWNER_LOGINS)
     try:
         me = run(["gh", "api", "user", "--jq", ".login"], timeout=GH_TIMEOUT)
         if me.returncode == 0:
@@ -325,13 +333,13 @@ def review_attempt(argv: list[str]) -> int:
         pass
     trusted.discard("")
     if author.lower() not in trusted and not a.allow_untrusted:
-        note(f"refused: the PR's author {author or '(unknown)'!r} is neither the repository owner nor the authenticated gh "
+        note(f"refused: the PR's author {author or '(unknown)'!r} is neither the operator's login nor the authenticated gh "
              "user; its diff and AGENTS.md can steer the reviewing model. --allow-untrusted reviews it anyway")
         return EXIT_USAGE
 
-    owner_authored = bool(author) and author.lower() == repo.split("/")[0]
+    owner_authored = marker.is_trusted_owner_login(author)
     if a.runtime == "yolo" and not owner_authored:
-        note(f"refused: --runtime yolo is only for a PR the repository owner authored (this one: {author or '(unknown)'!r}); "
+        note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored (this one: {author or '(unknown)'!r}); "
              "use --runtime restricted")
         return EXIT_USAGE
     runtime = "yolo" if (a.runtime == "yolo" or (a.runtime == "auto" and owner_authored)) else "restricted"
@@ -391,7 +399,7 @@ def review_attempt(argv: list[str]) -> int:
         (inp / "files.txt").write_bytes(files.stdout)
         prompt = PROMPT.format(pr=a.pr, repo=repo, head=head, base=base_sha, inp=INPUT_DIR,
                                head_short=head[:12], base_short=base_sha[:12], capability=CAPABILITY[runtime])
-        mode_args = ["--mode", "trusted", "--trusted-author", repo.split("/")[0]] if runtime == "yolo" else ["--mode", "review"]
+        mode_args = ["--mode", "trusted", "--trusted-author", author.lower()] if runtime == "yolo" else ["--mode", "review"]
         launch = [sys.executable, "-I", str(HERE / "review-launch"), *mode_args, "-C", str(wt), "--head", head,
                   "--schema", str(SCHEMA), "-p", prompt, "--timeout", str(a.timeout), "--stall-timeout", str(a.stall_timeout),
                   "--evidence-dir", str(evidence), "--json"]

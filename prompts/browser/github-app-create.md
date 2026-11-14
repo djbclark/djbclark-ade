@@ -24,11 +24,11 @@ Do not open PR tabs, Issue tabs, Discussions, code blobs, or external links.
    `{{manifest}}` from the `{{owner_repo}}` repository (or paste its JSON into
    the manifest field if the page offers that). Expected shape:
    - name: `{{app_name}}`
-   - `public: false`
+   - `public: true`
    - webhook inactive (`hook_attributes.active: false`)
    - permissions: Commit statuses **Read and write**, Checks **Read and write**,
      Pull requests **Read-only** (Metadata read-only implied)
-   - "Only on this account"
+   - "Any account" (public, since 2026-11-14, so it can be installed on the `frdminc` org)
 2. Confirm the create click **only**. Do not change any other App setting.
 3. After create, note the **App ID** and **Client ID** shown on the page.
 4. Install the App on **`{{owner_repo}}` only** (no other repositories).

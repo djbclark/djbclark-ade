@@ -65,9 +65,9 @@ def test_repo_github_toml_and_manifest_check_clean():
     assert payload["summary"]["app_name"] == "ade-merge-gate"
 
 
-def test_manifest_rejects_public_or_active_webhook(tmp_path):
-    root = _fixture_root(tmp_path, mutate_manifest={"public": True})
-    with pytest.raises(ags.GithubSetupError, match="public must be false"):
+def test_manifest_rejects_private_or_active_webhook(tmp_path):
+    root = _fixture_root(tmp_path, mutate_manifest={"public": False})
+    with pytest.raises(ags.GithubSetupError, match="public must be true"):
         ags.load_config(root=root)
 
     root2 = _fixture_root(tmp_path / "b")

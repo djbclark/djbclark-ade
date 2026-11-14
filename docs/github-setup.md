@@ -84,7 +84,7 @@ output never prints PEM material.
 
 `.github/app-manifest.json` matches `docs/review-boundary.md` operator setup:
 
-- name `ade-merge-gate`, `public: false`
+- name `ade-merge-gate`, `public: true` (2026-11-14: "Any account", so the App can be installed on the `frdminc` org the repository moves to; a private App installs on its owner's account only; it holds no authority without its private key, which stays in the `merge-gate` environment secret)
 - `hook_attributes.active: false` (webhook inactive; placeholder URL for the API)
 - `default_permissions`: statuses write, checks write, pull_requests read, metadata read
 - `default_events: []`

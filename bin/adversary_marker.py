@@ -38,7 +38,8 @@ and head are read through the API with the job's read-only `GITHUB_TOKEN`; the s
 token of the `ade-merge-gate` GitHub App (`STATUS_TOKEN`), whose key lives in the `merge-gate`
 environment that only `master` can deploy to, and the ruleset pins the required check to that App's
 `integration_id`, so a status a PR's own workflow posts under the same context does not satisfy it.
-GitHub artifacts **not** from the repository owner are untrusted data (operator, 2026-11-07; restated
+GitHub artifacts **not** from the operator's GitHub login (`djbclark`, TRUSTED_OWNER_LOGINS; not whoever owns the
+repository, which becomes the `frdminc` org) are untrusted data (operator, 2026-11-07; restated
 2026-11-10: distrust only what does not come from the owner or AIs they run). Body, title, commits, branch
 name, comments and check output are read, never executed or interpolated. Owner-authored PRs (the owner's
 login, including Cloud Agents acting under it) are trusted by default: `decide` succeeds without an APPROVE
@@ -66,6 +67,19 @@ CONTEXT = "adversary-marker"
 # case-insensitively to GraphQL `editor.login`. Does NOT approve outside/MEMBER/COLLABORATOR
 # PRs. Keep this list short: each entry is a residual "our App was steered into writing APPROVE"
 # surface, mitigated by the process rule that agents never write a live marker.
+# The operator's GitHub USER login(s): the one source of "the owner" for every trust decision here and in
+# bin/review-pr and bin/ade-merge-ready (operator 2026-11-14, ahead of the move to the `frdminc` org). Trust is
+# keyed to this login, NEVER to whoever owns the repository: an organization owner (`frdminc`, whose second member
+# is not the operator), a fork owner or a transferred-to account gets nothing by owning the repo. Lowercase;
+# compared case-insensitively; only a GraphQL `User` actor counts (an App or bot named the same never does).
+TRUSTED_OWNER_LOGINS = frozenset({"djbclark"})
+
+
+def is_trusted_owner_login(login: object) -> bool:
+    """True when ``login`` is one of TRUSTED_OWNER_LOGINS (case-insensitive). The repository owner is irrelevant."""
+    return isinstance(login, str) and login.strip().lower() in TRUSTED_OWNER_LOGINS
+
+
 BODY_TRUSTED_EDITOR_LOGINS = frozenset({
     "cursor",  # Cursor GitHub App / Cloud Agent body edits (PR 318, 2026-11-08)
 })
@@ -1030,6 +1044,7 @@ class CannedApi:
         self.answers = answers
         self.calls: dict[str, int] = {}
         self.posted: list[dict] = []
+        self.queries: list[dict] = []        # the GraphQL variables of every read, so a test sees which owner was queried
 
     def get(self, path: str):
         key = "GET " + path
@@ -1047,6 +1062,7 @@ class CannedApi:
         """Served like a GET: {"json": <the `data` object>} or {"error": ...}, from "GRAPHQL <number>" for the PR read
         and "GRAPHQL <number> comments" (the first page) or "GRAPHQL <number> comments after <cursor>" for the comments
         read (`variables` carries `cursor`)."""
+        self.queries.append(dict(variables))
         key = f"GRAPHQL {variables.get('number')}"
         if "cursor" in variables:
             key += " comments" + (f" after {variables['cursor']}" if variables["cursor"] else "")
@@ -1195,7 +1211,7 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
-            "pullRequest(number: $number) { state headRefOid body authorAssociation author { login } "
+            "pullRequest(number: $number) { state headRefOid body authorAssociation author { __typename login } "
             "editor { login } lastEditedAt } } }")
 COMMENTS_PER_PAGE = 100
 COMMENT_PAGES_MAX = 30     # 3,000 comments; a PR with more is not read in full, which fails closed
@@ -1212,18 +1228,17 @@ COMMENTS_QUERY = (
     f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login }} }} }} }} }} }} }} }}")
 
 
-def body_editor_trusted(editor: str, owner: str) -> bool:
+def body_editor_trusted(editor: str) -> bool:
     """True when ``editor`` may leave an owner-PR body's live APPROVE trusted.
 
-    The owner always qualifies. Logins in BODY_TRUSTED_EDITOR_LOGINS also qualify
+    The operator's login (TRUSTED_OWNER_LOGINS) always qualifies. Logins in BODY_TRUSTED_EDITOR_LOGINS also qualify
     (Cursor cloud rewrites of owner-authored PR bodies). Empty or unknown editors
     never qualify. Outside PRs never consult this for a body APPROVE.
     """
     e = (editor or "").lower()
-    o = (owner or "").lower()
-    if not e or not o:
+    if not e:
         return False
-    return e == o or e in {login.lower() for login in BODY_TRUSTED_EDITOR_LOGINS}
+    return is_trusted_owner_login(e) or e in {login.lower() for login in BODY_TRUSTED_EDITOR_LOGINS}
 
 
 def _pr_state_trusted(api, repo: str, n: int) -> dict:
@@ -1232,7 +1247,8 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     when the body was never edited (`lastEditedAt` null); an edit with no `editor` (a deleted user) is an unknown
     editor, which no body trust survives.
 
-    `owner_pr`: the author is the repository owner (logins compare case-insensitively). `body_trusted`: an owner PR
+    `owner_pr`: the author is the operator's `User` login, TRUSTED_OWNER_LOGINS (compared case-insensitively), not
+    whoever owns the repository and not an App or bot of the same name (`__typename` must be `User`). `body_trusted`: an owner PR
     whose body last editor is the owner or a BODY_TRUSTED_EDITOR_LOGINS login (2026-11-09). An explicit body APPROVE
     on an owner PR still needs that trust; a markerless owner PR is approved via owner-trust (2026-11-10). The
     allowlist exists so a Cursor Cloud rewrite of an owner PR body does not void an explicit live APPROVE
@@ -1241,7 +1257,7 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     one; MEMBER or COLLABORATOR authors stay outside-like (outside PRs still need an owner comment). A listed
     App editing an outside body still cannot approve it.
     """
-    owner, name = repo.split("/", 1)
+    owner, name = repo.split("/", 1)         # the repo owner only addresses the GraphQL query, it earns no trust
     data = api.graphql(PR_QUERY, {"owner": owner, "name": name, "number": n})
     pr = (((data or {}).get("repository") or {}).get("pullRequest")) if isinstance(data, dict) else None
     if not isinstance(pr, dict):
@@ -1253,11 +1269,11 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor = str(((pr.get("editor") or {}).get("login")) or "")
     if "editor" in pr and pr["editor"] is None and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
         editor = author                       # explicit never-edited shape only; absent/malformed editor is unknown
-    owner_pr = bool(author) and author.lower() == owner.lower()
+    owner_pr = is_trusted_owner_login(author) and (pr.get("author") or {}).get("__typename") == "User"
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
             "author": author, "editor": editor, "association": str(pr.get("authorAssociation") or "").upper(),
-            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor, owner)}
+            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor)}
 
 
 def _pr_comments(api, repo: str, n: int) -> list[dict]:
@@ -1284,19 +1300,20 @@ def _pr_comments(api, repo: str, n: int) -> list[dict]:
                      "not read in full")
 
 
-def _actor(a: object, owner: str) -> tuple[str, str]:
-    """('owner' | 'other' | 'unknown', login) for a GraphQL Actor: the owner only as a `User` with the owner's login."""
+def _actor(a: object) -> tuple[str, str]:
+    """('owner' | 'other' | 'unknown', login) for a GraphQL Actor: the owner only as a `User` with a login in
+    TRUSTED_OWNER_LOGINS."""
     if not isinstance(a, dict) or not isinstance(a.get("login"), str) or not a["login"]:
         return "unknown", ""
     login = a["login"]
-    if login.lower() != owner.lower():
+    if not is_trusted_owner_login(login):
         return "other", login
     if a.get("__typename") == "User":
         return "owner", login
     return ("unknown" if a.get("__typename") is None else "other"), login
 
 
-def _edit_attribution(node: dict, owner: str) -> tuple[str, str]:
+def _edit_attribution(node: dict) -> tuple[str, str]:
     """('never' | 'owner' | 'other' | 'unknown', a non-owner editor's login) for one GraphQL comment node.
 
     GitHub lets any repository writer edit another user's comment while the author stays the same (Codex review,
@@ -1314,7 +1331,7 @@ def _edit_attribution(node: dict, owner: str) -> tuple[str, str]:
             and edits["totalCount"] == 0 and not edits["nodes"]):
         return "never", ""
     actors = [node["editor"]] + [e.get("editor") if isinstance(e, dict) else None for e in edits["nodes"]]
-    kinds = [_actor(a, owner) for a in actors]
+    kinds = [_actor(a) for a in actors]
     for kind, login in kinds:
         if kind == "other":
             return "other", login
@@ -1331,7 +1348,7 @@ def _pr_comments_trusted(api, repo: str, n: int) -> list[dict]:
     Raises ApiError, or ValueError on a bad shape, more than COMMENT_PAGES_MAX pages, a cursor that does not advance
     or a count that does not match `totalCount`: a comment that was not read could hold a BLOCK, so an incomplete
     read fails closed like an unreadable body."""
-    owner, name = repo.split("/", 1)
+    owner, name = repo.split("/", 1)         # the repo owner only addresses the GraphQL query, it earns no trust
     out: list[dict] = []
     cursor = None
     for page in range(1, COMMENT_PAGES_MAX + 1):
@@ -1346,8 +1363,8 @@ def _pr_comments_trusted(api, repo: str, n: int) -> list[dict]:
         for c in conn["nodes"]:
             if not isinstance(c, dict) or not isinstance(c.get("body"), str):
                 raise ValueError(f"graphql pr {n} comments page {page}: an entry is not a comment with a body")
-            kind, login = _actor(c.get("author"), owner)
-            edit, edited_by = _edit_attribution(c, owner)
+            kind, login = _actor(c.get("author"))
+            edit, edited_by = _edit_attribution(c)
             cid = c.get("fullDatabaseId")
             out.append({"id": str(cid) if isinstance(cid, (int, str)) and str(cid) else None, "author": login,
                         "author_kind": kind, "body": c["body"], "edit": edit, "edited_by": edited_by})
@@ -1381,18 +1398,19 @@ def _merge_comments(trusted: list[dict], rest: list[dict]) -> list[dict]:
     return out
 
 
-def decide(head: str, owner: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
+def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
     """(outcome word, where, detail) for one PR: its body and its issue comments, judged by the one parser.
 
     1. A BLOCK for this head anywhere (the body, or ANY comment, whoever wrote it) blocks, then a malformed marker
        anywhere: the same asymmetry as the body's (rule 1, property 1). A comment marker naming another head is
        history (an approval of an earlier push), not a failure.
-    2. An owner PR (repository owner authored it — including Cloud Agents under that login): trusted by default
+    2. An owner PR (the operator's `User` login, TRUSTED_OWNER_LOGINS, authored it — including Cloud Agents under that
+       login; NOT whoever owns the repository): trusted by default
        (operator 2026-11-10: trust what comes only from the owner or AIs they run). No APPROVE marker is required.
        An explicit body APPROVE still counts when the body editor is trusted (owner or BODY_TRUSTED_EDITOR_LOGINS);
        an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed.
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
-       it last (a listed App included); only a live APPROVE for this head in a comment by the repository owner, not
+       it last (a listed App included); only a live APPROVE for this head in a comment by the operator's login, not
        posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
        `edited` (another user edited the owner's APPROVE comment), `edit-unknown` (its edit history is not known in
        full), `untrusted` (the only APPROVE is in someone else's comment, or via an App) or `outside`."""
@@ -1466,7 +1484,7 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
         comments = _merge_comments(trusted, _pr_comments(api, repo, n))
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"reading the comments failed: {e}"}
-    word, where, detail = decide(head, repo.split("/", 1)[0], pr, comments)
+    word, where, detail = decide(head, pr, comments)
     rec.update(last_editor=pr["editor"], trusted=pr["body_trusted"], author=pr["author"], owner_pr=pr["owner_pr"],
                comments=len(trusted))
     status = {"state": "success" if word == "approve" else "failure", "context": CONTEXT,

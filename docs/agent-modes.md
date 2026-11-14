@@ -59,7 +59,7 @@ consequential boundary.
 
 B4. The direct-Claude `review-pr` / `review-launch` restricted boundary is kept
 for external-security-critical review. Since 2026-11-12 (W2) `review-pr` also
-has a trusted internal runtime: for a PR the repository owner authored,
+has a trusted internal runtime: for a PR the operator's login (`djbclark`, not the repository owner) authored,
 `--runtime auto` (the default) launches `review-launch --mode trusted`
 (`--permission-mode bypassPermissions`, Bash added, no read-boundary claim); any
 other author, and `--runtime restricted`, keep `--mode review`. The trusted

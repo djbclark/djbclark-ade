@@ -29,7 +29,7 @@ THE MODES
              secret-path deny rules and the scrubbed environment stay as accidental-exposure guards only. It needs
              `--trusted-author LOGIN` (who vouches for the input; recorded in --json) and `--head SHA` (an exact,
              clean worktree). The launcher cannot verify the claim: the CALLER decides, and `bin/review-pr` does
-             so only for a PR GitHub reports as authored by the repository owner. Never for outside input.
+             so only for a PR GitHub reports as authored by the operator's login (`djbclark`, not whoever owns the repository). Never for outside input.
 
 THE LAUNCH (every flag is fixed; nothing is passed through):
   claude -p --output-format stream-json --verbose --tools <mode's tools> --permission-mode default

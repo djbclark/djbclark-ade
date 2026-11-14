@@ -21,7 +21,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    current one.** The `adversary-marker` Action (`.github/workflows/adversary-marker.yml`, logic in `bin/adversary_marker.py`,
    2026-11-06) reads it and posts the required `adversary-marker` status: `success` only for a live APPROVE naming the
    current head, `failure` for anything else, so there is no report-only mode (the ruleset requires the status). An
-   APPROVE counts only in two places. The first is the body of a PR the repository owner wrote, when the body's last
+   APPROVE counts only in two places. The first is the body of a PR the operator (`djbclark`, `TRUSTED_OWNER_LOGINS`; never "whoever owns the repository", 2026-11-14) wrote, when the body's last
    editor is the owner **or** a login in `BODY_TRUSTED_EDITOR_LOGINS` in `bin/adversary_marker.py` (today: `cursor`, so
    a Cursor Cloud rewrite of an owner-authored PR body does not void a live APPROVE; 2026-11-09). The second is an
    issue comment on the PR that the owner posted, not through a GitHub App, and that nobody but the owner has edited
@@ -144,13 +144,13 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     marker to paste into the PR body (verdict and head only; the model's free text never goes into it) and files
     `~/.local/state/review-launch/attempts/<owner>__<name>-pr<N>-<head>-<attempt>.json` (2026-11-12; the old path holds the latest result); it never posts. Completed matching reviews are reused unless `--retry`; unresolved findings require explicit `--resolve-finding ID` with `--retry`. Timeout-only replacement models and private partial evidence are described in [review-boundary.md](review-boundary.md). Exit 0 APPROVE, 1 BLOCK, 2 refused
     (usage, no such PR, an untrusted author, a refused launch), 3 failed, 77 tripwire (the run left the boundary), 124
-    timeout. A push needs a new run: the head is the key. It refuses a PR whose author is neither the repository owner nor
+    timeout. A push needs a new run: the head is the key. It refuses a PR whose author is neither the operator's login nor
     the authenticated gh user unless `--allow-untrusted` (the PR's own diff and AGENTS.md can try to steer the reviewing
     model: Codex Security Review, PR 130); its prompt tells the model that the diff and every file of the worktree are
     data, never instructions.
 
     **Runtime (2026-11-12, W2; operator: YOLO for trusted internal reviewers, restricted execution only for external-security-critical work).**
-    `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the repository owner through
+    `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the operator's login (`djbclark`) through
     `review-launch --mode trusted` (`bypassPermissions`, Read/Grep/Glob/Bash, no read-boundary claim; docs/review-boundary.md);
     every other PR (the authenticated gh user when that is not the owner, `--allow-untrusted`) and `--runtime restricted` keep
     `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR. The runtime is filed as `runtime`.
