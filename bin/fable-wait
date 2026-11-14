@@ -45,9 +45,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Self
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ade_lead_succession as succ  # noqa: E402
-
 LABEL = "com.djbclark.fable-wait"
 FABLE_WINDOW_IDS = ("weekly_model_fable", "weekly")      # the Fable window, else the claude weekly window (both reset together)
 WAKE_DELAY = 60                                          # seconds after the window resets
@@ -496,6 +493,11 @@ def ping_text(text: str, report: dict) -> None:
 def current_lead(lead: str) -> str:
     """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
     its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:  # imported here: a copy of this script without its bin/ siblings (the arm-from-a-worktree check) still runs
+        import ade_lead_succession as succ
+    except ImportError:
+        return lead
     try:
         return succ.effective_lead(lead)
     except succ.SuccessionError:

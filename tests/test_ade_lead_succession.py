@@ -14,9 +14,9 @@ A, B, C, D = (f"{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-00000000000{n}" for n in
 STRANGER = "99999999-0000-4000-8000-000000000009"
 
 
-def write_link(state: Path, home: Path, pred: str, nxt: str, status="archived", ack="ok", **over):
+def write_link(state: Path, home_dir: Path, pred: str, nxt: str, status="archived", ack="ok", **over):
     state.mkdir(parents=True, exist_ok=True)
-    rec = {"schema_version": 1, "kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home.resolve()),
+    rec = {"schema_version": 1, "kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home_dir.resolve()),
            "status": status, "ack": {"agent_id": nxt} if ack == "ok" else ack}
     rec.update(over)
     (state / f"handoff-{pred}.json").write_text(json.dumps(rec))
