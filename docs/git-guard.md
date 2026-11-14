@@ -304,7 +304,7 @@ Evaluated in order; the module docstring has every form.
 6. **`worktree remove` of a directory another live process uses (`worktree remove: live process`, 2026-11-14, gg-01):**
    claimed or not, yours or not. git removes a worktree whose cwd an orphaned agent, editor or dev server still holds and
    leaves that process in a deleted directory (site-public-djbclark-orchard-wt, orphan claude PID 10129). The guard asks
-   `lsof` (one all-process cwd listing, then `lsof +D <target>` for open files, 6 s each, `$ADE_LSOF_TIMEOUT`) and refuses
+   `lsof` (one all-process cwd listing, then `lsof +D <target>` for open files, 6 s each, `$ADE_LSOF_TIMEOUT`; inf, nan and junk read as 6 s, anything above 120 s is cut to it) and refuses
    with every pid, command and cwd or file (first 8, then a count). The caller's own process chain (the shim, the agent that
    ran it) is not "another user". **Fails open** when `lsof` is missing, fails or times out, or when `ps` cannot list processes for the caller-chain
    exclusion (a guard that cannot look must not stop `git worktree remove`; so a same-uid agent that sets `ADE_LSOF` or a tiny
@@ -406,9 +406,12 @@ shell-string `--check` analyser (and the Claude PreToolUse hook it was for, W5).
     path for allowlisted reads (a stray `--output` file there remains a nuisance, not lost work).
 15. **Worktree removal that does not go through the shim (2026-11-14):** `rm -rf` and `git worktree prune`, Paseo's own worktree
     archive (the daemon's git), and a human shell. The in-repo callers `bin/review-pr` and `bin/ade-merge-ready` used to
-    `shutil.rmtree` a worktree after a failed `git worktree remove --force`; since lw-01 an exit-77 refusal (a live process, or
-    another agent's claim) leaves the directory in place, reports it on stderr and records `worktree_left` in their result,
-    while any other failure still cleans up. The live-process check (shim rule 6) covers only `git worktree remove`.
+    `shutil.rmtree` a worktree after any failed `git worktree remove --force`; since lw-01 a refusal that names a live process
+    (`[worktree remove: live process]`) or another agent's claim (`[worktree remove of a claimed workspace]`) leaves the
+    directory in place, reports it on stderr and records `worktree_left` in their result. Any other failure still cleans up,
+    including the guard's routine `--force`-on-an-unclaimed-tree refusal (`[worktree remove --force]`, also exit 77): these
+    tools never claim their own temporary worktree, so under the shim that refusal is their normal case. The live-process
+    check (shim rule 6) covers only `git worktree remove`.
 
 ## Refusal, log and override (Wave 6 native-Paseo wording 2026-11-09)
 

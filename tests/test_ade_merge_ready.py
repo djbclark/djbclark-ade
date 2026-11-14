@@ -1436,8 +1436,15 @@ def test_stack_rebase_yes_rebase_and_retarget(tmp_path: Path) -> None:
     assert "rebase --onto origin/master origin/cursor/gone-f576" in log
 
 
-@pytest.mark.parametrize("remove_rc,left", [(77, True), (1, False), (0, False)])
-def test_stack_rebase_leaves_the_worktree_only_when_the_git_guard_refuses_its_removal(tmp_path: Path, remove_rc: int, left: bool) -> None:
+@pytest.mark.parametrize("remove_rc,text,left", [
+    (77, "REFUSED [worktree remove: live process]", True),
+    (77, "REFUSED [worktree remove of a claimed workspace]", True),
+    (77, "REFUSED [worktree remove --force] nobody; the target has no active claim of yours", False),
+    (1, "failed", False),
+    (0, "", False),
+])
+def test_stack_rebase_leaves_the_worktree_only_when_the_git_guard_refuses_for_a_live_process_or_a_claim(
+        tmp_path: Path, remove_rc: int, text: str, left: bool) -> None:
     """lw-01 (#693 review L5): exit 77 from `git worktree remove` is ade-git-guard's refusal (a live process uses the
     directory): the temporary worktree stays and the refusal is reported; any other failure still cleans up."""
     listing = json.dumps([{
@@ -1461,7 +1468,7 @@ def test_stack_rebase_leaves_the_worktree_only_when_the_git_guard_refuses_its_re
         #!/usr/bin/env bash
         if [[ "$1" == worktree && "$2" == add ]]; then echo "$4" > '{wt_log}'; exit 0; fi
         if [[ "$1" == worktree && "$2" == remove ]]; then
-          if [[ {remove_rc} -ne 0 ]]; then echo "guard: refused" >&2; fi
+          if [[ {remove_rc} -ne 0 ]]; then echo "{text}" >&2; fi
           exit {remove_rc}
         fi
         if [[ "$1" == rev-parse ]]; then echo deadbeef; exit 0; fi

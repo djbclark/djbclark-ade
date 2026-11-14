@@ -335,3 +335,33 @@ def test_an_indented_or_quoted_relaunch_reason_does_not_count(tmp_path, prompt):
     stub_report(tmp_path)
     out = run({"description": "Lead adversary review PR 684", "prompt": prompt}, env=footer_env(tmp_path))
     assert out["permissionDecision"] == "deny", prompt
+
+
+@pytest.mark.parametrize("label", ["Report path:", "**Report path:**", "- **Report path:**", "1. Report path:", "`Report path:`",
+                                   "Report  path:", "Report file:", "report path ="])
+def test_the_own_report_path_is_found_through_markdown_and_list_markers(tmp_path, label):
+    """lw-01 (#691 review B1, adversary r1 A2): the common spellings of the label still beat a peer's labelled report."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    out = run({"description": "Adv", "prompt": f"Worker report: {peer}\n{label} `{own}`\nreview it"}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, (label, out)
+    assert f"report: {own}" in out["updatedInput"]["prompt"], label
+
+
+def test_a_quoted_or_peer_path_label_is_not_the_own_report(tmp_path):
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    for line in (f"> Report path: {peer}", f"Worker report path: {peer}"):
+        out = run({"description": "Adv", "prompt": f"{line}\nreview it"}, env=footer_env(tmp_path))
+        assert out["permissionDecision"] == "deny", line
+
+
+def test_a_quoted_peer_label_does_not_compete_with_the_own_report_path(tmp_path):
+    """A `> Report path:` line is quoted text, not this prompt's own label (so it cannot make the own path ambiguous)."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    out = run({"description": "Adv", "prompt": f"> Report path: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]

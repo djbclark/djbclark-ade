@@ -39,10 +39,12 @@ _HOME_FOOTER = Path.home() / "src/djbclark-ade/docs/dispatch-footer.md"
 _END = r"(?!\w|\.(?:done|inbox|replies)\b)"      # not the middle of `X-report.md.done`
 _LEFT = r"(?<![\w.~$@+/-])"                          # a `~/x`, `$HOME/x` or relative path is not an absolute one
 REPORT_IN_PROMPT = re.compile(_LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
-REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
+_MD = r"[*_`]*"                                      # markdown around a label: `**Report path:** /x`, `` `Report path:` /x ``
+REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?" + _MD + r"\s*(?:is|:|=)" + _MD + r"\s*`?" + _LEFT
+                             + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the prompt's OWN `Report path:` / `Report file:` line (at the start of a line), as opposed to a peer's `Worker report: ...`
-REPORT_OWN = re.compile(r"(?im)^[ \t>*-]*report (?:path|file)[ \t]*(?:is|:|=)[ \t]*`?" + _LEFT
-                        + r"(/[\w.@~+/-]+-report\.md)" + _END)
+REPORT_OWN = re.compile(r"(?im)^[ \t]*(?:(?:\d+[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD + r"[ \t]*(?:is|:|=)"
+                        + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
 FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
@@ -62,7 +64,7 @@ RESUME_REASON = (
     "and the text \"resume from where you stopped\". Not an earlier agent of yours? If the path is another "
     "agent's report named only as background, or two long descriptions cut to the same name, give this agent "
     "its own `Report path: /abs/<name>-report.md` (or a distinct description). If you deliberately want a fresh "
-    "start, add a line `Relaunch-reason: <why>` to the prompt and launch again (the hook logs it, and the "
+    "start, add a line `Relaunch-reason: <why>` (at the start of the line) to the prompt and launch again (the hook logs it, and the "
     "earlier report is overwritten). Create `{report}.done` only for your own agent whose report is complete, "
     "never for one still running.")
 
