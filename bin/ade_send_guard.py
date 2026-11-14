@@ -10,7 +10,8 @@ target, what a sender should do instead:
             the old agent is already running again (`Archived=false`): the chain says it was replaced.
   refuse    the target is archived and nothing replaced it, or its succession ledger is cyclic, or the successor itself is
             archived: nothing is sent. `allow_archived` (operator override, deliberate resume of an archived agent) turns
-            a plain archived target into `pass`; it never overrides a cycle.
+            a plain archived target into `pass` when it is True or equals that agent's full id; it never overrides a
+            redirect or a cycle.
 
 `inspect` is injected: `inspect(id_or_name) -> {"Id": ..., "Archived": bool, ...}`, raising LookupError when Paseo does not
 know the agent and anything else (OSError, ValueError, ...) when it cannot answer. A Paseo outage fails OPEN (`pass`): a
@@ -30,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_lead_succession as succ  # noqa: E402
 
 PASS, REDIRECT, REFUSE = "pass", "redirect", "refuse"
-ALLOW_ENV = "ADE_ALLOW_ARCHIVED_SEND"  # =1 in a command's environment: a deliberate send to an archived agent
+ALLOW_ENV = "ADE_ALLOW_ARCHIVED_SEND"  # =<the agent's full id> in a command's environment: one deliberate resume of it
 EXIT_REFUSED = 4  # the ADE report class for "blocked"
 
 
@@ -53,9 +54,11 @@ def _record(inspect, ident: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def decide(target: str, inspect, allow_archived: bool = False, state_dir: Path | None = None,
+def decide(target: str, inspect, allow_archived: bool | str | None = False, state_dir: Path | None = None,
            home: Path | None = None) -> Decision:
     """What to do about a send to `target` (an id, an id prefix or a name Paseo resolves)."""
+    if target.startswith("-"):  # an option, not an agent: never hand it to the inspect CLI
+        return Decision(PASS, target, "not an agent id: not guarded")
     try:
         record = _record(inspect, target)
     except Exception:  # noqa: BLE001 - Paseo unreadable: fail open, the send reports its own error
@@ -75,13 +78,14 @@ def decide(target: str, inspect, allow_archived: bool = False, state_dir: Path |
         if successor is not None and successor.get("Archived") is True:
             return Decision(REFUSE, target, f"{ident} was replaced by {current}, which is archived too: nothing to send to")
         return Decision(REDIRECT, current, f"{ident} was replaced through a completed self-handoff; send to {current}")
-    if record.get("Archived") is True and not allow_archived:
+    if record.get("Archived") is True and not (allow_archived is True or allow_archived == ident):
         return Decision(REFUSE, target, f"{ident} is archived and no completed handoff replaced it: a send would un-archive "
-                        f"and run it. Send to its live owner, or set {ALLOW_ENV}=1 to resume it on purpose")
+                        f"and run it. Send to its live owner; resuming an archived agent needs the operator's explicit "
+                        f"instruction ({ALLOW_ENV}=<its full id>, for that one send)")
     return Decision(PASS, target)
 
 
-def paseo_inspect(paseo: str = "paseo", timeout: int = 8):
+def paseo_inspect(paseo: str = "paseo", timeout: int = 5):
     """An `inspect` callable over `paseo agent inspect ID --json` (argv list, bounded). LookupError for a not-found agent."""
     def inspect(ident: str) -> dict:
         proc = subprocess.run([paseo, "agent", "inspect", ident, "--json"], capture_output=True, text=True, timeout=timeout,
@@ -98,7 +102,7 @@ def paseo_inspect(paseo: str = "paseo", timeout: int = 8):
 def guard(target: str, paseo: str = "paseo", env=None, **kw) -> Decision:
     """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND."""
     env = os.environ if env is None else env
-    return decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) == "1", **kw)
+    return decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False, **kw)
 
 
 def main(argv=None) -> int:

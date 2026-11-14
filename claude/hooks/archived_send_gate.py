@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shlex
 import sys
 
 BIN = Path(__file__).resolve().parent.parent.parent / "bin"
-VALUE_FLAGS = {"--behavior", "--prompt-file", "--host", "--server", "--timeout", "--image", "--label", "--cwd"}
+VALUE_FLAGS = {"--prompt", "--prompt-file", "--image", "--behavior"}  # the value options of `paseo send`
+OTHER_DAEMON = {"--host", "--home"}  # another daemon: its agents are not in this ledger, so not judged
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 MCP_ID_KEYS = ("agentId", "agent_id", "id", "target")
-ALLOW = "ADE_ALLOW_ARCHIVED_SEND=1"
+ALLOW_VAR = "ADE_ALLOW_ARCHIVED_SEND"
 
 
 def deny(reason: str) -> None:
@@ -32,70 +34,97 @@ def deny(reason: str) -> None:
                                               "permissionDecisionReason": reason}}))
 
 
-def targets_in_command(command: str) -> list[tuple[str, bool]]:
-    """[(target, allow_archived)] for every `paseo [agent] send` simple command in a shell command line."""
-    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+NO_RUN = {"echo", "printf"}  # words after these are text, not a command
+
+
+def strip_heredocs(command: str) -> str:
+    """The command without heredoc bodies (a brief that merely quotes a send is not a send)."""
+    lines, out, end = command.split("\n"), [], None
+    for line in lines:
+        if end is not None:
+            if line.strip() == end:
+                end = None
+            continue
+        out.append(line)
+        m = HEREDOC.search(line)
+        if m:
+            end = m.group(2)
+    return "\n".join(out)
+
+
+def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
+    """[(target, allow)] for every `paseo [agent] send` found in a shell command line. `allow` is the value of an
+    ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None."""
+    text = strip_heredocs(command).replace("\n", " ; ").replace("`", " ; ").replace("$(", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError:
         return []
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, str | None]] = []
     simple: list[str] = []
     for tok in tokens + [";"]:
         if tok in SEPARATORS or set(tok) <= set(";&|()"):
-            out.extend(_one(simple))
+            out.extend(_one(simple, depth))
             simple = []
         else:
             simple.append(tok)
     return out
 
 
-def _one(words: list[str]) -> list[tuple[str, bool]]:
-    allow = False
-    i = 0
-    while i < len(words) and "=" in words[i] and not words[i].startswith("-") and words[i].split("=", 1)[0].isidentifier():
-        allow = allow or words[i] == ALLOW
-        i += 1
-    if i < len(words) and words[i] in ("env", "command", "exec"):
-        return _one(words[i + 1:]) if words[i] != "env" else _one_env(words[i + 1:], allow)
-    if i >= len(words) or Path(words[i]).name != "paseo":
+def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
+    """One simple command. The `paseo [agent] send` pair is looked for anywhere in it, so wrappers (timeout, env -u, nohup,
+    sudo, xargs, `{`, `if`, `!`) need no special case; `sh -c STRING` is parsed again."""
+    if not words or Path(words[0]).name in NO_RUN:
         return []
-    rest = words[i + 1:]
-    if rest[:1] == ["agent"]:
-        rest = rest[1:]
-    if rest[:1] != ["send"]:
-        return []
-    args = rest[1:]
+    allow = next((w.split("=", 1)[1] for w in words if w.startswith(ALLOW_VAR + "=")), None)
+    found: list[tuple[str, str | None]] = []
+    if depth < 3 and Path(words[0]).name in SHELLS and "-c" in words and words.index("-c") + 1 < len(words):
+        found.extend(targets_in_command(words[words.index("-c") + 1], depth + 1))
+    for i, w in enumerate(words):
+        if Path(w).name != "paseo":
+            continue
+        rest = words[i + 1:]
+        if rest[:1] == ["agent"]:
+            rest = rest[1:]
+        if rest[:1] != ["send"]:
+            continue
+        target = _target(rest[1:])
+        if target:
+            found.append((target, allow))
+        break
+    return found
+
+
+def _target(args: list[str]) -> str | None:
+    """The agent word of `paseo send` arguments: skip the value flags; the first word after `--`; None when another daemon
+    is addressed (--host/--home) or nothing is found."""
     j = 0
     while j < len(args):
-        if args[j] == "--":  # the target is the first word after it, unless a positional already came before it
-            return [(args[j + 1], allow)] if j + 1 < len(args) else []
-        if args[j] in VALUE_FLAGS:
+        a = args[j]
+        if a in OTHER_DAEMON or a.startswith(("--host=", "--home=")):
+            return None
+        if a == "--":
+            return args[j + 1] if j + 1 < len(args) else None
+        if a in VALUE_FLAGS:
             j += 2
-        elif args[j].startswith("-"):
+        elif a.startswith("-"):
             j += 1
         else:
-            return [(args[j], allow)]
-    return []
+            return a
+    return None
 
 
-def _one_env(words: list[str], allow: bool) -> list[tuple[str, bool]]:
-    k = 0
-    while k < len(words) and ("=" in words[k] and not words[k].startswith("-")):
-        allow = allow or words[k] == ALLOW
-        k += 1
-    found = _one(words[k:])
-    return [(t, a or allow) for t, a in found]
-
-
-def judge(target: str, allow: bool) -> str | None:
+def judge(target: str, allow: str | None) -> str | None:
     """A denial reason, or None to allow."""
     if not target or any(c in target for c in "$`*?[{~"):
         return None
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
-    env = {guard.ALLOW_ENV: "1"} if allow else {}
+    env = {guard.ALLOW_ENV: allow} if allow else {}
     d = guard.guard(target, env=env)
     if d.action == guard.REDIRECT:
         return (f"Blocked by archived_send_gate: {d.reason}. Re-send to {d.target} (a send to the replaced agent would "
@@ -109,12 +138,13 @@ def main() -> int:
     try:
         event = json.load(sys.stdin)
         tool, tin = event.get("tool_name", ""), event.get("tool_input") or {}
-        found: list[tuple[str, bool]] = []
+        found: list[tuple[str, str | None]] = []
         if tool == "Bash" and isinstance(tin.get("command"), str):
             found = targets_in_command(tin["command"])
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
-            found = [(ident, False)] if ident else []
+            other_host = bool(tin.get("serverId"))  # another host's agent: not in this ledger
+            found = [(ident, None)] if ident and not other_host else []
         for target, allow in found:
             reason = judge(target, allow)
             if reason:

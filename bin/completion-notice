@@ -30,6 +30,7 @@ Exit codes:
   5: Agent send accepted by Paseo (queued, delivery pending peer ack per order 10; not an error)
   1: Send failed, unreadable response, ack check timed out / unverified, or agent inspect failed
   2: Invalid arguments or message shape failure
+  4: BLOCKED: the target is archived and no handoff replaced it (bin/ade_send_guard.py, ls-02); nothing was sent
 """
 from __future__ import annotations
 
@@ -235,10 +236,14 @@ def lead_ack(
     is_idle = wait_for_idle(worker, timeout=timeout, paseo=paseo)
     if is_idle:
         ack_msg = f"ack {worker} {msg_id}"
-        argv = send_argv(worker, ack_msg, paseo=paseo)
-        rc, out, err = run_send(argv)
-        if rc == 0:
-            routes.append("prompt")
+        target, blocked = guard_target(worker, paseo)  # ls-02: an ack must not un-archive a worker that ade-tidy archived
+        if blocked:
+            sys.stderr.write(f"completion-notice: BLOCKED: no prompt ack: {blocked}\n")
+        else:
+            argv = send_argv(target, ack_msg, paseo=paseo)
+            rc, out, err = run_send(argv)
+            if rc == 0:
+                routes.append("prompt")
 
     result: dict[str, Any] = {
         "status": "acked" if routes else "failed",

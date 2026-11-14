@@ -495,7 +495,8 @@ _IMPORT_WARNED = False
 
 def current_lead(lead: str) -> str:
     """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
-    its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed."""
+    its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed here, and then
+    `archived_lead` (ls-02) refuses a cyclic one: nothing is delivered to it."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)

@@ -1286,3 +1286,32 @@ def test_holder_may_be_the_callers_ancestor_but_must_run_and_needs_an_announce_o
         extra = ["--pid", str(env.child("sleep 60").pid)] if action in ("kill", "notify", "relay") else []   # a record that can signal never takes a holder
         r = start(env, "badact", "--budget", "10", "--on-expire", action, "--holder", str(os.getpid()), *extra)
         assert r.returncode == 2 and "--holder" in r.stderr, action
+
+
+def _guarded_deadline(env, monkeypatch, inspect_archived):
+    for k, v in env.base.items():
+        if k != "DEADLINE_RELAY":
+            monkeypatch.setenv(k, v)
+    monkeypatch.delenv("DEADLINE_RELAY", raising=False)
+    monkeypatch.setenv("DEADLINE_PASEO", str(env.tmp / "paseo"))
+    monkeypatch.setenv("DL_LOG", str(env.log))
+    _write_native_paseo(env)
+    dl = load_module()
+    import ade_send_guard
+    monkeypatch.setattr(ade_send_guard, "guard", lambda owner, paseo="paseo", **kw: inspect_archived(ade_send_guard, owner))
+    return dl
+
+
+def test_a_replaced_owner_is_told_through_its_successor(env, monkeypatch):
+    dl = _guarded_deadline(env, monkeypatch, lambda g, o: g.Decision(g.REDIRECT, "successor-1", "replaced"))
+    rc, msg = dl.relay_rc("owner-old", "budget blown")
+    assert rc == 0, msg
+    log = env.log.read_text()
+    assert "PASEO send successor-1 --prompt-file" in log and "owner-old" not in log.replace("agent inspect owner-old", "")
+
+
+def test_a_refused_owner_gets_nothing(env, monkeypatch):
+    dl = _guarded_deadline(env, monkeypatch, lambda g, o: g.Decision(g.REFUSE, o, "archived and nothing replaced it"))
+    rc, msg = dl.relay_rc("owner-gone", "budget blown")
+    assert rc == 2 and "archived and nothing replaced it" in msg
+    assert "PASEO send" not in (env.log.read_text() if env.log.exists() else "")

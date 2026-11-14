@@ -152,3 +152,11 @@ def test_a_group_writable_record_and_a_relative_home_are_no_link(ledger):
     assert succ.successor_of(C, state, home) is None
     write_link(state, home, B, C, home=None)  # a missing/non-string home was read as the literal "None" path
     assert succ.successor_of(B, state, home) is None
+
+
+def test_a_record_owned_by_someone_else_is_no_link(ledger, monkeypatch):
+    state, home = ledger
+    write_link(state, home, A, B)
+    assert succ.successor_of(A, state, home) == B
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(state / f"handoff-{A}.json").st_uid + 1)
+    assert succ.successor_of(A, state, home) is None

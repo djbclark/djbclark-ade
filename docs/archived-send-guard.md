@@ -18,8 +18,11 @@ record's successor chain) or refused, and never resurrect it.
 3. `refuse`: the target is archived and nothing replaced it; or its replacement is archived too; or the ledger is cyclic. The
    reason names what to do.
 
-`ADE_ALLOW_ARCHIVED_SEND=1` in the command's environment (`ADE_ALLOW_ARCHIVED_SEND=1 paseo send ...`) is the deliberate
-override that resumes an archived agent on purpose. It never overrides a redirect or a cycle. Only an agent that was
+`ADE_ALLOW_ARCHIVED_SEND=<the agent's full id>` in the command's environment (`ADE_ALLOW_ARCHIVED_SEND=<id> paseo send ...<id>`)
+is the deliberate override that resumes one archived agent on purpose: it names the agent, so a blanket `=1` (or one exported
+earlier) never covers another send. The refusal text does not hand it over as a remedy: resuming needs the operator's
+explicit instruction. It never overrides a redirect or a cycle, so an agent a handoff replaced cannot be messaged through a
+guarded path at all (message its successor). Only an agent that was
 **handed off** has a successor; a finished worker that `ade-tidy` archived is plain archived, so a send to it is refused
 until the override is given (it is a resurrection, which the operator must mean).
 
@@ -28,13 +31,18 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
 ## Who calls it
 
 1. `claude/hooks/archived_send_gate.py`, a Claude Code PreToolUse hook (matcher `Bash|mcp__.*send_agent_prompt`, in
-   `agents/claude/settings.json.tmpl`). It parses `paseo [agent] send` simple commands (`--` and value flags such as
-   `--behavior`/`--prompt-file`; chains with `;`, `&&`, `|`, newlines; an `env`/`VAR=` prefix) and the MCP tool's `agentId`. A
+   `agents/claude/settings.json.tmpl`, timeout 30 s). It finds a `paseo [agent] send` word pair anywhere in a simple command
+   (so `timeout 30`, `env -u X`, `nohup`, `sudo`, `xargs`, `{ }`, `if` need no special case), re-parses `bash|sh|zsh -c STRING`,
+   skips heredoc bodies and `echo`/`printf` text, reads the target after `--` or after the value options (`--prompt`,
+   `--prompt-file`, `--image`, `--behavior`), and judges the MCP tool's `agentId`. A send aimed at another daemon (`--host`,
+   `--home`, the MCP `serverId`) is not judged. The hook is inert until `~/.claude/hooks/archived_send_gate.py` is linked
+   (`[ -f ... ] || exit 0`) and `~/.claude/settings.json` is re-rendered from the template. A
    `redirect` or `refuse` is **denied** with the successor named; the hook never rewrites the target. A target built by the shell
    (`$VAR`, a substitution, a glob) is not judged. Any error or missing module allows the call.
-2. `bin/completion-notice --send` (exit 4 `BLOCKED` on a refusal, redirect to the successor otherwise), `bin/fable-wait fire`
-   (a refused lead is reported `refused` and the items stay open; the chain redirect of #669 is unchanged) and `bin/deadline`
-   (redirects the owner; its own inspect gate already refuses an archived owner).
+2. `bin/completion-notice --send` and `--lead-ack` (exit 4 `BLOCKED` on a refusal, redirect to the successor otherwise; an ack
+   to an archived worker is skipped), `bin/fable-wait fire` (a refused lead, including one with a cyclic ledger, is reported
+   `refused` and its items stay open; the chain redirect of #669 is unchanged) and `bin/deadline` (redirects the owner; a
+   refused owner gets exit 2 `not sent`).
 3. Not guarded: other TUIs' own tools (no hook there: this page and AGENTS.md are the rule), `bin/load-watch`, `bin/ade-tidy`
    and `bin/ade-net-resume` (they message live agents they just listed), and `ade_self_session` (it messages its own live
    predecessor before the archive).

@@ -72,6 +72,14 @@ _IDENTITY_VARS = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL",
                   "AI_AGENT", "OMPCODE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY", "OPENCODE_SESSION_ID")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _umask_022():
+    """The handoff-record reader rejects group/world-writable files; test writers use plain write_text, so pin the umask."""
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
+
+
 @pytest.fixture(autouse=True)
 def _scrub_agent_identity(monkeypatch, tmp_path_factory):
     for var in _IDENTITY_VARS:

@@ -129,15 +129,28 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
 # --- the command parser ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("command,expected", [
-    (f"paseo send --json --no-wait -- {A} 'hi'", [(A, False)]),
-    (f"paseo send --behavior steer --json {A} hello", [(A, False)]),
-    (f"paseo send --prompt-file /tmp/x --no-wait --json {A}", [(A, False)]),
-    (f"paseo agent send {A} -- x", [(A, False)]),
-    (f"cd /repo && paseo send -- {A} 'a; b'", [(A, False)]),
-    (f"echo ok\npaseo send -- {A} msg", [(A, False)]),
-    (f"ADE_ALLOW_ARCHIVED_SEND=1 paseo send -- {A} msg", [(A, True)]),
-    (f"env ADE_ALLOW_ARCHIVED_SEND=1 /opt/bin/paseo send -- {A} msg", [(A, True)]),
-    (f"paseo send -- {A} m1; paseo send -- {B} m2", [(A, False), (B, False)]),
+    (f"paseo send --json --no-wait -- {A} 'hi'", [(A, None)]),
+    (f"paseo send --behavior steer --json {A} hello", [(A, None)]),
+    (f"paseo send --prompt-file /tmp/x --no-wait --json {A}", [(A, None)]),
+    (f"paseo send --prompt hello --json {A}", [(A, None)]),  # the value of --prompt is not the target
+    (f"paseo agent send {A} -- x", [(A, None)]),
+    (f"cd /repo && paseo send -- {A} 'a; b'", [(A, None)]),
+    (f"echo ok\npaseo send -- {A} msg", [(A, None)]),
+    (f"ADE_ALLOW_ARCHIVED_SEND={A} paseo send -- {A} msg", [(A, A)]),
+    (f"env ADE_ALLOW_ARCHIVED_SEND={A} /opt/bin/paseo send -- {A} msg", [(A, A)]),
+    (f"paseo send -- {A} m1; paseo send -- {B} m2", [(A, None), (B, None)]),
+    (f"timeout 30 paseo send --json --no-wait -- {A} hi", [(A, None)]),
+    (f"env -u PASEO_AGENT_ID paseo send --json -- {A} hi", [(A, None)]),
+    (f"/usr/bin/env -i nohup sudo paseo send {A} hi", [(A, None)]),
+    (f"bash -c 'paseo send --json -- {A} hi'", [(A, None)]),
+    (f"sh -c \"timeout 5 paseo send -- {A} hi\"", [(A, None)]),
+    (f"echo {A} | xargs paseo send {A} hi", [(A, None)]),
+    (f"{{ paseo send -- {A} hi; }}", [(A, None)]),
+    (f"if paseo send -- {A} hi; then echo ok; fi", [(A, None)]),
+    (f"x=$(paseo send -- {A} hi)", [(A, None)]),
+    (f"paseo send --home /elsewhere/.paseo {A} hi", []),  # another daemon: not this ledger
+    (f"paseo send --host other:6767 -- {A} hi", []),
+    (f"cat > brief.md <<'EOF'\npaseo send {A} hi\nEOF\ngit status", []),  # a heredoc body is text
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -177,7 +190,9 @@ def test_hook_denies_the_resurrected_ex_lead(world):
 def test_hook_denies_an_archived_agent_without_a_successor_unless_overridden(world):
     world.live(**{A: True})
     assert "archived" in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))
-    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_ARCHIVED_SEND=1 paseo send -- {A} hi"}) is None
+    assert denial(run_hook(world, "Bash", {"command": f"ADE_ALLOW_ARCHIVED_SEND=1 paseo send -- {A} hi"}))  # `1` names nobody
+    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_ARCHIVED_SEND={A} paseo send -- {A} hi"}) is None
+    assert "ADE_ALLOW_ARCHIVED_SEND" in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))
 
 
 def test_hook_covers_the_mcp_send_tool(world):
@@ -209,3 +224,35 @@ def test_cli_prints_the_decision_and_exits_4_for_a_refusal(world):
     proc = subprocess.run([sys.executable, str(ROOT / "bin" / "ade_send_guard.py"), A], capture_output=True, text=True,
                           env=world.env, timeout=30, check=False)
     assert proc.returncode == guard.EXIT_REFUSED and json.loads(proc.stdout)["action"] == guard.REFUSE
+
+
+def test_the_override_must_name_the_archived_agent(world):
+    assert decide(world, A, {A: True}, allow_archived=A).action == guard.PASS
+    assert decide(world, A, {A: True}, allow_archived=B).action == guard.REFUSE
+    assert decide(world, A, {A: True}, allow_archived="1").action == guard.REFUSE
+
+
+def test_why_a_target_passes_is_told_apart(world):
+    assert "unknown to paseo" in decide(world, STRANGER, {}).reason
+
+    def down(_):
+        raise OSError("daemon down")
+    assert "could not inspect" in guard.decide(A, down, state_dir=world.state, home=world.home).reason
+    assert decide(world, "--host=elsewhere", {}).action == guard.PASS  # an option word is never inspected
+
+
+def test_an_unreadable_successor_still_redirects(world):
+    write_link(world.state, world.home, A, B)
+
+    def inspect(ident):
+        if ident == B:
+            raise OSError("daemon hiccup")
+        return {"Id": ident, "Archived": True}
+    d = guard.decide(A, inspect, state_dir=world.state, home=world.home)
+    assert (d.action, d.target) == (guard.REDIRECT, B)
+
+
+def test_the_hook_skips_another_hosts_mcp_agent(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: True, B: False})
+    assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": A, "prompt": "hi", "serverId": "remote"}) is None
