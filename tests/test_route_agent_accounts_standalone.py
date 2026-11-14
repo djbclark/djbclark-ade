@@ -88,6 +88,15 @@ def test_an_unmeasured_second_account_keeps_the_pool_closed_for_the_plenty_gate(
     assert r.plenty_remaining(pool) is None
 
 
+def test_a_single_account_without_windows_adds_no_marker_a_measured_second_source_can_open_the_pool():
+    """The marker is for several accounts of one provider only: one account with no window leaves `windows` empty, so a
+    measured Paseo reading folded in by `_merge_pool` still opens the pool (adversary A1 on #698)."""
+    into = r._providers_from_accounts([NO_WINDOW], 60)
+    assert into["claude"]["windows"] == {} and into["claude"]["remaining"] is None
+    r._merge_pool(into, "claude", {"remaining": 60.0, "windows": {"5h": 60.0}, "sublimits": {}})
+    assert r.plenty_remaining(into["claude"]) == 60.0
+
+
 def test_two_measured_accounts_still_open_the_plenty_gate_on_the_tighter_one():
     other = {"provider": "claude", "age_seconds": 60, "windows": [_window("weekly", 80)]}
     pool = r._providers_from_accounts([KNOWN, other], 60)["claude"]
@@ -165,3 +174,14 @@ def test_imported_by_another_module_a_lone_copy_still_raises_the_import_error(tm
                           capture_output=True, text=True, env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
                           cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL)
     assert proc.returncode == 1 and "ModuleNotFoundError" in proc.stderr and "cannot route standalone" not in proc.stderr
+
+
+@pytest.mark.parametrize("modules", [
+    {"ade_config": "import ade_gates\n"},
+    {"ade_config": "", "ade_gates": "import model_tiers\n"},
+    {"ade_config": "import model_tiers\n", "ade_gates": ""},
+], ids=["ade_gates absent", "model_tiers absent behind ade_gates", "model_tiers absent behind ade_config"])
+def test_a_partial_tree_with_a_sibling_truly_absent_gets_the_one_line(tmp_path, modules):
+    proc = _run_script(tmp_path, _lone_tree(tmp_path, **modules))
+    assert proc.returncode == 2 and "Traceback" not in proc.stderr and "cannot route standalone" in proc.stderr
+    assert len(proc.stderr.splitlines()) == 1 and proc.stdout == ""
