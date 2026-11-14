@@ -136,11 +136,14 @@ def primary_checkout_of(cwd: str, _depth: int = 0) -> str:
     return path
 
 
-def linked_worktree(path: str) -> bool:
-    """True when `path` is a linked worktree of a repo (its git dir is not its common dir)."""
+def linked_worktree(path: str, _depth: int = 0) -> bool:
+    """True when `path` is a linked worktree of a repo (its git dir is not its common dir), or a submodule of one."""
     gd = _git(path, "rev-parse", "--path-format=absolute", "--git-dir")
     common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    return bool(gd and common and os.path.realpath(gd) != os.path.realpath(common))
+    if gd and common and os.path.realpath(gd) != os.path.realpath(common):
+        return True
+    sup = _git(path, "rev-parse", "--show-superproject-working-tree") if _depth < 4 else ""
+    return bool(sup) and linked_worktree(sup, _depth + 1)
 
 
 def repo_of(cwd: str) -> str:

@@ -97,7 +97,8 @@ class Env:
 
     def run(self, *args, cwd=None):
         self.flush()
-        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd)
+        # a non-repo default directory: the suite may itself run from a linked worktree, where an implicit cwd is checked
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd or self.tmp)
 
     def calls(self):
         if not self.calls_path.exists():
@@ -1385,14 +1386,17 @@ def test_the_repo_comes_from_the_cwd_when_no_repo_is_given(env):
     assert r.returncode == 1 and "second window" in r.stderr
 
 
-def test_a_legacy_window_counts_for_the_repo_of_its_cwd_only(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/cfengine-core"}]
-    r = other_repo_launch(env, repo_cwd="/libntech")  # the legacy window is cfengine-core's: a libntech launch mints
+def test_a_legacy_window_counts_for_the_repo_of_its_cwd_only(env, tmp_path):
+    core, lib = tmp_path / "cfengine-core", tmp_path / "libntech"
+    core.mkdir()
+    lib.mkdir()
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(core)}]
+    r = other_repo_launch(env, repo_cwd=str(lib))  # the legacy window is cfengine-core's: a libntech launch mints
     assert r.returncode == 0, r.stderr
     assert placed(env)[0][placed(env)[0].index("--new-workspace") + 1] == "local"
-    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/libntech"}]
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(lib)}]
     env.data["created_id"] = "wks_def456"
-    r = other_repo_launch(env, "Typo", "/libntech")  # the same repo: refused
+    r = other_repo_launch(env, "Typo", str(lib))  # the same repo: refused
     assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
 
 
@@ -1587,3 +1591,72 @@ def test_an_uninitialised_submodule_directory_is_not_a_primary_checkout(tmp_path
     subprocess.run(["rm", "-rf", str(main / "libs/sub")], check=True)
     (main / "libs/sub").mkdir()  # the primary checkout never initialised its submodule: an empty directory
     assert wsn.primary_checkout_of(str(wt / "libs/sub")) == os.path.realpath(wt / "libs/sub")
+    assert wsn.linked_worktree(str(wt / "libs/sub"))  # the superproject is a linked worktree: the launch warns
+
+
+def run_in(env, wt, *args):
+    return env.run("--lead", LEAD, "--slice", "s", *args, cwd=str(wt))
+
+
+def test_no_cwd_from_a_linked_worktree_is_checked_like_an_explicit_cwd(env, tmp_path):
+    """Lead review of #709, B1: standing in a worktree and giving no --cwd must not silently start the worker in the primary checkout."""
+    main, wt = make_repo(tmp_path)
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", "just do it")
+    assert r.returncode == 1 and "brief" in r.stderr and "ran from" in r.stderr and not placed(env)
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt) and "primary checkout" in r.stderr
+    # inside the primary checkout itself nothing is substituted and nothing is checked
+    env.data["workspaces"] = []
+    own(LEAD)
+    r = run_in(env, main, "--window-middle", "strictjson", "--", "--no-wait", "no path needed")
+    assert r.returncode == 0, r.stderr
+    assert "cwd" not in json.loads(r.stdout)
+    # the post-launch check covers the implicit case too: a worker that started in the worktree is stopped
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = str(wt)
+    own(LEAD)
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 1 and "started in" in r.stderr and "stopped (interrupted" in r.stderr
+
+
+def test_a_window_named_with_a_repo_alias_still_counts_for_the_same_checkout(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": os.path.realpath(main)}]
+    own(LEAD, "wks_alias")
+    r = mint(env, wt, middle="Wave 8")  # repo derived: libntech, not `ade`; same checkout: a typo, not a new repo
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_alias" in r.stderr
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": str(tmp_path / "elsewhere")}]
+    (tmp_path / "elsewhere").mkdir()
+    assert mint(env, wt, middle="Wave 8").returncode == 0  # another checkout: another repo
+
+
+def test_a_legacy_window_whose_directory_is_gone_still_counts(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(tmp_path / "libntech-old-wt")}]
+    r = mint(env, wt, middle="Typo")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+
+
+def test_a_prefix_or_a_dotted_sibling_does_not_name_the_worktree(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    for brief in (f"copy at /mnt/backup{wt}", f"copy at /mnt/backup-{wt}", f"see {wt}.old and {wt}.bak/x"):
+        r = mint(env, wt, brief=brief)
+        assert r.returncode == 1 and "brief" in r.stderr, brief
+    assert not placed(env)
+
+
+def test_the_footer_path_never_names_the_worktree(env, tmp_path):
+    """The footer carries <the script's checkout>/docs/dispatch-footer.md: a worktree that IS that checkout is not named by it."""
+    main, wt = make_repo(tmp_path)
+    for rel in ("bin", "docs"):
+        (wt / rel).mkdir(exist_ok=True)
+    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py"):
+        (wt / "bin" / f).write_text((ROOT / "bin" / f).read_text())
+    (wt / "bin/ade-worker-run").chmod(0o755)
+    (wt / "docs/dispatch-footer.md").write_text("footer\n")
+    env.flush()
+    r = subprocess.run([sys.executable, str(wt / "bin/ade-worker-run"), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson",
+                        "--cwd", str(wt), "--", "--no-wait", "do the work"], capture_output=True, text=True, cwd=env.tmp)
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env), r.stderr
