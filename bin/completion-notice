@@ -66,12 +66,13 @@ _ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?
 
 
 # `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the
-# full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character; a full SHA
+# full SHA, so the query prints [] and exits 0. 4-39 hex digits (expanded from 7; 4-6 are refused, see MIN_SHA) not followed by another word character; a full SHA
 # never matches. The flag must follow `gh run list` in the same shell segment (no `;`, `|` or `&` in between).
 _RUN_LIST_SHORT_SHA = re.compile(
     r"""(?P<head>\bgh\s+run\s+(?:list|ls)\b[^\n;|&]*?(?:--commit(?:=|\s+)|(?<!\S)-c(?:=|\s*))["']?)"""
     r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z_])"""
 )
+MIN_SHA = 7        # a 4-6 digit prefix resolves in about 1 repository in 15 even when it names another repo's commit
 MAX_FIELD = 2000   # the scan is quadratic in a line of repeated `gh run list`; a done notice line is far shorter
 
 
@@ -91,6 +92,11 @@ def _rev_parse(sha: str, cwd: str | None = None) -> str | None:
 def full_run_list_sha(text: str, *, cwd: str | None = None) -> str:
     """Expand each short SHA of a `gh run list --commit SHA` hint in `text` to the full SHA, or raise ValueError."""
     def expand(m: re.Match[str]) -> str:
+        if len(m.group("sha")) < MIN_SHA:
+            raise ValueError(
+                f"`gh run list --commit {m.group('sha')}`: {len(m.group('sha'))} digits are too few to name a commit "
+                f"safely (the cwd repository may hold another commit with that prefix); give at least {MIN_SHA} digits, "
+                "the full 40-character SHA, or use `gh run list --branch BRANCH`")
         full = _rev_parse(m.group("sha"), cwd)
         if full is None:
             raise ValueError(
