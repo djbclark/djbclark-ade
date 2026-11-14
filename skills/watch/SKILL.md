@@ -54,7 +54,7 @@ Execute the three read-only probes:
 ### Step 2: Evaluate whether load, memory, or churn is abnormal
 
 Investigate further (Step 3) **only** if one of these is true:
-1. `admit --json` reports `"status": "hot"` or lists any `refused` gates (e.g. `load`, `compressor`, `free_mem`, `pageins`, or `memory_unreadable`).
+1. `admit --json` reports `"status": "hot"` or lists any `refused` gates (e.g. `load`, `compressor`, `free_mem`, `swapins`, `pageins`, or `memory_unreadable`).
 2. The 1-minute load per core is $> 2.5$ **and** the 5- or 15-minute average agrees.
 3. `status` reports a sustained hot streak (`hot for N/300 s`).
 4. Compressor churn is sustained above the alert line ($50\text{k}$ pages/s, from `admit --json`).

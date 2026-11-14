@@ -64,6 +64,9 @@ os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
 # An existing test that runs one of them must neither write the real ~/.local/state/deadlines nor see an extra supervising process: a SET (empty)
 # DEADLINE_NAME is the documented "already under a deadline" signal. test_deadline_wrappers.py unsets it per test, with its own state dir.
 os.environ["DEADLINE_NAME"] = ""
+# Every `load-watch admit` appends a line to the admit tuning log (2026-11-14, default: the state dir). A test must not write the real log:
+# off unless a test sets LW_ADMIT_LOG itself (tests/test_load_watch_pr2.py does, into its tmp_path).
+os.environ["LW_ADMIT_LOG"] = "off"
 
 
 # Pi/OMP/OpenCode identity markers steer bin/self-slash and autorename.py (2026-11-03). A suite run from inside such a

@@ -17,10 +17,13 @@ CORES = os.cpu_count() or 1
 
 def admit(tmp_path, *args, load1=None, **env):
     e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
-             LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0")  # 0: the hysteresis has its own tests
+             LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0",  # 0: the hysteresis has its own tests
+             LW_MIN_FREE_MB="1000")  # the default floor scales with the host's RAM since 2026-11-14 (tests/test_load_watch_pr2.py): pin it here
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS", "LW_MIN_FREE_MB",
-              "LW_MAX_COMPRESSOR_S", "LW_MAX_COMPRESSOR_HARD_S", "LW_CHURN_THRASH_PER_CORE", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS"):
-        e.pop(k, None)
+              "LW_MAX_COMPRESSOR_S", "LW_MAX_COMPRESSOR_HARD_S", "LW_CHURN_THRASH_PER_CORE", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS",
+              "LW_FAKE_SWAPINS", "LW_MAX_SWAPINS_S", "LW_SWAPINS_CORROBORATED_S", "LW_STARVE_SOFT_S", "LW_STARVE_MIN_GAP_S"):
+        if k != "LW_MIN_FREE_MB":
+            e.pop(k, None)
     if load1 is not None:
         e["LW_FAKE_LOAD1"] = str(load1)
     e.update(env)
@@ -561,7 +564,7 @@ def test_vm_stat_snapshot_counts_free_file_backed_and_purgeable(monkeypatch):
     lw = load_module()
     fake_run(monkeypatch, lw, stdout=VM_STAT)
     s = lw.vm_snapshot()
-    assert s == {"free_mb": (3969 + 1500 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+    assert s == {"free_mb": (3969 + 1500 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000, "swapins": None}
 
 
 def mb_pages(mb, page=16384):
@@ -630,7 +633,7 @@ def test_linux_proc_equivalents(monkeypatch):
         return files[str(self)]
 
     monkeypatch.setattr(lw.Path, "read_text", read_text)
-    assert lw._proc_snapshot() == {"free_mb": 2000.0, "compress": 42, "pageins": 7}
+    assert lw._proc_snapshot() == {"free_mb": 2000.0, "compress": 42, "pageins": 7, "swapins": 30}
     files["/proc/meminfo"] = "MemFree: 512 kB\n"
     assert lw._proc_snapshot()["free_mb"] == 0.5  # no MemAvailable: MemFree
     del files["/proc/vmstat"]  # /proc/meminfo exists, /proc/vmstat does not: the source is broken, not absent

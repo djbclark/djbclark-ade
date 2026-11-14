@@ -159,7 +159,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
 4. **Every dispatch passes the load gate before it starts** (`load-watch admit --wait N`, default
    1800 s, exit 75 when the machine is still too hot; operator 2026-10-19), then its frontier, in-flight and per-wave
    checks, which parallel launches re-check under a lock after writing their record. The gate only decides whether to
-   *start*: it never kills, throttles or slows running work.
+   *start*: it never kills, throttles or slows running work. A gate that has refused a waiting `--wait` call for 5 minutes on soft gates only lets it through, at most one forced admit per 2 minutes machine-wide; swap-ins, churn over the hard line, free memory under 300 MB and load over the boost line never yield (2026-11-14, `bin/load-watch` docstring). acp-dispatch scrubs `LW_*` from admit's environment, so `LW_STARVE_SOFT_S`, `LW_STARVE_MIN_GAP_S`, `LW_MAX_SWAPINS_S` and `LW_SWAPINS_CORROBORATED_S` do not reach a dispatch (it runs the defaults, valve on, and cannot be switched off by env; the shim goes 2026-11-20); they apply to a hand-run `admit --wait S`.
 5. **Plan with the load in mind** (load watcher, 2026-10-23, after load reached 42-62 on 8 cores with swap at 90%
    from three concurrent local pytest runs plus three dispatches): check `load-watch admit --json` before a large
    fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new
