@@ -445,7 +445,7 @@ best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one i
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,
 (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers; their question names are free text) are skipped as `unclassified-provider` and keep their
-prompts for the operator. `mcp__` tools are exempt from the Pi/OMP `select|input|editor|confirm` words only. A request id that is a strict prefix of another pending id of the same agent is skipped
+prompts for the operator. An agent labelled `ade.kind=external-review` is skipped in every mode as `sensitive-sender` (one more `ls --label` probe per sweep; a failed or malformed probe fails the sweep closed, nothing is approved). `mcp__` tools are exempt from the Pi/OMP `select|input|editor|confirm` words only. A request id that is a strict prefix of another pending id of the same agent is skipped
 (`ambiguous-request-id`), since `permit allow` matches ids by prefix (checked against the sweep's snapshot only). Audit decisions go to `auto-permit.jsonl`; after a
 merge, `bin/ade-sched reconcile --yes` applies the template. See [fan-out](../skills/fan-out/SKILL.md) for scope and
 failure behavior. Render/review is separate from `install`; this change does not

@@ -2,7 +2,10 @@
 """Approve pending tool-permission requests for a lead's descendants, its `ade.lead=<lead>` workers,
 selected ADE labels or, with `--all-local`, every agent this host's daemon lists. A request that is a question
 or plan approval meant for the operator is skipped in any mode (best-effort name denylist, and only for
-providers whose question names are known: claude, codex, opencode, pi, omp)."""
+providers whose question names are known: claude, codex, opencode, pi, omp). An agent labelled
+`ade.kind=external-review` (it judges untrusted GitHub artifacts for prompt injection, so a steered one could ask
+for anything) is never approved in any mode: its requests stay pending for the lead or the operator
+(`sensitive-sender`; claude/hooks/peer_trust_gate.py tells the lead the same)."""
 import argparse
 from datetime import datetime, timezone
 import fcntl
@@ -211,6 +214,9 @@ def descendant(agent, lead, cache):
     return False
 
 
+SENSITIVE_LABEL = "ade.kind=external-review"  # same marker as claude/hooks/peer_trust_gate.py SENSITIVE_LABEL
+
+
 def sweep(lead, labels, log, all_local=False):
     current, leads, queried = lead_lineage(lead, log)
     requests = rows(call(["permit", "ls"]))
@@ -234,6 +240,13 @@ def sweep(lead, labels, log, all_local=False):
             if row["id"] not in eligible:
                 eligible[row["id"]] = reason
                 via[row["id"]] = label
+    # Agents whose permission requests are never auto-approved, whatever qualified them above. A failed probe
+    # raises ProbeError out of the sweep, so an unknown label set never approves anything.
+    sensitive = set()
+    for row in rows(call(["ls", "-a", "-g", "--label", SENSITIVE_LABEL])):
+        if not isinstance(row, dict) or not identifier(row.get("id")):
+            raise ProbeError("invalid labelled agent")
+        sensitive.add(row["id"])
     cache, seen, failed = {}, set(), False
     for row in requests:
         if not isinstance(row, dict):
@@ -262,6 +275,9 @@ def sweep(lead, labels, log, all_local=False):
         if rule is not None:
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
             log_event(log, "skip", "operator-question", agent, request, **event)
+            continue
+        if agent in sensitive:
+            log_event(log, "skip", "sensitive-sender", agent, request, **event)
             continue
         if agent not in providers:
             log_event(log, "skip", "outside-scope", agent, request, **event)

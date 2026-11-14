@@ -223,7 +223,7 @@ Labels are trusted local-agent scope markers, not an external security boundary.
 daemon lists, the lead included (audit reason `all-local`; no `--host`, so no remote agent). In every mode a question
 or plan approval for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP `select|input|editor|confirm`, similar
 names; a best-effort name denylist, missing names fail closed) is logged `skip` / `operator-question` and left pending,
-and agents of providers outside claude/codex/opencode/pi/omp (ACP-backed) keep their prompts (`unclassified-provider`).
+and agents of providers outside claude/codex/opencode/pi/omp (ACP-backed) keep their prompts (`unclassified-provider`). An agent labelled `ade.kind=external-review` (it reads outside GitHub text, so a steered one could ask for anything) is never approved, in any mode: logged `skip` / `sensitive-sender`, its requests stay for the lead or the operator.
 
 Only explicit pending `(agentId, requestId)` pairs are allowed; no `--all`.
 Failed/malformed discovery fails closed. JSONL records skips, attempts, confirmations
