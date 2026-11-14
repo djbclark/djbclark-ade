@@ -597,7 +597,7 @@ install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "UNKNOWN"
 platforms = ["mac", "linux"]
-notes = "2026-11-14: operator chose it; installed on the Mac by `paseo plugin add gpambrozio/github-board` (0.11.0, running). No paseo_plugin key, like the other offered plugin rows: with one, a chosen row makes ade-install apply/doctor fail wherever it is absent. Writes to GitHub with the gh login; see docs/install-catalog.md section G."
+notes = "2026-11-14: operator chose it; installed on the Mac by `paseo plugin add gpambrozio/github-board` (0.11.0, running). No paseo_plugin key, like the other offered plugin rows (doctor: unknown; apply: blocked; nothing runs): with one, a chosen row fails doctor wherever the plugin is absent. Writes to GitHub with the gh login; see docs/install-catalog.md section G."
 
 [[component]]
 id = "paseo-plugin-skills"
