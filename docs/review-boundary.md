@@ -27,15 +27,14 @@ closed: the PR is judged like an outside PR, so the operator's own marker commen
 pushed by the operator"). A first version read the workflow runs at the head instead; the adversary showed it misses a push that
 started no run (a push while the PR was closed, a run a writer deleted, a push with a workflow token) once the operator reopens the
 PR and so creates a run of their own, so the ref history is used. What it does not see: attacker commits the operator then pushed
-on top of (the operator vouches for what they push; this includes the operator's own tooling pushing for them: `ade-merge-ready stack-rebase` rebases a PR onto whatever open same-repo PR's head its base field names, and a writer can edit that field, and GitHub's "Update branch" button likewise pulls base content in under the operator's push), and a deploy key's push, whose reported actor is unconfirmed. So the org
+on top of (the operator vouches for what they push; this includes merging a child PR into this branch (a `pr_merge` entry; the child's content never passed the gate, because only the default branch is protected), and the operator's own tooling pushing for them: `ade-merge-ready stack-rebase` rebases a PR onto whatever open same-repo PR's head its base field names, and a writer can edit that field, and GitHub's "Update branch" button likewise pulls base content in under the operator's push), and a deploy key's push, whose reported actor is unconfirmed. So the org
 precondition below stays as defense in depth, checked by the operator before the transfer: `djbclark` is the only org **owner**,
 org base permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to
 anyone but `djbclark`, no App installation or deploy key with write access except ones that act only for `djbclark`, other apps
 on selected repositories (docs/threat-model.md). (b) *Login vs id.* Trust used to be the login string, so a renamed or deleted `djbclark`
 would hand owner trust to whoever registered the freed name. `TRUSTED_OWNER_USER_IDS` pins the GitHub numeric user id (131936):
 the PR author, every comment author and every comment edit actor must match login AND id (GraphQL `... on User { databaseId }`; a missing
-or different id fails closed), as must the pusher. The PR body's last editor is checked by login only: it matters only for a body APPROVE on an owner PR that already passed the author and pusher checks, so it cannot raise trust. `bin/review-pr` and `bin/ade-merge-ready` (not the gate) compare the
-login only, and now also refuse a `gh` author flagged `is_bot`.
+or different id fails closed), as must the pusher. The PR body's last editor is checked by login only: it matters only for a body APPROVE on an owner PR that already passed the author and pusher checks, so it cannot raise trust. `bin/review-pr` gives the full-permission (`yolo`) runtime only when the author is the operator by login AND id (`gh api users/LOGIN`) and the same `head_pusher_check` as the gate passes, else it reviews restricted (`--runtime yolo` is refused with the reason); `bin/ade-merge-ready` (not the gate) compares the login only. Both refuse a `gh` author flagged `is_bot`.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -79,8 +78,8 @@ work). It needs `--trusted-author LOGIN` and `--head SHA`, drops `blockReadsOuts
 `disableBypassPermissionsMode`, and skips the read tripwire, the symlink refusal and the self-check (`--check --mode trusted` exits 2);
 a hook event is not fatal. The stream proof of tools, permission mode, cwd, no MCP and no extra directories, the scrubbed
 environment, the secret-path deny rules (an accidental-read guard: Bash is not confined), the timeout and the descendant kill stay. The launcher cannot verify that the input is trusted: `bin/review-pr`
-decides, and only for a PR GitHub reports as authored by the operator's login (`djbclark`, not the repository owner) (`--runtime auto`, the default; `--runtime yolo`
-is refused for any other author; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
+decides, and only for a PR GitHub reports as authored by the operator's login and user id (`djbclark`, not the repository owner) whose head the operator pushed (`head_pusher_check`) (`--runtime auto`, the default; `--runtime yolo`
+is refused for any other author or a head someone else pushed; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
 anything with an untrusted author, always gets `--mode review`. A bypass or widening flag in the launcher's own argv and a permission-mode variable in its
 environment are still refused in every mode. Probe 2026-11-12: Claude Code's init event reports
 `permissionMode: "bypassPermissions"` for this flag in `-p` mode.
@@ -141,8 +140,8 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 ## `bin/review-pr PR`: rule 11's local review
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
-author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
-`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
+headRefName,isCrossRepository,author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
+`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,

@@ -2258,7 +2258,7 @@ def test_a_head_in_a_fork_or_with_an_unknown_origin_is_not_owner_trusted(repo):
 
 
 @pytest.mark.parametrize("repo", OWNERS)
-@pytest.mark.parametrize("branch", ["a b", "x;y", "", "a\nb", "--x y", "x&ref=refs/heads/y", "a#b", "a%2Fb"])
+@pytest.mark.parametrize("branch", ["a b", "x;y", "", "a\nb", "--x y", "x&ref=refs/heads/y", "a#b", "a%2Fb", "x\n", "caf\u00e9", "a+b"])
 def test_an_unusable_branch_name_fails_closed(repo, branch):
     # CannedApi records an attempted read even without a canned answer, so removing the name check is seen here
     doc = gql_doc(H1, "## Summary\n")

@@ -1480,7 +1480,7 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
 
 
 REF_UPDATES_OF_A_PUSHER = frozenset({"push", "force_push", "branch_creation", "pr_merge", "merge_queue_merge"})
-BRANCH_NAME = re.compile(r"^[\w./-]+$")
+BRANCH_NAME = re.compile(r"[A-Za-z0-9_./-]+")    # used with fullmatch: ASCII only, no `$`-before-newline
 
 
 def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) -> tuple[bool, str]:
@@ -1496,11 +1496,11 @@ def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) 
     Anything else fails closed, with the reason: a head in a fork (no ref here), an unusable branch name, an API error
     or an unexpected shape, no entry, a newest entry that is not this head or not a ref update, or anyone else as actor.
     The operator's own marker comment still approves such a PR (the outside path). Not covered: attacker commits
-    the operator then pushed on top of (the operator vouches for what they push), and a deploy key's push, whose
-    reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those)."""
+    the operator then pushed on top of (the operator vouches for what they push: that includes merging a child PR
+    into this branch, a `pr_merge` entry), and a deploy key's push, whose reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those)."""
     if cross_repo:
         return False, "the head branch lives in a fork, so its pusher is not read here"
-    if not isinstance(branch, str) or not BRANCH_NAME.match(branch):
+    if not isinstance(branch, str) or not BRANCH_NAME.fullmatch(branch):
         return False, "the head branch name is not usable"
     try:
         doc = api.get(f"repos/{repo}/activity?ref=refs/heads/{branch}&direction=desc&per_page=1")
