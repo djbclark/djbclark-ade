@@ -150,6 +150,7 @@ def role_ident(value):
 
 def title_ident(value):
     text = ' '.join(''.join(c if c.isprintable() else ' ' for c in str(value)).split())
+    text = text[:TITLE_LIMIT]  # 200 code points are at least 200 UTF-16 units: bounds the loop below
     while len(text.encode('utf-16-le')) // 2 > TITLE_LIMIT:  # Paseo's zod max(200) counts UTF-16 units
         text = text[:-1]
     text = text.rstrip()
@@ -413,7 +414,7 @@ class Service:
                 prior = existing.get('identity') if isinstance(existing.get('identity'), dict) else None
                 if prior is not None and (
                         (explicit_title is not None and prior.get('title') != explicit_title)
-                        or (explicit_role is not None and (prior.get('labels') or {}).get('ade.role') != explicit_role)):
+                        or (explicit_role is not None and (prior['labels'] if isinstance(prior.get('labels'), dict) else {}).get('ade.role') != explicit_role)):
                     raise SessionError('existing transaction has a different requested title or role; no create replayed')
                 return existing  # duplicate/ambiguous creation is never replayed
             if not quiesced:

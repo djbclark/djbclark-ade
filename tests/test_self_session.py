@@ -1280,3 +1280,14 @@ def test_a_malformed_checks_field_is_replaced_not_fatal(setup):
     forged['identity']['checks'] = []
     path.write_text(json.dumps(forged))
     assert accept(service, forged, path)['identity']['checks'] == {'accept': 'ok'}
+
+
+def test_a_huge_title_is_cut_before_the_utf16_loop_and_a_malformed_existing_record_still_refuses(setup):
+    assert ss.title_ident('\U0001F600' * 500000) == '\U0001F600' * 100
+    service, native, checkpoint = setup
+    first = service.handoff(checkpoint, quiesced=True, requested_role='r1')
+    forged = json.loads(Path(first['record']).read_text())
+    forged['identity']['labels'] = ['not', 'a', 'dict']
+    Path(first['record']).write_text(json.dumps(forged))
+    with pytest.raises(ss.SessionError, match='different requested title or role'):
+        service.handoff(checkpoint, quiesced=True, requested_role='r2')
