@@ -336,3 +336,76 @@ def test_agent_missing_from_listing_is_outside_scope_in_every_mode(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[req(CHILD)], 'parents':{CHILD:LEAD}, 'local':[OTHER]})
     assert not allows(calls)
     assert [r['reason'] for r in audit_rows(tmp_path)] == ['outside-scope']
+
+
+# Real tool names that earlier substring/token rules held back (2026-11-14): Claude Code built-ins, Paseo-style MCP
+# tools whose names carry prompt/mode/plan/ask/select words, and Codex/OpenCode/OMP tool names.
+FALSE_POSITIVES = ['Task', 'TaskStop', 'TaskOutput', 'Agent', 'Skill', 'ToolSearch', 'EnterWorktree', 'ExitWorktree',
+                   'CronCreate', 'SendMessage', 'CodexBash', 'CodexFileChange', 'external_directory', 'bash', 'edit',
+                   'task_user', 'Explanation', 'mcp__paseo__send_agent_prompt', 'mcp__paseo__set_agent_mode',
+                   'mcp__paseo__create_agent', 'mcp__paseo__browser_select', 'mcp__x__ask_gemini',
+                   'mcp__plan-server__list_items', 'mcp__x__approve_pull_request', 'mcp__x__task_user_list',
+                   'mcp__claude_ai_Gmail__create_draft', 'mcp__x__Ask']
+# Anything that is a question, plan or mode approval or elicitation must still be skipped, MCP-wrapped or not.
+# Malformed `mcp__` names (no server or tool segment) are skipped; a name that is not exactly lower-case `mcp__` gets the full rules.
+STILL_QUESTIONS = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'request_user_input', 'CodexMcpElicitation',
+                   'CodexPlanApproval', 'switch_mode', 'question', 'Pi ask_user', 'Pi select', 'OMP ask', 'OMP confirm',
+                   'mcp__x__AskUserQuestion', 'mcp__paseo__progress_question_ask', 'mcp__x__ask_user',
+                   'mcp__x__elicitation', 'mcp__x__request_user_input', 'mcp__x__plan_approval', 'mcp__x__exit_plan_mode',
+                   'mcp__ask', 'mcp____mode', 'mcp__x__', 'mcp__', 'MCP__x__ask']
+
+
+def test_false_positive_names_are_tool_prompts_with_no_rule():
+    module = runpy.run_path(str(SCRIPT))
+    for name in FALSE_POSITIVES:
+        assert module['classify']({'name': name}) is None, name
+    for name in STILL_QUESTIONS:
+        assert module['classify']({'name': name}) is not None, name
+
+
+def test_stems_start_on_word_boundaries_only():
+    module = runpy.run_path(str(SCRIPT))
+    assert module['classify']({'name': 'ask_user'}) == 'stem:askuser'
+    assert module['classify']({'name': 'AskUser'}) == 'stem:askuser'
+    assert module['classify']({'name': 'task_user'}) is None  # "askuser" inside "taskuser" is not a boundary
+    assert module['classify']({'name': 'exitplanmode'}) == 'stem:exitplan'
+    assert module['classify']({'name': 'Exit_Planmode'}) == 'stem:exitplan'
+    assert module['classify']({'name': 'x', 'kind': 'question'}) == 'kind'
+    assert module['classify']({'name': None}) == 'missing-name'
+    assert module['classify']({'name': 7}) == 'missing-name'
+
+
+def test_audit_rows_record_tool_name_and_rule_but_no_arguments(tmp_path):
+    reqs = [req(OTHER, 'a', 'Bash'), req(OTHER, 'b', 'mcp__paseo__send_agent_prompt'),
+            req(OTHER, 'c', 'AskUserQuestion'), req(CHILD, 'd', 'x' * 500), req(CHILD, 'e', 'Bash')]
+    result, calls = run_fake(tmp_path, {'requests': reqs, 'local': [OTHER], 'providers': {OTHER: 'claude/x', CHILD: 'copilot'}},
+                             '--all-local')
+    assert result.returncode == 0, result.stderr
+    rows_ = audit_rows(tmp_path)
+    assert [(r['request'], r['decision'], r['tool'], r['rule']) for r in rows_] == [
+        ('a', 'allow-attempt', 'Bash', None), ('a', 'allowed', 'Bash', None),
+        ('b', 'allow-attempt', 'mcp__paseo__send_agent_prompt', None), ('b', 'allowed', 'mcp__paseo__send_agent_prompt', None),
+        ('c', 'skip', 'AskUserQuestion', 'stem:question'),
+        ('d', 'skip', 'x' * 200, None), ('e', 'skip', 'Bash', None)]
+    assert [r['reason'] for r in rows_ if r['decision'] == 'skip'] == ['operator-question', 'outside-scope', 'outside-scope']
+    assert 'SECRET' not in (tmp_path / 'audit.jsonl').read_text()
+    assert all(set(r) == {'time', 'decision', 'reason', 'agent', 'request', 'tool', 'rule'} for r in rows_)
+
+
+def test_unnamed_and_non_string_names_log_a_null_tool_and_stay_pending(tmp_path):
+    odd = [{'agentId': OTHER, 'id': 'n1', 'description': 'SECRET'}, req(OTHER, 'n2', 7)]
+    result, calls = run_fake(tmp_path, {'requests': odd, 'local': [OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not allows(calls)
+    assert [(r['tool'], r['rule'], r['reason']) for r in audit_rows(tmp_path)] == [(None, 'missing-name', 'operator-question')] * 2
+
+
+def test_false_positive_and_question_names_end_to_end(tmp_path):
+    reqs = [req(OTHER, f'f{i:02d}', n) for i, n in enumerate(FALSE_POSITIVES)] + \
+           [req(OTHER, f'q{i:02d}', n) for i, n in enumerate(STILL_QUESTIONS)]
+    result, calls = run_fake(tmp_path, {'requests': reqs, 'local': [OTHER]}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert [c[3] for c in allows(calls)] == [f'f{i:02d}' for i in range(len(FALSE_POSITIVES))]
+    skipped = [r for r in audit_rows(tmp_path) if r['decision'] == 'skip']
+    assert [r['request'] for r in skipped] == [f'q{i:02d}' for i in range(len(STILL_QUESTIONS))]
+    assert all(r['rule'] for r in skipped)

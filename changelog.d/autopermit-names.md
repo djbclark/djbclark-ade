@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/ade-auto-permit`: the audit log (`auto-permit.jsonl`) now records each request's tool `name` (the name field only, never arguments) and the denylist `rule` that matched, in every skip, allow-attempt, allowed and error row. The question matcher splits names on word boundaries (a stem must start at a word start, so `task_user` is no longer `ask_user`), and a well-formed `mcp__server__tool` name is held back only when the tool is itself a question or elicitation, so `send_agent_prompt`, `set_agent_mode` and `browser_select` are approved as the tool prompts they are. `AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`, Codex/Pi/OMP/ACP question and elicitation names stay pending. (#662)

@@ -47,18 +47,28 @@ def rows(value):
 
 
 # A request that is a question or plan/mode approval for the operator must stay pending. Paseo's request
-# kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`), so
-# this is a name-based, best-effort DENYLIST (a missing name or a non-`tool` kind fails closed; an unlisted
-# question name is NOT caught, so only providers in CLASSIFIED_PROVIDERS, whose names are known, are served). Names seen in Paseo's providers: Claude AskUserQuestion / ExitPlanMode, Codex CodexPlanApproval /
-# CodexMcpElicitation / request_user_input, OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|
-# confirm", OMP "OMP ask" / "OMP select|...", ACP switch_mode. `kind` is also checked when a row carries it.
-# Substring stems are matched against the lower-cased name with separators removed (catches run-together
-# spellings); short words are matched as whole tokens (acronym- and camelCase-split) so "Task" is not "ask".
+# kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`; a kind
+# is honoured when a row carries one), so this is a name-based, best-effort DENYLIST. A missing or empty name or
+# a non-`tool` kind fails closed; an unlisted question name is NOT caught, so only providers in
+# CLASSIFIED_PROVIDERS, whose names are known, are served. Names read from Paseo's source (2026-11-14): Claude
+# AskUserQuestion / ExitPlanMode (every other Claude tool, `mcp__server__tool` included, is kind `tool`), Codex
+# CodexPlanApproval / CodexMcpElicitation / request_user_input (CodexBash and CodexFileChange are tools),
+# OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|confirm", OMP "OMP ask" / "OMP select|...", ACP
+# switch_mode. Every provider fills `name`; `kind` is absent from the CLI rows for all of them.
+#
+# Matching is on word boundaries, never inside a word: a name is split into words (separators and camelCase,
+# so "TaskStop" is task+stop and "Task" is not "ask"). STEMS must start at a word boundary of the name (they may
+# end inside a word, so "elicitation" and run-together "askuserquestion" match, while "task_user" does not
+# match "askuser"). TOKENS are whole words. Each match yields a rule label that the audit log records.
 CLASSIFIED_PROVIDERS = {"claude", "codex", "opencode", "pi", "omp"}  # question names read from Paseo's source
 STEMS = ("question", "elicit", "askuser", "userinput", "exitplan", "enterplan", "planmode", "planapproval",
          "switchmode", "requestinput")
 TOKENS = {"ask", "plan", "mode", "prompt", "dialog", "approval", "approve", "choose", "choice", "answer"}
-UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods; ignored for mcp__ tools
+UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods
+# `mcp__<server>__<tool>` is a third-party MCP tool the model calls: approving it runs the tool and answers no
+# question or plan, so only the STEMS (a tool that is itself a question or elicitation) keep it pending; the
+# generic TOKENS and UI_TOKENS ("send_agent_prompt", "set_agent_mode", "browser_select") do not.
+MAX_TOOL = 200
 
 
 def words(name):
@@ -67,25 +77,58 @@ def words(name):
     return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
 
 
-def operator_question(row):
-    """True when the request must stay pending for the operator. Missing/odd fields fail closed."""
+def tool_name(row):
+    """The permission row's `name` only (never arguments or descriptions), bounded, for the audit log."""
+    name = row.get("name") if isinstance(row, dict) else None
+    return name[:MAX_TOOL] if isinstance(name, str) else None
+
+
+def is_mcp_tool(name):
+    parts = name.split("__")
+    return len(parts) >= 3 and parts[0] == "mcp" and bool(parts[1]) and bool(parts[-1])
+
+
+def classify(row):
+    """The denylist rule that keeps this request pending for the operator, else None (a tool prompt).
+    Missing/odd fields fail closed (`missing-name`, `kind`)."""
     name, kind = row.get("name"), row.get("kind")
     if kind is not None and kind != "tool":
-        return True
+        return "kind"
     parts = words(name) if isinstance(name, str) else []
     if not parts:
-        return True
+        return "missing-name"
     compact = "".join(parts)
-    if any(stem in compact for stem in STEMS) or TOKENS.intersection(parts):
-        return True
-    return not name.startswith("mcp__") and bool(UI_TOKENS.intersection(parts))
+    starts, offset = [], 0
+    for part in parts:
+        starts.append(offset)
+        offset += len(part)
+    for stem in STEMS:
+        if any(compact.startswith(stem, at) for at in starts):
+            return f"stem:{stem}"
+    if is_mcp_tool(name):
+        return None
+    if name.startswith("mcp__"):
+        return "malformed-mcp-name"  # server or tool segment missing: not a name Paseo's providers emit
+    for token in parts:
+        if token in TOKENS:
+            return f"token:{token}"
+    for token in parts:
+        if token in UI_TOKENS:
+            return f"ui-token:{token}"
+    return None
 
 
-def log_event(log, decision, reason, agent=None, request=None):
-    # Never record tool arguments, descriptions, stdout or stderr (may contain secrets).
+def operator_question(row):
+    """True when the request must stay pending for the operator."""
+    return classify(row) is not None
+
+
+def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=None):
+    # Never record tool arguments, descriptions, stdout or stderr (may contain secrets): `tool` is the row's
+    # `name` field only and `rule` is the denylist rule label that matched (None: no rule, a tool prompt).
     log.write(json.dumps(dict(time=datetime.now(timezone.utc).isoformat(),
                               decision=decision, reason=reason,
-                              agent=agent, request=request)) + "\n")
+                              agent=agent, request=request, tool=tool, rule=rule)) + "\n")
     log.flush()
 
 
@@ -138,32 +181,34 @@ def sweep(lead, labels, log, all_local=False):
             continue
         agent, request = row.get("agentId"), row.get("id")
         if not identifier(agent) or not isinstance(request, str) or not request or request.startswith("-"):
-            log_event(log, "skip", "malformed-request")
+            log_event(log, "skip", "malformed-request", tool=tool_name(row))
             failed = True
             continue
         if (agent, request) in seen:
             continue
         seen.add((agent, request))
+        tool, rule = tool_name(row), classify(row)
+        event = dict(tool=tool, rule=rule)
         if any(r is not row and isinstance(r, dict) and r.get("agentId") == agent
                and isinstance(r.get("id"), str) and r["id"] != request and r["id"].startswith(request)
                for r in requests):
             # `paseo permit allow` matches ids by prefix and takes the first hit: another pending id that
             # starts with this one could be answered instead (e.g. a question). Never allow such an id.
             # Snapshot-only: a prefix-colliding id that appears after this `permit ls` is not seen.
-            log_event(log, "skip", "ambiguous-request-id", agent, request)
+            log_event(log, "skip", "ambiguous-request-id", agent, request, **event)
             failed = True
             continue
-        if operator_question(row):
+        if rule is not None:
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
-            log_event(log, "skip", "operator-question", agent, request)
+            log_event(log, "skip", "operator-question", agent, request, **event)
             continue
         if agent not in providers:
-            log_event(log, "skip", "outside-scope", agent, request)
+            log_event(log, "skip", "outside-scope", agent, request, **event)
             continue
         if providers[agent] not in CLASSIFIED_PROVIDERS:
             # ACP-backed providers name questions by tool kind or free-text title, so a question cannot be
             # told from a tool prompt by name; their prompts stay for the operator.
-            log_event(log, "skip", "unclassified-provider", agent, request)
+            log_event(log, "skip", "unclassified-provider", agent, request, **event)
             continue
         try:
             if agent == lead:
@@ -180,18 +225,18 @@ def sweep(lead, labels, log, all_local=False):
             if reason is None and all_local and agent in providers:
                 reason = "all-local"
             if reason is None:
-                log_event(log, "skip", "outside-scope", agent, request)
+                log_event(log, "skip", "outside-scope", agent, request, **event)
                 continue
             # Audit intent BEFORE the only mutation. An audit failure aborts approval.
-            log_event(log, "allow-attempt", reason, agent, request)
+            log_event(log, "allow-attempt", reason, agent, request, **event)
             response = rows(call(["permit", "allow", agent, request]))
             if not any(isinstance(r, dict) and r.get("agentId") == agent
                        and r.get("requestId") == request and r.get("result") == "allowed"
                        for r in response):
                 raise ProbeError("unconfirmed allow")
-            log_event(log, "allowed", reason, agent, request)
+            log_event(log, "allowed", reason, agent, request, **event)
         except ProbeError:
-            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request)
+            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request, **event)
             failed = True
     return 1 if failed else 0
 
