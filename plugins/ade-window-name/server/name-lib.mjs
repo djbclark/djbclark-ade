@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_TIMEOUT_MS = 20_000;
 const SETTLED_MAX = 1000;
+const SKEW_MS = 60_000; // a createdAt further ahead than this is a clock fault, not a young agent
 const YOUNG_MS = 5 * 60_000; // a title equal to the first agent's own counts as Paseo's default only this long after the agent was created
 const NAME_MAX = 100; // bin/ade_ws_names.py NAME_LIMIT
 
@@ -165,7 +166,8 @@ export async function handleAgentEvent(agent, context, deps = {}) {
     const inWindow = (listed?.entries ?? []).filter((e) => entryAgent(e)?.workspaceId === wid);
     if (!isFirstAgent({ ...self, id: agent.id }, inWindow)) return out("skip", { reason: "not the window's first agent" });
     const created = createdMs(self);
-    const young = created !== null && now() - created <= YOUNG_MS;
+    const age = created === null ? null : now() - created;
+    const young = age !== null && age >= -SKEW_MS && age <= YOUNG_MS;
     if (!isDefaultTitle(ws.title, title, young)) {
       remember(settled, wid);
       return out("skip", { reason: "window already has a title" });
@@ -206,7 +208,7 @@ export async function handleAgentEvent(agent, context, deps = {}) {
 
 /** Defence in depth on the decision script's output: a string in the scheme, within the window-name limit. */
 export function validName(name) {
-  return typeof name === "string" && [...name].length <= NAME_MAX && SCHEME_NAME.test(name);
+  return typeof name === "string" && [...name].length <= NAME_MAX && !/\p{C}/u.test(name) && SCHEME_NAME.test(name);
 }
 
 function remember(settled, wid) {
