@@ -25,7 +25,7 @@ Each doc carries its own summary.
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
 | [docs/dynamic-model-effort.md](docs/dynamic-model-effort.md) | design (2026-11-10): measured token efficiency → route/effort policy; gates; no live auto-route / no Jev nudge / no Pi acceptance writes (queue #24) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, report classes, messaging, the stagger rule |
-| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (`bin/wave6-delete-check`; the three shims were deleted 2026-11-14) |
+| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (the three shims and the gate tools `bin/wave6-delete-check` and `bin/wave6-mac-proof-capture` were deleted 2026-11-14) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
 | [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |

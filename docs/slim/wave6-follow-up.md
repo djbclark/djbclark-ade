@@ -1,6 +1,6 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
-**Done 2026-11-14:** the three shims were deleted (PR `wave6-delete-shims`, `docs/slim/log.md`); this file is now the record of the checklist and its evidence. Everything below describes the state before the deletion.
+**Done 2026-11-14:** the three shims were deleted (PR `wave6-delete-shims`, `docs/slim/log.md`); this file is now the record of the checklist and its evidence. Everything below describes the state before the deletion. The gate tools it names (`bin/wave6-delete-check`, `bin/wave6-mac-proof-capture`), their tests and `tests/fixtures/wave6-mac-proofs/` were retired on 2026-11-14 (their job was done; recover them from git history before that PR).
 
 Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on
 `origin/master` after `#498` — `wave6-delete-check --inventory` →
