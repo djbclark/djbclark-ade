@@ -894,6 +894,12 @@ def _skip_dollar_paren(s: str, j: int) -> int:
     return j
 
 
+def _brace_word_end(raw: str, i: int) -> bool:
+    """True when the `{` or `}` at raw[i] is a whole word (the reserved word of a group), not part of a word such as the
+    `{}` placeholder of `paseo send --json {} "..."` or a brace expansion `{a,b}`."""
+    return raw[i + 1:i + 2] in ("", " ", "\t", "\n", ";", "&", "|", ")")
+
+
 def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tuple[str, bool]]]:
     """`raw` split into simple commands; each is a list of (word, risky). `risky` is True for a word with an unescaped
     backtick or `$(` inside double quotes: the shell runs it before the program starts. Heredoc bodies are dropped by the
@@ -983,7 +989,7 @@ def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tupl
             k = len(raw) if k < 0 else k + 1
             cur.append(raw[i:k])
             i = k
-        elif c in ";&|\n" or (c in "(){}" and not cur):
+        elif c in ";&|\n" or (c in "()" and not cur) or (c in "{}" and not cur and _brace_word_end(raw, i)):
             end_cmd()
             i += 1
         else:
@@ -994,6 +1000,10 @@ def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tupl
 
 
 NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat", "gh", "jq"})
+# commands that run another command given after their own options (the `paseo` may follow option values: `env -u X paseo`)
+SEND_WRAPPERS = frozenset({"env", "sudo", "timeout", "bg", "nice", "rtk", "command", "exec", "time", "nohup", "deadline",
+                           "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "if", "then", "do", "else",
+                           "elif", "while", "until", "!"})
 
 
 def risky_send_reason(cmd: str) -> str | None:
@@ -1016,10 +1026,18 @@ def risky_send_reason(cmd: str) -> str | None:
 def _send_in(parsed: list[list[tuple[str, bool]]]) -> str | None:
     for words_ in parsed:
         names = [os.path.basename(w) for w, _ in words_]
-        if names[0] in NOT_A_SENDER:                    # `echo paseo send "$(date)"` only prints text
+        lead = 0                                        # leading `VAR=x` assignments are not the command word
+        while lead < len(names) - 1 and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words_[lead][0]):
+            lead += 1
+        if names[lead] in NOT_A_SENDER:                 # `echo paseo send "$(date)"` only prints text
             continue
+        # `paseo` is the command word, or comes after a wrapper (`env -u X`, `timeout 600`, `bg`): a `paseo` that is data
+        # for another command (`ls paseo send "$(date)"`) is not a send
+        wrapped = names[lead] in SEND_WRAPPERS
         start = None
         for k, name in enumerate(names):
+            if k > lead and not wrapped:
+                break
             if name == "paseo":
                 rest = names[k + 1:]
                 while rest and rest[0].startswith("-"):        # a global option before the verb

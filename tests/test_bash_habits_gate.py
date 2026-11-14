@@ -859,6 +859,15 @@ SEND_DENY = [
     'paseo send ab "nested $(echo "$(date)") text"',
     'paseo send ab "a" "b `c`"',
     'bg paseo send ab "`x`"',
+    'reply="$(paseo send --json ab "see `foo` call")"',          # Codex P2 r4575540753: a quoted substitution is read
+    'paseo send --json {} "x `y`"',                                # a `{}` placeholder is a word, not a group brace
+    'paseo send ab{} "x `y`"',
+    '{ paseo send ab "`x`"; }',                                    # a real group still separates
+    'if paseo send ab "`x`"; then true; fi',                       # after a shell keyword
+    'timeout 600 paseo send ab "`x`"',                             # after a wrapper and its option value
+    'sudo -u me paseo send ab "`x`"',
+    'deadline run --max 60 -- paseo send ab "`x`"',
+    'A=1 B=2 paseo send ab "`x`"',
 ]
 
 
@@ -901,6 +910,12 @@ def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denie
     'paseo send ab ok && echo "$(date)"',
     'paseo send ab ok | cat "`x`"',
     '(paseo send ab ok) ; echo "`x`"',
+    'ls paseo send "$(date)"',                      # Codex P2 r4575540749: `paseo` is data for `ls`, not the command word
+    "printf '%s\\n' paseo send \"$(date)\"",
+    'rg -e relay.py "$(printf pattern)" docs',
+    'cmd paseo send "`x`"',
+    'A=1 ls paseo send "`x`"',
+    'echo {a,b} "`x`"; paseo send ab ok',           # a brace word is not a group
 ])
 def test_gs02_send_lookalikes_pass(command):
     assert not denied(command), command
