@@ -94,7 +94,7 @@ are still refused. This PR installs or loads nothing.
 archived predecessors, so the job needs no reinstall. If the chain ends at an archived or unknown lead the scan appends a
 `skip-lead-retired` event (one row per pinned/current lead pair, so the minute-by-minute launchd job adds one row, not 1,440 a day), prints one stderr line and exits 0: a retired lead used to exit 2 every minute until
 `load-watch` stopped the job. A Paseo outage (the lead is unreadable and `ls -a` fails too), an unreadable-but-listed lead and a cyclic ledger are still exit 2. Exit 0 hides a retired lead from `load-watch`: watch the `skip-lead-retired` row. Details:
-[self-session.md](self-session.md) C0.
+[self-session.md](self-session.md) C0a.
 
 ## Quota resume (`--quota`, 2026-11-12)
 

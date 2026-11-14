@@ -115,16 +115,30 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    `ade-self-session` chain ends at `--lead` as that lead: its window record, its `ade.lead=<predecessor>` workers and
    its legacy-named windows are adoptable by the successor, with no hand step and no new window; a window registered to a
    genuinely different live lead is still refused. The ledger is `handoff-<predecessor>.json`
-   ([self-session.md](self-session.md) C0).
+   ([self-session.md](self-session.md) C0a).
 
 This supersedes the 2026-11-07 "temporary shared-tab arrangement" (workers as tabs in the lead's own window) for own-initiative
 workers only; operator-requested ones are tabs in the lead's MAIN window again (item 1 above).
+
+## Automatic naming of new windows (2026-11-14)
+
+Operator, 2026-11-14: "Some projects are still starting new workspaces without our MAIN/WORKERS/etc repo-name scheme." The
+scheme was applied only by `bin/ade-worker-run` (our own launches) and `bin/ade-tidy` (one repo, manual), so a lead in another
+repo, the operator's own new chat and a plain `paseo run` kept Paseo's default names. The **`ade-window-name` Paseo plugin**
+([plugins/ade-window-name](../plugins/ade-window-name/README.md)) names every default-named window on this host when its first agent is
+created (or next ends a turn, so an install also backfills existing ones) (`agent.create.after`, retried on `agent.turn.after` while the agent has no title); `bin/ade_ws_autoname.py` decides, on
+`bin/ade_ws_names.py` (the builder `ade-worker-run` and `ade-tidy` share). Rules: a window is **default-named when its Paseo
+`title` is null** (or equals the first agent's own title: Paseo's prompt pre-title for a window the app created with a prompt) and is then named `WORKERS` for an agent with a parent or an `ade.lead` label, else `MAIN` (`ade.placement`
+overrides; `USER` is never guessed); `<repo>` as in Naming item 4, `<work>` the agent's title, short; **a window with any other title (a human's, `ade-worker-run`'s, one already in the scheme) is
+never touched**, only the window's first agent names it, and `ade-worker-run` launches (labels `slice` + `ade.lead`) are left to it. `paseo run --new-workspace` creates the window before the agent and
+sends no prompt or label with it, which is why the hook is on the agent, not on `workspace.create.before`.
 
 ## Renaming
 
 - Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<task worktree>"`.
 - Agent title: `paseo agent update "$PASEO_AGENT_ID" --name "<name>"` (read in the Paseo 0.15.3 source,
   `packages/cli/src/commands/agent/index.ts`, 2026-11-06; run against 0.16.0-beta.2 on 2026-11-13), or set it at launch with `paseo run --title T`.
+- **Name collision (2026-11-14, [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668)):** `paseo agent archive ID` resolves client-side from the listing, and an agent whose workspace was deleted is missing from it; the CLI then falls back to a unique partial *title* match, and a worker tab is named `worker <slice> <lead id>`, so a lead's full id can resolve to (and archive) its live worker. `ade-self-session finish` therefore checks the predecessor is in `paseo ls -g --json` (the plain listing archive resolves from; not `-a`, which adds background workspaces) before archiving (`docs/self-session.md` C0a).
 
 ## Tidying (2026-11-13)
 

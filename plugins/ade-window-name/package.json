@@ -1,0 +1,9 @@
+{
+  "name": "@djbclark/paseo-plugin-ade-window-name",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test server/name-lib.test.mjs"
+  }
+}

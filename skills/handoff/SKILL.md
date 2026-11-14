@@ -29,7 +29,7 @@ paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead a
 `bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
 and runs the watcher with `--lead <its id>` (2026-11-13). After an acknowledged `ade-self-session` handoff nothing pinned to the
 predecessor's id needs a hand step (2026-11-14): `ade-worker-run` adopts its windows and labelled workers, and the installed
-`ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0). A manual
+`ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0a). A manual
 handoff that never runs `finish` records no chain: re-point those jobs by hand.
 
 Placement differs: workers go in the lead's one `WORKERS <repo> (<work>)` window, and workers the operator asks for
