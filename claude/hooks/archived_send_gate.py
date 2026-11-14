@@ -6,7 +6,7 @@ could act as a stale lead). This hook checks the target of a Bash `paseo send` /
 `send_agent_prompt` with `bin/ade_send_guard.py` (which reads `ade-self-session`'s completed-handoff records, #669):
 
   replaced by a completed handoff   deny, naming the successor (a hook cannot safely rewrite the target; re-send to it)
-  archived, nothing replaced it     deny; `ADE_ALLOW_ARCHIVED_SEND=1 paseo send ...` resumes it on purpose
+  archived, nothing replaced it     deny; `ADE_ALLOW_ARCHIVED_SEND=<its full id> paseo send ...` resumes it on purpose
   live, unknown to Paseo, anything this hook cannot parse or reach   allow silently (fails open)
 
 Only the target is judged, never the message. A target built by the shell (`$VAR`, a substitution, a glob) is not parsed.
@@ -34,7 +34,7 @@ def deny(reason: str) -> None:
                                               "permissionDecisionReason": reason}}))
 
 
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 NO_RUN = {"echo", "printf"}  # words after these are text, not a command
 
@@ -51,6 +51,8 @@ def strip_heredocs(command: str) -> str:
         m = HEREDOC.search(line)
         if m:
             end = m.group(2)
+    if end is not None:  # no terminator line: `<<` was not a heredoc (quoted, arithmetic): judge the whole command
+        return command
     return "\n".join(out)
 
 
@@ -67,7 +69,7 @@ def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | No
     out: list[tuple[str, str | None]] = []
     simple: list[str] = []
     for tok in tokens + [";"]:
-        if tok in SEPARATORS or set(tok) <= set(";&|()"):
+        if tok in SEPARATORS or (tok and set(tok) <= set(";&|()")):
             out.extend(_one(simple, depth))
             simple = []
         else:
@@ -82,8 +84,9 @@ def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
         return []
     allow = next((w.split("=", 1)[1] for w in words if w.startswith(ALLOW_VAR + "=")), None)
     found: list[tuple[str, str | None]] = []
-    if depth < 3 and Path(words[0]).name in SHELLS and "-c" in words and words.index("-c") + 1 < len(words):
-        found.extend(targets_in_command(words[words.index("-c") + 1], depth + 1))
+    cflag = next((i for i, w in enumerate(words) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", w)), None)  # -c, -lc, -ec ...
+    if depth < 3 and Path(words[0]).name in SHELLS and cflag is not None and cflag + 1 < len(words):
+        found.extend(targets_in_command(words[cflag + 1], depth + 1))
     for i, w in enumerate(words):
         if Path(w).name != "paseo":
             continue
@@ -143,8 +146,7 @@ def main() -> int:
             found = targets_in_command(tin["command"])
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
-            other_host = bool(tin.get("serverId"))  # another host's agent: not in this ledger
-            found = [(ident, None)] if ident and not other_host else []
+            found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it
         for target, allow in found:
             reason = judge(target, allow)
             if reason:

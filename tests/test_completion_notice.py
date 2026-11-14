@@ -411,6 +411,14 @@ def test_send_to_a_replaced_requester_goes_to_its_successor(monkeypatch):
     assert SUCCESSOR in sent[0] and REQUESTER not in sent[0]
 
 
+def test_lead_ack_does_not_prompt_an_archived_worker(monkeypatch, tmp_path):
+    _guarded(monkeypatch, "refuse", SENDER, "archived")
+    monkeypatch.setattr(mod, "wait_for_idle", lambda *a, **kw: True)
+    monkeypatch.setattr(mod, "run_send", lambda argv: pytest.fail("an ack must not un-archive a worker"))
+    rc, result = mod.lead_ack(worker=SENDER, msg_id=TEST_MSG_ID, done=tmp_path / "slice.done")
+    assert result["routes"] == ["disk"] and rc == 0
+
+
 def test_send_to_an_archived_requester_is_blocked_exit_4(monkeypatch, capsys):
     _guarded(monkeypatch, "refuse", REQUESTER, "archived")
     monkeypatch.setattr(mod, "run_send", lambda argv: pytest.fail("nothing may be sent to an archived requester"))

@@ -151,6 +151,12 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"paseo send --home /elsewhere/.paseo {A} hi", []),  # another daemon: not this ledger
     (f"paseo send --host other:6767 -- {A} hi", []),
     (f"cat > brief.md <<'EOF'\npaseo send {A} hi\nEOF\ngit status", []),  # a heredoc body is text
+    (f"bash -lc 'paseo send --json -- {A} hi'", [(A, None)]),  # combined -lc / -ec flags
+    (f"zsh -ec \"paseo send {A} hi\"", [(A, None)]),
+    (f"paseo send --prompt '' {A}", [(A, None)]),  # an empty quoted value is not a separator
+    (f"jq . <<< hello\npaseo send -- {A} hi", [(A, None)]),  # a here-string is not a heredoc
+    (f"echo $((1<<n))\npaseo send -- {A} hi", [(A, None)]),
+    (f"echo 'use <<EOF here'\npaseo send -- {A} hi", [(A, None)]),  # no terminator: the whole command is judged
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -252,7 +258,9 @@ def test_an_unreadable_successor_still_redirects(world):
     assert (d.action, d.target) == (guard.REDIRECT, B)
 
 
-def test_the_hook_skips_another_hosts_mcp_agent(world):
+def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
+    """A model may pass the calling daemon's own serverId for a local agent: judged; another host's id is unknown here and passes."""
     write_link(world.state, world.home, A, B)
     world.live(**{A: True, B: False})
-    assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": A, "prompt": "hi", "serverId": "remote"}) is None
+    assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": A, "prompt": "hi", "serverId": "self"})
+    assert run_hook(world, "mcp__paseo__send_agent_prompt", {"agentId": STRANGER, "prompt": "hi", "serverId": "remote"}) is None
