@@ -419,6 +419,77 @@ def test_omitted_mode_duplicate_of_ordinary_transaction_still_returns_saved(setu
     assert native.created == 1
 
 
+def run_args(native):
+    return next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+
+
+def test_explicit_thinking_is_passed_to_native_run_and_recorded(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Thinking'] = 'medium'
+    record = service.handoff(checkpoint, quiesced=True, requested_thinking='high')
+    call = run_args(native)
+    assert call[call.index('--thinking') + 1] == 'high'
+    assert call.index('--thinking') < call.index('--')
+    assert record['thinking'] == 'high'
+    assert json.loads(Path(record['record']).read_text())['thinking'] == 'high'
+
+
+def test_thinking_defaults_to_the_predecessors_own_level(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Thinking'] = 'high'
+    record = service.handoff(checkpoint, quiesced=True)
+    call = run_args(native)
+    assert call[call.index('--thinking') + 1] == 'high'
+    assert record['thinking'] == 'high'
+
+
+@pytest.mark.parametrize('source', ['absent', None, '', '-', 'auto', 'default', 'bad level;x', 7])
+def test_absent_or_unusable_source_thinking_passes_no_flag(setup, source):
+    service, native, checkpoint = setup
+    if source != 'absent':
+        native.rows[PRED]['Thinking'] = source
+    record = service.handoff(checkpoint, quiesced=True)
+    assert '--thinking' not in run_args(native)
+    assert record['thinking'] is None and record['status'] == 'awaiting-ack'
+
+
+def test_explicit_thinking_beats_the_source_level(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Thinking'] = 'low'
+    service.handoff(checkpoint, quiesced=True, requested_thinking='auto')
+    call = run_args(native)
+    assert call[call.index('--thinking') + 1] == 'auto'
+
+
+@pytest.mark.parametrize('value', ['', ' high', 'high ', 'high\n', 'hi gh', '-high', 'a;b', '$(x)', 'x' * 33, 5])
+def test_invalid_thinking_refused_before_any_native_call(setup, value):
+    service, native, checkpoint = setup
+    with pytest.raises(ss.SessionError, match='thinking level'):
+        service.handoff(checkpoint, quiesced=True, requested_thinking=value)
+    assert native.calls == [] and native.created == 0
+    assert not list(service.state.glob('handoff-*.json'))
+
+
+def test_duplicate_handoff_with_different_explicit_thinking_is_refused(setup):
+    service, native, checkpoint = setup
+    first = service.handoff(checkpoint, quiesced=True, requested_thinking='high')
+    calls = len(native.calls)
+    with pytest.raises(ss.SessionError, match='different requested thinking'):
+        service.handoff(checkpoint, quiesced=True, requested_thinking='low')
+    assert service.handoff(checkpoint, quiesced=True, requested_thinking='high') == first
+    assert service.handoff(checkpoint, quiesced=True) == first
+    assert len(native.calls) == calls and native.created == 1
+
+
+def test_cli_exposes_thinking_on_handoff_only():
+    cli = str(REPO / 'bin' / 'ade-self-session')
+    ok = subprocess.run([cli, 'handoff', '--help'], capture_output=True, text=True, check=False)
+    assert ok.returncode == 0 and '--thinking' in ok.stdout
+    bad = subprocess.run([cli, 'compact', '--checkpoint', '/x', '--request-id', 'r', '--thinking', 'high'],
+                         capture_output=True, text=True, check=False)
+    assert bad.returncode == 2
+
+
 @pytest.mark.parametrize('name', ['{pred}.json', 'handoff-{pred}.lock', 'handoff-{pred}.json.bak',
                                   'compact-{pred}-c1.json'])
 def test_load_record_requires_handoff_json_filename(setup, name):

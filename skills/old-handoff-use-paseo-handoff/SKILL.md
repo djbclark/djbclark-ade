@@ -286,6 +286,11 @@ are finished, the default is:
 ~/src/djbclark-ade/bin/ade-self-session handoff --checkpoint ABSOLUTE_BRIEF --quiesced
 ```
 
+Add `--thinking LEVEL` (for example `high`) to set the successor's thinking level.
+Without it the successor inherits your own level when Paseo reports one (an
+`auto` or unknown level launches with no flag); a lead that must run at `high`
+passes it explicitly or checks the successor's level after launch (2026-11-14).
+
 Follow [the native transaction protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
 Creation is pending, not completion: the exact successor reads and acknowledges
 the preserved checkpoint and next action with `accept`, waits for the predecessor to become

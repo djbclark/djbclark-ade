@@ -2,10 +2,8 @@
 the hook's messages (2026-10-18 rewrite: the old tests asserted
 SOFT_THRESHOLD/HARD_THRESHOLD and a `hermes send` call the hook no longer has)."""
 import json
-import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -13,8 +11,7 @@ import pytest
 HOOKS_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HOOKS_DIR))
 
-import context_size_nudge as nudge  # noqa: E402
-
+import context_size_nudge as nudge
 
 ALT = "the in-context alternative"
 _BOUNDARY_LINE = json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"
@@ -111,7 +108,8 @@ def test_boundary_note_once_at_120k(hook, tmp_path):
     path = _transcript(tmp_path, 100_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-bound", path)
     assert "At the next task completion" in out
-    assert "/new is ready" in out and "self-slash" not in out
+    assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
+    assert "/new is ready" not in out and "self-slash" not in out
     assert "Do not compact mid-task" in out
     assert hook.state()["s-bound"]["boundary"] is True
     _append(path, _usage(nudge.BOUNDARY_TOTAL + 5_000))
@@ -138,7 +136,8 @@ def test_ask_message_at_plus_200k_bare(hook, tmp_path):
     assert "Context is large" in out
     expected = f"{nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER:,}"
     assert f"by itself at about {expected} tokens" in out
-    assert "handoff" in out and "/new is ready" in out
+    assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
+    assert "/new is ready" not in out and "never hand the operator a /new" in out
     assert "self-slash" not in out
     assert pings == []
 

@@ -87,7 +87,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path
 
@@ -364,6 +364,13 @@ def _compaction_floor_since(transcript_path, since, size):
     return COMPACTED if value is None else value
 
 
+def _loads_or_none(line):
+    try:
+        return json.loads(line)
+    except Exception:
+        return None
+
+
 def _last_assistant_model(transcript_path):
     """The newest non-sidechain assistant record's `message.model`, or None.
 
@@ -386,10 +393,7 @@ def _last_assistant_model(transcript_path):
                 for line in reversed(lines):
                     if b'"model"' not in line:
                         continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
+                    obj = _loads_or_none(line)
                     if not isinstance(obj, dict) or obj.get("isSidechain"):
                         continue
                     message = obj.get("message")
@@ -511,12 +515,17 @@ def _successor_note(successor):
             f"`claude --model {spec.split('/', 1)[1]}` rather than continuing on this model.")
 
 
+_SELF_HANDOFF = ("`~/src/djbclark-ade/bin/ade-self-session handoff`, an acknowledged self-handoff; "
+                 "add `--thinking LEVEL` to pin the successor's thinking level")
+
+
 def _boundary_message(total, successor=None):
     return (
         f"Context is {total:,}. At the next task completion, if the following "
-        f"work is not a direct continuation, run the `handoff` skill "
-        f"and then tell the operator /new is ready instead of /compact: a fresh session re-writes ~46k, a "
-        "compaction re-writes ~72k plus a summariser call and leaves ~104k "
+        f"work is not a direct continuation and work remains, run handoff Step 9 yourself "
+        f"({_SELF_HANDOFF}) instead of /compact, and never hand the operator a /new "
+        "(operator ruling 2026-11-14: when there is more work, always hand off yourself): a fresh session "
+        "re-writes ~46k, a compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
         + _successor_note(successor)
     )
@@ -560,9 +569,10 @@ def _ask_message(total, growth, repeat, successor=None):
         "less its buffer; the PreCompact hook writes the Tier 1 checkpoint "
         "first). Until then start no new heavy work inline: send it through "
         "/fan-out or a minimum-spec sub-agent. When the current task is "
-        "finished, same topic or not, run the `handoff` skill (Tier 2 "
-        "document) and tell the operator /new is ready (a fresh session "
-        "re-writes ~46k); keep going in-context only when the work must "
+        "finished and more work remains, same topic or not, run handoff Step 9 yourself "
+        f"(the `handoff` skill's Tier 2 document, then {_SELF_HANDOFF}) and never "
+        "hand the operator a /new (operator ruling 2026-11-14); a fresh session "
+        "re-writes ~46k. Keep going in-context only when the work must "
         "continue. "
         + _midtask_note(total, "let the auto-compaction take it") + _successor_note(successor) + " "
         + _COST_NOTE
@@ -676,7 +686,7 @@ def _log_nudge(session_id, event, level, total, growth, kind):
     """
     try:
         line = (json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "session_id": session_id, "event": event, "level": level,
             "total": total, "growth": growth, "kind": kind,
         }) + "\n").encode("utf-8")
