@@ -452,11 +452,11 @@ def _fake_rev_parse(table):
     ("gh run ls --commit 5a2228d", f"gh run ls --commit {FULL}"),
     ("gh run list -c=5a2228d", f"gh run list -c={FULL}"),
     ("gh run list -c5a2228d", f"gh run list -c{FULL}"),
-    ("gh run list --commit 5a22", f"gh run list --commit {FULL}"),
+    ("gh run list --commit 5a2228d0", f"gh run list --commit {FULL}"),
 ], ids=["--commit", "--commit=", "-c", "single quotes", "upper case", "other flags around", "two hints", "ls alias", "-c=",
-        "-cSHA", "4 digits"])
+        "-cSHA", "8 digits"])
 def test_a_short_sha_in_a_gh_run_list_hint_is_expanded(monkeypatch, hint, expected):
-    fake = _fake_rev_parse({"5a2228d": FULL, "5A2228D": FULL, "5a22": FULL})
+    fake = _fake_rev_parse({"5a2228d": FULL, "5A2228D": FULL, "5a2228d0": FULL})
     monkeypatch.setattr(mod, "_rev_parse", fake)
     assert mod.full_run_list_sha(hint) == expected
     text = mod.build_message(title="gs-01", detail=f"CI running; {hint}", report=None, sender=SENDER, msg_id=TEST_MSG_ID)
@@ -545,3 +545,18 @@ def test_real_git_expands_and_refuses(tmp_path):
 def test_the_footer_names_the_full_sha_rule():
     text = FOOTER.read_text()
     assert "FULL 40-character SHA" in text and "gh run list --branch BRANCH" in text and "prints `[]` with exit 0" in text
+
+
+@pytest.mark.parametrize("sha", ["5a22", "5a222", "5a2228"])
+def test_a_sha_under_seven_digits_is_refused_without_asking_git(monkeypatch, sha):
+    fake = _fake_rev_parse({sha: FULL})
+    monkeypatch.setattr(mod, "_rev_parse", fake)
+    with pytest.raises(ValueError, match=r"too few.*at least 7 digits.*--branch"):
+        mod.full_run_list_sha(f"gh run list --commit {sha}")
+    assert fake.calls == []
+
+
+def test_seven_digits_is_the_floor(monkeypatch):
+    monkeypatch.setattr(mod, "_rev_parse", _fake_rev_parse({"5a2228d": FULL}))
+    assert mod.full_run_list_sha("gh run list -c 5a2228d") == f"gh run list -c {FULL}"
+
