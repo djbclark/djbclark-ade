@@ -391,14 +391,15 @@ test("Paseo's hook cancel (context.signal) aborts the run the same way", async (
       seen = args.signal;
       setTimeout(() => resolve({ action: "rename", name: "MAIN my-repo (Cancelled)", kind: "MAIN" }), 100);
     });
-  registerAdeWindowNameHooks(server, baseDeps({ run }));
+  const mine = [];
+  registerAdeWindowNameHooks(server, baseDeps({ run, log: (l) => mine.push(l) }));
   const p = handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo, signal: cancel.signal });
   await new Promise((r) => setTimeout(r, 30));
   cancel.abort();
   await p;
   assert.equal(seen.aborted, true);
   assert.deepEqual(d.state.calls, []);
-  assert.ok(lines.some((l) => l.includes('"outcome":"skip"') && l.includes("aborted")), "an aborted run logs a skip, not an error");
+  assert.ok(mine.some((l) => l.includes('"outcome":"skip"') && l.includes("aborted")), "an aborted run logs a skip, not an error");
 });
 
 test("an abort that lands during the last re-read stops the write", async () => {
@@ -483,7 +484,7 @@ test("validName counts code points like Python's len(), not UTF-16 units", () =>
 
 test("an invalid name from the decision script is never written", async () => {
   assert.equal(validName("MAIN my-repo (Fix)"), true);
-  for (const bad of [undefined, null, 42, "", "MAIN r (a\tb)", "MAIN r (a\u202Eb)", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
+  for (const bad of [undefined, null, 42, "", "MAIN r (a\tb)", "MAIN r (a\u202Eb)", "MAIN r (a\uD800b)", "MAIN r (a\uDC00b)", "MAIN r (a\uE000b)", "MAIN r (a\u{F0000}b)", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
     assert.equal(validName(bad), false, String(bad));
     const a = agentRec({ cwd: gitDir.repo });
     const d = fakeDaemon({ agents: [a] });
