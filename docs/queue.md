@@ -137,11 +137,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     constraint, list price only a tie-break. models.dev is community data: cache it with its fetch date, bound
     sanity (drop a price that moves >5x between fetches), never fail a route on a missing row. Next: install the
     plugin (operator asked), then a design note in `docs/model-routing.md` and a `route_agent.py` price reader.
-37. **route_agent rt-01: done 2026-11-14** (PR `route-agent-lows`; the PR 698 review's Lows D1 and D2, and the tendcf lead's ask): `--available` rows
-    of one pool key fold as accounts (`_merge_pool(accounts=True)`, an unknown row adds an `(unmeasured)` None window), an `error` row is an unmeasured account
-    in both folds, and `[dispatch.repo_overrides.REPO] frontier_order` sorts the already-eligible `frontier` pools for `--repo REPO` (tendcf: codex, claude,
-    antigravity-argon; an unknown name fails the policy load). Open: no other repo declares an order (nix2cf has only the floor override); an error row that
-    never clears keeps its provider's pools closed for the plenty gate. Lives in `bin/route_agent.py`, `config/routing.toml`, `skills/model-routing/SKILL.md` D5.
+37. **route_agent rt-01 follow-ups** (2026-11-14, PR 708 adversary Lows): `_merge_pool(accounts=True)` keys on the pool key, not the account (aiuse rows carry `account`: fold as accounts only when it differs, which would also retire `cap_only`); `usage_from_paseo` still folds two Paseo reports of one key with `_merge_caps`; no repo but tendcf declares a `frontier_order`. Lives in `bin/route_agent.py`.
 
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
@@ -208,3 +204,4 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 22. Watch Orca upstream for structural-reorg verbs; Orca's short PostCompact hook; the herdr-only capability and Orca parity list: dropped 2026-10-31 with Orca and herdr.
 23. Restart the `hindsight` MCP server in sessions older than 2026-08-23 20:00: moot (no such session survives).
 24. **Web search first and last** (operator, 2026-11-13; former Carried 34, shipped by the `websearch-policy` PR): the required `Prior art / docs checked:` brief line and the `Closing search:` report field live in `docs/dispatch-footer.md` rule 24 and the `skills/fan-out` brief section; the reviewer rule (missing on a non-exempt PR is a LOW) is `docs/code-review.md` rule 12.
+25. route_agent rt-01 (2026-11-14, PR 708): `--available` rows of one pool key fold as accounts (a window or row one account cannot measure closes the pool for every kind, not only the plenty gate), a snapshot `error` account is an unmeasured account (the `--available` guard is defensive: aiuse emits no error row there), and `[dispatch.repo_overrides.REPO] frontier_order` orders the eligible `frontier` pools for `--repo REPO` (tendcf: codex, claude, antigravity-argon; validated in both config loaders). No live routing changes today: the only multi-account provider is retired opencode-go.

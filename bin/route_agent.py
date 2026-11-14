@@ -444,6 +444,9 @@ def _check_frontier_orders(path: Path, data: dict[str, Any]) -> None:
         order = table.get("frontier_order") if isinstance(table, dict) else None
         if order is None:
             continue
+        if repo != str(repo).lower():
+            raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order: repo keys are "
+                             "lower case (the lookup lower-cases the repository name)")
         if not (isinstance(order, list) and order and all(isinstance(x, str) for x in order)):
             raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order must be a "
                              f"non-empty array of service names, got {order!r}")
@@ -558,6 +561,7 @@ def _load_runtime_config(
     data = ade_config.project_routing_domain(effective.data)
     source = Path(effective.provenance["routing_source"])
     ade_config.validate_legacy_routing_shape(data, source)
+    _check_frontier_orders(source, data)           # also the effective data: an overlay or unified base can carry one
     provenance = {key: effective.provenance[key]
                   for key in ("routing_source", "new_config", "local_config")}
     info = effective.provenance["model_tiers_info"]
@@ -900,8 +904,8 @@ UNMEASURED_WINDOW = "(unmeasured)"
 def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any], *, accounts: bool = False) -> None:
     """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind.
 
-    `accounts=False` (two SOURCES reading one pool: Paseo and aiuse): windows fold with `_merge_caps`, the tighter KNOWN
-    reading. `accounts=True` (two ACCOUNTS of one pool, `--available` rows): windows fold with `_merge_windows`, a window
+    `accounts=False` (several readings of one pool that are not known to be accounts: aiuse + Paseo, two Paseo reports): windows
+    fold with `_merge_caps`, the tighter KNOWN reading. `accounts=True` (two ACCOUNTS of one pool, `--available` rows): windows fold with `_merge_windows`, a window
     either account cannot measure stays None, and when either row's `remaining` is unknown the pool also gets one
     `UNMEASURED_WINDOW` None window, so the measured account cannot open the plenty gate alone while Paseo may launch on
     the unmeasured one (D1 of the PR 698 review, 2026-11-14)."""
@@ -2327,8 +2331,9 @@ def repo_frontier_order(repo: str | None) -> tuple[str, ...]:
     (`_check_frontier_orders`)."""
     if not repo:
         return ()
-    table = ((POLICY.get("dispatch") or {}).get("repo_overrides") or {}).get(str(repo).lower()) or {}
-    return tuple(str(x) for x in table.get("frontier_order") or ())
+    table = ((POLICY.get("dispatch") or {}).get("repo_overrides") or {}).get(str(repo).lower())
+    order = table.get("frontier_order") if isinstance(table, dict) else None
+    return tuple(x for x in order if isinstance(x, str)) if isinstance(order, list) else ()
 
 
 def estimate_floor(svc: Service, kind: str, info: dict[str, Any], repo: str | None = None) -> tuple[float, float | None]:

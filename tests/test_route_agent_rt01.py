@@ -40,6 +40,28 @@ def test_a_fresh_row_does_not_open_the_plenty_gate_beside_an_expired_row_of_the_
     assert r.plenty_remaining(pool) is None
 
 
+CAP = {**_row(35, family="fable"), "binding_window": "Claude Code weekly - Fable"}
+BARE_EXPIRED = {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 90,
+                "reading_expired": True, "age_seconds": 60}
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations([CAP, FRESH, EXPIRED])), ids=lambda o: "-".join(
+    {id(CAP): "cap", id(FRESH): "fresh", id(EXPIRED): "expired"}[id(x)] for x in o) if isinstance(o, tuple) else None)
+def test_a_cap_row_among_two_accounts_in_every_order_keeps_the_pool_closed(order):
+    """The cap row is no account and adds no marker, but the expired account still closes the pool wherever the cap sits."""
+    pool = r._providers_from_available(list(order), 60)["claude"]
+    assert pool["remaining"] == 50 and pool["sublimits"] == {"fable": 35.0}
+    assert r.plenty_remaining(pool) is None
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_an_expired_row_with_no_window_at_all_still_closes_the_pool_in_either_order(order):
+    """No `binding_window` and no `windows[]`: nothing but the marker can carry the unknown (`remaining` alone cannot)."""
+    pool = r._providers_from_available([[BARE_EXPIRED, FRESH][i] for i in order], 60)["claude"]
+    assert pool["remaining"] == 50
+    assert r.plenty_remaining(pool) is None
+
+
 def test_two_measured_available_rows_still_open_the_plenty_gate_on_the_tighter_one():
     pool = r._providers_from_available([FRESH, _row(80)], 60)["claude"]
     assert pool["windows"] == {"weekly": 50.0}
@@ -157,6 +179,32 @@ def test_argon_never_outranks_a_usable_pool_it_sits_behind_even_when_the_order_l
         table["frontier_order"] = saved
 
 
+@pytest.mark.parametrize("order, first", [(["codex"], "codex"), (["claude"], "claude"), (["claude", "codex"], "claude"),
+                                           (["codex", "claude"], "codex")])
+def test_listed_pools_lead_unlisted_ones_whatever_the_score(order, first):
+    table = r.POLICY["dispatch"]["repo_overrides"]["tendcf"]
+    saved = table["frontier_order"]
+    table["frontier_order"] = order
+    try:
+        assert _first(OPEN, "tendcf") == first
+    finally:
+        table["frontier_order"] = saved
+
+
+def test_a_malformed_order_read_without_the_loader_is_ignored_not_a_crash():
+    table = r.POLICY["dispatch"]["repo_overrides"]["tendcf"]
+    saved = table["frontier_order"]
+    try:
+        for bad in (5, "codex", {"a": 1}):
+            table["frontier_order"] = bad
+            assert r.repo_frontier_order("tendcf") == ()
+            assert _first(OPEN, "tendcf") == "claude"
+        table["frontier_order"] = ["codex", 3]
+        assert r.repo_frontier_order("tendcf") == ("codex",)
+    finally:
+        table["frontier_order"] = saved
+
+
 def test_the_order_is_for_frontier_only():
     code_quota = {"codex": {"remaining": 90.0}, "claude": {"remaining": 90.0}}
     assert r.route("code", quota=code_quota, repo="tendcf").service.name == r.route("code", quota=code_quota).service.name
@@ -190,3 +238,12 @@ def test_the_shipped_policy_loads(tmp_path):
 def test_a_bad_frontier_order_fails_the_policy_load_loudly(tmp_path, line, message):
     with pytest.raises(ValueError, match=re.escape(message)):
         r.load_policy(_policy_with(tmp_path, line))
+
+
+def test_an_upper_case_repo_key_fails_the_load_because_the_lookup_lower_cases(tmp_path):
+    text = (ROOT / "config" / "routing.toml").read_text().replace("[dispatch.repo_overrides.tendcf]\nfrontier_order",
+                                                                   "[dispatch.repo_overrides.TendCF]\nfrontier_order")
+    path = tmp_path / "routing.toml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="lower case"):
+        r.load_policy(path)

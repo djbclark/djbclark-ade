@@ -308,7 +308,7 @@ def test_present_unusable_input_never_falls_back(home, synthetic_root, monkeypat
 
 
 def _pure_legacy_reader():
-    """Compile only load_policy and its literal constants; no routing initialization."""
+    """Compile only load_policy, its frontier_order check and its literal constants; no routing initialization."""
     import ast
     import tomllib
     tree = ast.parse((BIN / "route_agent.py").read_text())
@@ -317,7 +317,7 @@ def _pure_legacy_reader():
     names = {"_SERVICE_REQUIRED", "LEAD_KEYS", "LEAD_ALL_KEYS", "LEAD_SWITCHES",
              "LEAD_PIPELINE_EFFORT_DEFAULT", "CLAUDE_EFFORT_LEVELS"}
     nodes = [n for n in tree.body if (
-        isinstance(n, ast.FunctionDef) and n.name == "load_policy"
+        isinstance(n, ast.FunctionDef) and n.name in ("load_policy", "_check_frontier_orders")
     ) or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets))]
     namespace = {"Path": Path, "tomllib": tomllib, "Any": object, "SERVICE_KEYS": fields}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "pure_load_policy", "exec"), namespace)
