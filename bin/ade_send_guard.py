@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -110,32 +111,35 @@ def paseo_inspect(paseo: str = "paseo", timeout: int = 5):
     return inspect
 
 
-def log_override(d: Decision, log_path: Path | None = None) -> None:
-    """Append one JSON line for a send that ADE_ALLOW_REPLACED_SEND let through (no message text). Never raises: a log that
-    cannot be written must not block the send."""
+def log_override(d: Decision, log_path: Path | None = None, source: str = "send") -> None:
+    """Append one JSON line for a send that ADE_ALLOW_REPLACED_SEND let through (no message text). `source` is `send` at the point
+    of sending (the shim, an in-repo sender) and `hook-precheck` for the Claude hook, which runs before the command and cannot
+    know it was sent. Never raises and never blocks: a path that is a symlink, a FIFO or any non-regular file is not written
+    (O_NOFOLLOW, O_NONBLOCK, fstat), and a failure is swallowed."""
     try:
         path = Path(log_path or os.environ.get(LOG_ENV) or Path.home() / DEFAULT_LOG)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         line = json.dumps({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "override": ALLOW_REPLACED_ENV,
                            "target": d.target, "successor": d.replaced_by, "pid": os.getpid(), "ppid": os.getppid(),
-                           "argv0": Path(sys.argv[0] if sys.argv and sys.argv[0] else "python").name})
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+                           "source": source, "argv0": Path(sys.argv[0] if sys.argv and sys.argv[0] else "python").name})
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
-            os.write(fd, (line + "\n").encode())
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.write(fd, (line + "\n").encode())
         finally:
             os.close(fd)
     except Exception:  # noqa: BLE001
         pass
 
 
-def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = None, **kw) -> Decision:
+def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = None, source: str = "send", **kw) -> Decision:
     """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND and ADE_ALLOW_REPLACED_SEND (a use of the latter
     is logged, see `log_override`)."""
     env = os.environ if env is None else env
     d = decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False,
                allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, **kw)
     if d.replaced_by:
-        log_override(d, log_path)
+        log_override(d, log_path, source)
     return d
 
 

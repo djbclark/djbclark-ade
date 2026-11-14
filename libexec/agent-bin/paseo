@@ -1,25 +1,37 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# ade-paseo-shim: v1 (every copy of this file carries this marker in its first lines; a shim never takes another shim for the real paseo)
 # paseo shim (ls-06, 2026-11-14): a `paseo` front door that stops a message to an archived or handoff-replaced agent in the
 # send path itself. Paseo un-archives and runs an archived agent that gets a message, and the Claude hook
-# (claude/hooks/archived_send_gate.py) sees only Bash and MCP tool calls, so a send built inside a Python program, a script or a
-# heredoc'd program went through. Design and limits: docs/archived-send-guard.md.
+# (claude/hooks/archived_send_gate.py) sees only Claude's Bash and MCP tool calls, so a send built inside a Python program
+# went through. Design and limits: docs/archived-send-guard.md.
 #
-# Installed by putting libexec/agent-bin first on an agent's PATH (the ade-claim plugin's W4 `agent.open.before` does it for
-# every agent it opens: docs/git-guard.md; by hand: `PATH="$HOME/src/djbclark-ade/libexec/agent-bin:$PATH"`). The shim finds its
-# helper beside itself (bin/ade-paseo-guard of the checkout it lives in, through any symlink), never in the caller's cwd.
-# The operator's own shell does not go through it unless he puts the directory on his PATH.
+# Written for /bin/sh on purpose: bash would source the operator's BASH_ENV (~/.bashrc) at start, rewrite PATH, and pick the
+# wrong paseo; `sh` (bash 3.2 in POSIX mode, dash) reads no startup file for a non-interactive script.
+#
+# WHAT IT SEES: only a `paseo` that the caller's PATH resolves to this directory. That holds for a Python `subprocess.run(["paseo",
+# ...])` (execvp uses the inherited PATH) and for any program that keeps its PATH. It does NOT hold for a bash process whose
+# startup file rewrites PATH: the operator's BASH_ENV=~/.bashrc puts ~/.local/bin and /opt/homebrew/bin first, so `bash -c`, a
+# `#!/usr/bin/env bash` script and a `bash <<EOF` program reach the real paseo unguarded (the hook still sees a send typed in a
+# Bash tool call). An absolute path to the real paseo is not seen either. Nothing installs this shim: put it first on PATH
+# yourself, `PATH="<checkout>/libexec/agent-bin:$PATH"` (and `env -u BASH_ENV` for a bash child), or run `<checkout>/libexec/agent-bin/paseo`
+# by its path. The ade-claim plugin's W4 `agent.open.before` hook prepends this directory to an agent's PATH only when the plugin
+# is installed, enabled AND in `enforce` mode (`~/.local/state/djbclark-ade/ade-claim.mode`); its default, observe mode, changes nothing.
+# The helper is found beside this script (bin/ade-paseo-guard of the checkout it lives in, through any symlink), never in the cwd.
 #
 # Order of work, cheapest first (no Python unless a `send` word is on the command line):
 #   1. No argument is `send`: exec the real paseo untouched.
-#   2. Otherwise `python3 -I bin/ade-paseo-guard ARGS...`, which parses `[global opts] [agent] send [opts] TARGET`, asks
-#      `paseo agent inspect` (the real paseo by absolute path, so the probe never re-enters this shim), and execs the real paseo:
-#      as asked (a live or unknown target, another daemon with --host/--home), with the target rewritten to its successor
-#      (a completed self-handoff replaced it), or not at all (exit 4: archived with no successor, a cyclic ledger).
+#   2. Otherwise `python3 -I bin/ade-paseo-guard ARGS...`, which parses `[global opts] [agent] send [opts] TARGET` (options may also
+#      follow `agent` and `send`), asks `paseo agent inspect` (the real paseo by absolute path, so the probe never re-enters this
+#      shim), and execs the real paseo: as asked (a live or unknown target, an explicit --host/--home), with the target rewritten
+#      to its successor (a completed self-handoff replaced it), or not at all (exit 4: archived with no successor, a cyclic
+#      ledger, a redirect that would be a send to oneself).
+# The real paseo is the first `paseo` on PATH (or ADE_REAL_PASEO) that is a regular executable file and not a shim: every copy of
+# this file is skipped, wherever it lives, so two checkouts' agent-bin directories on one PATH do not call each other.
+# A re-entry counter (ADE_PASEO_SHIM_DEPTH, cap 8) stops a wrapper that runs a shim again.
 # FAILS OPEN: no python3, a missing helper or any error inside it runs the real paseo with a one-line note on stderr. Only a
-# refusal stops a command. An accident guard, like the hook, not a sandbox: an absolute path to the real paseo, a changed PATH,
-# or a process that does not inherit the agent's PATH is not seen.
+# refusal stops a command. An accident guard, like the hook, not a sandbox.
 #
-# Exit codes: 4 refused (nothing sent); every other code is the real paseo's. 127 when no real paseo is found.
+# Exit codes: 4 refused (nothing sent); 127 no real paseo found or re-entered more than 8 times; every other code is the real paseo's.
 # Environment: ADE_REAL_PASEO (the real paseo; skips the PATH search), ADE_PYTHON (default python3),
 # ADE_ALLOW_ARCHIVED_SEND=<full id> (operator: resume one archived agent), ADE_ALLOW_REPLACED_SEND=<full id> (operator: send to
 # a replaced agent that is still live), ADE_SEND_GUARD_LOG (override log; default ~/.local/state/djbclark-ade/send-guard-overrides.jsonl).
@@ -28,15 +40,37 @@ set -u
 self="$0"
 case "$self" in */*) ;; *) self="./$self" ;; esac
 
-# the real paseo: ADE_REAL_PASEO, else the first `paseo` on PATH that is not this shim
+# re-entry cap: a wrapper named paseo that runs a shim again would loop forever
+depth="${ADE_PASEO_SHIM_DEPTH:-0}"
+case "$depth" in "" | *[!0-9]*) depth=0 ;; esac
+depth=$((depth + 1))
+if [ "$depth" -gt 8 ]; then
+  echo "paseo shim: re-entered $depth times (a wrapper named paseo that runs a shim again?): no real paseo reachable" >&2
+  exit 127
+fi
+export ADE_PASEO_SHIM_DEPTH="$depth"
+
+# is_shim FILE: a copy of this shim (marker line in its first lines), through symlinks
+is_shim() {
+  [ -f "$1" ] || return 1
+  shim_n=0
+  while [ "$shim_n" -lt 6 ] && IFS= read -r shim_line; do
+    case "$shim_line" in "# ade-paseo-shim:"*) return 0 ;; esac
+    shim_n=$((shim_n + 1))
+  done < "$1" 2> /dev/null
+  return 1
+}
+
+# the real paseo: ADE_REAL_PASEO, else the first `paseo` on PATH that is an executable file and not a shim
 real=""
-if [ -n "${ADE_REAL_PASEO:-}" ] && [ -x "$ADE_REAL_PASEO" ] && ! [ "$ADE_REAL_PASEO" -ef "$self" ]; then
+if [ -n "${ADE_REAL_PASEO:-}" ] && [ -f "$ADE_REAL_PASEO" ] && [ -x "$ADE_REAL_PASEO" ] && ! [ "$ADE_REAL_PASEO" -ef "$self" ] \
+  && ! is_shim "$ADE_REAL_PASEO"; then
   real="$ADE_REAL_PASEO"
 else
   set -f
   IFS=:
   for d in $PATH; do
-    if [ -n "$d" ] && [ -f "$d/paseo" ] && [ -x "$d/paseo" ] && ! [ "$d/paseo" -ef "$self" ]; then
+    if [ -n "$d" ] && [ -f "$d/paseo" ] && [ -x "$d/paseo" ] && ! [ "$d/paseo" -ef "$self" ] && ! is_shim "$d/paseo"; then
       real="$d/paseo"
       break
     fi
@@ -48,6 +82,7 @@ if [ -z "$real" ]; then
   echo "paseo shim: no real paseo found on PATH" >&2
   exit 127
 fi
+export ADE_REAL_PASEO="$real"
 
 # 1: no `send` word: nothing to judge
 has_send=0
@@ -60,12 +95,12 @@ fi
 
 # the helper beside this script, through the shim's symlinks: <checkout>/libexec/agent-bin/paseo -> <checkout>/bin/ade-paseo-guard
 helper_path() {
-  local src="$self" t
-  while [ -L "$src" ]; do
-    t=$(readlink "$src")
-    case "$t" in /*) src="$t" ;; *) src="${src%/*}/$t" ;; esac
+  hp_src="$self"
+  while [ -L "$hp_src" ]; do
+    hp_t=$(readlink "$hp_src")
+    case "$hp_t" in /*) hp_src="$hp_t" ;; *) hp_src="${hp_src%/*}/$hp_t" ;; esac
   done
-  printf '%s/../../bin/ade-paseo-guard' "${src%/*}"
+  printf '%s/../../bin/ade-paseo-guard' "${hp_src%/*}"
 }
 
 py="${ADE_PYTHON:-python3}"
@@ -76,5 +111,4 @@ if ! command -v "$py" > /dev/null 2>&1 || ! [ -f "$helper" ]; then
 fi
 
 # -I: isolated (no PYTHON* variables, no user site, no cwd or script dir on sys.path)
-export ADE_REAL_PASEO="$real"
 exec "$py" -I "$helper" "$@"

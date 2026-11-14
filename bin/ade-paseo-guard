@@ -10,9 +10,11 @@ in the send path itself, whoever builds the command:
 
   pass      (live target, unknown to Paseo, another daemon, any other subcommand): exec the real paseo with the argv as given
   redirect  (a completed self-handoff replaced the target): rewrite ONLY the target word to its successor, say so on stderr, exec
-  refuse    (archived with no successor, a cyclic ledger, an archived successor): reason and override hint on stderr, exit 4, no exec
+  refuse    (archived with no successor, a cyclic ledger, an archived successor, or a redirect to the caller itself): reason and
+            override hint on stderr, exit 4, no exec
 
-The target is parsed with the hook's own rules (`archived_send_gate._target_index`, VALUE_FLAGS, OTHER_DAEMON), never the message.
+The target is parsed with the hook's own rules (`archived_send_gate.locate_send`: global options before `agent`, between `agent` and
+`send` and after `send`; an explicit --host/--home anywhere is not judged), never the message.
 A pass-through is `os.execv`, so the exit code, signals, stdin and stdout are the real paseo's. This is an accident guard, like the
 hook: anything unexpected (an error here, no real paseo found for the probe) runs the real paseo unchanged. Only a refusal
 stops a command. The inspect probe calls the real paseo by its absolute path, so it never re-enters the shim.
@@ -29,46 +31,39 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent  # the checkout this script lives in (through any symlink), never the cwd
 sys.path.insert(0, str(ROOT / "bin"))
 sys.path.insert(0, str(ROOT / "claude" / "hooks"))
-AGENT_BIN = ROOT / "libexec" / "agent-bin"
 EXIT_REFUSED = 4  # same as bin/ade_send_guard.py: the ADE report class for "blocked"
-GLOBAL_VALUE_FLAGS = {"-o", "--format"}  # global options that take a value word, as in the hook's parser
+SHIM_MARKER = b"# ade-paseo-shim:"  # in the first lines of every copy of libexec/agent-bin/paseo
+
+
+def is_shim(path) -> bool:
+    """True for any copy of the shim (marker in its first lines, through symlinks), wherever it lives."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1024).split(b"\n")[:6]
+    except OSError:
+        return False
+    return any(line.startswith(SHIM_MARKER) for line in head)
 
 
 def real_paseo(env=None) -> str | None:
-    """ADE_REAL_PASEO, else the first `paseo` on PATH outside this checkout's agent-bin directory (the shim's own)."""
+    """ADE_REAL_PASEO, else the first `paseo` on PATH that is an executable regular file and no copy of the shim."""
     env = os.environ if env is None else env
     named = env.get("ADE_REAL_PASEO")
-    if named and os.access(named, os.X_OK):
+    if named and os.path.isfile(named) and os.access(named, os.X_OK) and not is_shim(named):
         return named
     for d in (env.get("PATH") or "").split(os.pathsep):
-        cand = Path(d) / "paseo" if d else None
-        if cand and cand.is_file() and os.access(cand, os.X_OK) and not _same_dir(Path(d), AGENT_BIN):
-            return str(cand)
+        cand = os.path.join(d, "paseo") if d else ""
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK) and not is_shim(cand):
+            return cand
     return None
 
 
-def _same_dir(a: Path, b: Path) -> bool:
-    try:
-        return a.resolve() == b.resolve()
-    except OSError:
-        return False
-
-
 def send_target_index(args: list[str]) -> int | None:
-    """Index in `args` (paseo's arguments, no argv[0]) of the target word of a `[global opts] [agent] send ...` call; None when
-    this is no send, or it addresses another daemon (`--host`, `--home`: its agents are not in this ledger), or has no target."""
+    """Index in `args` (paseo's arguments, no argv[0]) of the target word of a send; None when this is no send, an explicit
+    daemon selector (`--host`, `--home`) is present, or there is no target."""
     import archived_send_gate as gate  # noqa: PLC0415 - the hook's parser, one copy
-    i = 0
-    while i < len(args) and args[i].startswith("-"):  # a global option before the verb: --json, -o json, -q
-        if args[i] in gate.OTHER_DAEMON or args[i].startswith(("--host=", "--home=")):
-            return None
-        i += 2 if args[i] in GLOBAL_VALUE_FLAGS else 1
-    if args[i:i + 1] == ["agent"]:
-        i += 1
-    if args[i:i + 1] != ["send"]:
-        return None
-    j = gate._target_index(args[i + 1:])
-    return None if j is None else i + 1 + j
+    kind, idx = gate.locate_send(args)
+    return idx if kind == "send" else None
 
 
 def run(argv: list[str], env=None) -> int:
@@ -90,6 +85,11 @@ def run(argv: list[str], env=None) -> int:
                 print(f"ade-paseo-guard: only the operator overrides, naming the agent: {sg.ALLOW_ENV}=<its full id> resumes an "
                       f"archived one, {sg.ALLOW_REPLACED_ENV}=<its full id> sends to a replaced one that is still live; neither "
                       f"covers a cyclic ledger.", file=sys.stderr)
+                return EXIT_REFUSED
+            if d.action == sg.REDIRECT and d.target == (env.get("PASEO_AGENT_ID") or "").strip():
+                print(f"ade-paseo-guard: refused, nothing was sent: {target} was replaced by {d.target}, which is the caller itself; "
+                      f"a message to oneself would queue a spurious turn. Message the replaced agent only if you are the operator "
+                      f"({sg.ALLOW_REPLACED_ENV}=<its full id> sends to it while it is live).", file=sys.stderr)
                 return EXIT_REFUSED
             if d.action == sg.REDIRECT:
                 print(f"ade-paseo-guard: {target} was replaced by {d.target}; sending to {d.target}", file=sys.stderr)

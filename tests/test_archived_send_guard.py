@@ -172,6 +172,25 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"paseo --host=other send {A} hi", []),
     (f"paseo send --host=other {A} hi", []),
     (f"paseo send --image a.png {A} hi", [(A, None)]),
+    # global options after the verb and after `agent` too (adversary M1 on #696)
+    (f"paseo send -o json {A} hi", [(A, None)]),
+    (f"paseo send --format json {A} hi", [(A, None)]),
+    (f"paseo send -qo json {A} hi", [(A, None)]),
+    (f"paseo send -ojson {A} hi", [(A, None)]),
+    (f"paseo send --format=json {A} hi", [(A, None)]),
+    (f"paseo agent send -o json {A} hi", [(A, None)]),
+    (f"paseo agent --json send {A} hi", [(A, None)]),
+    (f"paseo agent -o json send {A} hi", [(A, None)]),
+    (f"paseo agent -q send {A}", [(A, None)]),
+    (f"paseo -qo json send {A} hi", [(A, None)]),
+    (f"paseo --json agent -qo json send -- {A} hi", [(A, None)]),
+    (f"paseo send {A} --json hi", [(A, None)]),
+    # an explicit daemon selector anywhere in option position is not judged (adversary L1)
+    (f"paseo send {A} --host vps:6767 hi", []),
+    (f"paseo send {A} hi --home=/x", []),
+    (f"paseo agent --host x send {A} hi", []),
+    (f"paseo agent send {A} --home /x hi", []),
+    (f"paseo send -- {A} --host vps:6767", [(A, None)]),  # after `--` it is message text
     (f"paseo send {A} ADE_ALLOW_ARCHIVED_SEND={A}", [(A, None)]),  # the override is not a word of the message
     (f"paseo send --json --no-wait \\\n  {A} --prompt hi", [(A, None)]),  # a line continuation
     (f"paseo \\\n send {A} hi", [(A, None)]),
@@ -520,12 +539,24 @@ def test_hook_replaced_override_needs_a_live_target_and_a_sound_ledger(world):
     assert "inconsistent" in denial(run_hook(world, "Bash", {"command": cmd}))
 
 
-def test_hook_replaced_override_reaches_the_backstop_form_too(world):
+def test_hook_backstop_never_takes_the_replaced_override_from_text(world):
+    """adversary L3 on #696: a non-exported assignment, or the variable named in the quoted message, is no override."""
     write_link(world.state, world.home, A, B)
     world.live(**{A: False, B: False})
-    cmd = f'ADE_ALLOW_REPLACED_SEND={A} LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'
-    assert run_hook(world, "Bash", {"command": cmd}) is None
-    assert "could not parse" in denial(run_hook(world, "Bash", {"command": f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'}))
+    for cmd in (f'ADE_ALLOW_REPLACED_SEND={A} LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done',
+                f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt "next time use ADE_ALLOW_REPLACED_SEND={A}"'):
+        assert "could not parse" in denial(run_hook(world, "Bash", {"command": cmd}))
+    found = gate.targets_in_command(f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt "use ADE_ALLOW_REPLACED_SEND={A}"')
+    assert gate.backstop_targets(f'LEAD={A}; paseo send --no-wait "$LEAD" --prompt x ADE_ALLOW_REPLACED_SEND={A}', found)[0].replaced is None
+
+
+def test_a_hook_override_use_is_logged_as_a_precheck(world, tmp_path):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    log = tmp_path / "log.jsonl"
+    env = {**world.env, guard.LOG_ENV: str(log)}
+    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"}, env=env) is None
+    assert json.loads(log.read_text())["source"] == "hook-precheck"
 
 
 def test_the_hook_ignores_a_replaced_override_exported_in_its_own_environment(world):

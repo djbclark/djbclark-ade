@@ -27,15 +27,16 @@ HELPER = ROOT / "bin" / "ade-paseo-guard"
 FAKE = """#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
-rec = {"argv": a}
+rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO")}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(rec) + "\\n")
 agents = json.load(open(os.environ["FAKE_AGENTS"]))
 if a[:2] == ["agent", "inspect"]:
-    if a[2] in agents:
-        print(json.dumps({"Id": a[2], "Archived": agents[a[2]]}))
+    hit = [k for k in agents if k == a[2]] or [k for k in agents if k.startswith(a[2])]  # an exact id, else a unique prefix
+    if len(hit) == 1:
+        print(json.dumps({"Id": hit[0], "Archived": agents[hit[0]]}))
         sys.exit(0)
     sys.stderr.write("Agent not found: %s\\n" % a[2:3])
     sys.exit(1)
@@ -61,9 +62,9 @@ def sw(world, tmp_path):  # noqa: F811
         world.env.pop(k, None)
     world.live()
 
-    def run(*args, env=None, input=None, shim=SHIM):
+    def run(*args, env=None, input=None, shim=SHIM, timeout=60):
         return subprocess.run([str(shim), *args], capture_output=True, text=True, env={**world.env, **(env or {})}, input=input,
-                              timeout=60, check=False)
+                              timeout=timeout, check=False)
 
     def calls():  # every recorded argv, in order
         return [json.loads(x)["argv"] for x in world.log.read_text().splitlines()] if world.log.exists() else []
@@ -80,7 +81,9 @@ def test_a_non_send_passes_through_untouched_with_argv_stdin_and_exit_code(sw):
     sw.live(**{A: True})
     p = sw.run("ls", "-a", "-g", "--json", "--stdin", env={"FAKE_RC": "7"}, input="piped text")
     assert p.returncode == 7 and p.stdout == "real paseo ran: ls -a -g --json --stdin\n"
-    assert [json.loads(x) for x in sw.log.read_text().splitlines()] == [{"argv": ["ls", "-a", "-g", "--json", "--stdin"], "stdin": "piped text"}]
+    rec = [json.loads(x) for x in sw.log.read_text().splitlines()]
+    assert [(r["argv"], r["stdin"]) for r in rec] == [(["ls", "-a", "-g", "--json", "--stdin"], "piped text")]
+    assert rec[0]["real_env"] == str(sw.bindir / "paseo")  # the shim names the real paseo to whatever it runs, also for a non-send
 
 
 def test_a_non_send_never_probes_and_needs_no_python(sw):
@@ -180,7 +183,7 @@ def test_a_send_without_a_target_passes(sw):
 
 def test_the_guard_reuses_the_hooks_parser_not_a_copy():
     text = HELPER.read_text()
-    assert "gate._target_index" in text and "gate.OTHER_DAEMON" in text and "\nVALUE_FLAGS" not in text and "\nOTHER_DAEMON" not in text
+    assert "gate.locate_send" in text and "GLOBAL_VALUE_FLAGS" not in text and "\nVALUE_FLAGS" not in text and "\nOTHER_DAEMON" not in text
 
 
 # --- the overrides ---------------------------------------------------------------------------------------------------
@@ -369,7 +372,7 @@ def test_the_probe_never_re_enters_the_shim(sw, tmp_path):
 
 def test_the_shim_is_executable_shell_and_the_helper_python():
     assert os.access(SHIM, os.X_OK) and os.access(HELPER, os.X_OK)
-    assert SHIM.read_text().startswith("#!/usr/bin/env bash") and HELPER.read_text().startswith("#!/usr/bin/env python3")
+    assert SHIM.read_text().startswith("#!/bin/sh\n") and HELPER.read_text().startswith("#!/usr/bin/env python3")
 
 
 # --- the motivating case -----------------------------------------------------------------------------------------------
@@ -428,3 +431,242 @@ def test_guard_returns_the_decision_even_when_the_log_cannot_be_written(sw, tmp_
     d = guard.guard(A, paseo=str(sw.bindir / "paseo"), env={guard.ALLOW_REPLACED_ENV: A}, log_path=blocker / "sub" / "log.jsonl")
     assert (d.action, d.target, d.replaced_by) == (guard.PASS, A, B)
     guard.log_override(d, blocker / "sub" / "log.jsonl")  # and the writer itself swallows the failure
+
+
+# === repair round 1 (adversary review of #696) ==========================================================================
+
+def checkout_copy(tmp_path, name):
+    """A second checkout's agent-bin: a copy of the shim whose `../../bin` is this checkout's helper."""
+    top = tmp_path / name
+    (top / "libexec" / "agent-bin").mkdir(parents=True)
+    shutil.copy(SHIM, top / "libexec" / "agent-bin" / "paseo")
+    (top / "bin").symlink_to(ROOT / "bin")
+    return top / "libexec" / "agent-bin"
+
+
+def load_helper():
+    loader = importlib.machinery.SourceFileLoader("ade_paseo_guard_under_test", str(HELPER))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+# M1: global options after the verb and after `agent` -------------------------------------------------------------------
+
+SEND_FORMS = [  # (argv template with {t} as the target word)
+    ["send", "-o", "json", "{t}", "hi"], ["send", "--format", "json", "{t}", "hi"], ["send", "-qo", "json", "{t}", "hi"],
+    ["send", "-ojson", "{t}", "hi"], ["send", "--format=json", "{t}", "hi"], ["agent", "send", "-o", "json", "{t}", "hi"],
+    ["agent", "--json", "send", "{t}", "hi"], ["agent", "-o", "json", "send", "{t}", "hi"], ["agent", "-q", "send", "{t}"],
+    ["-qo", "json", "send", "{t}", "hi"], ["--json", "agent", "-qo", "json", "send", "--", "{t}", "hi"], ["send", "{t}", "--json", "hi"],
+    ["send", "--no-wait", "--prompt", "ack", "-o", "json", "{t}"],
+]
+
+
+@pytest.mark.parametrize("form", SEND_FORMS, ids=lambda f: " ".join(f))
+def test_options_after_the_verb_and_after_agent_do_not_hide_the_target(sw, form):
+    write_link(sw.state, sw.home, A, B)
+    sw.live(**{A: True, B: False, C: True})
+    fill = lambda t: [t if w == "{t}" else w for w in form]  # noqa: E731
+    assert sw.run(*fill(C)).returncode == 4 and sw.sends() == []  # archived, nothing replaced it
+    p = sw.run(*fill(A))  # replaced: only the target word moves
+    assert p.returncode == 0 and sw.sends() == [fill(B)]
+
+
+# M2: two shim copies, a wrapper loop -------------------------------------------------------------------------------------
+
+def test_two_shim_copies_on_one_path_do_not_call_each_other(sw, tmp_path):
+    other = checkout_copy(tmp_path, "checkout-b")
+    sw.live(**{A: True, B: False})
+    for path in (f"{AGENT_BIN}:{other}:{sw.bindir}:/usr/bin:/bin", f"{other}:{AGENT_BIN}:{sw.bindir}:/usr/bin:/bin"):
+        sw.log.unlink(missing_ok=True)
+        p = sw.run("ls", env={"PATH": path}, timeout=20)
+        assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n", path
+        sw.log.unlink(missing_ok=True)
+        p = sw.run("send", A, "hi", env={"PATH": path}, timeout=20)  # the guard still runs, once
+        assert p.returncode == 4 and sw.sends() == []
+        p = sw.run("send", B, "hi", env={"PATH": path}, timeout=20)
+        assert p.returncode == 0 and sw.sends() == [["send", B, "hi"]]
+
+
+def test_a_symlink_to_the_shim_is_no_real_paseo_either(sw, tmp_path):
+    link = tmp_path / "links"
+    link.mkdir()
+    (link / "paseo").symlink_to(SHIM)
+    p = sw.run("ls", env={"PATH": f"{link}:{AGENT_BIN}:{sw.bindir}:/usr/bin:/bin"}, timeout=20)
+    assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n"
+
+
+def test_the_helper_skips_every_shim_copy_when_it_looks_for_the_real_paseo(sw, tmp_path):
+    other = checkout_copy(tmp_path, "checkout-b")
+    mod = load_helper()
+    assert mod.real_paseo({"PATH": f"{AGENT_BIN}:{other}:{sw.bindir}"}) == f"{sw.bindir}/paseo"
+    assert mod.real_paseo({"PATH": f"{AGENT_BIN}:{other}"}) is None
+    assert mod.real_paseo({"PATH": f"{sw.bindir}", "ADE_REAL_PASEO": str(other / "paseo")}) == f"{sw.bindir}/paseo"  # a shim is not named real
+    assert mod.is_shim(SHIM) and not mod.is_shim(sw.bindir / "paseo") and not mod.is_shim(tmp_path / "missing")
+
+
+def test_a_wrapper_that_runs_a_shim_again_stops_at_the_reentry_cap(sw, tmp_path):
+    wrapper = tmp_path / "wrapper" / "paseo"
+    wrapper.parent.mkdir()
+    wrapper.write_text(f'#!/bin/sh\nexec "{SHIM}" "$@"\n')
+    wrapper.chmod(0o755)
+    p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper)}, timeout=30)
+    assert p.returncode == 127 and "re-entered 9 times" in p.stderr and sw.calls() == []
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "not-a-number"}, timeout=30)  # junk counts as zero
+    assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n"
+
+
+# M3: BASH_ENV, which the fixture drops, is put back on purpose ------------------------------------------------------------
+
+BASH_SEND = "paseo send --no-wait -- {t} hi"
+
+
+def bash_env_world(sw, tmp_path):
+    """The operator's situation: a BASH_ENV startup file that puts a directory with another `paseo` ahead of PATH."""
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "paseo").write_text('#!/bin/sh\necho "decoy paseo ran: $*"\n')
+    (decoy / "paseo").chmod(0o755)
+    rc = tmp_path / "bashrc"
+    rc.write_text(f'PATH="{decoy}:$PATH"\nexport PATH\n')
+    return rc
+
+
+def test_a_bash_child_whose_startup_file_rewrites_path_is_not_guarded_which_the_docs_say(sw, tmp_path):
+    """The limit of the PR's claim, as a test: with BASH_ENV putting another paseo first, `bash -c 'paseo send X'` reaches it."""
+    rc = bash_env_world(sw, tmp_path)
+    sw.live(**{A: True})
+    env = {**sw.env, "PATH": f"{AGENT_BIN}:{sw.bindir}:{os.environ['PATH']}", "BASH_ENV": str(rc)}
+    p = subprocess.run(["bash", "-c", BASH_SEND.format(t=A)], capture_output=True, text=True, env=env, timeout=30, check=False)
+    assert p.returncode == 0 and "decoy paseo ran" in p.stdout and sw.calls() == []  # unguarded
+    # the same bash without the startup file, and a Python child with it, are guarded
+    for argv, e in ((["bash", "-c", BASH_SEND.format(t=A)], {k: v for k, v in env.items() if k != "BASH_ENV"}),
+                    ([sys.executable, "-c", f'import subprocess; raise SystemExit(subprocess.run(["paseo","send","--",{A!r},"hi"]).returncode)'], env)):
+        p = subprocess.run(argv, capture_output=True, text=True, env=e, timeout=30, check=False)
+        assert p.returncode == 4 and sw.sends() == [], argv
+
+
+def test_calling_the_shim_by_its_path_is_guarded_even_when_the_startup_file_reorders_path(sw, tmp_path):
+    """The workaround the docs give: `<checkout>/libexec/agent-bin/paseo send ...` needs no PATH. Here the startup file puts the real
+    paseo (as ~/.local/bin/paseo is on the operator's Mac) first: the shim, run by its path, still judges and then runs it."""
+    rc = tmp_path / "bashrc"
+    rc.write_text(f'PATH="{sw.bindir}:$PATH"\nexport PATH\n')
+    sw.live(**{A: True})
+    env = {**sw.env, "BASH_ENV": str(rc)}
+    p = subprocess.run(["bash", "-c", f'"{SHIM}" send --no-wait -- {A} hi'], capture_output=True, text=True, env=env, timeout=30, check=False)
+    assert p.returncode == 4 and sw.sends() == []
+
+
+# L1: a daemon selector after the target --------------------------------------------------------------------------------------
+
+def test_a_daemon_selector_after_the_target_is_not_judged_and_the_word_is_not_rewritten(sw):
+    write_link(sw.state, sw.home, A, B)
+    sw.live(**{A: True, B: False})
+    for argv in (["send", A, "--host", "vps:6767", "hi"], ["send", A, "hi", "--home=/x"], ["agent", "--host", "x", "send", A, "hi"]):
+        sw.log.unlink(missing_ok=True)
+        assert sw.run(*argv).returncode == 0 and sw.calls() == [argv]  # not redirected, not refused, no inspect
+    sw.log.unlink(missing_ok=True)
+    assert sw.run("send", "--", A, "--host", "x").returncode == 0 and sw.sends() == [["send", "--", B, "--host", "x"]]  # after `--` it is text
+
+
+# L2: a redirect to the caller itself -----------------------------------------------------------------------------------------
+
+def test_a_redirect_to_the_caller_itself_is_refused(sw):
+    write_link(sw.state, sw.home, A, B)
+    sw.live(**{A: True, B: False})
+    p = sw.run("send", A, "goodbye", env={"PASEO_AGENT_ID": B})
+    assert p.returncode == 4 and sw.sends() == [] and "the caller itself" in p.stderr
+    p = sw.run("send", A, "hi", env={"PASEO_AGENT_ID": C})  # someone else: redirected as before
+    assert p.returncode == 0 and sw.sends() == [["send", B, "hi"]]
+    sw.log.unlink()
+    assert sw.run("send", B, "hi", env={"PASEO_AGENT_ID": B}).returncode == 0  # a send to a live target is no redirect
+
+
+# L4/L5: the override log -------------------------------------------------------------------------------------------------
+
+def test_a_use_logged_at_the_shim_says_it_was_sent_and_several_uses_append(sw):
+    write_link(sw.state, sw.home, A, B)
+    sw.live(**{A: False, B: False})
+    for _ in range(2):
+        assert sw.run("send", A, "hi", env={guard.ALLOW_REPLACED_ENV: A}).returncode == 0
+    lines = [json.loads(x) for x in sw.override_log.read_text().splitlines()]
+    assert len(lines) == 2 and {x["source"] for x in lines} == {"send"}
+    assert all(x["ppid"] == os.getpid() for x in lines)  # the caller: this test process
+
+
+def test_a_log_path_that_is_a_symlink_or_a_fifo_is_never_written_through_or_waited_on(tmp_path):
+    d = guard.Decision(guard.PASS, A, "x", replaced_by=B)
+    target = tmp_path / "victim"
+    target.write_text("keep\n")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(target)
+    guard.log_override(d, link)
+    assert target.read_text() == "keep\n"
+    fifo = tmp_path / "fifo.jsonl"
+    os.mkfifo(fifo)
+    proc = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import ade_send_guard as g; "
+                           "g.log_override(g.Decision('pass', 'a', '', replaced_by='b'), sys.argv[2])", str(ROOT / "bin"), str(fifo)],
+                          capture_output=True, text=True, timeout=20, check=False)  # a blocking open would time out
+    assert proc.returncode == 0
+
+
+# L6 and the surviving mutants of the review (L9) --------------------------------------------------------------------------------
+
+def test_ADE_REAL_PASEO_naming_a_directory_or_the_shim_is_ignored(sw, tmp_path):
+    sw.live(**{A: False})
+    for bad in (str(tmp_path), str(SHIM), str(tmp_path / "missing")):
+        sw.log.unlink(missing_ok=True)  # a non-send is decided by the shim alone, a send by the helper too: both fall back to PATH
+        p = sw.run("ls", env={"ADE_REAL_PASEO": bad}, timeout=20)
+        assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n", bad
+        sw.log.unlink(missing_ok=True)
+        p = sw.run("send", A, "hi", env={"ADE_REAL_PASEO": bad}, timeout=20)
+        assert p.returncode == 0 and sw.sends() == [["send", A, "hi"]], bad
+
+
+def test_a_directory_named_paseo_earlier_on_path_is_no_candidate(sw, tmp_path):
+    (tmp_path / "dirs" / "paseo").mkdir(parents=True)
+    p = sw.run("ls", env={"PATH": f"{tmp_path / 'dirs'}:{AGENT_BIN}:{sw.bindir}:/usr/bin:/bin"}, timeout=20)
+    assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n"
+
+
+def test_a_prefix_target_needs_the_full_id_as_the_override(sw):
+    write_link(sw.state, sw.home, A, B)
+    sw.live(**{A: False, B: False})
+    pre = A[:8]
+    assert sw.run("send", pre, "hi", env={guard.ALLOW_REPLACED_ENV: pre}).returncode == 0
+    assert sw.sends() == [["send", B, "hi"]]  # a prefix is no override, even for a prefix target
+    sw.log.unlink()
+    assert sw.run("send", pre, "hi", env={guard.ALLOW_REPLACED_ENV: A}).returncode == 0
+    assert sw.sends() == [["send", pre, "hi"]]  # the full id covers a send that names the agent by prefix
+
+
+def test_the_shim_found_through_a_symlink_still_finds_its_helper(sw, tmp_path):
+    absolute = tmp_path / "abs" / "paseo"
+    absolute.parent.mkdir()
+    absolute.symlink_to(SHIM)
+    relative = tmp_path / "rel" / "bin" / "paseo"
+    relative.parent.mkdir(parents=True)
+    relative.symlink_to(os.path.relpath(SHIM, relative.parent))
+    sw.live(**{A: True})
+    for link in (absolute, relative):
+        p = sw.run("send", A, "hi", shim=link, env={"PATH": f"{link.parent}:{sw.bindir}:/usr/bin:/bin"}, timeout=20)
+        assert p.returncode == 4 and "unguarded" not in p.stderr, link
+
+
+def test_python_environment_variables_do_not_reach_the_helper(sw, tmp_path):
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    marker = tmp_path / "marker"
+    (evil / "shlex.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    sw.live(**{A: True})
+    p = sw.run("send", A, "hi", env={"PYTHONPATH": str(evil)}, timeout=30)
+    assert p.returncode == 4 and not marker.exists()
+
+
+def test_the_shim_itself_reads_no_startup_file(sw, tmp_path):
+    """It runs under /bin/sh: a BASH_ENV (the operator's ~/.bashrc) must not rewrite the PATH the shim walks (found while repairing M3)."""
+    marker = tmp_path / "sourced"
+    rc = tmp_path / "rc"
+    rc.write_text(f"echo x > {marker}\n")
+    p = sw.run("ls", env={"BASH_ENV": str(rc), "ENV": str(rc)}, timeout=30)
+    assert p.returncode == 0 and not marker.exists()

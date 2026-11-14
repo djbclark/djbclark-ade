@@ -23,8 +23,10 @@ import shlex
 import sys
 
 BIN = Path(__file__).resolve().parent.parent.parent / "bin"
-VALUE_FLAGS = {"--prompt", "--prompt-file", "--image", "--behavior"}  # the value options of `paseo send`
-OTHER_DAEMON = {"--host", "--home"}  # another daemon: its agents are not in this ledger, so not judged
+VALUE_FLAGS = {"--prompt", "--prompt-file", "--image", "--behavior", "-o", "--format"}  # the value options of `paseo send`; Paseo's
+# program options (-o/--format, --json, -q, --no-headers, --no-color, --host, --home) are accepted before AND after the verb, and `agent`
+# takes them before its own `send` too (adversary r1 on #696)
+OTHER_DAEMON = {"--host", "--home"}  # an explicit daemon selector: not judged (it may name the local daemon or another; the ledger is not consulted)
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 MCP_ID_KEYS = ("agentId", "agent_id", "id", "target")
 ALLOW_VAR = "ADE_ALLOW_ARCHIVED_SEND"
@@ -262,16 +264,12 @@ def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
     for i, w in enumerate(words):
         if Path(w).name != "paseo":
             continue
-        rest = words[i + 1:]
-        while rest and rest[0].startswith("-"):  # a global option before the verb: paseo --json send, paseo -o json send
-            if rest[0] in OTHER_DAEMON or rest[0].startswith(("--host=", "--home=")):
-                return found
-            rest = rest[2:] if rest[0] in {"-o", "--format"} else rest[1:]
-        if rest[:1] == ["agent"]:
-            rest = rest[1:]
-        if rest[:1] != ["send"]:
+        kind, j = locate_send(words[i + 1:])
+        if kind == "other":
+            return found
+        if kind != "send":
             continue
-        target = _target(rest[1:])
+        target = words[i + 1 + j] if j is not None else None
         if target:  # an override counts only as an assignment before the command, never as a word of the message
             allow = next((x.split("=", 1)[1] for x in words[:i] if x.startswith(ALLOW_VAR + "=")), None)
             replaced = next((x.split("=", 1)[1] for x in words[:i] if x.startswith(REPLACED_VAR + "=")), None)
@@ -280,23 +278,67 @@ def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
     return found
 
 
-def _target_index(args: list[str]) -> int | None:
-    """Where the agent word of `paseo send` arguments is: skip the value flags; the first word after `--`; None when another
-    daemon is addressed (--host/--home) or nothing is found."""
-    j = 0
+def _takes_value(word: str) -> bool:
+    """`-o` or a short-option cluster that ends in it (`-qo`): the next word is its value. `-ojson` carries its value."""
+    return re.fullmatch(r"-[A-Za-z]*o", word) is not None
+
+
+def _daemon_option(word: str) -> bool:
+    return word in OTHER_DAEMON or word.startswith(("--host=", "--home="))
+
+
+def _scan(args: list[str]) -> tuple[int | None, bool]:
+    """(index of the agent word, whether a daemon selector was seen) in the arguments after `send`. Value options are skipped with
+    their values; the first word after `--` is the agent when none came before it and the rest is message text. The whole option
+    list is read, so `send A --host X` is seen too (an option word after the agent is still an option to Paseo)."""
+    target, j = None, 0
     while j < len(args):
         a = args[j]
-        if a in OTHER_DAEMON or a.startswith(("--host=", "--home=")):
-            return None
+        if _daemon_option(a):
+            return None, True
         if a == "--":
-            return j + 1 if j + 1 < len(args) else None
-        if a in VALUE_FLAGS:
+            if target is None and j + 1 < len(args):
+                target = j + 1
+            break
+        if a in VALUE_FLAGS or _takes_value(a):
             j += 2
-        elif a.startswith("-"):
-            j += 1
         else:
-            return j
-    return None
+            if not a.startswith("-") and target is None:
+                target = j
+            j += 1
+    return target, False
+
+
+def _target_index(args: list[str]) -> int | None:
+    """Where the agent word of `paseo send` arguments is; None when a daemon selector is present or nothing is found."""
+    target, other = _scan(args)
+    return None if other else target
+
+
+def locate_send(args: list[str]) -> tuple[str, int | None]:
+    """Classify the arguments that follow the word `paseo`: ("send", index of the agent word or None), ("other", None) for an
+    explicit daemon selector, ("none", None) for anything else. Global options may stand before `agent`, between `agent` and
+    `send`, and after `send`: `paseo -o json send A`, `paseo agent --json send A`, `paseo agent -q send A`."""
+    i, agent = 0, False
+    while i < len(args):
+        a = args[i]
+        if _daemon_option(a):
+            return "other", None
+        if a == "send":
+            break
+        if a == "agent" and not agent:
+            agent = True
+            i += 1
+        elif a.startswith("-"):
+            i += 2 if (_takes_value(a) or a == "--format") else 1
+        else:
+            return "none", None
+    else:
+        return "none", None
+    j, other = _scan(args[i + 1:])
+    if other:
+        return "other", None
+    return "send", None if j is None else i + 1 + j
 
 
 def _target(args: list[str]) -> str | None:
@@ -326,7 +368,7 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     out: list[tuple[str, str | None]] = []
     for u in dict.fromkeys(UUID.findall(bare)):
         if u not in seen and len(out) < 5:
-            out.append(Hit(u, u if f"{ALLOW_VAR}={u}" in text else None, u if f"{REPLACED_VAR}={u}" in text else None))
+            out.append(Hit(u, u if f"{ALLOW_VAR}={u}" in text else None))  # never ADE_ALLOW_REPLACED_SEND: this is text of a form the parser could not follow (adversary L3)
     return out
 
 
@@ -338,7 +380,7 @@ def judge(target: str, allow: str | None, backstop: bool = False, replaced: str 
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
     env = {k: v for k, v in ((guard.ALLOW_ENV, allow), (guard.ALLOW_REPLACED_ENV, replaced)) if v}
-    d = guard.guard(target, env=env)
+    d = guard.guard(target, env=env, source="hook-precheck")
     if d.action not in (guard.REDIRECT, guard.REFUSE):
         return None
     if backstop:
