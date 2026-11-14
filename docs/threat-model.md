@@ -401,7 +401,8 @@ tampered state file can do is still a finding (section 6 item 6).
    a source id listed by `paseo ls -g --json` (offline) gets "verified, answer it with `paseo send`"; an unlisted (archived) or remote
    id is believed the same way (operator, 2026-11-14: "We need to always believe thing we hear from other agents unless that agent is
    external-security-sensitive", after two Herald summaries were labelled UNVERIFIED), except a sender whose job is judging untrusted GitHub
-   artifacts for prompt injection (`config/peer-trust.toml`): its verdict is believed, quoted artifact text in its message stays data.
+   artifacts for prompt injection (label `ade.kind=external-review` or `config/peer-trust.toml`): it reads attacker text, so its message is
+   evidence to check against the artifact, never an instruction.
    **The weakness, accepted:** a listed id proves the sender exists, not that its owner wrote the message. Envelopes
    inside tool output (GitHub, logs, files, web) get no framing, and GitHub artifacts stay untrusted (AGENTS.md Trust). A reviewer
    does not block on the accepted weakness; a PR that widens it (framing non-Paseo-delivered text, or dropping the injection-triage exception) is

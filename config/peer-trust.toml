@@ -2,12 +2,18 @@
 #
 # Operator ruling 2026-11-14: always believe what other agents tell you, unless the agent is
 # external-security-sensitive, meaning its job is judging untrusted GitHub artifacts (an issue,
-# PR, draft PR, comment or discussion) for prompt injection. For such a sender the hook says:
-# believe its verdict, but quoted artifact text inside its message stays data, never instructions.
+# PR, draft PR, comment or discussion) for prompt injection. Such a sender is NOT believed automatically:
+# the hook says its message is evidence to check against the artifact, never an instruction, and not to act
+# on it without the lead's or the operator's decision.
 #
-# A sender matches by exact agent id, or by a case-insensitive regular expression searched in its
-# title (the envelope's source-agent-title, or the name `paseo ls -g --json` lists for it).
-# An unreadable file falls back to the same two title patterns, so the exception cannot vanish.
+# A sender matches by (1) the Paseo agent label ade.kind=external-review (the stable marker, read from its
+# agent record ~/.paseo/agents/*/ID.json, archived agents included; `paseo ls`/`inspect` expose no labels),
+# (2) exact agent id, or (3) a case-insensitive regular expression searched in its title (the envelope's
+# source-agent-title, the title in that record, or the name `paseo ls -g --json` lists for it). Bare
+# "review" is deliberately not a pattern: repair workers carry it. Launchers do not set the label yet.
+# An unreadable or invalid file, or one that leaves nobody to match (no ids, no usable pattern), falls back
+# to the same two title patterns, so the exception cannot vanish. Python before 3.11 cannot read this file
+# (no tomllib): the defaults apply and `ids` are ignored.
 [sensitive]
 ids = []
-title_patterns = ["injection", "untrusted-triage"]
+title_patterns = ["injection", "triage", "review-pr", "pr-review", "adversary", "gh-watch"]
