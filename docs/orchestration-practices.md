@@ -11,9 +11,8 @@ with `paseo send --json`. Query `paseo provider ls --json` for the live registry
 general-purpose third-party TUI; required monthly-plan vendor clients and the Hermes exception remain. Archived
 omp/OpenCode clients are not dispatch targets or fallbacks. `skills/fan-out` is the how-to.
 
-`bin/acp-dispatch`, `skills/session-finder/relay.py` and `tools/acp-run` are transitional Wave 6 shims over those native
-commands (soft deletion deadline 2026-11-20; [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)). Do not start new
-call sites on them; do not invent shim flags.
+The Wave 6 shims (`bin/acp-dispatch`, `skills/session-finder/relay.py`, `tools/acp-run`) were deleted 2026-11-14
+([docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)); use the native commands above, never an invented shim flag.
 
 **Permission mode (2026-11-12):** every ordinary launch, child and trusted internal
 review uses catalog-backed unattended permissions. Explicit operator restrictions
@@ -104,9 +103,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
    `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
-   or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). While `acp-dispatch` still exists,
-   `acp-dispatch footer --report PATH` can print a filled copy for prompts only — it is not a launch path and goes with
-   the Wave 6 shim deletion.
+   or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). The Agent-tool footer hook
+   (`claude/hooks/agent_footer_gate.py`) fills it; `bin/ade-worker-run` appends one pointer line to the brief.
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
 and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
@@ -116,7 +114,7 @@ run. With a caller, its verified inspect snapshot must expose a workspace id; mi
 caller requires explicit `--workspace`. Only a run without `PASEO_AGENT_ID` may fall back to `PASEO_WORKSPACE_ID`.
 Native Paseo 0.15.3 `inspect --json` omitted workspace identity when checked on 2026-11-08, so agent-origin
 launches on that CLI need `--workspace`. Mint a workspace only with native `paseo workspace create` or
-`paseo run --new-workspace` (never via the transitional `acp-dispatch` shim). A lead's first launch of a run has no
+`paseo run --new-workspace` (there is no dispatch shim since 2026-11-14). A lead's first launch of a run has no
 WORKERS window yet: `--new-workspace local --cwd DIR` (DIR the repo's primary checkout), check the returned `cwd`, then name
 the window `WORKERS <repo> (<work>)` and reuse it for every later launch; each tab is `worker <slice> <lead agent
 id>` (operator rulings 2026-11-13, `docs/workspace-layout.md`, `skills/fan-out` section 3; `bin/ade-worker-run` does it). Parent links
@@ -157,9 +155,9 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
 3. **One level of delegation.** Workers launch no agents; only the
    orchestrator dispatches.⁵
 4. **Every dispatch passes the load gate before it starts** (`load-watch admit --wait N`, default
-   1800 s, exit 75 when the machine is still too hot; operator 2026-10-19), then its frontier, in-flight and per-wave
-   checks, which parallel launches re-check under a lock after writing their record. The gate only decides whether to
-   *start*: it never kills, throttles or slows running work. A gate that has refused a waiting `--wait` call for 5 minutes on soft gates only lets it through, at most one forced admit per 2 minutes machine-wide; swap-ins, churn over the hard line, free memory under 300 MB and load over the boost line never yield (2026-11-14, `bin/load-watch` docstring). acp-dispatch scrubs `LW_*` from admit's environment, so `LW_STARVE_SOFT_S`, `LW_STARVE_MIN_GAP_S`, `LW_MAX_SWAPINS_S` and `LW_SWAPINS_CORROBORATED_S` do not reach a dispatch (it runs the defaults, valve on, and cannot be switched off by env; the shim goes 2026-11-20); they apply to a hand-run `admit --wait S`.
+   1800 s, exit 75 when the machine is still too hot; operator 2026-10-19). Since 2026-11-14 no code enforces this: it is an instruction to the launcher, and the
+   frontier, in-flight and per-wave checks that acp-dispatch ran under a lock went with the shim. The gate only decides whether to
+   *start*: it never kills, throttles or slows running work. A gate that has refused a waiting `--wait` call for 5 minutes on soft gates only lets it through, at most one forced admit per 2 minutes machine-wide; swap-ins, churn over the hard line, free memory under 300 MB and load over the boost line never yield (2026-11-14, `bin/load-watch` docstring). `LW_STARVE_SOFT_S`, `LW_STARVE_MIN_GAP_S`, `LW_MAX_SWAPINS_S` and `LW_SWAPINS_CORROBORATED_S` are read from the environment of the `admit --wait S` call itself; a caller that scrubs them gets the defaults (valve on).
 5. **Plan with the load in mind** (load watcher, 2026-10-23, after load reached 42-62 on 8 cores with swap at 90%
    from three concurrent local pytest runs plus three dispatches): check `load-watch admit --json` before a large
    fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new
@@ -181,7 +179,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    classification codes: 0 report delivered and ending in `DONE`; 1 report present but unfinished, or still running;
    2 usage or a refused launch; 3 no report; 4 `BLOCKED` (or a pending permission); 5 pool unavailable before launch,
    re-plan; 75 machine too hot (`load-watch admit`), nothing launched; 77 review-launch's tripwire; 124 timed out
-   waiting. Exit 0 is still not success: verify the diff, the tests and the report's content. Do not assume a shim
+   waiting. Exit 0 is still not success: verify the diff, the tests and the report's content. Do not assume a launcher
    exit code — implement the classification by reading the artifacts.
 2. **Three attempts per slice, then stop and report.** The first run plus two
    re-routes. A slice stuck on the same error after that goes to the operator
@@ -251,8 +249,8 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    `--no-wait` (without it a send to a busy peer blocked over nine minutes, 2026-11-08). Always ask on first contact;
    read your own inbox for it; re-send when none arrives; report a peer you cannot reach to the operator.
 4. A reply written in your own turn reaches nobody: answer a peer by sending to it. A slice's channel back is its
-   report file; a mid-run nudge is `paseo send --json --no-wait <id> --prompt '…'` (plus the ack ask), not a shim
-   `tell` subcommand.
+   report file; a mid-run nudge is `paseo send --json --no-wait <id> --prompt '…'` (plus the ack ask), not a launcher
+   subcommand.
 
 5. **Push on completion (2026-11-09).** A delegated slice, once its report is finished and `.done` is touched, tells
    its requester with `paseo send --json --no-wait` (never relay): two lines, `done: <title>, <PR URL>` (or
@@ -305,8 +303,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    ex-lead 994234ba was resurrected twice by other repos' leads). A handoff can still land between the inspect and the
    send; if it does, tell the successor (it re-archives the ex-lead) and re-send to it.
 
-The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
-do not add new call sites.
+The session-finder relay shim (`relay.py`) was deleted 2026-11-14: send with `paseo send`.
 
 ## 5b. Unattended issue → PR (from `docs/history/coding-factory.md`, 2026-09-21)
 
@@ -342,8 +339,7 @@ its body (AGENTS.md, Trust).
 ## 7. Measure, or the savings are a guess
 
 1. Log, per slice: kind, vendor, model, tokens or cost (`paseo usage ls --json`, the provider's usage), attempts, and
-   whether the diff passed review unchanged. Write the calibrate row yourself (or keep reading bigteam `outcome`
-   records while the transitional shim's `outcome` subcommand still exists).
+   whether the diff passed review unchanged. Write the calibrate row yourself (the old shim's `outcome` subcommand is gone).
 2. Re-read that log before changing a capability profile in
    `route_agent.py`; a profile change without evidence is a guess.
 3. The cost math in source 1 is modelled, not measured; use your own before

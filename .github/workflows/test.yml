@@ -47,7 +47,7 @@ jobs:
         run: brew install coreutils findutils gnu-sed grep gawk
 
       - name: Run the test suite
-        run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+        run: uv run --with pytest --with pyyaml python -m pytest tests/ -q
 
   pytest-linux:
     if: ${{ github.event.inputs.context_only != 'true' }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Run the test suite
         if: steps.suite.outputs.needed == 'true'
-        run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+        run: uv run --with pytest --with pyyaml python -m pytest tests/ -q
 
       - name: Skipped full suite (prose/docs-only)
         if: steps.suite.outputs.needed != 'true'
@@ -163,7 +163,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Go policy, native compaction and Claude nudges
         run: >-
-          uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0'
+          uv run --with pytest --with pyyaml
           python -m pytest tests/test_go_model_policy.py tests/test_go_context_plugin.py
           claude/hooks/handoff-tools/tests/test_context_size_nudge.py
           tests/test_instruction_lint.py -q

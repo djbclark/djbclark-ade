@@ -82,8 +82,7 @@ Project-scope-resolved output directory for this target repo (e.g. `ls
 ~/ops/site-private/memory/handoffs/<repo>/` or `ls
 <repo-root>/docs/handoffs/`).
 
-**Also list this session's open background jobs** (the dispatch shim's job records; `~/.local/state/bigteam/`
-is still its state directory). A record is open when it has no `"closed"` key and its `owner` is
+**Also list this session's open background jobs** (old dispatch-shim job records in `~/.local/state/bigteam/`; the shim was deleted 2026-11-14, so only leftovers remain). A record is open when it has no `"closed"` key and its `owner` is
 this session (`me` below: the shared resolver, because a successor inherits its predecessor's `$CLAUDE_CODE_SESSION_ID`):
 
 ```bash

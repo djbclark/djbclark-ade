@@ -17,9 +17,6 @@ for _var in ("TMPDIR", "TEMP", "TMP"):
         del os.environ[_var]
 tempfile.tempdir = None
 
-# acp-dispatch's load gate (`load-watch admit`, 2026-10-19) waits up to 30 min on a hot host and refuses with 75.
-# Tests must not depend on the host's load: test_acp_dispatch.py turns it on per test with a fake load-watch.
-os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "0" must not turn the real 30-min gate on
 # bin/ade_sched.py (bin/ade-sched, 2026-11-04) installs jobs on launchd, systemd or cron. No test may touch the real ones:
 # every scheduler binary is a no-op and the agent/unit dirs and the crontab lock live in a throwaway directory.
 # Unconditional: an outer value must not point the suite at a real scheduler or ~/.config/systemd/user.
@@ -60,7 +57,7 @@ os.environ.setdefault("ROUTE_AGENT_PASEO", "off")
 _DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-links-"))
 atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
 os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
-# `load-watch admit --wait` and acp-dispatch-wait register their own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
+# `load-watch admit --wait` registers its own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
 # An existing test that runs one of them must neither write the real ~/.local/state/deadlines nor see an extra supervising process: a SET (empty)
 # DEADLINE_NAME is the documented "already under a deadline" signal. test_deadline_wrappers.py unsets it per test, with its own state dir.
 os.environ["DEADLINE_NAME"] = ""

@@ -15,14 +15,12 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
    `--new-workspace worktree`. Which provider, model and effort: `bin/route_agent.py plan`, [`model-routing`](skills/model-routing/SKILL.md).
 3. **Answer**: `paseo permit ls` lists pending permission cards; the asks / questions-please plugins (installed at the final merge) are the
    operator's inbox. Agents message each other with `paseo send --json` (positional id + message / `--prompt`; ask for
-   `ack <your id>` and prove the return path). The one-cycle shim `skills/session-finder/relay.py` remains until Wave 6
-   deletion (soft deadline 2026-11-20; [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md)) — do not start new
-   call sites on it.
+   `ack <your id>` and prove the return path). The one-cycle relay shim and the `acp-dispatch` / `acp-run` shims were deleted 2026-11-14
+   ([docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md)).
 4. **Carry**: [`handoff`](skills/handoff/SKILL.md) (Tier 2 document), [`session-handoff`](skills/session-handoff/SKILL.md)
    (Tier 1 pointer), [`baton`](skills/baton/SKILL.md) (`/resume`); [`loose`](skills/loose/SKILL.md) and [`steps`](skills/steps/SKILL.md) walk what is open.
 5. **Fan out**: [`fan-out`](skills/fan-out/SKILL.md): the Agent tool or a Workflow in process; `paseo run --no-wait` for a
    slice in its own worktree; `paseo wait` to collect. Rules: [docs/orchestration-practices.md](docs/orchestration-practices.md).
-   `bin/acp-dispatch` is a transitional `paseo run` shim scheduled for the same Wave 6 deletion — not the default launch path.
 
 ## Layout
 
@@ -33,7 +31,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 | `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
 | `agents/<tui>/*.tmpl` | live Claude, Codex and Hermes config templates (opencode tmpl is residual packaging); secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
 | `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
-| `tools/acp-run/`, `opencode-plugins/`, `omp/` | transitional ACP client (removed with `acp-dispatch` in Wave 6 deletion); OpenCode plugins; omp's commands — Pi is the sole 3rd-party TUI policy ([docs/tui-security-and-pi-migration.md](docs/tui-security-and-pi-migration.md)) |
+| `opencode-plugins/`, `omp/` | OpenCode plugins; omp's commands — Pi is the sole 3rd-party TUI policy ([docs/tui-security-and-pi-migration.md](docs/tui-security-and-pi-migration.md)) |
 | `docs/` | AGENTS.md lists the live docs; `docs/history/` holds retired designs and records, `docs/slim/` the slim-down's plan and log |
 | `changelog.d/`, `graft/` | one changelog fragment per PR (review rule 10); the generated context graph (`graft build`) |
 

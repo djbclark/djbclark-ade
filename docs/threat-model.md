@@ -16,7 +16,7 @@ tool describes the surface as it was.
   `bin/web-get`, `bin/ade-scan-state`, `bin/pr-wait`, `bin/local-review`, the quota guard and fleet governor, the
   watch family, session-finder's launcher and fleet, the pi subagent extension, and every retired TUI's adapter.
 * **Entry points today**: (a) native `paseo run` (live ops; the launch line from `route_agent.py` `Choice.dispatch`,
-  which for Pi is `paseo run --provider pi/… --no-wait`) behind `load-watch admit` and the frontier allowance; (b)
+  which for Pi is `paseo run --provider pi/… --no-wait`) behind `load-watch admit` (a caller instruction since 2026-11-14, not code) and the frontier allowance; (b)
   native `paseo send --json` for agent-to-agent messages (standing order 10; ask for `ack <your id>`); (c)
   `bin/review-launch` and `bin/review-pr`, the only way a review model is launched: read-only tools confined to a
   clean worktree at the exact head, no MCP, no hooks, secret paths denied, a tripwire (exit 77) on the first step
@@ -25,11 +25,9 @@ tool describes the surface as it was.
   status with the `ade-merge-gate` App's token (4.3); (e) `bin/load-watch`, `bin/deadline` and `bin/pr-policy`, the
   remaining launchd jobs (`launchd/com.djbclark.load-watch.plist`, `config/launchd/com.djbclark.deadline-sweep.plist`,
   `config/launchd/com.djbclark.pr-policy.plist`, plus the herdr server's plist for the installed bridges).
-* **Transitional shims (until ~2026-11-20 Wave 6 deletion)**: `bin/acp-dispatch` (over `paseo run`, or
-  `bin/review-launch` for a restricted Claude run), `skills/session-finder/relay.py` (over `paseo send --json`; Paseo
-  agents only, no anonymous send, fails closed on `paseo agent inspect`), and `tools/acp-run` beside the dispatch
-  shim. They keep one-cycle callers working; they are **not** the default launch or messaging path. Soft deadline
-  ~2026-11-20 (`tests/test_relay_shim.py::test_the_shim_is_removed_by_2026_11_20`; AGENTS.md "Two shims").
+* **No shims (deleted 2026-11-14, Wave 6 follow-up)**: `bin/acp-dispatch`, `skills/session-finder/relay.py` and `tools/acp-run`
+  are gone; live launches are native `paseo run` / `bin/ade-worker-run` (or `bin/review-launch` for a restricted Claude
+  run) and messages are native `paseo send --json`.
 * **TUI policy (2026-11-08)**: Pi is the sole general-purpose third-party TUI; required monthly-plan vendor clients
   and Hermes remain. Archived omp/OpenCode clients are not live launch targets or fallbacks
   (`docs/tui-security-and-pi-migration.md`).
@@ -61,38 +59,32 @@ What an attacker would want, in order of damage:
    (`~/src/sudo-secretspec/skills/sudo-secretspec/SKILL.md`, Pitfalls; the skill lives in the sudo-secretspec repo, unlinked from this one 2026-11-06); `run` injects them into a child.
 2. **Code execution as the operator.** (2026-10-20 snapshot; since 2026-11-06 agents run as Paseo agents in their
    provider's mode, `--perm` best effort outside `bin/review-launch`.) Live launches are `paseo run` (or
-   `Choice.dispatch` → for Pi, native `paseo run --provider pi/…`). The transitional `tools/acp-run` path (until
-   ~2026-11-20) ran every agent yolo by default (all tool calls auto-approved, operator 2026-10-14); `--perm
-   read-only` restricts an agent to non-mutating tools, or refuses an agent without a verified equivalent, and
-   `--perm deny` gates every call except, for agy, the read-only `read` and `search` kinds that `bin/failover.py`
-   once passed as `--tripwire-exempt-kinds` (so an agy deny run can still read data; `tools/acp-run/README.md`
-   Permissions; `failover.py` itself was deleted 2026-11-06). Both perm modes are reserved for a
-   security-sensitive slice (4.1). The proposal says an unattended builder has the daemon user's credentials and
+   `Choice.dispatch` → for Pi, native `paseo run --provider pi/…`). The deleted `tools/acp-run` path (gone 2026-11-14) ran every agent yolo by default (operator 2026-10-14); its `--perm
+   read-only` / `--perm deny` modes went with it, and `bin/review-launch` is the restricted-Claude path now (4.1). The proposal says an unattended builder has the daemon user's credentials and
    that scrubbed pastures and config stripping are reliability switches, not a boundary (proposal 10, risk 12).
 3. **GitHub write access** through the operator's `gh` login: push to this public repo, open and merge
    PRs. Merged code is code the operator's machine then runs (4.6).
 4. **Cloud-agent credentials and spend**: `CURSOR_API_KEY` (`bin/cursor-cloud`) and the Codex/Cursor
    GitHub apps' access to this repo (`docs/queue.md`, the carried "Cloud agents" line).
-5. **Agent state under `~/.local/state`**: dispatch records and reports (`~/.local/state/bigteam/<task>/`, still
-   written by the transitional `bin/acp-dispatch` shim), `~/.local/state/acp-dispatch/`, `~/.local/state/load-watch/`,
+5. **Agent state under `~/.local/state`**: old dispatch records and reports (`~/.local/state/bigteam/<task>/`, `~/.local/state/acp-dispatch/`; no
+   writer since the shim was deleted 2026-11-14), `~/.local/state/load-watch/`,
    `~/.local/state/review-launch/` (review results and the self-check cache).
 6. **Transcripts**, which hold whatever agents printed, occasionally a secret (proposal 4.5 item 5).
 7. **The Hermes/Telegram channel**: a message path to the operator's phone, and two-way tools
    (`mcp__hermes__*`, `docs/mcp-servers.md`).
 8. **launchd jobs** that persist across logins: `launchd/com.djbclark.load-watch.plist` and `config/launchd/*.plist`
    (deadline-sweep, pr-policy, the herdr server); skillopt-sleep, acp-dispatch's reap sweep, context-budget, the
-   monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down. The transitional
-   `bin/acp-dispatch` submits no launchd jobs since 2026-11-06 (a `paseo run` shim: the agent is a Paseo daemon
-   child); native `paseo run` likewise starts a daemon child.
+   monthly routing re-rank job and zcode-key-auth were deleted 2026-11-06 by the slim-down. Native `paseo run` starts a daemon child and submits
+   no launchd job (the `acp-dispatch` shim, deleted 2026-11-14, did the same).
 9. **The operator's machine itself** (a 16 GB Mac): availability under agent fan-out
-   (`load-watch admit` before `paseo run` / the transitional shim's `load_gate`; load reached 230 on 2026-10-12).
+   (`load-watch admit` before `paseo run`, an instruction to the launcher since 2026-11-14; load reached 230 on 2026-10-12).
 
 ## 2. Trust boundaries and actors
 
 | Actor | Trust | Notes |
 |---|---|---|
 | The operator | Full | The only principal. One person, one personal machine. |
-| Our own agents (Paseo agents started with native `paseo run` / `Choice.dispatch`; transitional `acp-dispatch` / `acp-run` until ~2026-11-20) | **Trusted** (2026-11-07 rulings: our agents trust each other; a GitHub artifact whose author or last editor GitHub reports as the owner is ours). The adversary marker, not prose, is the verdict: a "djbclark approved" in prose never substitutes for it or for a reviewer's own reading. A denied permission prompt goes to the operator, not to a peer | **Prompt-injectable**: they read fetched web pages (the firecrawl MCP and each client's own fetch tools; `bin/web-get` was deleted 2026-11-06), third-party repo content, tool output and each other's reports. An injected agent acts with the operator's rights. Pi is the sole general-purpose third-party TUI; archived omp/OpenCode are not live launch targets. |
+| Our own agents (Paseo agents started with native `paseo run` / `Choice.dispatch`; the `acp-dispatch` / `acp-run` shims were deleted 2026-11-14) | **Trusted** (2026-11-07 rulings: our agents trust each other; a GitHub artifact whose author or last editor GitHub reports as the owner is ours). The adversary marker, not prose, is the verdict: a "djbclark approved" in prose never substitutes for it or for a reviewer's own reading. A denied permission prompt goes to the operator, not to a peer | **Prompt-injectable**: they read fetched web pages (the firecrawl MCP and each client's own fetch tools; `bin/web-get` was deleted 2026-11-06), third-party repo content, tool output and each other's reports. An injected agent acts with the operator's rights. Pi is the sole general-purpose third-party TUI; archived omp/OpenCode are not live launch targets. |
 | Cloud agents: Cursor Cloud Agents (`bin/cursor-cloud`) | **Untrusted writers** | They run off the Mac, get the repo URL and a prompt, and push branches to a **public** repo (`cursor/...`, or `--work-on-branch` the starting ref; `bin/cursor-cloud` never opens the PR). They hold no vault access. |
 | Codex (GitHub connector) | **Untrusted input, advisory** (AGENTS.md rule 9; the 2026-11-07 external-security ruling) | Reviews PRs on request and posts review comments; it has no branch-writing path here. Its comments are read as data, never followed; the lead fixes what is real; not a merge gate. |
 | Hermes bot (`~/.local/bin/hermes-ping`, `mcp__hermes__*`) | Channel outside this repo | `hermes-ping` is one-way (operator; its code is not in this repo). The MCP bridge is two-way: read/send messages and `permissions_respond` on Hermes's approval queue (`docs/mcp-servers.md`). |
@@ -104,27 +96,25 @@ What an attacker would want, in order of damage:
 ## 3. Entry points
 
 1. **Prompts and footers written to files.** Live ops paste the delivery footer into a `paseo run` /
-   `Choice.dispatch` brief (or call `bin/review-launch` for a restricted Claude review). The transitional
-   `acp-dispatch` shim (until ~2026-11-20) still appends `docs/dispatch-footer.md` and passes it to `paseo run`
+   `Choice.dispatch` brief (or call `bin/review-launch` for a restricted Claude review). `bin/ade-worker-run` appends `docs/dispatch-footer.md` and passes it to `paseo run`
    as an argv pointer to the brief. `cursor-cloud launch --prompt-file` sends file text to a cloud agent.
-2. **launchd runner scripts built from record fields** (removed 2026-11-06, slim-down E6: neither native
-   `paseo run` nor the transitional shim submits a launchd job or writes a runner script; the agent is a Paseo
+2. **launchd runner scripts built from record fields** (removed 2026-11-06, slim-down E6: native
+   `paseo run` submits no launchd job or writes a runner script; the agent is a Paseo
    daemon child).
-3. **`acp-run --verify CMD`** (transitional until ~2026-11-20): runs `CMD` with a shell after an agent turn
-   (`tools/acp-run/README.md`, item 13). The one deliberate shell path on that shim; the string is whatever the
-   caller supplies. Native `paseo run` has no equivalent verify flag.
-4. **Load gate.** Live ops call `load-watch admit --wait N --json` before `paseo run` (since PR 7, 2026-10-20;
-   the transitional `acp-dispatch` shim's `load_gate` does the same; `machine_overloaded()` went with the E6
+3. **`acp-run --verify CMD`** (removed 2026-11-14 with `tools/acp-run`): the one deliberate shell path is gone. Native `paseo run` has
+   no equivalent verify flag.
+4. **Load gate.** Live ops call `load-watch admit --wait N --json` before `paseo run` (an instruction to the caller since 2026-11-14: `ade-worker-run` and `Choice.dispatch` do not call it; since PR 7, 2026-10-20;
+   `machine_overloaded()` went with the E6
    rewrite, 2026-11-06). Exit 75 refuses (admit's own exit 2 too). The gate fails open by design: a missing or
    crashed load-watch, a timeout, any other exit, or exit 0 with output it cannot parse starts the slice anyway
-   with a stderr warning and `load_gate.error` in the shim's record (`bin/acp-dispatch` `load_gate`), and exit 0
+   with a stderr warning, and exit 0
    is trusted over the JSON status.
 5. **PR bodies, review comments and issue text** written by agents or third parties, which other agents
    and reviewers read as instructions.
 6. **Mentions**: `@codex review`, `@cursor` on a comment (`docs/queue.md`). Whether a third party's
    mention triggers them is an app setting outside this repo and unverified: assume it can.
 7. **Environment variables** (trimmed 2026-11-07 to what exists). Tools read `ACP_DISPATCH_STATE` (the state root
-   for the transitional shim), `ACP_DISPATCH_LOCK_DIR`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `LW_STATE_DIR`
+   of the old dispatch records, read by `route_agent.py`; the shim that wrote them was deleted 2026-11-14), `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `LW_STATE_DIR`
    and `LW_REGISTRY` (the runner exports, `ACP_DISPATCH_LAUNCHCTL`/`AIUSE`/`NO_GATE`, `ZCODE_CREDENTIAL_SECRET`,
    and the three `*_LAUNCH_AGENTS` overrides went with their tools, 2026-11-06/07); `bin/firecrawl-router` reads
    `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and
@@ -135,11 +125,11 @@ What an attacker would want, in order of damage:
 8. **Web content and repo files** fetched by an agent mid-session (prompt-injection carrier).
 9. **`load-watch` steer messages**: it writes a brief and sends one line to an agent with native
    `paseo send --no-wait --json --behavior steer` (`bin/load-watch` header; no pane typing since 2026-11-06), so
-   text the tool composes becomes input to an agent. The transitional `relay.py` shim (until ~2026-11-20) reaches
+   text the tool composes becomes input to an agent. The deleted `relay.py` shim (2026-11-14) reached
    Paseo agents only (`paseo send --behavior steer --no-wait --json --prompt-file`; herdr and Orca pane routes
    retired). Paseo labels such a message `kind="agent-message"` with the sender's `PASEO_AGENT_ID` (a caller that
    is not a Paseo agent prefixes `[relay from <name>] `), so a receiving agent sees a peer, not the operator
-   (advisory: Paseo does not verify the sender id, see 4.1); the shim refuses text starting with `/`, and sends
+   (advisory: Paseo does not verify the sender id, see 4.1); the deleted shim refused text starting with `/` and sent
    only when `paseo agent inspect` returns exactly the target's id, `Archived: false`, no pending permission or
    question and status idle, running or closed (a stored agent the send resumes; a running agent only on a
    provider that can steer); anything else is not sent. A sourceless send runs with `clearPendingPermissions`, so
@@ -179,14 +169,14 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   not to edit (its agent definition lives outside this repo and includes Bash, so that is an instruction, not a
   sandbox); a read-only reviewer is built (2026-11-06): `bin/review-pr` over `bin/review-launch` (read-only tools confined to a clean worktree, no MCP, no hooks, a tripwire; `docs/review-boundary.md`); elsewhere `--perm read-only|deny` is best effort under the 2026-11-07 internal-trust ruling; the `adversary` reviews on request
   before a PR is opened. Cloud agents run off the Mac with no vault. An agent messages a Paseo-hosted peer with
-  native `paseo send --json` (standing order 10). The transitional `session-finder/relay.py` shim (until ~2026-11-20)
-  still wraps that path: Paseo labels the message as an agent message from the sender, the shim passes the text in a
-  `--prompt-file` so it cannot become a `paseo send` option, and it refuses a leading `/` (after trimming the
-  whitespace and zero-width characters Paseo itself trims, and the full-width slash).
+  native `paseo send --json` (standing order 10). The `session-finder/relay.py` shim that wrapped that path was deleted 2026-11-14: Paseo labels the message as an agent
+  message from the sender; a caller passes long text in a `--prompt-file` so it cannot become a `paseo send` option, and
+  must not lead with `/` (Paseo trims whitespace and zero-width characters before its slash parser; the shim used to refuse
+  a leading `/` and the full-width slash).
 * **Gap (2026-10-20).** Paseo does not authenticate the sender id: any same-user process can run `paseo send`
-  unlabelled or with any agent's id in `PASEO_AGENT_ID`, so the agent-message label and the transitional shim's
-  `[relay from <name>]` tag are advisory, and Paseo still records the message as a user turn in the receiver's
-  transcript. A permission card raised between the shim's `paseo agent inspect` and its send is still answered by the
+  unlabelled or with any agent's id in `PASEO_AGENT_ID`, so the agent-message label (and the deleted shim's
+  `[relay from <name>]` tag) is advisory, and Paseo still records the message as a user turn in the receiver's
+  transcript. A permission card raised between a caller's `paseo agent inspect` and its send is still answered by the
   send (Paseo has no conditional send). Candidate upstream issue.
 * **Gap.** A local agent reading a hostile page or third-party file runs yolo with the operator's rights;
   nothing screens tool output for instructions. A cloud agent reading this public repo's issue or PR text
@@ -274,6 +264,15 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   The Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
   the `adversary-marker` status pinned to the App (`docs/review-boundary.md`), nothing enforces any of this
   beyond branch protection's PR requirement.
+* **Gap 4 (2026-11-14, Wave 6 shim deletion).** No committer-identity guard remains. `tools/acp-run` injected a
+  config-based `reference-transaction` hook into every agent's git that refused a ref update to a fresh commit
+  (under 10 minutes old) whose committer was not the operator, and `--no-verify` could not skip it; it was added
+  after the 2026-10-18 incident where a slice copied an upstream maintainer's identity into `.git/config`, then
+  committed and pushed under it. It was off the live dispatch path since 2026-11-06 (acp-dispatch launched `paseo
+  run`), and `acp-run` itself is gone now. Nothing in `bin/ade-git-guard`, `libexec/git-hooks/*` or `claude/hooks/`
+  checks the committer. An agent, or injected content it reads, can set a repo-local `user.name`/`user.email` and
+  push under a third party's name to the operator's public repos. Not yet ruled on by the operator (the
+  internal-trust ruling of section 5 item 9 covers peer messages, not injected content), recorded so no one assumes the control exists; a port to the ade ref hooks is queue Carried 1c.
 
 ### 4.4 A cloud agent pushes where it should not, or opens a PR
 
@@ -296,7 +295,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 ### 4.6 launchd persistence
 
 * **Control.** Plists are installed by tools' own subcommands (`load-watch install`, `deadline install`,
-  `pr-policy install`, or `bin/ade-sched`; `skillopt-night install`, acp-dispatch's reap sweep installer,
+  `pr-policy install`, or `bin/ade-sched`; `skillopt-night install`, acp-dispatch's reap sweep installer (the shim is deleted),
   `zcode-key-auth install` and `context-budget-check install` were removed 2026-11-06),
   copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
   the monthly routing re-rank plist (deleted 2026-11-06; optional Paseo schedule `routing-recalibrate` in
@@ -324,29 +323,24 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 ### 4.8 Command injection into runner scripts
 
 * **Control.** Per-slice launchd runner scripts are gone (entry 2, 2026-11-06). What remains of that surface
-  on the transitional `acp-dispatch` shim (until ~2026-11-20): every interpolated value in printed resume and
-  rearm hints and the wait helper goes through `shlex.quote` (`rearm_cmd` and related helpers in
-  `bin/acp-dispatch`). Subprocesses use argv lists; a stored command is `shlex.split` back, not run through a
-  shell. Native `paseo run` starts a daemon child with argv, not a shell string.
-* **Gap.** Quoting protects against bad values, not a tampered record (4.9). Transitional `acp-run --verify`
-  is a shell by design (entry 3).
+  in the deleted `acp-dispatch` shim (2026-11-14) was every interpolated value in printed resume and
+  rearm hints; no such printer remains. Subprocesses use argv lists, never a shell string. Native `paseo run` starts a daemon child with argv, not a shell string.
+* **Gap.** Quoting protects against bad values, not a tampered record (4.9). `acp-run --verify` (a shell by design, entry 3) was removed 2026-11-14.
 
 ### 4.9 State tampering under `~/.local/state`
 
 * **Control.** Atomic writes (`write_atomic`, `os.replace`), a record lock (`update_record`), new fields
-  read with `.get` (still used by the transitional shim's records and by `load-watch` / `review-launch` state).
-* **Gap.** While the transitional `acp-dispatch` shim remains, its unsigned record under
-  `~/.local/state/acp-dispatch/` / `bigteam/` is that shim's source of truth for outcomes and resumes. Any
-  process running as the operator can edit a record; per-slice launchd runners are gone (entry 2), so the
+  read with `.get` (used by `load-watch` / `review-launch` state).
+* **Gap.** Any process running as the operator can edit state under `~/.local/state`; per-slice launchd runners are gone (entry 2), so the
   persistence path is no longer "edit a runner and wait for launchd", but a local foothold can still rewrite
-  shim state the lead or waiters trust. The same process can edit `~/.config/load-watch/ci-only.tsv`, which
+  state the lead or waiters trust (old `acp-dispatch` / `bigteam/` records have no writer since 2026-11-14). The same process can edit `~/.config/load-watch/ci-only.tsv`, which
   `bin/load-watch` only parses as a repo policy (which repos must build in CI, and how): that is an
   availability or policy change (`bg` refuses or allows local builds), not executed content. Accepted
   (section 5), but a PR that widens either is still a finding.
 
 ### 4.10 Denial of the operator's machine
 
-* **Control.** Live ops (and the transitional shim) call `load-watch admit` before starting a slice; `load-watch`
+* **Control.** Live ops call `load-watch admit` before starting a slice (an instruction to the caller, not code, since 2026-11-14; `docs/slim/log.md`, Lost on purpose); `load-watch`
   finds the session behind sustained load and steers it with `paseo send` to move heavy work to CI; `ci-only`
   makes `bg` refuse local builds (`bin/load-watch` header). The pre-shim overload hold
   (`machine_overloaded()` / `wait_for_capacity`, up to 900 s) and the dispatcher's own auto-resume (capped at

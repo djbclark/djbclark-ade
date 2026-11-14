@@ -9,7 +9,7 @@ URLs and open/closed state below were checked 2026-11-09.
 
 ADE framing that ages several drafts (slim-down / Wave 6 / Pi, 2026-11-07/08):
 Paseo is the only harness; herdr and Orca left this repo on 2026-10-31; Wave 6
-removes `tools/acp-run` after one live cycle; Pi is the third-party client path
+removed `tools/acp-run` (2026-11-14); Pi is the third-party client path
 (omp/OpenCode/Crush archived, never fallbacks). Graft's public GitHub home is
 now [trailhq/Trail-Code](https://github.com/trailhq/Trail-Code) (older
 NanoNets/Graft issue URLs redirect there).

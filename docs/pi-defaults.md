@@ -41,7 +41,7 @@ A5. Ordinary router plans print native `paseo run --provider pi/PROVIDER/MODEL`
 commands for Pi choices, translating explicit effort to `--thinking` and using
 `--no-wait`. Append the task text, `--title`, an existing `--workspace` and the
 matching session `--cwd`; put each assigned execution worktree in its brief.
-The transitional `acp-dispatch` shim does not launch Pi.
+The `acp-dispatch` shim (deleted 2026-11-14) never launched Pi.
 
 ## B. Model policy and reassessment
 

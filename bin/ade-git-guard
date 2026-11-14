@@ -18,7 +18,7 @@
 # 2026-10-25: only this guard, the hooks and bin/ade_claims.py exist (slice W1). W3 (Paseo / claim plugin export
 # ADE_CLAIM_ID; open as PR stacks on the ade-claim plugin), W4 (libexec/agent-bin first on agent PATH; same stack)
 # and W2 (worktree.create.after installs hooks into a new Paseo worktree; cow-pasture removed 2026-11-06) land via
-# those PRs — not via the Wave 6 transitional acp-dispatch/acp-run shims (those leave ~2026-11-20). The
+# those PRs — not via the Wave 6 acp-dispatch/acp-run shims (deleted 2026-11-14). The
 # operator's shell and IDEs never go through this shim.
 # Design: design-isolation-report.md 3.4-3.5 (2026-10-24); O2 design: frontier-pr59-design-report.md (2026-10-25).
 #

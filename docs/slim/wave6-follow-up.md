@@ -1,5 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
+**Done 2026-11-14:** the three shims were deleted (PR `wave6-delete-shims`, `docs/slim/log.md`); this file is now the record of the checklist and its evidence. Everything below describes the state before the deletion.
+
 Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on
 `origin/master` after `#498` — `wave6-delete-check --inventory` →
 `callers_remaining=0` / `gate_exits.callers=0`; C3 `--dry-run` FIXTURE
@@ -56,7 +58,7 @@ shims.** Soft deadline for relay / dispatch / `acp-run` removal:
 
 1. **Mac live-cycle proofs** — **received 2026-11-10** (bigmac). Still need B2 drain/recapture after lead `0cc34651…` label clears. Do not open the deletion PR on this capture alone.
 2. **C3 row evidence:** migrated tendcf, nix2cf, site_public_home_agents (re-probed clean on bigmac 2026-11-12 by lead 8cd86203; proofs in /Users/djbclark/tmp/wave6-mac-live-20261112-b2/proofs), waived cfengine+aiuse (2026-11-12) plus C1+C2; B2 drained 2026-11-12 (leads 0cc34651 and 54821e52 archived, operator yes); remaining gate = soft deadline 2026-11-20 (operator 2026-11-12: wait, no early deletion); fleet-watch still calls acp-dispatch via UPSTREAM_DISPATCH (migration PR approved, in progress).
-3. **Extra outside client:** fleet-watch source migration is authorized and merged in site-djbclark #251. Verify deployment to the installed Mac caller (`~/ops/site-private-djbclark/bin/fleet-watch` in the earlier capture), native delivery and pending receipt handling; do not re-request source migration permission.
+3. **Extra outside client:** fleet-watch source migration is authorized. Re-checked 2026-11-14 against the local site-public checkout (6040584): site-djbclark #251 (merged) replaced the relay dependency with native Paseo receipts, but `bin/fleet-watch` still defaults `UPSTREAM_DISPATCH` to `~/src/djbclark-ade/bin/acp-dispatch` (about :222) and the launchd job sets `FLEET_WATCH_UPSTREAM=off`, so upstream dispatch is paused and would exit 127 if re-enabled (docs/queue.md Carried 1b). The `UPSTREAM_DISPATCH` migration is not done; do not re-request source migration permission.
 4. **Deletion PR last**: `bin/wave6-delete-check --evidence <json>` must exit 0 (**never** treat `--dry-run`, `--inventory`, FIXTURE, or `--linux-safe` as deletion-ready); keep `bin/review-launch`. No `--allow-early` without explicit yes after C3+Mac complete.
 
 ### Readiness stack (merged; do not treat as delete)

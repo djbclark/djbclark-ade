@@ -264,8 +264,8 @@ Evaluated in order; the module docstring has every form.
    overwrite an existing tip without `-f`); force/delete/move/copy `branch` forms still are. An ade-stub `hooksPath`
    stays allowed. If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. **acp-run's own config pairs (2026-10-30; transitional until Wave 6 deletes `tools/acp-run`):** while
-   `acp-run` still launches agents it puts two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
+   hooks fail open**. **acp-run's own config pairs (2026-10-30; `tools/acp-run` was deleted 2026-11-14, so this allowance is dead code kept until a follow-up removes it, `docs/queue.md` Carried 1):** while
+   `acp-run` launched agents it put two `GIT_CONFIG_PARAMETERS` entries in every agent's environment,
    `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
    (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
    per-key rule exempts exactly those two pairs from environment configuration (PARAMETERS or legacy COUNT pairs; command value
@@ -418,12 +418,11 @@ paseo send --json --no-wait OWNER --prompt '…'
 
 (positional id + `--prompt`; ask for `ack <your id>` and prove delivery per AGENTS.md order 10). To edit elsewhere, make
 your own workspace (`paseo run --new-workspace worktree …`), never borrow a claimed one. The one-cycle shim
-`skills/session-finder/relay.py` (over `paseo send`) remains until Wave 6 deletion (soft deadline 2026-11-20;
-[docs/slim/PLAN.md](slim/PLAN.md) F) — do not start new call sites on it. Code refusal strings are the twin of this
+`skills/session-finder/relay.py` (over `paseo send`) was deleted 2026-11-14 ([docs/slim/PLAN.md](slim/PLAN.md) F). Code refusal strings are the twin of this
 teaching ([#338](https://github.com/djbclark/djbclark-ade/pull/338)).
 
-The operator allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the same env name the transitional
-`bin/acp-dispatch` shim historically used; Wave 6 deletes that shim after one live cycle), in the shim and the hooks
+The operator allows and logs one call with `ACP_OPERATOR_APPROVED=git-guard` (the same env name the deleted
+`bin/acp-dispatch` shim used), in the shim and the hooks
 alike. Other environment: `ADE_REAL_GIT` (skip the PATH search), `ADE_PYTHON` (default `python3`), `ADE_STATE_DIR`.
 
 The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
@@ -432,7 +431,7 @@ The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside 
 `macos: true` dispatch or a local run on the Mac.
 
 On 2026-10-30 `acp-run` began shell-quoting the identity hook command and checking inherited hook pairs before treating
-a nested launch as guarded (kept as history while `tools/acp-run` remains; Wave 6 removes it with the dispatch shim). A
+a nested launch as guarded (history: `tools/acp-run` was deleted 2026-11-14 with the dispatch shim). A
 marker whose PARAMETERS transport was stripped is repaired.
 
 ## S4 six-case enforcement pilot (scaffold 2026-11-09; pilot before hard refuse)

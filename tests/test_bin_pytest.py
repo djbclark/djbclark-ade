@@ -25,7 +25,7 @@ class BinPytestTests(unittest.TestCase):
     def test_print_is_safe_to_paste_into_a_shell(self) -> None:
         mine = subprocess.run([sys.executable, str(WRAPPER), "--print"], capture_output=True, text=True,
                               check=True).stdout.strip()
-        self.assertIn("'agent-client-protocol>=0.9,<1.0'", mine)
+        self.assertNotIn("agent-client-protocol", mine)
 
 
 if __name__ == "__main__":

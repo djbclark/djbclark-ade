@@ -21,7 +21,7 @@ stopped"; a deliberate fresh start carries a prompt line `Relaunch-reason: <why>
 logs to `<report dir>/<session>/relaunch.log`. The guard covers the path the hook would use and, for a prompt that
 already has the footer, the path the prompt labels ("Report path: ...") or its footer's delivery line names; it skips on any error (fail open).
 Fills `docs/dispatch-footer.md` inline (2026-11-09: no longer shells out to
-`acp-dispatch footer`, which Wave 6 deletes). Fails open on any other error.
+`acp-dispatch footer`, deleted 2026-11-14). Fails open on any other error.
 """
 
 import json

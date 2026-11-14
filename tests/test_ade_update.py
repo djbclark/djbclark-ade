@@ -144,13 +144,6 @@ class Env:
         return r
 
 
-@pytest.fixture(autouse=True)
-def _allow_fixture_identity(monkeypatch):
-    # The reference-transaction guard refuses a ref update whose committer is not the operator
-    # (inside an acp-run session); the fixture repos commit as "t". The override is per test.
-    monkeypatch.setenv("ACP_RUN_ALLOW_GIT_IDENTITY", "1")
-
-
 @pytest.fixture
 def env(tmp_path):
     return Env(tmp_path)
