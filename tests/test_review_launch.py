@@ -734,12 +734,13 @@ sys.stderr.write("fake gh: unserved " + " ".join(a) + "\n"); sys.exit(1)
 class PrWorld(World):
     """A bare `origin` named like the real repository, a PR head under refs/pull/7/head, a clone to run from."""
 
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, owner: str = "djbclark") -> None:
         super().__init__(tmp)
+        self.owner = owner      # who owns the repository: the operator's user, or (after the move) the frdminc org
         (self.bin / "gh").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{tmp / "fake_gh.py"}" "$@"\n')
         (self.bin / "gh").chmod(0o755)
         (tmp / "fake_gh.py").write_text(FAKE_GH)
-        self.origin = tmp / "djbclark" / "djbclark-ade.git"
+        self.origin = tmp / owner / "djbclark-ade.git"
         self.origin.parent.mkdir()
         git("init", "-q", "--bare", "-b", "master", str(self.origin), cwd=tmp)
         seed = tmp / "seed"
@@ -768,11 +769,11 @@ class PrWorld(World):
         return super().env(FAKE_GH_DIR=str(self.tmp), **extra)
 
     def review(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, "-I", str(REVIEW_PR), "7", "--repo", "djbclark/djbclark-ade", *args],
+        return subprocess.run([sys.executable, "-I", str(REVIEW_PR), "7", "--repo", f"{self.owner}/djbclark-ade", *args],
                               capture_output=True, text=True, env=env or self.env(), timeout=180, cwd=str(self.clone))
 
     def filed(self) -> dict:
-        return json.loads((self.state / f"djbclark__djbclark-ade-pr7-{self.pr_head}.json").read_text())
+        return json.loads((self.state / f"{self.owner}__djbclark-ade-pr7-{self.pr_head}.json").read_text())
 
 
 @pytest.fixture
@@ -1110,6 +1111,30 @@ def test_the_authenticated_user_who_is_not_the_owner_gets_the_restricted_runtime
     assert prw.review().returncode == 0
     assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default"
     assert prw.review("--runtime", "yolo").returncode == 2
+
+
+@pytest.mark.parametrize("author,me,runtime,refused", [
+    ("djbclark", "djbclark", "yolo", False),            # the operator's PR: yolo, whoever owns the repository
+    ("frdminc", "djbclark", None, True),                # the org's own name is no author the reviewer trusts
+    ("technoeuphora", "technoeuphora", "restricted", False),   # the gh user (an org member) is reviewed, but restricted
+])
+def test_review_pr_trust_follows_the_operators_login_when_the_org_owns_the_repository(tmp_path, author, me, runtime, refused):
+    """After the move (owner `frdminc`) the operator's PR still gets yolo, `--trusted-author djbclark`; nobody else does."""
+    w = PrWorld(tmp_path, owner="frdminc")
+    w.gh(view={"headRefOid": w.pr_head, "baseRefOid": w.base, "baseRefName": "master",
+               "author": {"login": author}, "state": "OPEN"}, me=me)
+    r = w.review()
+    assert (r.returncode == 2) == refused, r.stderr
+    if refused:
+        assert w.calls() == []
+        return
+    assert r.returncode == 0, r.stderr
+    argv = w.launches()[0]["argv"]
+    assert w.filed()["runtime"] == runtime
+    assert (argv_val(argv, "--permission-mode") == "bypassPermissions") == (runtime == "yolo")
+    if runtime == "yolo":
+        assert w.filed()["author"] == "djbclark"
+    assert w.review("--runtime", "yolo").returncode == (0 if runtime == "yolo" else 2)
 
 
 def test_an_owner_login_is_matched_case_insensitively_and_an_unknown_author_is_not_owner(prw):

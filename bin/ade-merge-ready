@@ -23,8 +23,8 @@ count an outside author's or bot's same-head APPROVE. Classify / stacks /
 approve-paste / retrigger-marker never invent an APPROVE. `approve-paste`
 prints templates only (and warns: never paste them through herdr — herdr
 mangles `<!-- … -->`). `approve-post` posts those templates via the GitHub
-API (not herdr) **only** when the authenticated `gh` user is the repository
-owner and both `--i-reviewed` and `--yes` are set (dry-run otherwise).
+API (not herdr) **only** when the authenticated `gh` user is the operator's
+login (`djbclark`, not the repository owner) and both `--i-reviewed` and `--yes` are set (dry-run otherwise).
 Default `--via auto`: owner-authored tips get a **body** append (today's gate
 counts body APPROVE on owner PRs; comments do not); outside tips get an issue
 **comment**. `--via body` / `--via comment` force one path. Never invents a

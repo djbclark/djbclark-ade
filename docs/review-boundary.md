@@ -15,6 +15,15 @@ org: an organization authors no PR, and its second member, `technoeuphora`, is n
 counts: an App or `[bot]` of a similar name does not.
 
 Artifacts whose author GitHub reports as that login (including Cloud Agents under it) are ours.
+
+**Two limits this rule does not remove (adversary review of #670, 2026-11-14).** (a) Owner trust follows the PR *author*, not who
+pushed its head: once the repo is in the `frdminc` org, anyone with write access to it (the org's second member `technoeuphora`, or
+an installed App with `contents: write`) can push to a branch of an open `djbclark` PR and the gate approves it with no marker. So
+the move is conditional on a written precondition, checked by the operator: org base permission `read` or `none`, no `write` or
+`admin` grant on this repository to anyone but `djbclark`, and the org's apps limited to selected repositories (docs/threat-model.md;
+a gate that requires a marker when a head commit's committer is not `djbclark` is possible but forgeable, so advisory only).
+(b) Trust is the login *string*: renaming the `djbclark` account would hand its owner trust to whoever registers the freed name.
+Never rename it; pinning the user's immutable id in `TRUSTED_OWNER_LOGINS` is the fix if that ever has to change.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -197,7 +206,7 @@ marker through herdr (body or comment). Prefer `approve-post` (GitHub API).
 Default `--via auto`: **comment** for outside tips; **body** only when forcing
 an explicit owner-PR APPROVE.
 
-`approve-post` posts only when `gh api user` is the operator's login (`djbclark`, whoever owns the repository) and both
+`approve-post` posts only when `gh api user` is the operator's login (`djbclark`, not the repository owner) and both
 `--i-reviewed` and `--yes` are set (otherwise dry-run). `--expect-head N=40hex`
 is required with `--yes`. After #484, skip `approve-post` for owner-authored
 tips — the gate trusts them without a marker.
