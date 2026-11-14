@@ -470,9 +470,9 @@ SHELL_HEREDOC = re.compile(
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
-ENV_OPTS = re.compile(r"\benv\s+(?:(?:-[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*")
-NICE_OPTS = re.compile(r"\bnice\s+(?:-n\s+\S+\s+|-\S+\s+)*")
-SUDO_OPTS = re.compile(r"\bsudo\s+(?:(?:-[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
+ENV_OPTS = re.compile(r"(?<![\w./-])env\s+(?:(?:-[uCSP]|--(?:unset|chdir|split-string))\s+\S+\s+|-\S+\s+)*")
+NICE_OPTS = re.compile(r"(?<![\w./-])nice\s+(?:-n\s+\S+\s+|-\S+\s+)*")
+SUDO_OPTS = re.compile(r"(?<![\w./-])sudo\s+(?:(?:-[ugphCDRTU]|--(?:user|group|host|prompt|chdir|chroot|role|type))"
                        r"\s+\S+\s+|-\S+\s+)*")
 QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
 
@@ -618,8 +618,14 @@ def _drop_heredocs(c: str) -> str:
 def gh_args(stage: str) -> list[str] | None:
     """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
     `rtk`, `do`/`then`), else None."""
-    stage = SUDO_OPTS.sub("sudo ", stage)             # `sudo -u USER gh ...`
-    stage = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", stage))  # `env -i VAR=x gh`, `nice -n 10 gh`
+    # `sudo -u USER gh`, `env -i VAR=x gh`, `nice -n 10 gh`: only the words before the first `gh`
+    # (an argument such as `-R o/env` or a branch named `env` must not be read as a wrapper)
+    w = stage.split()
+    k = next((n for n, x in enumerate(w) if os.path.basename(x) == "gh"), None)
+    if k:
+        pre = " ".join(w[:k]) + " "
+        pre = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", SUDO_OPTS.sub("sudo ", pre)))
+        stage = pre + " ".join(w[k:])
     for _ in range(8):
         head, rest = command_word(stage)
         base = os.path.basename(head)

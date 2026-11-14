@@ -680,6 +680,10 @@ def test_long_newline_runs_stay_fast(command):
     "env -i -u FOO BAR=1 gh pr checks 5 --watch",
     "nice -n 10 gh run watch 9",
     "nice -10 gh run watch 9",
+    "gh pr checks fix-env --watch --required",                  # branch named like a wrapper
+    "gh pr checks env --watch",
+    "gh run watch 9 -R o/sudo",
+    "sudo env -i HOME=$HOME gh run watch 9",
 ])
 def test_gw03_wrapper_options_do_not_hide_a_watcher(command):
     assert denied(command), command
@@ -692,6 +696,9 @@ def test_gw03_wrapper_options_do_not_hide_a_watcher(command):
     "nice -n 10 gh run list -L 3",
     "echo env -i gh run watch 9",
     "echo 'rtk proxy gh run watch 9'",
+    "gh run watch 9 -R o/env -i 60",                            # compliant watcher, repo named env
+    "gh run watch 9 -R o/nice -i 60",
+    "gh pr checks nice --watch -i 60",
 ])
 def test_gw03_wrapper_one_shots_and_prose_pass(command):
     assert not denied(command), command
