@@ -24,7 +24,7 @@ Our limits are stricter on purpose.
 
 ## Writing rules
 
-1. Keep every sentence to 20 words or fewer. This is a house rule for all text in an ELI5 answer, not for other agent output, and not an STE limit.
+1. Keep every sentence to 20 words or fewer. This house rule covers all text in an ELI5 answer, not other agent output. It is not an STE limit.
 2. Give one idea in each sentence.
 3. Use the active voice. Name the actor: "The server sends the page", not "The page is sent".
 4. Use a direct verb. Write "start", not "perform an initialization of".
