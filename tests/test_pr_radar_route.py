@@ -32,6 +32,23 @@ if mode == "fail":
     sys.exit(7)
 if mode == "fail-silent":
     sys.exit(3)
+if mode == "no-headroom":      # what route_agent.py route prints when no service has headroom: JSON on stdout, exit 1
+    print(json.dumps({"kind": "code", "service": None, "reason": "no eligible service with headroom"}))
+    sys.exit(1)
+if mode == "fail-both":
+    print(json.dumps({"reason": "stdout reason"}))
+    sys.stderr.write("stderr reason\\n")
+    sys.exit(4)
+if mode == "fail-blank-tail":
+    print(json.dumps({"reason": "stdout reason"}))
+    sys.stderr.write("real note\\n   \\n")
+    sys.exit(4)
+if mode == "fail-noise":
+    print("not json {")
+    sys.exit(2)
+if mode == "fail-odd-reason":
+    print(json.dumps({"reason": ["x"]}))
+    sys.exit(5)
 if mode == "bad":
     print("not json {")
     sys.exit(0)
@@ -161,7 +178,7 @@ def test_router_argv_and_output(rig):
         "provider": "claude", "model": "opus", "thinkingOptionId": "high", "modeId": "bypassPermissions",
         "reason": "[judgment] judgment: claude; 52% headroom",
     }
-    assert "contextMode" not in out and "profileName" not in out
+    assert "contextMode" not in out and "profile" not in out   # PR Radar's launch-profile field (start-agent-modal reads result.profile)
 
 
 def test_untrusted_text_never_reaches_the_router(rig):
@@ -202,6 +219,77 @@ def test_router_failure_without_stderr_gets_a_reason(rig):
     proc, _ = rig({"pr": {}}, mode="fail-silent")
     assert proc.returncode == 3 and proc.stdout == ""
     assert proc.stderr == "route_agent.py exited with 3\n"
+
+
+def test_no_headroom_reason_goes_to_stderr_and_stdout_stays_empty(rig):
+    """route_agent.py prints the no-headroom reason on stdout (JSON) with empty stderr; PR Radar shows stderr only."""
+    proc, _ = rig({"pr": {}}, mode="no-headroom")
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert proc.stderr == "no eligible service with headroom\n"
+
+
+def test_router_stdout_reason_leads_and_the_last_stderr_line_follows(rig):
+    """aiuse falling back to the snapshot file writes a note to stderr; it must not hide the no-headroom reason."""
+    proc, _ = rig({"pr": {}}, mode="fail-both")
+    assert proc.returncode == 4 and proc.stdout == ""
+    assert proc.stderr == "stdout reason (router: stderr reason)\n"
+
+
+def test_a_blank_last_stderr_line_does_not_hide_the_note_before_it(rig):
+    proc, _ = rig({"pr": {}}, mode="fail-blank-tail")
+    assert proc.returncode == 4 and proc.stdout == ""
+    assert proc.stderr == "stdout reason (router: real note)\n"
+
+
+@pytest.mark.parametrize("mode", ["fail-noise", "fail-odd-reason"])
+def test_router_failure_with_no_usable_reason_names_the_exit_code(rig, mode):
+    proc, _ = rig({"pr": {}}, mode=mode)
+    code = {"fail-noise": 2, "fail-odd-reason": 5}[mode]
+    assert proc.returncode == code and proc.stdout == ""
+    assert proc.stderr == f"route_agent.py exited with {code}\n"
+
+
+@pytest.mark.parametrize("dispatch, field", [
+    ("paseo run --provider agent/<id from: paseo provider models agent> --label ade.kind=code --no-wait", "model"),
+    ("paseo run --provider <provider>/opus --no-wait", "provider"),
+    ("paseo run --provider claude/opus --thinking <level> --no-wait", "thinkingOptionId"),
+    ("paseo run --provider claude/opus --mode <mode> --no-wait", "modeId"),
+    ("paseo run --provider claude/opus> --no-wait", "model"),
+])
+def test_template_dispatch_values_are_refused(rig, dispatch, field):
+    proc, _ = rig({"pr": {}}, answer={"agent": "claude", "dispatch": dispatch, "why": "w"})
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1
+    assert f"template {field}" in proc.stderr
+
+
+def test_cursor_cloud_launch_template_is_refused_not_turned_into_a_provider(rig):
+    """`cursor-cloud launch --repo <url> ...` has no --provider; its agent name is not a Paseo provider."""
+    dispatch = "cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief> --model composer-2"
+    proc, _ = rig({"pr": {}}, answer={"agent": "cursor-cloud", "dispatch": dispatch, "why": "w"})
+    assert proc.returncode == 1 and proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1 and "template dispatch" in proc.stderr
+
+
+def test_template_launch_line_with_a_mode_but_no_provider_is_refused(rig):
+    dispatch = "somelauncher --mode bypassPermissions --repo <url>"
+    proc, _ = rig({"pr": {}}, answer={"agent": "somelauncher", "dispatch": dispatch})
+    assert proc.returncode == 1 and proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1 and "template dispatch" in proc.stderr
+
+
+def test_template_agent_fallback_is_refused(rig):
+    proc, _ = rig({"pr": {}}, answer={"agent": "<agent>", "dispatch": "paseo run --no-wait"})
+    assert proc.returncode == 1 and proc.stdout == ""
+    assert "template provider" in proc.stderr
+
+
+def test_angle_brackets_in_the_reason_text_are_not_a_template(rig):
+    proc, _ = rig({"pr": {}}, answer={"dispatch": DISPATCH, "why": "judgment: <5% headroom on claude"})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["reason"] == "[code] judgment: <5% headroom on claude"
 
 
 @pytest.mark.parametrize("mode", ["bad", "list"])
