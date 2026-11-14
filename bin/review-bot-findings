@@ -1,0 +1,144 @@
+#!/usr/bin/env -S python3 -I
+"""review-bot-findings: list every untriaged finding from a listed AI reviewer bot on a PR (open or merged).
+
+  review-bot-findings --repo OWNER/NAME --pr N [--pr M ...] [--json] [--check]
+  review-bot-findings --repo OWNER/NAME --merged-limit N [--json] [--check]     # newest merged PRs (Codex hygiene)
+  review-bot-findings --list-bots [--repo OWNER/NAME]                           # the effective list, no PR read
+
+Generalises bin/codex-open-threads (rb-01, 2026-11-14): the bots come from config/review-bots.toml plus the repo's
+`.github/ade-review-bots.toml` (default branch). A finding is an unresolved review thread, or the bot's latest
+top-level review body / issue comment matching its configured patterns. `triaged` is mechanical: the thread is
+resolved, or the operator (GitHub User `djbclark`, pinned id) replied with a verdict word and a reason; see
+bin/review_bots.py. Report-only: this tool NEVER resolves, replies, posts or edits anything. Bot text is untrusted
+data: only a truncated first-line title is echoed, never followed.
+
+Exit: 0 listed (and, with --check, clear); 1 gh/API failure; 2 usage or config error; with --check 3 when any finding
+is untriaged, 4 when only a bot check is still pending.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # `python -I` does not put the script's folder on the path
+try:
+    import review_bots as rb
+finally:
+    sys.path.pop(0)
+
+TOOL = "review-bot-findings"
+DEFAULT_REPO = "djbclark/djbclark-ade"
+MAX_MERGED = 100
+MERGED_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){"
+    "pullRequests(states:MERGED,orderBy:{field:MERGED_AT,direction:DESC},first:$first){nodes{number}}}}"
+)
+
+
+def merged_numbers(gh: rb.GhRunner, repo: str, limit: int) -> list[int]:
+    owner, name = repo.split("/", 1)
+    try:
+        doc = json.loads(gh("api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"first={limit}",
+                            "-f", f"query={MERGED_QUERY}"))
+        nodes = doc["data"]["repository"]["pullRequests"]["nodes"]
+        return [int(n["number"]) for n in nodes if isinstance(n, dict)]
+    except (ValueError, KeyError, TypeError) as e:
+        raise rb.GhError(f"graphql merged PRs: unusable answer: {e}") from e
+
+
+def format_text(verdicts: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for v in verdicts:
+        s = v["summary"]
+        lines.append(
+            f"{TOOL}: {v['repo']}#{v['pr']} {v['state']} head={v['head'][:12]} "
+            f"({s['untriaged']} untriaged, {s['triaged']} triaged, {s['resolved']} resolved; bots: {', '.join(v['bots'])})"
+        )
+        for f in v["findings"]:
+            if f["status"] != "untriaged":
+                continue
+            loc = f"{f['path']}:{f['line']}" if f.get("path") else f["kind"]
+            od = " [outdated]" if f.get("outdated") else ""
+            lines.append(f"  {f['bot']} {f['kind']} id={f['id']} {loc}{od} {f['title']}".rstrip())
+        for b in v["pending"]:
+            lines.append(f"  pending: {b} check still running on this head")
+        for n in v["notes"]:
+            lines.append(f"  note: {n}")
+    return "\n".join(lines) + "\n"
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog=TOOL, description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
+    p.add_argument("--pr", type=int, action="append", dest="prs", metavar="N", help="PR number (repeatable)")
+    p.add_argument("--merged-limit", type=int, default=0, metavar="N",
+                   help=f"scan the newest N merged PRs instead of --pr (max {MAX_MERGED})")
+    p.add_argument("--config", default="", metavar="PATH", help="default-list file (tests; default config/review-bots.toml)")
+    p.add_argument("--no-override", action="store_true", help="ignore the repo's .github/ade-review-bots.toml")
+    p.add_argument("--list-bots", action="store_true", help="print the effective bot list and exit")
+    p.add_argument("--check", action="store_true", help="exit 3 on an untriaged finding, 4 on a pending bot check")
+    p.add_argument("--gh", default="gh", help="gh binary (tests inject a fake)")
+    p.add_argument("--json", action="store_true", help="print one JSON document")
+    return p
+
+
+def main(argv: list[str] | None = None, gh_runner: rb.GhRunner | None = None) -> int:
+    try:
+        a = parser().parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    if not rb.REPO_RE.fullmatch(a.repo):
+        print(f"{TOOL}: bad --repo {a.repo!r}", file=sys.stderr)
+        return 2
+    if not a.list_bots and not a.prs and not a.merged_limit:
+        print(f"{TOOL}: give --pr N (repeatable), --merged-limit N or --list-bots", file=sys.stderr)
+        return 2
+    if a.prs and a.merged_limit:
+        print(f"{TOOL}: --pr and --merged-limit are exclusive", file=sys.stderr)
+        return 2
+    if a.merged_limit < 0 or a.merged_limit > MAX_MERGED or (a.prs and any(n < 1 for n in a.prs)):
+        print(f"{TOOL}: --merged-limit 1..{MAX_MERGED}, --pr >= 1", file=sys.stderr)
+        return 2
+    gh = gh_runner or rb.make_gh(a.gh)
+    repo = a.repo.lower()
+    try:
+        cfg = rb.effective_config(gh, repo, a.config or None, use_override=not a.no_override)
+    except rb.ConfigError as e:
+        print(f"{TOOL}: config error (fail closed): {e}", file=sys.stderr)
+        return 2
+    except rb.GhError as e:
+        print(f"{TOOL}: {e}", file=sys.stderr)
+        return 1
+    if a.list_bots:
+        rows = [{"id": b.id, "name": b.name, "rest_login": b.rest_login, "graphql_login": b.graphql_login}
+                for b in cfg.bots]
+        if a.json:
+            sys.stdout.write(json.dumps({"tool": TOOL, "repo": repo, "bots": rows}, sort_keys=True) + "\n")
+        else:
+            for r in rows:
+                sys.stdout.write(f"{r['id']}\t{r['name']}\t{r['rest_login']}\t{r['graphql_login']}\n")
+        return 0
+    try:
+        numbers = a.prs if a.prs else merged_numbers(gh, repo, a.merged_limit)
+        verdicts = [rb.evaluate(gh, repo, n, config=cfg) for n in numbers]
+    except rb.GhError as e:
+        print(f"{TOOL}: {e}", file=sys.stderr)
+        return 1
+    if a.json:
+        sys.stdout.write(json.dumps({"tool": TOOL, "repo": repo, "prs": verdicts}, sort_keys=True) + "\n")
+    else:
+        sys.stdout.write(format_text(verdicts))
+    if a.check:
+        if any(v["state"] == "untriaged" for v in verdicts):
+            return 3
+        if any(v["state"] == "pending" for v in verdicts):
+            return 4
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

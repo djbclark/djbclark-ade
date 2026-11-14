@@ -3,7 +3,11 @@
 
   codex-open-threads [--repo OWNER/NAME] [--limit N] [--pr N ...] [--skip-outdated] [--json]
 
-AGENTS.md review rule 9 hygiene (Carried #11, 2026-10-23; advisory since slim-down J8):
+SUPERSEDED for the merge gate (2026-11-14, rb-01): `bin/review-bot-findings` covers every listed reviewer bot
+(config/review-bots.toml), open or merged PRs, with mechanical triage; `bin/ade-merge-ready` refuses on it. This older
+Codex-only lister stays working unchanged.
+
+AGENTS.md review rule 9 hygiene (Carried #11, 2026-10-23; was advisory under slim-down J8, now must-triage):
 list every unresolved Codex finding thread left on a merged pull request so the lead can
 read each against the code and fix what is real. GraphQL `reviewThreads.isResolved` is the
 authority (PR 32, 2026-10-23: an earlier head's P1 stayed open past two pushes; a head-only

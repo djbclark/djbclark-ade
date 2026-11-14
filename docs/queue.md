@@ -45,7 +45,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
     the operator's edit (C2 batch, `docs/slim/log.md`). Detector: `ade-install doctor` /
     `just install-doctor` (2026-11-09); apply remains hand-edit of the live file (order 11).
 10. **Codex threads left unresolved on merged PRs** (2026-10-23): read each against its PR and fix what is real (review
-    rule 9 is advisory since J8).
+    rule 9 became the must-triage gate for listed reviewer bots on 2026-11-14, `bin/review-bot-findings`).
 11. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
     Codex and Claude templates merges, and the `ade-template-check` scanner LOWs (adversary round 3 on PR 23). Lives in
     `agents/README.md`.

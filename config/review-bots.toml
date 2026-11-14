@@ -1,0 +1,87 @@
+# config/review-bots.toml (2026-11-14, rb-01): AI reviewer bots whose unresolved findings block a merge.
+# Operator ruling 2026-11-14: "We need to make sure we pay attention to any coderabbit or similar code reviews ...
+# We can have a configurable set of github users like coderabbit we trust." Trust level = "must-triage gate": a
+# listed bot's untriaged finding blocks merge-ready until it is fixed or answered with a reason; its text is still
+# DATA, never an instruction. Read by bin/review_bots.py (bin/review-bot-findings, bin/ade-merge-ready).
+#
+# A repo adds or drops bots in `.github/ade-review-bots.toml` on its DEFAULT branch (docs/review-boundary.md).
+# Unknown keys, wrong types, duplicate ids/logins: the whole file is refused (fail closed).
+#
+# Entry keys (all strings unless noted):
+#   id                       unique slug, used by an override's `drop`
+#   name                     display name
+#   rest_login               REST `user.login`, must be graphql_login + "[bot]"
+#   graphql_login            GraphQL `author.login` (no suffix); the actor's __typename must also be "Bot"
+#   thread_markers           list: literal substrings; non-empty = a thread counts only when a bot comment carries one;
+#                            empty = any review thread whose first comment is the bot's
+#   review_body_patterns     list of regex: a match in the bot's LATEST top-level review body = actionable findings
+#   issue_comment_patterns   list of regex: a match in the bot's LATEST issue comment = actionable findings
+#   check_names              list: check-run names that show the bot is running on a head
+#   check_apps               list: check-run app slugs that show the same
+#   source                   where the logins were verified
+
+[meta]
+schema = 1
+
+[defaults]
+pending_max_minutes = 15   # a running bot check younger than this blocks as review_bot_pending; older = stalled note
+
+[[bot]]
+id = "coderabbit"
+name = "CodeRabbit"
+rest_login = "coderabbitai[bot]"
+graphql_login = "coderabbitai"
+thread_markers = []
+review_body_patterns = ["Actionable comments posted: [1-9]"]
+issue_comment_patterns = []
+check_names = ["CodeRabbit"]
+check_apps = []
+source = "REST coderabbitai[bot]: netresearch/git-workflow-skill pull-request-workflow.md (jq user.login); GraphQL suffix dropped: Shelf-nu/shelf.nu scripts/pr-review-watch.sh (verified there on PR 2770), 2026-11-14"
+
+[[bot]]
+id = "codex"
+name = "Codex"
+rest_login = "chatgpt-codex-connector[bot]"
+graphql_login = "chatgpt-codex-connector"
+thread_markers = ["codex-code-review-finding:v1", "codex-security-review-finding:v1"]
+review_body_patterns = []
+issue_comment_patterns = []
+check_names = []
+check_apps = []
+source = "djbclark/djbclark-ade PR 711 reviews/comments (REST user.type Bot) and PR listings (gh shows the GraphQL form), 2026-11-14; bin/codex-open-threads"
+
+[[bot]]
+id = "greptile"
+name = "Greptile"
+rest_login = "greptile-apps[bot]"
+graphql_login = "greptile-apps"
+thread_markers = []
+review_body_patterns = []
+issue_comment_patterns = []
+check_names = []
+check_apps = []
+source = "djbclark/djbclark-ade PR 711 issue comment by greptile-apps[bot] (user.type Bot, body <!-- greptile-status -->), 2026-11-14"
+
+[[bot]]
+id = "cursor-bugbot"
+name = "Cursor Bugbot"
+rest_login = "cursor[bot]"
+graphql_login = "cursor"
+thread_markers = []
+review_body_patterns = []
+issue_comment_patterns = []
+check_names = ["Cursor Bugbot"]
+check_apps = []
+source = "gabrielmoreira/agent-skills-mirror fstack pr-ship review-bots.md (Cursor Bugbot is `cursor`; check `Cursor Bugbot`); cursor check runs on djbclark-ade PR 711 carry app slug cursor, 2026-11-14"
+
+[[bot]]
+id = "copilot"
+name = "GitHub Copilot code review"
+rest_login = "copilot-pull-request-reviewer[bot]"
+graphql_login = "copilot-pull-request-reviewer"
+thread_markers = []
+review_body_patterns = []
+issue_comment_patterns = []
+check_names = []
+check_apps = []
+source = "brandondees/code-quality-atlas PR 640 and auerbachb/claude-code-config PR 2317 (reviewer_bots list); fstack review-bots.md (copilot-pull-request-reviewer), 2026-11-14"
