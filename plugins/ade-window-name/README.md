@@ -54,7 +54,7 @@ are notifications (`waits: false`): a failure here can never block or delay an a
    misplaced). Pick distinctive `--window-middle` values.
 5. **One event per window, with a budget.** While a handler runs for a window, a second event for it is dropped (the next turn
    brings another), so nothing queues behind Paseo's 30 s hook timeout. Each run has a 25 s budget and an `AbortController`, aborted by the
-   budget or by Paseo's hook cancel: the python child is killed and the run writes nothing more.
+   budget or by Paseo's hook cancel: the python child is killed and the run makes no further daemon call or title write (a call already in flight still completes).
 
 ## Install and configuration
 

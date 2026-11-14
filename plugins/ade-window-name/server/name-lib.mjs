@@ -206,7 +206,7 @@ export async function handleAgentEvent(agent, context, deps = {}) {
 
 /** Defence in depth on the decision script's output: a string in the scheme, within the window-name limit. */
 export function validName(name) {
-  return typeof name === "string" && name.length <= NAME_MAX && SCHEME_NAME.test(name);
+  return typeof name === "string" && [...name].length <= NAME_MAX && SCHEME_NAME.test(name);
 }
 
 function remember(settled, wid) {

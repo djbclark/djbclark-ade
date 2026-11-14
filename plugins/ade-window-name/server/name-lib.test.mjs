@@ -455,6 +455,15 @@ test("equality-as-default holds only while the first agent is young; later only 
   assert.deepEqual(nulltitle.state.titles, ["MAIN my-repo (Same text)"], "a null title is named at any age");
 });
 
+test("validName counts code points like Python's len(), not UTF-16 units", () => {
+  const work = "\u{1F600}".repeat(50); // 50 characters, 100 UTF-16 units
+  const name = `MAIN r (${work})`; // 59 characters, 109 units
+  assert.equal([...name].length, 59);
+  assert.ok(name.length > 100);
+  assert.equal(validName(name), true);
+  assert.equal(validName(`MAIN r (${"\u{1F600}".repeat(93)})`), false); // 102 characters
+});
+
 test("an invalid name from the decision script is never written", async () => {
   assert.equal(validName("MAIN my-repo (Fix)"), true);
   for (const bad of [undefined, null, 42, "", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
