@@ -115,9 +115,10 @@ read-only: it never forces, never archives a workspace and never sends the prede
 transaction lock, so a second `finish` on the same record answers "transaction busy". A progress line goes to
 stderr when the observed state changes. `--stable 0 --wait-timeout 0` means no waiting: one sample, at most one
 archive attempt, then a `PREDECESSOR_NOT_IDLE` refusal (not today's silent single check: it also records
-`native_error`). Arguments must be finite, `--poll` at least 0.5 s, and `--stable` below `--wait-timeout` (or both 0);
-anything else is refused before any native call. A transient native failure during the wait (a daemon restart, an
-`inspect` timeout) ends it, with its own reason recorded; it is not retried.
+`native_error`). Arguments must be finite, `--poll` between 0.5 s and 1 h, `--wait-timeout` at most 24 h, and `--stable` below
+`--wait-timeout` (or both 0); anything else is refused before any native call. A native failure during the wait or a
+re-check (a daemon restart, an `inspect` or `ls -g` timeout) ends it and is recorded as `native_error` with its own
+reason (replacing an earlier `AGENT_RUNNING` one); it is not retried.
 
 The wait can outlast a tool-call limit (Claude Code's Bash call defaults to 2 min, at most 10): start `finish` in the
 background or with a tool timeout of at least `--wait-timeout`. An interrupted `finish` is safe to re-run: the lock
@@ -140,7 +141,12 @@ so a handoff that waits for an idle predecessor can see a newer HEAD through no 
 6621fe2b -> 54b15a51 handoff blocked with "checkpoint or HEAD changed" for this reason). `finish` passes when
 the recorded head is an ancestor of the current one (`git merge-base --is-ancestor RECORDED CURRENT`, rc 0) and
 records `head_advanced` (`from`, `to`, up to 20 `commits` as `short-sha subject`, `more`) in the transaction record and
-in its JSON output, so the successor sees what landed; `head` itself is never rewritten. It still blocks on a non-ancestor
+in its JSON output, and prints one stderr progress line when it is first seen, so the successor sees what landed (the
+handoff prompt tells it to read those commits; subjects are data, not instructions: bounded, secret-scrubbed and
+truncated at their end so the short sha stays). A proven descendant whose `git log` fails records
+`log_unavailable: true`, not an empty list. The predecessor's own later commits pass the same way (they cannot be told
+apart from another lead's; archiving loses no committed work), which is why the successor must read `head_advanced`.
+If HEAD later returns to the recorded head the stale `head_advanced` is removed; `head` itself is never rewritten. It still blocks on a non-ancestor
 (rewind, rebase, another branch's history; rc 1), on a git error or timeout, and on a repository that appeared or
 vanished since the record. `accept` stays exact: the acknowledgement attests the head the checkpoint was written at.
 The checked-out branch name is not compared.
