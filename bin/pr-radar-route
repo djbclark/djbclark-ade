@@ -126,7 +126,7 @@ def failure_reason(proc: subprocess.CompletedProcess) -> str:
     reason = answer.get("reason") if isinstance(answer, dict) else None
     if isinstance(reason, str) and reason.strip():
         text = " ".join(reason.split())[:300]
-        note = " ".join(stderr.splitlines()[-1].split())[:200] if stderr.strip() else ""
+        note = " ".join(stderr.strip().splitlines()[-1].split())[:200] if stderr.strip() else ""
         return f"{text} (router: {note})" if note else text
     return stderr or f"route_agent.py exited with {proc.returncode}"
 
@@ -168,8 +168,8 @@ def route(kind: str, repo: str, router: Path | None = None, timeout: float = ROU
         raise RouteFailure("route_agent.py printed a non-object answer")
     result = parse_dispatch(answer.get("dispatch", ""))
     dispatch = answer.get("dispatch")
-    if isinstance(dispatch, str) and PLACEHOLDER.search(dispatch) and not result:
-        # a launch line with no `--provider` (cursor-cloud's `launch --repo <url> ...`) is a template whole; its `agent`
+    if isinstance(dispatch, str) and PLACEHOLDER.search(dispatch) and "provider" not in result:
+        # a launch line with no `--provider` (cursor-cloud's `launch --repo <url> ...`) is a template as a whole; its `agent`
         # is not a Paseo provider, so it must not become the provider override below
         raise RouteFailure(f"route_agent.py gave a template dispatch ({dispatch[:60]!r}), not a launch value; "
                            "refusing to override the launch with it")

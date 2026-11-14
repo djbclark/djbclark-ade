@@ -263,6 +263,13 @@ def test_cursor_cloud_launch_template_is_refused_not_turned_into_a_provider(rig)
     assert len(proc.stderr.splitlines()) == 1 and "template dispatch" in proc.stderr
 
 
+def test_template_launch_line_with_a_mode_but_no_provider_is_refused(rig):
+    dispatch = "somelauncher --mode bypassPermissions --repo <url>"
+    proc, _ = rig({"pr": {}}, answer={"agent": "somelauncher", "dispatch": dispatch})
+    assert proc.returncode == 1 and proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1 and "template dispatch" in proc.stderr
+
+
 def test_template_agent_fallback_is_refused(rig):
     proc, _ = rig({"pr": {}}, answer={"agent": "<agent>", "dispatch": "paseo run --no-wait"})
     assert proc.returncode == 1 and proc.stdout == ""
