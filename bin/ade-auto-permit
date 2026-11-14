@@ -213,7 +213,7 @@ def descendant(agent, lead, cache, sensitive=frozenset()):
         if parent in leads:
             return True
         if parent in sensitive:
-            return False  # a child of an external-review agent does not inherit the lead's approval
+            return "sensitive"  # a child of an external-review agent does not inherit the lead's approval, in any mode
         agent = parent
     return False
 
@@ -298,10 +298,14 @@ def sweep(lead, labels, log, all_local=False):
                 reason = eligible[agent]
             else:
                 try:
-                    reason = "descendant" if descendant(agent, leads, cache, sensitive) else None
+                    found = descendant(agent, leads, cache, sensitive)
+                    if found == "sensitive":
+                        log_event(log, "skip", "sensitive-sender", agent, request, **event)
+                        continue
+                    reason = "descendant" if found else None
                 except ProbeError:
-                    if not all_local:
-                        raise
+                    if not all_local or sensitive:
+                        raise  # with an external-review agent pending, unknown ancestry never falls back to all-local
                     reason = None  # all-local does not depend on ancestry; local membership decides
             if reason is None and all_local and agent in providers:
                 reason = "all-local"

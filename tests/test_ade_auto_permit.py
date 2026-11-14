@@ -647,12 +647,27 @@ def test_descendant_of_an_external_review_agent_is_not_approved(tmp_path):
                                         'labelled': {SENSITIVE: [OTHER]}})
     assert result.returncode == 0, result.stderr
     assert not any(c[:2] == ['permit', 'allow'] for c in calls)
-    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'outside-scope')]
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'sensitive-sender')]
+    # --all-local (the installed job) must not take the child back through its fallback
+    (tmp_path / 'calls.jsonl').unlink()
+    (tmp_path / 'audit.jsonl').unlink()
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD},
+                                        'labelled': {SENSITIVE: [OTHER]}}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'sensitive-sender')]
     # an ordinary intermediate parent still qualifies the child
     (tmp_path / 'calls.jsonl').unlink()
     (tmp_path / 'audit.jsonl').unlink()
     result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD}})
     assert ['permit', 'allow', CHILD, 'request'] in calls
+
+
+def test_failed_ancestry_probe_never_falls_back_to_all_local_when_an_external_review_agent_exists(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: 'error'},
+                                        'labelled': {SENSITIVE: [OTHER]}}, '--all-local')
+    assert result.returncode == 1
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
 
 
 def test_sensitive_probe_is_skipped_when_nothing_is_pending(tmp_path):
