@@ -148,18 +148,17 @@ def strip_comments(text: str) -> str:
 
 
 RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at", "tmux", "osascript"}  # words that run a string argument
-RUN_FLAG = re.compile(r"-[A-Za-z]*[ce][A-Za-z]*|--command|--run(=.*)?")  # `-c`, `-lc`, `-e`, `--run`: the next word is a command string
-SHELL_WORD = re.compile(r"(?<![\w.-])(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")(?![\w.-])")  # a shell anywhere may read a string from stdin
+NO_RUN = {"echo", "printf", "grep", "rg", "sed", "awk"}  # their `-e`/`-c` flags take text, not a command: `echo -e "old: paseo send A"`
+RUN_FLAG = re.compile(r"-[A-Za-z]*[ce][A-Za-z]*|--command(=.*)?|--run(=.*)?")  # `-c`, `-lc`, `-e`, `--run=`: the next word is a command string
+# A shell in the (already masked) text may read a script from stdin: `| sh`, `bash <<<`, `| $SHELL`, `source <(...)`. No `\S*/` prefix:
+# the lookbehind already matches after a `/`, and the prefix made the scan quadratic on a long blob without blanks.
+SHELL_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(SHELLS)) + r")(?![\w.-])|\$\{?SHELL\b\}?|(?<![\w.-])(?:source|\.)\s+<\(")
+IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)+")
 
 
-def mask_literals(text: str) -> str:
-    """`text` (already through strip_comments) with each quoted string that is message text blanked to `''`. A string stays when
-    it is a lone id (a quoted id), contains a `$(` or backtick (a real substitution), or follows a word that runs a
-    string (`eval`, `watch`, `-c`, `--run`: `eval 'paseo send A hi'` is a send), or the command names a shell anywhere. An unbalanced quote means the structure is
-    unclear: nothing is masked. `$'...'` is read with its backslash escapes."""
+def _mask(text: str) -> str:
     out, words, word = [], [], []
     i, n = 0, len(text)
-    shell_anywhere = bool(SHELL_WORD.search(text))  # `echo 'paseo send A' | sh`, `bash <<< '...'`: any string may be a script
     while i < n:
         c = text[i]
         if c in "'\"" or (c == "$" and text.startswith("$'", i)):
@@ -171,9 +170,11 @@ def mask_literals(text: str) -> str:
             if j >= n:
                 return text
             body = text[i + 1:j]
-            runs = any(Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) for w in words + ["".join(word)])
-            keep = (runs or shell_anywhere or UUID.fullmatch(body) is not None
-                    or (q == '"' and ("$(" in body or "`" in body)))  # a lone quoted id is a target, not message text
+            runs = (any(Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) for w in words + ["".join(word)])
+                    and not (words and Path(words[0]).name in NO_RUN))
+            keep = (runs or IDS_ONLY.fullmatch(body) is not None  # a quoted id (or a list of ids) is a target, not message text
+                    or (q == '"' and (("$(" in body or "`" in body)  # a real substitution
+                                      or ("$" in body and not re.search(r"\s", body)))))  # `"${LEAD:-<id>}"`, `"$SHELL"`
             out.append(text[start:j + 1] if keep else "''")
             word.append("Q")
             i = j + 1
@@ -193,6 +194,16 @@ def mask_literals(text: str) -> str:
             out.append(c)
             i += 1
     return "".join(out)
+
+
+def mask_literals(text: str) -> str:
+    """`text` (already through strip_comments) with each quoted string that is message text blanked to `''`. A string stays when
+    it is a quoted id or list of ids, a `"${VAR:-id}"` expansion, a `$(` or backtick body, or the argument of a word that runs a
+    string (`eval`, `watch`, `-c`, `--run=`: `eval 'paseo send A hi'` is a send). When a shell word is left outside quotes
+    (`echo '...' | sh`, `bash <<< '...'`) every string may be a script, so nothing is masked; a shell word inside message text
+    does not count. An unbalanced quote means the structure is unclear: nothing is masked. `$'...'` is read with its escapes."""
+    masked = _mask(text)
+    return text if SHELL_WORD.search(masked) else masked
 
 
 def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
@@ -277,6 +288,8 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     than the parser found judgeable targets for, every full agent id written in the command is judged too (at most 5): a false
     denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form
     nobody listed."""
+    if "paseo" not in command:
+        return []
     text = strip_heredocs(command)
     judged = [t for t, _ in found if t and not any(c in t for c in SHELL_BUILT)]  # `$LEAD`, `{}`, `$id` are never judged
     bare = mask_literals(strip_comments(text))  # a `paseo send` or an id inside a quoted message (a `code span`) is text

@@ -380,6 +380,20 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"foo --command 'paseo send {A} hi'", [A]),
     (f"watch -n1 true; paseo send -- {B} --prompt 'old: paseo send {A} hi'", []),  # the runner word ends with its command
     (f'NEW={B}; paseo send "$NEW" --prompt "ack:{A}"', [B]),  # an id glued into message text is text; only a lone quoted id counts
+    (f'paseo send --no-wait "${{LEAD:-{A}}}" --prompt done', [A]),  # a parameter expansion with an id default (r3 A1)
+    (f'LEAD="${{LEAD:-{A}}}"; paseo send "$LEAD" hi', [A]),
+    (f'SIBS="{A} {B}"; for id in $SIBS; do paseo send --no-wait "$id" hi; done', [A, B]),  # a quoted list of ids (r3 A4)
+    (f'echo "{A} {B}" | xargs -n1 paseo send --no-wait', [A, B]),
+    (f"echo 'paseo send {A} hi' | $SHELL", [A]),  # r3 A5a
+    (f'echo \'paseo send {A} hi\' | "$SHELL"', [A]),
+    (f"foo --command='paseo send {A} hi'", [A]),  # r3 A5b
+    (f"source <(echo 'paseo send {A} hi')", [A]),  # r3 A5c
+    (f"perl -e 'system(q(paseo send {A} hi))'", [A]),  # kills "drop `e` from RUN_FLAG" (r3 A7)
+    (f"tmux new -d 'paseo send {A} hi'", [A]),  # kills "drop tmux from RUNNERS"
+    (f"nix-shell --run='paseo send {A} hi'", [A]),  # kills "--run(=.*)? -> --run"
+    (f'echo -e "old: paseo send {A}"; paseo send -- {B} hi', []),  # r3 A6: echo's -e takes text
+    (f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send from bash: ack {B}"', []),  # r3 A3
+    (f'git commit -m "fix: paseo send {A} in the sh wrapper"', []),
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
@@ -428,6 +442,23 @@ def test_a_takeover_notice_sent_to_a_shell_variable_is_not_denied_for_the_replac
     world.live(**{A: False, B: False})
     cmd = f'NEW={B}; paseo send --json --no-wait -- "$NEW" --prompt "LEAD $NEW took over from {A}. Reply: ack $NEW"'
     assert run_hook(world, "Bash", {"command": cmd}) is None
+
+
+def test_a_takeover_notice_mentioning_bash_is_allowed(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    notice = f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send from bash: ack {B}"'
+    assert run_hook(world, "Bash", {"command": notice}) is None  # a shell word inside message text does not unmask it
+
+
+def test_the_backstop_scan_is_linear_on_a_long_command_without_blanks():
+    """r3 A2: a `(?:\\S*/)?` prefix in SHELL_WORD made this take ~15 s at 150 KB."""
+    import time
+    blob = "echo '" + "x" * 300_000 + "' > f; paseo send -- " + A
+    t0 = time.monotonic()  # only the backstop is timed: the shlex pass in targets_in_command is not what r3 A2 measured
+    gate.backstop_targets(blob, [(A, None)])
+    gate.backstop_targets("echo '" + "x" * 300_000 + "' > f", [])  # no `paseo`: returns at once
+    assert time.monotonic() - t0 < 1.0
 
 
 def test_the_backstop_judges_a_send_run_by_eval(world):
