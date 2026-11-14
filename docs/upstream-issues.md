@@ -195,6 +195,20 @@ modifies `.gitignore`; with the variable set it does not. The variable does not
 cover `ensureBuildConfigIgnored` (`/.graft/`, written when a persisted build
 option is saved): that one has no switch in 0.23.0.
 
+**Open question to add when filing: should `.ignore` be committed?**
+(2026-11-14, operator: "add this to the previous graft question".) The
+`.ignore` graft drops (`!graft/`, `graft/.cache/`, `graft/.graph/`) lets
+ripgrep search the gitignored `graft/` index, so search depends on it. It
+cannot go in `.git/info/exclude`: ripgrep reads it from the worktree.
+Committing it is one file and needs nothing else (`graft/` stays ignored and is
+rebuilt by `graft build`), but it only helps a clone that also runs graft. Our
+repos already disagree, all with the identical file: `djbclark-ade` commits it
+(`df8c0860`, 2026-08-23), while `site-public-djbclark`, `site-private-djbclark`
+and `cfengine-all` leave it untracked. The recipe above excludes `/.ignore`,
+which hides it instead. Ask upstream which is intended (and say so in graft's
+docs), and for a switch that skips writing it, like `--no-gitignore`. Until
+then, leave existing untracked copies as they are.
+
 ## 3. orca — CLI parity for structural reorg (filed 2026-09-26)
 
 **Status: already-filed** — [stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272)
