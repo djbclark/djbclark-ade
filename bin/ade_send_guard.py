@@ -11,7 +11,9 @@ target, what a sender should do instead:
   refuse    the target is archived and nothing replaced it, or its succession ledger is cyclic, or the successor itself is
             archived: nothing is sent. `allow_archived` (operator override, deliberate resume of an archived agent) turns
             a plain archived target into `pass` when it is True or equals that agent's full id; it never overrides a
-            redirect or a cycle.
+            redirect or a cycle. `allow_replaced` (operator override, ADE_ALLOW_REPLACED_SEND, 2026-11-14) turns a redirect
+            into `pass` only when it equals the target's full id, the target is live (`Archived` is False, so the send cannot
+            un-archive it) and its succession chain is sound; the decision then carries `replaced_by` and `guard()` logs the use.
 
 `inspect` is injected: `inspect(id_or_name) -> {"Id": ..., "Archived": bool, ...}`, raising LookupError when Paseo does not
 know the agent and anything else (OSError, ValueError, ...) when it cannot answer. A Paseo outage fails OPEN (`pass`): a
@@ -21,6 +23,7 @@ Read-only: this module never writes a record and never sends.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -32,6 +35,9 @@ import ade_lead_succession as succ  # noqa: E402
 
 PASS, REDIRECT, REFUSE = "pass", "redirect", "refuse"
 ALLOW_ENV = "ADE_ALLOW_ARCHIVED_SEND"  # =<the agent's full id> in a command's environment: one deliberate resume of it
+ALLOW_REPLACED_ENV = "ADE_ALLOW_REPLACED_SEND"  # =<a live, replaced agent's full id>: send to it anyway, not to its successor
+LOG_ENV = "ADE_SEND_GUARD_LOG"  # where overrides are logged (default DEFAULT_LOG under the home directory)
+DEFAULT_LOG = Path(".local/state/djbclark-ade/send-guard-overrides.jsonl")
 EXIT_REFUSED = 4  # the ADE report class for "blocked"
 EXIT_REDIRECT = 3  # send to the decision's target, not to the one asked for
 
@@ -41,6 +47,7 @@ class Decision:
     action: str
     target: str  # the id to send to (the original target for pass and refuse)
     reason: str = ""
+    replaced_by: str = ""  # set on a `pass` that ignored a redirect (ADE_ALLOW_REPLACED_SEND): the successor it skipped
 
     def as_dict(self) -> dict:
         return {"action": self.action, "target": self.target, "reason": self.reason}
@@ -56,7 +63,7 @@ def _record(inspect, ident: str) -> dict | None:
 
 
 def decide(target: str, inspect, allow_archived: bool | str | None = False, state_dir: Path | None = None,
-           home: Path | None = None) -> Decision:
+           home: Path | None = None, allow_replaced: str | None = None) -> Decision:
     """What to do about a send to `target` (an id, an id prefix or a name Paseo resolves)."""
     if target.startswith("-"):  # an option, not an agent: never hand it to the inspect CLI
         return Decision(PASS, target, "not an agent id: not guarded")
@@ -78,6 +85,9 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
             successor = None
         if successor is not None and successor.get("Archived") is True:
             return Decision(REFUSE, target, f"{ident} was replaced by {current}, which is archived too: nothing to send to")
+        if allow_replaced == ident and record.get("Archived") is False:  # live: the send cannot un-archive it
+            return Decision(PASS, target, f"{ident} was replaced by {current}, but {ALLOW_REPLACED_ENV} names it and it is live: "
+                            "sent as asked", replaced_by=current)
         return Decision(REDIRECT, current, f"{ident} was replaced through a completed self-handoff; send to {current}")
     if record.get("Archived") is True and not (allow_archived is True or allow_archived == ident):
         return Decision(REFUSE, target, f"{ident} is archived and no completed handoff replaced it: a send would un-archive "
@@ -100,10 +110,33 @@ def paseo_inspect(paseo: str = "paseo", timeout: int = 5):
     return inspect
 
 
-def guard(target: str, paseo: str = "paseo", env=None, **kw) -> Decision:
-    """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND."""
+def log_override(d: Decision, log_path: Path | None = None) -> None:
+    """Append one JSON line for a send that ADE_ALLOW_REPLACED_SEND let through (no message text). Never raises: a log that
+    cannot be written must not block the send."""
+    try:
+        path = Path(log_path or os.environ.get(LOG_ENV) or Path.home() / DEFAULT_LOG)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        line = json.dumps({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "override": ALLOW_REPLACED_ENV,
+                           "target": d.target, "successor": d.replaced_by, "pid": os.getpid(), "ppid": os.getppid(),
+                           "argv0": Path(sys.argv[0] if sys.argv and sys.argv[0] else "python").name})
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (line + "\n").encode())
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = None, **kw) -> Decision:
+    """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND and ADE_ALLOW_REPLACED_SEND (a use of the latter
+    is logged, see `log_override`)."""
     env = os.environ if env is None else env
-    return decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False, **kw)
+    d = decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False,
+               allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, **kw)
+    if d.replaced_by:
+        log_override(d, log_path)
+    return d
 
 
 def main(argv=None) -> int:

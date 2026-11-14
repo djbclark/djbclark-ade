@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""ade-paseo-guard: the decision half of the `paseo` PATH shim (libexec/agent-bin/paseo), ls-06, 2026-11-14.
+
+Paseo un-archives and runs an archived agent that gets a message, so a send to an archived or handoff-replaced agent is
+stopped (docs/archived-send-guard.md). The Claude hook sees only Bash and MCP tool calls; a send made from a Python
+`subprocess.run(["paseo", "send", ...])`, a script or a heredoc'd program never reaches it. This helper is the same decision
+in the send path itself, whoever builds the command:
+
+  ade-paseo-guard paseo-ARGS...         the shim's call: judge `[global opts] [agent] send [opts] TARGET ...`, then exec the real paseo
+
+  pass      (live target, unknown to Paseo, another daemon, any other subcommand): exec the real paseo with the argv as given
+  redirect  (a completed self-handoff replaced the target): rewrite ONLY the target word to its successor, say so on stderr, exec
+  refuse    (archived with no successor, a cyclic ledger, an archived successor): reason and override hint on stderr, exit 4, no exec
+
+The target is parsed with the hook's own rules (`archived_send_gate._target_index`, VALUE_FLAGS, OTHER_DAEMON), never the message.
+A pass-through is `os.execv`, so the exit code, signals, stdin and stdout are the real paseo's. This is an accident guard, like the
+hook: anything unexpected (an error here, no real paseo found for the probe) runs the real paseo unchanged. Only a refusal
+stops a command. The inspect probe calls the real paseo by its absolute path, so it never re-enters the shim.
+
+Environment: ADE_REAL_PASEO (the real paseo; the shim exports it), ADE_ALLOW_ARCHIVED_SEND=<id> and ADE_ALLOW_REPLACED_SEND=<id>
+(overrides, read through `ade_send_guard.guard`), ADE_SEND_GUARD_LOG (where a replaced-send override is logged).
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent  # the checkout this script lives in (through any symlink), never the cwd
+sys.path.insert(0, str(ROOT / "bin"))
+sys.path.insert(0, str(ROOT / "claude" / "hooks"))
+AGENT_BIN = ROOT / "libexec" / "agent-bin"
+EXIT_REFUSED = 4  # same as bin/ade_send_guard.py: the ADE report class for "blocked"
+GLOBAL_VALUE_FLAGS = {"-o", "--format"}  # global options that take a value word, as in the hook's parser
+
+
+def real_paseo(env=None) -> str | None:
+    """ADE_REAL_PASEO, else the first `paseo` on PATH outside this checkout's agent-bin directory (the shim's own)."""
+    env = os.environ if env is None else env
+    named = env.get("ADE_REAL_PASEO")
+    if named and os.access(named, os.X_OK):
+        return named
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        cand = Path(d) / "paseo" if d else None
+        if cand and cand.is_file() and os.access(cand, os.X_OK) and not _same_dir(Path(d), AGENT_BIN):
+            return str(cand)
+    return None
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def send_target_index(args: list[str]) -> int | None:
+    """Index in `args` (paseo's arguments, no argv[0]) of the target word of a `[global opts] [agent] send ...` call; None when
+    this is no send, or it addresses another daemon (`--host`, `--home`: its agents are not in this ledger), or has no target."""
+    import archived_send_gate as gate  # noqa: PLC0415 - the hook's parser, one copy
+    i = 0
+    while i < len(args) and args[i].startswith("-"):  # a global option before the verb: --json, -o json, -q
+        if args[i] in gate.OTHER_DAEMON or args[i].startswith(("--host=", "--home=")):
+            return None
+        i += 2 if args[i] in GLOBAL_VALUE_FLAGS else 1
+    if args[i:i + 1] == ["agent"]:
+        i += 1
+    if args[i:i + 1] != ["send"]:
+        return None
+    j = gate._target_index(args[i + 1:])
+    return None if j is None else i + 1 + j
+
+
+def run(argv: list[str], env=None) -> int:
+    """Decide for `argv` (paseo's arguments) and exec the real paseo, or return the exit code of a refusal."""
+    env = os.environ if env is None else env
+    real = real_paseo(env)
+    if real is None:
+        print("ade-paseo-guard: no real paseo found on PATH", file=sys.stderr)
+        return 127
+    args = list(argv)
+    try:
+        idx = send_target_index(args)
+        if idx is not None:
+            import ade_send_guard as sg  # noqa: PLC0415
+            target = args[idx]
+            d = sg.guard(target, paseo=real, env=env)
+            if d.action == sg.REFUSE:
+                print(f"ade-paseo-guard: refused, nothing was sent: {d.reason}.", file=sys.stderr)
+                print(f"ade-paseo-guard: only the operator overrides, naming the agent: {sg.ALLOW_ENV}=<its full id> resumes an "
+                      f"archived one, {sg.ALLOW_REPLACED_ENV}=<its full id> sends to a replaced one that is still live; neither "
+                      f"covers a cyclic ledger.", file=sys.stderr)
+                return EXIT_REFUSED
+            if d.action == sg.REDIRECT:
+                print(f"ade-paseo-guard: {target} was replaced by {d.target}; sending to {d.target}", file=sys.stderr)
+                args[idx] = d.target
+    except Exception as exc:  # noqa: BLE001 - an accident guard: its own bug runs the real paseo, never blocks it
+        print(f"ade-paseo-guard: {type(exc).__name__}: {exc}; running paseo unguarded", file=sys.stderr)
+        args = list(argv)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(real, [real, *args])
+    except OSError as exc:
+        print(f"ade-paseo-guard: cannot run {real}: {exc}", file=sys.stderr)
+        return 126
+    return 127  # not reached
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(list(sys.argv[1:] if argv is None else argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

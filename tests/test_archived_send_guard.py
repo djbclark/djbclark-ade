@@ -486,3 +486,50 @@ def test_a_code_span_in_a_single_quoted_message_is_not_a_send(world):
     world.live(**{A: False, B: False})
     cmd = f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'"
     assert run_hook(world, "Bash", {"command": cmd}) is None
+
+
+# --- ADE_ALLOW_REPLACED_SEND (ls-06) ---------------------------------------------------------------------------------
+
+def test_the_replaced_override_is_read_from_the_assignment_before_the_command_only():
+    hits = gate.targets_in_command(f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} msg; paseo send {B} ADE_ALLOW_REPLACED_SEND={B}")
+    assert hits == [(A, None), (B, None)] and [h.replaced for h in hits] == [A, None]  # a word of the message is no override
+    both = gate.targets_in_command(f"env ADE_ALLOW_ARCHIVED_SEND={A} ADE_ALLOW_REPLACED_SEND={A} paseo send {A} hi")
+    assert both == [(A, A)] and both[0].replaced == A
+
+
+def test_hook_lets_an_operator_override_send_to_a_live_replaced_agent(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    log = world.state.parent / "overrides.jsonl"
+    env = {**world.env, guard.LOG_ENV: str(log)}
+    assert B in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))
+    assert run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"}, env=env) is None
+    assert json.loads(log.read_text())["successor"] == B  # the use is logged
+    for wrong in ("1", B, A[:8]):
+        assert B in denial(run_hook(world, "Bash", {"command": f"ADE_ALLOW_REPLACED_SEND={wrong} paseo send -- {A} hi"}, env=env))
+    assert B in denial(run_hook(world, "Bash", {"command": f"ADE_ALLOW_ARCHIVED_SEND={A} paseo send -- {A} hi"}, env=env))  # the other override is no cover
+
+
+def test_hook_replaced_override_needs_a_live_target_and_a_sound_ledger(world):
+    write_link(world.state, world.home, A, B)
+    cmd = f"ADE_ALLOW_REPLACED_SEND={A} paseo send -- {A} hi"
+    world.live(**{A: True, B: False})  # replaced and archived: still redirected
+    assert B in denial(run_hook(world, "Bash", {"command": cmd}))
+    write_link(world.state, world.home, B, A)  # a cycle
+    world.live(**{A: False, B: False})
+    assert "inconsistent" in denial(run_hook(world, "Bash", {"command": cmd}))
+
+
+def test_hook_replaced_override_reaches_the_backstop_form_too(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    cmd = f'ADE_ALLOW_REPLACED_SEND={A} LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'
+    assert run_hook(world, "Bash", {"command": cmd}) is None
+    assert "could not parse" in denial(run_hook(world, "Bash", {"command": f'LEAD={A}; paseo send --json --no-wait "$LEAD" --prompt done'}))
+
+
+def test_the_hook_ignores_a_replaced_override_exported_in_its_own_environment(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    env = {**world.env, guard.ALLOW_REPLACED_ENV: A}
+    assert B in denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}, env=env))

@@ -7,6 +7,7 @@ could act as a stale lead). This hook checks the target of a Bash `paseo send` /
 
   replaced by a completed handoff   deny, naming the successor (a hook cannot safely rewrite the target; re-send to it)
   archived, nothing replaced it     deny; `ADE_ALLOW_ARCHIVED_SEND=<its full id> paseo send ...` resumes it on purpose
+  replaced but still live           `ADE_ALLOW_REPLACED_SEND=<its full id> paseo send ...` sends to it anyway (logged)
   live, unknown to Paseo, anything this hook cannot parse or reach   allow silently (fails open)
 
 Only the target is judged, never the message. A target built by the shell (`$VAR`, a substitution, a glob) is not parsed.
@@ -27,6 +28,7 @@ OTHER_DAEMON = {"--host", "--home"}  # another daemon: its agents are not in thi
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 MCP_ID_KEYS = ("agentId", "agent_id", "id", "target")
 ALLOW_VAR = "ADE_ALLOW_ARCHIVED_SEND"
+REPLACED_VAR = "ADE_ALLOW_REPLACED_SEND"
 SHELL_BUILT = "$`*?[{~"  # a target containing one of these is built by the shell: judge() skips it
 
 
@@ -212,9 +214,21 @@ def mask_literals(text: str) -> str:
     return text if SHELL_WORD.search(masked) else masked
 
 
+class Hit(tuple):
+    """`(target, allow)`, the pair every caller unpacks, with the ADE_ALLOW_REPLACED_SEND value riding along as `.replaced`
+    (an attribute, so a Hit still compares equal to its two-element tuple)."""
+    replaced: str | None
+
+    def __new__(cls, target: str, allow: str | None, replaced: str | None = None):
+        self = super().__new__(cls, (target, allow))
+        self.replaced = replaced
+        return self
+
+
 def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
     """[(target, allow)] for every `paseo [agent] send` found in a shell command line. `allow` is the value of an
-    ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None."""
+    ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None; the value of an
+    ADE_ALLOW_REPLACED_SEND=... assignment is the hit's `.replaced`."""
     text = strip_comments(strip_heredocs(command))
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -260,28 +274,35 @@ def _one(words: list[str], depth: int) -> list[tuple[str, str | None]]:
         target = _target(rest[1:])
         if target:  # an override counts only as an assignment before the command, never as a word of the message
             allow = next((x.split("=", 1)[1] for x in words[:i] if x.startswith(ALLOW_VAR + "=")), None)
-            found.append((target, allow))
+            replaced = next((x.split("=", 1)[1] for x in words[:i] if x.startswith(REPLACED_VAR + "=")), None)
+            found.append(Hit(target, allow, replaced))
         break
     return found
 
 
-def _target(args: list[str]) -> str | None:
-    """The agent word of `paseo send` arguments: skip the value flags; the first word after `--`; None when another daemon
-    is addressed (--host/--home) or nothing is found."""
+def _target_index(args: list[str]) -> int | None:
+    """Where the agent word of `paseo send` arguments is: skip the value flags; the first word after `--`; None when another
+    daemon is addressed (--host/--home) or nothing is found."""
     j = 0
     while j < len(args):
         a = args[j]
         if a in OTHER_DAEMON or a.startswith(("--host=", "--home=")):
             return None
         if a == "--":
-            return args[j + 1] if j + 1 < len(args) else None
+            return j + 1 if j + 1 < len(args) else None
         if a in VALUE_FLAGS:
             j += 2
         elif a.startswith("-"):
             j += 1
         else:
-            return a
+            return j
     return None
+
+
+def _target(args: list[str]) -> str | None:
+    """The agent word of `paseo send` arguments (see `_target_index`), or None."""
+    j = _target_index(args)
+    return args[j] if j is not None else None
 
 
 SEND_WORD = re.compile(r"\bpaseo\b(?:\s+[^\s;&|]+){0,4}?\s+send\b")
@@ -305,18 +326,18 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     out: list[tuple[str, str | None]] = []
     for u in dict.fromkeys(UUID.findall(bare)):
         if u not in seen and len(out) < 5:
-            out.append((u, u if f"{ALLOW_VAR}={u}" in text else None))
+            out.append(Hit(u, u if f"{ALLOW_VAR}={u}" in text else None, u if f"{REPLACED_VAR}={u}" in text else None))
     return out
 
 
-def judge(target: str, allow: str | None, backstop: bool = False) -> str | None:
+def judge(target: str, allow: str | None, backstop: bool = False, replaced: str | None = None) -> str | None:
     """A denial reason, or None to allow. `backstop`: the id was only found written in a command the parser could not follow,
     so the reason says that (the command may already send to the successor, and `Re-send to X` would loop)."""
     if not target or any(c in target for c in SHELL_BUILT):
         return None
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
-    env = {guard.ALLOW_ENV: allow} if allow else {}
+    env = {k: v for k, v in ((guard.ALLOW_ENV, allow), (guard.ALLOW_REPLACED_ENV, replaced)) if v}
     d = guard.guard(target, env=env)
     if d.action not in (guard.REDIRECT, guard.REFUSE):
         return None
@@ -343,8 +364,8 @@ def main() -> int:
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
             found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it
-        for target, allow, back in [(t, a, False) for t, a in found] + [(t, a, True) for t, a in extra]:
-            reason = judge(target, allow, back)
+        for hit, back in [(h, False) for h in found] + [(h, True) for h in extra]:
+            reason = judge(hit[0], hit[1], back, getattr(hit, "replaced", None))
             if reason:
                 deny(reason)
                 return 0
