@@ -83,11 +83,13 @@ class Native:
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
             # `ls -a` adds includeBackground; a plain `ls -g` (what archive resolves from) hides it
-            label = args[args.index('--label') + 1] if '--label' in args else None
-            data = [{'id': i} for i in sorted(self.labels.get(label, ()))] if (
-                label and not label.startswith('ade.handoff=')) else self.labelled if label else [
-                {'id': k} for k in self.rows
-                if k not in self.unlisted and (k not in self.background or '-a' in args)]
+            wanted = [args[i + 1] for i, a in enumerate(args) if a == '--label']
+            if wanted and not any(w.startswith('ade.handoff=') for w in wanted):
+                data = [{'id': i} for i in sorted(set.intersection(*(self.labels.get(w, set()) for w in wanted)))]
+            else:
+                data = self.labelled if wanted else [
+                    {'id': k} for k in self.rows
+                    if k not in self.unlisted and (k not in self.background or '-a' in args)]
         elif args[:2] == ['agent', 'update']:
             self.updates.append(args[2:])
             if self.update_result is not None:
@@ -1097,9 +1099,23 @@ def test_no_usable_name_and_no_chain_record_gets_a_derived_title(setup, name):
     if name is not None:
         native.rows[PRED]['Name'] = name
     record = service.handoff(checkpoint, quiesced=True)
-    assert record['identity']['title'] == 'Lead (successor of 11111111)'
+    assert record['identity']['title'] == 'Lead (self-handoff successor)'
     assert record['identity']['title_source'] == 'derived'
-    assert '--title=Lead (successor of 11111111)' in run_call(native)
+    assert '--title=Lead (self-handoff successor)' in run_call(native)
+    # paseo#9668: a partial-title archive fallback must never match on an id prefix in a lead's title
+    assert PRED[:7] not in record['identity']['title'] and PRED[:8] not in record['identity']['title']
+
+
+def test_derived_title_names_the_role_when_there_is_one(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, requested_role='tendcf-lead')
+    assert record['identity']['title'] == 'Lead tendcf-lead' and record['identity']['title_source'] == 'derived'
+
+
+def test_an_unprintable_name_falls_through_to_the_next_title_source(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = '\u200b\u200b'
+    assert service.handoff(checkpoint, quiesced=True)['identity']['title_source'] == 'derived'
 
 
 def test_requested_title_wins_and_is_normalised(setup):
@@ -1184,3 +1200,83 @@ def test_a_record_from_before_st01_has_no_identity_and_is_left_alone(setup):
     finished = settle(service, native, old, path)
     assert finished['status'] == 'archived' and 'identity' not in finished
     assert native.updates == []
+
+
+@pytest.mark.parametrize('identity', [
+    {}, {'title': 5, 'labels': []},
+    {'title': 'T', 'labels': 'x'}, {'title': 'T', 'labels': {'ade.role': 'a,ade.kind=code'}},
+    {'title': 'T', 'labels': {'ade.kind': 'external-review'}}, {'title': 'T', 'labels': {'ade.chain': 'nope'}},
+    {'title': 'T\n', 'labels': {}}])
+@pytest.mark.parametrize('stage', ['accept', 'finish'])
+def test_a_malformed_or_forged_identity_is_recorded_and_never_fatal_or_sent(setup, identity, stage):
+    service, native, record, path = start(setup)
+    forged = json.loads(path.read_text())
+    forged['identity'] = copy.deepcopy(identity)
+    path.write_text(json.dumps(forged))
+    if stage == 'finish':
+        record = accept(service, forged, path)
+        record['identity'] = copy.deepcopy(identity)
+        path.write_text(json.dumps(record))
+        native.rows[PRED]['Status'] = 'idle'
+        done = service.finish(path)
+        assert done['status'] == 'archived'
+    else:
+        done = accept(service, forged, path)
+        assert done['status'] == 'acknowledged'
+    assert done['identity']['checks'][stage] == 'failed'
+    assert done['identity']['error']['stage'] == stage
+    assert native.updates == []  # nothing from the record reached `agent update`
+
+
+def test_a_forged_chain_record_label_is_dropped_before_it_reaches_the_new_record(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Self-handoff x'
+    service.state.mkdir(mode=0o700, parents=True)
+    earlier = {'kind': 'handoff', 'home': str(service.home), 'predecessor': OTHER, 'successor': PRED,
+               'identity': {'title': 'T', 'labels': {'ade.chain': 'not-a-uuid', 'ade.role': 'a,ade.kind=code'}}}
+    (service.state / ('handoff-' + OTHER + '.json')).write_text(json.dumps(earlier))
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['identity']['labels'] == {'ade.chain': PRED, 'ade.predecessor': PRED}
+
+
+def test_a_chain_record_from_another_daemon_home_is_ignored(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Self-handoff x'
+    service.state.mkdir(mode=0o700, parents=True)
+    earlier = {'kind': 'handoff', 'home': '/elsewhere', 'predecessor': OTHER, 'successor': PRED,
+               'identity': {'title': 'Foreign', 'labels': {'ade.chain': OTHER, 'ade.role': 'x'}}}
+    (service.state / ('handoff-' + OTHER + '.json')).write_text(json.dumps(earlier))
+    assert service.handoff(checkpoint, quiesced=True)['identity']['title'] == 'Lead (self-handoff successor)'
+
+
+def test_a_duplicate_handoff_with_a_different_title_or_role_is_refused_not_replayed(setup):
+    service, native, checkpoint = setup
+    first = service.handoff(checkpoint, quiesced=True, requested_title='One', requested_role='r1')
+    assert service.handoff(checkpoint, quiesced=True, requested_title='One', requested_role='r1') == first
+    assert service.handoff(checkpoint, quiesced=True) == first  # nothing explicit: the retry is the same request
+    for kwargs in ({'requested_title': 'Two'}, {'requested_role': 'r2'}):
+        with pytest.raises(ss.SessionError, match='different requested title or role'):
+            service.handoff(checkpoint, quiesced=True, **kwargs)
+    assert native.created == 1
+
+
+def test_title_is_capped_in_utf16_units_like_paseo(setup):
+    assert len(ss.title_ident('\U0001F600' * 150).encode('utf-16-le')) // 2 <= 200
+    assert ss.title_ident('\U0001F600' * 150) == '\U0001F600' * 100
+    assert ss.title_ident('a' * 300) == 'a' * 200
+
+
+def test_label_readback_is_one_listing_when_nothing_is_missing(setup):
+    service, native, record, path = start(setup)
+    before = sum(1 for a, _ in native.calls if a[4:6] == ['agent', 'ls'] and '--label' in a)
+    accept(service, record, path)
+    after = sum(1 for a, _ in native.calls if a[4:6] == ['agent', 'ls'] and '--label' in a)
+    assert after - before == 1
+
+
+def test_a_malformed_checks_field_is_replaced_not_fatal(setup):
+    service, native, record, path = start(setup)
+    forged = json.loads(path.read_text())
+    forged['identity']['checks'] = []
+    path.write_text(json.dumps(forged))
+    assert accept(service, forged, path)['identity']['checks'] == {'accept': 'ok'}
