@@ -435,7 +435,8 @@ def load_policy(path: Path | str) -> dict[str, Any]:
 def _check_frontier_orders(path: Path, data: dict[str, Any]) -> None:
     """`[dispatch.repo_overrides.REPO] frontier_order` (a repo's declared frontier reviewer order, rt-01 2026-11-14) is a
     list of distinct [[service]] names. A name that matches no service fails the load: a typo must not silently drop a
-    reviewer from the order a repository's rule names."""
+    reviewer from the order a repository's rule names. The pure legacy file read only; the runtime config is checked by
+    `ade_config.validate_frontier_orders` (same rules and messages, tests/test_ade_config.py pins the parity)."""
     names = {e.get("name") for e in data.get("service") or [] if isinstance(e, dict)}
     overrides = (data.get("dispatch") or {}).get("repo_overrides") or {}
     if not isinstance(overrides, dict):
@@ -561,7 +562,7 @@ def _load_runtime_config(
     data = ade_config.project_routing_domain(effective.data)
     source = Path(effective.provenance["routing_source"])
     ade_config.validate_legacy_routing_shape(data, source)
-    _check_frontier_orders(source, data)           # also the effective data: an overlay or unified base can carry one
+    ade_config.validate_frontier_orders(data, ade_config.routing_label(effective.provenance))   # overlays included, named
     provenance = {key: effective.provenance[key]
                   for key in ("routing_source", "new_config", "local_config")}
     info = effective.provenance["model_tiers_info"]
