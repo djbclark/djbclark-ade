@@ -138,7 +138,7 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
 passes (operator, 2026-11-13), the tool prompts of every local Claude, Codex, OpenCode, Pi and OMP agent are approved
 (reason `all-local`); a question or plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP
-`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, and agents of
+`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a descendant of one is skipped as `sensitive-sender` (only the label counts, and no launcher sets it yet), and agents of
 any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers) keep their prompts (`unclassified-provider`; the operator's "all local agents" ruling is narrowed for them until Paseo exposes `kind`). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 

@@ -639,3 +639,24 @@ def test_invalid_sensitive_label_row_never_approves(tmp_path):
                                         'labelled': {SENSITIVE: ['not-a-uuid']}})
     assert result.returncode == 1
     assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+
+
+def test_descendant_of_an_external_review_agent_is_not_approved(tmp_path):
+    # CHILD's parent is the sensitive OTHER, whose parent is the lead: the taint does not pass down
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD},
+                                        'labelled': {SENSITIVE: [OTHER]}})
+    assert result.returncode == 0, result.stderr
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'outside-scope')]
+    # an ordinary intermediate parent still qualifies the child
+    (tmp_path / 'calls.jsonl').unlink()
+    (tmp_path / 'audit.jsonl').unlink()
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD}})
+    assert ['permit', 'allow', CHILD, 'request'] in calls
+
+
+def test_sensitive_probe_is_skipped_when_nothing_is_pending(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': []})
+    assert result.returncode == 0
+    assert ['ls', '-a', '-g', '--label', SENSITIVE] not in calls
+
