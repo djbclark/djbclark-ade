@@ -1343,3 +1343,106 @@ def test_an_unreadable_inspect_never_fails_a_good_launch(env):
     env.data["inspect_rc"] = 1
     r = launch(env)
     assert r.returncode == 0, r.stderr
+
+
+# --- wr-01: one WORKERS window per (lead, repo); a minted window sits in the repo's primary checkout (2026-11-14) -------------
+
+def other_repo_launch(env, middle="tendcf PR41 fork fixes", repo_cwd="/libntech-wt", *extra):
+    return env.run("--lead", LEAD, "--slice", "s", "--window-middle", middle, "--cwd", repo_cwd, *extra, "--", "--no-wait", "B")
+
+
+def test_a_launch_for_another_repo_mints_its_own_window_not_a_refusal(env):
+    """The reported case: the lead owns a WORKERS window for repo A; a new --window-middle for repo B is not a typo."""
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    r = other_repo_launch(env, "tendcf PR41 fork fixes", "/libntech-wt", "--repo", "libntech")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
+    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
+    assert registry(LEAD) == {"wks_a", "wks_abc123"}  # the new window is the lead's own beside the first
+
+
+def test_the_typo_guard_still_refuses_a_mistyped_middle_for_the_same_repo(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
+                              {"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+    own(LEAD, "wks_a", "wks_l")
+    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "libntech")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
+    assert "wks_a" not in r.stderr  # only the same repo's window is named
+    assert not placed(env)
+
+
+def test_the_repo_comes_from_the_cwd_when_no_repo_is_given(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    r = other_repo_launch(env, repo_cwd="/libntech")  # repo_of(/libntech) = libntech
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
+    # and a same-repo typo is still refused when the repo is derived the same way
+    env.data["workspaces"].append({"workspaceId": "wks_abc123", "name": "WORKERS libntech (tendcf PR41 fork fixes)", "cwd": "/libntech"})
+    r = other_repo_launch(env, "tendcf PR41 fork fixs", "/libntech")
+    assert r.returncode == 1 and "second window" in r.stderr
+
+
+def test_a_legacy_window_counts_for_the_repo_of_its_cwd_only(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/cfengine-core"}]
+    r = other_repo_launch(env, repo_cwd="/libntech")  # the legacy window is cfengine-core's: a libntech launch mints
+    assert r.returncode == 0, r.stderr
+    assert placed(env)[0][placed(env)[0].index("--new-workspace") + 1] == "local"
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/libntech"}]
+    env.data["created_id"] = "wks_def456"
+    r = other_repo_launch(env, "Typo", "/libntech")  # the same repo: refused
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+
+
+def test_a_window_whose_repo_is_unreadable_still_guards(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}"}]  # a legacy window with no cwd
+    r = other_repo_launch(env, repo_cwd="/libntech")
+    assert r.returncode == 1 and "second window" in r.stderr  # cannot prove another repo: stay safe, keep the refusal
+
+
+def test_no_repo_keeps_every_owned_window_in_the_typo_guard(env, monkeypatch):
+    """find_window with repo None (a direct call, archive-window): the guard counts every window the lead placed."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_t", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("ade_worker_run_t", loader)
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    own(LEAD, "wks_a")
+    env.flush()
+    with pytest.raises(mod.Refused, match="second window"):
+        mod.find_window(LEAD, None, "Whatever")
+    with pytest.raises(mod.Refused, match="second window"):
+        mod.find_window(LEAD, "cfengine-core", "Whatever")
+    assert mod.find_window(LEAD, "libntech", "Whatever") is None
+
+
+def git(*args, cwd):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"})
+
+
+def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(env, tmp_path):
+    main = tmp_path / "libntech"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
+    wt = tmp_path / "libntech-strictjson-wt"
+    git("worktree", "add", "-q", "-b", "sj", str(wt), cwd=main)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--cwd") + 1] == os.path.realpath(main)
+    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (strictjson)"
+    # the placement check compares with the primary checkout: a worker that started there passes, one elsewhere is stopped
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = os.path.realpath(main)
+    own(LEAD)
+    assert env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B").returncode == 0
+    env.data["workspaces"] = []
+    env.data["inspect_cwd"] = str(wt)
+    r = env.run("--lead", LEAD, "--slice", "s3", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", "B")
+    assert r.returncode == 1 and "started in" in r.stderr and "primary checkout" in r.stderr

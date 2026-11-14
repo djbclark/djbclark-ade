@@ -93,6 +93,23 @@ def migrated_name(legacy: Legacy, repo: str) -> str:
     return build(legacy.kind, repo, normalize_work(legacy.middle, repo))
 
 
+def primary_checkout_of(cwd: str) -> str:
+    """The primary (non-worktree) checkout of the repo `cwd` is in: the parent of the git common dir when that is a `.git`,
+    else `cwd` itself (not a repo, a bare repo, a missing directory, or the directory does not exist). Never raises."""
+    path = os.path.realpath(cwd)
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        out = subprocess.run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return path
+    if out.returncode == 0 and out.stdout.strip():
+        common = Path(out.stdout.strip())
+        if common.name == ".git" and common.parent.is_dir():
+            return os.path.realpath(common.parent)
+    return path
+
+
 def repo_of(cwd: str) -> str:
     """The repo name for a directory: the main checkout's name via git (so a linked worktree `repo-x-wt` still reads `repo`),
     else the directory's own basename. Never raises on a non-repo or a missing directory."""

@@ -10,6 +10,7 @@
 Window names (operator ruling 2026-11-13; bin/ade_ws_names.py): `<KIND> <repo> (<work>)`, KIND MAIN, WORKERS or USER;
 the lead id is NOT in a window name (it stays in the tab name and the ade.lead label). <repo> is --repo, else the repo
 of --cwd (the main checkout's name, also from a linked worktree); <work> is --window-middle.
+A window the launch opens is created in --cwd's primary checkout (never a claimed worktree; the brief names the worktree by absolute path).
 --cwd must be the directory of the window the worker is placed in (`paseo run --workspace` ignores it, getpaseo/paseo#9699):
 a different --cwd is refused before anything is renamed or launched; after every launch with --cwd the agent's Cwd is read
 back (`paseo agent inspect`) and a mismatch stops the fresh worker (`paseo agent stop`, an interrupt, not an archive) and is reported (the agent
@@ -19,7 +20,7 @@ Launch: strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every
 window in `paseo workspace ls --json`: by exact name `WORKERS <repo> (<work>)` when --window-middle is given, else the
 one WORKERS window the lead owns (several: `--repo`, or the repo of --cwd / the current directory, narrows them to that repo's
 windows; one is used, several refuse). A `--window-middle` that names nothing opens a new window unless the lead itself placed
-another (a typo guard); windows only a predecessor placed do not count. Ownership is evidence, never the name: the lead's window record
+another of the same repo (a typo guard; one WORKERS window per lead and repo, so a repo with no window of the lead's gets its own); windows only a predecessor placed do not count. Ownership is evidence, never the name: the lead's window record
 ($ADE_WORKER_RUN_STATE/<lead id>.windows.json, written when this tool mints or migrates a window, launches into an existing (e.g. inherited) one, or adopts an empty
 unclaimed one after a successful launch), a live agent labelled ade.lead=<lead>, or the lead id in a legacy name. Refused:
 two matches; a window registered to another lead or holding any agent (closed included) labelled for another lead; adopting
@@ -236,7 +237,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     window record (written when the helper mints or migrates a window, and by a launch into an existing WORKERS window), a live agent labelled ade.lead=<lead> in it, or the
     lead id in a legacy name. Refused: two matches; a window registered to another lead or holding any agent (closed
     included) labelled for another lead; a `middle` that matches nothing while the lead owns another window (a typo must not
-    open a second one; windows only a predecessor placed do not count, so a successor opens a new one for new work). With several
+    open a second one, and only a window of the launch's own `repo` counts: one WORKERS window per (lead, repo), so a launch
+    for a repo the lead has no window for mints one; windows only a predecessor placed do not count either, so a successor opens
+    a new one for new work; a window whose repo cannot be read counts, and with `repo` None every owned window counts). With several
     owned windows and no `middle`, `repo` narrows them to that repo's (one match picks it). A name match with no evidence either way is returned with owned=False: a launch may adopt it, an
     archive never does."""
     mine = lineage(lead)
@@ -246,6 +249,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     own_ids = labelled.get(lead, set()) | read_registry(registry_path(lead))  # not inherited from a predecessor
     owned: list[dict] = []
     owned_own: list[dict] = []  # the subset the lead itself placed (or labelled): a typo must not open a second window
+    own_repo: dict[str, str | None] = {}  # window id -> its repo (the name's, else a legacy window's cwd's), None when unreadable
     hits: list[tuple[dict, str | None, Refused | None]] = []
     for row in list_windows():
         cur = wsn.parse(row["name"])
@@ -257,12 +261,14 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 owned.append(row)
                 if row.get("workspaceId") in own_ids:
                     owned_own.append(row)
+                    own_repo[row["workspaceId"]] = cur.repo
             if by_name or (middle is None and by_member):
                 hits.append((row, None, None))
         elif legacy and legacy.kind == "WORKERS" and legacy.lead in mine:
             owned.append(row)
             if legacy.lead == lead:
                 owned_own.append(row)
+                own_repo[row["workspaceId"]] = wsn.repo_of(row["cwd"]) if row.get("cwd") else None
             try:  # the new name is built for a hit only: an unbuildable legacy name must not block unrelated calls
                 new, err = legacy_target(row, legacy, repo, explicit), None
             except Refused as e:
@@ -275,8 +281,12 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     # Windows only a predecessor placed are inherited, not windows this lead placed, so they do not trigger the typo guard: new
     # work gets a new window (2026-11-14, lead 8dcd57f4 stuck with four inherited windows). A window becomes the lead's own while
     # one of its live workers sits in it (labelled[lead]), or from the launch that places a worker in it (register_window below).
-    if middle is not None and not hits and owned_own:
-        ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in owned_own)
+    # One WORKERS window per (lead, repo): a typo guards only against a second window for the SAME repo. A launch for a repo the
+    # lead has no window for mints one (2026-11-14, tendcf lead 698fa914: a libntech worker was refused for a cfengine-core window
+    # and had to run in it). A window whose repo cannot be read still counts, and `repo` None keeps every owned window counting.
+    same_repo = [r for r in owned_own if repo is None or own_repo.get(r["workspaceId"]) in (None, repo)]
+    if middle is not None and not hits and same_repo:
+        ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in same_repo)
         raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
                       "use that --window-middle (or none), not a second window")
     if len(hits) > 1:  # a duplicate unclaimed name must not lock the lead out of its own window
@@ -561,8 +571,12 @@ def launch(opts, rest: list[str]) -> int:
         else:
             wname = win["name"]
         tab = f"worker {name} {lead}"
+        # A minted window's cwd is its repo's primary checkout, never the claimed worktree the caller named (docs/workspace-layout.md
+        # item 5): every later worker of the window defaults to that directory, so a worktree there would hand another writer a
+        # claimed worktree (2026-11-14, wr-01). The worktree travels in the brief by absolute path, as for an existing window.
+        new_cwd = wsn.primary_checkout_of(cwd)
         place = ["--workspace", row_wks(win), "--cwd", opts.cwd and cwd or win.get("cwd") or cwd] if win \
-            else ["--new-workspace", "local", "--cwd", cwd]
+            else ["--new-workspace", "local", "--cwd", new_cwd]
         args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}"]
         if main_place:
             args += ["--label", "ade.placement=main"]
@@ -590,11 +604,12 @@ def launch(opts, rest: list[str]) -> int:
             run_ok(["agent", "update", agent_id, "--name", tab])
             if opts.cwd:  # paseo drops --cwd in an existing window and from inside an agent (getpaseo/paseo#9699): check where it landed
                 got = agent_cwd(agent_id)
-                if got and os.path.realpath(got) != cwd:
+                want = cwd if win is not None else new_cwd
+                if got and os.path.realpath(got) != want:
                     stopped = stop_agent(agent_id)  # a fresh worker has done no work yet; running its brief in the wrong checkout is the harm
                     again = ("relaunch with the window's own --cwd" if win is not None else
-                             "relaunch from a directory that is the work's own worktree (paseo dropped --cwd for the new window)")
-                    raise Refused(f"the worker started in {got}, not --cwd {cwd} (paseo ignored --cwd); it was "
+                             "relaunch from the repo's primary checkout (paseo dropped --cwd for the new window)")
+                    raise Refused(f"the worker started in {got}, not {want} (paseo ignored --cwd); it was "
                                   f"{'stopped (interrupted, not archived)' if stopped else 'NOT stopped: stop or archive it now'}; {again}")
         except (Refused, OSError) as e:
             raise Refused(f"{e} (agent {agent_id} was launched; fix its placement by hand)")
