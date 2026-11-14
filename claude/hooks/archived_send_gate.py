@@ -291,7 +291,7 @@ def _daemon_option(word: str) -> bool:
     return word in OTHER_DAEMON or word.startswith(("--host=", "--home="))
 
 
-REDIRECT = re.compile(r"[<>]+&?")  # `>`, `>>`, `<<<`, `>&`: the lexer splits them from their operand (`2>x` leaves the `2` behind)
+REDIRECT = re.compile(r"&?[<>]+[&|]?")  # `>`, `>>`, `<<<`, `>&`, `&>`, `>|`: the lexer splits them from their operand
 
 
 def _scan(args: list[str]) -> tuple[int | None, bool]:
@@ -301,6 +301,9 @@ def _scan(args: list[str]) -> tuple[int | None, bool]:
     target, j = None, 0
     while j < len(args):
         a = args[j]
+        if re.fullmatch(r"\d{1,2}", a) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]):  # `2>x`: the lexer leaves the fd number behind
+            j += 1
+            continue
         if REDIRECT.fullmatch(a):  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`: the operand is a file or text, not an option or the agent
             j += 2
             continue

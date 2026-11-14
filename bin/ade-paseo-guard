@@ -73,6 +73,8 @@ def run(argv: list[str], env=None) -> int:
     if real is None:
         print("ade-paseo-guard: no real paseo found on PATH", file=sys.stderr)
         return 127
+    if env is os.environ:  # the shim names the real paseo to this helper alone: not on to the probe or the send (a paseo may start a daemon)
+        os.environ.pop("ADE_REAL_PASEO", None)
     args = list(argv)
     try:
         idx = send_target_index(args)

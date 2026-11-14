@@ -517,6 +517,20 @@ def test_a_wrapper_that_runs_a_shim_again_stops_at_the_reentry_cap(sw, tmp_path)
     assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n"
 
 
+@pytest.mark.parametrize("body", [
+    '( "{shim}" "$@"; : )',  # a subshell between two shims: the pid chain is broken, the hop counter ends it (ls-07 r1 A1)
+    "sh -c '\"{shim}\" \"$@\"; :' sh \"$@\"",
+    '"{shim}" "$@" | cat',
+])
+def test_a_wrapper_that_forks_before_the_next_shim_still_stops(sw, tmp_path, body):
+    wrapper = tmp_path / "wrapper" / "paseo"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n" + body.format(shim=SHIM) + "\n")
+    wrapper.chmod(0o755)
+    p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper)}, timeout=60)
+    assert "re-entered" in p.stderr and sw.calls() == []  # the wrapper's own `: ` or `| cat` swallows the exit code
+
+
 def last_depth(sw):
     return json.loads(sw.log.read_text().splitlines()[-1])["depth"]
 
@@ -524,8 +538,8 @@ def last_depth(sw):
 def test_a_counter_left_by_a_daemon_parent_is_not_a_loop(sw):
     """ls-06 r2 B1 / ls-07: `paseo daemon start` through the shim passes ADE_PASEO_SHIM_DEPTH to the daemon and every agent it
     spawns. The counter is valid only when ADE_PASEO_SHIM_PID is this shim's pid or its parent's (an exec chain)."""
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8", "ADE_PASEO_SHIM_PID": "99999999"}, timeout=30)
-    assert p.returncode == 0 and last_depth(sw) == "1"  # a stale value from another process: counted from zero
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8", "ADE_PASEO_SHIM_PID": "99999999", "ADE_PASEO_SHIM_HOPS": "3"}, timeout=30)
+    assert p.returncode == 0 and last_depth(sw) == "1"  # a stale value from another process: counted from zero (hops stay inherited)
     p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8"}, timeout=30)  # no pid at all
     assert p.returncode == 0 and last_depth(sw) == "1"
     p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8", "ADE_PASEO_SHIM_PID": str(os.getpid())}, timeout=30)  # a chain: this test is the parent
@@ -541,6 +555,14 @@ def test_a_counter_with_leading_zeros_is_a_decimal_number(sw):
     assert p.returncode == 127 and "re-entered 9 times" in p.stderr
     p = sw.run("ls", env={**env, "ADE_PASEO_SHIM_DEPTH": "99999999999999999999"}, timeout=30)  # an absurdly long counter counts as zero
     assert p.returncode == 0 and last_depth(sw) == "1"
+
+
+def test_the_real_paseo_path_reaches_no_real_paseo_not_even_on_a_send(sw):
+    """ls-07 r1 A2: the helper receives ADE_REAL_PASEO, the real paseo never does (it may start a daemon that hands it to agents)."""
+    sw.live(**{A: False})
+    assert sw.run("send", A, "hi").returncode == 0
+    recs = [json.loads(x) for x in sw.log.read_text().splitlines()]
+    assert len(recs) == 2 and all(r["real_env"] is None for r in recs)  # the inspect probe and the send
 
 
 def test_a_copy_of_the_shim_named_as_real_paseo_is_skipped_not_run(sw, tmp_path):

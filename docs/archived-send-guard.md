@@ -64,8 +64,9 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    `paseo` on PATH that is an executable regular file and **not a copy of the shim** (every copy carries a marker line, so two
    checkouts' `libexec/agent-bin` on one PATH, or a symlink to the shim, are skipped; a re-entry counter, `ADE_PASEO_SHIM_DEPTH`, cap 8,
    exits 127 for a wrapper that runs a shim again; it counts only an exec chain, valid when `ADE_PASEO_SHIM_PID` is the shim's own pid or its
-   parent's, so a value a daemon started through the shim hands to its agents counts from zero; the real paseo's path is named
-   to the helper alone, never exported to a paseo that may start a daemon), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
+   parent's, so a value a daemon started through the shim hands to its agents counts from zero; a second counter, `ADE_PASEO_SHIM_HOPS`, always inherited,
+   cap 32, ends a wrapper that forks between two shims (`( paseo "$@" )`, `sh -c`, `timeout`); the real paseo's path is named
+   to the helper alone and removed before the helper execs the real paseo), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
    and the helper parses `paseo [global opts] [agent [global opts]] send [opts] TARGET` with the hook's own parser
    (`archived_send_gate.locate_send`, imported, not copied; global options `--json`, `-o/--format X`, `-qo X`, `-q`, `--no-headers`,
    `--no-color` may stand before `agent`, after it and after `send`; an explicit `--host`/`--home` is not judged). Then: `pass` execs the real paseo with the argv as
@@ -132,7 +133,7 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    about* `paseo send` unquoted (`rg paseo send`) with an archived agent's id in it is denied; a runner not on the list
    (`eval watch su fish script parallel ssh at tmux osascript`, `-c`/`-e`/`--command`/`--run`) that takes a quoted command string is not seen;
    a `case ... in a) ...` pattern inside a `$(...)` (zsh only) desynchronises the parser and can hide a send in it or glue a following `#`; a quoted runner word (`'eval' '...'`) is not recognised; a command text built for `eval` by `printf` (`eval "$(printf 'paseo send %s' A)"`, the format string is
-   text after `printf`) and `source FILE` / `. FILE` of a file that holds a send are not seen (`sh FILE` is).
+   text after `printf`) and `source FILE` / `. FILE` of a file that holds a send are not seen (`sh FILE` is); an fd-numbered redirect before the agent (`2>x`) is skipped, but an agent prefix of one or two digits directly followed by a redirect word is taken for the fd.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`) and
