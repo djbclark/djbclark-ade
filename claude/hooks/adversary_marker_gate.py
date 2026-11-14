@@ -17,7 +17,7 @@ Denied: a command that runs a `gh` write and sends a LIVE APPROVE marker.
     strings (`bash -c`/`-lc`/`-ec "..."`, `eval "..."`, `$( ... )` inside a double-quoted word, three levels deep) are read
     again; a script heredoc that names `gh pr edit` or `gh api -f` counts, and one fed to a shell (`bash <<'EOF'`) is run
     through the same parser so its `--body-file` operands are read. A gh word inside a quoted string that is not run
-    (`rg "gh pr edit"`, a commit message) does not, except that when a write is present every word of the command is scanned;
+    (`rg "gh pr edit"`, a commit message) is not a write, but it does make the command's own words get scanned (no files are read for it);
   * what it sends (the write's own words and operand files first, outside the byte budget; then, within it, the rest):
     every word of the command, so a body written earlier (`printf M > new.md &&`, `BODY=M;`) is seen; the files it names as body operands (`--body-file F`, `-F F`,
     `-F body=@F`, `--input F`, `-T F`, `$(cat F)`, `$(< F)`, relative to the cwd after `cd`), its `< F` and `<<<` operands,
@@ -32,18 +32,18 @@ this gate lets through is what the Action reads as documentation:
             whose JSON does not parse but mentions APPROVE (a duplicate key, a typo), a near-miss spelling
             (`adversary_verdict`, `adversary-verdict {`) that mentions APPROVE, and a `<!-- adversary-verdict ... $` /
             backtick marker (the shell builds its JSON: `$V`, `$(cat f)`) when APPROVE appears in what the gh write sends;
-            a marker whose literal verdict is BLOCK never counts, whatever the head expands to
+            a marker comment whose every `verdict` value is a literal BLOCK never counts, whatever the head expands to
 
 Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
 without naming `gh pr`/`gh api`); a body built by a variable set in ANOTHER command (`--body-file "$F"`; `BODY=M; gh ... "$BODY"` in one command is seen);
 a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; `gh pr create --fill*`
-(the body comes from commit messages); a `gh alias`; `git -C DIR`; more than three levels of `bash -c`; obfuscated markers
+(the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
 (`$'\\x3c'`); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
 the operator tells to, runs it. An agent that wants the verdict recorded puts the marker in its report inside a fenced block.
 
 Failure modes (stated): fails OPEN, with a one-line stderr diagnostic that a hook on exit 0 does not show, for bad stdin,
-a non-Bash tool, an unreadable, non-regular or over-256 KB file, the 600,000-character scan budget, any internal error, a
+a non-Bash tool, an unreadable, non-regular or over-256 KB file, the 600,000-character scan budget (the write's own operand files sit outside it: past 400 texts or 2 MB of them the command is denied if it mentions APPROVE), any internal error, a
 missing `bin/adversary_marker.py` (looked for beside this file's checkout, then `~/src/djbclark-ade/bin`) and a hook timeout
 (15 s). A text with more than 100 marker starts is denied if it mentions APPROVE, never parsed (bounded work). Fails CLOSED
 where the command cannot be parsed: shlex failure (a stray apostrophe) splits on the shell operators instead and, when the raw
@@ -70,7 +70,8 @@ MAX_SHLEX = 100000
 MAX_FILES = 40
 MAX_TEXT = 70000   # GitHub rejects a body or comment over 65,536 characters
 MAX_TOTAL = 600000
-MAX_FORCED = 400
+MAX_FORCED = 400            # operand files / stdin texts read outside the byte budget
+MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -78,7 +79,8 @@ VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
 APPROVE_WORD = re.compile(r"approve", re.IGNORECASE)
 CAT_SUB = re.compile(r"""(?:\$\(|`)\s*(?:cat\s+(?:--\s+)?|<\s*)['"]?([^\s()'"`]+)""")
 EXPANDED_MARKER = re.compile(r"<!--\s*adversary[-_ ]?verdict[^>\n]{0,400}[$`]", re.IGNORECASE)
-LITERAL_VERDICT = re.compile(r"verdict\W{1,6}(APPROVE|BLOCK)(?![A-Za-z])", re.IGNORECASE)
+VERDICT_VALUE = re.compile(r"""verdict\\?["']?\s*:\s*\\?["']?([^,}"'\s\\]*)""", re.IGNORECASE)   # quotes optional: the shell may eat them
+MARKER_NAME = re.compile(r"adversary[-_ ]?verdict\s*:?\s*v?\d*", re.IGNORECASE)
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 TEXT_VERBS = {"create", "new", "edit", "comment", "review", "close", "reopen"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
@@ -323,18 +325,22 @@ class Scan:
 
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
-        self.token_write, self.incidental, self.forced = False, 0, 0
+        self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
 
-    def add(self, text: str, force: bool = False):
+    def add(self, text: str, force: bool = False, operand: bool = False):
+        """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
+        outside the byte budget but capped in count and bytes (past the cap `truncated` is set and the text is not read)."""
         if not text:
             return
-        if force:
-            if self.forced >= MAX_FORCED:
+        text = text[:MAX_TEXT]
+        if operand:
+            if self.forced >= MAX_FORCED or self.forced_bytes + len(text) > MAX_FORCED_BYTES:
+                self.truncated = True
                 return
             self.forced += 1
-        elif self.budget <= 0:
+            self.forced_bytes += len(text)
+        elif not force and self.budget <= 0:
             return
-        text = text[:MAX_TEXT]
         self.budget -= len(text)
         self.texts.append(text)
 
@@ -435,18 +441,18 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                 for a in g[2]:
                     scan.add(a, force=True)
                     for m in CAT_SUB.finditer(a):
-                        scan.add(scan.read(m.group(1), seg["cwd"]), force=True)
+                        scan.add(scan.read(m.group(1), seg["cwd"]), operand=True)
                 for f in operand_files(g[0], g[2]):
-                    scan.add(scan.read(f, seg["cwd"]), force=True)
+                    scan.add(scan.read(f, seg["cwd"]), operand=True)
                 for w in seg["words"][:g[3]]:  # `find . -name F -exec gh ...`, `xargs`: words before gh may name files
                     feeder(w, seg)
             else:                              # a feeder: echo/printf words, cat F, jq --rawfile b F
                 for w in seg["words"]:
                     feeder(w, seg)
             for f in seg["stdin"]:
-                scan.add(scan.read(f, seg["cwd"]), force=True)
+                scan.add(scan.read(f, seg["cwd"]), operand=True)
             for h in seg["here"]:
-                scan.add(h, force=True)
+                scan.add(h, operand=True)
     if not scan.token_write and loose_write(cleaned):
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
@@ -470,12 +476,17 @@ def judge(command: str, cwd: str, am_loader) -> str:
         if found:
             return found
     if any(APPROVE_WORD.search(t) for t in scan.texts):
+        if scan.truncated:
+            return "more operand text than this gate can scan in time (%d files or %d bytes) next to the word APPROVE" % (
+                MAX_FORCED, MAX_FORCED_BYTES)
         for t in scan.texts:
             stripped = am._strip_code(t)
             for m in EXPANDED_MARKER.finditer(stripped):
-                lv = LITERAL_VERDICT.search(stripped[m.start():m.start() + 450])
-                if lv and lv.group(1).upper() == "BLOCK":
-                    continue                   # a literal BLOCK can never approve, whatever the head expands to
+                end = stripped.find("-->", m.start())
+                comment = stripped[m.start():end if 0 < end < m.start() + 450 else m.start() + 450]
+                values = [v.upper() for v in VERDICT_VALUE.findall(MARKER_NAME.sub("", comment, count=1))]
+                if values and all(v == "BLOCK" for v in values):
+                    continue                   # every `verdict` value in this comment is a literal BLOCK, whatever the head expands to
                 return "an `adversary-verdict` marker built by the shell next to the word APPROVE"
     return ""
 
