@@ -81,8 +81,10 @@ C2. **Hold registry (new, written by `admit --wait`).** On each poll in which a 
 It removes the file in a `finally` when it returns. Like `admit_log`, the write and the removal sit in their own
 `try` and can **never raise, change the verdict or change the exit code**. `gui_hog` is imported lazily, inside that
 `try`. If the module breaks, `admit` still answers 0 or 75, and `bg` never falls back to its plain load check (`bg`
-~695), which would lose the churn gate and the valve. `refused_since` is checked before it is written: it must not be in
-the future, and it must not be before the caller's start time. A file whose `updated` is more than 60 s old, or whose pid and start
+~695), which would lose the churn gate and the valve. `refused_since` goes through the follow-ups slice's
+`parse_refused_since` rule before it is written, never a second rule. A non-integer or future value is ignored, and the
+age is capped at `STARVE_REFUSED_SINCE_MAX_S`. A cross-chunk value from `bg` is legitimately older than this `admit`
+process. A file whose `updated` is more than 60 s old, or whose pid and start
 no longer match, is stale and gets swept. `refused_since` is the start of the unbroken refusal run. It comes from the
 `--refused-since` argument when one is passed. The follow-ups slice (worker 6c092e3c) is adding that argument to
 `load-watch`, and the 3-minute trigger uses the same clock. It spans `bg`'s 420 s chunks only once `bg`
@@ -108,11 +110,16 @@ C4. **Decision (one pure function, `gui_hog.should_show(held, apps, now, snooze,
 
 "Non-build" excludes four kinds of tree. (a) Any app tree whose ancestry reaches a held caller's pid, a Paseo agent CLI
 (`AGENT_CLIS`) or `bg`. That covers Playwright's Chrome for Testing. (b) **Build subtrees inside an app**: the walk down
-an app's tree **stops** at any shell, pty-attached process, `bg`, agent CLI or process holding an admit reservation. The
-cores of those subtrees never count towards the app. So `make` in VS Code's or a JetBrains IDE's terminal, or a Gradle
-daemon an IDE started, is a build and not a GUI hog. (c) Build GUIs that LaunchServices starts with ppid 1
-(Simulator from `simctl` or `xcodebuild`, anything run through `open`). Ancestry cannot see these, so they are protected by
-bundle id (F6). (d) Any protected app (F6) and the dialog itself.
+an app's tree **stops** at five kinds of process: (1) a shell; (2) a pty-attached process; (3) `bg` or an agent CLI;
+(4) a process holding an admit reservation; (5) **any descendant whose executable realpath lies outside the app's own
+bundle**, such as a JDK `java` (an IDE's Gradle daemon through the tooling API), `/usr/bin` and Homebrew tools, or
+toolchains. The cores of those subtrees never count towards the app. An app that has such a subtree gets no actions
+(E2). So `make` in VS Code's terminal, or a Gradle daemon an IDE started, is a build and not a GUI hog. IDEs whose
+toolchain sits **inside** their bundle defeat stop (5): Xcode (`com.apple.dt.Xcode`, whose `swift-frontend` and `clang`
+run from `Xcode.app`) and IDEs that bundle a JDK (Android Studio and other JetBrains IDEs). These IDEs are protected by
+bundle id by default (F6). (c) **Known** build GUIs that LaunchServices starts with ppid 1 (Simulator from `simctl` or
+`xcodebuild`). Ancestry cannot see these, so they are protected by bundle id (F6). An arbitrary app opened through `open`
+cannot be told apart from an app the operator opened, so it is not claimed. (d) Any protected app (F6) and the dialog itself.
 
 C5. **Who calls it.** The sampler calls it on every tick (20 s). It runs as a launchd agent in the operator's `gui/502`
 domain, which is the Aqua session: exactly where a window can appear. When `should_show` is true and the dialog is not
@@ -166,7 +173,9 @@ contract, because the window outlives one sample. **No command lines** go into t
 (`admit_caller` already strips them).
 
 D4. **Actions out.** Each click runs `bin/gui-hog` through `Process` with `executableURL` plus an `arguments` array:
-(a) `vet --pid P --start S --bundle-id B` (exit 0 allowed, 3 protected, 4 identity changed);
+(a) `vet --pid P --start S --bundle-id B` (exit 0 allowed, 3 protected, 4 identity changed, 5 hosts a build or
+terminal subtree). `vet` re-walks the app's tree **live** using the C4b rule, never the snapshot's member list, which can
+be about 22 s old. Swift honours exit 5 for `terminate()` and `forceTerminate()` as well as for Freeze;
 (b) `freeze --pid P --start S --minutes 10|--indefinite`;
 (c) `resume --entry ID`;
 (d) `log --event ...`.
@@ -181,7 +190,11 @@ re-checks `NSRunningApplication(processIdentifier:)`: its bundle id against the 
 D5. **Exit codes of `ade-gui-hog`.** The sampler is a one-shot process each tick (`StartInterval` 20 through
 `ade-job-run`), so no later tick can read a detached child's exit status. The dialog therefore records its own outcome:
 it writes `gui-hog/last-exit.json` atomically (`{"code":N,"at":epoch,"by":"dialog"}`), and Ignore runs
-`bin/gui-hog snooze --minutes 60` itself, which writes `snooze_until`. The sampler reads those files. The codes still
+`bin/gui-hog snooze --minutes 60` itself, which writes `gui-hog/snooze.json` (`{"snooze_until":epoch}`). Both files are
+written atomically through a unique temp name (`tempfile.mkstemp` in the same directory, then `os.replace`). The sampler
+only **reads** them and never writes them, and the dialog never touches the sampler's `state.json`. The sampler's
+`save_state` uses a fixed `state.json.tmp` with no lock (`bin/load-watch` ~250-254), so a second writer would clobber it
+or lose the snooze. The codes still
 matter for manual runs and tests (nothing blocks on them):
 
 | Code | Meaning | Sampler does |
@@ -278,7 +291,10 @@ F5. **Every thaw path:**
 `ps` timeout makes `cmd_sample` return early (`bin/load-watch` ~1484-1488), and this order keeps a thaw from waiting on
 it. A due freeze resumes within one tick. That is normally 20 s, but launchd has run ticks 3-7 min apart under a
 load-60 stall (`bin/load-watch` ~1477), so 20 s is not a guarantee. The `--status-only` menu item runs the same check on
-its own 20 s timer, which gives two independent clocks;
+its own 20 s timer, which gives two independent clocks. Under a stall, every identity read in a thaw is bounded:
+each `ps -o lstart=` call has a 5 s `timeout` (`proc_pidpath` and `/proc` reads do not block), and a thaw pass has a
+30 s total budget. Entries left over when the budget runs out wait for the next tick, and they are never signalled
+without a completed identity check;
 (b) **startup**: the dialog and the status item each run `thaw --due --stale` when they start;
 (c) **crash**: (a) and F2 cover it;
 (d) **reboot or logout**: the stopped processes are gone. The first tick after login drops every entry whose identity no
@@ -303,8 +319,9 @@ SystemUIServer (`com.apple.systemuiserver`), Control Center (`com.apple.controlc
 (e) every ancestor or descendant of a held caller or of a Paseo agent CLI (the build itself).
 The configurable defaults are Paseo (`sh.paseo.desktop`, `sh.paseo.desktop.helper`), terminals (Ghostty, Terminal,
 iTerm2, WezTerm, kitty), Hermes, VPN and proxy apps (`io.tailscale.ipn.macsys` was running on 2026-11-14; WireGuard),
-Simulator and CoreSimulator (`com.apple.CoreSimulator.CoreSimulatorService` was running on 2026-11-14), Docker or
-container, password managers, and conferencing apps during a call. Bundle ids that were not
+Simulator and CoreSimulator (`com.apple.CoreSimulator.CoreSimulatorService` was running on 2026-11-14), IDEs whose
+toolchain is inside their bundle (Xcode `com.apple.dt.Xcode`, Android Studio and other JetBrains IDEs that bundle a JDK;
+C4b), Docker or container, password managers, and conferencing apps during a call. Bundle ids that were not
 seen running get checked against `lsappinfo` or `mdls` when the config is written, so no id is guessed.
 
 F7. **Manual escape hatch.** These do not depend on the dialog:
@@ -336,7 +353,7 @@ F8. **Failure-mode table.**
 | 14 | Frozen app was in a call or playing audio | call drops, audio glitches | conferencing and audio apps are protected by default; Freeze has no confirm because Resume is one lossless click (**DECIDE F8-14: confirm before an indefinite Freeze? Recommended: no**) |
 | 15 | Lock timeout or hang | no action | 5 s `flock` timeout; error shown in the row; no signal sent |
 | 16 | An agent runs `gui-hog freeze` itself | breaks "never automatic" | rule in `skills/loadwatch/SKILL.md` and this doc; every event logs `by`; accepted because same-uid processes can already `kill -STOP` (J1) |
-| 17 | An IDE (VS Code, JetBrains) runs a build in its terminal or a Gradle daemon | Freeze or Quit would stop or kill the build; its compiler would count as a GUI hog | the tree walk stops at shells, ptys, `bg`, agent CLIs and reservation holders (C4b); such an app is listed without actions and skipped by Quit All (E2, G4) |
+| 17 | An IDE (VS Code, JetBrains, Xcode) runs a build in its terminal, through a Gradle daemon, or with an in-bundle toolchain | Freeze or Quit would stop or kill the build; its compiler would count as a GUI hog | the tree walk stops at shells, ptys, `bg`, agent CLIs, reservation holders and out-of-bundle executables (C4b); IDEs with in-bundle toolchains are protected by bundle id (F6); `vet` re-walks the tree live and refuses with exit 5 (D4); such an app is listed without actions and skipped by Quit All (E2, G4) |
 
 F9. **What freezing does not do.** SIGSTOP frees **CPU**, not RAM. A stopped app's pages only go cold, and the
 compressor or swap may reclaim them over time. Resuming can then cause a burst of page-ins, which is the very gate that
@@ -374,8 +391,9 @@ TCC grant and adds nothing, because graceful quit already protects unsaved work.
 H1. **Linux CI (pytest-linux, the required check) covers all Python:**
 (a) `should_show` as a table test: hold time, which gates refused, sum versus threshold, rate limit, snooze, the
 non-build exclusion;
-(b) app grouping from fixture `ps` and `lsappinfo` text, including an IDE fixture whose terminal runs `make`: its cores
-are not counted, and the app is listed without actions;
+(b) app grouping from fixture `ps` and `lsappinfo` text, with three fixtures: an IDE whose terminal runs `make`, an
+IDE-started Gradle daemon (a JDK `java` outside the bundle with no shell above it), and Xcode with `swift-frontend`
+children. In each, the build's cores are not counted, and the app is listed without actions or is protected;
 (c) protected matching, including a spoofed display name, a config that tries to remove a hard-floor entry, and a
 bundle-path prefix;
 (d) the frozen-list state machine (freezing, frozen, thawing, gone), driven by a fake clock and a temp state directory;
