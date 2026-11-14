@@ -419,10 +419,10 @@ GH_FANOUT_WARNING = (
 GH_FANOUT_CMD = re.compile(r"\bgh\s+(?:(?:-R|--repo)\s+\S+\s+)?"
                            r"(?:api|pr|run|issue|repo|search|release|workflow)\b")
 SHELL_C = re.compile(
-    r"""(?:^|[;&|(\n{]|\$\()\s*(?:[\w=./{}%-]+\s+){0,4}(?P<sh>(?:[\w./-]*/)?(?:ba|z|da)?sh)\s+"""
+    r"""(?:^|[;&|(\n{]|\$\()[ \t]*(?:[\w=./{}%-]+[ \t]+){0,4}(?P<sh>(?:[\w./-]*/)?(?:ba|z|da)?sh)\s+"""
     r"""(?:-{1,2}[A-Za-z0-9][\w-]*(?:\s+\w+)?\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
 SHELL_HEREDOC = re.compile(
-    r"""(?:^|[;&|(]|&&)\s*(?:[\w=./-]+\s+){0,3}(?:[\w./-]*/)?(?:ba|z|da)?sh\b[^<\n]*<<-?\s*"""
+    r"""(?:^|[;&|(]|&&)[ \t]*(?:[\w=./-]+[ \t]+){0,3}(?:[\w./-]*/)?(?:ba|z|da)?sh\b[^<\n]*<<-?\s*"""
     r"""['"]?(\w+)['"]?""")
 SHELL_PIPED_HEREDOC = re.compile(
     r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
@@ -437,7 +437,7 @@ def quoted_spans(text: str) -> list[tuple[int, int, str]]:
         ch = text[i]
         if ch == "\\":
             i += 2
-        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+        elif ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|()<>"):
             j = text.find("\n", i)
             i = n if j < 0 else j
         elif ch in "'\"":
@@ -456,7 +456,9 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
     `$(` or backtick substitution before `pos` does run it."""
     for a, b, q in spans:
         if a <= pos < b:
-            return not (q == '"' and re.search(r"\$\(|`", text[a:pos]))
+            seg = re.sub(r"\\.", "", text[a:pos])          # escaped `\`` and `\$(` are text
+            seg = re.sub(r"\$\([^()]*\)|`[^`]*`", "", seg)  # a closed substitution already ran
+            return not (q == '"' and re.search(r"\$\(|`", seg))
     return False
 
 

@@ -540,6 +540,8 @@ def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
     "out=\"$(sh -c 'gh pr checks 5 --watch')\"",
     "echo it\\'s; bash -c 'gh run watch 9'",                                        # N4
     "# don't spam the API\nbash -c 'gh run watch 9'",
+    "true;# don't spam\nbash -c 'gh run watch 9'",                                  # R2b
+    "x\n" + " \n" * 3000 + "bash -c 'gh run watch 9'",                              # R3: fast
     "cat <<'EOF' | bash\ngh run watch 9\nEOF",                                      # N7
     "/bin/bash -c 'gh run watch 9'",                                                # B7a
     "bash -o pipefail -c 'gh run watch 9'",                                         # B7b
@@ -565,6 +567,9 @@ def test_adversary_round1_watchers_are_denied(command):
     "gh pr create --title x --body \"covers wrappers; sh -c 'gh pr checks 5 --watch'\"",
     "cat <<'EOF' > f\nbash <<X\ngh run watch 9\nX\nEOF",
     "bash <<'EOF'\ngh run view 9 --json status\nEOF",
+    "gh pr create --title x --body \"Fixes \\`bin/gh-pr-checks\\`; (bash -c 'gh run watch 9') is denied\"",  # R1
+    "git commit -m \"a \\$( b; bash -c 'gh run watch 9' c\"",
+    "gh pr comment 5 --body \"Fixed in $(git rev-parse HEAD); bash -c 'gh run watch 9' is now denied\"",
 ])
 def test_adversary_round1_false_positives_and_documented_forms_pass(command):
     assert not denied(command), command
