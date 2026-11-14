@@ -795,6 +795,7 @@ def test_gw04_lead_review_lows_compliant_and_one_shots_pass(command):
     "x=1 echo ===",
     "echo $(echo ===)",
     "bash -c 'true'; echo ===",
+    "(( (a+(b)) == 2 )) && echo ===",              # nested arithmetic parentheses are matched by depth
     "echo a;===",                                   # glued to the operator
     "true&&==x",
     "echo a|===",
@@ -814,6 +815,8 @@ def test_gs02_unquoted_equals_word_is_denied(command):
     "echo =(true)",
     "[[ a == a ]] && echo ok",
     "[[ a == a && b == b ]]; echo ok",
+    "(( (a+(b)) == 2 )) && echo ok",
+    "[[ a == b ]] || [[ c == d ]]; echo ok",
     "(( 1 == 1 )) && echo ok",
     "echo $((1==1))",
     "if [[ $x =~ ^a ]]; then echo y; fi",
@@ -835,8 +838,15 @@ SEND_DENY = [
     'paseo --json send ab "`z`"',
     'env -u A -u B paseo send ab "`z`"',
     'ADE_ALLOW_ARCHIVED_SEND=ab paseo send ab "fix `x`"',
-    'python3 skills/session-finder/relay.py ab "a `b`"',
-    '~/src/djbclark-ade/skills/session-finder/relay.py --ack me ab "$(cat msg)"',
+    'paseo send ${LEAD} "the `foo` call"',                     # an unquoted ${..} / $(..) target must not end the command
+    'paseo send --json --no-wait $(cat id) "the `foo` call"',
+    'paseo send $(cat "id file") "the `foo` call"',
+    'paseo send `cat id` "the `foo` call"',
+    'paseo send $(cat id ) "the `foo` call"',                    # `)` at the start of a word inside the target
+    'paseo send ${X:-a } "the `foo` call"',
+    'paseo send `echo a; echo b` "the `foo` call"',            # a separator inside the target
+    'paseo send ab{c,d} "the `foo` call"',                       # a brace inside a word
+    'paseo send ab "n is $(( $(date +%s) + 1 ))"',                # arithmetic holding a real substitution
     'echo hi; paseo send ab "text `x` more"; echo done',
     'paseo send ab "nested $(echo "$(date)") text"',
     'paseo send ab "a" "b `c`"',
@@ -863,9 +873,14 @@ def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denie
     'git commit -m "paseo send `x`"',
     'rg "paseo send `x`" docs',
     "paseo send ab --prompt-file /tmp/m.txt",
+    'paseo send ab "retry in $((n*2)) s"',                       # arithmetic runs no command
+    'paseo send ab "$(( (a+(b)) * 2 ))"',
+    'echo paseo send "$(date)"',                                  # only prints text
+    'printf "%s\\n" paseo send "`x`"',
+    'paseo send ${LEAD} ok; echo "`date`"',
     'paseo agent inspect "$(cat /tmp/id)" --json',
     'paseo run "`x`" --name a',
-    'cat <<\'EOF\' | paseo send ab --prompt-file -\nsee `foo` and $(bar)\nEOF',
+    "cat > /tmp/m.txt <<'EOF'\nsee `foo` and $(bar)\nEOF\npaseo send ab --prompt-file /tmp/m.txt",
     "# paseo send ab \"`x`\"\necho ok",
     'echo "unterminated paseo send ab "`x`',
     'paseo run --name send "`x`"',                  # `send` appears, but the verb is `run`
@@ -878,4 +893,16 @@ def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denie
 ])
 def test_gs02_send_lookalikes_pass(command):
     assert not denied(command), command
+
+
+def test_gs02_unclosed_test_blocks_are_linear():
+    import time
+    from importlib import util
+    spec = util.spec_from_file_location("bhg", HOOK)
+    mod = util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for blob in ("[[ " * 200000, "(( " * 20000):
+        t0 = time.monotonic()
+        mod.drop_test_blocks(blob + " echo ok")
+        assert time.monotonic() - t0 < 2, blob[:3]
 

@@ -47,11 +47,11 @@
    `case` pattern `=*)` all fail; `echo =` passes, and so do `=(cmd)` (process substitution), `a=b`, `--x=y`, `\\===`,
    `[[ a == a ]]`, `(( 1 == 1 ))` and `$((1==1))`. Quoted words, heredoc bodies and comments do not count. The reason says
    to quote the word (`'==='`) or use `---`.
-9. `paseo send` / `paseo agent send` / `relay.py` with a double-quoted argument that holds a backtick or `$(`
+9. `paseo send` / `paseo agent send` with a double-quoted argument that holds a backtick or `$(`
    (deny, 2026-11-14). The shell runs that text before paseo sees the message: a worker's `"... the `foo` call ..."`
-   ran `foo`, and the message arrived with a hole in it. Single quotes, a quoted heredoc and python argv do not. An
-   escaped `\\`` or `\\$(` is literal text and passes. A deliberate `"$(cat FILE)"` is denied too (the operator's
-   rule is simple; pass the text via python argv or a quoted heredoc, or `BASH_HABITS_GATE_OFF=1`).
+   ran `foo`, and the message arrived with a hole in it. Single quotes, `--prompt-file FILE` and python argv do not. An
+   escaped `\\`` or `\\$(` and arithmetic `$((n*2))` are literal text and pass. A deliberate `"$(cat FILE)"` is denied too
+   (assign it first: `ID=$(cat f); paseo send "$ID" ...`).
 
 Words inside quotes, heredoc bodies and comments do not count. Fails open on any parse error.
 The tool table is separate from bin/gnu-tools-check's, which flags every long option on its
@@ -829,24 +829,50 @@ def gnu_reason(tool: str, flag: str, via_xargs: bool = False) -> str:
 
 
 ZSH_EQUALS_REASON = (
-    "`{word}` starts with `=`: zsh (this Mac's Bash-tool shell) reads an unquoted `=name` as the path of command `name`, "
-    "and `zsh: {rest} not found` aborts the rest of a `;` chain (2026-11-14: `echo ===; next` never ran `next`). "
+    "`{word}` starts with `=`: zsh (this Mac's Bash-tool shell) expands an unquoted `=name` to the path of command `name`, "
+    "and when there is none `zsh: {rest} not found` aborts the rest of a `;` chain (2026-11-14: `echo ===; next` never ran `next`). "
     "Quote the word (`'==='`) or use `---` as a separator. `[[ a == b ]]`, `(( a == b ))`, `a=b` and `=(cmd)` are fine; "
     "`[ a == b ]` is not (write `[ a = b ]` or `[[ a == b ]]`).")
-TEST_BLOCKS = re.compile(r"\[\[.*?\]\]|\(\(.*?\)\)", re.S)
+
+
+def drop_test_blocks(view: str) -> str:
+    """`view` with each `[[ ... ]]` and `(( ... ))` (parentheses matched by depth) replaced by a blank. One pass: an opener
+    with no closer ends the search for that kind (a second one cannot find a closer either), so `"[[ " * N` is linear."""
+    out: list[str] = []
+    i, n = 0, len(view)
+    no_br = no_pr = False
+    while i < n:
+        two = view[i:i + 2]
+        if two == "[[" and not no_br:
+            k = view.find("]]", i + 2)
+            if k >= 0:
+                out.append(" ")
+                i = k + 2
+                continue
+            no_br = True
+        elif two == "((" and not no_pr:
+            depth, j = 2, i + 2
+            while j < n and depth:
+                depth += (view[j] == "(") - (view[j] == ")")
+                j += 1
+            if depth == 0:
+                out.append(" ")
+                i = j
+                continue
+            no_pr = True
+        out.append(view[i])
+        i += 1
+    return "".join(out)
 
 
 def zsh_equals_word(view: str) -> str | None:
     """The first word of `view` (already through strip_literals) that zsh would expand as `=name`: it starts with `=`
     and is longer than `=` (a lone `=` is plain; `=(` is process substitution). `[[ ]]` and `(( ))` tests are dropped first."""
-    for pipeline in re.split(r"&&|\|\||;|\n|&|\|", TEST_BLOCKS.sub(" ", view)):
+    for pipeline in re.split(r"&&|\|\||;|\n|&|\|", drop_test_blocks(view)):
         for w in pipeline.split():
             if w.startswith("=") and len(w) > 1 and w[1] != "(":
                 return w
     return None
-
-
-SEND_VERB_WORDS = ("relay.py",)
 
 
 def _skip_dollar_paren(s: str, j: int) -> int:
@@ -912,6 +938,10 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
                     risky = True
                     k = raw.find("`", j + 1)
                     j = n if k < 0 else k + 1
+                elif raw.startswith("$((", j):          # arithmetic runs no command, unless it holds a substitution
+                    k = _skip_dollar_paren(raw, j + 2)
+                    risky = risky or "$(" in raw[j + 3:k] or "`" in raw[j + 3:k]
+                    j = k
                 elif raw.startswith("$(", j):
                     risky = True
                     j = _skip_dollar_paren(raw, j + 2)
@@ -927,7 +957,19 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
         elif c in " \t":
             end_word()
             i += 1
-        elif c in ";&|\n(){}":
+        elif c == "$" and raw[i + 1:i + 2] in ("(", "{"):
+            # an unquoted `$(...)` / `${...}` is part of the word (`paseo send $(cat id) "msg"`): its parentheses and braces
+            # must not end the command
+            k = _skip_dollar_paren(raw, i + 2) if raw[i + 1] == "(" else raw.find("}", i + 2)
+            k = len(raw) if k < 0 else (k if raw[i + 1] == "(" else k + 1)
+            cur.append(raw[i:k])
+            i = k
+        elif c == "`":
+            k = raw.find("`", i + 1)
+            k = len(raw) if k < 0 else k + 1
+            cur.append(raw[i:k])
+            i = k
+        elif c in ";&|\n" or (c in "(){}" and not cur):
             end_cmd()
             i += 1
         else:
@@ -937,13 +979,18 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
     return cmds
 
 
+NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat", "gh", "jq"})
+
+
 def risky_send_reason(cmd: str) -> str | None:
-    """A denial reason when a `paseo [agent] send` / `relay.py` command carries a double-quoted argument with a backtick
-    or `$(` (the shell would run it, not send it)."""
-    if "send" not in cmd and "relay.py" not in cmd:
+    """A denial reason when a `paseo [agent] send` command carries a double-quoted argument with a backtick or `$(` (the
+    shell would run it, not send it)."""
+    if "send" not in cmd:
         return None
     for words_ in simple_commands(_drop_heredocs(cmd)):
         names = [os.path.basename(w) for w, _ in words_]
+        if names[0] in NOT_A_SENDER:                    # `echo paseo send "$(date)"` only prints text
+            continue
         start = None
         for k, name in enumerate(names):
             if name == "paseo":
@@ -955,18 +1002,16 @@ def risky_send_reason(cmd: str) -> str | None:
                 if rest[:1] == ["send"]:
                     start = k
                     break
-            elif name in SEND_VERB_WORDS:
-                start = k
-                break
         if start is None:
             continue
         for w, bad in words_[start + 1:]:
             if bad:
-                return ("A double-quoted argument of this `paseo send` (or relay.py) holds a backtick or `$(`: the shell "
+                return ("A double-quoted argument of this `paseo send` holds a backtick or `$(`: the shell "
                         "runs it BEFORE paseo starts, so the message arrives with a hole in it and the command may "
                         "run (2026-11-14: a worker's quoted `identifier` ran as a command). Pass the text through "
-                        "python argv (`subprocess.run([\"paseo\", \"send\", ..., text])`), a quoted heredoc "
-                        "(`--prompt-file`/`cat <<'EOF'`), or single quotes; drop the backticks from prose.")
+                        "python argv (`subprocess.run([\"paseo\", \"send\", ..., text])`), or write it with "
+                        "`cat > FILE <<'EOF'` and send `paseo send ID --prompt-file FILE`, or use single quotes; drop the "
+                        "backticks from prose. A target id taken from a command: `ID=$(cat f); paseo send \"$ID\" ...`.")
     return None
 
 
