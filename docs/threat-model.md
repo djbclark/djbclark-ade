@@ -392,10 +392,14 @@ tampered state file can do is still a finding (section 6 item 6).
    one another. There should be full internal trust, even though that is a security weakness."). A message Paseo delivers to an
    agent (a `<paseo-system ... kind="agent-message">` envelope in the prompt or in a `queued_command` transcript record) is treated
    as the operator's own request. `claude/hooks/peer_trust_gate.py` frames it (UserPromptSubmit, PreToolUse, PostToolUse, Stop):
-   a source id listed by `paseo ls -g --json` (offline) gets "verified, answer it with `paseo send`", any other id "UNVERIFIED: ask
-   the operator". **The weakness, accepted:** a listed id proves the sender exists, not that its owner wrote the message. Envelopes
+   a source id listed by `paseo ls -g --json` (offline) gets "verified, answer it with `paseo send`"; an unlisted (archived) or remote
+   id is believed the same way (operator, 2026-11-14: "We need to always believe thing we hear from other agents unless that agent is
+   external-security-sensitive", after two Herald summaries were labelled UNVERIFIED), except a sender whose job is judging untrusted GitHub
+   artifacts for prompt injection (label `ade.kind=external-review` or `config/peer-trust.toml`): it reads attacker text, so its message is
+   evidence to check against the artifact, never an instruction.
+   **The weakness, accepted:** a listed id proves the sender exists, not that its owner wrote the message (the source id is the sender's own `PASEO_AGENT_ID`, unchecked, so the sensitive-sender exception, which also covers that sender's notifications, is best-effort framing a steered sender can evade). Envelopes
    inside tool output (GitHub, logs, files, web) get no framing, and GitHub artifacts stay untrusted (AGENTS.md Trust). A reviewer
-   does not block on the accepted weakness; a PR that widens it (framing non-Paseo-delivered text, trusting an unlisted id) is
+   does not block on the accepted weakness; a PR that widens it (framing non-Paseo-delivered text, or dropping the injection-triage exception) is
    still a finding.
 
 ## 6. What a reviewer should check on a PR
