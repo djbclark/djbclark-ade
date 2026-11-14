@@ -2544,7 +2544,9 @@ def main(supervise=False):
     p.add_argument("--min-free-mb", type=float, default=ADMIT_MIN_FREE_MB, metavar="N",
                    help=f"and available memory (free + file-backed + purgeable pages on macOS, MemAvailable on Linux) is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
-                   help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S)")
+                   help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S). A lower line, "
+                        f"{ADMIT_PAGEINS_CORROBORATED_S:g}/s (env LW_MAX_PAGEINS_CORROBORATED_S), also refuses, but only when free memory "
+                        f"is below the floor or compressor churn is above its admit limit")
     p.add_argument("--max-agents", type=int, nargs="?", const=ADMIT_MAX_AGENTS, default=0, metavar="N",
                    help=f"and fewer than N live Paseo agents (`paseo ls -g --background --json`, status running or "
                         f"initializing) are alive machine-wide. OFF unless given (0 = off), because only a caller that "
