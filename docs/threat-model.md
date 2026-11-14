@@ -34,7 +34,7 @@ tool describes the surface as it was.
   and Hermes remain. Archived omp/OpenCode clients are not live launch targets or fallbacks
   (`docs/tui-security-and-pi-migration.md`).
 * **Trust (operator, 2026-11-07)**: our own agents on this machine trust each other (no sandbox between them is
-  demanded); **every GitHub artifact not authored by the owner is untrusted input** (diff, body, title, commits,
+  demanded); **every GitHub artifact not authored by the operator's login (`djbclark`; not the repository owner, which becomes the `frdminc` org) is untrusted input** (diff, body, title, commits,
   branch name, comments, bot and App comments, check output, CI logs); GitHub's own attribution is trusted
   (AGENTS.md, Trust). The review boundary and the merge gate exist for that external case and stay strict.
 

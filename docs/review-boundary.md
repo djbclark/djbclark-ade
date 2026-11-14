@@ -9,7 +9,12 @@ short pointer and the machine-readable marker requirement.
 
 ## What is untrusted (operator, 2026-11-07; restated 2026-11-10: distrust only what is not from the owner or AIs they run)
 
-Artifacts whose author GitHub reports as the repository owner (including Cloud Agents under that login) are ours.
+**"The owner" below is the operator's GitHub *user* login, `djbclark` (`TRUSTED_OWNER_LOGINS` in `bin/adversary_marker.py`, the one list
+`bin/review-pr` and `bin/ade-merge-ready` use too), never whoever owns the repository** (2026-11-14, ahead of the move to the `frdminc`
+org: an organization authors no PR, and its second member, `technoeuphora`, is not the operator). Only a GraphQL `User` actor
+counts: an App or `[bot]` of a similar name does not.
+
+Artifacts whose author GitHub reports as that login (including Cloud Agents under it) are ours.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -17,7 +22,7 @@ or checks out anything from a PR; the review model is told that the diff, the bo
 data under review and that it reports only through the schema.
 
 **Owner-authored PRs succeed without an APPROVE marker** (2026-11-10): `decide` returns success when the author is the
-repository owner and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
+operator's login and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
 owner PR still counts when the last editor is the owner or a login in `BODY_TRUSTED_EDITOR_LOGINS` (`cursor` as of
 2026-11-09; absent or malformed editor attribution fails closed for that explicit APPROVE path). **Outside / MEMBER /
 COLLABORATOR PRs** still need a live APPROVE in an issue comment the owner posted (not through a GitHub App) that
@@ -53,7 +58,7 @@ work). It needs `--trusted-author LOGIN` and `--head SHA`, drops `blockReadsOuts
 `disableBypassPermissionsMode`, and skips the read tripwire, the symlink refusal and the self-check (`--check --mode trusted` exits 2);
 a hook event is not fatal. The stream proof of tools, permission mode, cwd, no MCP and no extra directories, the scrubbed
 environment, the secret-path deny rules (an accidental-read guard: Bash is not confined), the timeout and the descendant kill stay. The launcher cannot verify that the input is trusted: `bin/review-pr`
-decides, and only for a PR GitHub reports as authored by the repository owner (`--runtime auto`, the default; `--runtime yolo`
+decides, and only for a PR GitHub reports as authored by the operator's login (`djbclark`, not the repository owner) (`--runtime auto`, the default; `--runtime yolo`
 is refused for any other author; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
 anything with an untrusted author, always gets `--mode review`. A bypass or widening flag in the launcher's own argv and a permission-mode variable in its
 environment are still refused in every mode. Probe 2026-11-12: Claude Code's init event reports
@@ -115,7 +120,7 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 ## `bin/review-pr PR`: rule 11's local review
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
-author,state`), refuses an author who is neither the repository owner nor the authenticated gh user unless
+author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
 `--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
@@ -192,7 +197,7 @@ marker through herdr (body or comment). Prefer `approve-post` (GitHub API).
 Default `--via auto`: **comment** for outside tips; **body** only when forcing
 an explicit owner-PR APPROVE.
 
-`approve-post` posts only when `gh api user` is the repository owner and both
+`approve-post` posts only when `gh api user` is the operator's login (`djbclark`, whoever owns the repository) and both
 `--i-reviewed` and `--yes` are set (otherwise dry-run). `--expect-head N=40hex`
 is required with `--yes`. After #484, skip `approve-post` for owner-authored
 tips — the gate trusts them without a marker.
@@ -239,7 +244,9 @@ for both `statuses: write` and `checks: write`, so the App must have both.
 
 1. **The App.** GitHub → Settings → Developer settings → GitHub Apps → New: name `ade-merge-gate`, Webhook off, repository
    permissions **Commit statuses: Read and write**, **Checks: Read and write** and **Pull requests: Read-only**,
-   installable on this account only. Note
+   installable by **any account** (public; the manifest says `"public": true` since 2026-11-14, so the App can be installed on the
+   `frdminc` org the repository moves to: a private App installs on its owner's account only, docs.github.com "Making a GitHub
+   App public or private"; it holds no authority without its private key, which stays in the `merge-gate` environment). Note
    the App ID and the Client ID; generate a private key. Install it on `djbclark/djbclark-ade` only. Both write
    permissions are needed: the workflow's token step requests both, and token creation fails if the App lacks one.
 2. **The environment.**
@@ -265,7 +272,7 @@ for both `statuses: write` and `checks: write`, so the App must have both.
    `active`, `bypass_actors: []`, target `~DEFAULT_BRANCH`, `strict_required_status_checks_policy: false`; `adversary-marker`
    pinned to the `ade-merge-gate` App (`integration_id` 5655191, read from the App's check suite on a commit:
    `gh api repos/djbclark/djbclark-ade/commits/<sha>/check-suites --jq '.check_suites[]|[.app.id,.app.slug]|@tsv'`; a
-   private App has no public `GET /apps/<slug>`), `pytest-linux` and `context-policy` pinned to GitHub Actions (15368).
+   private App has no public `GET /apps/<slug>`; a public one has), `pytest-linux` and `context-policy` pinned to GitHub Actions (15368).
    Check: `gh api repos/djbclark/djbclark-ade/rules/branches/master`. Before this the checks were advisory (no ruleset,
    branch protection `required_status_checks: null`). `pytest` (the macOS job) is not required: it is skipped on every
    PR by design.

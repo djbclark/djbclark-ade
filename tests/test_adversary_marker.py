@@ -1126,10 +1126,11 @@ def pr_doc(head: str = H1, body: str = "", state: str = "open") -> dict:
 
 
 def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "djbclark", editor: str | None = None,
-            assoc: str = "OWNER") -> dict:
+            assoc: str = "OWNER", author_type: str = "User") -> dict:
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
-        "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc, "author": {"login": author},
+        "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc,
+        "author": {"__typename": author_type, "login": author},
         "editor": {"login": editor} if editor else None, "lastEditedAt": EDITED_AT if editor else None}}}}
 
 
@@ -1533,11 +1534,14 @@ def test_hole2_an_owner_edit_of_an_outside_body_never_approves_its_hidden_marker
 
 def test_body_editor_trusted_helper_is_owner_or_allowlist_only():
     import adversary_marker as am
-    assert am.body_editor_trusted("djbclark", "djbclark")
-    assert am.body_editor_trusted("CURSOR", "djbclark")
-    assert not am.body_editor_trusted("stranger", "djbclark")
-    assert not am.body_editor_trusted("", "djbclark")
-    assert not am.body_editor_trusted("cursor", "")
+    assert am.body_editor_trusted("djbclark")
+    assert am.body_editor_trusted("DJBClark")
+    assert am.body_editor_trusted("CURSOR")
+    assert not am.body_editor_trusted("stranger")
+    assert not am.body_editor_trusted("frdminc")        # the org that will own the repo is not the operator
+    assert not am.body_editor_trusted("technoeuphora")  # nor is its other member
+    assert not am.body_editor_trusted("djbclark[bot]")
+    assert not am.body_editor_trusted("")
     assert "cursor" in {x.lower() for x in am.BODY_TRUSTED_EDITOR_LOGINS}
 
 
@@ -1763,7 +1767,7 @@ def test_the_editor_and_the_body_come_from_the_same_read():
 
 def test_the_graphql_read_asks_for_the_trust_fields():
     q = adversary_marker.PR_QUERY
-    for field in ("headRefOid", "body", "authorAssociation", "author { login }", "editor { login }", "lastEditedAt",
+    for field in ("headRefOid", "body", "authorAssociation", "author { __typename login }", "editor { login }", "lastEditedAt",
                   "state"):
         assert field in q, field
     # GitHub's schema has no `lastEditedBy` (2026-11-07): asking for it fails every read.
@@ -2007,7 +2011,7 @@ def test_b1_the_comment_query_asks_for_the_attribution_fields():
 def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
     second = {"json": {"repository": {"pullRequest": {
         "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
-        "author": {"login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
+        "author": {"__typename": "User", "login": "djbclark"}, "editor": None, "lastEditedAt": EDITED_AT}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
     assert api.posted[0]["state"] == "failure" and report["prs"][0]["outcome"] == "untrusted", report
 
@@ -2094,3 +2098,80 @@ def test_b2_the_pulls_head_fallback_reads_every_page():
     answers[key + "2"] = [{"json": {"message": "nope"}}]
     rc, report, api = run_ev(ev, answers)
     assert rc == 2 and api.posted == [], report
+
+
+# ---- owner trust is keyed to the operator's user login, never to the repository owner (2026-11-14) ----------
+#
+# The repository moves from the `djbclark` user to the `frdminc` org. Every case below runs against both owners, and
+# the verdict must not change: `frdminc` (an org, with a second member) earns nothing by owning the repository.
+
+OWNERS = ["djbclark/djbclark-ade", "frdminc/djbclark-ade"]
+
+
+def judge_in(repo: str, n: int, answers: dict) -> tuple[dict, "adversary_marker.CannedApi"]:
+    """`judge_pr` for PR N of REPO, with the canned answers (written for REPO_A) re-keyed to REPO."""
+    api = adversary_marker.CannedApi({k.replace(REPO_A, repo): v for k, v in {**at_head(H1), **answers}.items()})
+    return adversary_marker.judge_pr(api, repo, n), api
+
+
+def test_the_trusted_owner_set_is_exactly_the_operators_user_login():
+    am = adversary_marker
+    assert am.TRUSTED_OWNER_LOGINS == frozenset({"djbclark"})
+    assert am.is_trusted_owner_login("djbclark") and am.is_trusted_owner_login("DJBClark")
+    for login in ("frdminc", "technoeuphora", "djbclark[bot]", "djbclark-bot", "", None, 7):
+        assert not am.is_trusted_owner_login(login), login
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("author,typename,assoc,want", [
+    ("djbclark", "User", "OWNER", "approve"), ("DJBClark", "User", "OWNER", "approve"),
+    ("djbclark", "User", "MEMBER", "approve"),              # the same user, whatever the repository calls them
+    ("frdminc", "User", "OWNER", "outside"),                # the org (or an account of its name) as an author
+    ("technoeuphora", "User", "MEMBER", "outside"),         # a member-association author
+    ("djbclark[bot]", "Bot", "NONE", "outside"), ("djbclark", "Bot", "NONE", "outside"),
+    ("cursor", "Bot", "NONE", "outside"),
+])
+def test_owner_pr_follows_the_author_login_not_the_repository_owner(repo, author, typename, assoc, want):
+    res, api = judge_in(repo, 7, serve(7, "## Summary\n", author=author, author_type=typename, assoc=assoc))
+    assert res["outcome"] == want, res
+    assert res["owner_pr"] is (want == "approve")
+    assert {q["owner"] for q in api.queries} == {repo.split("/")[0]}, "the repository owner only addresses the query"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("editor,want", [("djbclark", "approve"), ("cursor", "approve"), ("frdminc", "untrusted"),
+                                          ("technoeuphora", "untrusted"), ("stranger", "untrusted")])
+def test_an_owner_pr_body_approve_needs_the_operator_or_the_allowlist_as_last_editor(repo, editor, want):
+    res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), author="djbclark", editor=editor))
+    assert res["outcome"] == want, res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("login,want", [("djbclark", "approve"), ("DJBClark", "approve"), ("frdminc", "untrusted"),
+                                         ("technoeuphora", "untrusted"), ("djbclark[bot]", "untrusted")])
+def test_an_outside_pr_is_approved_only_by_a_comment_of_the_operators_login(repo, login, want):
+    c = comment(marker("APPROVE", H1), login=login)
+    res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
+    assert res["outcome"] == want, res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_a_bot_named_like_the_operator_never_approves_an_outside_pr(repo):
+    c = comment(marker("APPROVE", H1), login="djbclark", gql={"author": {"__typename": "Bot", "login": "djbclark"}})
+    res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
+    assert res["outcome"] == "untrusted", res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("editor,want", [(None, "approve"), ("djbclark", "approve"), ("frdminc", "edited"),
+                                          ("technoeuphora", "edited"), ("cursor", "edited")])
+def test_the_operators_approve_comment_survives_no_edit_by_anyone_else(repo, editor, want):
+    c = comment(marker("APPROVE", H1), login="djbclark", editor=editor)
+    res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
+    assert res["outcome"] == want, res
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+def test_an_app_editing_an_outside_body_cannot_approve_it(repo):
+    res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), author="stranger", assoc="NONE", editor="cursor"))
+    assert res["outcome"] == "outside", res

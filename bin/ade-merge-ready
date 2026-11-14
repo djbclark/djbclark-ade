@@ -101,7 +101,16 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # `python -I` does not put the script's folder on the path
+try:
+    # "The owner" is the operator's user login, the gate's one list, not whoever owns the repository (which becomes the
+    # frdminc org, an account that authors no PR; 2026-11-14).
+    from adversary_marker import is_trusted_owner_login
+finally:
+    sys.path.pop(0)
 
 MARKER_RE = re.compile(
     r"<!--\s*adversary-verdict:v1\s*(\{.*?\})\s*-->",
@@ -232,10 +241,6 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
     # bottoms (#334–#368) from classify/stacks paste output. Cap high enough
     # for this repo; still fail closed if gh truncates silently (we cannot
     # see a next page without GraphQL).
-    try:
-        owner = repo_owner_login(gh, repo)
-    except RuntimeError:
-        owner = ""
     listing = run_gh(
         gh,
         [
@@ -276,7 +281,7 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             author = (auth.get("login") or "").strip()
         elif isinstance(auth, str):
             author = auth.strip()
-        owner_pr = bool(author) and bool(owner) and author.lower() == owner.lower()
+        owner_pr = is_trusted_owner_login(author)
         checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
         # gh pr checks exits 1 when any check failed; stdout still usable
         check_text = checks.stdout or ""
@@ -564,20 +569,6 @@ def gh_login(gh: str) -> str:
     if not login:
         raise RuntimeError("gh api user returned empty login")
     return login
-
-
-def repo_owner_login(gh: str, repo: str) -> str:
-    p = run_gh(
-        gh,
-        ["repo", "view", repo, "--json", "owner", "-q", ".owner.login"],
-        timeout=30,
-    )
-    if p.returncode != 0:
-        raise RuntimeError(f"gh repo view {repo} failed: {(p.stderr or p.stdout).strip()}")
-    owner = (p.stdout or "").strip()
-    if not owner:
-        raise RuntimeError(f"gh repo view {repo} returned empty owner")
-    return owner
 
 
 def _approve_marker(head: str) -> str:
@@ -1958,13 +1949,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             expect_heads = parse_expect_heads(a.expect_head)
             login = gh_login(a.gh)
-            owner = repo_owner_login(a.gh, a.repo)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
             return die(str(e))
-        if login != owner:
+        if not is_trusted_owner_login(login):
             return die(
-                f"approve-post refuses: gh user {login!r} is not repo owner "
-                f"{owner!r} (only the owner's comment counts for APPROVE)"
+                f"approve-post refuses: gh user {login!r} is not the operator's login "
+                "(only that login's comment counts for APPROVE; the repository owner earns no trust)"
             )
         if not paste_rows:
             print(
@@ -2022,7 +2012,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(
                 {
                     "dry_run": dry_run,
-                    "owner": owner,
+                    "owner": login,
                     "via": a.via,
                     "posted": posted,
                     "numbers": [r["number"] for r in paste_rows],

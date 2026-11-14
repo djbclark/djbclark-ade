@@ -1101,7 +1101,7 @@ def test_review_pr_never_gives_an_outside_author_the_yolo_runtime(prw):
     assert prw.filed()["runtime"] == "restricted"
     before = len(prw.calls())
     r = prw.review("--runtime", "yolo", "--allow-untrusted")
-    assert r.returncode == 2 and "only for a PR the repository owner authored" in r.stderr and len(prw.calls()) == before
+    assert r.returncode == 2 and "only for a PR the operator (djbclark) authored" in r.stderr and len(prw.calls()) == before
 
 
 def test_the_authenticated_user_who_is_not_the_owner_gets_the_restricted_runtime(prw):

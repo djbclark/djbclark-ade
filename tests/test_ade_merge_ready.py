@@ -623,7 +623,7 @@ def test_approve_post_refuses_non_owner(tmp_path: Path) -> None:
         "1",
     )
     assert r.returncode == 2
-    assert "not repo owner" in r.stderr
+    assert "not the operator's login" in r.stderr
 
 
 def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path) -> None:
@@ -1925,3 +1925,64 @@ def test_corrupt_state_bytes_never_crash_classify(tmp_path: Path, blob: bytes) -
     r = run(gh, "--json", "--min", "500")
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)[0]["marker_dispatch"] == "dispatched"
+
+
+def _dry_run_world(tmp_path: Path, repo_owner: str, author: str, gh_user: str) -> subprocess.CompletedProcess[str]:
+    """approve-post dry-run for one PR whose author is AUTHOR, in a repository owned by REPO_OWNER."""
+    head = "e" * 40
+    listing = json.dumps(
+        [
+            {
+                "number": 334,
+                "title": "t",
+                "headRefOid": head,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": "cursor/x-f576",
+                "author": {"login": author},
+            }
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo {gh_user} ;;
+              *"repo view"*) echo {repo_owner} ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    return run(gh, "--repo", f"{repo_owner}/djbclark-ade", "approve-post", "--prs", "334", "--min", "1")
+
+
+@pytest.mark.parametrize("repo_owner", ["djbclark", "frdminc"])
+@pytest.mark.parametrize("author", ["djbclark", "DJBClark"])
+def test_owner_is_the_operator_login_before_and_after_the_org_move(tmp_path: Path, repo_owner: str, author: str) -> None:
+    """The operator's PR is an owner PR (body append) whether the repository belongs to djbclark or to the frdminc org."""
+    r = _dry_run_world(tmp_path, repo_owner, author, "djbclark")
+    assert r.returncode == 0, r.stderr
+    assert "would body-edit #334" in r.stdout
+
+
+@pytest.mark.parametrize("repo_owner", ["djbclark", "frdminc"])
+@pytest.mark.parametrize("author", ["frdminc", "technoeuphora", "djbclark[bot]", "stranger"])
+def test_the_repository_owner_or_a_member_is_not_an_owner_pr(tmp_path: Path, repo_owner: str, author: str) -> None:
+    """The org name, another org member and a `[bot]` login are outside authors: an issue comment, never a body append."""
+    r = _dry_run_world(tmp_path, repo_owner, author, "djbclark")
+    assert r.returncode == 0, r.stderr
+    assert "would body-edit" not in r.stdout and "would comment" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("repo_owner", ["djbclark", "frdminc"])
+@pytest.mark.parametrize("gh_user", ["frdminc", "technoeuphora", "cursor-bot"])
+def test_approve_post_refuses_the_repository_owner_account_and_org_members(tmp_path: Path, repo_owner: str, gh_user: str) -> None:
+    r = _dry_run_world(tmp_path, repo_owner, "djbclark", gh_user)
+    assert r.returncode == 2
+    assert "not the operator's login" in r.stderr
