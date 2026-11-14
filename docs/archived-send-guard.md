@@ -61,6 +61,10 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    **Backstop:** when the command text names more `paseo ... send` than the parser found targets for (a send inside
    `"$(...)"`, a lone trailing backslash, an escaped space before a `#`), every full agent id written in the command is judged
    too (at most 5). A false denial needs an archived agent's id in a command that mentions `paseo send`.
+   Known limits of the backstop (adversary r5, accepted): only **full** ids are judged, so a prefix or a name inside such a form
+   is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can push it
+   out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; and a command that merely *talks about*
+   `paseo send` (a commit message, `rg 'paseo send'`) with an archived agent's id in it is denied, with the same reason text.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).
