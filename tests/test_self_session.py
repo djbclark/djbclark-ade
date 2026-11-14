@@ -31,6 +31,9 @@ class Native:
         self.create_error = None
         self.send_error = None
         self.archive_error = None
+        self.run_result = None      # (returncode, stdout, stderr) replacing the `agent run` answer
+        self.archive_result = None  # same, for `agent archive`
+        self.workspaces = [{'workspaceId': WS, 'project': 'p', 'name': 'MAIN p (w)', 'cwd': str(root)}]
         self.head = HEAD
         self.git_result = None  # (returncode, stdout, stderr) overriding the default git answer
         self.rows = {PRED: {'Id': PRED, 'Provider': 'claude', 'Model': 'sonnet',
@@ -53,9 +56,13 @@ class Native:
         args = argv[4:]
         if args == ['provider', 'ls']:
             data = [{'provider': self.rows[PRED]['Provider'], 'enabled': 'Enabled', 'status': 'available', 'modes': 'display labels only'}]
+        elif args == ['workspace', 'ls']:
+            data = self.workspaces
         elif args[:2] == ['agent', 'inspect']:
             data = copy.deepcopy(self.rows[args[2]])
         elif args[:2] == ['agent', 'run']:
+            if self.run_result is not None:
+                return subprocess.CompletedProcess(argv, *self.run_result)
             self.created += 1
             self.rows[SUCC] = {**self.rows[PRED], 'Id': SUCC, 'Status': 'running',
                                'Mode': args[args.index('--mode') + 1]}
@@ -68,6 +75,8 @@ class Native:
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
+            if self.archive_result is not None:
+                return subprocess.CompletedProcess(argv, *self.archive_result)
             self.rows[PRED]['Archived'] = True
             if self.archive_error:
                 raise self.archive_error
@@ -668,3 +677,178 @@ def test_real_git_unreadable_dot_git_refuses(tmp_path):
             service.git_head(str(repo))
     finally:
         (repo / '.git').chmod(0o755)
+
+
+# --- native failure reasons (2026-11-14: WORKSPACE_NOT_FOUND and a mismatched archive were hidden) ---
+
+def envelope(code, message, details=None):
+    error = {'code': code, 'message': message}
+    if details:
+        error['details'] = details
+    return json.dumps({'error': error})
+
+
+def test_stderr_envelope_is_parsed_with_rc_and_bounded_tail(setup):
+    service, native, _ = setup
+    native.archive_result = (1, '', envelope('SOME_CODE', 'bad thing') + '\n' + 'x' * 5000)
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    error = caught.value
+    assert error.outcome == 'refused'
+    assert error.info['code'] == 'SOME_CODE' and error.info['message'] == 'bad thing'
+    assert error.info['rc'] == 1 and error.info['op'] == 'agent archive'
+    assert len(error.info['stderr_tail']) <= ss.TAIL_LIMIT
+    assert 'SOME_CODE' in str(error) and 'bad thing' in str(error) and 'unknown' not in str(error)
+
+
+def test_envelope_on_stdout_is_also_parsed(setup):
+    service, native, _ = setup
+    native.archive_result = (2, envelope('ON_STDOUT', 'stdout copy'), '')
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    assert caught.value.outcome == 'refused' and caught.value.info['code'] == 'ON_STDOUT'
+
+
+def test_stderr_tail_scrubs_secret_shaped_values(setup):
+    service, native, _ = setup
+    native.archive_result = (1, '', envelope('E', 'm') + '\nAuthorization: Bearer abc123 token=hunter2 api_key: "k-9"')
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    tail = caught.value.info['stderr_tail']
+    assert 'hunter2' not in tail and 'abc123' not in tail and 'k-9' not in tail and '[redacted]' in tail
+
+
+@pytest.mark.parametrize('result', [(1, '', ''), (1, 'not json', 'also not json'), (3, '', 'panic: boom')])
+def test_unparseable_nonzero_exit_stays_unknown_and_keeps_rc_and_tail(setup, result):
+    service, native, _ = setup
+    native.archive_result = result
+    with pytest.raises(ss.NativeError) as caught:
+        service.native('agent', 'archive', PRED)
+    assert caught.value.outcome == 'unknown' and 'outcome unknown' in str(caught.value)
+    assert caught.value.info['rc'] == result[0] and caught.value.info['code'] is None
+    assert caught.value.info['stderr_tail'] == result[2]
+
+
+def test_timeout_and_oserror_are_unknown_outcomes(setup):
+    service, native, _ = setup
+    for exc, code in ((subprocess.TimeoutExpired('paseo', 30), 'TIMEOUT'), (FileNotFoundError('paseo'), 'OSERROR')):
+        native.archive_error = exc
+        with pytest.raises(ss.NativeError) as caught:
+            service.native('agent', 'archive', PRED)
+        assert caught.value.outcome == 'unknown' and caught.value.info['code'] == code
+        assert caught.value.info['rc'] is None
+
+
+def test_agent_send_rc_5_is_still_a_receipt(setup):
+    service, _native, checkpoint = setup
+    record = service.compact(checkpoint, request_id='r1')
+    assert record['status'] == 'requested' and 'native_error' not in record
+
+
+def test_create_refusal_reason_is_recorded_not_hidden(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('AGENT_CREATE_FAILED', 'provider rejected the mode'))
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['status'] == 'creation-unknown' and native.created == 0
+    assert record['native_error']['op'] == 'agent run'
+    assert record['native_error']['code'] == 'AGENT_CREATE_FAILED'
+    assert record['native_error']['rc'] == 1
+    assert json.loads(Path(record['record']).read_text())['native_error'] == record['native_error']
+
+
+def test_malformed_creation_receipt_is_recorded(setup):
+    service, native, checkpoint = setup
+    native.run_result = (0, json.dumps(['not', 'a', 'dict']), '')
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['status'] == 'creation-unknown'
+    assert record['native_error']['message'] == 'malformed creation receipt'
+
+
+def test_compact_send_refusal_is_recorded(setup):
+    service, native, checkpoint = setup
+    native.send_error = subprocess.TimeoutExpired('paseo', 30)
+    record = service.compact(checkpoint, request_id='r2')
+    assert record['status'] == 'send-unknown' and record['native_error']['code'] == 'TIMEOUT'
+
+
+def test_workspace_gone_launches_successor_in_a_new_local_workspace(setup):
+    service, native, checkpoint = setup
+    native.workspaces = [{'workspaceId': 'wks_0000000000000000'}]
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['status'] == 'awaiting-ack' and record['workspace'] == WS
+    assert record['workspace_placement'] == 'new-local'
+    call = next(a for a, k in native.calls if a[4:6] == ['agent', 'run'])
+    assert '--workspace' not in call and call[call.index('--new-workspace') + 1] == 'local'
+    assert call[call.index('--cwd') + 1] == record['cwd']
+    # verify_successor, accept and finish do not care that the placement differs
+    record = accept(service, record, Path(record['record']))
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(Path(record['record']))['status'] == 'archived'
+
+
+def test_workspace_present_keeps_explicit_workspace(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['workspace_placement'] == 'existing'
+    call = next(a for a, k in native.calls if a[4:6] == ['agent', 'run'])
+    assert call[call.index('--workspace') + 1] == WS and '--new-workspace' not in call
+
+
+def test_workspace_registry_failure_refuses_before_any_intent(setup):
+    service, native, checkpoint = setup
+    original = native.__call__
+    def broken(argv, **kwargs):
+        if argv[4:6] == ['workspace', 'ls']:
+            return subprocess.CompletedProcess(argv, 1, '', envelope('DAEMON_DOWN', 'no daemon'))
+        return original(argv, **kwargs)
+    service.runner = broken
+    with pytest.raises(ss.NativeError, match='DAEMON_DOWN'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0 and not list(service.state.glob('handoff-*.json'))
+
+
+def finished_up_to_archive(setup):
+    service, native, record, path = start(setup)
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    return service, native, path
+
+
+def test_archive_refusal_is_recorded_and_not_retried(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (1, '', envelope('ARCHIVE_FAILED', 'agent is busy'))
+    with pytest.raises(ss.NativeError, match='ARCHIVE_FAILED'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown'
+    assert saved['native_error']['op'] == 'agent archive' and saved['native_error']['code'] == 'ARCHIVE_FAILED'
+    assert native.archived == 1
+
+
+def test_archive_resolving_to_a_different_agent_gets_the_specific_error(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # the 2026-11-14 stderr, byte for byte in shape: empty stdout, rc 1
+    native.archive_result = (1, '', envelope('AGENT_ALREADY_ARCHIVED', 'Agent c9a97e5 is already archived',
+                                             'Archived at: 2026-11-14T10:34:32.539Z'))
+    with pytest.raises(ss.SessionError, match='different agent c9a97e5') as caught:
+        service.finish(path)
+    assert 'archive_agent' in str(caught.value) and PRED in str(caught.value)
+    assert 'unknown' not in str(caught.value)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'AGENT_ALREADY_ARCHIVED'
+    assert native.archived == 1  # never retried automatically
+    # operator archives by exact id (MCP), then finish completes without another archive call
+    native.archive_result = None
+    native.rows[PRED]['Archived'] = True
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+    done = json.loads(path.read_text())
+    assert 'native_error' not in done and done['resolved_native_error']['code'] == 'AGENT_ALREADY_ARCHIVED'
+
+
+def test_archive_error_naming_the_predecessor_prefix_is_not_a_mismatch(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (1, '', envelope('AGENT_ALREADY_ARCHIVED', 'Agent 1111111 is already archived'))
+    with pytest.raises(ss.NativeError) as caught:
+        service.finish(path)
+    assert 'different agent' not in str(caught.value)

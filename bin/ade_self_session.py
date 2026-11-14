@@ -25,6 +25,69 @@ class SessionError(RuntimeError):
     pass
 
 
+class NativeError(SessionError):
+    """A failed native command with the reason Paseo gave, so a record can keep it.
+
+    `info` is the nonsecret, bounded `native_error` record: op (subcommand words only, never
+    a prompt), code, message, rc and a stderr tail. `outcome` is `refused` when Paseo reported
+    a failure it understood and `unknown` when the effect cannot be told (timeout, OSError,
+    unparseable output on both streams).
+    """
+
+    def __init__(self, text, info, outcome):
+        super().__init__(text)
+        self.info = info
+        self.outcome = outcome
+
+
+TAIL_LIMIT = 512
+MESSAGE_LIMIT = 300
+_SECRETISH = re.compile(r'(?i)((?:token|secret|password|passwd|authorization|bearer|api[_-]?key)'
+                        r'["\']?\s*[:=]?\s*["\']?)[^\s"\',}]+')
+
+
+def bounded(text, limit):
+    """Printable, secret-scrubbed tail of text, at most `limit` characters."""
+    text = ''.join(c if c.isprintable() or c in '\n\t' else '?' for c in str(text or ''))
+    text = _SECRETISH.sub(lambda m: m.group(1) + '[redacted]', text).strip()
+    return text if len(text) <= limit else '...' + text[-(limit - 3):]
+
+
+def parse_envelope(*streams):
+    """(code, message) from Paseo's `{"error": {"code", "message"}}` envelope in any stream.
+
+    Whole-stream JSON first, then the last line that is a JSON object. None when no stream
+    carries a JSON object.
+    """
+    for text in streams:
+        text = (text or '').strip()
+        if not text:
+            continue
+        for candidate in (text, *reversed([x for x in text.splitlines() if x.lstrip().startswith('{')])):
+            try:
+                data = json.loads(candidate)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            error = data.get('error')
+            if isinstance(error, dict):
+                code, message = error.get('code'), error.get('message')
+            else:
+                code, message = data.get('code'), error if isinstance(error, str) else data.get('message')
+            code = bounded(code, 64) if isinstance(code, str) and code else None
+            return code, bounded(message, MESSAGE_LIMIT) if isinstance(message, str) else None
+    return None
+
+
+def native_error_record(op, error):
+    """The `native_error` dict for a record, whether or not the error came from `native()`."""
+    if isinstance(error, NativeError):
+        return dict(error.info)
+    return {'op': op, 'code': None, 'message': bounded(str(error), MESSAGE_LIMIT), 'rc': None,
+            'stderr_tail': ''}
+
+
 def ident(value: str) -> str:
     try:
         return str(uuid.UUID(value))
@@ -99,20 +162,50 @@ class Service:
         if detached:
             for key in ('PASEO_AGENT_ID', 'PASEO_AGENT_CWD', 'PASEO_WORKSPACE_ID'):
                 env.pop(key, None)
+        op = ' '.join(a for a in args[:2] if re.fullmatch(r'[a-z][a-z-]*', a)) or 'native'
+
+        def failure(outcome, text, code, message, rc, tail=''):
+            info = {'op': op, 'code': code, 'message': message, 'rc': rc, 'stderr_tail': tail}
+            return NativeError(text, info, outcome)
+
         try:
             result = self.runner(['paseo', '--home', str(self.home), '--json', *args],
                                  env=env, capture_output=True, text=True, timeout=30)
-            if len(result.stdout or '') > 16 * 1024 * 1024:
-                raise SessionError('native response too large; inspect before retry')
-            data = json.loads(result.stdout)
-            if result.returncode != 0 and not (args[:2] == ('agent', 'send') and result.returncode == 5):
-                raise SessionError('native command refused or failed; inspect before retry')
-            return data
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            raise SessionError('native outcome unknown; inspect before retry') from None
+        except subprocess.TimeoutExpired:
+            raise failure('unknown', f'native {op} timed out; outcome unknown; inspect before retry',
+                          'TIMEOUT', 'native command timed out', None) from None
+        except OSError as error:
+            raise failure('unknown', f'native {op} could not run ({type(error).__name__}); outcome unknown; '
+                          'inspect before retry', 'OSERROR', type(error).__name__, None) from None
+        stdout, stderr = result.stdout or '', result.stderr or ''
+        if len(stdout) > 16 * 1024 * 1024:
+            raise SessionError('native response too large; inspect before retry')
+        rc = result.returncode
+        if rc != 0 and not (args[:2] == ('agent', 'send') and rc == 5):
+            # Paseo prints its error envelope on stderr (2026-11-14: stdout empty, rc 1).
+            tail = bounded(stderr, TAIL_LIMIT)
+            envelope = parse_envelope(stderr, stdout)
+            if envelope is None:
+                raise failure('unknown', f'native {op} exited {rc} with no parseable output; '
+                              'outcome unknown; inspect before retry', None, None, rc, tail)
+            code, message = envelope
+            detail = ': '.join(x for x in (code, message) if x)
+            raise failure('refused', f'native {op} refused (rc {rc})' + (f': {detail}' if detail else '')
+                          + '; inspect before retry', code, message, rc, tail)
+        try:
+            return json.loads(stdout)
+        except ValueError:
+            raise failure('unknown', f'native {op} output unparseable; outcome unknown; inspect before retry',
+                          None, None, rc, bounded(stderr, TAIL_LIMIT)) from None
 
     def actor(self):
         return ident(self.env.get('PASEO_AGENT_ID', ''))
+
+    def workspace_exists(self, workspace):
+        rows = self.native('workspace', 'ls')  # a failure here is before any intent: nothing sent
+        if not isinstance(rows, list):
+            raise SessionError('native workspace registry unavailable')
+        return any(isinstance(r, dict) and r.get('workspaceId') == workspace for r in rows)
 
     def inspect(self, agent):
         row = self.native('agent', 'inspect', ident(agent))
@@ -249,6 +342,10 @@ class Service:
                     or not isinstance(source.get('Model'), str) or source['Model'] in ('', '-', 'default')):
                 raise SessionError('concrete predecessor provider/model unavailable')
             workspace = workspace_ident(self.env.get('PASEO_WORKSPACE_ID', ''))
+            # 2026-11-14: the predecessor's workspace had been removed, `agent run --workspace`
+            # answered WORKSPACE_NOT_FOUND and the helper hid it. Decided: a successor is a new
+            # lead in its own placement, so a vanished workspace is replaced, not a reason to refuse.
+            placement = 'existing' if self.workspace_exists(workspace) else 'new-local'
             plan = self.mode_plan(source, requested_mode)
             thinking = explicit_thinking
             if thinking is None:
@@ -262,7 +359,8 @@ class Service:
             preserved, sha = self.checkpoint(checkpoint, token=token)
             record = {'schema_version': 1, 'kind': 'handoff', 'token': token,
                       'predecessor': predecessor, 'successor': None, 'home': str(self.home),
-                      'cwd': cwd, 'workspace': workspace, 'provider': source['Provider'],
+                      'cwd': cwd, 'workspace': workspace, 'workspace_placement': placement,
+                      'provider': source['Provider'],
                       'model': source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
@@ -288,7 +386,8 @@ class Service:
             )
             try:
                 thinking_args = ('--thinking', thinking) if thinking else ()
-                result = self.native('agent', 'run', '--workspace', workspace, '--cwd', cwd,
+                where = ('--workspace', workspace) if placement == 'existing' else ('--new-workspace', 'local')
+                result = self.native('agent', 'run', *where, '--cwd', cwd,
                                      '--provider', source['Provider'] + '/' + source['Model'],
                                      '--mode', plan['mode_id'], *thinking_args, '--no-wait', '--label',
                                      'ade.handoff=' + token, '--', prompt, detached=True)
@@ -296,7 +395,8 @@ class Service:
                     raise SessionError('malformed creation receipt')
                 record['successor'] = ident(result.get('agentId', ''))
                 record['status'] = 'awaiting-ack'
-            except SessionError:
+            except SessionError as error:
+                record['native_error'] = native_error_record('agent run', error)
                 self.save(path, record)
                 return record
             self.save(path, record)
@@ -323,6 +423,7 @@ class Service:
             record['successor'] = ident(rows[0].get('id', ''))
             self.verify_successor(record)
             record['status'] = 'awaiting-ack'
+            self.resolve_native_error(record)
             self.save(target, record)
             return record
 
@@ -371,13 +472,46 @@ class Service:
                     raise SessionError('predecessor must be idle without permission waits; never force archive')
                 record['status'] = 'archive-unknown'
                 self.save(target, record)
-                self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
+                try:
+                    self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
+                except SessionError as error:
+                    # No automatic retry, no --force, no workspace archive: keep the reason in the record.
+                    record['native_error'] = native_error_record('agent archive', error)
+                    self.save(target, record)
+                    other = self.archive_other_agent(error, record['predecessor'])
+                    if other:
+                        raise SessionError(
+                            f'Paseo resolved archive to a different agent {other}; preserve, archive by exact id '
+                            f'{record["predecessor"]} via the Paseo MCP archive_agent, verify with `paseo agent '
+                            'inspect`, then re-run finish') from None
+                    raise
                 predecessor = self.inspect(record['predecessor'])
                 if predecessor.get('Archived') is not True:
                     raise SessionError('archive unconfirmed; preserve transaction and inspect before retry')
             record['status'] = 'archived'
+            self.resolve_native_error(record)
             self.save(target, record)
             return record
+
+    @staticmethod
+    def archive_other_agent(error, predecessor):
+        """The agent id an archive error names when it is not the predecessor (prefix compare), else None.
+
+        2026-11-14: `paseo agent archive FULL_UUID` answered AGENT_ALREADY_ARCHIVED for a different
+        agent ("Agent c9a97e5 is already archived") while `agent inspect` of the same id was right.
+        """
+        if not isinstance(error, NativeError):
+            return None
+        named = re.search(r'\bAgent\s+([0-9a-f][0-9a-f-]{5,35})\b', error.info.get('message') or '', re.IGNORECASE)
+        if named and not predecessor.lower().startswith(named.group(1).lower()):
+            return named.group(1)
+        return None
+
+    @staticmethod
+    def resolve_native_error(record):
+        """A later success keeps the earlier reason as history instead of a live `native_error`."""
+        if 'native_error' in record:
+            record['resolved_native_error'] = record.pop('native_error')
 
     def compact(self, checkpoint, *, request_id):
         predecessor = self.actor()
@@ -410,8 +544,8 @@ class Service:
                     raise SessionError('invalid send receipt')
                 record['status'] = 'requested'
                 record['delivery_status'] = result['status']
-            except SessionError:
-                pass
+            except SessionError as error:
+                record['native_error'] = native_error_record('agent send', error)
             self.save(path, record)
             return record
 
