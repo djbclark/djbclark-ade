@@ -436,7 +436,7 @@ HELD = ['paseo_respond_to_permission', 'paseo_set_agent_mode', 'paseo_send_agent
         'mcp__paseo__archive_agent', 'mcp__paseo__create_schedule', 'mcp__paseo__create_heartbeat',
         'mcp__paseo__respondToPermission', 'mcp__paseo___respond_to_permission', 'mcp__paseo__respond_to_permission ',
         'mcp__paseo__RESPOND_TO_PERMISSION', 'respond-to-permission', 'Paseo Respond To Permission', 'paseo_sendTerminalKeys']
-NOT_HELD = ['mcp__paseo__create_agent', 'mcp__paseo__list_agents', 'mcp__paseo__update_schedule', 'paseo_echo_context',
+NOT_HELD = ['mcp__paseo__create_agent', 'mcp__paseo__list_agents', 'mcp__paseo__delete_schedule', 'paseo_echo_context',
             'mcp__paseo__get_agent_status', 'paseo_list_agents', 'Bash', 'mcp__paseo__browser_select']
 
 
@@ -444,7 +444,7 @@ def test_hold_tools_match_by_trailing_words_under_any_prefix():
     module = runpy.run_path(str(SCRIPT))
     for name in HELD:
         rule = module['classify']({'name': name})
-        assert rule and (rule.startswith('hold:') or rule.startswith('token:')), (name, rule)
+        assert rule and rule.startswith('hold:'), (name, rule)
     for name in ['paseo_respond_to_permission', 'paseo_update_agent', 'mcp__paseo__update_agent', 'mcp__paseo__kill_agent',
                  'mcp__paseo__respondToPermission', 'mcp__paseo___respond_to_permission', 'mcp__paseo__respond_to_permission ']:
         assert module['classify']({'name': name}).startswith('hold:'), name
@@ -478,3 +478,43 @@ def test_credential_looking_names_are_redacted_in_the_log(tmp_path):
 
 def test_unused_max_tool_constant_is_gone():
     assert 'MAX_TOOL' not in runpy.run_path(str(SCRIPT))
+
+
+# All 41 tools Paseo registers (packages/server/src/server/agent/tools/paseo-tools.ts, 2026-11-14), each held or approved on
+# purpose; a new Paseo tool must be added here, so it cannot slip in unclassified.
+PASEO_HELD = ['archive_agent', 'archive_workspace', 'cancel_agent', 'create_heartbeat', 'create_schedule', 'kill_agent',
+              'kill_terminal', 'respond_to_permission', 'resume_schedule', 'run_schedule_once', 'send_agent_prompt',
+              'send_terminal_keys', 'set_agent_mode', 'update_agent', 'update_schedule']
+PASEO_APPROVED = ['capture_terminal', 'create_agent', 'create_terminal', 'create_workspace', 'delete_heartbeat',
+                  'delete_schedule', 'get_agent_activity', 'get_agent_status', 'inspect_provider', 'inspect_schedule',
+                  'list_agents', 'list_hosts', 'list_models', 'list_pending_permissions', 'list_profiles', 'list_providers',
+                  'list_schedules', 'list_terminals', 'list_workspace_scripts', 'list_workspaces', 'pause_schedule',
+                  'rename_workspace', 'schedule_logs', 'speak', 'start_workspace_script', 'stop_workspace_script']
+
+
+def test_every_paseo_tool_is_classified_in_each_naming_scheme():
+    assert len(PASEO_HELD) + len(PASEO_APPROVED) == 41 and not set(PASEO_HELD) & set(PASEO_APPROVED)
+    module = runpy.run_path(str(SCRIPT))
+    for tool in PASEO_HELD:
+        for name in (f'mcp__paseo__{tool}', f'paseo_{tool}', f'paseo-host_{tool}', f'mcp__paseo-host__{tool}'):
+            assert module['classify']({'name': name}) == f'hold:{tool}', name
+    for tool in PASEO_APPROVED:
+        for name in (f'mcp__paseo__{tool}', f'paseo_{tool}', f'paseo-host_{tool}', f'mcp__paseo-host__{tool}'):
+            assert module['classify']({'name': name}) is None, name
+
+
+def test_hold_matches_suffixed_pluralised_and_run_together_variants():
+    module = runpy.run_path(str(SCRIPT))
+    for name in ['mcp__paseo__respond_to_permission_v2', 'mcp__paseo__respond_to_permission_tool',
+                 'mcp__paseo__respond_to_permission_async', 'mcp__paseo__respond_to_permissions', 'mcp__paseo__respondtopermission',
+                 'mcp__paseo__cancel_agent_turn', 'mcp__paseo__send_agent_prompt_v2', 'mcp__paseo__archive_workspace_now']:
+        assert module['classify']({'name': name}).startswith('hold:'), name
+
+
+def test_more_credential_shapes_are_redacted():
+    module = runpy.run_path(str(SCRIPT))
+    for name in ['AKIAIOSFODNN7EXAMPLE', 'glpat-abcdefghij0123456789', 'sk_live_abcdefghij0123456789',
+                 'AIzaSyA-abcdefghij_0123456789abcdefgh', 'sk_test_abc']:
+        assert module['tool_name']({'name': name}, 'claude') == '<redacted>', name
+    for name in ['mcp__paseo__list_agents', 'Task-x', 'AIz', 'task_live_x']:
+        assert module['tool_name']({'name': name}, 'claude') == name, name

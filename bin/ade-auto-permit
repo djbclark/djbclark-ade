@@ -71,16 +71,22 @@ UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI meth
 # generic TOKENS and UI_TOKENS ("browser_select", "ask_gemini") do not.
 # HOLD_TOOLS is an explicit hold list, not an allowlist (the operator wants no prompts, so unknown tools stay
 # approvable): tools that act on ANOTHER agent's pending cards, mode or turn, or defer a prompt. A held tool is
-# found by its trailing words under ANY prefix (OpenCode asks as `<server>_<tool>`, Claude as `mcp__<server>__<tool>`),
-# case-folded and camelCase-split. respond_to_permission answers a card; set_agent_mode and update_agent (modeId)
-# can widen an agent to bypassPermissions; send_agent_prompt or a steer denies every pending question and plan of
-# its target; send_terminal_keys types into a TUI prompt; cancel/kill/archive_agent abort the turn that holds a
-# card; create_schedule and create_heartbeat are deferred prompts.
+# found in the run-together name under ANY prefix or suffix (OpenCode asks as `<server>_<tool>`, Claude as
+# `mcp__<server>__<tool>`; `_v2`/`_async` variants too), case-folded and camelCase-split. respond_to_permission
+# answers a card; set_agent_mode and update_agent (modeId) can widen an agent to bypassPermissions;
+# send_agent_prompt or a steer denies every pending question and plan of its target; send_terminal_keys types into
+# a TUI prompt and kill_terminal destroys it; cancel/kill/archive_agent and archive_workspace abort the turns that
+# hold cards; create/update_schedule, run_schedule_once, resume_schedule and create_heartbeat set, fire or re-arm
+# deferred prompts and modes. Every one of Paseo's 41 MCP tools is classified in the tests. `create_agent` stays
+# approvable on purpose (the ADE's fan-out needs it; operator trust ruling 2026-11-13). A shell `paseo` command run
+# through Bash is approved like any other Bash.
 HOLD_TOOLS = ("respond_to_permission", "set_agent_mode", "update_agent", "send_agent_prompt", "send_terminal_keys",
-              "cancel_agent", "kill_agent", "archive_agent", "create_schedule", "create_heartbeat")
+              "kill_terminal", "cancel_agent", "kill_agent", "archive_agent", "archive_workspace", "create_schedule",
+              "update_schedule", "run_schedule_once", "resume_schedule", "create_heartbeat")
 TOOL_SHAPE = re.compile(r"[A-Za-z][A-Za-z0-9_.:\-]{0,159}( [a-z_]{1,32})?")  # an identifier or "Pi method", never a command line
 # A logged name that looks like a credential is redacted: a known token prefix at a name start/separator, or a long run.
-CREDENTIAL = re.compile(r"(?:^|[_\-\s])(?:gh[pousr]_|github_pat_|sk-|xox[a-z]-)|[A-Za-z0-9+/=]{32,}")
+CREDENTIAL = re.compile(r"(?:^|[_\-\s])(?:gh[pousr]_|github_pat_|sk-|sk_(?:live|test)_|xox[a-z]-|glpat-|AIza)"
+                        r"|AKIA[0-9A-Z]{16}|[A-Za-z0-9+/=]{32,}")
 
 
 def words(name):
@@ -124,8 +130,7 @@ def classify(row):
         if any(compact.startswith(stem, at) for at in starts) if stem in WORD_START_STEMS else stem in compact:
             return f"stem:{stem}"
     for held in HOLD_TOOLS:
-        held_words = held.split("_")
-        if parts[-len(held_words):] == held_words:
+        if held.replace("_", "") in compact:
             return f"hold:{held}"
     if is_mcp_tool(name):
         return None
