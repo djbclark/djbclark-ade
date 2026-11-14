@@ -281,26 +281,58 @@ def test_starve_claim_is_atomic_under_concurrent_callers(monkeypatch, tmp_path):
 
     def go():
         barrier.wait()
-        wins.append(lw.starve_claim(5000.0, 120.0))
+        wins.append(lw.starve_claim(120.0, t=5000.0))
     threads = [threading.Thread(target=go) for _ in range(8)]
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert wins.count(True) == 1 and wins.count(False) == 7
     assert not list((tmp_path / "state").glob("starve.json.tmp*"))   # temp files replaced, none left
-    assert lw.starve_claim(5000.0 + 119.0, 120.0) is False and lw.starve_claim(5000.0 + 121.0, 120.0) is True
-    # a clock that stepped back (last_forced_t in the future) never blocks forever
-    assert lw.starve_claim(10.0, 120.0) is True
+    assert lw.starve_claim(120.0, t=5000.0 + 119.0) is False and lw.starve_claim(120.0, t=5000.0 + 121.0) is True
+    # a clock that stepped back by more than the gap (last_forced_t far in the future) never blocks forever
+    assert lw.starve_claim(120.0, t=10.0) is True
+
+
+def test_an_earlier_time_cannot_slip_past_a_later_claim(monkeypatch, tmp_path):
+    """F1 (lead adversary 2026-11-14): a waiter that read its clock before waiting for the flock holds an earlier time than the claim
+    that won; it must be refused, and the stored claim must not move backwards."""
+    lw = load_module(monkeypatch, tmp_path / "state")
+    assert lw.starve_claim(120.0, t=5000.0) is True
+    assert lw.starve_claim(120.0, t=4999.5) is False
+    assert json.loads((tmp_path / "state" / "starve.json").read_text())["last_forced_t"] == 5000.0
+    assert lw.starve_claim(120.0, t=4880.5) is False and lw.starve_claim(120.0, t=5119.5) is False   # |t - last| < gap on both sides
+    assert lw.starve_claim(120.0, t=4879.0) is True   # a clock stepped back by more than the gap unblocks
+
+
+def test_the_claim_reads_the_clock_after_taking_the_lock(monkeypatch, tmp_path):
+    lw = load_module(monkeypatch, tmp_path / "state")
+    seen = []
+    monkeypatch.setattr(lw, "now", lambda: seen.append("now") or 7000.0)
+    assert lw.starve_claim(120.0) is True and seen == ["now"]
+    assert lw.starve_claim(120.0) is False   # the same clock again is inside the gap
+
+
+def test_concurrent_claims_with_staggered_times_pick_one_winner(monkeypatch, tmp_path):
+    lw = load_module(monkeypatch, tmp_path / "state")
+    wins, barrier = [], threading.Barrier(8)
+
+    def go(i):
+        barrier.wait()
+        wins.append(lw.starve_claim(120.0, t=5000.0 - i * 0.01))   # a later lock holder may carry an earlier time
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert wins.count(True) == 1 and wins.count(False) == 7
 
 
 def test_starve_claim_survives_a_corrupt_state_and_an_unwritable_dir(monkeypatch, tmp_path):
     lw = load_module(monkeypatch, tmp_path / "state")
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "starve.json").write_text("{not json")
-    assert lw.starve_claim(1.0, 120.0) is True
+    assert lw.starve_claim(120.0, t=1.0) is True
     blocker = tmp_path / "file"
     blocker.write_text("x")
     monkeypatch.setattr(lw, "STATE_DIR", blocker / "sub")   # cannot be created: fail toward waiting
-    assert lw.starve_claim(1.0, 120.0) is False
+    assert lw.starve_claim(120.0, t=1.0) is False
 
 
 def test_a_forced_admit_under_the_agent_cap_records_its_reservation(monkeypatch, tmp_path, capsys):
@@ -495,3 +527,24 @@ def test_a_claim_that_cannot_be_written_drops_its_forced_reservation(monkeypatch
     rows = json.loads((run.state / "agent-reservations.json").read_text())["r"]
     assert [r for r in rows if r["until"] > run.wall0] == []   # about 20 polls tried; none left a reservation behind
     assert not list(run.state.glob("starve.json.tmp*"))
+
+
+# --- lead adversary round 1 (2026-11-14) ----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["memory_unreadable", "agents_unreadable", "agents_reserve_failed", "some_future_gate"])
+def test_unreadable_and_unknown_refusals_are_always_hard(monkeypatch, tmp_path, name):
+    lw = load_module(monkeypatch, tmp_path / "state")
+    m = {"churn": None, "free_mb": None}
+    lim = {"churn": 30000.0}
+    assert lw.hard_refusals([name], 0.1, m, lim, 4.0) == [name]
+    assert lw.hard_refusals(["agents", name], 0.1, m, lim, 4.0) == [name]   # one hard name among soft ones holds the valve
+    assert lw.hard_refusals(["pageins", "agents"], 0.1, m, lim, 4.0) == []   # the plain soft gates yield
+
+
+def test_the_valve_never_forces_past_an_unreadable_memory_reading(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, LW_FAKE_LOAD1=0.1, LW_FAKE_AGENTS=30)
+    real = run.lw.admit_refusals
+    monkeypatch.setattr(run.lw, "admit_refusals", lambda *a, **k: real(*a, **k) + ["memory_unreadable"])
+    rc, rec, _ = run(capsys, wait=600.0, max_agents=20)
+    assert rc == 75 and "forced" not in rec and "memory_unreadable" in rec["refused"]
+    assert not (run.state / "starve.json").exists()

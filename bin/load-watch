@@ -169,7 +169,11 @@ above the boost line (--boost-per-core, 4.0), an unreadable memory or agent coun
 machine-wide (LW_STARVE_MIN_GAP_S, 0 = no limit; starve.json in the state dir, replaced atomically under a flock; the claim is written only
 once the forced admit's agent reservation, when --max-agents asks for one, has been recorded). It prints
 `admit ok forced=starved waited_s=N overrode=reason,reason ...` (JSON: forced, overrode) and exits 0; a forced admit under --max-agents still
-records its reservation. Admit tuning log (2026-11-14): every `admit` call appends one JSON line (UTC time, verdict ok/hot/forced, the
+records its reservation. acp-dispatch scrubs every LW_* variable from admit's environment (it passes only its own knobs as flags, plus
+LW_BOOST_CALM_S), so LW_STARVE_SOFT_S, LW_STARVE_MIN_GAP_S, LW_MAX_SWAPINS_S, LW_SWAPINS_CORROBORATED_S, LW_ADMIT_LOG and LW_ADMIT_CALLER do NOT
+reach a dispatch: it always runs with the defaults (valve on at 300 s / 120 s) and there is no way to switch the valve off for it from the
+environment; the shim is deleted 2026-11-20, and until then a knob needs a change in bin/acp-dispatch's load_gate_knobs. Run `admit --wait S`
+by hand (or any other caller) for the knobs to apply. Admit tuning log (2026-11-14): every `admit` call appends one JSON line (UTC time, verdict ok/hot/forced, the
 refused or overridden gates, load1, per_core, churn, pageins, swapins, free_mb, agents, the limits used, waited_s, the caller's program) to
 LW_ADMIT_LOG (default admit-log.jsonl in the state dir; a relative path is relative to the state dir; `off`, 0, false or no disables;
 only a plain program name is recorded as the caller), rotated at 5 MB to one `.1` file; a log failure never changes the
@@ -2391,10 +2395,12 @@ def hard_refusals(refused, per_core, m, lim, hard_load):
     return hard
 
 
-def starve_claim(t, min_gap, before=None, undo=None):
-    """True when this caller may force ONE admit at time `t`: at most one per `min_gap` seconds machine-wide (0: no limit). starve.json
+def starve_claim(min_gap, before=None, undo=None, t=None):
+    """True when this caller may force ONE admit: at most one per `min_gap` seconds machine-wide (0: no limit). starve.json
     ({"last_forced_t"}) is read and replaced (temp file, os.replace) under an exclusive flock, so two waiters that starve in the same
-    second cannot both pass. `before()` (the forced admit's agent reservation) runs under that lock once the gap allows, and the claim
+    second cannot both pass. The time is read AFTER the lock is taken (`t` is a test override): a waiter that read its clock before
+    waiting for the lock cannot slip in with an earlier time, and a stored time within `min_gap` on either side blocks (|t - last|), so
+    only a clock stepped back by more than the gap unblocks. `before()` (the forced admit's agent reservation) runs under that lock once the gap allows, and the claim
     is written only when it returns true: a reservation that fails never spends the machine-wide gap, and a claim that cannot be
     written calls `undo()` (drop that reservation) so nothing leaks per poll. A lock or state that cannot be taken or written means
     no (fail toward waiting)."""
@@ -2403,11 +2409,13 @@ def starve_claim(t, min_gap, before=None, undo=None):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         with open(STATE_DIR / "starve.lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            if t is None:
+                t = now()
             try:
                 last = json.loads((STATE_DIR / "starve.json").read_text()).get("last_forced_t")
             except (OSError, ValueError, AttributeError):
                 last = None
-            if _num(last) and 0 <= t - last < min_gap:
+            if _num(last) and abs(t - last) < min_gap:
                 return False
             if before is not None and not before():
                 return False
@@ -2819,7 +2827,7 @@ def cmd_admit(a):
             m["reservation"] = rid
             return True
         if (refused and a.wait > 0 and STARVE_SOFT_S > 0 and waited - refused_since >= STARVE_SOFT_S
-                and not hard_refusals(refused, per_core, m, lim, hard_load) and starve_claim(now(), STARVE_MIN_GAP_S, reserve_forced,
+                and not hard_refusals(refused, per_core, m, lim, hard_load) and starve_claim(STARVE_MIN_GAP_S, reserve_forced,
                                  lambda: drop_reservation(m.pop("reservation", None)))):
             forced = list(refused)
             break
