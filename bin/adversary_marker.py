@@ -91,7 +91,10 @@ def trusted_owner_user_state(login: object, database_id: object) -> str:
         return "other"
     if not isinstance(database_id, int) or isinstance(database_id, bool):
         return "unknown"
-    return "owner" if database_id == TRUSTED_OWNER_USER_IDS[str(login).strip().lower()] else "other"
+    pinned = TRUSTED_OWNER_USER_IDS.get(str(login).strip().lower())
+    if pinned is None:    # a trusted login with no pinned id: never trusted (fail closed, no exception)
+        return "unknown"
+    return "owner" if database_id == pinned else "other"
 
 
 BODY_TRUSTED_EDITOR_LOGINS = frozenset({
@@ -1063,10 +1066,10 @@ class CannedApi:
     def get(self, path: str):
         key = "GET " + path
         seq = self.answers.get(key)
+        n = self.calls.get(key, 0)
+        self.calls[key] = n + 1      # an attempted read is recorded even with no canned answer
         if not seq:
             raise ApiError(f"GET {path}: no canned answer")
-        n = self.calls.get(key, 0)
-        self.calls[key] = n + 1
         ans = seq[min(n, len(seq) - 1)]
         if "error" in ans:
             raise ApiError(f"GET {path}: {ans['error']}")
@@ -1500,7 +1503,7 @@ def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) 
     if not isinstance(branch, str) or not BRANCH_NAME.match(branch):
         return False, "the head branch name is not usable"
     try:
-        doc = api.get(f"repos/{repo}/activity?ref=refs/heads/{branch}&per_page=30")
+        doc = api.get(f"repos/{repo}/activity?ref=refs/heads/{branch}&direction=desc&per_page=1")
     except (ApiError, ValueError) as e:
         return False, f"the branch's ref history could not be read ({e})"
     if not isinstance(doc, list) or not doc or not all(isinstance(e, dict) for e in doc):

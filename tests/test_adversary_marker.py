@@ -1208,7 +1208,7 @@ def act_entry(login: str = "djbclark", after: str = H1, kind: str = "User", uid:
 
 
 def activity_key(branch: str = BRANCH) -> str:
-    return f"GET repos/{REPO_A}/activity?ref=refs/heads/{branch}&per_page=30"
+    return f"GET repos/{REPO_A}/activity?ref=refs/heads/{branch}&direction=desc&per_page=1"
 
 
 def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None,
@@ -2258,8 +2258,9 @@ def test_a_head_in_a_fork_or_with_an_unknown_origin_is_not_owner_trusted(repo):
 
 
 @pytest.mark.parametrize("repo", OWNERS)
-@pytest.mark.parametrize("branch", ["a b", "x;y", "", "a\nb", "--x y"])
+@pytest.mark.parametrize("branch", ["a b", "x;y", "", "a\nb", "--x y", "x&ref=refs/heads/y", "a#b", "a%2Fb"])
 def test_an_unusable_branch_name_fails_closed(repo, branch):
+    # CannedApi records an attempted read even without a canned answer, so removing the name check is seen here
     doc = gql_doc(H1, "## Summary\n")
     doc["json"]["repository"]["pullRequest"]["headRefName"] = branch
     res, api = judge_in(repo, 7, serve(7, "## Summary\n", second=doc))
@@ -2286,7 +2287,7 @@ def test_the_ref_history_is_read_only_for_an_owner_pr():
 
 def test_the_ref_history_is_asked_for_the_pr_branch_in_the_repository():
     _res, api = judge_in("frdminc/djbclark-ade", 7, serve(7, "## Summary\n"))
-    assert "GET repos/frdminc/djbclark-ade/activity?ref=refs/heads/feature/x&per_page=30" in api.calls
+    assert "GET repos/frdminc/djbclark-ade/activity?ref=refs/heads/feature/x&direction=desc&per_page=1" in api.calls
 
 
 # N2: the pinned id
@@ -2331,3 +2332,8 @@ def test_an_edit_by_a_user_holding_the_operators_old_login_is_not_the_operators(
     c["_gql"]["editor"]["databaseId"] = 4242
     res, _api = judge_in(repo, 7, serve(7, "outside", author="stranger", assoc="NONE", comments=[c]))
     assert res["outcome"] == "edited", res
+
+
+def test_every_trusted_login_has_a_pinned_id_and_an_unpinned_one_is_unknown():
+    assert set(adversary_marker.TRUSTED_OWNER_USER_IDS) == set(adversary_marker.TRUSTED_OWNER_LOGINS)
+    assert adversary_marker.trusted_owner_user_state("djbclark", adversary_marker.TRUSTED_OWNER_USER_IDS["djbclark"]) == "owner"
