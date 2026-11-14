@@ -133,10 +133,12 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 ```
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
-discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (edit the dispatch's own `--label ade.kind=...`, do not add a
-second one; no tool but the peer-trust hook reads the value). `bin/ade-auto-permit` does not look at it: it still approves the
-permission requests of a worker labelled `ade.lead`, so for a triage worker the lead watches `paseo permit ls` itself (follow-up: skip
-`external-review` agents in `sweep()`, reason `sensitive-sender`). `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (set it, replacing the dispatch's own `--label ade.kind=...` when it has
+one; never a second label; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
+`sensitive-sender`) lands:** `bin/ade-auto-permit` ignores the label. It approves a triage worker's tool requests whenever the worker is a
+descendant of the lead, carries `ade.lead` or an `--ade-label`, or (the loaded launchd job passes `--all-local`, operator 2026-11-13) is any
+local agent of a classified provider, so within 60 s and before the lead can see the request in `paseo permit ls`. Launch such a worker in a mode
+that needs no approvals (read-only, no Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
 the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
 
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
