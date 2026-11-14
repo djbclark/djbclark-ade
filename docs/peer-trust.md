@@ -80,8 +80,8 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    `adversary`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
    record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
    sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
-   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; no launcher for the
-   fleet's gh watcher exists (it starts no Paseo agent, so nothing there sets the label and its title is not a pattern); and the PR Radar plugin
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; the fleet's gh
+   watcher is fleet-watch's upstream PR watcher (off since 2026-11-07, `UPSTREAM=off`; its dispatcher `bin/acp-dispatch` was deleted in PR 699; `fleet-watch upstream --relay-to <session>` hands third-party PR text to an existing session): its `upstream-pr-*` / `upstream-paseo-*` titles match no default pattern, so any native `paseo run` port of it, and any relay target, must carry `--label ade.kind=external-review`, appended last; and the PR Radar plugin
    launches reviewers of outside PRs and issues with no label field (`bin/pr-radar-route` returns provider, model, thinking, mode and reason
    only; the upstream field is proposed in omercnet/paseo-plugins#619). So no launcher sets the label today; a `paseo run` launch of such an
    agent appends `--label ade.kind=external-review` last, because `paseo run` keeps the last `--label` for a duplicate key; "that agent" is the SENDER only, so a receiving session
