@@ -438,6 +438,19 @@ probe = "paseo plugin ls --json (id=ade-yolo → ok|disabled|missing)"
 platforms = ["mac", "linux"]
 notes = "2026-11-10: restores pre-slim-down YOLO (paseo-bypass-watch / paseo-new-seat). Observe-only in catalog; never auto-install."
 
+[[component]]
+id = "ade-window-name"
+class = "optional"
+chosen = false
+summary = "Paseo plugin: names a new window <KIND> <repo> (<work>) when its first agent is created (agent.create.after, retry agent.turn.after)"
+source = "plugins/ade-window-name"
+paseo_plugin = "ade-window-name"
+install = "paseo plugin install /absolute/path/to/plugins/ade-window-name (operator only; doctor/apply never install or enable)"
+update = "UNKNOWN"
+probe = "paseo plugin ls --json (id=ade-window-name → ok|disabled|missing)"
+platforms = ["mac", "linux"]
+notes = "2026-11-14: decisions in bin/ade_ws_autoname.py; never renames a window that already has a title. Observe-only in catalog; never auto-install."
+
 # --- suggested / never (recorded, not installed by default) ---
 
 [[component]]

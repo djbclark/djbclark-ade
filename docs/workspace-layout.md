@@ -115,6 +115,19 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
 This supersedes the 2026-11-07 "temporary shared-tab arrangement" (workers as tabs in the lead's own window) for own-initiative
 workers only; operator-requested ones are tabs in the lead's MAIN window again (item 1 above).
 
+## Automatic naming of new windows (2026-11-14)
+
+Operator, 2026-11-14: "Some projects are still starting new workspaces without our MAIN/WORKERS/etc repo-name scheme." The
+scheme was applied only by `bin/ade-worker-run` (our own launches) and `bin/ade-tidy` (one repo, manual), so a lead in another
+repo, the operator's own new chat and a plain `paseo run` kept Paseo's default names. The **`ade-window-name` Paseo plugin**
+([plugins/ade-window-name](../plugins/ade-window-name/README.md)) names every default-named window on this host when its first agent is
+created (or next ends a turn, so an install also backfills existing ones) (`agent.create.after`, retried on `agent.turn.after` while the agent has no title); `bin/ade_ws_autoname.py` decides, on
+`bin/ade_ws_names.py` (the builder `ade-worker-run` and `ade-tidy` share). Rules: a window is **default-named when its Paseo
+`title` is null** (or equals the first agent's own title: Paseo's prompt pre-title for a window the app created with a prompt) and is then named `WORKERS` for an agent with a parent or an `ade.lead` label, else `MAIN` (`ade.placement`
+overrides; `USER` is never guessed); `<repo>` as in Naming item 4, `<work>` the agent's title, short; **a window with any other title (a human's, `ade-worker-run`'s, one already in the scheme) is
+never touched**, only the window's first agent names it, and `ade-worker-run` launches (labels `slice` + `ade.lead`) are left to it. `paseo run --new-workspace` creates the window before the agent and
+sends no prompt or label with it, which is why the hook is on the agent, not on `workspace.create.before`.
+
 ## Renaming
 
 - Workspace title: `paseo workspace rename "$PASEO_WORKSPACE_ID" "<task worktree>"`.
