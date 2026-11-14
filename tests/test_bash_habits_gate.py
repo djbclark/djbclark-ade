@@ -786,3 +786,160 @@ def test_gw04_lead_review_lows_are_denied(command):
 ])
 def test_gw04_lead_review_lows_compliant_and_one_shots_pass(command):
     assert not denied(command), command
+
+
+# --- gs-02 (2026-11-14): an unquoted `=word` (zsh `=cmd` expansion) and backticks / `$(` in a double-quoted `paseo send` argument ---
+@pytest.mark.parametrize("command", [
+    "echo ===",
+    "echo ====; echo next",
+    "echo a; echo ==; echo b",
+    "echo ==",
+    "echo =b",
+    'echo ="x"',
+    "echo ==$e",
+    "print -r -- ===",
+    'printf "%s\\n" ===',
+    "ls =nonexist",
+    "[ a == a ] && echo ok",
+    "test a == a",
+    "echo a | cat; echo === | cat",
+    "x=1 echo ===",
+    "echo $(echo ===)",
+    "bash -c 'true'; echo ===",
+    "(( (a+(b)) == 2 )) && echo ===",              # nested arithmetic parentheses are matched by depth
+    "echo a;===",                                   # glued to the operator
+    "true&&==x",
+    "echo a|===",
+])
+def test_gs02_unquoted_equals_word_is_denied(command):
+    assert denied(command), command
+    assert "starts with `=`" in run(command)["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "echo =",
+    "echo '==='",
+    'echo "==="',
+    "echo \\===",
+    "echo a=b --x=y c==d",
+    "x==y",
+    "echo =(true)",
+    "[[ a == a ]] && echo ok",
+    "[[ a == a && b == b ]]; echo ok",
+    "(( (a+(b)) == 2 )) && echo ok",
+    "[[ a == b ]] || [[ c == d ]]; echo ok",
+    "(( 1 == 1 )) && echo ok",
+    "echo $((1==1))",
+    "if [[ $x =~ ^a ]]; then echo y; fi",
+    "echo hi # ===",
+    "cat <<'EOF'\n===\n====\nEOF",
+    "git diff --stat -- a=b",
+    "echo '---'; echo --- ; echo -=-",
+    "[ a = a ]",
+])
+def test_gs02_equals_lookalikes_pass(command):
+    assert not denied(command), command
+
+
+SEND_DENY = [
+    'paseo send --json --no-wait ab "see `foo` call"',
+    'paseo send ab "x $(date)"',
+    'paseo send --json ab "x `y`" --no-wait',
+    'paseo agent send ab "run $(x)"',
+    'paseo --json send ab "`z`"',
+    'env -u A -u B paseo send ab "`z`"',
+    'ADE_ALLOW_ARCHIVED_SEND=ab paseo send ab "fix `x`"',
+    'r=$(paseo send --json --no-wait ab "the `foo` call")',    # a send inside a substitution body
+    'echo $(paseo send ab "`foo`")',
+    'cat <(paseo send ab "`foo`")',
+    'r="$(paseo send ab "the `foo` call")"',
+    'r=$(echo $(paseo send ab "`x`"))',                           # nested bodies: only the worklist reaches the inner send
+    'x=`paseo send ab "$(date)"`',
+    'echo "`paseo send ab "$(date)"`"',                          # a backtick body inside double quotes
+    'paseo send ab "$(echo $(paseo send c "`z`"))"',
+    'paseo send ${LEAD} "the `foo` call"',                     # an unquoted ${..} / $(..) target must not end the command
+    'paseo send --json --no-wait $(cat id) "the `foo` call"',
+    'paseo send $(cat "id file") "the `foo` call"',
+    'paseo send `cat id` "the `foo` call"',
+    'paseo send $(cat id ) "the `foo` call"',                    # `)` at the start of a word inside the target
+    'paseo send ${X:-a } "the `foo` call"',
+    'paseo send `echo a; echo b` "the `foo` call"',            # a separator inside the target
+    'paseo send ab{c,d} "the `foo` call"',                       # a brace inside a word
+    'paseo send ab "n is $(( $(date +%s) + 1 ))"',                # arithmetic holding a real substitution
+    'echo hi; paseo send ab "text `x` more"; echo done',
+    'paseo send ab "nested $(echo "$(date)") text"',
+    'paseo send ab "a" "b `c`"',
+    'bg paseo send ab "`x`"',
+    'reply="$(paseo send --json ab "see `foo` call")"',          # Codex P2 r4575540753: a quoted substitution is read
+    'paseo send --json {} "x `y`"',                                # a `{}` placeholder is a word, not a group brace
+    'paseo send ab{} "x `y`"',
+    '{ paseo send ab "`x`"; }',                                    # a real group still separates
+    'if paseo send ab "`x`"; then true; fi',                       # after a shell keyword
+    'timeout 600 paseo send ab "`x`"',                             # after a wrapper and its option value
+    'sudo -u me paseo send ab "`x`"',
+    'deadline run --max 60 -- paseo send ab "`x`"',
+    'A=1 B=2 paseo send ab "`x`"',
+]
+
+
+@pytest.mark.parametrize("command", SEND_DENY)
+def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denied(command):
+    assert denied(command), command
+    assert "BEFORE paseo starts" in run(command)["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "paseo send ab 'see `foo` call'",
+    "paseo send ab 'x $(date)'",
+    'paseo send ab "plain text, no substitution"',
+    'paseo send ab "$LEAD"',
+    'paseo send ab "price is \\$5 and \\`quoted\\`"',
+    'paseo send ab "\\$(not run)"',
+    'paseo send ab "it\'s fine"',
+    'echo "`date`"; paseo send ab ok',
+    'echo "paseo send `x`"',
+    'git commit -m "paseo send `x`"',
+    'rg "paseo send `x`" docs',
+    "paseo send ab --prompt-file /tmp/m.txt",
+    'paseo send ab "retry in $((n*2)) s"',                       # arithmetic runs no command
+    'paseo send ab "$(( (a+(b)) * 2 ))"',
+    'echo paseo send "$(date)"',                                  # only prints text
+    'printf "%s\\n" paseo send "`x`"',
+    'paseo send ${LEAD} ok; echo "`date`"',
+    'r=$(paseo send --json ab ok); echo "`date`"',
+    'echo $(echo send "`x`")',
+    '(paseo send ab ok)',
+    'paseo agent inspect "$(cat /tmp/id)" --json',
+    'paseo run "`x`" --name a',
+    "cat > /tmp/m.txt <<'EOF'\nsee `foo` and $(bar)\nEOF\npaseo send ab --prompt-file /tmp/m.txt",
+    "# paseo send ab \"`x`\"\necho ok",
+    'echo "unterminated paseo send ab "`x`',
+    'paseo run --name send "`x`"',                  # `send` appears, but the verb is `run`
+    'X="$(date)" paseo send ab ok',                  # before the verb: not an argument of the send
+    "cat <<'EOF'\npaseo send ab \"`x`\"\nEOF",        # a heredoc body is data
+    'paseo send ab ok; echo "`date`"',               # the substitution belongs to the next command
+    'paseo send ab ok && echo "$(date)"',
+    'paseo send ab ok | cat "`x`"',
+    '(paseo send ab ok) ; echo "`x`"',
+    'ls paseo send "$(date)"',                      # Codex P2 r4575540749: `paseo` is data for `ls`, not the command word
+    "printf '%s\\n' paseo send \"$(date)\"",
+    'rg -e relay.py "$(printf pattern)" docs',
+    'cmd paseo send "`x`"',
+    'A=1 ls paseo send "`x`"',
+    'echo {a,b} "`x`"; paseo send ab ok',           # a brace word is not a group
+])
+def test_gs02_send_lookalikes_pass(command):
+    assert not denied(command), command
+
+
+def test_gs02_unclosed_test_blocks_are_linear():
+    import time
+    from importlib import util
+    spec = util.spec_from_file_location("bhg", HOOK)
+    mod = util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for blob in ("[[ " * 200000, "(( " * 20000):
+        t0 = time.monotonic()
+        mod.drop_test_blocks(blob + " echo ok")
+        assert time.monotonic() - t0 < 2, blob[:3]
+

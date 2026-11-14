@@ -40,6 +40,19 @@
    it carries `--interval`/`-i` of 60 or more (quota-safe: about 2-3 calls a minute; the lead's
    documented CI wait). `xargs -P N` / `parallel` around `gh` calls only warns.
 
+8. An unquoted word that starts with `=` (deny, 2026-11-14). zsh (this Mac's Bash-tool shell) expands `=cmd` to the
+   path of `cmd` and fails with `zsh: == not found` when there is none, and that error aborts the rest of a `;`
+   chain: `echo ===; next` printed an error and never ran `next` (memory feedback_zsh_triple_equals_separator.md
+   did not stop it). Probed: `echo ===`, `echo ==`, `echo =b`, `echo ="x"`, `echo ==$e`, `[ a == a ]`, `test a == a` and a
+   `case` pattern `=*)` all fail; `echo =` passes, and so do `=(cmd)` (process substitution), `a=b`, `--x=y`, `\\===`,
+   `[[ a == a ]]`, `(( 1 == 1 ))` and `$((1==1))`. Quoted words, heredoc bodies and comments do not count. The reason says
+   to quote the word (`'==='`) or use `---`.
+9. `paseo send` / `paseo agent send` with a double-quoted argument that holds a backtick or `$(`
+   (deny, 2026-11-14). The shell runs that text before paseo sees the message: a worker's `"... the `foo` call ..."`
+   ran `foo`, and the message arrived with a hole in it. Single quotes, `--prompt-file FILE` and python argv do not. An
+   escaped `\\`` or `\\$(` and arithmetic `$((n*2))` are literal text and pass. A deliberate `"$(cat FILE)"` is denied too
+   (assign it first: `ID=$(cat f); paseo send "$ID" ...`).
+
 Words inside quotes, heredoc bodies and comments do not count. Fails open on any parse error.
 The tool table is separate from bin/gnu-tools-check's, which flags every long option on its
 basics (its job is to find code to review); a hook that blocks a live command must not guess.
@@ -816,6 +829,238 @@ def gnu_reason(tool: str, flag: str, via_xargs: bool = False) -> str:
             f"A deliberate BSD call writes `/bin/{tool}` or `/usr/bin/{tool}`.")
 
 
+ZSH_EQUALS_REASON = (
+    "`{word}` starts with `=`: zsh (this Mac's Bash-tool shell) expands an unquoted `=name` to the path of command `name`, "
+    "and when there is none `zsh: {rest} not found` aborts the rest of a `;` chain (2026-11-14: `echo ===; next` never ran `next`). "
+    "Quote the word (`'==='`) or use `---` as a separator. `[[ a == b ]]`, `(( a == b ))`, `a=b` and `=(cmd)` are fine; "
+    "`[ a == b ]` is not (write `[ a = b ]` or `[[ a == b ]]`).")
+
+
+def drop_test_blocks(view: str) -> str:
+    """`view` with each `[[ ... ]]` and `(( ... ))` (parentheses matched by depth) replaced by a blank. One pass: an opener
+    with no closer ends the search for that kind (a second one cannot find a closer either), so `"[[ " * N` is linear."""
+    out: list[str] = []
+    i, n = 0, len(view)
+    no_br = no_pr = False
+    while i < n:
+        two = view[i:i + 2]
+        if two == "[[" and not no_br:
+            k = view.find("]]", i + 2)
+            if k >= 0:
+                out.append(" ")
+                i = k + 2
+                continue
+            no_br = True
+        elif two == "((" and not no_pr:
+            depth, j = 2, i + 2
+            while j < n and depth:
+                depth += (view[j] == "(") - (view[j] == ")")
+                j += 1
+            if depth == 0:
+                out.append(" ")
+                i = j
+                continue
+            no_pr = True
+        out.append(view[i])
+        i += 1
+    return "".join(out)
+
+
+def zsh_equals_word(view: str) -> str | None:
+    """The first word of `view` (already through strip_literals) that zsh would expand as `=name`: it starts with `=`
+    and is longer than `=` (a lone `=` is plain; `=(` is process substitution). `[[ ]]` and `(( ))` tests are dropped first."""
+    for pipeline in re.split(r"&&|\|\||;|\n|&|\|", drop_test_blocks(view)):
+        for w in pipeline.split():
+            if w.startswith("=") and len(w) > 1 and w[1] != "(":
+                return w
+    return None
+
+
+def _skip_dollar_paren(s: str, j: int) -> int:
+    """Index just past the `)` that closes the `$(` whose `(` is at s[j - 1]; len(s) when it never closes."""
+    depth, n = 1, len(s)
+    while j < n and depth:
+        c = s[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c in "'\"":
+            k = s.find(c, j + 1)
+            while c == '"' and k > 0 and s[k - 1] == "\\":
+                k = s.find(c, k + 1)
+            j = n if k < 0 else k + 1
+            continue
+        depth += (c == "(") - (c == ")")
+        j += 1
+    return j
+
+
+def _brace_word_end(raw: str, i: int) -> bool:
+    """True when the `{` or `}` at raw[i] is a whole word (the reserved word of a group), not part of a word such as the
+    `{}` placeholder of `paseo send --json {} "..."` or a brace expansion `{a,b}`."""
+    return raw[i + 1:i + 2] in ("", " ", "\t", "\n", ";", "&", "|", ")")
+
+
+def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tuple[str, bool]]]:
+    """`raw` split into simple commands; each is a list of (word, risky). `risky` is True for a word with an unescaped
+    backtick or `$(` inside double quotes: the shell runs it before the program starts. Heredoc bodies are dropped by the
+    caller. An unterminated quote makes the structure unclear: [] (fail open). The text of every `$(...)`, `<(...)`,
+    `>(...)` and backtick span (quoted or not) is appended to `bodies`: it is a command line of its own."""
+    cmds: list[list[tuple[str, bool]]] = []
+    words_: list[tuple[str, bool]] = []
+    cur: list[str] = []
+    risky = False
+    i, n = 0, len(raw)
+
+    def end_word() -> None:
+        nonlocal cur, risky
+        if cur or risky:
+            words_.append(("".join(cur), risky))
+        cur, risky = [], False
+
+    def end_cmd() -> None:
+        nonlocal words_
+        end_word()
+        if words_:
+            cmds.append(words_)
+        words_ = []
+
+    while i < n:
+        c = raw[i]
+        if c == "\\":
+            if raw[i + 1:i + 2] != "\n":
+                cur.append(raw[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            k = raw.find("'", i + 1)
+            if k < 0:
+                return []
+            cur.append(raw[i + 1:k])
+            i = k + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and raw[j] != '"':
+                if raw[j] == "\\":
+                    j += 2
+                elif raw[j] == "`":
+                    risky = True
+                    k = raw.find("`", j + 1)
+                    if bodies is not None:
+                        bodies.append(raw[j + 1:n if k < 0 else k])
+                    j = n if k < 0 else k + 1
+                elif raw.startswith("$((", j):          # arithmetic runs no command, unless it holds a substitution
+                    k = _skip_dollar_paren(raw, j + 2)
+                    risky = risky or "$(" in raw[j + 3:k] or "`" in raw[j + 3:k]
+                    j = k
+                elif raw.startswith("$(", j):
+                    risky = True
+                    k = _skip_dollar_paren(raw, j + 2)
+                    if bodies is not None:
+                        bodies.append(raw[j + 2:k - 1 if raw[k - 1:k] == ")" else k])
+                    j = k
+                else:
+                    j += 1
+            if j >= n:
+                return []
+            cur.append(raw[i + 1:j])
+            i = j + 1
+        elif c == "#" and not cur and not risky:
+            k = raw.find("\n", i)
+            i = n if k < 0 else k
+        elif c in " \t":
+            end_word()
+            i += 1
+        elif (c == "$" or c in "<>") and raw[i + 1:i + 2] == "(" and not raw.startswith("$((", i):
+            k = _skip_dollar_paren(raw, i + 2)            # `$(...)`, `<(...)`, `>(...)`: a command line of its own
+            if bodies is not None:
+                bodies.append(raw[i + 2:k - 1 if raw[k - 1:k] == ")" else k])
+            cur.append(raw[i:k])
+            i = k
+        elif c == "$" and raw[i + 1:i + 2] in ("(", "{"):
+            # an unquoted `$(...)` / `${...}` is part of the word (`paseo send $(cat id) "msg"`): its parentheses and braces
+            # must not end the command
+            k = _skip_dollar_paren(raw, i + 2) if raw[i + 1] == "(" else raw.find("}", i + 2)
+            k = len(raw) if k < 0 else (k if raw[i + 1] == "(" else k + 1)
+            cur.append(raw[i:k])
+            i = k
+        elif c == "`":
+            k = raw.find("`", i + 1)
+            if bodies is not None:
+                bodies.append(raw[i + 1:len(raw) if k < 0 else k])
+            k = len(raw) if k < 0 else k + 1
+            cur.append(raw[i:k])
+            i = k
+        elif c in ";&|\n" or (c in "()" and not cur) or (c in "{}" and not cur and _brace_word_end(raw, i)):
+            end_cmd()
+            i += 1
+        else:
+            cur.append(c)
+            i += 1
+    end_cmd()
+    return cmds
+
+
+NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat", "gh", "jq"})
+# commands that run another command given after their own options (the `paseo` may follow option values: `env -u X paseo`)
+SEND_WRAPPERS = frozenset({"env", "sudo", "timeout", "bg", "nice", "rtk", "command", "exec", "time", "nohup", "deadline",
+                           "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "if", "then", "do", "else",
+                           "elif", "while", "until", "!"})
+
+
+def risky_send_reason(cmd: str) -> str | None:
+    """A denial reason when a `paseo [agent] send` command carries a double-quoted argument with a backtick or `$(` (the
+    shell would run it, not send it)."""
+    if "send" not in cmd:
+        return None
+    todo, seen = [_drop_heredocs(cmd)], 0
+    while todo and seen < 200:                       # a worklist: a substitution body is a command line too
+        seen += 1
+        bodies: list[str] = []
+        parsed = simple_commands(todo.pop(), bodies)
+        todo.extend(b for b in bodies if "send" in b)
+        reason = _send_in(parsed)
+        if reason:
+            return reason
+    return None
+
+
+def _send_in(parsed: list[list[tuple[str, bool]]]) -> str | None:
+    for words_ in parsed:
+        names = [os.path.basename(w) for w, _ in words_]
+        lead = 0                                        # leading `VAR=x` assignments are not the command word
+        while lead < len(names) - 1 and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words_[lead][0]):
+            lead += 1
+        if names[lead] in NOT_A_SENDER:                 # `echo paseo send "$(date)"` only prints text
+            continue
+        # `paseo` is the command word, or comes after a wrapper (`env -u X`, `timeout 600`, `bg`): a `paseo` that is data
+        # for another command (`ls paseo send "$(date)"`) is not a send
+        wrapped = names[lead] in SEND_WRAPPERS
+        start = None
+        for k, name in enumerate(names):
+            if k > lead and not wrapped:
+                break
+            if name == "paseo":
+                rest = names[k + 1:]
+                while rest and rest[0].startswith("-"):        # a global option before the verb
+                    rest = rest[1:]
+                if rest[:1] == ["agent"]:
+                    rest = rest[1:]
+                if rest[:1] == ["send"]:
+                    start = k
+                    break
+        if start is None:
+            continue
+        for w, bad in words_[start + 1:]:
+            if bad:
+                return ("A double-quoted argument of this `paseo send` holds a backtick or `$(`: the shell "
+                        "runs it BEFORE paseo starts, so the message arrives with a hole in it and the command may "
+                        "run (2026-11-14: a worker's quoted `identifier` ran as a command). Pass the text through "
+                        "python argv (`subprocess.run([\"paseo\", \"send\", ..., text])`), or write it with "
+                        "`cat > FILE <<'EOF'` and send `paseo send ID --prompt-file FILE`, or use single quotes; drop the "
+                        "backticks from prose. A target id taken from a command: `ID=$(cat f); paseo send \"$ID\" ...`.")
+    return None
+
+
 def deny(reason: str) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                              "permissionDecision": "deny",
@@ -886,10 +1131,16 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     gh = gh_watch_in(cmd)
     if gh:
         return gh, None
+    send = risky_send_reason(cmd)
+    if send:
+        return send, None
     plain = strip_literals(cmd)
     warn = None
     fanout = False
     for view in command_views(plain):
+        eq = zsh_equals_word(view)
+        if eq:
+            return ZSH_EQUALS_REASON.format(word=eq, rest=eq[1:]), None
         # control operators split pipelines; the pipe splits stages
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
             for stage in re.split(r"\|&?", pipeline):
