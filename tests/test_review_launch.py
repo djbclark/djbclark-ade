@@ -724,7 +724,8 @@ a = sys.argv[1:]
 if a[:2] == ["pr", "view"]:
     if s.get("view_rc"):
         sys.stderr.write("no such PR\n"); sys.exit(1)
-    print(json.dumps({"headRefName": "feature", "isCrossRepository": False, **s["view"]})); sys.exit(0)
+    v = {"headRefName": "feature", "isCrossRepository": False, **s["view"]}
+    print(json.dumps({k: x for k, x in v.items() if x != "__absent__"})); sys.exit(0)
 if a[:2] == ["api", "user"]:
     print(s.get("me", "djbclark")); sys.exit(0)
 if len(a) >= 2 and a[0] == "api" and a[1].startswith("users/"):
@@ -739,7 +740,7 @@ if len(a) == 2 and a[0] == "api" and "/activity?" in a[1]:
     view = {"headRefName": "feature", **s["view"]}
     default = [{"activity_type": "push", "ref": "refs/heads/" + view["headRefName"], "after": view["headRefOid"],
                 "actor": {"login": "djbclark", "type": "User", "id": 131936}}]
-    print(json.dumps(s.get("activity", default))); sys.exit(0)
+    print(s["activity_raw"] if "activity_raw" in s else json.dumps(s.get("activity", default))); sys.exit(0)
 sys.stderr.write("fake gh: unserved " + " ".join(a) + "\n"); sys.exit(1)
 """
 
@@ -893,9 +894,9 @@ def test_review_pr_never_calls_gh_to_post(prw):
     prw.review()
     for line in (prw.tmp / "gh.log").read_text().splitlines():
         argv = json.loads(line)
-        assert argv[:2] in (["pr", "view"], ["api", "user"]) or (
-            argv[0] == "api" and argv[1].startswith(("users/", "repos/")) and len(argv) in (2, 4)
-            and not {"-X", "--method", "-f", "-F", "--input"} & set(argv)), argv
+        assert (argv[:2] in (["pr", "view"], ["api", "user"])
+                or (argv[0] == "api" and argv[1].startswith("repos/") and len(argv) == 2)
+                or (argv[0] == "api" and argv[1].startswith("users/") and argv[2:] == ["--jq", ".id"])), argv
 
 
 # ---- E8 review repairs (2026-11-07) -------------------------------------------------------------------------
@@ -1196,8 +1197,23 @@ def test_review_pr_gives_the_operators_pr_the_yolo_runtime_only_when_the_operato
     assert r.returncode == 2 and "authored and pushed" in r.stderr and len(prw.calls()) == before
 
 
-def test_review_pr_gives_a_head_in_a_fork_the_restricted_runtime(prw):
-    prw.gh(view=_view(prw, isCrossRepository=True))
+@pytest.mark.parametrize("raw", ["not json", "[" * 100000, "{}", "[1]"])
+def test_review_pr_gives_an_unreadable_branch_history_the_restricted_runtime(prw, raw):
+    prw.gh(view=_view(prw), activity_raw=raw)
+    r = prw.review()
+    assert r.returncode == 0, r.stderr
+    assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default" and "runtime restricted" in r.stderr
+
+
+def test_review_pr_asked_for_restricted_does_not_read_the_branch_history(prw):
+    assert prw.review("--runtime", "restricted").returncode == 0
+    log = [json.loads(line) for line in (prw.tmp / "gh.log").read_text().splitlines()]
+    assert not [a for a in log if a[:1] == ["api"] and "/activity" in a[1]] and not [a for a in log if a[:2] == ["api", "users/djbclark"]]
+
+
+@pytest.mark.parametrize("cross", [True, None, "__absent__"])
+def test_review_pr_gives_a_head_in_a_fork_or_of_unknown_origin_the_restricted_runtime(prw, cross):
+    prw.gh(view=_view(prw, isCrossRepository=cross))
     r = prw.review()
     assert r.returncode == 0, r.stderr
     assert argv_val(prw.launches()[0]["argv"], "--permission-mode") == "default"

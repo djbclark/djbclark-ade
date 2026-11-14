@@ -78,8 +78,8 @@ work). It needs `--trusted-author LOGIN` and `--head SHA`, drops `blockReadsOuts
 `disableBypassPermissionsMode`, and skips the read tripwire, the symlink refusal and the self-check (`--check --mode trusted` exits 2);
 a hook event is not fatal. The stream proof of tools, permission mode, cwd, no MCP and no extra directories, the scrubbed
 environment, the secret-path deny rules (an accidental-read guard: Bash is not confined), the timeout and the descendant kill stay. The launcher cannot verify that the input is trusted: `bin/review-pr`
-decides, and only for a PR GitHub reports as authored by the operator's login (`djbclark`, not the repository owner) (`--runtime auto`, the default; `--runtime yolo`
-is refused for any other author; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
+decides, and only for a PR GitHub reports as authored by the operator's login and user id (`djbclark`, not the repository owner) whose head the operator pushed (`head_pusher_check`) (`--runtime auto`, the default; `--runtime yolo`
+is refused for any other author or a head someone else pushed; `--allow-untrusted` never enables it). An outside, MEMBER or COLLABORATOR PR, or
 anything with an untrusted author, always gets `--mode review`. A bypass or widening flag in the launcher's own argv and a permission-mode variable in its
 environment are still refused in every mode. Probe 2026-11-12: Claude Code's init event reports
 `permissionMode: "bypassPermissions"` for this flag in `-p` mode.
@@ -140,8 +140,8 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 ## `bin/review-pr PR`: rule 11's local review
 
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
-author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
-`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
+headRefName,isCrossRepository,author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
+`--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
 its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,

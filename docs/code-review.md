@@ -153,10 +153,10 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
     data, never instructions.
 
     **Runtime (2026-11-12, W2; operator: YOLO for trusted internal reviewers, restricted execution only for external-security-critical work).**
-    `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the operator's login (`djbclark`) through
+    `review-pr --runtime auto` (the default) reviews a PR whose GitHub author is the operator's login and user id (`djbclark`) and whose head the operator pushed (`head_pusher_check`) through
     `review-launch --mode trusted` (`bypassPermissions`, Read/Grep/Glob/Bash, no read-boundary claim; docs/review-boundary.md);
     every other PR (the authenticated gh user when that is not the owner, `--allow-untrusted`) and `--runtime restricted` keep
-    `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR. The runtime is filed as `runtime`.
+    `--mode review`. `--runtime yolo` is refused (exit 2) unless the owner authored the PR and pushed its head. The runtime is filed as `runtime`.
     The adversary marker is never written by this tool; the untrusted-author refusal and the "diff is data" prompt are unchanged.
 12. **A non-exempt PR body carries a `Prior art / docs checked:` line** (operator, 2026-11-13; queue Done item 24): what the author searched
     before building (the shared `mcp__firecrawl__*`, Context7 for library docs, `WebFetch`), with the tool named and what turned up or

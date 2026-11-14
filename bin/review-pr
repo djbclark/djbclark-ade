@@ -167,7 +167,10 @@ class _GhGet:
             raise self.marker.ApiError(f"gh api {path}: {e}") from e
         if r.returncode != 0:
             raise self.marker.ApiError(f"gh api {path} failed: {r.stderr.strip()[:200]}")
-        return json.loads(r.stdout)    # a ValueError is caught by the check, and fails closed
+        try:
+            return json.loads(r.stdout)
+        except (ValueError, RecursionError) as e:    # a non-JSON or absurdly nested answer: the check fails closed
+            raise self.marker.ApiError(f"gh api {path}: unreadable answer ({type(e).__name__})") from e
 
 
 def operator_pushed_head(marker, repo: str, author: str, head: str, doc: dict) -> tuple[bool, str]:
@@ -196,8 +199,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-untrusted", action="store_true",
                    help="review a PR whose author is neither the operator's login nor the authenticated gh user")
     p.add_argument("--runtime", choices=RUNTIMES, default="auto",
-                   help="auto (default): yolo for a PR the operator (djbclark) authored, else restricted; "
-                        "yolo: refused unless the owner authored it; restricted: Read/Grep/Glob only, always allowed")
+                   help="auto (default): yolo for a PR the operator (djbclark) authored (login and id) and pushed the head of, else restricted; "
+                        "yolo: refused unless both hold; restricted: Read/Grep/Glob only, always allowed")
     p.add_argument("--retry", action="store_true", help="create another attempt instead of reusing a completed matching review")
     p.add_argument("--replacement-model", action="append", default=[], help="replace a timed-out reviewer with this model (repeatable, ordered)")
     p.add_argument("--stall-timeout", type=float, default=300, help="replace after this many seconds without stream output; 0 disables (default 300)")
@@ -373,13 +376,18 @@ def review_attempt(argv: list[str]) -> int:
     # Full permissions need more than the author's login: the author's id, and that the operator pushed this head (the
     # gate's own check). Anyone else who can push to the branch of an operator PR could plant instructions for the
     # reviewing model in the diff (adversary review of #675, C1).
-    yolo_ok, why_not = (operator_pushed_head(marker, repo, author, head, doc) if owner_authored else (False, "not authored by the operator"))
+    if not owner_authored:
+        yolo_ok, why_not = False, "not authored by the operator"
+    elif a.runtime == "restricted":
+        yolo_ok, why_not = False, "--runtime restricted"     # asked for: no need to read the history
+    else:
+        yolo_ok, why_not = operator_pushed_head(marker, repo, author, head, doc)
     if a.runtime == "yolo" and not yolo_ok:
         note(f"refused: --runtime yolo is only for a PR the operator (djbclark) authored and pushed (this one: {author or '(unknown)'!r}: "
              f"{why_not}); use --runtime restricted")
         return EXIT_USAGE
     runtime = "yolo" if (a.runtime == "yolo" or (a.runtime == "auto" and yolo_ok)) else "restricted"
-    if owner_authored and not yolo_ok:
+    if owner_authored and not yolo_ok and a.runtime != "restricted":
         note(f"runtime restricted: {why_not}")
 
     sd = state_dir()
