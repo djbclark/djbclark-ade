@@ -38,7 +38,7 @@ Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the
 without naming `gh pr`/`gh api`); a body built by a variable set in ANOTHER command (`--body-file "$F"`; `BODY=M; gh ... "$BODY"` in one command is seen);
 a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; `gh pr create --fill*`
 (the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
-(`$'\\x3c'`); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
+(`$'\\x3c'`, a shell-built `verdict` key beside a decoy BLOCK); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
 the operator tells to, runs it. An agent that wants the verdict recorded puts the marker in its report inside a fenced block.
 

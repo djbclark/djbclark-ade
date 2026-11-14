@@ -333,6 +333,39 @@ def test_operand_text_past_the_cap_is_denied_when_it_mentions_approve(live, monk
     assert gate.judge("gh pr edit 41 --body-file " + str(live / "o0.md"), str(live), gate._checker) == ""
 
 
+@pytest.mark.parametrize("command", [
+    # the write's operand FILE is what is read, so the words-only backstop cannot be what catches these
+    "/usr/bin/env gh pr edit 41 --body-file live.md",
+    "env " + " ".join("A%d=1" % i for i in range(20)) + " gh pr edit 41 --body-file live.md",
+    'eval "gh pr edit 41 --body-file live.md"',
+    'gh issue new --title t --body "$(cat live.md)"',
+    'gh pr new --title t --body "$(cat live.md)"',
+    'gh pr close 41 --comment "$(cat live.md)"',
+    'gh issue reopen 41 --comment "$(cat live.md)"',
+])
+def test_operand_files_are_read_for_every_verb_wrapper_and_eval(live, command):
+    assert run(command, cwd=live), command
+
+
+def test_here_string_and_plain_arguments_survive_an_exhausted_budget(live):
+    for i in range(9):
+        (live / ("big%d.txt" % i)).write_text("x" * 70000)
+    feeders = " ".join("big%d.txt" % i for i in range(9))
+    assert run("cat %s | gh pr edit 41 --body %s" % (feeders, q(APPROVE)), cwd=live)
+    assert run("cat %s | gh pr edit 41 --body-file - <<< %s" % (feeders, q(APPROVE)), cwd=live)
+
+
+def test_a_marker_past_the_70000_character_cap_is_not_scanned(live):
+    (live / "huge.md").write_text("x" * 70500 + "\n" + APPROVE + "\n")
+    assert run("gh pr edit 41 --body-file huge.md", cwd=live) is None   # documented limit: GitHub rejects a body over 65,536
+
+
+def test_a_block_comment_followed_by_prose_about_another_verdict_passes():
+    head = "H=$(git rev-parse HEAD); "
+    text = '<!-- adversary-verdict:v1 {\\"verdict\\":\\"BLOCK\\",\\"head\\":\\"$H\\"} --> my verdict: APPROVE next time'
+    assert run(head + 'gh pr comment 41 --body "%s"' % text) is None
+
+
 def test_a_budget_spent_on_feeders_never_hides_the_write_operands(live):
     for i in range(9):
         (live / ("big%d.txt" % i)).write_text("x" * 70000)
