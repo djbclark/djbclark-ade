@@ -233,6 +233,16 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"echo \"$( (true) )'\" ; paseo send {A} x", [(A, None)]),  # a subshell inside a substitution inside quotes
     (f'echo "$(echo $(date) ; paseo send {A} x)"', [(A, None)]),  # a nested substitution
     (f'echo "$( (true) ; paseo send {A} x)"', [(A, None)]),
+    (f"paseo send {A} hi >--home=x.log", [(A, None)]),  # a redirect operand is no daemon selector (ls-06 r2 B3)
+    (f"paseo send > log {A} hi", [(A, None)]),  # nor the agent
+    (f'xargs -n1 paseo send <<< "{A} {B}"', []),  # the here-string is not an agent
+    (f"paseo send --no-wait {A} hi 2>&1", [(A, None)]),
+    (f"paseo send >&2 {A} hi", [(A, None)]),  # ls-07 r1 R1: `>&` is one operator
+    (f"paseo send 2>/dev/null {A} hi", [(A, None)]),  # the fd number the lexer leaves before `>` is no agent
+    (f"paseo send 1>out {A} hi", [(A, None)]),
+    (f"paseo send &>/dev/null {A} hi", [(A, None)]),
+    (f"paseo send >|f {A} hi", [(A, None)]),
+    ("paseo send - hi", [("-", None)]),  # a lone `-` is an operand for Commander, so it is the agent (the prompt is `hi`)
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),
@@ -425,6 +435,13 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f'SIBS=" {A} {B}"; for id in $SIBS; do paseo send "$id" hi; done', [A, B]),
     (f'paseo send -- "$NEW" --prompt "took over from {A}"; ./run.sh', []),  # `.sh` is not a shell word
     (f'cat bash.log; paseo send -- "$NEW" --prompt "took over from {A}"', []),
+    (f"printf '%s\\n' $'{A}\\n{B}' | xargs -n1 paseo send --no-wait", [A, B]),  # ls-07: `\\n` in an ANSI-C body is a blank
+    (f'xargs -n1 paseo send <<< "{A} {B}"', [A, B]),  # ls-07: a here-string is no agent, so the ids in it are judged
+    (f"osascript 'do shell script \"paseo send {A} hi\"'", [A]),  # kills "drop osascript from RUNNERS" (no `-e` here)
+    (f"printf '%s\\n' $'{A}\\t{B}' | xargs -n1 paseo send", [A, B]),  # kills "[ntr] -> n"
+    (f"echo 'x'; eval'paseo send {A} hi'", [A]),  # kills "no quoted_word reset" (a glued string after a runner word)
+    (f"rg -e 'paseo send {A}' notes.md; paseo send \"$X\" hi", []),  # kills "drop rg from NO_RUN"
+    (f"mawk 'BEGIN{{system(\"paseo send {A} hi\")}}'", [A]),  # kills "drop gawk/mawk from RUNNERS"
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
@@ -491,6 +508,22 @@ def test_the_backstop_scan_is_linear_on_a_long_command_without_blanks():
     gate.backstop_targets("echo '" + "x" * 300_000 + "' > f", [])  # no `paseo`: returns at once
     many = "paseo send x; " + "echo 'a b' " * 4000  # r4 B4: every quoted string used to rescan its whole command
     gate.backstop_targets(many, [])
+    assert time.monotonic() - t0 < 1.0
+
+
+def test_locate_send_does_not_take_a_repeated_agent_word_for_the_verb():
+    assert gate.locate_send(["agent", "agent", "send", A]) == ("none", None)
+    assert gate.locate_send(["agent", "send", A]) == ("send", 2)
+
+
+def test_the_backstop_stays_linear_on_unquoted_blobs_and_on_glued_quotes():
+    """ls-07 r2 B1/B2: `(?:\\S*/)?` back in SHELL_WORD costs ~1 s per 20 KB of `x/` or `,:`; each glued quote used to re-join its word."""
+    import time
+    t0 = time.monotonic()
+    gate.backstop_targets("echo " + ",:" * 100_000 + "; paseo send x", [])
+    gate.backstop_targets("echo " + "x/" * 100_000 + "; paseo send x", [])
+    gate.backstop_targets("echo " + "''" * 40_000 + "; paseo send x", [])
+    gate.backstop_targets("echo " + ",:" * 100_000, [])  # no `paseo`: returns at once
     assert time.monotonic() - t0 < 1.0
 
 
