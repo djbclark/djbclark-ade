@@ -163,7 +163,7 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
 5. **Plan with the load in mind** (load watcher, 2026-10-23, after load reached 42-62 on 8 cores with swap at 90%
    from three concurrent local pytest runs plus three dispatches): check `load-watch admit --json` before a large
    fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new
-   local pytest or dispatch while load per core is 1.5 or more (`uptime`).
+   local pytest or dispatch while `load-watch admit` says hot (load per core above its 2.0 base; `uptime`).
 6. **Stagger sends to a working Claude agent** (PR 294, from the retired `helm` lead guide, 2026-11-06): one message
    at a time, each gated on the target going idle (`paseo wait ID --json` reads `idle`, or `paseo agent inspect`),
    sent in the background. Paseo replaces a Claude agent's current turn when a steer is declined (for example during
