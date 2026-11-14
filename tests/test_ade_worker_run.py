@@ -1205,3 +1205,23 @@ def test_an_unbuildable_predecessor_window_for_the_same_work_still_refuses_a_new
     own(PRED1, "wks_leg")
     r = launch(env)  # --window-middle "Wave 7": the same work, but the window cannot be renamed (repo name invalid)
     assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
+
+
+def test_a_buildable_predecessor_window_for_other_work_never_takes_a_new_middle(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Big Wave 7 {PRED1}", "cwd": "/repo"}]
+    own(PRED1, "wks_leg")
+    r = launch(env)  # --window-middle "Wave 7" is not the work "Big Wave 7" (a suffix is not a match)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local"
+    assert "wks_leg" not in registry(LEAD) and not [c for c in env.calls() if c["argv"][:2] == ["workspace", "rename"] and "wks_leg" in c["argv"]]
+
+
+def test_an_unbuildable_predecessor_window_for_other_work_does_not_block_new_work(env):
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Big Wave 7 {PRED1}", "cwd": "/x/bad repo"}]
+    own(PRED1, "wks_leg")
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    assert placed(env)

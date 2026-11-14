@@ -16,7 +16,7 @@ window in `paseo workspace ls --json`: by exact name `WORKERS <repo> (<work>)` w
 one WORKERS window the lead owns (several: `--repo`, or the repo of --cwd / the current directory, narrows them to that repo's
 windows; one is used, several refuse). A `--window-middle` that names nothing opens a new window unless the lead itself placed
 another (a typo guard); windows only a predecessor placed do not count. Ownership is evidence, never the name: the lead's window record
-($ADE_WORKER_RUN_STATE/<lead id>.windows.json, written when this tool mints or migrates a window, or adopts an empty
+($ADE_WORKER_RUN_STATE/<lead id>.windows.json, written when this tool mints or migrates a window, launches into an existing (e.g. inherited) one, or adopts an empty
 unclaimed one after a successful launch), a live agent labelled ade.lead=<lead>, or the lead id in a legacy name. Refused:
 two matches; a window registered to another lead or holding any agent (closed included) labelled for another lead; adopting
 a same-named window that holds agents not labelled for this lead. A legacy window of this lead (`workers <middle> <lead id>` or `WORKERS <middle>
@@ -263,7 +263,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 new, err = legacy_target(row, legacy, repo, explicit), None
             except Refused as e:
                 new, err = None, e
-            names_it = err is not None and (legacy.middle.strip() == middle or legacy.middle.strip().endswith(f" {middle}"))
+            lm = legacy.middle.strip()
+            names_it = err is not None and middle is not None and (lm == middle or any(
+                wsn.normalize_work(lm, r) == middle for r in {repo, os.path.basename(row.get("cwd") or "")} if r))
             if middle is None or (new is not None and wsn.parse(new).work == middle) or names_it:  # unbuildable but for this work: refuse
                 hits.append((row, new, err))
     # Windows only a predecessor placed are inherited, not windows this lead placed, so they do not trigger the typo guard: new
@@ -568,7 +570,7 @@ def launch(opts, rest: list[str]) -> int:
             raise Refused("paseo run printed an unusable agentId (expected a UUID)")
         try:
             wks = resolve_window_id(win, result, err, agent_id)
-            if win is not None:  # a launch into an existing window (inherited, legacy, adopted) makes it this lead's own
+            if win is not None and not main_place:  # a launch into an existing window (inherited, legacy, adopted) makes it this lead's own
                 register_window(lead, wks)
             if win is None:
                 register_window(lead, wks)  # the window is this lead's from the moment it exists
