@@ -59,7 +59,11 @@ exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch no
 and it records a reservation: once the agent has spawned, or the launch failed, run `~/src/djbclark-ade/bin/load-watch release <reservation>` (the `reservation` field of the JSON; exit 66 for an unknown id (already released or expired) is harmless, exit 1 is a lock or write failure (the slot is held until `LW_RESERVE_S`); a launcher that is the only dispatcher on the machine
 may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
 (one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
-and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
+and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Pass the placement to the plan
+(`plan --kinds KIND --lead <your id> --slice <name> --cwd <the window's directory, ~/src/<repo>> [--window-middle <work>]`, `--slice` once per
+kind; `--lead` defaults to `$PASEO_AGENT_ID`), and its `dispatch` is already an `ade-worker-run` line (section 3): a bare `paseo run`
+puts the worker in the caller's own workspace, since Paseo ignores `--cwd` (getpaseo/paseo#9699, #4125). A plan that lacks one
+input keeps a `<lead>` / `<slice>` placeholder in the line and names it in `dispatch_warnings` (JSON) and on stderr: fix it, never launch it. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
 the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
@@ -112,7 +116,8 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
    `worker <NAME> <LEAD>` with `paseo agent update`, and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
    The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (a plan's
-   `Choice.dispatch` string starts with it; drop that prefix and pass the rest split into argv); no bundled short options
+   a bare `paseo run` template, `route --kind K`, starts with it; `plan`'s `dispatch` is already the whole `ade-worker-run` line
+   (rd-01, 2026-11-14), so run it as it stands and append only the brief); no bundled short options
    (`-qd`); and `--no-wait` is required. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
    `archive-window` of one lead never interleave. `--lead` must be the caller's own agent id: when `PASEO_AGENT_ID` is set
    and differs, both forms refuse unless `--on-behalf-of-lead` is passed (a stale id in a brief would otherwise place, label
@@ -140,8 +145,9 @@ its own placement (its own MAIN window), and opens its own WORKERS window when i
 
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.
 
-Take `Choice.dispatch` from a **fresh** `route_agent.py plan` **as-is** (native `paseo run --provider …`), then append
-only placement flags and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
+Take `Choice.dispatch` from a **fresh** `route_agent.py plan --lead … --slice … --cwd …` **as-is** (an `ade-worker-run --lead … --slice … -- --provider …` line,
+rd-01, 2026-11-14; `route --kind K` still prints the bare `paseo run` template, which places nothing), then append
+only extra labels and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
 lead's first launch of a run, which opens its WORKERS window (above).
@@ -197,8 +203,9 @@ Three independent fixes in one repository, one review:
 
 1. Lead writes `a.md`, `b.md`, `c.md` (one owner per file set, the check each slice runs) and three
    worktrees `~/src/r-a-wt`, `~/src/r-b-wt`, `~/src/r-c-wt`.
-2. For each slice, take `route_agent.py plan --kinds code`'s `Choice.dispatch` and run it with
-   `ade-worker-run --lead <lead id> --slice <name> --cwd ~/src/r -- <the plan's dispatch minus its leading `paseo run`, as argv, with --no-wait> --label ade.name=<name> --label ade.task=fixes`
+2. For each slice, take `route_agent.py plan --kinds code --lead <lead id> --slice <name> --cwd ~/src/r`'s `Choice.dispatch`
+   (`ade-worker-run --lead <lead id> --slice <name> --cwd … -- --provider … --no-wait`) and run it with
+   `--label ade.name=<name> --label ade.task=fixes` appended
    plus the positional brief (agent and model from the plan; the brief names the slice's worktree `~/src/r-<name>-wt`
    as an absolute path).
 3. While they run, the lead does its own part (standing order 3), then `paseo wait` on each agent id.
