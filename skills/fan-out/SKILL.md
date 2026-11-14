@@ -75,6 +75,10 @@ ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
 # `paseo run … --workspace wks_… --cwd ~/src/<repo> --label ade.lead=LEAD`, or --new-workspace local on the first launch
 ```
 
+A worker that judges untrusted GitHub artifacts for prompt injection (injection triage, reading an outside PR, issue or comment) takes
+`--label ade.kind=external-review` as its `ade.kind` (set it, replacing the dispatch's own value when it has one; never a second label): the peer-trust hook then frames its messages and notifications as evidence, not instruction
+(docs/orchestration-practices.md section 3).
+
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
 top-level worker the lead starts with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`:
 such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only recognise it by this label
