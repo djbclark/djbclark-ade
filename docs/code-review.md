@@ -131,7 +131,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    issue comment that matches its configured patterns (CodeRabbit: `Actionable comments posted: N`, N >= 1). Codex threads
    count when they carry `codex-code-review-finding:v1` / `codex-security-review-finding:v1`; to read its state, match the
    summary comment's `<!-- codex-review-state:v1 {...} -->` `commit_sha` (suffix `:v1`), never a comment's `created_at` or a
-   "newest `@codex review`" window (PR 12, 2026-10-20). **Triaged** means: thread resolved by `djbclark`'s account (not the PR author, another writer or the bot), or a LATER thread comment (created after the bot's last edit of the finding, itself never edited by anyone but `djbclark`) authored
+   "newest `@codex review`" window (PR 12, 2026-10-20). **Triaged** means: thread resolved by `djbclark`'s account (not the PR author, another writer or the bot), or a LATER thread comment (created after the bot's last edit of the finding, and never edited by anyone: an edited comment is not a triage, post a new one) authored
    by `djbclark`'s User account (GraphQL `User`, pinned id; a bot, the PR author, a lookalike or a renamed account never
    counts) whose first line is a verdict (`fixed`, `wontfix` / `won't fix`, `not a bug` / `not an issue`, `by design`,
    `deferred`) followed by a reason; a top-level finding needs a later issue comment from that account with a line

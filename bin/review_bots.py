@@ -144,6 +144,8 @@ def _patterns(value: Any, where: str, strict: bool = False) -> tuple[re.Pattern[
     for i, s in enumerate(_strs(value, where)):
         if len(s) > 300:
             raise ConfigError(f"{where}[{i}]: pattern longer than 300 characters")
+        if strict and len(re.findall(r"\.[*+]", s)) > 1:
+            raise ConfigError(f"{where}[{i}]: more than one `.*`/`.+` is refused in an override pattern (backtracking)")
         if strict and _QUANTIFIED_GROUP.search(s):
             raise ConfigError(f"{where}[{i}]: a quantified group is refused in an override pattern (backtracking)")
         try:
@@ -328,13 +330,10 @@ def title_of(body: str) -> str:
 
 
 def owner_triage_author(c: dict[str, Any]) -> bool:
-    """The comment is the operator's AND no one else edited it: a writer or an App can edit another user's comment, so
-    an edited comment counts only when its last editor is the operator too (unknown editor = not a triage)."""
-    if not is_owner_actor(c.get("author")):
-        return False
-    if not c.get("lastEditedAt"):
-        return True
-    return is_owner_actor(c.get("editor"))
+    """The comment is the operator's AND was never edited: a writer or an App can edit another user's comment, and the
+    last editor alone does not show who edited before (a later owner touch-up would launder it), so an edited comment is
+    never a triage; the operator posts a new one."""
+    return is_owner_actor(c.get("author")) and not c.get("lastEditedAt")
 
 
 def _triage_line(body: str) -> bool:
@@ -388,7 +387,10 @@ def assert_read_only_gh_argv(args: tuple[str, ...] | list[str]) -> None:
             raise GhError(f"refusing non-GET HTTP method in gh argv: {a}")
         if low == "--input" or low.startswith("--input="):
             raise GhError("refusing --input in gh argv")
-        if low in ("-f", "-F".lower(), "--field", "--raw-field") and not graphql:
+        if not graphql and (
+            low in ("-f", "--field", "--raw-field") or low.startswith(("--field=", "--raw-field="))
+            or (a.startswith(("-f", "-F")) and len(a) > 2 and not a.startswith("--"))
+        ):
             raise GhError("refusing a request body field on a non-graphql gh api call (it would POST)")
         if a.startswith("query=") and re.search(r"(?i)\bmutation\b", a):
             raise GhError("refusing GraphQL mutation in gh argv")
@@ -431,7 +433,7 @@ def parse_pages(text: str) -> list[Any]:
 
 
 ACTOR = "author{__typename login ... on User{databaseId}}"
-EDITOR = "editor{__typename login ... on User{databaseId}}"
+EDITOR = ""   # an edited owner comment is never a triage, so who edited it is not read
 THREAD_FIELDS = (
     f"isResolved isOutdated resolvedBy{{__typename login ... on User{{databaseId}}}} "
     "comments(first:100){pageInfo{hasNextPage} nodes{databaseId createdAt lastEditedAt "

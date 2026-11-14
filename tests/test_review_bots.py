@@ -753,10 +753,14 @@ def test_an_owner_reply_edited_by_someone_else_does_not_triage(editor) -> None:
     assert statuses(evaluate(FakeGh(reviews=[r], comments=[forged_top]))) == ["untriaged"]
 
 
-def test_an_owner_reply_edited_by_the_owner_still_triages() -> None:
+@pytest.mark.parametrize("editor", [OWNER, APP])
+def test_an_edited_owner_reply_never_triages_even_if_the_owner_edited_last(editor) -> None:
+    """Edit history is not readable cheaply, so an edit by anyone (owner included, as a laundering touch-up) voids it."""
     finding = comment(CODERABBIT, "x")
-    mine = edited(comment(OWNER, "Fixed in abc1234"), OWNER)       # built after the finding: a later reply
-    assert statuses(evaluate(FakeGh(threads=[thread([finding, mine])]))) == ["triaged"]
+    mine = edited(comment(OWNER, "Fixed in abc1234"), editor)
+    assert statuses(evaluate(FakeGh(threads=[thread([finding, mine])]))) == ["untriaged"]
+    fresh = comment(OWNER, "Fixed in abc1234")                      # a new, unedited comment does triage
+    assert statuses(evaluate(FakeGh(threads=[thread([finding, mine, fresh])]))) == ["triaged"]
 
 
 def test_top_level_triage_is_timed_by_creation_not_by_an_owner_edit() -> None:
@@ -783,6 +787,13 @@ def test_the_last_marker_comment_is_the_anchor_and_a_reply_before_it_is_stale() 
 def test_a_running_check_with_no_date_blocks_rather_than_guesses() -> None:
     v = evaluate(FakeGh(checks=[{"name": "CodeRabbit", "status": "in_progress", "app": {"slug": "x"}}]))
     assert v["state"] == "pending"
+
+
+def test_override_patterns_with_repeated_wildcards_are_refused() -> None:
+    bad = ('[meta]\nschema = 1\n[[add]]\nid = "r"\nname = "R"\nrest_login = "r[bot]"\ngraphql_login = "r"\n'
+           'review_body_patterns = [".*.*.*.*Z"]\n')
+    with pytest.raises(rb.ConfigError, match="backtracking"):
+        rb.apply_override(rb.load_default_config(), bad)
 
 
 def test_override_patterns_with_a_quantified_group_are_refused() -> None:
@@ -814,6 +825,8 @@ def test_terminal_escapes_in_a_path_are_stripped() -> None:
 @pytest.mark.parametrize("argv", [
     ("api", "--method=POST", "repos/o/r"), ("api", "-XPOST", "repos/o/r"), ("api", "--input", "f", "repos/o/r"),
     ("api", "-f", "body=x", "repos/o/r/issues/1/comments"), ("api", "graphql", "-F", "query=@file"),
+    ("api", "-fbody=x", "repos/o/r/issues/1/comments"), ("api", "--field=body=x", "repos/o/r/x"),
+    ("api", "--raw-field=body=x", "repos/o/r/x"),
 ])
 def test_read_only_guard_covers_method_forms_input_and_fields(argv) -> None:
     with pytest.raises(rb.GhError):

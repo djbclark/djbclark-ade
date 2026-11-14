@@ -345,7 +345,7 @@ top-level review body / issue comment matching its patterns. Triaged = the threa
 `djbclark`'s GitHub User account (login and pinned id; a bot, the PR author, a lookalike or a renamed account never
 counts) starts with `fixed` / `wontfix` / `won't fix` / `not a bug` / `not an issue` / `by design` / `deferred` and a
 reason of at least three characters; a top-level finding needs a later issue comment from that account with a line
-`triage <id|all>: <verdict> <reason>`. An owner comment that someone else last edited (a writer or an App can edit another user's comment) is not a triage.
+`triage <id|all>: <verdict> <reason>`. An owner comment that was ever edited is not a triage (a writer or an App can edit another user's comment and edit history is not read): post a new one. Open Low: a comment an App posted with the operator's token reads as the operator's.
 
 **Trust root.** The default list is read from the checkout that runs the tool: run `ade-merge-ready` from master or the installed copy, never from the PR's own worktree. An override's regex patterns may not contain a quantified group (backtracking guard); `--merged-limit` is capped at 40 PRs (about 5 GraphQL calls each).
 

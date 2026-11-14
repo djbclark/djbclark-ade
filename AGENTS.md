@@ -193,7 +193,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
   follow-up (operator: "Let's get rid of that shim"); agents launch with native `paseo run` / `bin/ade-worker-run`
   and message with `paseo send`.
 - Master is **PR-only** (branch protection includes admins). Work in a worktree
-  (order 9); merge when `adversary-marker` and Tests are green and `bin/ade-merge-ready` reads no `review_bot_*` class (merge with `ade-merge-ready merge-now --prs N --yes`, which re-reads the bot gate on the exact head; a raw `gh pr merge` skips it)
+  (order 9); merge when `adversary-marker` and Tests are green and `bin/ade-merge-ready` reads no `review_bot_*` class (merge with `ade-merge-ready merge-now --prs N --yes`, which re-reads the bot gate on the exact head; a raw `gh pr merge` skips the gate)
   (`gh pr merge --squash --match-head-commit`); before `--delete-branch`, `gh pr list --base <head-branch>` must be empty:
   deleting a stacked PR's base closes that PR unmerged and it cannot be reopened (2026-11-12, #567). Repo: `djbclark/djbclark-ade`.
 - Facts carry snapshot dates; probes beat memory; update the doc when you verify
