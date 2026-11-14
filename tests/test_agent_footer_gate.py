@@ -491,6 +491,9 @@ def test_the_mirror_image_with_a_bare_own_label_outside_is_the_own_path(tmp_path
     "Your report path is {own}\n\nFrom the handoff:\n1. report: `{peer}`\nreview it",           # R1
     "Your report: {own}\n> Report path: {peer}\nreview it",                                      # R5
     "Report is {peer} (the worker's).\nYour report path is {own}\n",                             # R8
+    "Review the worker's output at {peer}.\n```\nwrite your report to {own}\n```\nreview it",       # M1: unlabelled own, fenced
+    "> Write your full report to {own}\nThe worker wrote {peer}\nreview it",                       # M2: unlabelled own, quoted
+    "Write your report to {own}\n```\npeer brief: {peer}\n```\nreview it",                       # M3: its mirror image
 ])
 def test_conflicting_report_labels_never_resolve_to_the_peer(tmp_path, prompt):
     """Adversary r3 B1: a prompt that gave the hook's own path on origin/master must not now name a peer's report."""

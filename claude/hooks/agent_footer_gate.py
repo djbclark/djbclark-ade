@@ -136,7 +136,8 @@ def named_report(prompt):
       1. the strict own label (`Report path:` / `Report file:` at line start) in the text outside pasted blocks;
       2. a bare own label (`Report:`) outside, merged with every labelled report outside;
       3. the own and labelled reports of the whole prompt (a brief that names its report only inside pasted text);
-      4. a bare path mention, outside pasted text, then anywhere.
+      4. a bare path mention anywhere (never outside-first: an unlabelled own path pasted in a fence against a peer's path in
+         prose, and its mirror image, are a conflict like any other; adversary r4 B1).
     A path whose .done exists is someone's finished report (2026-10-18), so it is never reused."""
     outside = _outside_pasted(prompt)
     strict = _uniq(REPORT_OWN_STRICT.findall(outside))
@@ -148,7 +149,7 @@ def named_report(prompt):
             paths = _uniq(bare, REPORT_LABELLED.findall(outside))
         else:
             paths = (_uniq(REPORT_OWN.findall(prompt), REPORT_LABELLED.findall(prompt))
-                     or _uniq(REPORT_IN_PROMPT.findall(outside)) or _uniq(REPORT_IN_PROMPT.findall(prompt)))
+                     or _uniq(REPORT_IN_PROMPT.findall(prompt)))
     if len(paths) != 1:
         return None
     return None if Path(paths[0] + ".done").exists() else paths[0]
