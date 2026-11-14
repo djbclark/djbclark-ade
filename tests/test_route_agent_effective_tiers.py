@@ -6,9 +6,22 @@ import json
 import re
 
 import pytest
+import test_route_agent_effective_config as _effective_config
+from test_route_agent_effective_config import (
+    ac,
+    cli,
+    local_file,
+    router,
+    unified_file,
+)
 
-from test_route_agent_effective_config import ac, cli, local_file, router, tree, unified_file
+# isort: split
+# The sibling import above puts bin/ on sys.path; model_tiers must load after it.
 import model_tiers as mt
+
+# pytest fixture shared from the sibling module: bound by assignment, not an
+# import, so the tests' `tree` parameters do not read as redefinitions (F811).
+tree = _effective_config.tree
 
 
 @pytest.fixture(autouse=True)

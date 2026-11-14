@@ -216,7 +216,7 @@ def test_explicit_pure_reader_and_reload_ignore_unified_and_local(tree, monkeypa
 
 
 def test_missing_selected_routing_path_refuses_runtime(tree):
-    root, home = tree
+    root, _home = tree
     unified_file(root)
     result = cli(tree, "policy", env={"ROUTING_POLICY": str(root / "missing.toml")})
     assert result.returncode != 0
