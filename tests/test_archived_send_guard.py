@@ -450,6 +450,13 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"printf '%s\\n' $'{A}\\12' | xargs -n1 paseo send", [A]),  # a short octal escape at the end of the body (`\\12{B}` would read `\\121`)
     (f"printf '%s\\n' $'{A}\\u000a{B}' | xargs -n1 paseo send", [A, B]),
     (f"printf '%s\\n' $'{A}\\x20{B}' | xargs -n1 paseo send", [A, B]),
+    (f"printf '%s\\n' $'{A}\\v{B}' | xargs -n1 paseo send", [A, B]),  # kills `[ntrvf]` -> `[ntr]`
+    (f"printf '%s\\n' $'{A}\\412{B}' | xargs -n1 paseo send", [A, B]),  # bash keeps the low 8 bits: `\\412` is a newline
+    (f"printf '%s\\n' $'{A}\\x9' | xargs -n1 paseo send", [A]),  # one hex digit
+    (f"printf '%s\\n' $'{A}\\x2d{B}' | xargs -n1 paseo send", []),  # `-` is no blank
+    (f"printf '%s\\n' $'{A}\\x1c{B}' | xargs -n1 paseo send", []),  # str.isspace knows it, a shell does not
+    (f"printf '%s\\n' $'{A}\\cJ{B}' | xargs -n1 paseo send", [A, B]),
+    (f"printf '%s\\n' $'{A}\\U0000000a{B}' | xargs -n1 paseo send", [A, B]),
     (f"printf '%s\\n' $'took over from {A}\\x0a' | xargs -n1 paseo send", []),  # not an id list: still masked
     (f"printf '%s\\n' $'{A}\\\\n{B}' | xargs -n1 paseo send", []),  # an escaped backslash then `n` is no blank
     (f"echo 'x'; eval'paseo send {A} hi'", [A]),  # kills "no quoted_word reset" (a glued string after a runner word)

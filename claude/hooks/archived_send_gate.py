@@ -160,19 +160,27 @@ SHELL_BODY = re.compile(r"(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")")  # a 
 IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)+")
 
 
-ANSI_ESCAPE = re.compile(r"\\(?:(\\)|([ntrvf])|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|([0-7]{1,3}))")
+ANSI_ESCAPE = re.compile(r"\\(?:(?P<bs>\\)|(?P<name>[ntrvf])|x(?P<x>[0-9A-Fa-f]{1,2})|u(?P<u>[0-9A-Fa-f]{1,4})|U(?P<U>[0-9A-Fa-f]{1,8})"
+                         r"|(?P<o>[0-7]{1,3})|c(?P<c>.))", re.S)
+BLANKS = " \t\n\r\v\f"  # what splits a word list in a shell (not every character `str.isspace` knows)
 
 
 def ansi_blanks(body: str) -> str:
-    """`body` of a `$'...'` with each escape that bash turns into a blank (`\\n`, `\\t`, `\\x0a`, `\\u000a`, `\\012`, ...) replaced by a
-    space; `\\\\` stays a backslash, so `\\\\n` is no blank."""
+    """`body` of a `$'...'` with each escape that bash turns into a blank (`\\n`, `\\t`, `\\x0a`, `\\u000a`, `\\012`, `\\cJ`, ...) replaced by
+    a space; `\\\\` stays a backslash, so `\\\\n` is no blank."""
     def blank(m: re.Match) -> str:
-        if m.group(1):
+        g = m.groupdict()
+        if g["bs"]:
             return m.group(0)
-        if m.group(2):
+        if g["name"]:
             return " "
-        code = int(m.group(3) or m.group(4) or m.group(5), 16 if (m.group(3) or m.group(4)) else 8)
-        return " " if chr(code % 256 if m.group(5) else code).isspace() else m.group(0)
+        if g["c"]:  # `\\cJ`: a control character
+            code = ord(g["c"].upper()) & 0x1F
+        elif g["o"]:
+            code = int(g["o"], 8) % 256  # bash keeps the low 8 bits of an octal escape
+        else:
+            code = int(g["x"] or g["u"] or g["U"], 16)
+        return " " if code < 0x110000 and chr(code) in BLANKS else m.group(0)
     return ANSI_ESCAPE.sub(blank, body)
 
 
@@ -310,21 +318,24 @@ def _daemon_option(word: str) -> bool:
 REDIRECT = re.compile(r"&?[<>]+[&|]?")  # `>`, `>>`, `<<<`, `>&`, `&>`, `>|`: the lexer splits them from their operand
 
 
-def _after_redirect(args: list[str], j: int) -> int | None:
+def _after_redirect(args: list[str], j: int, shell: bool = True) -> int | None:
     """Index after the redirect that starts at `args[j]` (an optional one or two digit fd number, the operator and its operand: the
-    operand is a file or text, never an option or the agent); None when none starts there."""
+    operand is a file or text, never an option or the agent); None when none starts there. `shell=False`: `args` is a real argv (the
+    shell has removed its redirects), so `>` and `2` are plain words."""
+    if not shell:
+        return None
     k = j + 1 if re.fullmatch(r"\d{1,2}", args[j]) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]) else j  # `2>x`: the lexer leaves the fd number behind
     return k + 2 if REDIRECT.fullmatch(args[k]) else None
 
 
-def _scan(args: list[str]) -> tuple[int | None, bool]:
+def _scan(args: list[str], shell: bool = True) -> tuple[int | None, bool]:
     """(index of the agent word, whether a daemon selector was seen) in the arguments after `send`. Value options are skipped with
     their values; the first word after `--` is the agent when none came before it and the rest is message text. The whole option
     list is read, so `send A --host X` is seen too (an option word after the agent is still an option to Paseo)."""
     target, j = None, 0
     while j < len(args):
         a = args[j]
-        after = _after_redirect(args, j)  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`, `paseo send 2>x A`
+        after = _after_redirect(args, j, shell)  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`, `paseo send 2>x A`
         if after is not None:
             j = after
             continue
@@ -333,7 +344,7 @@ def _scan(args: list[str]) -> tuple[int | None, bool]:
         if a == "--":
             k = j + 1  # the shell still takes redirects after `--` (`paseo send -- 2>x A`): the first word that is none is the agent
             while target is None and k < len(args):
-                after = _after_redirect(args, k)
+                after = _after_redirect(args, k, shell)
                 if after is None:
                     target = k
                 k = k + 1 if after is None else after
@@ -353,7 +364,7 @@ def _target_index(args: list[str]) -> int | None:
     return None if other else target
 
 
-def locate_send(args: list[str]) -> tuple[str, int | None]:
+def locate_send(args: list[str], shell: bool = True) -> tuple[str, int | None]:
     """Classify the arguments that follow the word `paseo`: ("send", index of the agent word or None), ("other", None) for an
     explicit daemon selector, ("none", None) for anything else. Global options may stand before `agent`, between `agent` and
     `send`, and after `send`: `paseo -o json send A`, `paseo agent --json send A`, `paseo agent -q send A`."""
@@ -373,7 +384,7 @@ def locate_send(args: list[str]) -> tuple[str, int | None]:
             return "none", None
     else:
         return "none", None
-    j, other = _scan(args[i + 1:])
+    j, other = _scan(args[i + 1:], shell)
     if other:
         return "other", None
     return "send", None if j is None else i + 1 + j

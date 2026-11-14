@@ -62,7 +62,7 @@ def send_target_index(args: list[str]) -> int | None:
     """Index in `args` (paseo's arguments, no argv[0]) of the target word of a send; None when this is no send, an explicit
     daemon selector (`--host`, `--home`) is present, or there is no target."""
     import archived_send_gate as gate  # noqa: PLC0415 - the hook's parser, one copy
-    kind, idx = gate.locate_send(args)
+    kind, idx = gate.locate_send(args, shell=False)  # a real argv: the shell has taken its redirects out
     return idx if kind == "send" else None
 
 
