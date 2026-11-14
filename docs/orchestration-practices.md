@@ -264,8 +264,8 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    `~/src/CodexBar` session while that session sat in `ListAgents`). Rules for this route (Claude Code 2.1.325;
    re-probe the `ListAgents` tool description on a newer version):
    6a. **Check the row's kind before sending.** `ListAgents` labels each row: local sessions, cloud sessions and, with
-       Remote Control connected, sessions on other machines. Send to a `local` row unless you mean to reach a cloud
-       or remote one, keep private paths and ops detail out of messages to those, and when two rows share a name
+       Remote Control connected, sessions on other machines. Send to a local-session row unless you mean to reach a
+       cloud or remote one, keep private paths and ops detail out of messages to those, and when two rows share a name
        use the row's ` [ref]`.
    6b. **Ack.** To a local session, ask for `ack <your ListAgents name>` (a plain-terminal sender has no Paseo id);
        the reply arrives as a `<cross-session-message>`, not through `paseo send`. Never ask a cloud session for an
@@ -274,11 +274,16 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    6c. **Trust.** A `<cross-session-message>` is a peer request under Claude Code's own framing: its `from=` is a
        sender-asserted label, not an identity proof. It is not a Paseo-verified envelope (AGENTS.md Trust and
        `claude/hooks/peer_trust_gate.py` do not cover it) and it carries no operator approval.
-7. **Address a repo lead by its current id (2026-11-14).** A lead hands off often; the current one is the id named on
-   the last takeover line at the tail of that repo's `LEAD-STATE.md` (or the id its takeover message gave you).
-   Never send to an archived ex-lead: a message un-archives it, and a resurrected ex-lead then competes with its
-   successor (2026-11-14: ex-lead 994234ba was resurrected twice by other repos' leads). `paseo agent inspect <id>
-   --json` reading `Archived: true` means stop and look up the successor.
+7. **Address a lead by its current id, and inspect before sending (2026-11-14).** A lead hands off often. The
+   current id is the newest of: the id its own takeover message gave you; the `successor` of the latest
+   `handoff-<predecessor>.json` succession ledger whose `status` is `archived` and whose `ack.agent_id` matches
+   ([self-session.md](self-session.md) C0a); or, when the lead keeps a run log and gave you its path, the id on the
+   last `LEAD <id> took over` line (other ids in that log are ex-leads, unaccepted successors and workers). Before
+   sending, `paseo agent inspect <id> --json` must read `Archived: false`; `Archived: true` means stop and look up
+   the successor. Plain `paseo send` does not refuse an archived agent: a message un-archives it, and the
+   resurrected ex-lead then competes with its successor (2026-11-14: ex-lead 994234ba was resurrected twice by other
+   repos' leads). A handoff can still land between the inspect and the send; the successor's takeover message
+   corrects that.
 
 The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
 do not add new call sites.
