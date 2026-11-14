@@ -56,19 +56,21 @@ the brief) while its Paseo session sits in the lead's WORKERS window (below).
 Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
 (N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
 exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
-and it records a reservation: once the agent has spawned, or the launch failed, run `load-watch release <reservation>` (the `reservation` field of the JSON; a strictly serial
-launcher may pass `--no-reserve`), or the slot is counted twice for 20 minutes. The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
+and it records a reservation: once the agent has spawned, or the launch failed, run `~/src/djbclark-ade/bin/load-watch release <reservation>` (the `reservation` field of the JSON; exit 1 for an unknown id is harmless; a launcher that is the only dispatcher on the machine
+may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
 (one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
 and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
 the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
+# Before EACH launch: ~/src/djbclark-ade/bin/load-watch admit --wait 420 --max-agents --json   (exit 0 only; keep .reservation)
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
   --provider PROVIDER/MODEL --no-wait --mode FULL_ACCESS_MODE \
   --label ade.kind=KIND --label ade.name=NAME --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
+# Then (also if the launch failed): ~/src/djbclark-ade/bin/load-watch release <reservation>
 # ade-worker-run adds the placement (WORKERS window), --label ade.lead=LEAD and --label slice=NAME (below); by hand that is
 # `paseo run … --workspace wks_… --cwd ~/src/<repo> --label ade.lead=LEAD`, or --new-workspace local on the first launch
 ```
