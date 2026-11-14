@@ -115,6 +115,72 @@ does not rearchive an already archived predecessor. Continue project writes only
 after verified retirement **and** reconciliation of the repository's exclusive
 workspace claim/ownership. This helper does not grant or rewrite claims.
 
+### C0. Why a native command failed (2026-11-14)
+
+A failed native command raises with Paseo's own reason, not "outcome unknown". The helper
+reads the `{"error": {"code", "message"}}` envelope from stderr (or stdout), and the error
+and the transaction record carry `native_error`: `op` (subcommand words only, never a
+prompt), `code`, `message`, `rc` and `stderr_tail` (at most 512 characters, control
+characters scrubbed; token, secret, password, api/access/private-key, credential and cookie
+values, `Authorization` schemes, quoted multi-word values, URL userinfo and bare
+`ghp_`/`gho_`/`sk-`/`xox`/`AKIA` tokens redacted). "Outcome unknown"
+stays only for a timeout (`TIMEOUT`), an OS error (`OSERROR`) and a nonzero exit whose
+stdout and stderr both hold no Paseo error envelope (a JSON object with an `error` or
+`code` key; any other JSON, such as a receipt or a log line, proves no refusal); those still
+keep `rc` and the tail. Only the last 64 KiB of stderr is read. The envelope `code` is validated (`[A-Z0-9_]{1,64}`, else `INVALID_CODE`), never scrubbed; the scrub needs `:` or `=` before a bare value, so prose such as "Password required" and codes such as `TOKEN_EXPIRED` survive. `agent send`
+exit 5 stays a queued receipt. After a later success (`reconcile` to `awaiting-ack`,
+`finish` to `archived`) the earlier reason moves to `resolved_native_error`.
+`creation-unknown` and `archive-unknown` are diagnosable from the record file alone.
+
+Workspace pre-check: `handoff` reads `paseo workspace ls --json` before saving the intent. A
+failure there refuses with Paseo's reason and sends nothing. When the predecessor's
+`PASEO_WORKSPACE_ID` is no longer listed (`workspace ls` omits background workspaces, so one of
+those also reads as gone and gets a new local workspace; the 2026-11-14 `WORKSPACE_NOT_FOUND`), the
+successor is a new lead in its own placement: the helper launches it with
+`--new-workspace local` instead of `--workspace`, and records `workspace_placement:
+new-local` (`existing` otherwise; `workspace` keeps the predecessor's id). The checks
+`accept` and `finish` run do not compare workspaces. It is a decision, not a fallback to hide:
+the record and this section say so.
+
+Before `finish` calls `agent archive` it requires the exact predecessor id in `paseo ls -g
+--json` (no `-a`: `-a` adds background workspaces, which `agent archive`'s own fetch does not
+include, so only the plain listing is the one its resolver sees). Paseo's CLI resolves the id
+client-side from that listing; an agent whose workspace was deleted (or is a background
+workspace) is missing from it, and the CLI then falls back to a unique partial *title* match, which can
+be the lead's live worker (`worker <slice> <lead id>`; [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668),
+[docs/workspace-layout.md](workspace-layout.md)). When the id is absent `finish` refuses with a
+`LISTING_GAP` `native_error`, archives nothing and points at the manual fallback (b) below.
+
+`finish` archive failures are never retried and never forced. When the archive error
+names an agent id that is not the predecessor's (prefix compare; 2026-11-14: `paseo agent
+archive FULL_UUID` answered `AGENT_ALREADY_ARCHIVED` for `c9a97e5`, a different agent, while
+`agent inspect` of the same id was right) the error reads "Paseo resolved archive to a
+different agent ...; preserve, archive by exact id ... via the Paseo MCP archive_agent ...".
+Paseo prints ids as their first 7 characters; the helper matches a 7-character or full-UUID
+id, not any hex-looking word. A successful archive must also return the predecessor's own
+`agentId`: another id raises "Paseo archived a different agent ...; unarchive it ..." with
+`ARCHIVED_OTHER_AGENT` in the record (a receipt naming no agent: `ARCHIVE_RECEIPT_UNREADABLE`);
+the status stays `archive-unknown` and nothing is retried.
+
+#### Manual fallbacks
+
+(a) Creation failed or stayed `creation-unknown`: read `native_error` in the record, then
+FIRST run `bin/ade-self-session reconcile --record RECORD` (or `paseo ls -a -g --label
+ade.handoff=TOKEN --json`): a timeout, `OSERROR` or "no parseable output" may have created
+the successor. If reconcile finds one labelled agent, stop here: it is the successor. Only
+when it reports zero labelled agents, fix the cause and launch one labelled successor with
+the record's argv, that is the `agent run` call of
+section C (same `--cwd`, `--provider PROVIDER/MODEL`, `--mode`, `--thinking`, the prompt
+text the record's checkpoint and transaction paths imply, `--label ade.handoff=<token>`,
+`--no-wait`, ambient `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID` removed),
+plus `--new-workspace local` when the workspace is gone. Then run reconcile again as the
+predecessor; it needs exactly one agent with that label. Never launch a second one.
+
+(b) Archive failed or stayed `archive-unknown`: archive the predecessor by exact full id
+with the Paseo MCP `archive_agent` (never `--force`, never a workspace archive), verify
+with `paseo agent inspect ID` (`Archived: true`), then re-run `bin/ade-self-session finish
+--record RECORD`; it skips the archive call once the readback shows `Archived`.
+
 ### C1. Agent-run fallback
 
 If the helper refuses **before any successor creation intent**, the predecessor
