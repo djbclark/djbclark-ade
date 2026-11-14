@@ -1225,7 +1225,7 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
-            "pullRequest(number: $number) { state headRefOid body authorAssociation author { __typename login ... on User { databaseId } } "
+            "pullRequest(number: $number) { state headRefOid headRefName isCrossRepository body authorAssociation author { __typename login ... on User { databaseId } } "
             "editor { login } lastEditedAt } } }")
 COMMENTS_PER_PAGE = 100
 COMMENT_PAGES_MAX = 30     # 3,000 comments; a PR with more is not read in full, which fails closed
@@ -1289,7 +1289,8 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
             "author": author, "editor": editor, "association": str(pr.get("authorAssociation") or "").upper(),
-            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor)}
+            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor),
+            "branch": pr.get("headRefName"), "cross_repo": pr.get("isCrossRepository") is not False}
 
 
 def _pr_comments(api, repo: str, n: int) -> list[dict]:
@@ -1475,55 +1476,43 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
                            "an owner comment must approve this head")
 
 
-RUN_EVENTS_OF_A_PUSHER = frozenset({"pull_request", "push"})   # the runs a push to the head causes; the pusher is the run's actor
-RUN_PAGES_MAX = 10
+REF_UPDATES_OF_A_PUSHER = frozenset({"push", "force_push", "branch_creation", "pr_merge", "merge_queue_merge"})
+BRANCH_NAME = re.compile(r"^[\w./-]+$")
 
 
-def head_pusher_check(api, repo: str, head: str) -> tuple[bool, str]:
-    """(ok, why) for owner trust of the head `head`: was it pushed by the operator, the last pusher being what counts?
+def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) -> tuple[bool, str]:
+    """(ok, why) for owner trust of the head `head`: was the update that put the branch there made by the operator?
 
     Owner trust follows the PR *author*, so anyone who can push to the branch of an open operator PR (an org owner,
-    a writer, an App with `contents: write`, a deploy key) could change its code and keep the owner's PR green
-    (adversary review of #670, N1, 2026-11-14). GitHub attests who caused a workflow run, so the runs at this head
-    answer it: `GET actions/runs?head_sha=HEAD`, every page, and every `pull_request` or `push` run must have as `actor`
-    the pinned operator `User` (login AND id), and at least one `pull_request` run must exist. Anything else fails
-    closed, with the reason: an API error or a short read, no such run (a `[skip ci]` push, runs expired), a run by
-    anyone else (a push before the PR was opened counts too), or an App or bot actor. The operator's own marker comment
-    still approves such a PR (the outside path). Runs are keyed by sha, so a later push by someone else is a new head
-    with its own runs. Not covered: commits an attacker pushed earlier that the operator then pushed on top of (the
-    operator vouches for what they push), and a branch an attacker pushed with no run before the operator opened the
-    PR (docs/review-boundary.md)."""
-    runs: list[dict] = []
-    total = None
+    a writer, an App with `contents: write`) could change its code and keep the owner's PR green (adversary review of
+    #670, N1, 2026-11-14). The ref's own history says who moved it: `GET repos/{repo}/activity?ref=refs/heads/BRANCH`
+    (newest first; `after` is the new sha, `actor` who pushed). The newest entry must be a ref update whose `after` is
+    this head and whose `actor` is the pinned operator `User` (login AND id). A workflow-run list was tried first and
+    rejected: it does not show a push that started no run (a push while the PR was closed, a run deleted by a
+    writer, a push with a workflow token) once the operator reopens the PR and so creates a run of their own.
+    Anything else fails closed, with the reason: a head in a fork (no ref here), an unusable branch name, an API error
+    or an unexpected shape, no entry, a newest entry that is not this head or not a ref update, or anyone else as actor.
+    The operator's own marker comment still approves such a PR (the outside path). Not covered: attacker commits
+    the operator then pushed on top of (the operator vouches for what they push), and a deploy key's push, whose
+    reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those)."""
+    if cross_repo:
+        return False, "the head branch lives in a fork, so its pusher is not read here"
+    if not isinstance(branch, str) or not BRANCH_NAME.match(branch):
+        return False, "the head branch name is not usable"
     try:
-        for page in range(1, RUN_PAGES_MAX + 1):
-            doc = api.get(f"repos/{repo}/actions/runs?head_sha={head}&per_page=100&page={page}")
-            batch = doc.get("workflow_runs") if isinstance(doc, dict) else None
-            if (not isinstance(batch, list) or not all(isinstance(r, dict) for r in batch)
-                    or not isinstance(doc.get("total_count"), int) or isinstance(doc.get("total_count"), bool)):
-                return False, "the head's workflow runs could not be read (unexpected shape)"
-            runs.extend(batch)
-            total = doc["total_count"]
-            if len(runs) >= total or not batch:
-                break
-        else:
-            return False, "the head has more workflow runs than are read"
+        doc = api.get(f"repos/{repo}/activity?ref=refs/heads/{branch}&per_page=30")
     except (ApiError, ValueError) as e:
-        return False, f"the head's workflow runs could not be read ({e})"
-    if total is None or len(runs) < total:
-        return False, f"read {len(runs)} of {total} workflow runs at the head"
-    seen_pr = False
-    for r in runs:
-        if r.get("event") not in RUN_EVENTS_OF_A_PUSHER or str(r.get("head_sha") or "").lower() != head.lower():
-            continue
-        a = r.get("actor")
-        who = a.get("login") if isinstance(a, dict) else None
-        if (not isinstance(a, dict) or a.get("type") != "User"
-                or trusted_owner_user_state(a.get("login"), a.get("id")) != "owner"):
-            return False, f"a {r.get('event')} run at this head was caused by {who or '(unknown)'}, not the operator"
-        seen_pr = seen_pr or r.get("event") == "pull_request"
-    if not seen_pr:
-        return False, "no pull_request run at this head names who pushed it"
+        return False, f"the branch's ref history could not be read ({e})"
+    if not isinstance(doc, list) or not doc or not all(isinstance(e, dict) for e in doc):
+        return False, "the branch's ref history is empty or has an unexpected shape"
+    newest = doc[0]
+    if (newest.get("ref") != f"refs/heads/{branch}" or str(newest.get("after") or "").lower() != head.lower()
+            or newest.get("activity_type") not in REF_UPDATES_OF_A_PUSHER):
+        return False, "the branch's newest ref update is not the update to this head"
+    a = newest.get("actor")
+    who = a.get("login") if isinstance(a, dict) else None
+    if not isinstance(a, dict) or a.get("type") != "User" or trusted_owner_user_state(a.get("login"), a.get("id")) != "owner":
+        return False, f"this head was pushed by {who or '(unknown)'}, not the operator"
     return True, ""
 
 
@@ -1558,7 +1547,7 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"reading the comments failed: {e}"}
     if pr["owner_pr"]:
-        pr["pusher_ok"], pr["pusher_detail"] = head_pusher_check(api, repo, head)
+        pr["pusher_ok"], pr["pusher_detail"] = head_pusher_check(api, repo, head, pr["branch"], pr["cross_repo"])
     word, where, detail = decide(head, pr, comments)
     rec.update(last_editor=pr["editor"], trusted=pr["body_trusted"], author=pr["author"], owner_pr=pr["owner_pr"],
                pusher_ok=pr.get("pusher_ok"), comments=len(trusted))

@@ -1126,10 +1126,10 @@ def pr_doc(head: str = H1, body: str = "", state: str = "open") -> dict:
 
 
 def gql_doc(head: str = H1, body: str = "", state: str = "OPEN", author: str = "djbclark", editor: str | None = None,
-            assoc: str = "OWNER", author_type: str = "User") -> dict:
+            assoc: str = "OWNER", author_type: str = "User", cross_repo: bool = False, branch: str = "feature/x") -> dict:
     """The GraphQL second read (`_pr_state_trusted`): state, head, body, author, last editor, author association."""
     return {"json": {"repository": {"pullRequest": {
-        "state": state, "headRefOid": head, "body": body, "authorAssociation": assoc,
+        "state": state, "headRefOid": head, "headRefName": branch, "isCrossRepository": cross_repo, "body": body, "authorAssociation": assoc,
         "author": {"__typename": author_type, "login": author, "databaseId": user_id(author)},
         "editor": {"login": editor} if editor else None, "lastEditedAt": EDITED_AT if editor else None}}}}
 
@@ -1197,29 +1197,29 @@ def gql_comment_pages(n: int, comments: list, per_page: int = 100, total: int | 
     return out
 
 
-def run_entry(event: str = "pull_request", login: str = "djbclark", head: str = H1, kind: str = "User",
-              uid: int | None = None) -> dict:
-    """One workflow run of the head, as `GET actions/runs?head_sha=` lists it."""
-    return {"id": 1, "event": event, "head_sha": head,
+BRANCH = "feature/x"
+
+
+def act_entry(login: str = "djbclark", after: str = H1, kind: str = "User", uid: int | None = None,
+              type_: str = "push", ref: str | None = None) -> dict:
+    """One entry of `GET repos/.../activity?ref=refs/heads/BRANCH` (newest first): the ref moved to AFTER by LOGIN."""
+    return {"id": 1, "activity_type": type_, "ref": ref or f"refs/heads/{BRANCH}", "before": "0" * 40, "after": after,
             "actor": {"login": login, "type": kind, "id": user_id(login) if uid is None else uid}}
 
 
-def runs_key(head: str, page: int = 1) -> str:
-    return f"GET repos/{REPO_A}/actions/runs?head_sha={head}&per_page=100&page={page}"
-
-
-def runs_answer(runs: list, total: int | None = None) -> dict:
-    return {"json": {"total_count": len(runs) if total is None else total, "workflow_runs": runs}}
+def activity_key(branch: str = BRANCH) -> str:
+    return f"GET repos/{REPO_A}/activity?ref=refs/heads/{branch}&per_page=30"
 
 
 def serve(n: int, body: str, head: str = H1, state: str = "open", second: dict | None = None,
-          comments: list | None = None, runs: list | dict | None = None, **trust) -> dict:
+          comments: list | None = None, acts: list | dict | None = None, **trust) -> dict:
     """Canned answers for PR N: the REST first read, the GraphQL second read (the same PR unless `second`) and its
     issue comments (none unless `comments`), through GraphQL and REST alike."""
-    runs = [run_entry(head=head)] if runs is None else runs      # the head was pushed by the operator unless a test says otherwise
+    branch = BRANCH if n == 7 else f"{BRANCH}-{n}"                # one branch per PR, so a multi-PR batch reads each history
+    acts = [act_entry(after=head, ref=f"refs/heads/{branch}")] if acts is None else acts   # pushed by the operator unless a test says otherwise
     return {f"GET repos/{REPO_A}/pulls/{n}": [pr_doc(head, body, state)],
-            f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), **trust)],
-            runs_key(head): [runs if isinstance(runs, dict) else runs_answer(runs)],
+            f"GRAPHQL {n}": [second or gql_doc(head, body, state.upper(), branch=branch, **trust)],
+            activity_key(branch): [acts if isinstance(acts, dict) else {"json": acts}],
             **rest_comment_pages(n, comments or []), **gql_comment_pages(n, comments or [])}
 
 
@@ -1475,12 +1475,9 @@ def test_the_tests_workflow_it_follows_exists_under_that_name():
 def test_the_job_has_read_permissions_only_and_the_merge_gate_environment():
     doc = workflow()
     assert doc["permissions"] == {} and "concurrency" not in doc
-    read_only = {"pull-requests": "read", "contents": "read"}
+    for job in doc["jobs"].values():
+        assert job["permissions"] == {"pull-requests": "read", "contents": "read"}
     marker_job, resolve_job = doc["jobs"]["marker"], doc["jobs"]["resolve"]
-    assert resolve_job["permissions"] == read_only
-    # the marker job also lists the head's workflow runs (who pushed it, `head_pusher_check`): read only, nothing more
-    assert marker_job["permissions"] == {**read_only, "actions": "read"}
-    assert set(doc["jobs"]) == {"resolve", "marker"}
     assert marker_job["environment"] == "merge-gate"
     assert "default_branch" in resolve_job["if"], "a dispatch from another ref does nothing"
     assert marker_job["concurrency"]["cancel-in-progress"] is True
@@ -2038,7 +2035,8 @@ def test_b1_the_comment_query_asks_for_the_attribution_fields():
 
 def test_b1_an_edited_pr_body_with_a_deleted_editor_is_not_the_owners():
     second = {"json": {"repository": {"pullRequest": {
-        "state": "OPEN", "headRefOid": H1, "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
+        "state": "OPEN", "headRefOid": H1, "headRefName": BRANCH, "isCrossRepository": False,
+        "body": marker("APPROVE", H1), "authorAssociation": "OWNER",
         "author": {"__typename": "User", "login": "djbclark", "databaseId": OPERATOR_ID}, "editor": None,
         "lastEditedAt": EDITED_AT}}}}
     rc, report, api = run_ev(wr_event(), serve(7, marker("APPROVE", H1), second=second))
@@ -2208,76 +2206,87 @@ def test_an_app_editing_an_outside_body_cannot_approve_it(repo):
 
 # ---- N1: owner trust also needs the head pushed by the operator; N2: the operator is pinned by user id (2026-11-14) ----
 
-def _ow(repo, runs, **kw):
-    res, api = judge_in(repo, 7, serve(7, "## Summary\n", runs=runs, **kw))
+def _ow(repo, acts, **kw):
+    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", acts=acts, **kw))
     return res
 
 
 @pytest.mark.parametrize("repo", OWNERS)
-@pytest.mark.parametrize("runs,ok", [
-    ([run_entry()], True),
-    ([run_entry(), run_entry("push")], True),
-    ([run_entry("pull_request", "DJBClark")], True),
-    ([run_entry("pull_request", "technoeuphora")], False),                 # an org member pushed it
-    ([run_entry(), run_entry("push", "technoeuphora")], False),            # pushed by someone else before the PR event
-    ([run_entry("pull_request", "frdminc")], False),
-    ([run_entry("pull_request", "djbclark", kind="Bot")], False),
-    ([run_entry("pull_request", "djbclark", uid=7)], False),               # a different user holds the name now
-    ([run_entry("pull_request", "cursor", kind="Bot")], False),
-    ([], False),                                                           # no run names a pusher: fail closed
-    ([run_entry("push")], False),                                          # a push run but no pull_request run
-    ([run_entry("workflow_dispatch", "technoeuphora"), run_entry()], True),    # other events do not name a pusher
-    ([{"event": "pull_request", "head_sha": H1}], False),                  # no actor
+@pytest.mark.parametrize("acts,ok", [
+    ([act_entry()], True),
+    ([act_entry(type_="force_push")], True),
+    ([act_entry(type_="branch_creation")], True),
+    ([act_entry(), act_entry("technoeuphora", after="9" * 40)], True),     # an older update by someone else is history
+    ([act_entry("DJBClark")], True),
+    ([act_entry("technoeuphora")], False),                                 # an org member pushed it
+    ([act_entry("frdminc")], False),
+    ([act_entry("djbclark", kind="Bot")], False),
+    ([act_entry("djbclark", uid=7)], False),                               # a different user holds the name now
+    ([act_entry("djbclark", uid=None) | {"actor": {"login": "djbclark", "type": "User"}}], False),   # no actor id
+    ([act_entry("cursor", kind="Bot")], False),
+    ([act_entry("github-actions[bot]", kind="Bot")], False),               # a push with a workflow token
+    ([act_entry("technoeuphora", after="9" * 40), act_entry()], False),    # newest entry is not this head
+    ([act_entry(after="9" * 40)], False),
+    ([act_entry(type_="branch_deletion")], False),
+    ([act_entry(ref="refs/heads/other")], False),
+    ([act_entry() | {"actor": None}], False),
+    ([], False),
+    ([{}], False),
 ])
-def test_owner_pr_needs_the_head_pushed_by_the_operator(repo, runs, ok):
-    res = _ow(repo, runs)
+def test_owner_pr_needs_the_head_pushed_by_the_operator(repo, acts, ok):
+    res = _ow(repo, acts)
     assert (res["outcome"], res["pusher_ok"]) == (("approve", True) if ok else ("outside", False)), res
     assert res["owner_pr"] is True
     if not ok:
         assert res["status"]["state"] == "failure"
-        assert "not known to be pushed by the operator" in res["detail"] or res["detail"] == "", res
+        assert "not known to be pushed by the operator" in res["detail"], res
 
 
 @pytest.mark.parametrize("repo", OWNERS)
-def test_a_run_of_another_head_does_not_vouch_for_this_head(repo):
-    assert _ow(repo, [run_entry("pull_request", "djbclark", head=H2)])["outcome"] == "outside"
-
-
-@pytest.mark.parametrize("repo", OWNERS)
-@pytest.mark.parametrize("answer", [{"error": "HTTP 403"}, {"json": []}, {"json": {"workflow_runs": []}},
-                                    {"json": {"total_count": 3, "workflow_runs": [run_entry()]}},
-                                    {"json": {"total_count": 1, "workflow_runs": "x"}}])
-def test_an_unreadable_or_short_runs_list_fails_closed(repo, answer):
+@pytest.mark.parametrize("answer", [{"error": "HTTP 403"}, {"json": {"message": "x"}}, {"json": "x"}, {"json": [1]}])
+def test_an_unreadable_ref_history_fails_closed(repo, answer):
     assert _ow(repo, answer)["outcome"] == "outside"
 
 
 @pytest.mark.parametrize("repo", OWNERS)
-def test_runs_are_read_across_pages(repo):
-    page1 = [run_entry("push") for _ in range(100)]
-    answers = serve(7, "## Summary\n", runs=runs_answer(page1, total=101))
-    answers[runs_key(H1, 2)] = [runs_answer([run_entry("pull_request", "technoeuphora")], total=101)]
-    res, _api = judge_in(repo, 7, answers)
-    assert res["outcome"] == "outside", "a later page's actor is judged too"
-    answers[runs_key(H1, 2)] = [runs_answer([run_entry("pull_request")], total=101)]
-    assert judge_in(repo, 7, answers)[0]["outcome"] == "approve"
+def test_a_head_in_a_fork_or_with_an_unknown_origin_is_not_owner_trusted(repo):
+    assert _ow(repo, [act_entry()], cross_repo=True)["outcome"] == "outside"
+    doc = gql_doc(H1, "## Summary\n")
+    doc["json"]["repository"]["pullRequest"].pop("isCrossRepository")
+    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", second=doc))
+    assert res["outcome"] == "outside"
+
+
+@pytest.mark.parametrize("repo", OWNERS)
+@pytest.mark.parametrize("branch", ["a b", "x;y", "", "a\nb", "--x y"])
+def test_an_unusable_branch_name_fails_closed(repo, branch):
+    doc = gql_doc(H1, "## Summary\n")
+    doc["json"]["repository"]["pullRequest"]["headRefName"] = branch
+    res, api = judge_in(repo, 7, serve(7, "## Summary\n", second=doc))
+    assert res["outcome"] == "outside" and not [k for k in api.calls if "/activity" in k]
 
 
 @pytest.mark.parametrize("repo", OWNERS)
 def test_the_operators_own_comment_still_approves_an_owner_pr_with_an_unknown_pusher(repo):
     c = comment(marker("APPROVE", H1), login="djbclark")
-    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", runs=[run_entry("pull_request", "technoeuphora")], comments=[c]))
+    res, _api = judge_in(repo, 7, serve(7, "## Summary\n", acts=[act_entry("technoeuphora")], comments=[c]))
     assert res["outcome"] == "approve" and res["where"] == "owner comment", res
 
 
 @pytest.mark.parametrize("repo", OWNERS)
 def test_a_body_approve_on_an_owner_pr_does_not_count_when_the_pusher_is_not_the_operator(repo):
-    res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), runs=[run_entry("pull_request", "technoeuphora")]))
+    res, _api = judge_in(repo, 7, serve(7, marker("APPROVE", H1), acts=[act_entry("technoeuphora")]))
     assert res["outcome"] == "outside", res
 
 
-def test_the_runs_check_only_runs_for_an_owner_pr():
-    res, api = judge_in(REPO_A, 7, serve(7, "outside", author="stranger", assoc="NONE", runs=[]))
-    assert res["outcome"] == "outside" and not [k for k in api.calls if "actions/runs" in k]
+def test_the_ref_history_is_read_only_for_an_owner_pr():
+    res, api = judge_in(REPO_A, 7, serve(7, "outside", author="stranger", assoc="NONE", acts=[]))
+    assert res["outcome"] == "outside" and not [k for k in api.calls if "/activity" in k]
+
+
+def test_the_ref_history_is_asked_for_the_pr_branch_in_the_repository():
+    _res, api = judge_in("frdminc/djbclark-ade", 7, serve(7, "## Summary\n"))
+    assert "GET repos/frdminc/djbclark-ade/activity?ref=refs/heads/feature/x&per_page=30" in api.calls
 
 
 # N2: the pinned id
