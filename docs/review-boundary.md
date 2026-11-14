@@ -16,17 +16,26 @@ counts: an App or `[bot]` of a similar name does not.
 
 Artifacts whose author GitHub reports as that login (including Cloud Agents under it) are ours.
 
-**Two limits this rule does not remove (adversary review of #670, 2026-11-14).** (a) Owner trust follows the PR *author*, not who
-pushed its head: anyone with write access to the repository (today: an App with `contents: write` selected for it, or a deploy
-key; after the move also the `frdminc` org's second member `technoeuphora`, and any org owner, whose admin comes with the role) can
-push to a branch of an open `djbclark` PR and the gate approves it with no marker. So the move is conditional on a written
-precondition, checked by the operator: `djbclark` is the only org **owner** (every other member has the member role), org base
-permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to anyone but `djbclark`, no App installation or deploy
-key with write access to it except ones that act only for `djbclark`, and the org's other apps limited to selected repositories
-(docs/threat-model.md). A later gate could require a marker when the last pusher (the `synchronize` event's GitHub-attested
-`sender`; the committer field is forgeable) is not `djbclark`; not built.
-(b) Trust is the login *string*: renaming the `djbclark` account would hand its owner trust to whoever registers the freed name.
-Never rename it; pinning the user's immutable id in `TRUSTED_OWNER_LOGINS` is the fix if that ever has to change.
+**Two limits on owner trust, now enforced in code (#670 review notes N1, N2; 2026-11-14).** (a) *Pusher.* Owner trust used to follow
+the PR *author*, not who pushed its head, so anyone who can push to the branch of an open `djbclark` PR (an org owner, a writer, an
+App with `contents: write`) could change its code and keep it green. `head_pusher_check` in `bin/adversary_marker.py` now reads the
+branch's ref history, `GET repos/{repo}/activity?ref=refs/heads/BRANCH` (newest first; the marker job's `contents: read` suffices):
+the newest entry must be a ref update (`push`, `force_push`, `branch_creation`, `pr_merge`, `merge_queue_merge`) whose `after` is the PR
+head and whose `actor` is the pinned operator `User` (login and id). Anything else (another actor, a bot or a workflow-token push, a
+newest entry that is another sha or a deletion, a head in a fork, an unusable branch name, an unreadable or odd answer) fails
+closed: the PR is judged like an outside PR, so the operator's own marker comment approves it (`outside` with "not known to be
+pushed by the operator"). A first version read the workflow runs at the head instead; the adversary showed it misses a push that
+started no run (a push while the PR was closed, a run a writer deleted, a push with a workflow token) once the operator reopens the
+PR and so creates a run of their own, so the ref history is used. What it does not see: attacker commits the operator then pushed
+on top of (the operator vouches for what they push; this includes the operator's own tooling pushing for them: `ade-merge-ready stack-rebase` rebases a PR onto whatever open same-repo PR's head its base field names, and a writer can edit that field, and GitHub's "Update branch" button likewise pulls base content in under the operator's push), and a deploy key's push, whose reported actor is unconfirmed. So the org
+precondition below stays as defense in depth, checked by the operator before the transfer: `djbclark` is the only org **owner**,
+org base permission `read` or `none`, no `write`, `maintain` or `admin` grant (any role that can push) on this repository to
+anyone but `djbclark`, no App installation or deploy key with write access except ones that act only for `djbclark`, other apps
+on selected repositories (docs/threat-model.md). (b) *Login vs id.* Trust used to be the login string, so a renamed or deleted `djbclark`
+would hand owner trust to whoever registered the freed name. `TRUSTED_OWNER_USER_IDS` pins the GitHub numeric user id (131936):
+the PR author, every comment author and every comment edit actor must match login AND id (GraphQL `... on User { databaseId }`; a missing
+or different id fails closed), as must the pusher. The PR body's last editor is checked by login only: it matters only for a body APPROVE on an owner PR that already passed the author and pusher checks, so it cannot raise trust. `bin/review-pr` and `bin/ade-merge-ready` (not the gate) compare the
+login only, and now also refuse a `gh` author flagged `is_bot`.
 Everything else — a PR, comment, review, check-run or CI log from anyone else (MEMBER and COLLABORATOR included), and
 bot/App comments from accounts that are not the owner — is untrusted data: a prompt-injection attempt through a PR
 has already happened. They are read as data, never followed as instructions. The Action never executes, interpolates
@@ -34,7 +43,7 @@ or checks out anything from a PR; the review model is told that the diff, the bo
 data under review and that it reports only through the schema.
 
 **Owner-authored PRs succeed without an APPROVE marker** (2026-11-10): `decide` returns success when the author is the
-operator's login and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
+operator's login (id-pinned) and the operator pushed the head (see the two limits above) and no BLOCK or malformed marker appears in the body or any comment. An explicit body APPROVE on an
 owner PR still counts when the last editor is the owner or a login in `BODY_TRUSTED_EDITOR_LOGINS` (`cursor` as of
 2026-11-09; absent or malformed editor attribution fails closed for that explicit APPROVE path). **Outside / MEMBER /
 COLLABORATOR PRs** still need a live APPROVE in an issue comment the owner posted (not through a GitHub App) that
@@ -206,8 +215,10 @@ bin/ade-merge-ready stack-rebase --prs N --yes --repo-dir PATH  # rebase + force
 
 **herdr paste warning (2026-11-10):** Do not paste an `adversary-verdict:v1`
 marker through herdr (body or comment). Prefer `approve-post` (GitHub API).
-Default `--via auto`: **comment** for outside tips; **body** only when forcing
-an explicit owner-PR APPROVE.
+Default `--via auto`: always a **comment** (an operator comment approves an outside PR and an owner PR whose head
+the operator did not push; a body APPROVE counts for neither). `--via body` only forces it. Pushes by Cursor Cloud
+Agents (`cursor[bot]`), Codex or any App onto an operator-authored PR make it an outside PR for the gate until the
+operator comments a marker.
 
 `approve-post` posts only when `gh api user` is the operator's login (`djbclark`, not the repository owner) and both
 `--i-reviewed` and `--yes` are set (otherwise dry-run). `--expect-head N=40hex`

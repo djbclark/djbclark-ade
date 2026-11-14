@@ -25,9 +25,9 @@ prints templates only (and warns: never paste them through herdr — herdr
 mangles `<!-- … -->`). `approve-post` posts those templates via the GitHub
 API (not herdr) **only** when the authenticated `gh` user is the operator's
 login (`djbclark`, not the repository owner) and both `--i-reviewed` and `--yes` are set (dry-run otherwise).
-Default `--via auto`: owner-authored tips get a **body** append (today's gate
-counts body APPROVE on owner PRs; comments do not); outside tips get an issue
-**comment**. `--via body` / `--via comment` force one path. Never invents a
+Default `--via auto`: always an issue **comment** (the gate counts an operator comment
+APPROVE on any PR; a body APPROVE never counts once the head was pushed by someone else,
+so a body append would report success and leave the check red). `--via body` / `--via comment` force one path. Never invents a
 head — each marker names the tip `headRefOid` just collected.
 `retrigger-marker` only runs `gh workflow run adversary-marker.yml -f pr=N`
 for selected open tips (dry-run unless `--yes`); it never posts markers and
@@ -281,7 +281,8 @@ def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:
             author = (auth.get("login") or "").strip()
         elif isinstance(auth, str):
             author = auth.strip()
-        owner_pr = is_trusted_owner_login(author)
+        # `gh` marks an App or bot author with `is_bot` (login `app/<slug>`); only a human `User` can be the operator.
+        owner_pr = is_trusted_owner_login(author) and not (isinstance(auth, dict) and auth.get("is_bot"))
         checks = run_gh(gh, ["pr", "checks", str(n), "--repo", repo])
         # gh pr checks exits 1 when any check failed; stdout still usable
         check_text = checks.stdout or ""
@@ -513,9 +514,10 @@ def print_approve_paste(rows: list[dict[str, Any]]) -> None:
         "(GitHub API, not herdr; outside tips → owner comment)."
     )
     print(
-        "# Owner tips (after #484 on master): no APPROVE paste — Tests / push "
-        "rejudge flips adversary-marker; use merge-now. Outside tips still need "
-        "an owner comment (+ approve-post or dispatch)."
+        "# Owner tips (after #484 on master): no APPROVE paste when the operator "
+        "pushed the head — Tests / push rejudge flips adversary-marker; use "
+        "merge-now. Outside tips, and owner tips whose head a Cloud Agent or App "
+        "pushed, still need an owner comment (+ approve-post or dispatch)."
     )
     for r in rows:
         head = r.get("head") or ""
@@ -921,10 +923,15 @@ def retrigger_marker_prs(
 
 
 def resolve_approve_via(via: str, owner_pr: bool) -> str:
-    """Return 'body' or 'comment' for one tip under --via auto|body|comment."""
+    """Return 'body' or 'comment' for one tip under --via auto|body|comment.
+
+    `auto` is always a comment: an operator comment APPROVE approves an outside PR, and an owner PR the gate does not
+    trust (its head was pushed by someone else, e.g. a `cursor[bot]` push) is judged as an outside PR, where a body
+    APPROVE never counts (adversary round 2 of #675, M1). On an owner PR whose head the operator pushed the gate
+    approves with no marker, so the comment is harmless there. `owner_pr` is unused now and kept for the call signature."""
     v = (via or "auto").strip().lower()
     if v == "auto":
-        return "body" if owner_pr else "comment"
+        return "comment"
     if v in ("body", "comment"):
         return v
     raise RuntimeError(f"unknown --via {via!r} (want auto|body|comment)")
@@ -1751,8 +1758,8 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         choices=("auto", "body", "comment"),
         help=(
-            "approve-post: auto=body for owner-authored tips else comment; "
-            "or force body / comment (default auto)"
+            "approve-post: auto=always an issue comment (a body APPROVE never counts once "
+            "someone else pushed the head); or force body / comment (default auto)"
         ),
     )
     ap.add_argument(

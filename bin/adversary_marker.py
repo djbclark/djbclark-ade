@@ -73,11 +73,28 @@ CONTEXT = "adversary-marker"
 # is not the operator), a fork owner or a transferred-to account gets nothing by owning the repo. Lowercase;
 # compared case-insensitively; only a GraphQL `User` actor counts (an App or bot named the same never does).
 TRUSTED_OWNER_LOGINS = frozenset({"djbclark"})
+# The same user pinned by GitHub's immutable numeric id (`gh api users/djbclark --jq .id`, 2026-11-14): a login is only a
+# name, and a renamed or deleted `djbclark` frees it for someone else, so the gate also needs the id. Both must match.
+TRUSTED_OWNER_USER_IDS = {"djbclark": 131936}
 
 
 def is_trusted_owner_login(login: object) -> bool:
     """True when ``login`` is one of TRUSTED_OWNER_LOGINS (case-insensitive). The repository owner is irrelevant."""
     return isinstance(login, str) and login.strip().lower() in TRUSTED_OWNER_LOGINS
+
+
+def trusted_owner_user_state(login: object, database_id: object) -> str:
+    """'owner' | 'other' | 'unknown' for a User's login and numeric id: the owner only when the login is trusted AND the
+    id is the pinned one; a trusted login with another id is `other` (a different user took the name); one with no
+    usable id is `unknown` (fail closed)."""
+    if not is_trusted_owner_login(login):
+        return "other"
+    if not isinstance(database_id, int) or isinstance(database_id, bool):
+        return "unknown"
+    pinned = TRUSTED_OWNER_USER_IDS.get(str(login).strip().lower())
+    if pinned is None:    # a trusted login with no pinned id: never trusted (fail closed, no exception)
+        return "unknown"
+    return "owner" if database_id == pinned else "other"
 
 
 BODY_TRUSTED_EDITOR_LOGINS = frozenset({
@@ -1049,10 +1066,10 @@ class CannedApi:
     def get(self, path: str):
         key = "GET " + path
         seq = self.answers.get(key)
+        n = self.calls.get(key, 0)
+        self.calls[key] = n + 1      # an attempted read is recorded even with no canned answer
         if not seq:
             raise ApiError(f"GET {path}: no canned answer")
-        n = self.calls.get(key, 0)
-        self.calls[key] = n + 1
         ans = seq[min(n, len(seq) - 1)]
         if "error" in ans:
             raise ApiError(f"GET {path}: {ans['error']}")
@@ -1211,7 +1228,7 @@ def _pr_state(api, repo: str, n: int) -> tuple[str, str, str]:
 
 
 PR_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { "
-            "pullRequest(number: $number) { state headRefOid body authorAssociation author { __typename login } "
+            "pullRequest(number: $number) { state headRefOid headRefName isCrossRepository body authorAssociation author { __typename login ... on User { databaseId } } "
             "editor { login } lastEditedAt } } }")
 COMMENTS_PER_PAGE = 100
 COMMENT_PAGES_MAX = 30     # 3,000 comments; a PR with more is not read in full, which fails closed
@@ -1223,9 +1240,9 @@ EDITS_MAX = 100            # a comment's edit history read in full; a longer one
 COMMENTS_QUERY = (
     "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { "
     f"pullRequest(number: $number) {{ comments(first: {COMMENTS_PER_PAGE}, after: $cursor) {{ totalCount "
-    "pageInfo { hasNextPage endCursor } nodes { fullDatabaseId body author { __typename login } "
-    "editor { __typename login } lastEditedAt includesCreatedEdit "
-    f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login }} }} }} }} }} }} }} }}")
+    "pageInfo { hasNextPage endCursor } nodes { fullDatabaseId body author { __typename login ... on User { databaseId } } "
+    "editor { __typename login ... on User { databaseId } } lastEditedAt includesCreatedEdit "
+    f"userContentEdits(first: {EDITS_MAX}) {{ totalCount nodes {{ editor {{ __typename login ... on User {{ databaseId }} }} }} }} }} }} }} }} }}")
 
 
 def body_editor_trusted(editor: str) -> bool:
@@ -1269,11 +1286,14 @@ def _pr_state_trusted(api, repo: str, n: int) -> dict:
     editor = str(((pr.get("editor") or {}).get("login")) or "")
     if "editor" in pr and pr["editor"] is None and "lastEditedAt" in pr and pr["lastEditedAt"] is None:
         editor = author                       # explicit never-edited shape only; absent/malformed editor is unknown
-    owner_pr = is_trusted_owner_login(author) and (pr.get("author") or {}).get("__typename") == "User"
+    actor_doc = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    owner_pr = (actor_doc.get("__typename") == "User"
+                and trusted_owner_user_state(actor_doc.get("login"), actor_doc.get("databaseId")) == "owner")
     body = pr.get("body")
     return {"state": str(pr.get("state") or "").lower(), "head": head, "body": body if isinstance(body, str) else "",
             "author": author, "editor": editor, "association": str(pr.get("authorAssociation") or "").upper(),
-            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor)}
+            "owner_pr": owner_pr, "body_trusted": owner_pr and body_editor_trusted(editor),
+            "branch": pr.get("headRefName"), "cross_repo": pr.get("isCrossRepository") is not False}
 
 
 def _pr_comments(api, repo: str, n: int) -> list[dict]:
@@ -1309,7 +1329,7 @@ def _actor(a: object) -> tuple[str, str]:
     if not is_trusted_owner_login(login):
         return "other", login
     if a.get("__typename") == "User":
-        return "owner", login
+        return trusted_owner_user_state(login, a.get("databaseId")), login
     return ("unknown" if a.get("__typename") is None else "other"), login
 
 
@@ -1408,7 +1428,9 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
        login; NOT whoever owns the repository): trusted by default
        (operator 2026-11-10: trust what comes only from the owner or AIs they run). No APPROVE marker is required.
        An explicit body APPROVE still counts when the body editor is trusted (owner or BODY_TRUSTED_EDITOR_LOGINS);
-       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed.
+       an APPROVE body last edited by anyone else is `untrusted`. BLOCK/malformed still fail closed. The author is the
+       pinned operator `User` (login and id), AND the head was pushed by the operator (`head_pusher_check`; an owner PR
+       whose head is not known to be pushed by them is judged like an outside PR, `pr["pusher_ok"]`, fail closed).
     3. Any other PR (an outside, MEMBER or COLLABORATOR author): an APPROVE in the body never counts, whoever edited
        it last (a listed App included); only a live APPROVE for this head in a comment by the operator's login, not
        posted via a GitHub App, and never edited by anyone but the owner (`_edit_attribution`), approves. Otherwise
@@ -1427,7 +1449,7 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
     for c, w in judged:
         if w == "malformed":
             return "malformed", "comment", f"malformed marker in comment {c['id']} by {c['author'] or '(ghost)'}"
-    if pr["owner_pr"]:
+    if pr["owner_pr"] and pr.get("pusher_ok") is True:
         if body_word == "approve" and not pr["body_trusted"]:
             return "untrusted", "", f"owner PR body last edited by {pr['editor'] or '(ghost)'}"
         if body_word == "approve":
@@ -1449,9 +1471,52 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
         return "edit-unknown", "", f"owner comment {own[0]['id']} holds an APPROVE but its edit history is unknown"
     if any(w == "approve" for _c, w in judged):
         return "untrusted", "comment", "the only APPROVE comments are not the owner's own (another author, or an App)"
+    if pr["owner_pr"]:
+        return "outside", "", (f"owner PR (author {pr['author']}) whose head is not known to be pushed by the operator: "
+                               f"{pr.get('pusher_detail') or 'not checked'}; an owner comment must approve this head")
     return "outside", "", (f"outside PR (author {pr['author'] or '(ghost)'}): the body's "
                            f"{'APPROVE' if body_word == 'approve' else 'marker'} does not count; "
                            "an owner comment must approve this head")
+
+
+REF_UPDATES_OF_A_PUSHER = frozenset({"push", "force_push", "branch_creation", "pr_merge", "merge_queue_merge"})
+BRANCH_NAME = re.compile(r"^[\w./-]+$")
+
+
+def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) -> tuple[bool, str]:
+    """(ok, why) for owner trust of the head `head`: was the update that put the branch there made by the operator?
+
+    Owner trust follows the PR *author*, so anyone who can push to the branch of an open operator PR (an org owner,
+    a writer, an App with `contents: write`) could change its code and keep the owner's PR green (adversary review of
+    #670, N1, 2026-11-14). The ref's own history says who moved it: `GET repos/{repo}/activity?ref=refs/heads/BRANCH`
+    (newest first; `after` is the new sha, `actor` who pushed). The newest entry must be a ref update whose `after` is
+    this head and whose `actor` is the pinned operator `User` (login AND id). A workflow-run list was tried first and
+    rejected: it does not show a push that started no run (a push while the PR was closed, a run deleted by a
+    writer, a push with a workflow token) once the operator reopens the PR and so creates a run of their own.
+    Anything else fails closed, with the reason: a head in a fork (no ref here), an unusable branch name, an API error
+    or an unexpected shape, no entry, a newest entry that is not this head or not a ref update, or anyone else as actor.
+    The operator's own marker comment still approves such a PR (the outside path). Not covered: attacker commits
+    the operator then pushed on top of (the operator vouches for what they push), and a deploy key's push, whose
+    reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those)."""
+    if cross_repo:
+        return False, "the head branch lives in a fork, so its pusher is not read here"
+    if not isinstance(branch, str) or not BRANCH_NAME.match(branch):
+        return False, "the head branch name is not usable"
+    try:
+        doc = api.get(f"repos/{repo}/activity?ref=refs/heads/{branch}&direction=desc&per_page=1")
+    except (ApiError, ValueError) as e:
+        return False, f"the branch's ref history could not be read ({e})"
+    if not isinstance(doc, list) or not doc or not all(isinstance(e, dict) for e in doc):
+        return False, "the branch's ref history is empty or has an unexpected shape"
+    newest = doc[0]
+    if (newest.get("ref") != f"refs/heads/{branch}" or str(newest.get("after") or "").lower() != head.lower()
+            or newest.get("activity_type") not in REF_UPDATES_OF_A_PUSHER):
+        return False, "the branch's newest ref update is not the update to this head"
+    a = newest.get("actor")
+    who = a.get("login") if isinstance(a, dict) else None
+    if not isinstance(a, dict) or a.get("type") != "User" or trusted_owner_user_state(a.get("login"), a.get("id")) != "owner":
+        return False, f"this head was pushed by {who or '(unknown)'}, not the operator"
+    return True, ""
 
 
 def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
@@ -1484,9 +1549,11 @@ def judge_pr(api, repo: str, n: int, target_url: str = "") -> dict:
         comments = _merge_comments(trusted, _pr_comments(api, repo, n))
     except (ApiError, ValueError) as e:
         return {**rec, "result": "error", "detail": f"reading the comments failed: {e}"}
+    if pr["owner_pr"]:
+        pr["pusher_ok"], pr["pusher_detail"] = head_pusher_check(api, repo, head, pr["branch"], pr["cross_repo"])
     word, where, detail = decide(head, pr, comments)
     rec.update(last_editor=pr["editor"], trusted=pr["body_trusted"], author=pr["author"], owner_pr=pr["owner_pr"],
-               comments=len(trusted))
+               pusher_ok=pr.get("pusher_ok"), comments=len(trusted))
     status = {"state": "success" if word == "approve" else "failure", "context": CONTEXT,
               "description": describe(word, head, where)}
     if target_url:
