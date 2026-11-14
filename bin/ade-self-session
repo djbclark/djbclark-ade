@@ -20,11 +20,12 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ade_self_session import Service, SessionError
+import ade_lead_succession  # the readers of these records resolve the same default directory
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/djbclark-ade/self-session')
+    p.add_argument('--state-dir', type=Path, default=ade_lead_succession.default_state_dir())
     p.add_argument('--paseo-home', type=Path, default=Path(os.environ.get('PASEO_HOME') or Path.home() / '.paseo'))
     sub = p.add_subparsers(dest='command', required=True)
     for command in ('handoff', 'compact'):

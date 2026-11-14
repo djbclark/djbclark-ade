@@ -34,9 +34,13 @@ d = json.loads(Path(os.environ['FAKE_DATA']).read_text())
 a = sys.argv[1:]
 open(os.environ['FAKE_CALLS'], 'a').write(json.dumps(a) + '\\n')
 if a[:1] == ['ls']:
-    assert a == ['ls', '-g', '--background', '--json']
+    if a == ['ls', '-a', '-g', '--json']:  # only the lead-retired probe asks for archived agents too
+        if d.get('ls_all_fail'): sys.exit(1)
+    else:
+        assert a == ['ls', '-g', '--background', '--json']
     print(json.dumps([{'id': k, 'status': v['Status']} for k,v in d['agents'].items()]))
 elif a[:2] == ['agent', 'inspect']:
+    if a[2] in d.get('inspect_fail', []): sys.exit(1)
     print(json.dumps(d['agents'][a[2]]))
 elif a[:1] == ['logs']:
     if '--json' in a:
@@ -1041,3 +1045,122 @@ def test_blocked_first_sight_is_not_re_read(quota, activity, action):
         assert quota["scan"]() == 0
     assert len(logs_calls()) == first
     assert quota["actions"]() == [action]
+
+
+# --- lead succession (2026-11-14): a self-handoff must not strand the job that was installed with the old lead id ---
+
+NEW_LEAD = "00000000-0000-0000-0000-000000000009"
+STRANGER = "00000000-0000-0000-0000-00000000000a"
+
+
+def link(state_dir, home, pred, nxt, status="archived"):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / f"handoff-{pred}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home.resolve()), "status": status,
+         "ack": {"agent_id": nxt}}))
+
+
+@pytest.fixture
+def handed_off(fake, tmp_path, monkeypatch):
+    """The installed `--lead LEAD` is archived; the ledger is in tmp, the daemon home is tmp."""
+    data, scan, sent, state = fake
+    ledger, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(ledger))
+    monkeypatch.setenv("PASEO_HOME", str(home))
+    data["agents"][LEAD]["Archived"] = True
+    data["agents"][NEW_LEAD] = {"Id": NEW_LEAD, "ParentAgentId": None, "Archived": False, "Status": "running", "Provider": "codex"}
+    return data, scan, sent, state, ledger, home
+
+
+def test_pinned_archived_lead_follows_its_successor(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    link(ledger, home, LEAD, NEW_LEAD)
+    assert scan() == 0  # the child still has ParentAgentId LEAD (the archived predecessor)
+    assert json.loads(sent.read_text()) == ["send", "--json", "--no-wait", "--", CHILD, M["PROMPT"]]
+    assert json.loads((state / "events.jsonl").read_text().splitlines()[-1])["lead"] == NEW_LEAD
+
+
+def test_three_step_chain_covers_a_child_of_the_middle_lead(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    data["agents"][MIDDLE] = {"Id": MIDDLE, "ParentAgentId": None, "Archived": True, "Status": "idle", "Provider": "codex"}
+    data["agents"][CHILD]["ParentAgentId"] = MIDDLE
+    link(ledger, home, LEAD, MIDDLE)
+    link(ledger, home, MIDDLE, NEW_LEAD)
+    assert scan() == 0 and sent.exists()
+
+
+def test_a_stranger_leads_child_is_still_not_resumed(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    data["agents"][STRANGER] = {"Id": STRANGER, "ParentAgentId": None, "Archived": False, "Status": "running", "Provider": "codex"}
+    data["agents"][CHILD]["ParentAgentId"] = STRANGER
+    link(ledger, home, LEAD, NEW_LEAD)
+    assert scan() == 0 and not sent.exists()
+
+
+@pytest.mark.parametrize("setup", ["no-record", "unconfirmed-handoff", "successor-archived", "successor-unknown"])
+def test_retired_lead_without_a_live_successor_skips_with_exit_zero(handed_off, capsys, setup):
+    data, scan, sent, state, ledger, home = handed_off
+    if setup == "unconfirmed-handoff":
+        link(ledger, home, LEAD, NEW_LEAD, status="acknowledged")  # the chain stops: LEAD is archived
+    if setup == "successor-archived":
+        link(ledger, home, LEAD, NEW_LEAD)
+        data["agents"][NEW_LEAD]["Archived"] = True
+    if setup == "successor-unknown":
+        link(ledger, home, LEAD, NEW_LEAD)
+        del data["agents"][NEW_LEAD]
+    assert scan() == 0  # was: ScanError "lead is archived or unknown", exit 2 every minute under launchd
+    assert not sent.exists()
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [r["action"] for r in rows] == ["skip-lead-retired"] and rows[0]["pinned"] == LEAD
+    assert "nothing to resume" in capsys.readouterr().err
+    assert scan() == 0  # a new process (launchd every minute): the ledger already says so, no second row
+    assert scan() == 0
+    assert len((state / "events.jsonl").read_text().splitlines()) == 1
+    assert "nothing to resume" not in capsys.readouterr().err
+
+
+def test_a_paseo_outage_is_still_an_error_not_a_skip(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    del data["agents"][LEAD]  # unknown to inspect ...
+    data["ls_all_fail"] = True  # ... and the daemon cannot list either: an outage, not a retired lead
+    with pytest.raises(M["ScanError"]):
+        scan()
+    assert not sent.exists()
+
+
+def test_a_new_pinned_or_current_lead_logs_a_new_skip_row(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    assert scan() == 0
+    link(ledger, home, LEAD, NEW_LEAD)
+    data["agents"][NEW_LEAD]["Archived"] = True  # now the chain ends elsewhere: a different (pinned, lead) pair
+    assert scan() == 0
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [(r["pinned"], r["lead"]) for r in rows] == [(LEAD, LEAD), (LEAD, NEW_LEAD)]
+
+
+def test_two_pinned_ids_sharing_one_state_dir_each_log_once(handed_off, tmp_path):
+    data, scan, sent, state, ledger, home = handed_off
+    other_pinned = "00000000-0000-0000-0000-00000000000b"
+    data["agents"][other_pinned] = {"Id": other_pinned, "ParentAgentId": None, "Archived": True, "Status": "idle", "Provider": "codex"}
+    for _ in range(3):  # a hand-run `--lead other_pinned` alternating with the installed job
+        assert scan() == 0
+        assert Scanner(other_pinned, state, True).scan() == 0
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert sorted(r["pinned"] for r in rows) == sorted([LEAD, other_pinned])
+
+
+def test_cyclic_ledger_is_an_error_never_a_quiet_retired_skip(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    link(ledger, home, LEAD, NEW_LEAD)
+    link(ledger, home, NEW_LEAD, LEAD)
+    with pytest.raises(M["ScanError"], match="inconsistent"):
+        scan()
+    assert not sent.exists() and not (state / "events.jsonl").read_text()
+
+
+def test_unreadable_but_listed_lead_is_an_error_not_a_skip(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    data["inspect_fail"] = [LEAD]  # `ls -a` still lists LEAD: a transient inspect failure, not a retired lead
+    with pytest.raises(M["ScanError"], match="unreadable"):
+        scan()
+    assert not sent.exists() and not (state / "events.jsonl").read_text()

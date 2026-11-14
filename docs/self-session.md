@@ -181,6 +181,41 @@ with the Paseo MCP `archive_agent` (never `--force`, never a workspace archive),
 with `paseo agent inspect ID` (`Archived: true`), then re-run `bin/ade-self-session finish
 --record RECORD`; it skips the archive call once the readback shows `Archived`.
 
+### C0a. Lead ids pinned elsewhere follow the successor (2026-11-14)
+A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own
+`ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
+(read-only; no paseo call, no second ledger): a link counts only for a completed handoff of this daemon home, so an unfinished
+(`awaiting-ack`, `acknowledged`, `archive-unknown`), foreign-home, corrupt, symlinked or oversized record is no link and the
+chain stops there. A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
+`ade-auto-permit` audits `succession-ledger-inconsistent` and narrows to `--lead` itself, `fable-wait` warns on stderr), never a silent
+fall-back to the old id. The default ledger directory is `ADE_SELF_SESSION_STATE`, else `~/.local/state/djbclark-ade/self-session`;
+`ade-self-session --state-dir` defaults to the same. The ledger never checks Paseo: a predecessor someone un-archives later still reads as
+replaced. Consumers of an old lead id:
+
+1. `bin/ade-worker-run`: the successor's lineage (itself plus every archived predecessor) owns the predecessors' window
+   records (`<id>.windows.json`), their `ade.lead=<id>` labelled workers and their legacy window names; those are no longer
+   "another lead's". A different live lead is still refused. `archive-window` also clears the archived window from the
+   predecessors' records. Registries and ownership use the whole lineage (file reads); `paseo ls --label` is asked about the lead and
+   its 8 nearest predecessors only, so a long chain stays cheap. The bound also applies to `archive-window`'s "every labelled worker is handled"
+   guard (a live worker labelled for a lead nine or more handoffs back, outside the target window, no longer blocks the archive; one
+   inside the window still does) and to window discovery by label alone (a window known only by such a worker, with no record, is not
+   found by label alone; a launch with `--window-middle` adopts and records it, and only then can `archive-window` find it as the lead's). A
+   far-labelled worker inside the window blocks the archive as "other live agent in the window" even when idle: close it first. The blocker
+   text names the label that matched.
+2. `bin/ade-net-resume --lead <pinned id>` (the installed launchd job): follows the chain to the current lead, counts
+   descendants of any lead in the lineage, and when the chain ends at an archived or unknown lead logs
+   `skip-lead-retired` (one ledger row per pinned/current pair, not one per minute), prints one line and exits 0 (was exit 2 every
+   minute); a cyclic ledger and a Paseo outage are still exit 2.
+3. `bin/ade-auto-permit --lead <pinned id>`: the sweep covers the `ade.lead=` workers and the descendants of every lead in the
+   lineage (labels asked for `--lead` and the current lead's 8 nearest predecessors, at most 10 ids); an approval qualified by a label records it as
+   `via` in the audit rows.
+4. `bin/fable-wait fire`: an item filed by a lead that later handed off is sent to the current lead, never to the archived id.
+
+No re-install of a job and no hand edit of a registry is needed after a self-handoff. A job installed with a lead that was
+retired without a completed `finish` (or archived by hand) still needs `ade-sched` reinstalled with a live `--lead`.
+Not covered: `bin/ade-tidy` keeps comparing exact lead ids (a predecessor's windows read as another lead's, a refusal, never
+a mistaken archive) and workspace claims (`ade_claims.py --lead`) are informational and unchanged.
+
 ### C1. Agent-run fallback
 
 If the helper refuses **before any successor creation intent**, the predecessor

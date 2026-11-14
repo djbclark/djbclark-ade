@@ -490,10 +490,35 @@ def ping_text(text: str, report: dict) -> None:
     report["ping"] = "sent" if rc == 0 else f"exit {rc}: {err.strip()[:120]}"
 
 
+_IMPORT_WARNED = False
+
+
+def current_lead(lead: str) -> str:
+    """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
+    its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:  # imported here: a copy of this script without its bin/ siblings (the arm-from-a-worktree check) still runs
+        import ade_lead_succession as succ
+    except ImportError:
+        global _IMPORT_WARNED
+        if not _IMPORT_WARNED:  # once per process, not once per queued item
+            _IMPORT_WARNED = True
+            print("fable-wait: ade_lead_succession.py cannot be imported beside this script; "
+                  "delivering to each lead as filed", file=sys.stderr)
+        return lead
+    try:
+        return succ.effective_lead(lead)
+    except succ.SuccessionError as e:
+        print(f"fable-wait: {e}; delivering to {lead} as filed", file=sys.stderr)
+        return lead
+
+
 def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
     by_lead: dict[str, list[dict]] = {}
     for i in items:
-        by_lead.setdefault(i["lead"], []).append(i)
+        by_lead.setdefault(current_lead(i["lead"]), []).append(i)
     paseo = tool("FABLE_WAIT_PASEO", "paseo")
     failed = 0
     for lead, its in sorted(by_lead.items()):
@@ -565,8 +590,8 @@ def fire_locked(a: argparse.Namespace, disarm: list[str | None]) -> int:
                 return 0
             items = fire_items(report)
             if a.dry_run:
-                for lead in sorted({i["lead"] for i in items or []}):
-                    print(f"[dry run] would send {lead}:\n{message_for([i for i in items or [] if i['lead'] == lead], wake_id)}")
+                for lead in sorted({current_lead(i["lead"]) for i in items or []}):
+                    print(f"[dry run] would send {lead}:\n{message_for([i for i in items or [] if current_lead(i['lead']) == lead], wake_id)}")
                 print(f"[dry run] queue problems: {report.get('queue_error') or report.get('bad_lines') or 'none'}; "
                       f"would run hermes-ping with {len(items or [])} item(s) queued, then disarm")
                 return 0

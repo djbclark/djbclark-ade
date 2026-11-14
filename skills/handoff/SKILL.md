@@ -27,7 +27,10 @@ predecessor running, as specified by Step 9.
 A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID
 paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead agent id>`; without it
 `bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
-and runs the watcher with `--lead <its id>` (2026-11-13).
+and runs the watcher with `--lead <its id>` (2026-11-13). After an acknowledged `ade-self-session` handoff nothing pinned to the
+predecessor's id needs a hand step (2026-11-14): `ade-worker-run` adopts its windows and labelled workers, and the installed
+`ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0a). A manual
+handoff that never runs `finish` records no chain: re-point those jobs by hand.
 
 Placement differs: workers go in the lead's one `WORKERS <repo> (<work>)` window, and workers the operator asks for
 interactively in the lead's own `MAIN <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a

@@ -31,6 +31,9 @@ atexit.register(shutil.rmtree, _SCHED_ROOT, ignore_errors=True)
 os.environ["ADE_SCHED_LAUNCH_AGENTS"] = str(_SCHED_ROOT / "LaunchAgents")
 os.environ["ADE_SCHED_UNIT_DIR"] = str(_SCHED_ROOT / "systemd-user")
 os.environ["ADE_SCHED_LOCK"] = str(_SCHED_ROOT / "ade-sched.lock")
+# bin/ade_lead_succession.py reads ade-self-session's handoff records (2026-11-14). The suite never reads the real ledger:
+# an empty throwaway directory, unconditional; tests that need a chain write records into their own tmp dir.
+os.environ["ADE_SELF_SESSION_STATE"] = str(_SCHED_ROOT / "self-session")
 # route_agent.load_snapshot() runs `aiuse --available --json` unless a snapshot is pinned (2026-10-20).
 # Off in tests so the suite never depends on, or spawns, the host's real aiuse;
 # test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.
