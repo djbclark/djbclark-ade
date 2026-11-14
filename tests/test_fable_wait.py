@@ -565,3 +565,27 @@ def test_disarm_expect_leaves_a_newer_wake(fw):
     assert r.returncode == 0 and "newer wake" in r.stdout
     assert json.loads((fw.state / "wake.json").read_text())["wake_id"] == wake["wake_id"]
     assert not [c for c in fw.calls("sched") if "uninstall" in c]
+
+
+def test_fire_delivers_to_the_successor_of_a_handed_off_lead(fw, tmp_path):
+    """An item filed by a lead that later handed off (ade-self-session) goes to the agent now holding the role."""
+    new, newer = "cccccccc-0000-4000-8000-00000000000c", "dddddddd-0000-4000-8000-00000000000d"
+    ledger = tmp_path / "self-session"
+    ledger.mkdir()
+    home = tmp_path / "paseo-home"
+    for pred, nxt in ((LEAD, new), (new, newer)):  # two hops; LEAD2 is untouched
+        (ledger / f"handoff-{pred}.json").write_text(json.dumps(
+            {"kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home.resolve()), "status": "archived",
+             "ack": {"agent_id": nxt}}))
+    fw.env.update(ADE_SELF_SESSION_STATE=str(ledger), PASEO_HOME=str(home))
+    a = fw.add("alpha", LEAD)
+    b = fw.add("beta", new)
+    c = fw.add("gamma", LEAD2)
+    due = datetime.fromisoformat(arm(fw)["fire_at"]).timestamp()
+    assert fw.run("fire", "--dry-run", now=due).returncode == 0
+    r = fw.run("fire", now=due)
+    assert r.returncode == 0, r.stderr
+    sends = [x for x in fw.calls("paseo") if x[0] == "send"]
+    by_lead = {s[s.index("--") + 1]: s[-1] for s in sends}
+    assert set(by_lead) == {newer, LEAD2}  # nothing is sent to the archived ids
+    assert a in by_lead[newer] and b in by_lead[newer] and c in by_lead[LEAD2]

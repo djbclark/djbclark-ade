@@ -66,6 +66,10 @@ change alone does not update the installed job:
 bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=$HOME/.local/state/ade/net-resume install config/launchd/com.djbclark.ade-net-resume.plist
 ```
 
+A `--lead` that is later replaced by an acknowledged self-handoff needs no reinstall (the job follows the completed
+`ade-self-session` chain, [self-session.md](self-session.md) C0a); one retired without a completed handoff logs one
+`skip-lead-retired` row and exits 0 on every run until the job is reinstalled with a live lead.
+
 This command activates the dry-run job; it does not enable resumes. See
 [net-resume.md](net-resume.md) for quota eligibility and ledger behavior.
 
@@ -416,7 +420,7 @@ The template passes `--all-local` (operator ruling 2026-11-13, "All local agents
 prompts are the same kind of tool request), because operator-started agents (a Bash prompt in a `bypassPermissions`
 session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`), agents labelled `ade.lead=<that lead's
 id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
-without `--all-local` only those qualify and the lead is excluded. Only the local daemon is asked (no `--host`, any
+without `--all-local` only those qualify and the lead is excluded. A `--lead` replaced by a completed self-handoff also covers the descendants of every lead in the chain and the `ade.lead=` workers of the nearest ones ([self-session.md](self-session.md) C0a). Only the local daemon is asked (no `--host`, any
 `PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode the job skips, and leaves for the operator, a request that looks like a question or plan
 approval** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
 `select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or
@@ -436,7 +440,7 @@ card/mode/turn MCP tools only. `EnterPlanMode` stays pending too (a mode change)
 provider is classified and the name is an identifier that does not look like a credential, because ACP titles are free text and can be command lines; never
 arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
 `hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
-tool prompt), so a skipped request can be told apart from a misclassified one. The check is a
+tool prompt), so a skipped request can be told apart from a misclassified one. The approval rows (`allow-attempt`, `allowed`, `probe-or-allow-unconfirmed`) of an agent qualified by an `ade.lead=` label also carry `via` (that label; added 2026-11-14, so a handed-off lead's lineage is visible); skip rows never do. The check is a
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,

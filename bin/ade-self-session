@@ -24,7 +24,7 @@ from ade_self_session import Service, SessionError
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/djbclark-ade/self-session')
+    p.add_argument('--state-dir', type=Path, default=Path(os.environ.get('ADE_SELF_SESSION_STATE') or Path.home() / '.local/state/djbclark-ade/self-session'))  # same default as ade_lead_succession.default_state_dir (this script is copied alone in tests: no import)
     p.add_argument('--paseo-home', type=Path, default=Path(os.environ.get('PASEO_HOME') or Path.home() / '.paseo'))
     sub = p.add_subparsers(dest='command', required=True)
     for command in ('handoff', 'compact'):
