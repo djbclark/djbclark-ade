@@ -67,8 +67,8 @@ bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=$HOME/.local/state/ade/ne
 ```
 
 A `--lead` that is later replaced by an acknowledged self-handoff needs no reinstall (the job follows the completed
-`ade-self-session` chain, [self-session.md](self-session.md) C0); one retired without a completed handoff makes each run log
-`skip-lead-retired` and exit 0 until the job is reinstalled with a live lead.
+`ade-self-session` chain, [self-session.md](self-session.md) C0); one retired without a completed handoff logs one
+`skip-lead-retired` row and exits 0 on every run until the job is reinstalled with a live lead.
 
 This command activates the dry-run job; it does not enable resumes. See
 [net-resume.md](net-resume.md) for quota eligibility and ledger behavior.
@@ -420,7 +420,7 @@ The template passes `--all-local` (operator ruling 2026-11-13, "All local agents
 prompts are the same kind of tool request), because operator-started agents (a Bash prompt in a `bypassPermissions`
 session) were logged `skip outside-scope` every 60 s. Descendants (`descendant`), agents labelled `ade.lead=<that lead's
 id>` (`lead-label`, checked by default, 2026-11-13) and explicit `--ade-label ade.KEY=VALUE` pairs keep their reasons;
-without `--all-local` only those qualify and the lead is excluded. A `--lead` replaced by a completed self-handoff also covers the successor's `ade.lead=` workers and the predecessor's descendants ([self-session.md](self-session.md) C0). Only the local daemon is asked (no `--host`, any
+without `--all-local` only those qualify and the lead is excluded. A `--lead` replaced by a completed self-handoff also covers the `ade.lead=` workers and descendants of every lead in the chain ([self-session.md](self-session.md) C0). Only the local daemon is asked (no `--host`, any
 `PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode the job skips, and leaves for the operator, a request that looks like a question or plan
 approval** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
 `select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or

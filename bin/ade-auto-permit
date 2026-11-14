@@ -165,14 +165,28 @@ def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=N
     log.flush()
 
 
-def lead_lineage(lead):
-    """The lead's current holder (`--lead` followed through completed self-handoffs) and every archived lead it replaced:
-    a handoff must not leave this job approving the dead lead's workers only (2026-11-14). A cyclic ledger resolves nothing."""
+LOGGED_LINEAGE = set()  # one audit row per change, not one per 2 s sweep
+
+
+def lead_lineage(lead, log):
+    """(current lead, every lead whose descendants and labelled workers qualify, ids to ask `ls --label` about).
+    `--lead` is followed through completed self-handoffs: a handoff must not leave this job approving the dead lead's workers
+    only (2026-11-14). A cyclic ledger narrows to `--lead` itself (never wider) and is audited."""
     try:
         current = succ.effective_lead(lead)
-        return current, {lead} | succ.lineage(current)
-    except succ.SuccessionError:
-        return lead, {lead}
+        leads = {lead} | succ.lineage(current)
+        queried = list(dict.fromkeys([lead, *succ.recent_lineage(current)]))
+    except succ.SuccessionError as exc:
+        key = ("cycle", lead)
+        if key not in LOGGED_LINEAGE:
+            LOGGED_LINEAGE.add(key)
+            log_event(log, "error", "succession-ledger-inconsistent", rule=str(exc)[:200])
+        return lead, {lead}, [lead]
+    key = (lead, current, len(leads))
+    if leads != {lead} and key not in LOGGED_LINEAGE:
+        LOGGED_LINEAGE.add(key)
+        log_event(log, "lineage", f"current={current} members={len(leads)}")
+    return current, leads, queried
 
 
 def descendant(agent, lead, cache):
@@ -199,7 +213,7 @@ def descendant(agent, lead, cache):
 
 
 def sweep(lead, labels, log, all_local=False):
-    current, leads = lead_lineage(lead)
+    current, leads, queried = lead_lineage(lead, log)
     requests = rows(call(["permit", "ls"]))
     eligible = {}
     # This host's daemon only (no --host): remote hosts' agents are never in this list. It also gives each
@@ -213,7 +227,7 @@ def sweep(lead, labels, log, all_local=False):
     # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
     # The lead's own `ade.lead=<lead>` label is always checked: a lead launches top-level
     # (env-stripped) workers that are not descendants, and they carry that label.
-    for reason, label in ([("lead-label", f"ade.lead={x}") for x in sorted(leads)]
+    for reason, label in ([("lead-label", f"ade.lead={x}") for x in queried]
                           + [("ade-label", v) for v in labels]):
         for row in rows(call(["ls", "-a", "-g", "--label", label])):
             if not isinstance(row, dict) or not identifier(row.get("id")):

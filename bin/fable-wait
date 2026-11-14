@@ -500,7 +500,8 @@ def current_lead(lead: str) -> str:
         return lead
     try:
         return succ.effective_lead(lead)
-    except succ.SuccessionError:
+    except succ.SuccessionError as e:
+        print(f"fable-wait: {e}; delivering to {lead} as filed", file=sys.stderr)
         return lead
 
 

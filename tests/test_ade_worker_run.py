@@ -1017,7 +1017,17 @@ def test_a_cyclic_ledger_adopts_nothing(env):
     handoff(PRED1, LEAD)
     handoff(LEAD, PRED1)
     r = launch(env)
-    assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr
+    assert r.returncode == 1 and "cyclic" in r.stderr and not placed(env)  # loud, never "no predecessors"
+
+
+def test_label_queries_stay_bounded_on_a_long_chain(env):
+    ids = [f"{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa" for i in range(1, 41)]
+    chain(*ids, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(ids[0], "wks_win1")  # the OLDEST predecessor's record is still honoured: registries are file reads
+    assert launch(env).returncode == 0
+    label_calls = [c["argv"] for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
+    assert 1 <= len(label_calls) <= 9  # the lead plus the 8 nearest predecessors, however long the chain
 
 
 def test_archive_window_covers_a_replaced_leads_window_and_clears_its_record(env):

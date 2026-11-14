@@ -120,17 +120,23 @@ A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived
 `ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
 (read-only; no paseo call, no second ledger): a link counts only for a completed handoff of this daemon home, so an unfinished
 (`awaiting-ack`, `acknowledged`, `archive-unknown`), foreign-home, corrupt, symlinked or oversized record is no link and the
-chain stops there. A cycle or a chain over 64 hops is an error and resolves nothing. Consumers of an old lead id:
+chain stops there. A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
+`ade-auto-permit` audits `succession-ledger-inconsistent` and narrows to `--lead` itself, `fable-wait` warns on stderr), never a silent
+fall-back to the old id. The default ledger directory is `ADE_SELF_SESSION_STATE`, else `~/.local/state/djbclark-ade/self-session`;
+`ade-self-session --state-dir` defaults to the same. The ledger never checks Paseo: a predecessor someone un-archives later still reads as
+replaced. Consumers of an old lead id:
 
 1. `bin/ade-worker-run`: the successor's lineage (itself plus every archived predecessor) owns the predecessors' window
    records (`<id>.windows.json`), their `ade.lead=<id>` labelled workers and their legacy window names; those are no longer
    "another lead's". A different live lead is still refused. `archive-window` also clears the archived window from the
-   predecessors' records.
+   predecessors' records. Registries and ownership use the whole lineage (file reads); `paseo ls --label` is asked about the lead and
+   its 8 nearest predecessors only, so a long chain stays cheap.
 2. `bin/ade-net-resume --lead <pinned id>` (the installed launchd job): follows the chain to the current lead, counts
    descendants of any lead in the lineage, and when the chain ends at an archived or unknown lead logs
-   `skip-lead-retired`, prints one line and exits 0 (was exit 2 every minute). A Paseo outage is still exit 2.
-3. `bin/ade-auto-permit --lead <pinned id>`: the sweep covers the current lead's `ade.lead=` workers and the descendants of
-   every lead in the lineage.
+   `skip-lead-retired` (one ledger row per pinned/current pair, not one per minute), prints one line and exits 0 (was exit 2 every
+   minute); a cyclic ledger and a Paseo outage are still exit 2.
+3. `bin/ade-auto-permit --lead <pinned id>`: the sweep covers the `ade.lead=` workers and the descendants of every lead in the
+   lineage (labels asked for the 9 nearest); the audit log records a `lineage` row when it differs from `--lead`.
 4. `bin/fable-wait fire`: an item filed by a lead that later handed off is sent to the current lead, never to the archived id.
 
 No re-install of a job and no hand edit of a registry is needed after a self-handoff. A job installed with a lead that was

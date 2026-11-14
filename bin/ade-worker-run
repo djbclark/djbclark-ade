@@ -140,16 +140,24 @@ def list_windows() -> list[dict]:
 def lineage(lead: str) -> set[str]:
     """`lead` plus the archived leads it replaced through completed self-handoffs (bin/ade_lead_succession.py). Their window
     records and `ade.lead` labels are this lead's: an acknowledged handoff must not strand the predecessor's windows and
-    workers (2026-11-14). An inconsistent ledger (a cycle) resolves nothing: only `lead` itself."""
+    workers (2026-11-14). A cyclic ledger is refused loudly, never read as "no predecessors"."""
     try:
         return succ.lineage(lead)
-    except succ.SuccessionError:
-        return {lead}
+    except succ.SuccessionError as e:
+        raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
 
 
-def lead_member_windows(leads: set[str]) -> set[str]:
+def label_queries(lead: str) -> list[str]:
+    """The ids worth one `paseo ls --label ade.lead=<id>` call: the lead and its nearest predecessors (bounded)."""
+    try:
+        return succ.recent_lineage(lead)
+    except succ.SuccessionError as e:
+        raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
+
+
+def lead_member_windows(leads: list[str]) -> set[str]:
     """Window ids that hold a live agent labelled ade.lead=<one of leads> (from its state file)."""
-    ids = [r["id"] for lead in sorted(leads) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
+    ids = [r["id"] for lead in leads for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
            if isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("status") != "closed"]
     return {st["workspaceId"] for st in map(state_file, ids) if st and isinstance(st.get("workspaceId"), str)}
 
@@ -221,7 +229,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     open a second one). A name match with no evidence either way is returned with owned=False: a launch may adopt it, an
     archive never does."""
     mine = lineage(lead)
-    members = lead_member_windows(mine).union(*(read_registry(registry_path(x)) for x in mine))
+    members = lead_member_windows(label_queries(lead)).union(*(read_registry(registry_path(x)) for x in mine))
     others = other_leads_windows(mine)
     owned: list[dict] = []
     hits: list[tuple[dict, str | None, Refused | None]] = []
@@ -248,9 +256,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; "
                       "use that --window-middle (or none), not a second window")
     if len(hits) > 1:  # a duplicate unclaimed name must not lock the lead out of its own window
-        mine = [h for h in hits if h[1] is not None or h[0].get("workspaceId") in members]
-        if len(mine) == 1:
-            hits = mine
+        own_hits = [h for h in hits if h[1] is not None or h[0].get("workspaceId") in members]
+        if len(own_hits) == 1:
+            hits = own_hits
     if len(hits) > 1:
         ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r, _, _ in hits)
         raise Refused(f"{len(hits)} windows match the lead's WORKERS window: {ids}; archive or rename the extras")
@@ -583,7 +591,7 @@ def live_agents() -> list[dict]:
 
 
 def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
-    labelled = {r["id"] for x in sorted(lineage(lead)) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or [])
+    labelled = {r["id"] for x in label_queries(lead) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or [])
                 if isinstance(r, dict) and isinstance(r.get("id"), str)}
     in_main = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", "ade.placement=main"]) or [])
                if isinstance(r, dict) and isinstance(r.get("id"), str)} & labelled

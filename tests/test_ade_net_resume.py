@@ -40,6 +40,7 @@ if a[:1] == ['ls']:
         assert a == ['ls', '-g', '--background', '--json']
     print(json.dumps([{'id': k, 'status': v['Status']} for k,v in d['agents'].items()]))
 elif a[:2] == ['agent', 'inspect']:
+    if a[2] in d.get('inspect_fail', []): sys.exit(1)
     print(json.dumps(d['agents'][a[2]]))
 elif a[:1] == ['logs']:
     if '--json' in a:
@@ -1112,8 +1113,10 @@ def test_retired_lead_without_a_live_successor_skips_with_exit_zero(handed_off, 
     rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
     assert [r["action"] for r in rows] == ["skip-lead-retired"] and rows[0]["pinned"] == LEAD
     assert "nothing to resume" in capsys.readouterr().err
+    assert scan() == 0  # a new process (launchd every minute): the ledger already says so, no second row
     assert scan() == 0
-    assert len((state / "events.jsonl").read_text().splitlines()) == 2  # a second scan of this process adds a row only per Scanner
+    assert len((state / "events.jsonl").read_text().splitlines()) == 1
+    assert "nothing to resume" not in capsys.readouterr().err
 
 
 def test_a_paseo_outage_is_still_an_error_not_a_skip(handed_off):
@@ -1125,8 +1128,28 @@ def test_a_paseo_outage_is_still_an_error_not_a_skip(handed_off):
     assert not sent.exists()
 
 
-def test_cyclic_ledger_resolves_nothing_and_skips(handed_off):
+def test_a_new_pinned_or_current_lead_logs_a_new_skip_row(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    assert scan() == 0
+    link(ledger, home, LEAD, NEW_LEAD)
+    data["agents"][NEW_LEAD]["Archived"] = True  # now the chain ends elsewhere: a different (pinned, lead) pair
+    assert scan() == 0
+    rows = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [(r["pinned"], r["lead"]) for r in rows] == [(LEAD, LEAD), (LEAD, NEW_LEAD)]
+
+
+def test_cyclic_ledger_is_an_error_never_a_quiet_retired_skip(handed_off):
     data, scan, sent, state, ledger, home = handed_off
     link(ledger, home, LEAD, NEW_LEAD)
     link(ledger, home, NEW_LEAD, LEAD)
-    assert scan() == 0 and not sent.exists()
+    with pytest.raises(M["ScanError"], match="inconsistent"):
+        scan()
+    assert not sent.exists() and not (state / "events.jsonl").read_text()
+
+
+def test_unreadable_but_listed_lead_is_an_error_not_a_skip(handed_off):
+    data, scan, sent, state, ledger, home = handed_off
+    data["inspect_fail"] = [LEAD]  # `ls -a` still lists LEAD: a transient inspect failure, not a retired lead
+    with pytest.raises(M["ScanError"], match="unreadable"):
+        scan()
+    assert not sent.exists() and not (state / "events.jsonl").read_text()

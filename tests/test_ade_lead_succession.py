@@ -17,8 +17,10 @@ STRANGER = "99999999-0000-4000-8000-000000000009"
 def write_link(state: Path, home_dir: Path, pred: str, nxt: str, status="archived", ack="ok", **over):
     state.mkdir(parents=True, exist_ok=True)
     rec = {"schema_version": 1, "kind": "handoff", "predecessor": pred, "successor": nxt, "home": str(home_dir.resolve()),
-           "status": status, "ack": {"agent_id": nxt} if ack == "ok" else ack}
+           "status": status, "ack": ack}
     rec.update(over)
+    if ack == "ok":  # the ack names the successor as finally recorded, so an overridden successor is tested on its own
+        rec["ack"] = {"agent_id": rec["successor"]}
     (state / f"handoff-{pred}.json").write_text(json.dumps(rec))
 
 
@@ -53,7 +55,7 @@ def test_unreplaced_lead_is_its_own_lineage(ledger):
 @pytest.mark.parametrize("bad", [
     {"status": "awaiting-ack"}, {"status": "acknowledged"}, {"status": "archive-unknown"}, {"status": "creation-unknown"},
     {"ack": None}, {"ack": {"agent_id": STRANGER}}, {"kind": "compact"}, {"predecessor": STRANGER},
-    {"home": "/somewhere/else"}, {"successor": "not-a-uuid"}, {"successor": A}, {"successor": None},
+    {"home": "/somewhere/else"}, {"successor": "not-a-uuid"}, {"successor": B}, {"successor": None},
 ])
 def test_incomplete_or_foreign_record_is_no_link(ledger, bad):
     state, home = ledger
@@ -62,6 +64,37 @@ def test_incomplete_or_foreign_record_is_no_link(ledger, bad):
     assert succ.chain(A, state, home) == [A, B]
     assert succ.effective_lead(A, state, home) == B
     assert succ.predecessors(C, state, home) == set()
+
+
+def test_the_successor_of_a_record_is_checked_on_its_own(ledger):
+    """Each bad successor carries a matching ack, so only the successor check itself can reject it (mutation guard)."""
+    state, home = ledger
+    for bad in ("not-a-uuid", B, None, 7, "AAAA"):  # B is the predecessor of its own record: a self-link
+        write_link(state, home, B, C, successor=bad)
+        assert succ.successor_of(B, state, home) is None, bad
+
+
+def test_recent_lineage_is_bounded_but_lineage_is_whole(ledger):
+    state, home = ledger
+    ids = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(1, 31)]
+    for pred, nxt in zip(ids, ids[1:]):
+        write_link(state, home, pred, nxt)
+    head = ids[-1]
+    assert len(succ.lineage(head, state, home)) == 30
+    recent = succ.recent_lineage(head, state, home)
+    assert recent == [head, *reversed(ids[-1 - succ.RECENT_PREDECESSORS:-1])]  # nearest first, bounded
+    assert len(recent) == succ.RECENT_PREDECESSORS + 1
+    assert succ.effective_lead(ids[0], state, home) == head  # no hop cap on the forward walk
+
+
+def test_a_fifo_or_nested_json_record_never_hangs_or_raises(ledger):
+    state, home = ledger
+    write_link(state, home, A, B)
+    state.joinpath(f"handoff-{B}.json").write_text("[" * 200000)  # RecursionError in a naive json.loads
+    assert succ.effective_lead(A, state, home) == B
+    (state / f"handoff-{B}.json").unlink()
+    os.mkfifo(state / f"handoff-{B}.json")
+    assert succ.effective_lead(A, state, home) == B  # O_NONBLOCK: a FIFO is neither opened blocking nor followed
 
 
 def test_corrupt_oversized_symlinked_and_misnamed_records_are_no_link(ledger, tmp_path):
