@@ -469,6 +469,30 @@ def test_an_unclosed_fence_is_plain_text_even_with_a_peer_label_before_it(tmp_pa
     assert f"report: {own}" in foot and str(peer) not in foot
 
 
+def test_a_fenced_own_report_path_beats_a_peers_labelled_report_in_prose(tmp_path):
+    """Adversary r2 B1 (Q1): `Worker report:` outside the fence is a peer's labelled line, the fenced `Report path:` is the own one."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Worker report: {peer}\n```\nReport path: {own}\n```\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_quoted_own_report_path_beats_a_peers_labelled_report_in_prose(tmp_path):
+    """Adversary r2 B1 (Q2): was the hook's derived path on master, the PEER's at 6660ae84 and e21264d7."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"> Report path: {own}\nWorker report: {peer}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_fence_that_closes_after_an_unclosed_opener_is_still_removed(tmp_path):
+    """Adversary r2 B2 (Q7): the lone ``` never closes (plain text); the ~~~ block after it is a pasted peer brief."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Report path: {own}\n```\nnote\n~~~\nReport path: {peer}\n~~~\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
 def test_a_long_prompt_of_unclosed_openers_is_fast(tmp_path):
     import time
     own = tmp_path / "adv-report.md"
