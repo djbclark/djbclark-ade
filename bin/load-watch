@@ -28,14 +28,14 @@
                                             `ade-sched migrate-wrapper launchd/com.djbclark.load-watch.plist --ade DIR`; install/uninstall refuse it (exit 1) until then.
                                             `guard reset` is macOS only (exit 69 without launchctl); the sampler never needs it.
 
-Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
+Why (2026-10-18): agents keep starting heavy builds and tests on this Mac (32 GB, 10-core: 8P+2E; it was a 16 GB, 8-core Mac until 2026-11) (load 24-41 that
 morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, site-djbclark's `heavy-shim` and the Claude test hook throttle
 what goes through them; nothing noticed what did not, or told the agent that started it. Plektra and
 stayturgid-agent already build only on CI (free GitHub runners since 2026-10-18, `ci/base` + `ci/run/**`; `forgejo-ci` skill); this finds the next
 candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
-the 1-minute load per core is at least LW_LOAD_PER_CORE (4.0; was 2.0 until 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this 16 GB, 8-core Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
+the 1-minute load per core is at least LW_LOAD_PER_CORE (4.0; was 2.0 until 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
 continuously hot samples it attributes the mean CPU of the samples in that window to Paseo agents (`paseo ls -g
 --background --json`, slim-down E5, 2026-11-06; it carries no pid and no session id, so the join is by working directory: a process
 belongs to the one agent whose cwd equals its own cwd or its nearest ancestor's (`/proc/PID/cwd` on Linux, `lsof` on
@@ -82,7 +82,7 @@ therefore reads macOS `vm_stat` Compressions + Decompressions once, takes the de
 sample's counter (kept in state.json as churn_prev / churn_prev_t; no extra sleep, so the first sample, a
 counter that went backwards, a gap over MAX_GAP_S and a missing `vm_stat` give no reading) and keeps
 `churn_since` while pages/s stay above the ALERT line LW_CHURN_ALERT_PAGES_S (default 50000; deliberately not the admit limit
-LW_MAX_COMPRESSOR_S, 20000, so standing memory pressure the gate already handles does not page hourly). Held for LW_CHURN_SUSTAIN_S (180)
+LW_MAX_COMPRESSOR_S, 30000, so standing memory pressure the gate already handles does not page hourly). Held for LW_CHURN_SUSTAIN_S (180)
 seconds it sends one line, with the top 3 commands by cores, to the watcher at most hourly (cooldown
 `churn-watcher`, WATCHER_NOCPU_S) and to Hermes every LW_COOLDOWN_H (cooldown `churn`); `status` lists both.
 When a top command matches Grok|Chrome|WindowServer the line adds the standing exception (djbclark, 2026-10-23);
@@ -101,7 +101,7 @@ covers every repo under that directory. Older 3-column rows (repo, CI command, d
 Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate a launcher calls before it
 starts an agent (`--load-wait`, `--no-load-gate` on the transitional acp-dispatch shim). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
-1.5; `bg`'s own base is 2.5 since 2026-11-01 and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
+2.0, was 1.5 until 2026-11-13; `bg`'s own base is 2.5 since 2026-11-01 and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
@@ -114,27 +114,29 @@ does not register again; an unusable deadline tool is one stderr warning and the
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
 file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
-term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 300, operator 2026-11-01; 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
-exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01) AND corroborates thrash: load above
+term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 1000 since 2026-11-13, operator, for the 32 GB Mac; 300 from 2026-11-01, 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
+exceeds --max-mem-churn (default 30000 since 2026-11-13, env LW_MAX_COMPRESSOR_S; 20000 from 2026-11-01, 60000 before) AND corroborates thrash: load above
 LW_CHURN_THRASH_PER_CORE (1.5) per core or pageins over their limit, or churn above LW_MAX_COMPRESSOR_HARD_S (60000) on its own
 (djbclark 2026-11-02: standing churn with idle CPU had refused nearly every launch for hours); pageins exceed --max-pageins per
-second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
-with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
+second (default 4000 since 2026-11-13, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work
+can trip it with memory to spare; 4000/s is still only ~64 MB/s at 16 KB pages, measured p90 1280/s, max 1916/s on 2026-11-13) or,
+the old 1000/s limit (env LW_MAX_PAGEINS_CORROBORATED_S) once pageins are corroborated by memory pressure: free memory below the
+floor or compressor churn above the admit limit (swap-ins would be the better corroboration; they are not measured yet); or, ONLY when the caller passes --max-agents (a dispatcher that STARTS
 agents does; `bg` never does: a test run starts no agent, and gating it would starve the very sessions the cap counts),
 the live Paseo agents machine-wide (`paseo ls -g --background --json`, status `running` or `initializing`; retired
-Wave 6 shim process names are never counted) number N or more (bare --max-agents = 14, env LW_MAX_AGENTS,
+Wave 6 shim process names are never counted) number N or more (bare --max-agents = 20, was 14 until 2026-11-13, env LW_MAX_AGENTS,
 0 = no cap: THE knob to tune how many agent slices may START); an admission under the cap is recorded as a reservation
 (agent-reservations.json, flock) counted with the live ones until `load-watch release ID` (the dispatcher does it at
-spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all pass at 13 of 14 (--no-reserve: records none but
+spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all pass at 19 of 20 (--no-reserve: records none but
 still counts the held ones; LW_RESERVE_S=0: off). A vm_stat or `paseo ls` that exists but fails, times out or prints
 nonsense refuses too (`memory_unreadable`, `agents_unreadable`): that is likeliest when the machine is starving. Only an
 absent tool (Linux without vm_stat, no /proc, no `paseo`) leaves its gate open,
 listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
-load 35-70 on this 8-core, 16 GB Mac was memory starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s,
+load 35-70 on the old 8-core, 16 GB Mac (now 32 GB, 10-core: 8P+2E) was memory starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s,
 ~1760 pageins/s, kernel_task 57% and sys 25-39% of CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3); the
 4.0 calm boost let a slice start in every brief dip and each start pushed memory back over. The 2026-10-23 calibration of
 the churn line (215 ten-second samples: calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s) set
-60000; 2026-11-01 showed starvation at 12k, so it is 20000. Load and swap alone did not separate that spike from a calm hour.
+60000; 2026-11-01 showed starvation at 12k, so it was 20000 (30000 since 2026-11-13). Load and swap alone did not separate that spike from a calm hour.
 Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never kills) when one Google Chrome process
 (not "Chrome for Testing") has used LW_CHROME_CORES (0.9) or more for LW_CHROME_SUSTAIN_S (300), once an hour per pid, with its kind, the
 URL on its command line when it has one, and role-aware Task Manager (Shift+Esc) advice: match the pid and
@@ -143,7 +145,7 @@ mds probe (2026-11-01, ported onto Wave 6 Paseo counting 2026-11-10 from #231): 
 LW_MDS_CORES (0.5) or more over consecutive samples spanning LW_MDS_SUSTAIN_S (120; a gap over LW_MDS_MAX_GAP_S, 90 s,
 restarts the span), one log line per LW_MDS_COOLDOWN_S (1800) names mds, Finder and the six busiest other processes by
 program name only. No ping, no signal, no root required; an optional installed root helper may append XPC clients.
-Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default = the compressor limit, 20000; 25000 until 2026-11-01)
+Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default = the compressor limit, 30000 since 2026-11-13; 20000 from 2026-11-01 to 2026-11-13, 25000 before)
 the per-core limit is --boost-per-core (default 4.0, was 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
 passes its base; at higher churn, or when churn cannot be read, the base limit holds. Hysteresis (2026-11-01): the boost
 applies only after the machine has stayed calm (churn at most the boost line, free memory above the floor, pageins under
@@ -1195,7 +1197,7 @@ def cmd_guard(a):
 
 
 CHURN_SUSTAIN_S = float(os.environ.get("LW_CHURN_SUSTAIN_S", "180"))  # seconds of churn above the alert threshold
-# The ALERT threshold, deliberately NOT the admit gate's limit (LW_MAX_COMPRESSOR_S, 20000 since 2026-11-01): the gate should stay
+# The ALERT threshold, deliberately NOT the admit gate's limit (LW_MAX_COMPRESSOR_S, 30000 since 2026-11-13): the gate should stay
 # strict, but with the alert sharing that number it paged the watcher every hour for standing memory pressure (2026-11-02:
 # 29-38k pages/s at load ~0.7/core, CPU half idle, no runaway: none was an incident). 50000 is the old 60k limit's range.
 CHURN_ALERT_PAGES_S = float(os.environ.get("LW_CHURN_ALERT_PAGES_S", "50000"))
@@ -1808,7 +1810,7 @@ def cmd_ci_only(a):
     return 0
 
 
-ADMIT_PER_CORE = 1.5  # admit's own default base; `bg` passes its own (2.5 since 2026-11-01). LOAD_PER_CORE (4.0) is only the blame step
+ADMIT_PER_CORE = 2.0  # admit's own default base (1.5 until 2026-11-13); `bg` passes its own (2.5 since 2026-11-01). LOAD_PER_CORE (4.0) is only the blame step
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
 
 
@@ -1825,28 +1827,35 @@ def _env_float(name, default, lo=0.0):
 # spike was load 42-74 with kern.memorystatus_level 37% and swap 86-92%, the same swap a calm hour shows).
 # What it did show was compressor churn. Calibrated 2026-10-23 from 215 ten-second samples (10:20-10:52):
 # load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. The limit was 60000.
-# 2026-11-01 (load watcher d8891c91, measured): a sustained load of 35-70 on this 8-core, 16 GB Mac was memory
+# 2026-11-01 (load watcher d8891c91, measured): a sustained load of 35-70 on the old 8-core, 16 GB Mac (now 32 GB, 10-core: 8P+2E) was memory
 # starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s, ~1760 pageins/s, kernel_task 57% and sys
 # 25-39% of the CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3). The 4.0 calm boost let a slice
 # start in every brief dip and each start pushed memory back over: an oscillation. So admit now fails toward
-# WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 is the line), a pageins
+# WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 was the line then, 30000 since 2026-11-13), a pageins
 # limit and a cap on live Paseo agents, all env-tunable; a reading that cannot be taken is said so, never guessed.
-ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 20000.0, 1.0)
+# 2026-11-13 retune for the 32 GB, 10-core (8P+2E) Mac (operator-approved; measured that day: churn p50 7.3k, p90 13k, max 25k pages/s;
+# pageins p50 689, p90 1280, max 1916/s; swap-ins ~0/s): churn limit 20000 -> 30000 (hard line 60000 kept), pageins 1000 -> 4000/s
+# (the 1000 limit remains only when corroborated), free floor 300 -> 1000 MB, admit base 1.5 -> 2.0 per core, agent cap 14 -> 20.
+ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 30000.0, 1.0)
 # Churn over ADMIT_CHURN_PAGES_S refuses only with corroboration (djbclark 2026-11-02, after standing 30-65k churn with idle CPU
 # refused nearly every launch for hours): load per core above ADMIT_CHURN_THRASH_PER_CORE or pageins over their limit; churn above
 # ADMIT_CHURN_HARD_PAGES_S (the pre-2026-11-01 limit) refuses on its own.
 ADMIT_CHURN_THRASH_PER_CORE = _env_float("LW_CHURN_THRASH_PER_CORE", 1.5, 0.0)
 ADMIT_CHURN_HARD_PAGES_S = _env_float("LW_MAX_COMPRESSOR_HARD_S", 60000.0, 1.0)
-ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 300.0)  # djbclark 2026-11-01, with the available-memory measure (PR 230)
-ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 1000.0, 1.0)
-ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 14, 0))  # 0 = no cap
+ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 1000.0)  # 300 from djbclark 2026-11-01 (available-memory measure, PR 230); 1000 on 2026-11-13 for 32 GB
+ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 4000.0, 1.0)  # was 1000 until 2026-11-13: refuses on its own
+# The old 1000/s line still refuses, but only corroborated by memory pressure: free memory below the floor or compressor churn above the
+# admit limit. Swap-ins are the proper corroboration (page-ins with no swap-ins are mostly file reads); they are not measured yet (a later
+# change adds that gate), so the two readings we have stand in. admit_refusals uses min(this, the --max-pageins limit).
+ADMIT_PAGEINS_CORROBORATED_S = _env_float("LW_MAX_PAGEINS_CORROBORATED_S", 1000.0, 1.0)
+ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 20, 0))  # 0 = no cap
 ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' deltas are the per-second rates
 # Calm boost (operator 2026-10-25, "make the change" after a load of 12-14 with no UI lag): while the compressor is
 # calm the per-core limit rises from ADMIT_PER_CORE to ADMIT_BOOST_PER_CORE. The signal is churn, not swap: swap sat
 # at 86-92% in calm hours too (above), so a swap condition would almost never boost. A churn that cannot be read
 # (no vm_stat) never boosts.
 # 2026-11-01 (operator): the boost limit rose from 2.0 to 4.0 per core. A load of 3.5 per core "is actually not too bad for
-# this system"; the real constraint on this 16 GB, 8-core Mac is memory pressure (compressor churn, swap) and process churn
+# this system"; the real constraint on the then 16 GB, 8-core Mac (now 32 GB, 10-core: 8P+2E) is memory pressure (compressor churn, swap) and process churn
 # (2026-10-31: five parallel pytest runs forked thousands of short git processes, load 222, swap 7.9/9.2 GB).
 # Same day, hysteresis: the boost applies only after the machine has been calm (churn at most the boost line, free
 # memory above the floor, pageins under their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot
@@ -1855,7 +1864,7 @@ ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' 
 ADMIT_BOOST_PER_CORE = 4.0
 ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
-# Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 13 of 14 live agents and
+# Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 19 of 20 live agents and
 # spend 2 s sampling memory would both be admitted before either launches. An admission under the cap is therefore
 # recorded (agent-reservations.json under an flock, `{"r": [{"id", "until"}]}`) and counted with the live Paseo
 # agents until it is released or expires. The dispatcher releases it (`load-watch release ID`) the moment its agent
@@ -2240,8 +2249,12 @@ def admit_refusals(per_core, limit, m, lim):
             out.append("compressor")
     if m["free_mb"] is not None and m["free_mb"] < lim["min_free_mb"]:
         out.append("free_mem")
-    if m["pageins_s"] is not None and m["pageins_s"] > lim["max_pageins"]:
-        out.append("pageins")
+    # Pageins: over the admit limit refuses alone; over the lower corroborated line (1000/s) only with memory pressure (2026-11-13):
+    # free memory below the floor or churn above its admit limit.
+    if m["pageins_s"] is not None:
+        pressure = ("free_mem" in out) or (m["churn"] is not None and m["churn"] > lim["churn"])
+        if m["pageins_s"] > lim["max_pageins"] or (pressure and m["pageins_s"] > min(lim.get("pageins_corroborated", ADMIT_PAGEINS_CORROBORATED_S), lim["max_pageins"])):
+            out.append("pageins")
     if lim["max_agents"] and m["agents"] is not None and m["agents"] + m.get("reserved", 0) >= lim["max_agents"]:
         out.append("agents")
     if "memory" in m["failed"]:
@@ -2268,6 +2281,8 @@ def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
     if m["pageins_s"] is not None:
         rec["pageins_s"] = int(m["pageins_s"])
         rec["max_pageins_s"] = lim["max_pageins"]
+        if "pageins" in refused and m["pageins_s"] <= lim["max_pageins"]:  # the corroborated line decided: report it, not the admit limit
+            rec["max_pageins_s"] = min(lim.get("pageins_corroborated", ADMIT_PAGEINS_CORROBORATED_S), lim["max_pageins"])
     if m["agents"] is not None:
         rec["agents"] = m["agents"]
         if m.get("reserved"):
@@ -2525,7 +2540,7 @@ def main(supervise=False):
                    help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
     p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
                    help=f"and compressor churn (pages compressed + decompressed per second, sampled over ~{ADMIT_MEM_WINDOW_S:g} s) "
-                        f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; was 60000 until 2026-11-01)")
+                        f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; 20000 from 2026-11-01 to 2026-11-13, 60000 before)")
     p.add_argument("--min-free-mb", type=float, default=ADMIT_MIN_FREE_MB, metavar="N",
                    help=f"and available memory (free + file-backed + purgeable pages on macOS, MemAvailable on Linux) is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
