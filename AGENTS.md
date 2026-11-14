@@ -185,6 +185,12 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
 - Facts carry snapshot dates; probes beat memory; update the doc when you verify
   (standing order 2). Ops-suite conventions live in `~/CLAUDE.md` / site-private.
 
+## ELI5 and plain-language explanations (operator, 2026-11-14)
+
+When asked for an ELI5 or a plain-language explanation, load [skills/eli5/SKILL.md](skills/eli5/SKILL.md) and follow it:
+STE-based rules (not full STE), short active sentences, one everyday analogy with its limits, then the real terms,
+checked against the real system. Standing order 5 still applies: label headings and items (`A.`, `A1`).
+
 <!-- graft:start -->
 ## Graft — repo context graph
 
