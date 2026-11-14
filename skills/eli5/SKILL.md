@@ -24,11 +24,11 @@ Our limits are stricter on purpose.
 
 ## Writing rules
 
-1. Keep every sentence to 20 words or fewer. This is a house rule for all text, not an STE limit.
+1. Keep every sentence to 20 words or fewer. This is a house rule for all text in an ELI5 answer, not for other agent output, and not an STE limit.
 2. Give one idea in each sentence.
 3. Use the active voice. Name the actor: "The server sends the page", not "The page is sent".
 4. Use a direct verb. Write "start", not "perform an initialization of".
-5. Use one word for one thing. Never swap in a synonym for variety (STE 1.11, Google style guide).
+5. Use one word for one thing. Never swap in a synonym for variety (STE 1.11 for technical nouns, and the Google style guide).
 6. Put no more than three nouns in a row. Expand dense compounds (STE 2.1).
 7. Write literally. Use "because" and "although", not "since" and "while". Avoid idioms, slang and jokes.
 8. Keep paragraphs to 3 or 4 sentences, on one topic. This is stricter than the STE limit of six.
@@ -59,7 +59,7 @@ For a small question, use one paragraph: core idea, analogy, and where it breaks
 ## Reply format for the operator
 
 Standing order 5 still applies. When the answer has headings or lists, label them `A.`, `A1`, `A2`, `B.`, and so
-on. The five parts above become headings `A.` to `D.`.
+on. The first four parts above become headings `A.` to `D.`. The optional last line has no heading.
 
 ## Sources (fetched 2026-11-14)
 
