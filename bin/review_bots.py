@@ -64,10 +64,10 @@ VERDICT = (
     r"(?:fixed|won['’]?t[ -]?fix|wontfix|not an? (?:bug|issue)|by design|deferred)"
 )
 # the first non-empty line of an owner reply in a thread: a verdict word, then a reason of at least three characters
-THREAD_TRIAGE_RE = re.compile(rf"^\s*{VERDICT}\b[\s:.,;()\-]*(\S.{{2,}})$", re.IGNORECASE)
+THREAD_TRIAGE_RE = re.compile(rf"^\s*{VERDICT}\b(?![?!])[\s:.,;()\-]*([\w`'\"].{{2,}})$", re.IGNORECASE)
 # a line of an owner issue comment: `triage 123456: fixed in abc1234`, `triage all: wontfix <reason>`
 TOP_TRIAGE_RE = re.compile(
-    rf"^\s*triage\s+(#?\d+|all)\s*:\s*{VERDICT}\b[\s:.,;()\-]*(\S.{{2,}})$", re.IGNORECASE | re.MULTILINE
+    rf"^\s*triage\s+(#?\d+|all)\s*:\s*{VERDICT}\b(?![?!])[\s:.,;()\-]*([\w`'\"].{{2,}})$", re.IGNORECASE | re.MULTILINE
 )
 
 _FORBIDDEN_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -95,6 +95,7 @@ class Bot:
     issue_comment_patterns: tuple[re.Pattern[str], ...]
     check_names: tuple[str, ...]
     check_apps: tuple[str, ...]
+    status_contexts: tuple[str, ...]
     source: str
 
 
@@ -106,7 +107,8 @@ class Config:
 
 BOT_REQUIRED = frozenset({"id", "name", "rest_login", "graphql_login"})
 BOT_OPTIONAL = frozenset({
-    "thread_markers", "review_body_patterns", "issue_comment_patterns", "check_names", "check_apps", "source",
+    "thread_markers", "review_body_patterns", "issue_comment_patterns", "check_names", "check_apps", "status_contexts",
+    "source",
 })
 
 
@@ -174,6 +176,7 @@ def _parse_bot(raw: Any, where: str, strict: bool = False) -> Bot:
         issue_comment_patterns=_patterns(t.get("issue_comment_patterns", []), f"{where}.issue_comment_patterns", strict),
         check_names=_strs(t.get("check_names", []), f"{where}.check_names"),
         check_apps=_strs(t.get("check_apps", []), f"{where}.check_apps"),
+        status_contexts=_strs(t.get("status_contexts", []), f"{where}.status_contexts"),
         source=_str(t["source"], f"{where}.source") if "source" in t else "",
     )
 
@@ -516,6 +519,17 @@ def fetch_check_runs(gh: GhRunner, repo: str, head: str) -> list[dict[str, Any]]
     return runs
 
 
+def fetch_statuses(gh: GhRunner, repo: str, head: str) -> list[dict[str, Any]]:
+    """The commit statuses (not check runs) on the exact head: `GET commits/<head>/status`, read-only."""
+    out: list[dict[str, Any]] = []
+    for doc in parse_pages(gh("api", "--paginate", f"repos/{repo}/commits/{head}/status?per_page=100")):
+        part = doc.get("statuses") if isinstance(doc, dict) else None
+        if not isinstance(part, list):
+            raise GhError(f"commit status {head[:12]}: unexpected page shape")
+        out.extend(r for r in part if isinstance(r, dict))
+    return out
+
+
 # ---------------------------------------------------------------- findings
 
 def _thread_findings(threads: list[dict[str, Any]], bots: tuple[Bot, ...], repo: str, pr: int) -> list[dict[str, Any]]:
@@ -573,7 +587,10 @@ def _top_findings(
     kind: str, nodes: list[dict[str, Any]], bots: tuple[Bot, ...], issue_comments: list[dict[str, Any]],
     repo: str, pr: int,
 ) -> list[dict[str, Any]]:
-    """The LATEST top-level item of each bot (review body or issue comment); a finding when it matches a pattern."""
+    """Top-level findings. Reviews: EVERY non-pending review of a bot that matches a pattern is its own finding (a later
+    `Actionable comments posted: 0` review does not erase an earlier body-only, outside-the-diff finding); each is
+    triaged by its own id or `triage all`. Issue comments: only the bot's LATEST one counts (a status comment is edited
+    or re-posted in place)."""
     found: list[dict[str, Any]] = []
     for b in bots:
         pats = b.review_body_patterns if kind == "review" else b.issue_comment_patterns
@@ -585,56 +602,70 @@ def _top_findings(
         ]
         if not mine:
             continue
-        latest = max(mine, key=lambda n: _edited(n, f"PR#{pr} {kind}"))
-        body = (latest.get("body") or "")[:BODY_SCAN_MAX]
-        if not any(p.search(body) for p in pats):
-            continue
-        at = _edited(latest, f"PR#{pr} {kind}")
-        cid = latest.get("databaseId")
-        triaged = False
-        for c in issue_comments:
-            if not owner_triage_author(c) or _ts(c.get("createdAt"), f"PR#{pr} comment") <= at:
+        picked = mine if kind == "review" else [max(mine, key=lambda n: _edited(n, f"PR#{pr} {kind}"))]
+        for item in picked:
+            body = (item.get("body") or "")[:BODY_SCAN_MAX]
+            if not any(p.search(body) for p in pats):
                 continue
-            refs = _top_triage_refs(c.get("body") or "")
-            if "all" in refs or str(cid) in refs:
-                triaged = True
-                break
-        found.append({
-            "bot": b.id, "kind": kind, "id": cid, "status": "triaged" if triaged else "untriaged",
-            "path": None, "line": None, "commit": (latest.get("commit") or {}).get("oid"), "outdated": False,
-            "title": title_of(latest.get("body") or ""),
-            "url": latest.get("url") or f"https://github.com/{repo}/pull/{pr}",
-        })
+            at = _edited(item, f"PR#{pr} {kind}")
+            cid = item.get("databaseId")
+            triaged = False
+            for c in issue_comments:
+                if not owner_triage_author(c) or _ts(c.get("createdAt"), f"PR#{pr} comment") <= at:
+                    continue
+                refs = _top_triage_refs(c.get("body") or "")
+                if "all" in refs or str(cid) in refs:
+                    triaged = True
+                    break
+            found.append({
+                "bot": b.id, "kind": kind, "id": cid, "status": "triaged" if triaged else "untriaged",
+                "path": None, "line": None, "commit": (item.get("commit") or {}).get("oid"), "outdated": False,
+                "title": title_of(item.get("body") or ""),
+                "url": item.get("url") or f"https://github.com/{repo}/pull/{pr}",
+            })
     return found
 
 
+_RANK = {"completed": 0, "not_started": 1, "stalled": 2, "pending": 3}
+
+
+def _running_state(started: Any, label: str, max_minutes: int, now: dt.datetime) -> str:
+    try:
+        age = now - _ts(started, label)
+    except GhError:
+        return "pending"       # a running check we cannot date: block rather than guess
+    return "pending" if age < dt.timedelta(minutes=max_minutes) else "stalled"
+
+
 def bot_check_states(
-    runs: list[dict[str, Any]], bots: tuple[Bot, ...], max_minutes: int, now: dt.datetime
+    runs: list[dict[str, Any]], bots: tuple[Bot, ...], max_minutes: int, now: dt.datetime,
+    statuses: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> dict[str, str]:
-    """Per bot: not_started | pending | stalled | completed, from check runs on the exact head."""
+    """Per bot: not_started | pending | stalled | completed, from check runs and commit statuses on the exact head."""
     states: dict[str, str] = {}
     for b in bots:
         mine = [
             r for r in runs
             if r.get("name") in b.check_names or (r.get("app") or {}).get("slug") in b.check_apps
         ]
-        if not mine:
+        mine_st = [s for s in statuses if b.status_contexts and s.get("context") in b.status_contexts]
+        if not mine and not mine_st:
             states[b.id] = "not_started"
             continue
-        state = "completed"
+        parts: list[str] = []
         for r in mine:
             if r.get("status") == "completed":
-                continue
-            try:
-                age = now - _ts(r.get("started_at") or r.get("created_at"), f"check run {r.get('name')}")
-            except GhError:
-                state = "pending"      # a running check we cannot date: block rather than guess
-                break
-            if age < dt.timedelta(minutes=max_minutes):
-                state = "pending"
-                break
-            state = "stalled"
-        states[b.id] = state
+                parts.append("completed")
+            else:
+                parts.append(_running_state(
+                    r.get("started_at") or r.get("created_at"), f"check run {r.get('name')}", max_minutes, now))
+        for st in mine_st:
+            if st.get("state") != "pending":
+                parts.append("completed")
+            else:
+                parts.append(_running_state(
+                    st.get("updated_at") or st.get("created_at"), f"status {st.get('context')}", max_minutes, now))
+        states[b.id] = max(parts, key=lambda x: _RANK[x])
     return states
 
 
@@ -664,10 +695,9 @@ def evaluate(
         findings += _top_findings("issue_comment", comments, bots, comments, repo, pr)
     checks: dict[str, str] = {}
     if bots and meta["state"] == "OPEN":
-        checks = bot_check_states(
-            fetch_check_runs(gh, repo, meta["head"]), bots, cfg.pending_max_minutes,
-            now or dt.datetime.now(dt.timezone.utc),
-        )
+        runs = fetch_check_runs(gh, repo, meta["head"])
+        stat = fetch_statuses(gh, repo, meta["head"]) if any(b.status_contexts for b in bots) else []
+        checks = bot_check_states(runs, bots, cfg.pending_max_minutes, now or dt.datetime.now(dt.timezone.utc), stat)
     untriaged = [f for f in findings if f["status"] == "untriaged"]
     pending = sorted(b for b, s in checks.items() if s == "pending")
     state = "untriaged" if untriaged else ("pending" if pending else "clear")

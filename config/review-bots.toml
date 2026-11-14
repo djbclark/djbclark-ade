@@ -18,6 +18,8 @@
 #   issue_comment_patterns   list of regex: a match in the bot's LATEST issue comment = actionable findings
 #   check_names              list: check-run names that show the bot is running on a head
 #   check_apps               list: check-run app slugs that show the same
+#   status_contexts          list: commit-status contexts (GET commits/<head>/status) that show the same; a `pending`
+#                            one younger than pending_max_minutes blocks (CodeRabbit reports as a status in many repos)
 #   source                   where the logins were verified
 
 [meta]
@@ -36,6 +38,7 @@ review_body_patterns = ["Actionable comments posted: [1-9]"]
 issue_comment_patterns = []
 check_names = ["CodeRabbit"]
 check_apps = []
+status_contexts = ["CodeRabbit"]
 source = "REST coderabbitai[bot]: netresearch/git-workflow-skill pull-request-workflow.md (jq user.login); GraphQL suffix dropped: Shelf-nu/shelf.nu scripts/pr-review-watch.sh (verified there on PR 2770), 2026-11-14"
 
 [[bot]]

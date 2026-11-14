@@ -1,6 +1,6 @@
 ### Added
 
-- `bin/review-bot-findings` and `config/review-bots.toml`: a must-triage gate for listed AI reviewer bots (CodeRabbit, Codex, Greptile, Cursor Bugbot, Copilot code review): unresolved bot threads and actionable review bodies must be fixed or answered with a reason by `djbclark`'s account; a repo adds or drops bots in `.github/ade-review-bots.toml` on its default branch; the bots' text stays data. (#713)
+- `bin/review-bot-findings` and `config/review-bots.toml`: a must-triage gate for listed AI reviewer bots (CodeRabbit, Codex, Greptile, Cursor Bugbot, Copilot code review): unresolved bot threads and actionable review bodies must be fixed or answered with a reason by `djbclark`'s account; every actionable review body counts (a later 0-count review does not erase an earlier one); a running bot check run or commit status (`status_contexts`) blocks as pending; a repo adds or drops bots in `.github/ade-review-bots.toml` on its default branch; the bots' text stays data. (#713)
 
 ### Changed
 

@@ -316,7 +316,7 @@ inline findings carry `codex-code-review-finding:v1` / `codex-security-review-fi
 Cursor Bugbot (`cursor[bot]`), Copilot code review (`copilot-pull-request-reviewer[bot]`). Each entry names the REST login
 (with `[bot]`) and the GraphQL login (without) and where they were verified (`source`), how its findings are recognised
 (`thread_markers`, `review_body_patterns`, `issue_comment_patterns`) and which check runs show it is working
-(`check_names`, `check_apps`). Identity is the exact login AND actor type `Bot`: a human account `coderabbitai`, `CodeRabbitAI`,
+(`check_names`, `check_apps`, `status_contexts`). Identity is the exact login AND actor type `Bot`: a human account `coderabbitai`, `CodeRabbitAI`,
 `coderabbitai-dev` and the REST spelling in a GraphQL position are not the bot. Unknown keys, wrong types, a bad regex, a
 duplicate id or login, or a `rest_login` that is not `graphql_login` + `[bot]` refuse the whole file (fail closed).
 
@@ -340,18 +340,17 @@ A missing file (HTTP 404) is no override; any other failure, or a file that does
 (AGENTS.md order 11).
 
 **Findings and triage** (the exact rules are in `bin/review_bots.py` and `docs/code-review.md` rule 9): an unresolved
-review thread whose first comment is the bot's (or, for a bot with `thread_markers`, that carries one), or the bot's latest
-top-level review body / issue comment matching its patterns. Triaged = the thread is resolved **by `djbclark`** (a resolve by the PR author, another writer or the bot itself, which auto-resolves, does not count), or a later reply (created after the bot's last edit of its finding) authored by
+review thread whose first comment is the bot's (or, for a bot with `thread_markers`, that carries one), or a top-level finding: EVERY non-pending review of the bot whose body matches its patterns (a later `Actionable comments posted: 0` review does not erase an earlier body-only, outside-the-diff finding; `triage all:` clears them in one comment) and the bot's latest issue comment matching its patterns. A CodeRabbit review with inline comments therefore also needs a `triage <id|all>:` comment after its threads are resolved. Triaged = the thread is resolved **by `djbclark`** (a resolve by the PR author, another writer or the bot itself, which auto-resolves, does not count), or a later reply (created after the bot's last edit of its finding) authored by
 `djbclark`'s GitHub User account (login and pinned id; a bot, the PR author, a lookalike or a renamed account never
 counts) starts with `fixed` / `wontfix` / `won't fix` / `not a bug` / `not an issue` / `by design` / `deferred` and a
 reason of at least three characters; a top-level finding needs a later issue comment from that account with a line
 `triage <id|all>: <verdict> <reason>`. An owner comment that was ever edited is not a triage (a writer or an App can edit another user's comment and edit history is not read): post a new one. Open Low: a comment an App posted with the operator's token reads as the operator's.
 
-**Trust root.** The default list is read from the checkout that runs the tool: run `ade-merge-ready` from master or the installed copy, never from the PR's own worktree. An override's regex patterns may not contain a quantified group (backtracking guard); `--merged-limit` is capped at 40 PRs (about 5 GraphQL calls each).
+**Trust root.** The default list is read from the checkout that runs the tool: run `ade-merge-ready` from master or the installed copy, never from the PR's own worktree. An override's regex patterns may not contain a quantified group or more than one `.*` / `.+` (a heuristic backtracking guard, not a proof: a hostile default-branch override can still hang the tool, and the default branch is the repo's own); `--merged-limit` is capped at 40 PRs (about 5 GraphQL calls each).
 
-**Pending bots.** The tool never sleeps. A listed bot whose check run on the exact head is not completed and started less
+**Pending bots.** The tool never sleeps. A listed bot whose check run (`check_names` / `check_apps`) or commit status (`status_contexts`, read from `GET commits/<head>/status`) on the exact head is not completed and started or updated less
 than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the next `classify` sees the result. A running check
-older than that is a `stalled` note, and a bot with no check run on the head (never installed, never started, or one that
+older than that is a `stalled` note, and a bot with no check run or status on the head (never installed, never started, or one that
 reviews without a check) never blocks.
 
 ```sh

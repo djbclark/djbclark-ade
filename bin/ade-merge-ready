@@ -278,6 +278,11 @@ def review_bot_gate(
         return {"state": "unknown", "reason": f"config: {e}"[:300], "head": "", "pending": [], "notes": [], "untriaged": []}
     except (review_bots.GhError, subprocess.TimeoutExpired, OSError) as e:
         return {"state": "unknown", "reason": f"api: {e}"[:300], "head": "", "pending": [], "notes": [], "untriaged": []}
+    except Exception as e:  # noqa: BLE001 - a malformed API answer must not blind the whole listing: this PR is unknown
+        return {
+            "state": "unknown", "reason": review_bots.clean(f"gate error: {type(e).__name__}: {e}")[:300],
+            "head": "", "pending": [], "notes": [], "untriaged": [],
+        }
 
 
 def collect(gh: str, repo: str, min_n: int) -> list[dict[str, Any]]:

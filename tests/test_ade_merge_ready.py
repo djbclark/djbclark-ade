@@ -31,6 +31,7 @@ def _bot_gate_stub(script: str) -> str:
     return (
         '              *"api repos/"*"/contents/"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
         '              *"api --paginate repos/"*"/check-runs"*) echo \'{"total_count":0,"check_runs":[]}\' ;;\n'
+        '              *"api --paginate repos/"*"/status"*) echo \'{"state":"success","statuses":[]}\' ;;\n'
         '              *"api graphql"*"headRefOid"*)\n'
         '                N=$(printf "%s" "$*" | grep -o "number=[0-9]*" | head -1 | cut -d= -f2); H=' + "0" * 40 + "\n"
         '                case "$N" in\n' + head_cases + "                esac\n"

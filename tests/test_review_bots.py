@@ -88,7 +88,8 @@ class FakeGh:
     """Serves one PR's recorded answers; records every argv (the tool must stay read-only)."""
 
     def __init__(self, *, threads=(), reviews=(), comments=(), checks=(), override: str | None = None,
-                 state: str = "OPEN", head: str = HEAD, override_error: str | None = None):
+                 state: str = "OPEN", head: str = HEAD, override_error: str | None = None, statuses=()):
+        self.statuses = list(statuses)
         self.threads, self.reviews, self.comments = list(threads), list(reviews), list(comments)
         self.checks, self.override, self.state, self.head = list(checks), override, state, head
         self.override_error = override_error
@@ -106,6 +107,8 @@ class FakeGh:
             raw = self.override.encode()
             return json.dumps({"type": "file", "encoding": "base64", "size": len(raw),
                                "content": base64.b64encode(raw).decode()})
+        if "--paginate" in args and "/status" in args[-1]:
+            return json.dumps({"state": "pending", "statuses": self.statuses})
         if "--paginate" in args:
             return json.dumps({"total_count": len(self.checks), "check_runs": self.checks})
         assert args[1] == "graphql", joined
@@ -205,6 +208,19 @@ def test_override_add_and_drop() -> None:
     )
     ids = [b.id for b in out.bots]
     assert "greptile" not in ids and "copilot" not in ids and ids[-1] == "sourcery" and "codex" in ids
+
+
+def test_documented_override_examples_parse_and_apply() -> None:
+    """Every ```toml block in docs/review-boundary.md that is an override ([meta] + [bots]/[[add]]) must load: a repo
+    copying the example must not get review_bot_unknown (Codex P1 on PR 713: `drop` landed inside [meta])."""
+    import re
+    doc = (ROOT / "docs" / "review-boundary.md").read_text()
+    blocks = [b for b in re.findall(r"```toml\n(.*?)```", doc, re.S) if "[meta]" in b and "[bots]" in b]
+    assert blocks, "docs/review-boundary.md lost its override example"
+    for text in blocks:
+        out = rb.apply_override(rb.load_default_config(), text)
+        ids = [b.id for b in out.bots]
+        assert "greptile" not in ids and ids[-1] == "sourcery"
 
 
 def test_override_is_read_from_the_default_branch_not_a_ref() -> None:
@@ -391,11 +407,11 @@ def test_coderabbit_review_body_with_actionable_comments_is_a_finding() -> None:
     assert evaluate(FakeGh(reviews=[review(CODERABBIT, "Actionable comments posted: 0")]))["findings"] == []
 
 
-def test_only_the_latest_review_of_a_bot_counts() -> None:
+def test_review_order_does_not_matter_and_a_zero_count_review_is_not_a_finding() -> None:
     old = review(CODERABBIT, "Actionable comments posted: 3", at="2026-11-14T10:00:00Z")
     new = review(CODERABBIT, "Actionable comments posted: 0", at="2026-11-14T11:00:00Z")
-    assert evaluate(FakeGh(reviews=[old, new]))["findings"] == []
-    assert evaluate(FakeGh(reviews=[new, old]))["findings"] == []
+    for order in ([old, new], [new, old]):
+        assert [f["id"] for f in evaluate(FakeGh(reviews=order))["findings"]] == [old["databaseId"]]
 
 
 def test_pending_state_review_is_not_read() -> None:
@@ -585,6 +601,8 @@ elif argv[0] == "api" and "/contents/" in argv[1]:
     import base64
     raw = world["override"].encode()
     out({"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()})
+elif argv[0] == "api" and "--paginate" in argv and "/status" in argv[-1]:
+    out({"state": "pending", "statuses": world.get("statuses", [])})
 elif argv[0] == "api" and "--paginate" in argv:
     out({"total_count": 0, "check_runs": world.get("check_runs", [])})
 elif argv[:2] == ["api", "graphql"]:
@@ -841,3 +859,87 @@ def test_merge_now_refuses_when_the_head_moves_between_classify_and_merge(tmp_pa
     merge_world(tmp_path, late_head_after=1, late_head="d" * 40)
     r = mr(tmp_path, "merge-now", "--prs", "600", "--yes")
     assert r.returncode == 2 and "refuse merge" in r.stderr and "pr merge" not in (tmp_path / "gh.log").read_text()
+
+
+# ------------------------------------------------------------------ lead review 2026-11-14 (B1-B4)
+
+def test_a_later_zero_count_review_does_not_erase_an_earlier_body_only_finding() -> None:
+    """B1: CodeRabbit's outside-the-diff findings live only in the review body; an incremental review that says 0 is
+    not a triage of the first one."""
+    first = review(CODERABBIT, "Actionable comments posted: 1\n\nOutside diff range: bug in x", at="2026-11-14T20:00:00Z")
+    later = review(CODERABBIT, "Actionable comments posted: 0", at="2026-11-14T20:30:00Z")
+    v = evaluate(FakeGh(reviews=[first, later]))
+    assert v["state"] == "untriaged" and [f["id"] for f in v["findings"]] == [first["databaseId"]]
+    triage = issue_comment(OWNER, f"triage {first['databaseId']}: fixed in abc1234", at="2026-11-14T21:00:00Z")
+    assert evaluate(FakeGh(reviews=[first, later], comments=[triage]))["state"] == "clear"
+
+
+def test_two_actionable_reviews_are_two_findings_and_triage_all_clears_both() -> None:
+    a = review(CODERABBIT, "Actionable comments posted: 2", at="2026-11-14T20:00:00Z")
+    b = review(CODERABBIT, "Actionable comments posted: 1", at="2026-11-14T20:30:00Z")
+    v = evaluate(FakeGh(reviews=[a, b]))
+    assert len(v["findings"]) == 2 and v["state"] == "untriaged"
+    only_a = issue_comment(OWNER, f"triage {a['databaseId']}: fixed in abc1234", at="2026-11-14T21:00:00Z")
+    assert statuses(evaluate(FakeGh(reviews=[a, b], comments=[only_a]))) == ["triaged", "untriaged"]
+    every = issue_comment(OWNER, "triage all: wontfix not reachable from outside input", at="2026-11-14T21:00:00Z")
+    assert evaluate(FakeGh(reviews=[a, b], comments=[every]))["state"] == "clear"
+
+
+def status_of(context: str, state: str, at: str) -> dict:
+    return {"context": context, "state": state, "created_at": at, "updated_at": at}
+
+
+def test_a_pending_commit_status_blocks_like_a_running_check_run() -> None:
+    """B2: CodeRabbit reports as a commit status in many repos; it must pend like a check run."""
+    fresh = status_of("CodeRabbit", "pending", "2026-11-14T21:59:00Z")
+    v = evaluate(FakeGh(statuses=[fresh]))
+    assert v["state"] == "pending" and v["pending"] == ["coderabbit"]
+    stale = status_of("CodeRabbit", "pending", "2026-11-14T21:00:00Z")
+    v = evaluate(FakeGh(statuses=[stale]))
+    assert v["state"] == "clear" and any("stalled" in n for n in v["notes"])
+    assert evaluate(FakeGh(statuses=[status_of("CodeRabbit", "success", "2026-11-14T21:59:00Z")]))["state"] == "clear"
+    assert evaluate(FakeGh(statuses=[status_of("other-ci", "pending", "2026-11-14T21:59:00Z")]))["state"] == "clear"
+
+
+def test_the_status_read_is_read_only_and_only_for_bots_that_list_contexts() -> None:
+    fake = FakeGh(statuses=[status_of("CodeRabbit", "pending", "2026-11-14T21:59:00Z")])
+    evaluate(fake)
+    status_calls = [c for c in fake.calls if "/status" in c[-1]]
+    assert status_calls == [("api", "--paginate", f"repos/o/r/commits/{HEAD}/status?per_page=100")]
+    ov = '[meta]\nschema = 1\n[bots]\ndrop = ["coderabbit"]\n'
+    quiet = FakeGh(override=ov)
+    evaluate(quiet)
+    assert not [c for c in quiet.calls if "/status" in c[-1]]       # no bot lists a status context: no extra call
+
+
+def test_a_running_check_run_and_a_finished_status_still_pends() -> None:
+    run = run_of("CodeRabbit", "in_progress", "2026-11-14T21:59:00Z")
+    done = status_of("CodeRabbit", "success", "2026-11-14T21:59:00Z")
+    assert evaluate(FakeGh(checks=[run], statuses=[done]))["state"] == "pending"
+
+
+@pytest.mark.parametrize("body", ["Fixed? not yet, still looking", "Deferred? no idea what this is", "fixed !!! maybe"])
+def test_a_question_after_the_verdict_word_is_not_a_triage(body: str) -> None:
+    t = thread([comment(CODERABBIT, "bug"), comment(OWNER, body)])
+    assert statuses(evaluate(FakeGh(threads=[t]))) == ["untriaged"]
+    rev = review(CODERABBIT, "Actionable comments posted: 1", at="2026-11-14T20:00:00Z")
+    top = issue_comment(OWNER, f"triage all: {body}", at="2026-11-14T21:00:00Z")
+    assert evaluate(FakeGh(reviews=[rev], comments=[top]))["state"] == "untriaged"
+
+
+def load_merge_ready() -> types.ModuleType:
+    loader = importlib.machinery.SourceFileLoader("ade_merge_ready_mod", str(ROOT / "bin" / "ade-merge-ready"))
+    spec = importlib.util.spec_from_loader("ade_merge_ready_mod", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_a_malformed_api_answer_makes_one_pr_unknown_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B4: an odd GraphQL shape (here `comments` is a list) must not raise out of collect() for every PR."""
+    mr_mod = load_merge_ready()
+    bad = {"isResolved": False, "isOutdated": False, "resolvedBy": None, "comments": ["not", "a", "dict"]}
+    monkeypatch.setattr(mr_mod.review_bots, "make_gh", lambda gh_bin="gh": FakeGh(threads=[bad]))
+    gate = mr_mod.review_bot_gate("gh", "o/r", 9)
+    assert gate["state"] == "unknown" and "gate error" in gate["reason"]
