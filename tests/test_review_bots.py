@@ -927,6 +927,19 @@ def test_a_question_after_the_verdict_word_is_not_a_triage(body: str) -> None:
     assert evaluate(FakeGh(reviews=[rev], comments=[top]))["state"] == "untriaged"
 
 
+@pytest.mark.parametrize("body", ["Fixed \u2014 moved the lock", "fixed: #712 and the follow-up", "wontfix: `x` is trusted input",
+                                  "fixed ... in abc1234"])
+def test_an_honest_reason_in_any_script_is_a_triage(body: str) -> None:
+    t = thread([comment(CODERABBIT, "bug"), comment(OWNER, body)])
+    assert statuses(evaluate(FakeGh(threads=[t]))) == ["triaged"]
+
+
+@pytest.mark.parametrize("body", ["fixed ---", "fixed ...", "fixed: ;;", "deferred ()", "fixed ??? ok"])
+def test_punctuation_is_not_a_reason(body: str) -> None:
+    t = thread([comment(CODERABBIT, "bug"), comment(OWNER, body)])
+    assert statuses(evaluate(FakeGh(threads=[t]))) == ["untriaged"]
+
+
 def load_merge_ready() -> types.ModuleType:
     loader = importlib.machinery.SourceFileLoader("ade_merge_ready_mod", str(ROOT / "bin" / "ade-merge-ready"))
     spec = importlib.util.spec_from_loader("ade_merge_ready_mod", loader)

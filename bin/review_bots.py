@@ -64,10 +64,10 @@ VERDICT = (
     r"(?:fixed|won['’]?t[ -]?fix|wontfix|not an? (?:bug|issue)|by design|deferred)"
 )
 # the first non-empty line of an owner reply in a thread: a verdict word, then a reason of at least three characters
-THREAD_TRIAGE_RE = re.compile(rf"^\s*{VERDICT}\b(?![?!])[\s:.,;()\-]*([\w`'\"].{{2,}})$", re.IGNORECASE)
+THREAD_TRIAGE_RE = re.compile(rf"^\s*{VERDICT}\b[\s:.,;()\-]*([^\s?!:.,;()\-].{{2,}})$", re.IGNORECASE)
 # a line of an owner issue comment: `triage 123456: fixed in abc1234`, `triage all: wontfix <reason>`
 TOP_TRIAGE_RE = re.compile(
-    rf"^\s*triage\s+(#?\d+|all)\s*:\s*{VERDICT}\b(?![?!])[\s:.,;()\-]*([\w`'\"].{{2,}})$", re.IGNORECASE | re.MULTILINE
+    rf"^\s*triage\s+(#?\d+|all)\s*:\s*{VERDICT}\b[\s:.,;()\-]*([^\s?!:.,;()\-].{{2,}})$", re.IGNORECASE | re.MULTILINE
 )
 
 _FORBIDDEN_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
