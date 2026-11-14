@@ -161,8 +161,9 @@ limit in force. Swap is not the signal (86-92% in calm hours too). The result an
 record carry `mem_churn_pages_s`, `free_mb`, `pageins_s`, `agents` and `refused` (the names of the gates that said no: load,
 compressor, free_mem, swapins, pageins, agents); a reading that cannot be taken is listed in `unreadable` and its gate stays open
 (Linux reads /proc/meminfo MemAvailable and /proc/vmstat pswpin+pswpout, pswpin and pgmajfault as the equivalents).
-Starvation valve (2026-11-14): a caller that has waited long enough gets through. ONLY `admit --wait S` (any waiting launcher; `bg` polls with `--wait 0` in its own 15 s loop and gets no valve; a bare
-check always reports the truth): once refused without a break for LW_STARVE_SOFT_S (300; 0 turns the valve off), it is admitted anyway when
+Starvation valve (2026-11-14): a caller that has waited long enough gets through. ONLY `admit --wait S` (any waiting launcher; `bg` calls `admit --wait CHUNK`, CHUNK = BG_ADMIT_CHUNK, 420 s by default, after a first `--wait 0` look; a bare
+`--wait 0` check always reports the truth). The clock is per call: it starts at the call's first refusal, so `bg` gets the valve only once a hold has lasted 300 s inside
+one chunk, and a chunk shorter than LW_STARVE_SOFT_S never gets it (a follow-up could hand `bg`'s hold start to load-watch through a `--refused-since` flag or an environment variable): once refused without a break for LW_STARVE_SOFT_S (300; 0 turns the valve off), it is admitted anyway when
 every refusing gate is SOFT: load per core up to the boost line, corroborated churn and pageins, the agent cap, free memory at or above 300 MB.
 HARD gates never yield: churn above LW_MAX_COMPRESSOR_HARD_S (60000), swap-ins above --max-swapins, free memory below 300 MB, load per core
 above the boost line (--boost-per-core, 4.0), an unreadable memory or agent count. At most one forced admit per LW_STARVE_MIN_GAP_S (120)
@@ -1924,7 +1925,7 @@ ADMIT_PAGEINS_CORROBORATED_S = _env_float("LW_MAX_PAGEINS_CORROBORATED_S", 1000.
 # gate off.
 ADMIT_SWAPINS_S = _env_float("LW_MAX_SWAPINS_S", 300.0, 1.0)
 ADMIT_SWAPINS_CORROBORATED_S = _env_float("LW_SWAPINS_CORROBORATED_S", 20.0, 1.0)
-# Starvation valve (2026-11-14), `admit --wait` only (a waiting launcher; bg polls with --wait 0 and gets none): a caller refused continuously for
+# Starvation valve (2026-11-14), `admit --wait` only (a waiting launcher; bg calls `admit --wait CHUNK`, and the clock is per call, so bg gets the valve only after 300 s inside one chunk): a caller refused continuously for
 # LW_STARVE_SOFT_S (300; 0 = valve off) gets through when every refusing gate is soft, at most once per LW_STARVE_MIN_GAP_S (120; 0 = no
 # limit) machine-wide (starve.json, flock).
 STARVE_SOFT_S = _env_float("LW_STARVE_SOFT_S", 300.0)
@@ -2681,7 +2682,7 @@ def cmd_admit_log(a):
             reasons[x] = reasons.get(x, 0) + 1
     print(f"admit log {path}: {len(rows)} calls in the last {a.days:g} days")
     polls = sum(1 for r in rows if not r.get("wait_s"))
-    print(f"calls with --wait 0 (a pure check, or a bg poll, which polls every 15 s): {polls} of {len(rows)}")
+    print(f"calls with --wait 0 (a pure check, such as bg's first look before it holds with --wait CHUNK): {polls} of {len(rows)}")
     print("verdicts: " + " ".join(f"{k}={v}" for k, v in sorted(verdicts.items(), key=lambda kv: str(kv[0]))))
     print("refused/overrode reasons: " + (" ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])) or "none"))
     for key in ("free_mb", "pageins", "swapins"):
@@ -2807,7 +2808,7 @@ def cmd_admit(a):
                 refused = admit_refusals(per_core, limit, m, lim)
             else:
                 m["reservation"] = rid
-        # Starvation valve (2026-11-14): only a waiting caller (`--wait S`; bg polls with --wait 0 and gets none; a bare check reports the truth),
+        # Starvation valve (2026-11-14): only a waiting caller (`--wait S`; the clock is per call, so bg, which calls `--wait CHUNK`, gets it only after 300 s inside one chunk; a bare check reports the truth),
         # refused without a break for STARVE_SOFT_S, with only SOFT gates refusing, and at most one per STARVE_MIN_GAP_S machine-wide.
         if not refused:
             refused_since = None

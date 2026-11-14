@@ -53,7 +53,12 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
 the brief) while its Paseo session sits in the lead's WORKERS window (below).
-After `route_agent.py plan` / `route` and `~/src/djbclark-ade/bin/load-watch admit` (machine capacity — not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs; exit 75 = refused, wait before launching):
+Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
+(N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
+exit 0 = go, 75 = refused: launch nothing and report; `--max-agents` is the live-agent cap, 20 by default, `LW_MAX_AGENTS`; a waiting call also gets
+the starvation valve, docs/orchestration-practices.md rule 4), then takes a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5), and launches with
+`Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
+the model pin, the in-flight quota reservation or the per-wave re-check (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
 # Re-plan immediately before EACH launch when several slices share one quota pool
