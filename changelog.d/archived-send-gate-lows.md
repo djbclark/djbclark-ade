@@ -1,0 +1,3 @@
+### Fixed
+
+- `archived_send_gate`: a `$(...)` or backtick is text inside single quotes (a markdown code span in a message was judged as a send, a false deny) and a command inside double quotes (`"$(paseo send X)"` is parsed as a send); a `#` after an escaped blank, a continuation or a closing quote is no longer a comment start; a target in a shell variable (`"$LEAD"`, `$id`, `{}`) no longer switches the backstop off; the backstop ignores `paseo send` inside quoted text and the sender's own `PASEO_AGENT_ID`, and its denial says the hook could not parse the form instead of `Re-send to`. `ade-worker-run`: tests for the normalised-work, other-repo and MAIN-placement branches of window ownership, and the `find_window` docstring. (#692)

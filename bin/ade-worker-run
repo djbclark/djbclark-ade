@@ -229,7 +229,7 @@ class Found(NamedTuple):
 def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool = False) -> Found | None:
     """The lead's WORKERS window. Matches by exact name `WORKERS <repo> (<middle>)` (any repo when `repo` is None) or, without
     `middle`, by ownership; a legacy name carrying <lead> matches too. Ownership is evidence, never a name: the lead's
-    window record (written when the helper mints or migrates a window), a live agent labelled ade.lead=<lead> in it, or the
+    window record (written when the helper mints or migrates a window, and by a launch into an existing WORKERS window), a live agent labelled ade.lead=<lead> in it, or the
     lead id in a legacy name. Refused: two matches; a window registered to another lead or holding any agent (closed
     included) labelled for another lead; a `middle` that matches nothing while the lead owns another window (a typo must not
     open a second one; windows only a predecessor placed do not count, so a successor opens a new one for new work). With several

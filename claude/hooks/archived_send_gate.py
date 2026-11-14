@@ -16,6 +16,7 @@ Block form: stdout JSON permissionDecision "deny" and exit 0 (same as upstream_r
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -27,6 +28,7 @@ OTHER_DAEMON = {"--host", "--home"}  # another daemon: its agents are not in thi
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 MCP_ID_KEYS = ("agentId", "agent_id", "id", "target")
 ALLOW_VAR = "ADE_ALLOW_ARCHIVED_SEND"
+SHELL_BUILT = "$`*?[{~"  # a target containing one of these is built by the shell: judge() skips it
 
 
 def deny(reason: str) -> None:
@@ -57,41 +59,80 @@ def strip_heredocs(command: str) -> str:
 
 
 def strip_comments(text: str) -> str:
-    """The command as one logical line per simple command, without shell comments. A `#` that starts a word outside quotes
-    runs to the end of its line; a `#` inside a word (a URL fragment) or a quote is text. `\\`+newline is a line continuation
-    (removed outside quotes and inside double quotes, as the shell does). A newline outside quotes becomes ` ; ` (a command
-    separator); inside quotes it stays. (shlex's own comment handling cuts at any `#`, so it is switched off.)"""
+    """The command as one logical line per simple command, without shell comments, and with command substitutions turned into
+    separators. A `#` that starts a word outside quotes runs to the end of its line; a `#` inside a word (a URL fragment) or a
+    quote is text. `\\`+newline is a line continuation (removed outside quotes and inside double quotes, as the shell does). A
+    newline outside quotes becomes ` ; ` (a command separator); inside quotes it stays. `$(` and a backtick start a command
+    outside quotes and inside double quotes, where the quote is closed around the body and reopened after it (`"a $(b) c"` ->
+    `"a " ; b ; " c"`); inside single quotes they are text (a markdown `code span` in a message is not a command). (shlex's own
+    comment handling cuts at any `#`, so it is switched off.)"""
     out, quote, i, n = [], None, 0, len(text)
+    word_start = True  # the last thing emitted ended a word (blank, separator, newline), so a `#` here starts a comment
+    stack: list[str] = []  # open `(`/`$(` outside quotes ("p"); a `$(` ("d") or backtick ("b") opened inside double quotes
     while i < n:
         c = text[i]
         if quote == "'":
             out.append(c)
             if c == "'":
-                quote = None
+                quote, word_start = None, False
         elif quote == '"':
             if c == "\\" and i + 1 < n:
                 i += 1
                 if text[i] != "\n":  # a continuation vanishes; any other escaped pair stays
                     out.append(c + text[i])
+            elif (c == "$" and text.startswith("$(", i) and not text.startswith("$((", i)) or c == "`":
+                out.append('" ; ')  # close the quote around the substitution body
+                stack.append("b" if c == "`" else "d")
+                quote, word_start = None, True
+                i += c == "$"  # skip the `(`
             else:
                 out.append(c)
                 if c == '"':
-                    quote = None
+                    quote, word_start = None, False
         elif c == "\\" and i + 1 < n:
             i += 1
-            if text[i] != "\n":
+            if text[i] != "\n":  # a continuation leaves word_start as it was
                 out.append(c + text[i])
+                word_start = False  # an escaped blank or separator is text: `echo a\ #x` has no comment
         elif c in "'\"":
             quote = c
             out.append(c)
-        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
+        elif c == "#" and word_start:
             while i < n and text[i] != "\n":
                 i += 1
             continue
         elif c == "\n":
             out.append(" ; ")
+            word_start = True
+        elif c == "`":
+            if stack and stack[-1] == "b":  # the end of a backtick body that began inside double quotes: reopen the quote
+                stack.pop()
+                out.append(' ; "')
+                quote = '"'
+            else:
+                out.append(" ; ")
+            word_start = True
+        elif c == "$" and text.startswith("$(", i) and not text.startswith("$((", i):
+            out.append(" ; ")
+            stack.append("p")
+            word_start = True
+            i += 1
+        elif c == "(" or c == ")":
+            if c == "(":
+                stack.append("p")
+                out.append(c)
+            elif stack and stack[-1] == "d":  # the `)` that ends a `$(` begun inside double quotes: reopen the quote
+                stack.pop()
+                out.append(' ; "')
+                quote = '"'
+            else:
+                if stack and stack[-1] == "p":
+                    stack.pop()
+                out.append(c)
+            word_start = quote is None
         else:
             out.append(c)
+            word_start = c in " \t;&|()"
         i += 1
     return "".join(out)
 
@@ -99,7 +140,7 @@ def strip_comments(text: str) -> str:
 def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
     """[(target, allow)] for every `paseo [agent] send` found in a shell command line. `allow` is the value of an
     ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None."""
-    text = strip_comments(strip_heredocs(command)).replace("`", " ; ").replace("$(", " ; ")
+    text = strip_comments(strip_heredocs(command))
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""  # comments were removed above, with the shell's rule
@@ -168,6 +209,7 @@ def _target(args: list[str]) -> str | None:
     return None
 
 
+QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")  # a quoted string (after strip_comments: only literal text is left in quotes)
 SEND_WORD = re.compile(r"\bpaseo\b(?:\s+[^\s;&|]+){0,4}?\s+send\b")
 UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 
@@ -176,11 +218,13 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     """The parser cannot follow every shell form (a send inside "$(...)" in double quotes, a lone trailing backslash, an
     escaped space before a `#`...). When the command text (heredoc bodies aside) names more `paseo ... send` than the parser
     found targets for, every full agent id written in the command is judged too (at most 5): a false denial needs an archived
-    agent's id in a command that mentions `paseo send`, a missed send needs a form nobody listed."""
+    agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form nobody listed."""
     text = strip_heredocs(command)
-    if len(SEND_WORD.findall(text)) <= len(found):
+    judged = [t for t, _ in found if t and not any(c in t for c in SHELL_BUILT)]  # `$LEAD`, `{}`, `$id` are never judged
+    bare = QUOTED.sub("''", strip_comments(text))  # a `paseo send` inside a quoted message (a `code span`) is text, not a send
+    if len(SEND_WORD.findall(bare)) <= len(judged):
         return []
-    seen = {t for t, _ in found}
+    seen = {t for t, _ in found} | {os.environ.get("PASEO_AGENT_ID", "")}  # the sender's own id (`ack <id>` text) is no target
     out: list[tuple[str, str | None]] = []
     for u in dict.fromkeys(UUID.findall(text)):
         if u not in seen and len(out) < 5:
@@ -188,20 +232,26 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     return out
 
 
-def judge(target: str, allow: str | None) -> str | None:
-    """A denial reason, or None to allow."""
-    if not target or any(c in target for c in "$`*?[{~"):
+def judge(target: str, allow: str | None, backstop: bool = False) -> str | None:
+    """A denial reason, or None to allow. `backstop`: the id was only found written in a command the parser could not follow,
+    so the reason says that (the command may already send to the successor, and `Re-send to X` would loop)."""
+    if not target or any(c in target for c in SHELL_BUILT):
         return None
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
     env = {guard.ALLOW_ENV: allow} if allow else {}
     d = guard.guard(target, env=env)
+    if d.action not in (guard.REDIRECT, guard.REFUSE):
+        return None
+    if backstop:
+        return (f"Blocked by archived_send_gate: this command mentions `paseo send` in a form the hook could not parse and "
+                f"writes the id {target}, which is not a live agent ({d.reason}). If no send to {target} is meant, leave its "
+                f"id out of the command or split the command; if one is, send to " +
+                (f"{d.target}." if d.action == guard.REDIRECT else "a live agent (it would un-archive and run it)."))
     if d.action == guard.REDIRECT:
         return (f"Blocked by archived_send_gate: {d.reason}. Re-send to {d.target} (a send to the replaced agent would "
                 f"un-archive and run it as a stale lead).")
-    if d.action == guard.REFUSE:
-        return f"Blocked by archived_send_gate: {d.reason}."
-    return None
+    return f"Blocked by archived_send_gate: {d.reason}."
 
 
 def main() -> int:
@@ -209,14 +259,15 @@ def main() -> int:
         event = json.load(sys.stdin)
         tool, tin = event.get("tool_name", ""), event.get("tool_input") or {}
         found: list[tuple[str, str | None]] = []
+        extra: list[tuple[str, str | None]] = []  # ids the backstop picked out of text the parser could not follow
         if tool == "Bash" and isinstance(tin.get("command"), str):
             found = targets_in_command(tin["command"])
-            found += backstop_targets(tin["command"], found)
+            extra = backstop_targets(tin["command"], found)
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
             found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it
-        for target, allow in found:
-            reason = judge(target, allow)
+        for target, allow, back in [(t, a, False) for t, a in found] + [(t, a, True) for t, a in extra]:
+            reason = judge(target, allow, back)
             if reason:
                 deny(reason)
                 return 0
