@@ -489,16 +489,11 @@ def test_unreadable_or_foreign_agent_records_are_ignored(box, raw):
     assert "external-security-sensitive" not in context(box({"prompt": block(source=FAKE)}))
 
 
-@pytest.mark.parametrize("kind", ["fifo", "symlink_to_zero"])
-def test_non_regular_agent_record_cannot_stall_the_hook(tmp_path, kind):
-    # a FIFO or a symlink to /dev/zero at the record path would block or eat memory if opened
+def test_fifo_agent_record_cannot_stall_the_hook(tmp_path):
+    # opening a FIFO for reading blocks forever without O_NONBLOCK; a real subprocess proves it returns
     folder = tmp_path / ".paseo/agents/slug"
     folder.mkdir(parents=True)
-    path = folder / f"{FAKE}.json"
-    if kind == "fifo":
-        os.mkfifo(path)
-    else:
-        path.symlink_to("/dev/zero")
+    os.mkfifo(folder / f"{FAKE}.json")
     payload = {"session_id": "s3", "hook_event_name": "UserPromptSubmit", "prompt": block(source=FAKE)}
     proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True,
                           text=True, timeout=20, env={"HOME": str(tmp_path), "PATH": str(tmp_path)})
@@ -506,8 +501,43 @@ def test_non_regular_agent_record_cannot_stall_the_hook(tmp_path, kind):
     assert "could not be read" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
+def test_symlinked_agent_record_is_not_followed(box):
+    real = box.home / "elsewhere.json"
+    real.write_text(json.dumps({"id": FAKE, "title": "x", "labels": {"ade.kind": "external-review"}}))
+    folder = box.home / ".paseo/agents/slug"
+    folder.mkdir(parents=True)
+    (folder / f"{FAKE}.json").symlink_to(real)
+    assert "external-security-sensitive" not in context(box({"prompt": block(source=FAKE)}))
+
+
+def test_deeply_nested_agent_record_is_skipped_and_the_next_one_is_read(box):
+    deep = "[" * 100000 + "]" * 100000
+    folder = box.home / ".paseo/agents/a-deep"
+    folder.mkdir(parents=True)
+    (folder / f"{FAKE}.json").write_text(deep)
+    assert "external-security-sensitive" not in context(box({"prompt": block(source=FAKE)}))  # note still given
+    write_record(box.home, FAKE, labels={"ade.kind": "external-review"}, folder="z-good")
+    assert "external-security-sensitive" in context(box({"prompt": block(source=FAKE, mid=MID2)}))
+
+
+def test_home_with_glob_characters_still_finds_the_record(tmp_path, monkeypatch):
+    home = tmp_path / "ho[me]*"
+    write_record(home, FAKE, labels={"ade.kind": "external-review"})
+    spec = importlib.util.spec_from_file_location("peer_trust_glob", HOOK)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    monkeypatch.setenv("HOME", str(home))
+    assert hook.agent_record(FAKE) == ("", {"ade.kind": "external-review"})
+
+
 def test_a_bad_record_does_not_hide_the_next_one(box):
     write_record(box.home, FAKE, labels={"ade.kind": "code"}, folder="a-bad")
     (box.home / ".paseo/agents/a-bad" / f"{FAKE}.json").write_text("not json")
     write_record(box.home, FAKE, labels={"ade.kind": "external-review"}, folder="z-good")
     assert "external-security-sensitive" in context(box({"prompt": block(source=FAKE)}))
+
+
+def test_records_are_read_in_sorted_order_so_the_result_is_deterministic(box):
+    write_record(box.home, FAKE, labels={"ade.kind": "code"}, folder="a-first")
+    write_record(box.home, FAKE, labels={"ade.kind": "external-review"}, folder="z-second")
+    assert "external-security-sensitive" not in context(box({"prompt": block(source=FAKE)}))

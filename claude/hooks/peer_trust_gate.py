@@ -328,26 +328,36 @@ def agent_record(sender):
     """(title, labels) from Paseo's own agent record, ~/.paseo/agents/*/ID.json (archived agents keep one).
 
     `paseo ls -g --json` and `paseo agent inspect` expose no labels, so the state file is the only
-    offline source. Anything unreadable gives ("", {}).
+    offline source. Nothing here may block or crash: a record is opened non-blocking without following
+    a symlink and checked with fstat (so a FIFO or device swapped in at any moment is never read), the
+    read is capped, and an unreadable, hostile or absurdly nested record is skipped. Anything
+    unreadable gives ("", {}).
     """
+    pattern = os.path.join(glob.escape(os.path.expanduser("~")), ".paseo", "agents", "*", sender + ".json")
     try:
-        paths = glob.glob(os.path.join(os.path.expanduser("~"), ".paseo", "agents", "*", sender + ".json"))
+        paths = sorted(glob.glob(pattern))
     except OSError:
         return "", {}
     for path in paths:
+        fd = -1
         try:
-            info = os.lstat(path)
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_RECORD:
-                continue  # a FIFO, device or symlink must never be opened (a read could block forever)
-            with open(path, encoding="utf-8") as fh:
+                continue
+            with os.fdopen(fd, encoding="utf-8") as fh:
+                fd = -1  # fdopen owns the descriptor now
                 data = json.loads(fh.read(MAX_RECORD))
             if not isinstance(data, dict) or str(data.get("id") or sender) != sender:
                 continue
             labels = data.get("labels")
             labels = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
             return str(data.get("title") or ""), labels
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue  # one bad record does not hide the next
+        finally:
+            if fd >= 0:
+                os.close(fd)
     return "", {}
 
 
