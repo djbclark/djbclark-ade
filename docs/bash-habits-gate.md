@@ -12,7 +12,7 @@ Checks include bare BSD `sed`, recursive `grep`, GNU-only flags on BSD tools
 and pipelines that mistake a filter's status for the producing command's.
 
 **GitHub watchers (2026-11-14).** `gh run watch` and `gh pr checks --watch` are denied (found through `timeout`, `bg`,
-`rtk`, `sudo -u X`, env prefixes, `-R`, `&&`/`;`/subshells, `do`/`then`, backslash-newline, `$(...)` and backtick
+`rtk` (also `rtk proxy`), `sudo -u X`, `env -i`/`env -u X`/`env -C DIR`, `nice -n N`, env prefixes (a wrapper option value that is itself named `gh` is handled: the first four `gh` words are each tried as the command), `-R`, `&&`/`;`/subshells, `do`/`then`, backslash-newline, `$(...)` and backtick
 substitutions (also inside double quotes) and the body of `bash -c '...'`; quoted text and heredoc bodies
 are data). Why: every agent shares one GitHub token with a 5000/h API quota, and four `gh run watch` at gh's default
 3 s interval emptied it from 10:22Z to 11:22Z. The reason names dispatch-footer item 20 and the alternatives: report "CI running"
@@ -25,7 +25,7 @@ started from a script or inline Python, `ssh host <<EOF`, `bash -c $'...'`, a sh
 (`deadline run --on-expire kill -- bash -c ...`), `$'..\\'..'`, a quoted command word (`gh run 'watch'`, `"gh" run watch`), `timeout -k 10 600 gh ...` (options with values),
 a heredoc delimiter with non-word characters (`<<'X-Y'`), a `<<` that is a here-string, shift or quoted/commented text
 (it hides the lines after it), substitutions in an unquoted heredoc body, a comment ending in a backslash, a nested `"$(... "x's" ...)"` followed by a single-quoted word (the apostrophe pairs with it), `$(case a in a) ...)`,
-a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before the subcommand, other wrapper options with values
+a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before the subcommand, `rtk proxy -- gh ...`, `env -S 'gh run watch 9'` (the value is the command), an absolute-path wrapper (`/usr/bin/env -i gh ...`), a placeholder command word (`env -i $GH run watch 9`, ``env -i `which gh` ...``), other wrapper options with values
 (`time -p gh`, `stdbuf -o L gh`), a watcher in a `case` branch (`a) gh run watch 9;;`), a function body (`f() { gh run watch "$1"; }`),
 `parallel gh run watch ::: 1 2` (only the fan-out warning fires), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
 loop that sleeps under 60 s). Known false positives (deny side): a `bash <<EOF` line, or `bash -c 'gh run watch N'` after a live `$(` in a double-quoted

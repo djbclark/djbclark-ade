@@ -439,6 +439,7 @@ def bare_open(stage: str) -> bool:
     return False
 
 
+GH_CANDIDATES = 4        # words named gh tried as the command word (see gh_args)
 GH_WATCH_MIN_INTERVAL = 60  # seconds; None would make every watcher a denial
 # Words that only introduce the next command (or wrap it with options of their own).
 SHELL_KW = frozenset({"do", "then", "else", "elif", "if", "while", "until"})
@@ -615,22 +616,32 @@ def _drop_heredocs(c: str) -> str:
     return "\n".join(out)
 
 
-def gh_args(stage: str) -> list[str] | None:
+def gh_args(stage: str) -> list[list[str]]:
     """The words after `gh` when the stage runs it (past VAR=x, wrappers, `timeout N`, `bg`,
-    `rtk`, `do`/`then`), else None."""
-    # `sudo -u USER gh`, `env -i VAR=x gh`, `nice -n 10 gh`: only the words before the first `gh`
+    `rtk`, `do`/`then`), else []. One entry per reading: a wrapper option's value may itself be
+    named `gh` (`sudo -u gh gh run watch`), so each of the first GH_CANDIDATES words named `gh`
+    or `gh-pr-checks` is tried as the command word and the caller denies when any reading is a watcher."""
+    # `sudo -u USER gh`, `env -i VAR=x gh`, `nice -n 10 gh`: only the words before the candidate
     # (an argument such as `-R o/env` or a branch named `env` must not be read as a wrapper)
     w = stage.split()
-    k = next((n for n, x in enumerate(w) if os.path.basename(x) == "gh"), None)
-    if k:
-        pre = " ".join(w[:k]) + " "
-        pre = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", SUDO_OPTS.sub("sudo ", pre)))
-        stage = pre + " ".join(w[k:])
+    cands = [n for n, x in enumerate(w) if os.path.basename(x) in ("gh", "gh-pr-checks")]
+    out: list[list[str]] = []
+    for k in cands[:GH_CANDIDATES] or [0]:
+        st = stage
+        if k:
+            pre = " ".join(w[:k]) + " "
+            pre = ENV_OPTS.sub("env ", NICE_OPTS.sub("nice ", SUDO_OPTS.sub("sudo ", pre)))
+            st = pre + " ".join(w[k:])
+        out += _gh_args_one(st)
+    return out
+
+
+def _gh_args_one(stage: str) -> list[list[str]]:
     for _ in range(8):
         head, rest = command_word(stage)
         base = os.path.basename(head)
         if base == "deadline" and "--" in rest:       # `deadline run ... -- gh ...`
-            stage = " ".join(rest[rest.index("--") + 1:])
+            stage = " ".join(rest[rest.index("--") + 1:])      # inner words were normalised by gh_args
             continue
         if base == "gh-pr-checks":                    # bin/gh-pr-checks forwards to `gh pr checks`
             fwd, k = [], 0
@@ -643,7 +654,7 @@ def gh_args(stage: str) -> list[str] | None:
                 elif rest[k] != "--no-deadline" and not rest[k].startswith("--budget="):
                     fwd.append(rest[k])
                 k += 1
-            return ["pr", "checks"] + fwd
+            return [["pr", "checks"] + fwd]
         if base in SHELL_KW or base in EXTRA_WRAP:
             while base in EXTRA_WRAP and rest and rest[0].startswith("-"):
                 rest = rest[1:]
@@ -651,8 +662,8 @@ def gh_args(stage: str) -> list[str] | None:
                 rest = rest[1:]
             stage = " ".join(rest)
             continue
-        return rest if base == "gh" else None
-    return None
+        return [rest] if base == "gh" else []
+    return []
 
 
 def gh_watch(args: list[str]) -> str | None:
@@ -712,10 +723,10 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
     for view in command_views(plain):
         for pipeline in re.split(r"&&|\|\||;|\n|&", view):
             for stage in re.split(r"\|&?", pipeline):
-                args = gh_args(stage)
-                reason = gh_watch(args) if args is not None else None
-                if reason:
-                    return reason
+                for args in gh_args(stage):
+                    reason = gh_watch(args)
+                    if reason:
+                        return reason
     raw = _drop_heredocs(text)
     if depth < 4:
         for body in live_bodies(raw):

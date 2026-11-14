@@ -673,6 +673,35 @@ def test_long_newline_runs_stay_fast(command):
 # gw-03: lead review Lows on #672 (rtk proxy, env/nice options)
 
 @pytest.mark.parametrize("command", [
+    "sudo -u gh gh run watch 9",                                # option value named gh (adv8 R1)
+    "sudo -D /x/gh gh run watch 9",
+    "env -u gh gh run watch 9",
+    "env -C /opt/gh gh run watch 9",
+    "env --chdir /opt/gh gh run watch 9",
+    "nice -n 5 env -C /x/gh gh run watch 9",
+    "sudo -u gh env -i gh run watch 9",
+    "bash -c 'env -u gh gh run watch 9'",
+    "deadline run gh --budget 10m -- env -i gh run watch 9",
+    "sudo -u me gh-pr-checks 5 --watch",                        # wrapper options before bin/gh-pr-checks (adv8 R2)
+    "env -i bin/gh-pr-checks 5 --watch",
+    "nice -n 5 bin/gh-pr-checks 5 --watch",
+    "env -u X ~/src/djbclark-ade/bin/gh-pr-checks 5 --watch",
+])
+def test_gw03_option_value_named_gh_and_wrapped_gh_pr_checks(command):
+    assert denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u gh gh run watch 9 -i 60",
+    "env -C /opt/gh gh run watch 9 --interval 60",
+    "sudo -u me gh-pr-checks 5 --watch --interval 60",
+    "sudo -u gh gh run view 9",
+])
+def test_gw03_option_value_named_gh_compliant_passes(command):
+    assert not denied(command), command
+
+
+@pytest.mark.parametrize("command", [
     "rtk proxy gh run watch 9",
     "rtk proxy gh pr checks 5 --watch",
     "env -i HOME=$HOME PATH=$PATH gh run watch 9",
