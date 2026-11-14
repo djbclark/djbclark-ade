@@ -154,6 +154,9 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    arrives, and report a peer you cannot reach to the operator, never assume it read. For completion notices (operator
    ruling 2026-11-12), proof uses dual routes: (a) prompt `ack <sender id> <msg-id>` sent only once target is `idle` (`paseo agent inspect`),
    worker ends turn immediately after sending; (b) atomic `<done>.ack` disk artifact. Unique msg-id allows deduplication.
+   A local Claude Code session outside Paseo is reached with `ListAgents` + `SendMessage` (docs/orchestration-practices.md
+   5a item 6). Address a repo lead by the current id at the tail of its `LEAD-STATE.md`, never an archived one: a message
+   un-archives it (5a item 7).
 
 11. **djbclark-ade is the lead's project; ask before changing code anywhere else** (operator, 2026-10-30: "You should ask me before you make changes to any code not
    in your project, which is djbclark-ade."). The lead of this repo edits, commits and pushes in djbclark-ade (and its worktrees) on its own judgment
