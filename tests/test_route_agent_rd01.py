@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -23,7 +24,23 @@ import route_agent as r  # noqa: E402
 from test_route_agent import IDLE  # noqa: E402
 
 LEAD = "6302bea5-9b20-4134-bcc7-7726c403eea5"
+LAUNCHER = os.path.expanduser(r.WORKER_RUN)      # the emitted launcher path is absolute
+WINDOW = "/Users/x/src/repo"                    # the WORKERS window's directory (the checkout), not a slice worktree
 OLD_KEYS = {"kind", "service", "cli", "agent", "model", "dispatch", "remaining", "why"}
+
+
+def _unset(env):
+    """A context that removes every variable whose value in `env` is None (genuinely unset, not empty)."""
+    import os as _os
+    saved = {k: _os.environ[k] for k, v in env.items() if v is None and k in _os.environ}
+    class Ctx:
+        def __enter__(self):
+            for k, v in env.items():
+                if v is None:
+                    _os.environ.pop(k, None)
+        def __exit__(self, *exc):
+            _os.environ.update(saved)
+    return Ctx()
 
 
 def _run(*argv, env=None):
@@ -32,7 +49,8 @@ def _run(*argv, env=None):
     env = {"PASEO_AGENT_ID": ""} if env is None else env
     with mock.patch.object(r, "load_snapshot", return_value=(IDLE, 60.0)), \
             mock.patch.object(r, "operator_disabled", return_value=set()), \
-            mock.patch.dict("os.environ", env), \
+            mock.patch.dict("os.environ", {k: v for k, v in env.items() if v is not None}), \
+            mock.patch.dict("os.environ", {}) if all(v is not None for v in env.values()) else _unset(env), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = r.main(list(argv))
     return code, out.getvalue(), err.getvalue()
@@ -47,7 +65,7 @@ def _slices(*argv, env=None):
 def test_every_kind_dispatches_through_ade_worker_run():
     kinds = [k for k in r.KINDS]
     slices, _ = _slices("plan", "--kinds", ",".join(kinds), *[a for i, _k in enumerate(kinds) for a in ("--slice", f"s{i}")],
-                        "--lead", LEAD, "--cwd", "/tmp/x-wt")
+                        "--lead", LEAD, "--cwd", WINDOW)
     routed = [s for s in slices if s["dispatch"] and s["agent"] != "cursor-cloud"]
     assert len(routed) >= 3
     for i, s in enumerate(slices):
@@ -56,10 +74,10 @@ def test_every_kind_dispatches_through_ade_worker_run():
         if s["agent"] == "cursor-cloud":        # a cloud agent: no Paseo workspace to place
             assert s["dispatch"].startswith("cursor-cloud launch ") and s["dispatch_warnings"] == []
             continue
-        argv = shlex.split(s["dispatch"].replace("~", "HOME", 1))
-        assert argv[0] == "HOME" + r.WORKER_RUN[1:], s["dispatch"]
+        argv = shlex.split(s["dispatch"])
+        assert argv[0] == LAUNCHER and not argv[0].startswith("~"), s["dispatch"]
         assert argv[1:5] == ["--lead", LEAD, "--slice", f"s{i}"], s["dispatch"]
-        assert argv[5:7] == ["--cwd", "/tmp/x-wt"]
+        assert argv[5:7] == ["--cwd", WINDOW]
         assert argv[7] == "--" and argv[8] == "--provider", s["dispatch"]
         assert argv[-1] == "--no-wait"
         assert "paseo" not in argv and "run" not in argv[:8]
@@ -67,11 +85,11 @@ def test_every_kind_dispatches_through_ade_worker_run():
 
 
 def test_a_complete_placement_has_no_warning_and_no_bare_paseo_run():
-    slices, err = _slices("plan", "--kinds", "frontier", "--slice", "review", "--lead", LEAD, "--cwd", "/tmp/x-wt",
+    slices, err = _slices("plan", "--kinds", "frontier", "--slice", "review", "--lead", LEAD, "--cwd", WINDOW,
                           "--window-middle", "tendcf-review", "--worker-repo", "tendcf")
     d = slices[0]["dispatch"]
-    assert d.startswith(f"{r.WORKER_RUN} --lead {LEAD} --slice review --window-middle tendcf-review --repo tendcf "
-                        "--cwd /tmp/x-wt -- --provider ")
+    assert d.startswith(f"{LAUNCHER} --lead {LEAD} --slice review --window-middle tendcf-review --repo tendcf "
+                        "--cwd /Users/x/src/repo -- --provider ")
     assert not d.startswith("paseo run")
     assert slices[0]["dispatch_warnings"] == []
     assert "WARNING: slice" not in err
@@ -80,7 +98,7 @@ def test_a_complete_placement_has_no_warning_and_no_bare_paseo_run():
 def test_missing_placement_warns_in_json_and_on_stderr_and_keeps_placeholders():
     slices, err = _slices("plan", "--kinds", "frontier")
     s = slices[0]
-    assert s["dispatch"].startswith(f"{r.WORKER_RUN} --lead {r.LEAD_PLACEHOLDER} --slice {r.SLICE_PLACEHOLDER} -- --provider ")
+    assert s["dispatch"].startswith(f"{LAUNCHER} --lead '<lead>' --slice '<slice>' -- --provider ")
     assert not s["dispatch"].startswith("paseo run")
     joined = " ".join(s["dispatch_warnings"])
     assert "no lead id" in joined and "no slice name" in joined and "no --cwd" in joined
@@ -120,7 +138,7 @@ def test_old_json_keys_are_unchanged_and_the_new_key_is_additive():
 def test_text_plan_prints_the_worker_run_line_and_the_warning():
     code, out, err = _run("plan", "--kinds", "code")
     assert code == 0
-    assert f"  {r.WORKER_RUN} --lead {r.LEAD_PLACEHOLDER} --slice {r.SLICE_PLACEHOLDER} -- --provider " in out
+    assert f"  {LAUNCHER} --lead '<lead>' --slice '<slice>' -- --provider " in out
     assert "WARNING: slice 1 (code): no lead id" in err
 
 
@@ -137,7 +155,7 @@ def test_adjust_dispatches_through_ade_worker_run_too():
     with mock.patch.dict("os.environ", {"ADE_ROUTE_ADJUST_DIR": "/nonexistent-rd01"}), \
             mock.patch("route_adjust.state_dir", return_value=Path("/nonexistent-rd01")):
         slices, err = _slices("adjust", "--kinds", "code", "--dry-run", "--slice", "a", "--lead", LEAD, "--cwd", "/w")
-    assert slices[0]["dispatch"].startswith(f"{r.WORKER_RUN} --lead {LEAD} --slice a --cwd /w -- --provider ")
+    assert slices[0]["dispatch"].startswith(f"{LAUNCHER} --lead {LEAD} --slice a --cwd /w -- --provider ")
     assert slices[0]["dispatch_warnings"] == []
 
 
@@ -148,7 +166,7 @@ def test_pi_template_and_cursor_cloud_lines():
     bare = pi.dispatch
     assert bare.startswith("paseo run --provider pi/zai/glm-5.3-flash")
     pi.placement = r.Placement(lead=LEAD, slice="s", cwd="/w")
-    assert pi.dispatch == f"{r.WORKER_RUN} --lead {LEAD} --slice s --cwd /w -- " + bare[len("paseo run "):]
+    assert pi.dispatch == f"{LAUNCHER} --lead {LEAD} --slice s --cwd /w -- " + bare[len("paseo run "):]
     cc = r.Choice(r.BY_NAME["cursor-cloud"], 50, 1, model="composer-2.5", kind="code",
                   placement=r.Placement(lead=LEAD, slice="s", cwd="/w"))
     assert cc.dispatch.startswith("cursor-cloud launch ") and WORKER_RUN_NOT_IN(cc.dispatch)
@@ -161,5 +179,74 @@ def WORKER_RUN_NOT_IN(line):
 
 def test_a_modelless_template_keeps_its_placeholder_inside_the_placed_line():
     c = r.Choice(r.BY_NAME["codex"], 80, 1, kind="code", placement=r.Placement(lead=LEAD, slice="s", cwd="/w"))
-    assert c.dispatch.startswith(f"{r.WORKER_RUN} --lead {LEAD} --slice s --cwd /w -- --provider codex/<id from: ")
+    assert c.dispatch.startswith(f"{LAUNCHER} --lead {LEAD} --slice s --cwd /w -- --provider codex/<id from: ")
     assert c.dispatch.endswith("--no-wait")
+
+
+def test_placeholders_are_quoted_literals_a_shell_cannot_redirect_or_expand():
+    slices, _ = _slices("plan", "--kinds", "code")
+    d = slices[0]["dispatch"]
+    assert f"--lead '<lead>' --slice '<slice>' -- " in d, d
+    assert r.LEAD_PLACEHOLDER == "<lead>" and r.SLICE_PLACEHOLDER == "<slice>"
+    assert "~" not in d.split(" -- ")[0]
+
+
+def test_every_user_value_is_one_shell_token():
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", LEAD, "--slice", "a b", "--cwd", "/x/my dir",
+                        "--window-middle", "Wave 7", "--worker-repo", "re po")
+    argv = shlex.split(slices[0]["dispatch"])
+    assert argv[argv.index("--slice") + 1] == "a b"
+    assert argv[argv.index("--window-middle") + 1] == "Wave 7"
+    assert argv[argv.index("--repo") + 1] == "re po"
+    assert argv[argv.index("--cwd") + 1] == "/x/my dir"
+    d = slices[0]["dispatch"]
+    assert "'a b'" in d and "'Wave 7'" in d and "'re po'" in d and "'/x/my dir'" in d
+    for hostile in ("$(touch x)", "a;b", "`id`"):
+        slices, _ = _slices("plan", "--kinds", "code", "--lead", LEAD, "--slice", hostile)
+        assert shlex.split(slices[0]["dispatch"])[4] == hostile
+
+
+@pytest.mark.parametrize("flag,needle", [("--lead", "no lead id"), ("--slice", "no slice name"), ("--cwd", "no --cwd")])
+def test_each_missing_input_alone_is_named(flag, needle):
+    full = {"--lead": LEAD, "--slice": "a", "--cwd": WINDOW}
+    argv = ["plan", "--kinds", "code"] + [x for k, v in full.items() if k != flag for x in (k, v)]
+    slices, err = _slices(*argv)
+    warnings = slices[0]["dispatch_warnings"]
+    assert len(warnings) == 1 and needle in warnings[0]
+    assert f"WARNING: slice 1 (code): {warnings[0]}" in err
+
+
+def test_an_unset_caller_id_is_a_warning_not_a_fake_lead():
+    slices, _ = _slices("plan", "--kinds", "code", "--slice", "a", "--cwd", WINDOW, env={"PASEO_AGENT_ID": None})
+    assert "--lead '<lead>'" in slices[0]["dispatch"]
+    assert any("no lead id" in w for w in slices[0]["dispatch_warnings"])
+
+
+def test_a_lead_or_slice_the_launcher_would_refuse_is_flagged_at_plan_time():
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", "not-an-id", "--slice=-bad", "--cwd", WINDOW)
+    joined = " ".join(slices[0]["dispatch_warnings"])
+    assert "not an agent id" in joined and "not a valid slice name" in joined
+
+
+def test_empty_values_are_not_emitted_and_count_as_missing():
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", LEAD, "--slice", "a", "--cwd", "", "--window-middle", "",
+                        "--worker-repo", "")
+    d = slices[0]["dispatch"]
+    assert "--cwd" not in d and "--window-middle" not in d and "--repo" not in d.split(" -- ")[0]
+    assert any("no --cwd" in w for w in slices[0]["dispatch_warnings"])
+
+
+def test_more_slice_names_than_kinds_is_a_usage_error():
+    with pytest.raises(SystemExit) as e:
+        _run("plan", "--kinds", "code", "--slice", "a", "--slice", "b")
+    assert e.value.code == 2
+
+
+def test_adjust_warns_on_stderr_and_a_slice_count_mismatch_writes_no_state(tmp_path):
+    with mock.patch("route_adjust.state_dir", return_value=tmp_path):
+        slices, err = _slices("adjust", "--kinds", "code", "--dry-run")
+        assert "WARNING: slice 1 (code): no slice name" in err
+        with pytest.raises(SystemExit) as e:
+            _run("adjust", "--kinds", "code,code", "--slice", "only-one")
+        assert e.value.code == 2
+    assert list(tmp_path.iterdir()) == []      # exited before any hold/restore state or change log was written

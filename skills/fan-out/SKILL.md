@@ -62,8 +62,8 @@ may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a f
 and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Pass the placement to the plan
 (`plan --kinds KIND --lead <your id> --slice <name> --cwd <the window's directory, ~/src/<repo>> [--window-middle <work>]`, `--slice` once per
 kind; `--lead` defaults to `$PASEO_AGENT_ID`), and its `dispatch` is already an `ade-worker-run` line (section 3): a bare `paseo run`
-puts the worker in the caller's own workspace, since Paseo ignores `--cwd` (getpaseo/paseo#9699, #4125). A plan that lacks one
-input keeps a `<lead>` / `<slice>` placeholder in the line and names it in `dispatch_warnings` (JSON) and on stderr: fix it, never launch it. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
+puts the worker in the caller's own workspace, since Paseo ignores `--cwd` (getpaseo/paseo#9699, #4125). A plan that lacks a
+lead or slice keeps a quoted `'<lead>'` / `'<slice>'` placeholder in the line and names it in `dispatch_warnings` (JSON) and on stderr: fix it, never launch it; a missing `--cwd` is advisory (only a lead's first launch takes the current directory). The line is a complete shell command with an absolute launcher path: paste it into the command as it is, then add the labels and the brief (not `$VAR` expansion: a quoted window name would split). Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
 the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
@@ -115,8 +115,8 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
 2. It adds `--label ade.lead=<LEAD>` and `--label slice=<NAME>` itself (so do not pass them, nor `--workspace`,
    `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
    `worker <NAME> <LEAD>` with `paseo agent update`, and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
-   The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (a plan's
-   a bare `paseo run` template, `route --kind K`, starts with it; `plan`'s `dispatch` is already the whole `ade-worker-run` line
+   The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (the bare
+   `paseo run` template that `route --kind K` prints starts with it; `plan`'s `dispatch` is already the whole `ade-worker-run` line
    (rd-01, 2026-11-14), so run it as it stands and append only the brief); no bundled short options
    (`-qd`); and `--no-wait` is required. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
    `archive-window` of one lead never interleave. `--lead` must be the caller's own agent id: when `PASEO_AGENT_ID` is set

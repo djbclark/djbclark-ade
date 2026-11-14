@@ -171,7 +171,8 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 
 1. **Workers, refuter, writer and reviewer are `fan-out` slices, not only
    Claude sub-agents.** Dispatch each brief with native Paseo: take
-   `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND --lead LEAD --slice N --cwd <run-folder-parent> --window-middle <work>`
+   `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND --lead LEAD --slice N --cwd ~/src/<repo> --window-middle <work>`
+   (`--cwd` is the checkout whose WORKERS window holds the slices, not the run folder: name the run folder in each brief as an absolute path)
    and run each choice's `dispatch` field **as-is** (rd-01, 2026-11-14: an
    `ade-worker-run … -- --provider … [--thinking …] [--label ade.kind=…] --no-wait` line for
    every pool, including Claude and Codex, which places the worker; a bare `paseo run` — what `route --kind K` prints — would land it in
@@ -181,9 +182,10 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    `--kinds frontier`. Minimal shape (see `skills/fan-out`):
 
    ```bash
-   # after: route_agent.py plan --kinds research|frontier --lead LEAD --slice N --cwd <run-folder-parent> --window-middle <work>
-   # DISPATCH is Choice.dispatch verbatim (ade-worker-run adds ade.lead and slice); then labels + positional brief:
-   $DISPATCH --label ade.name=N \
+   # after: route_agent.py plan --kinds research|frontier --lead LEAD --slice N --cwd ~/src/<repo> --window-middle <work>
+   # Paste Choice.dispatch itself as the start of the command (it is a complete shell command; ade-worker-run adds
+   # ade.lead and slice). Not `$DISPATCH`: a variable would split the quoted window name. Then labels + positional brief:
+   <Choice.dispatch> --label ade.name=N \
      --label ade.task=research-<slug> \
      "$(cat brief-with-footer.md)"
    ```
@@ -208,7 +210,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    go to a Cursor slice on that model and its verdict is applied as given. **Every worker
    role runs on all three families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel after
-   `route_agent.py plan --kinds frontier` (or `research`) → each family's
+   `route_agent.py plan --kinds frontier --lead LEAD --slice N … --cwd ~/src/<repo>` (or `research`) → each family's
    `Choice.dispatch` line **as-is** (rd-01: that emit is already an
    `ade-worker-run … -- --provider … [--label ade.kind=…] --no-wait` line — never
    hand-roll a raw `paseo run` that skips the planner's load/frontier/eligibility
@@ -234,7 +236,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    for its reset and the same step resumes (the slice writes incrementally,
    per `feedback_quota_wait_dont_lose_work`). A Cursor slice on the xAI model that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
-   1a. **GPT reviewers also go through `route_agent.py plan --kinds frontier`
+   1a. **GPT reviewers also go through `route_agent.py plan --kinds frontier --lead … --slice … --cwd …`
    → that Choice's `dispatch` field as-is** (never a hand-rolled `paseo run`;
    the `ocx-gpt-6-*` Agent-tool sub-agents and the opencodex proxy behind them
    were uninstalled 2026-10-19). If the Codex pool is out
@@ -267,9 +269,9 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 6. **Preflight mechanics.** Print the probe brief with `python3 -I
    scripts/research_check.py probe --brief`, save it to `<run>/.probe.md`
    and dispatch it to each planned route in parallel the same way as item 1:
-   `route_agent.py plan --kinds KIND` → `$DISPATCH` (Choice.dispatch verbatim)
+   `route_agent.py plan --kinds KIND --lead … --slice … --cwd …` → `<Choice.dispatch>` (pasted verbatim)
    plus extra labels and the positional brief, e.g.
-   `$DISPATCH --label ade.name=probe-<agent> --label ade.task=research-<slug> \
+   `<Choice.dispatch> --label ade.name=probe-<agent> --label ade.task=research-<slug> \
      "$(cat <run>/.probe.md-with-footer)"`
    (same agents/models the planner admitted; an Agent-tool sub-agent gets
    the brief plus the item 2 footer). Do not invent a second raw `paseo run`.

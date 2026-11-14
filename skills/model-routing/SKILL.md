@@ -104,7 +104,7 @@ D1. **Plan a wave with the router, re-plan at every slice boundary:** `bin/route
 [--repo NAME] [--lead ID --slice A --slice B … --cwd DIR [--window-middle WORK]]` prints, for every pool, an `ade-worker-run --lead … --slice … --cwd … -- --provider …`
 line (rd-01, 2026-11-14: a bare `paseo run` has no workspace and Paseo ignores `--cwd`, getpaseo/paseo#9699), or `cursor-cloud launch …` for
 the Cursor Cloud row. `--lead` defaults to `$PASEO_AGENT_ID`, `--slice` is once per kind, `--cwd` is the WORKERS window's directory; an input left out keeps `<lead>` / `<slice>`
-in the line and is named in each slice's `dispatch_warnings` (JSON) and on stderr (a line with a warning is not launched). `route --kind K` prints the bare `paseo run` template
+in the line (quoted, so a shell passes it on and `ade-worker-run` refuses it) and is named in each slice's `dispatch_warnings` (JSON) and on stderr; fix a missing lead or slice before launching (a missing `--cwd` is advisory: only a lead's first launch takes the current directory). `route --kind K` prints the bare `paseo run` template
 (PR Radar's adapter reads it). It spreads
 the wave over pools by `max_parallel`, and keeps a slice queued rather than buy a much weaker pool into code or judgment
 (`quality_max_rank_gap`). `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste

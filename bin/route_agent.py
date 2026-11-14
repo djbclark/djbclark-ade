@@ -1968,8 +1968,11 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
 # (getpaseo/paseo#9699), so a worker launched from a plan line landed in the caller's own workspace. `ade-worker-run` is not
 # on PATH; the checkout path is the one the fan-out skill and the load-watch lines use.
 WORKER_RUN = "~/src/djbclark-ade/bin/ade-worker-run"
-LEAD_PLACEHOLDER = "<lead>"
+LEAD_PLACEHOLDER = "<lead>"        # emitted quoted ('<lead>'): an unquoted <...> is a shell redirection, not an inert token
 SLICE_PLACEHOLDER = "<slice>"
+# The shapes `ade-worker-run` accepts (LEAD_RE, SLICE_RE there); a value outside them is refused at launch, so say so at plan time.
+LEAD_SHAPE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SLICE_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 @dataclass(frozen=True)
@@ -2006,11 +2009,15 @@ class Choice:
         out = []
         if not pl.lead:
             out.append(f"no lead id: {LEAD_PLACEHOLDER} stays in the line (pass --lead; $PASEO_AGENT_ID was not set)")
+        elif not LEAD_SHAPE.fullmatch(pl.lead):
+            out.append(f"lead {pl.lead!r} is not an agent id: ade-worker-run refuses it (pass your own full id)")
         if not pl.slice:
             out.append(f"no slice name: {SLICE_PLACEHOLDER} stays in the line (pass --slice, once per kind)")
+        elif not SLICE_SHAPE.fullmatch(pl.slice):
+            out.append(f"slice {pl.slice!r} is not a valid slice name: ade-worker-run refuses it (letters, digits, . _ -)")
         if not pl.cwd:
-            out.append("no --cwd: ade-worker-run launches in its own current directory, the caller's workspace "
-                       "(pass --cwd <the window's directory, ~/src/<repo>>)")
+            out.append("no --cwd: a lead's first launch opens its WORKERS window in ade-worker-run's current directory; "
+                       "pass --cwd <the window's directory, ~/src/<repo>> (a later launch uses the existing window's own)")
         return out
 
     @property
@@ -2024,8 +2031,9 @@ class Choice:
         if self.placement is None:
             return f"paseo run {run}"
         pl = self.placement
-        head = [WORKER_RUN, "--lead", shlex.quote(pl.lead) if pl.lead else LEAD_PLACEHOLDER,
-                "--slice", shlex.quote(pl.slice) if pl.slice else SLICE_PLACEHOLDER]
+        # Absolute at emit time: a `~` path works only where a shell parses the line directly (not shlex.split + exec, not $VAR).
+        head = [shlex.quote(os.path.expanduser(WORKER_RUN)), "--lead", shlex.quote(pl.lead or LEAD_PLACEHOLDER),
+                "--slice", shlex.quote(pl.slice or SLICE_PLACEHOLDER)]
         for flag, value in (("--window-middle", pl.window_middle), ("--repo", pl.repo), ("--cwd", pl.cwd)):
             if value:
                 head += [flag, shlex.quote(value)]
@@ -3333,6 +3341,8 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     bad = [k for k in kinds if k not in KINDS]
     if bad:
         parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
+    if args.slices and len(args.slices) != len(kinds):
+        parser.error("--slice must be given once per kind, in --kinds order")   # before the locked write below
     skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
     repo = args.repo or repo_of(os.getcwd())
     write = cfg["enabled"] and not args.dry_run
