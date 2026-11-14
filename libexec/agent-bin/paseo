@@ -27,12 +27,14 @@
 #      ledger, a redirect that would be a send to oneself).
 # The real paseo is the first `paseo` on PATH (or ADE_REAL_PASEO) that is a regular executable file and not a shim: every copy of
 # this file is skipped, wherever it lives, so two checkouts' agent-bin directories on one PATH do not call each other.
-# A re-entry counter (ADE_PASEO_SHIM_DEPTH, cap 8) stops a wrapper that runs a shim again.
+# A re-entry counter (ADE_PASEO_SHIM_DEPTH, cap 8) stops a wrapper that runs a shim again. It counts only an exec chain: it is valid
+# only when ADE_PASEO_SHIM_PID, the pid of the shim that set it, is this process (an exec) or its parent (a wrapper that runs the shim
+# as a child). Anything else, such as a value a daemon started through the shim passes to every agent it spawns, counts from zero.
 # FAILS OPEN: no python3, a missing helper or any error inside it runs the real paseo with a one-line note on stderr. Only a
 # refusal stops a command. An accident guard, like the hook, not a sandbox.
 #
 # Exit codes: 4 refused (nothing sent); 127 no real paseo found or re-entered more than 8 times; every other code is the real paseo's.
-# Environment: ADE_REAL_PASEO (the real paseo; skips the PATH search), ADE_PYTHON (default python3),
+# Environment: ADE_REAL_PASEO (the real paseo; skips the PATH search; the shim passes it only to its helper), ADE_PYTHON (default python3),
 # ADE_ALLOW_ARCHIVED_SEND=<full id> (operator: resume one archived agent), ADE_ALLOW_REPLACED_SEND=<full id> (operator: send to
 # a replaced agent that is still live), ADE_SEND_GUARD_LOG (override log; default ~/.local/state/djbclark-ade/send-guard-overrides.jsonl).
 set -u
@@ -41,14 +43,17 @@ self="$0"
 case "$self" in */*) ;; *) self="./$self" ;; esac
 
 # re-entry cap: a wrapper named paseo that runs a shim again would loop forever
-depth="${ADE_PASEO_SHIM_DEPTH:-0}"
+depth=0
+case "${ADE_PASEO_SHIM_PID:-}" in "$$" | "$PPID") depth="${ADE_PASEO_SHIM_DEPTH:-0}" ;; esac  # a counter set by an ancestor exec chain only
 case "$depth" in "" | *[!0-9]*) depth=0 ;; esac
+while [ "${depth#0}" != "$depth" ]; do depth="${depth#0}"; done  # `08` is eight, not an octal error
+case "$depth" in "" | ??????*) depth=0 ;; esac
 depth=$((depth + 1))
 if [ "$depth" -gt 8 ]; then
   echo "paseo shim: re-entered $depth times (a wrapper named paseo that runs a shim again?): no real paseo reachable" >&2
   exit 127
 fi
-export ADE_PASEO_SHIM_DEPTH="$depth"
+export ADE_PASEO_SHIM_DEPTH="$depth" ADE_PASEO_SHIM_PID="$$"
 
 # is_shim FILE: a copy of this shim (marker line in its first lines), through symlinks
 is_shim() {
@@ -82,7 +87,6 @@ if [ -z "$real" ]; then
   echo "paseo shim: no real paseo found on PATH" >&2
   exit 127
 fi
-export ADE_REAL_PASEO="$real"
 
 # 1: no `send` word: nothing to judge
 has_send=0
@@ -111,4 +115,4 @@ if ! command -v "$py" > /dev/null 2>&1 || ! [ -f "$helper" ]; then
 fi
 
 # -I: isolated (no PYTHON* variables, no user site, no cwd or script dir on sys.path)
-exec "$py" -I "$helper" "$@"
+ADE_REAL_PASEO="$real" exec "$py" -I "$helper" "$@"  # named for the helper alone, never for a paseo that may start a daemon

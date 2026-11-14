@@ -27,7 +27,7 @@ HELPER = ROOT / "bin" / "ade-paseo-guard"
 FAKE = """#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
-rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO")}
+rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH")}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -83,7 +83,7 @@ def test_a_non_send_passes_through_untouched_with_argv_stdin_and_exit_code(sw):
     assert p.returncode == 7 and p.stdout == "real paseo ran: ls -a -g --json --stdin\n"
     rec = [json.loads(x) for x in sw.log.read_text().splitlines()]
     assert [(r["argv"], r["stdin"]) for r in rec] == [(["ls", "-a", "-g", "--json", "--stdin"], "piped text")]
-    assert rec[0]["real_env"] == str(sw.bindir / "paseo")  # the shim names the real paseo to whatever it runs, also for a non-send
+    assert rec[0]["real_env"] is None  # ls-07: the real path is named to the helper alone, never to a paseo that may start a daemon
 
 
 def test_a_non_send_never_probes_and_needs_no_python(sw):
@@ -503,6 +503,7 @@ def test_the_helper_skips_every_shim_copy_when_it_looks_for_the_real_paseo(sw, t
     assert mod.real_paseo({"PATH": f"{AGENT_BIN}:{other}"}) is None
     assert mod.real_paseo({"PATH": f"{sw.bindir}", "ADE_REAL_PASEO": str(other / "paseo")}) == f"{sw.bindir}/paseo"  # a shim is not named real
     assert mod.is_shim(SHIM) and not mod.is_shim(sw.bindir / "paseo") and not mod.is_shim(tmp_path / "missing")
+    assert mod.real_paseo({"PATH": str(sw.bindir), "ADE_REAL_PASEO": str(tmp_path)}) == f"{sw.bindir}/paseo"  # a directory is not named real (r2 C1)
 
 
 def test_a_wrapper_that_runs_a_shim_again_stops_at_the_reentry_cap(sw, tmp_path):
@@ -512,8 +513,41 @@ def test_a_wrapper_that_runs_a_shim_again_stops_at_the_reentry_cap(sw, tmp_path)
     wrapper.chmod(0o755)
     p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper)}, timeout=30)
     assert p.returncode == 127 and "re-entered 9 times" in p.stderr and sw.calls() == []
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "not-a-number"}, timeout=30)  # junk counts as zero
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "not-a-number", "ADE_PASEO_SHIM_PID": str(os.getpid())}, timeout=30)  # junk counts as zero
     assert p.returncode == 0 and p.stdout == "real paseo ran: ls\n"
+
+
+def last_depth(sw):
+    return json.loads(sw.log.read_text().splitlines()[-1])["depth"]
+
+
+def test_a_counter_left_by_a_daemon_parent_is_not_a_loop(sw):
+    """ls-06 r2 B1 / ls-07: `paseo daemon start` through the shim passes ADE_PASEO_SHIM_DEPTH to the daemon and every agent it
+    spawns. The counter is valid only when ADE_PASEO_SHIM_PID is this shim's pid or its parent's (an exec chain)."""
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8", "ADE_PASEO_SHIM_PID": "99999999"}, timeout=30)
+    assert p.returncode == 0 and last_depth(sw) == "1"  # a stale value from another process: counted from zero
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8"}, timeout=30)  # no pid at all
+    assert p.returncode == 0 and last_depth(sw) == "1"
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_DEPTH": "8", "ADE_PASEO_SHIM_PID": str(os.getpid())}, timeout=30)  # a chain: this test is the parent
+    assert p.returncode == 127 and "re-entered 9 times" in p.stderr
+
+
+def test_a_counter_with_leading_zeros_is_a_decimal_number(sw):
+    """`08` used to abort the sh arithmetic ("value too great for base", rc 1, paseo not run)."""
+    env = {"ADE_PASEO_SHIM_PID": str(os.getpid())}
+    p = sw.run("ls", env={**env, "ADE_PASEO_SHIM_DEPTH": "07"}, timeout=30)
+    assert p.returncode == 0 and last_depth(sw) == "8"
+    p = sw.run("ls", env={**env, "ADE_PASEO_SHIM_DEPTH": "08"}, timeout=30)
+    assert p.returncode == 127 and "re-entered 9 times" in p.stderr
+    p = sw.run("ls", env={**env, "ADE_PASEO_SHIM_DEPTH": "99999999999999999999"}, timeout=30)  # an absurdly long counter counts as zero
+    assert p.returncode == 0 and last_depth(sw) == "1"
+
+
+def test_a_copy_of_the_shim_named_as_real_paseo_is_skipped_not_run(sw, tmp_path):
+    """Kills "drop `! is_shim \"$ADE_REAL_PASEO\"`" (ls-06 r2 C3): the copy would be run, one exec deeper (depth 2)."""
+    other = checkout_copy(tmp_path, "checkout-c")
+    p = sw.run("ls", env={"ADE_REAL_PASEO": str(other / "paseo")}, timeout=30)
+    assert p.returncode == 0 and last_depth(sw) == "1"
 
 
 # M3: BASH_ENV, which the fixture drops, is put back on purpose ------------------------------------------------------------
@@ -608,6 +642,22 @@ def test_a_log_path_that_is_a_symlink_or_a_fifo_is_never_written_through_or_wait
                            "g.log_override(g.Decision('pass', 'a', '', replaced_by='b'), sys.argv[2])", str(ROOT / "bin"), str(fifo)],
                           capture_output=True, text=True, timeout=20, check=False)  # a blocking open would time out
     assert proc.returncode == 0
+
+
+def test_a_fifo_with_a_reader_is_not_written(tmp_path):
+    """ls-06 r2 C2: the open succeeds (a reader is there), so only the fstat regular-file check keeps the line out."""
+    fifo = tmp_path / "f.jsonl"
+    os.mkfifo(fifo)
+    rfd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        guard.log_override(guard.Decision(guard.PASS, A, "x", replaced_by=B), fifo)
+        try:
+            data = os.read(rfd, 4096)
+        except BlockingIOError:
+            data = b""
+        assert data == b""
+    finally:
+        os.close(rfd)
 
 
 # L6 and the surviving mutants of the review (L9) --------------------------------------------------------------------------------

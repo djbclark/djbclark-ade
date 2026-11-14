@@ -41,7 +41,7 @@ def deny(reason: str) -> None:
 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
-NO_RUN = {"echo", "printf"}  # words after these are text, not a command
+NO_RUN = {"echo", "printf", "grep", "rg"}  # words after these are text, not a command; their `-e`/`-c` flags take text too: `echo -e "old: paseo send A"`. Read by `_one` and by `_mask`
 
 
 def strip_heredocs(command: str) -> str:
@@ -152,7 +152,6 @@ def strip_comments(text: str) -> str:
 
 
 RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at", "tmux", "osascript", "awk", "gawk", "mawk"}  # words that run a string argument (awk: `system("...")`)
-NO_RUN = {"echo", "printf", "grep", "rg"}  # their `-e`/`-c` flags take text, not a command: `echo -e "old: paseo send A"`
 RUN_FLAG = re.compile(r"-[A-Za-z]*[ce][A-Za-z]*|--command(=.*)?|--run(=.*)?")  # `-c`, `-lc`, `-e`, `--run=`: the next word is a command string
 # A shell in the (already masked) text may read a script from stdin: `| sh`, `bash <<<`, `| $SHELL`, `source <(...)`. No `\S*/` prefix:
 # the lookbehind already matches after a `/`, and the prefix made the scan quadratic on a long blob without blanks.
@@ -164,6 +163,7 @@ IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 def _mask(text: str) -> str:
     out, word = [], []
     first, runner = "", False  # the first word of this simple command; has a runner word or flag come before the string?
+    quoted_word = False  # the word being read holds a quote or an escape: never a runner name (and `'a''b''c'...` stays linear)
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -176,19 +176,22 @@ def _mask(text: str) -> str:
             if j >= n:
                 return text
             body = text[i + 1:j]
-            cur = "".join(word)
+            ids_body = re.sub(r"\\[ntr]", " ", body) if ansi else body  # a backslash-n in `$'...'` is a blank
+            cur = "" if quoted_word else "".join(word)
             runs = ((runner or Path(cur).name in RUNNERS or RUN_FLAG.fullmatch(cur) is not None)
                     and Path(first or cur).name not in NO_RUN)
             keep = (runs or SHELL_BODY.fullmatch(body) is not None  # `| "sh"` is still a shell reading stdin
-                    or IDS_ONLY.fullmatch(body) is not None  # a quoted id (or a list of ids) is a target, not message text
+                    or IDS_ONLY.fullmatch(ids_body) is not None  # a quoted id or list of ids (also `$'A<backslash>nB'`)
                     or (q == '"' and (("$(" in body or "`" in body)  # a real substitution
                                       or ("$" in body and not re.search(r"\s", body)))))  # `"${LEAD:-<id>}"`, `"$SHELL"`
-            out.append(text[start:j + 1] if keep else "''")
+            out.append(("$'" + ids_body + "'" if ansi and ids_body != body and IDS_ONLY.fullmatch(ids_body) else text[start:j + 1]) if keep else "''")
             word.append("Q")
+            quoted_word = True
             i = j + 1
         elif c == "\\" and i + 1 < n:
             out.append(text[i:i + 2])
             word.append("Q")
+            quoted_word = True
             i += 2
         else:
             if c.isspace() or c in ";&|()":
@@ -197,6 +200,7 @@ def _mask(text: str) -> str:
                     first = first or w
                     runner = runner or Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) is not None
                     word.clear()
+                quoted_word = False
                 if c in ";&|()":
                     first, runner = "", False
             else:
@@ -287,6 +291,9 @@ def _daemon_option(word: str) -> bool:
     return word in OTHER_DAEMON or word.startswith(("--host=", "--home="))
 
 
+REDIRECT = re.compile(r"[<>]+&?")  # `>`, `>>`, `<<<`, `>&`: the lexer splits them from their operand (`2>x` leaves the `2` behind)
+
+
 def _scan(args: list[str]) -> tuple[int | None, bool]:
     """(index of the agent word, whether a daemon selector was seen) in the arguments after `send`. Value options are skipped with
     their values; the first word after `--` is the agent when none came before it and the rest is message text. The whole option
@@ -294,6 +301,9 @@ def _scan(args: list[str]) -> tuple[int | None, bool]:
     target, j = None, 0
     while j < len(args):
         a = args[j]
+        if REDIRECT.fullmatch(a):  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`: the operand is a file or text, not an option or the agent
+            j += 2
+            continue
         if _daemon_option(a):
             return None, True
         if a == "--":
@@ -303,7 +313,7 @@ def _scan(args: list[str]) -> tuple[int | None, bool]:
         if a in VALUE_FLAGS or _takes_value(a):
             j += 2
         else:
-            if not a.startswith("-") and target is None:
+            if (not a.startswith("-") or a == "-") and target is None:  # a lone `-` is an operand for Commander
                 target = j
             j += 1
     return target, False
