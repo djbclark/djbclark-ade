@@ -326,6 +326,7 @@ duplicate id or login, or a `rest_login` that is not `graphql_login` + `[bot]` r
 ```toml
 [meta]
 schema = 1
+[bots]
 drop = ["greptile"]                       # ids from config/review-bots.toml; an unknown id is an error
 [[add]]                                   # same keys as a [[bot]] entry; the id and the login must be new
 id = "sourcery"

@@ -170,8 +170,8 @@ def test_malformed_config_fails_closed(text: str, needle: str) -> None:
 
 
 @pytest.mark.parametrize("text, needle", [
-    ('[meta]\nschema = 1\ndrop = ["nope"]\n', "names no listed bot"),
-    ('[meta]\nschema = 1\ndrop = "codex"\n', "list"),
+    ('[meta]\nschema = 1\n[bots]\ndrop = ["nope"]\n', "names no listed bot"),
+    ('[meta]\nschema = 1\n[bots]\ndrop = "codex"\n', "list"),
     ('[meta]\nschema = 1\nwat = 1\n', "unknown key"),
     ('[meta]\nschema = 1\n[[add]]\nid = "codex"\nname = "dup"\nrest_login = "zz[bot]"\ngraphql_login = "zz"\n', "duplicate"),
     ('[meta]\nschema = 1\n[[add]]\nid = "new"\nname = "n"\nrest_login = "chatgpt-codex-connector[bot]"\n'
@@ -190,7 +190,7 @@ def test_override_add_and_drop() -> None:
     cfg = rb.load_default_config()
     out = rb.apply_override(
         cfg,
-        '[meta]\nschema = 1\ndrop = ["greptile", "copilot"]\n'
+        '[meta]\nschema = 1\n[bots]\ndrop = ["greptile", "copilot"]\n'
         '[[add]]\nid = "sourcery"\nname = "Sourcery"\nrest_login = "sourcery-ai[bot]"\ngraphql_login = "sourcery-ai"\n',
     )
     ids = [b.id for b in out.bots]
@@ -198,7 +198,7 @@ def test_override_add_and_drop() -> None:
 
 
 def test_override_is_read_from_the_default_branch_not_a_ref() -> None:
-    fake = FakeGh(override='[meta]\nschema = 1\ndrop = ["coderabbit"]\n')
+    fake = FakeGh(override='[meta]\nschema = 1\n[bots]\ndrop = ["coderabbit"]\n')
     cfg = rb.effective_config(fake, "o/r")
     assert "coderabbit" not in [b.id for b in cfg.bots]
     argv = fake.calls[0]
@@ -299,11 +299,9 @@ def test_outdated_unresolved_thread_still_blocks() -> None:
     "wontfix - by design, see docs/threat-model.md",
     "Not a bug. The value is validated two lines up",
     "Deferred, tracked in docs/queue.md carried 12",
-    "Fixed’s the wrong word but wontfix works",
+    "Won\u2019t fix: the caller holds the lock already",
 ])
 def test_owner_reply_with_verdict_and_reason_triages(reply: str) -> None:
-    if reply.startswith("Fixed’s"):
-        pytest.skip("not a verdict form")
     v = evaluate(FakeGh(threads=[thread([comment(CODERABBIT, "finding"), comment(OWNER, reply)])]))
     assert statuses(v) == ["triaged"] and v["state"] == "clear"
 
@@ -353,7 +351,7 @@ def test_unlisted_bot_is_ignored() -> None:
 
 def test_override_add_makes_a_new_bot_blocking_and_drop_silences_one() -> None:
     sourcery = bot("sourcery-ai")
-    ov = ('[meta]\nschema = 1\ndrop = ["coderabbit"]\n[[add]]\nid = "sourcery"\nname = "S"\n'
+    ov = ('[meta]\nschema = 1\n[bots]\ndrop = ["coderabbit"]\n[[add]]\nid = "sourcery"\nname = "S"\n'
           'rest_login = "sourcery-ai[bot]"\ngraphql_login = "sourcery-ai"\n')
     threads = [thread([comment(sourcery, "added bot finding")]), thread([comment(CODERABBIT, "dropped bot finding")])]
     v = evaluate(FakeGh(threads=threads, override=ov))
@@ -387,7 +385,6 @@ def test_only_the_latest_review_of_a_bot_counts() -> None:
     old = review(CODERABBIT, "Actionable comments posted: 3", at="2026-11-14T10:00:00Z")
     new = review(CODERABBIT, "Actionable comments posted: 0", at="2026-11-14T11:00:00Z")
     assert evaluate(FakeGh(reviews=[old, new]))["findings"] == []
-    assert statuses(evaluate(FakeGh(reviews=[new, old]))) == ["untriaged"] or True   # order in the list is irrelevant
     assert evaluate(FakeGh(reviews=[new, old]))["findings"] == []
 
 
@@ -671,7 +668,7 @@ def test_merge_ready_pending_bot_check_blocks_then_clears(tmp_path: Path) -> Non
 
 
 def test_merge_ready_bad_repo_override_fails_closed(tmp_path: Path) -> None:
-    merge_world(tmp_path, override='[meta]\nschema = 1\ndrop = ["no-such-bot"]\n')
+    merge_world(tmp_path, override='[meta]\nschema = 1\n[bots]\ndrop = ["no-such-bot"]\n')
     row = row_of(tmp_path)
     assert row["class"] == "review_bot_unknown" and "no listed bot" in row["review_bots"]["reason"]
     r = mr(tmp_path, "merge-now", "--prs", "600", "--yes")
@@ -680,7 +677,7 @@ def test_merge_ready_bad_repo_override_fails_closed(tmp_path: Path) -> None:
 
 def test_merge_ready_override_drop_lets_the_merge_through(tmp_path: Path) -> None:
     merge_world(tmp_path, threads=[thread([comment(CODERABBIT, "x")])],
-                override='[meta]\nschema = 1\ndrop = ["coderabbit"]\n')
+                override='[meta]\nschema = 1\n[bots]\ndrop = ["coderabbit"]\n')
     assert row_of(tmp_path)["class"] == "merge_now"
 
 

@@ -212,10 +212,11 @@ def parse_config(text: str, where: str = "review-bots.toml") -> Config:
 
 
 def apply_override(cfg: Config, text: str, where: str = OVERRIDE_PATH) -> Config:
-    """Apply a per-repo override: `drop = [ids]` removes default bots, `[[add]]` appends full entries."""
+    """Apply a per-repo override: `[bots] drop = [ids]` removes default bots, `[[add]]` appends full entries."""
     doc = _load_toml(text, where, OVERRIDE_MAX_BYTES)
-    _table(doc, frozenset({"meta", "drop", "add"}), frozenset({"meta"}), where)
-    drop = _strs(doc.get("drop", []), f"{where}.drop")
+    _table(doc, frozenset({"meta", "bots", "add"}), frozenset({"meta"}), where)
+    bots_tbl = _table(doc.get("bots", {}), frozenset({"drop"}), frozenset(), f"{where} [bots]")
+    drop = _strs(bots_tbl.get("drop", []), f"{where} [bots].drop")
     have = {b.id for b in cfg.bots}
     unknown = sorted(set(drop) - have)
     if unknown:
