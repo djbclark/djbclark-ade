@@ -47,18 +47,48 @@ def rows(value):
 
 
 # A request that is a question or plan/mode approval for the operator must stay pending. Paseo's request
-# kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`), so
-# this is a name-based, best-effort DENYLIST (a missing name or a non-`tool` kind fails closed; an unlisted
-# question name is NOT caught, so only providers in CLASSIFIED_PROVIDERS, whose names are known, are served). Names seen in Paseo's providers: Claude AskUserQuestion / ExitPlanMode, Codex CodexPlanApproval /
-# CodexMcpElicitation / request_user_input, OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|
-# confirm", OMP "OMP ask" / "OMP select|...", ACP switch_mode. `kind` is also checked when a row carries it.
-# Substring stems are matched against the lower-cased name with separators removed (catches run-together
-# spellings); short words are matched as whole tokens (acronym- and camelCase-split) so "Task" is not "ask".
+# kinds are tool|plan|question|mode|other, but `permit ls --json` rows expose only `name` (no `kind`; a kind
+# is honoured when a row carries one), so this is a name-based, best-effort DENYLIST. A missing or empty name or
+# a non-`tool` kind fails closed; an unlisted question name is NOT caught, so only providers in
+# CLASSIFIED_PROVIDERS, whose names are known, are served. Names read from Paseo's source (2026-11-14): Claude
+# AskUserQuestion / ExitPlanMode (every other Claude tool, `mcp__server__tool` included, is kind `tool`), Codex
+# CodexPlanApproval / CodexMcpElicitation / request_user_input (CodexBash and CodexFileChange are tools),
+# OpenCode question, Pi "Pi ask_user" / "Pi select|input|editor|confirm", OMP "OMP ask" / "OMP select|...", ACP
+# switch_mode. Every provider fills `name`; `kind` is absent from the CLI rows for all of them.
+#
+# Matching: a name is split into words (separators and camelCase, so "TaskStop" is task+stop and "Task" is not
+# "ask"). TOKENS are whole words. STEMS are matched in the run-together name (separators removed, so run-together
+# and all-caps spellings still match); only WORD_START_STEMS must begin at a word start (so "task_user" is a tool
+# and "ask_user" is not). Each match yields a rule label that the audit log records.
 CLASSIFIED_PROVIDERS = {"claude", "codex", "opencode", "pi", "omp"}  # question names read from Paseo's source
 STEMS = ("question", "elicit", "askuser", "userinput", "exitplan", "enterplan", "planmode", "planapproval",
          "switchmode", "requestinput")
+WORD_START_STEMS = {"askuser"}  # short enough to occur inside other words ("task_user"); the rest match anywhere
 TOKENS = {"ask", "plan", "mode", "prompt", "dialog", "approval", "approve", "choose", "choice", "answer"}
-UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods; ignored for mcp__ tools
+UI_TOKENS = {"select", "input", "editor", "confirm"}  # Pi/OMP extension-UI methods
+# `mcp__<server>__<tool>` is a third-party MCP tool the model calls: approving it runs the tool and answers no
+# question or plan, so only the STEMS (a tool that is itself a question or elicitation) keep it pending; the
+# generic TOKENS and UI_TOKENS ("browser_select", "ask_gemini") do not.
+# HOLD_TOOLS is an explicit hold list, not an allowlist (the operator wants no prompts, so unknown tools stay
+# approvable): tools that act on ANOTHER agent's pending cards, mode or turn, or defer a prompt. A held tool is
+# found in the run-together name under ANY prefix or suffix (OpenCode asks as `<server>_<tool>`, Claude as
+# `mcp__<server>__<tool>`; `_v2`/`_async` variants too), case-folded and camelCase-split. respond_to_permission
+# answers a card; set_agent_mode and update_agent (modeId) can widen an agent to bypassPermissions;
+# send_agent_prompt or a steer denies every pending question and plan of its target; send_terminal_keys types into
+# a TUI prompt and kill_terminal destroys it; cancel/kill/archive_agent and archive_workspace abort the turns that
+# hold cards; create/update_schedule, run_schedule_once, resume_schedule and create_heartbeat set, fire or re-arm
+# deferred prompts and modes. The tests classify Paseo's 41 core MCP tools and its 22 conditional browser tools (a hand
+# list, not read from Paseo's source: a new Paseo tool is approved until added). `create_agent` and `stop_workspace_script`
+# stay approvable on purpose (fan-out needs the first; a stopped dev server answers no card; operator trust ruling
+# 2026-11-13). A shell `paseo` command run through Bash, or Paseo's browser tools driving the daemon web UI, are approved
+# like any other tool: the hold covers Paseo's card/mode/turn MCP tools only.
+HOLD_TOOLS = ("respond_to_permission", "set_agent_mode", "update_agent", "send_agent_prompt", "send_terminal_keys",
+              "kill_terminal", "cancel_agent", "kill_agent", "archive_agent", "archive_workspace", "create_schedule",
+              "update_schedule", "run_schedule_once", "resume_schedule", "create_heartbeat")
+TOOL_SHAPE = re.compile(r"[A-Za-z][A-Za-z0-9_.:\-]{0,159}( [a-z_]{1,32})?")  # an identifier or "Pi method", never a command line
+# A logged name that looks like a credential is redacted: a known token prefix at a name start/separator, or a long run.
+CREDENTIAL = re.compile(r"(?:^|[_\-\s])(?:gh[pousr]_|github_pat_|sk-|sk_(?:live|test)_|xox[a-z]-|glpat-|AIza)"
+                        r"|AKIA[0-9A-Z]{16}|[A-Za-z0-9+/=]{32,}")
 
 
 def words(name):
@@ -67,25 +97,67 @@ def words(name):
     return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
 
 
-def operator_question(row):
-    """True when the request must stay pending for the operator. Missing/odd fields fail closed."""
+def tool_name(row, provider=None):
+    """The permission row's `name` only (never arguments or descriptions), for the audit log. Only a classified
+    provider's name that has the shape of a tool identifier is logged: ACP providers fill `name` with a free-text
+    tool title (it can be a command line), which is redacted, as is any name that is not an identifier."""
+    name = row.get("name") if isinstance(row, dict) else None
+    if not isinstance(name, str):
+        return None
+    if provider not in CLASSIFIED_PROVIDERS or not TOOL_SHAPE.fullmatch(name) or CREDENTIAL.search(name):
+        return "<redacted>"
+    return name
+
+
+def is_mcp_tool(name):
+    parts = name.split("__")
+    return len(parts) >= 3 and parts[0] == "mcp" and bool(parts[1]) and bool(parts[-1])
+
+
+def classify(row):
+    """The denylist rule that keeps this request pending for the operator, else None (a tool prompt).
+    Missing/odd fields fail closed (`missing-name`, `kind`)."""
     name, kind = row.get("name"), row.get("kind")
     if kind is not None and kind != "tool":
-        return True
+        return "kind"
     parts = words(name) if isinstance(name, str) else []
     if not parts:
-        return True
+        return "missing-name"
     compact = "".join(parts)
-    if any(stem in compact for stem in STEMS) or TOKENS.intersection(parts):
-        return True
-    return not name.startswith("mcp__") and bool(UI_TOKENS.intersection(parts))
+    starts, offset = [], 0
+    for part in parts:
+        starts.append(offset)
+        offset += len(part)
+    for stem in STEMS:
+        if any(compact.startswith(stem, at) for at in starts) if stem in WORD_START_STEMS else stem in compact:
+            return f"stem:{stem}"
+    for held in HOLD_TOOLS:
+        if held.replace("_", "") in compact:
+            return f"hold:{held}"
+    if is_mcp_tool(name):
+        return None
+    if name.startswith("mcp__"):
+        return "malformed-mcp-name"  # server or tool segment missing: not a name Paseo's providers emit
+    for token in parts:
+        if token in TOKENS:
+            return f"token:{token}"
+    for token in parts:
+        if token in UI_TOKENS:
+            return f"ui-token:{token}"
+    return None
 
 
-def log_event(log, decision, reason, agent=None, request=None):
-    # Never record tool arguments, descriptions, stdout or stderr (may contain secrets).
+def operator_question(row):
+    """True when the request must stay pending for the operator."""
+    return classify(row) is not None
+
+
+def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=None):
+    # Never record tool arguments, descriptions, stdout or stderr (may contain secrets): `tool` is the row's
+    # `name` field only and `rule` is the denylist rule label that matched (None: no rule, a tool prompt).
     log.write(json.dumps(dict(time=datetime.now(timezone.utc).isoformat(),
                               decision=decision, reason=reason,
-                              agent=agent, request=request)) + "\n")
+                              agent=agent, request=request, tool=tool, rule=rule)) + "\n")
     log.flush()
 
 
@@ -144,26 +216,28 @@ def sweep(lead, labels, log, all_local=False):
         if (agent, request) in seen:
             continue
         seen.add((agent, request))
+        tool, rule = tool_name(row, providers.get(agent)), classify(row)
+        event = dict(tool=tool, rule=rule)
         if any(r is not row and isinstance(r, dict) and r.get("agentId") == agent
                and isinstance(r.get("id"), str) and r["id"] != request and r["id"].startswith(request)
                for r in requests):
             # `paseo permit allow` matches ids by prefix and takes the first hit: another pending id that
             # starts with this one could be answered instead (e.g. a question). Never allow such an id.
             # Snapshot-only: a prefix-colliding id that appears after this `permit ls` is not seen.
-            log_event(log, "skip", "ambiguous-request-id", agent, request)
+            log_event(log, "skip", "ambiguous-request-id", agent, request, **event)
             failed = True
             continue
-        if operator_question(row):
+        if rule is not None:
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
-            log_event(log, "skip", "operator-question", agent, request)
+            log_event(log, "skip", "operator-question", agent, request, **event)
             continue
         if agent not in providers:
-            log_event(log, "skip", "outside-scope", agent, request)
+            log_event(log, "skip", "outside-scope", agent, request, **event)
             continue
         if providers[agent] not in CLASSIFIED_PROVIDERS:
             # ACP-backed providers name questions by tool kind or free-text title, so a question cannot be
             # told from a tool prompt by name; their prompts stay for the operator.
-            log_event(log, "skip", "unclassified-provider", agent, request)
+            log_event(log, "skip", "unclassified-provider", agent, request, **event)
             continue
         try:
             if agent == lead:
@@ -180,18 +254,18 @@ def sweep(lead, labels, log, all_local=False):
             if reason is None and all_local and agent in providers:
                 reason = "all-local"
             if reason is None:
-                log_event(log, "skip", "outside-scope", agent, request)
+                log_event(log, "skip", "outside-scope", agent, request, **event)
                 continue
             # Audit intent BEFORE the only mutation. An audit failure aborts approval.
-            log_event(log, "allow-attempt", reason, agent, request)
+            log_event(log, "allow-attempt", reason, agent, request, **event)
             response = rows(call(["permit", "allow", agent, request]))
             if not any(isinstance(r, dict) and r.get("agentId") == agent
                        and r.get("requestId") == request and r.get("result") == "allowed"
                        for r in response):
                 raise ProbeError("unconfirmed allow")
-            log_event(log, "allowed", reason, agent, request)
+            log_event(log, "allowed", reason, agent, request, **event)
         except ProbeError:
-            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request)
+            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request, **event)
             failed = True
     return 1 if failed else 0
 

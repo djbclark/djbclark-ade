@@ -420,7 +420,23 @@ without `--all-local` only those qualify and the lead is excluded. Only the loca
 `PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode the job skips, and leaves for the operator, a request that looks like a question or plan
 approval** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
 `select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or
-elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. The check is a
+elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. Words are split on separators and camelCase
+(2026-11-14: `Task`, `TaskStop`, `task_user` are tools, `ask_user` is not; the long stems `question`, `elicit`, `exitplan`,
+`planapproval`, `switchmode`, `userinput`… still match inside a run-together or all-caps name). A well-formed
+`mcp__<server>__<tool>` name is a third-party tool prompt: only a tool that is itself a question or elicitation stays pending, so
+`browser_select`, `ask_gemini` and `create_agent` are approved. Tools that act on another agent's cards, mode or turn are held under any prefix or suffix
+(`mcp__paseo__x`, OpenCode's `paseo_x`, `_v2`/`_async` variants; case-folded, camelCase split, run-together): `respond_to_permission`,
+`set_agent_mode`, `update_agent`, `send_agent_prompt`, `send_terminal_keys`, `kill_terminal`, `cancel_agent`, `kill_agent`,
+`archive_agent`, `archive_workspace`, `create_schedule`, `update_schedule`, `run_schedule_once`, `resume_schedule`,
+`create_heartbeat` (rule `hold:<tool>`; an explicit hold list, not an allowlist, so unknown tools stay approvable; tests classify
+Paseo's 41 core and 22 conditional browser MCP tools by hand, so a new Paseo tool is approved until added). `create_agent` stays
+approved on purpose (fan-out needs it, and its `labels`/`modeId` can widen a new agent's scope; peer-trust ruling 2026-11-13), as are
+`stop_workspace_script`, Paseo's browser tools and a shell `paseo` command run through Bash: the hold covers Paseo's
+card/mode/turn MCP tools only. `EnterPlanMode` stays pending too (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
+provider is classified and the name is an identifier that does not look like a credential, because ACP titles are free text and can be command lines; never
+arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
+`hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
+tool prompt), so a skipped request can be told apart from a misclassified one. The check is a
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,
