@@ -428,7 +428,34 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             if lead[key] not in CLAUDE_EFFORT_LEVELS:
                 raise ValueError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
                                  + ", ".join(CLAUDE_EFFORT_LEVELS))
+    _check_frontier_orders(path, data)
     return data
+
+
+def _check_frontier_orders(path: Path, data: dict[str, Any]) -> None:
+    """`[dispatch.repo_overrides.REPO] frontier_order` (a repo's declared frontier reviewer order, rt-01 2026-11-14) is a
+    list of distinct [[service]] names. A name that matches no service fails the load: a typo must not silently drop a
+    reviewer from the order a repository's rule names."""
+    names = {e.get("name") for e in data.get("service") or [] if isinstance(e, dict)}
+    overrides = (data.get("dispatch") or {}).get("repo_overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError(f"routing policy {path}: [dispatch.repo_overrides] must be a table")
+    for repo, table in overrides.items():
+        order = table.get("frontier_order") if isinstance(table, dict) else None
+        if order is None:
+            continue
+        if repo != str(repo).lower():
+            raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order: repo keys are "
+                             "lower case (the lookup lower-cases the repository name)")
+        if not (isinstance(order, list) and order and all(isinstance(x, str) for x in order)):
+            raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order must be a "
+                             f"non-empty array of service names, got {order!r}")
+        unknown = [x for x in order if x not in names]
+        if unknown:
+            raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order names "
+                             f"no known service: {unknown} (known: {sorted(n for n in names if n)})")
+        if len(set(order)) != len(order):
+            raise ValueError(f"routing policy {path}: [dispatch.repo_overrides.{repo}] frontier_order repeats a service: {order}")
 
 
 def _service_from_entry(entry: dict[str, Any]) -> Service:
@@ -534,6 +561,7 @@ def _load_runtime_config(
     data = ade_config.project_routing_domain(effective.data)
     source = Path(effective.provenance["routing_source"])
     ade_config.validate_legacy_routing_shape(data, source)
+    _check_frontier_orders(source, data)           # also the effective data: an overlay or unified base can carry one
     provenance = {key: effective.provenance[key]
                   for key in ("routing_source", "new_config", "local_config")}
     info = effective.provenance["model_tiers_info"]
@@ -870,8 +898,17 @@ def _later_resets(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[st
     return out
 
 
-def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
-    """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind."""
+UNMEASURED_WINDOW = "(unmeasured)"
+
+
+def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any], *, accounts: bool = False) -> None:
+    """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind.
+
+    `accounts=False` (several readings of one pool that are not known to be accounts: aiuse + Paseo, two Paseo reports): windows
+    fold with `_merge_caps`, the tighter KNOWN reading. `accounts=True` (two ACCOUNTS of one pool, `--available` rows): windows fold with `_merge_windows`, a window
+    either account cannot measure stays None, and when either row's `remaining` is unknown the pool also gets one
+    `UNMEASURED_WINDOW` None window, so the measured account cannot open the plenty gate alone while Paseo may launch on
+    the unmeasured one (D1 of the PR 698 review, 2026-11-14)."""
     prior = into.get(key)
     if prior is None:
         into[key] = entry
@@ -879,7 +916,12 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     p_rem, e_rem = prior.get("remaining"), entry.get("remaining")
     take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
     merged = dict(entry if take_new else prior)
-    merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
+    if accounts:
+        merged["windows"] = _merge_windows(prior.get("windows"), entry.get("windows"))
+        if p_rem is None or e_rem is None:
+            merged["windows"] = {**merged["windows"], UNMEASURED_WINDOW: None}
+    else:
+        merged["windows"] = _merge_caps(prior.get("windows"), entry.get("windows"))   # per window, the tighter known reading
     merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
     resets = _later_resets(prior.get("sublimit_resets"), entry.get("sublimit_resets"))
     if resets:
@@ -904,14 +946,21 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
     row's `remaining`, never loosen it. Malformed rows raise (the caller falls back)."""
     pools: dict[str, Any] = {}
     foreign: list[tuple[str, float]] = []
+    errored: set[str] = set()                       # providers with an error row: an account whose quota is unknown
+    key_provider: dict[str, str] = {}               # pool key -> the provider whose rows built it
+    cap_only: set[str] = set()                      # pool keys whose entry so far is a model-cap row alone, no account
     for row in rows:
         name = row.get("provider")
-        if not name or row.get("error"):
+        if not name:
+            continue
+        if row.get("error"):
+            errored.add(name)                       # an error says nothing about the quota; Paseo may still launch on it (D2)
             continue
         family = row.get("pool_family")
         key = pool_service(name, family)
         if key is None:
             continue
+        key_provider[key] = name
         row_age = _clean_age(row.get("age_seconds"))
         if row_age is None:
             row_age = age
@@ -955,7 +1004,8 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
             elif finfo.get("remaining") is not None:
                 # another family's window inside this row: never creates or loosens that pool
                 foreign.append((fkey, finfo["remaining"]))
-        if family in SUBLIMIT_FAMILIES and key == name:
+        cap_row = family in SUBLIMIT_FAMILIES and key == name
+        if cap_row:
             # a model cap inside the shared pool: bounds that model only (sublimits), and
             # must not drag the whole account down
             cap = _tighter(entry["remaining"], entry["sublimits"].get(family))
@@ -970,11 +1020,21 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
                 if cap.get("available_at"):
                     entry["sublimit_resets"] = {**(entry.get("sublimit_resets") or {}),
                                                 cap["pool_family"]: cap["available_at"]}
-        _merge_pool(pools, key, entry)
+        # a cap-only row is no account: two real rows of one pool key are two accounts (an account has one row per family)
+        first = key not in pools
+        _merge_pool(pools, key, entry, accounts=not cap_row and key not in cap_only)
+        if cap_row and first:
+            cap_only.add(key)
+        elif not cap_row:
+            cap_only.discard(key)
     for fkey, rem in foreign:
         cur = pools.get(fkey)
         if cur is not None and cur.get("remaining") is not None and rem < cur["remaining"]:
             cur["remaining"] = rem
+    for key, entry in pools.items():
+        if key_provider.get(key) in errored:
+            # the error row's pool family is unknown, so every pool its provider built stays unknown for the plenty gate
+            entry["windows"] = {**entry["windows"], UNMEASURED_WINDOW: None}
     return pools
 
 
@@ -986,9 +1046,14 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
     key_provider: dict[str, str] = {}               # pool key -> the provider whose accounts built it
     for acct in accounts:
         name = acct.get("provider")
-        if not name or acct.get("error"):
+        if not name:
             continue
         n_accounts[name] = n_accounts.get(name, 0) + 1
+        if acct.get("error"):
+            # a collection or auth error says nothing about the account's quota, and Paseo may still launch on it: it is an
+            # unmeasured account, never a skipped one (D2 of the PR 698 review, 2026-11-14)
+            unmeasured.add(name)
+            continue
 
         # Account freshness: use account's age_seconds or collected_at
         acct_age = None
@@ -2260,6 +2325,17 @@ def repo_floors(repo: str | None) -> dict[str, float]:
     return {str(k): float(v) for k, v in (table.get("estimate_floor") or {}).items()}
 
 
+def repo_frontier_order(repo: str | None) -> tuple[str, ...]:
+    """`[dispatch.repo_overrides.REPO] frontier_order` of `repo` (a repository's declared frontier reviewer order, rt-01
+    2026-11-14: tendcf's standing rule 3, Astra then Fable then Argon), () for any other repo. Names are validated at load
+    (`_check_frontier_orders`)."""
+    if not repo:
+        return ()
+    table = ((POLICY.get("dispatch") or {}).get("repo_overrides") or {}).get(str(repo).lower())
+    order = table.get("frontier_order") if isinstance(table, dict) else None
+    return tuple(x for x in order if isinstance(x, str)) if isinstance(order, list) else ()
+
+
 def estimate_floor(svc: Service, kind: str, info: dict[str, Any], repo: str | None = None) -> tuple[float, float | None]:
     """(estimate floor, cap) of a `kind` slice on `svc` in `repo`, by the lookup acp-dispatch's `estimate_floor_and_cap` uses
     (`floor_lookup`, on the model `plan` would hand it): [dispatch.estimate_floor], replaced by the repo's override when that
@@ -2428,7 +2504,13 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     # and the name broke the tie). The pool must be in `scored`, i.e. take the kind now; a named pool a wave cap or an
     # `exclude` took out leaves Argon the overflow.
     candidates = {s.name for _, s, _, _ in scored}
-    scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after), t[0], t[1].name))
+    # A repo's declared frontier reviewer order (`frontier_order`) sorts the pools that already passed every gate above:
+    # listed pools by their position, unlisted ones after them, the score only inside a position. It never admits a pool a
+    # gate closed, and a fallback still sorts behind the pools it sits behind.
+    order = repo_frontier_order(repo) if kind == "frontier" else ()
+    position = {n: i for i, n in enumerate(order)}
+    scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after),
+                               position.get(t[1].name, len(position)), t[0], t[1].name))
     best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]
     if remaining is not None:

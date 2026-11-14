@@ -1,0 +1,3 @@
+### Changed
+
+- Peer-trust follow-up to #703: a worker that judges untrusted GitHub artifacts for prompt injection is launched with `--label ade.kind=external-review` (docs/orchestration-practices.md section 3, `skills/fan-out`), which `claude/hooks/peer_trust_gate.py` reads; `bin/review-launch` and `bin/review-pr` start no Paseo agent, so they need no label (documented). The remote-sender note no longer says a send "is not guarded": it says the hook could not tell whether the id is local and keeps `archived_send_gate` as the fallback. docs/peer-trust.md rule 3 is split into unlisted (3a) and remote (3b). (#706)

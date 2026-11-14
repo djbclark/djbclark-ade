@@ -10,7 +10,7 @@
 # agent record ~/.paseo/agents/*/ID.json, archived agents included; `paseo ls`/`inspect` expose no labels),
 # (2) exact agent id, or (3) a case-insensitive regular expression searched in its title (the envelope's
 # source-agent-title, the title in that record, or the name `paseo ls -g --json` lists for it). Bare
-# "review" is deliberately not a pattern: repair workers carry it. Launchers do not set the label yet.
+# "review" is deliberately not a pattern: repair workers carry it. No launcher sets the label yet (none exists for the gh watcher; PR Radar has no label field); a `paseo run` launch should, last (docs/orchestration-practices.md).
 # The sender id in a Paseo envelope is self-stamped from the sender's own PASEO_AGENT_ID and unverified, so this
 # exception is best-effort framing: a steered sender can rename itself, forge an id or start an unlabelled child.
 # An unreadable or invalid file, or one that leaves nobody to match (no ids, no usable pattern), falls back
@@ -18,4 +18,4 @@
 # (no tomllib): the defaults apply and `ids` are ignored.
 [sensitive]
 ids = []
-title_patterns = ["injection", "triage", "review-pr", "pr-review", "adversary", "gh-watch"]
+title_patterns = ["injection", "triage", "review-pr", "pr-review", "adversary"]

@@ -132,13 +132,22 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 # the lead's first launch has no WORKERS window yet: --new-workspace local --cwd ~/src/<repo> instead of --workspace
 ```
 
+**A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
+discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (it replaces the dispatch's own `--label ade.kind=...`: `paseo run` keeps the LAST `--label` for a duplicate key, so
+append `--label ade.kind=external-review` last, or drop the other; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
+`sensitive-sender`) lands:** `bin/ade-auto-permit` ignores the label. It approves a triage worker's tool requests whenever the worker is a
+descendant of the lead, carries `ade.lead` or an `--ade-label`, or (the loaded launchd job passes `--all-local`, operator 2026-11-13) is any
+local agent of a classified provider, so within 60 s and before the lead can see the request in `paseo permit ls`. Launch such a worker in a mode
+that needs no approvals (read-only, no Bash or network tools), and read `auto-permit.jsonl` to see what was approved. `claude/hooks/peer_trust_gate.py` reads that label from the agent record, so its messages and notifications reach
+the lead framed as evidence to check, never an instruction (docs/peer-trust.md rule 4); without it only a title pattern catches it.
+
 `--label ade.lead=LEAD` (the lead's own full agent id) is required: a top-level worker started with
 `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` is not a descendant of the lead, and
 `bin/ade-auto-permit` approves its permission requests through this label (audit reason `lead-label`;
 2026-11-13 incident: a worker without it stalled 1h40m on a Bash prompt). With `--all-local`, which the checked-in plist
 passes (operator, 2026-11-13), the tool prompts of every local Claude, Codex, OpenCode, Pi and OMP agent are approved
 (reason `all-local`); a question or plan approval meant for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP
-`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, and agents of
+`select|input|editor|confirm`: a best-effort name denylist) is logged `operator-question` and left pending, an agent labelled `ade.kind=external-review` or a descendant of one is skipped as `sensitive-sender` (only the label counts, and no launcher sets it yet), and agents of
 any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; derived profiles; plugin providers) keep their prompts (`unclassified-provider`; the operator's "all local agents" ruling is narrowed for them until Paseo exposes `kind`). Its tab name carries the lead's id too
 (`worker <slice> <lead id>`; window names carry none, `docs/workspace-layout.md`); a handoff successor is a new lead and keeps its own placement.
 
@@ -154,10 +163,8 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    lands.
 3. **One level of delegation.** Workers launch no agents; only the
    orchestrator dispatches.⁵
-4. **Every dispatch passes the load gate before it starts** (`load-watch admit --wait N`, default
-   1800 s, exit 75 when the machine is still too hot; operator 2026-10-19). Since 2026-11-14 no code enforces this: it is an instruction to the launcher, and the
-   frontier, in-flight and per-wave checks that acp-dispatch ran under a lock went with the shim. The gate only decides whether to
-   *start*: it never kills, throttles or slows running work. A gate that has refused a waiting `--wait` call for 5 minutes on soft gates only lets it through, at most one forced admit per 2 minutes machine-wide; swap-ins, churn over the hard line, free memory under 300 MB and load over the boost line never yield (2026-11-14, `bin/load-watch` docstring). `LW_STARVE_SOFT_S`, `LW_STARVE_MIN_GAP_S`, `LW_MAX_SWAPINS_S` and `LW_SWAPINS_CORROBORATED_S` are read from the environment of the `admit --wait S` call itself; a caller that scrubs them gets the defaults (valve on).
+4. **Every dispatch passes the load gate before it starts** (`load-watch admit --wait N --max-agents --json`, N in 300-600; exit 0 go, any other exit, 75 when the machine is too hot or 20 agents are live: launch nothing, report; release the recorded reservation once the agent has spawned, `load-watch release ID`: exit 0 released, **66 no such reservation** (released over 30 s ago or expired: harmless, carry on), **1 the reservations file could not be locked or written** (the reservation stays until `LW_RESERVE_S`: retry once or leave it; it is no longer the same code as an unknown id, 2026-11-14); operator 2026-10-19). Since 2026-11-14 no code enforces this: it is an instruction to the launcher, run before each `paseo run` and each wave (recipe: `skills/fan-out` section 3), and so are the model pin (launch with `Choice.dispatch` unchanged), the quota check (no code reserves quota: a fresh `route_agent.py plan` per slice and no over-launching one snapshot, model-routing D5) and the per-wave frontier and cap re-check that acp-dispatch ran under a lock before the shim went. The gate only decides whether to
+   *start*: it never kills, throttles or slows running work. A gate that has refused a waiting `--wait` call for 5 minutes on soft gates only lets it through, at most one forced admit per 2 minutes machine-wide; the agent cap is soft too; swap-ins, churn over the hard line, free memory under 300 MB and load over the boost line never yield (2026-11-14, `bin/load-watch` docstring); `bg` holds with `admit --wait CHUNK` (420 s) and, the clock being per call, would get it only in the last ~120 s of a chunk, so a caller that holds in chunks passes `--refused-since EPOCH` (integer UTC epoch seconds of its FIRST soft refusal; env `LW_REFUSED_SINCE` is the fallback, the flag wins; `--wait 0` ignores it; a future or non-numeric value is ignored with a stderr note; pass it per call, never `export LW_REFUSED_SINCE`, because an older-than-cap value earns the full cap; credit capped at `LW_STARVE_REFUSED_SINCE_MAX_S`, 3600 s; it adds no privilege beyond that cap, and hard gates and the one-per-2-minutes machine-wide gap are untouched) on every chunk call (operator ruling 2026-11-14; flag added 2026-11-14, `bin/load-watch` docstring). `LW_STARVE_SOFT_S`, `LW_STARVE_MIN_GAP_S`, `LW_MAX_SWAPINS_S` and `LW_SWAPINS_CORROBORATED_S` are read from the environment of the `admit --wait S` call itself; a caller that scrubs them gets the defaults (valve on).
 5. **Plan with the load in mind** (load watcher, 2026-10-23, after load reached 42-62 on 8 cores with swap at 90%
    from three concurrent local pytest runs plus three dispatches): check `load-watch admit --json` before a large
    fan-out; builds and tests only through `bg` or CI, never `BG_LOAD_WAIT=0`; **one local test run at a time**; no new

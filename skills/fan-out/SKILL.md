@@ -53,18 +53,31 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
 the brief) while its Paseo session sits in the lead's WORKERS window (below).
-After `route_agent.py plan` / `route` and `~/src/djbclark-ade/bin/load-watch admit` (machine capacity — not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs; exit 75 = refused, wait before launching):
+Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
+(N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
+exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
+and it records a reservation: once the agent has spawned, or the launch failed, run `~/src/djbclark-ade/bin/load-watch release <reservation>` (the `reservation` field of the JSON; exit 66 for an unknown id (already released or expired) is harmless, exit 1 is a lock or write failure (the slot is held until `LW_RESERVE_S`); a launcher that is the only dispatcher on the machine
+may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
+(one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
+and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
+the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/log.md`, "Wave 6 follow-up"); they are this instruction.
 
 ```bash
+# Before EACH launch: ~/src/djbclark-ade/bin/load-watch admit --wait 420 --max-agents --json   (exit 0 only; keep .reservation)
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
   --provider PROVIDER/MODEL --no-wait --mode FULL_ACCESS_MODE \
   --label ade.kind=KIND --label ade.name=NAME --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
+# Then (also if the launch failed): ~/src/djbclark-ade/bin/load-watch release <reservation>
 # ade-worker-run adds the placement (WORKERS window), --label ade.lead=LEAD and --label slice=NAME (below); by hand that is
 # `paseo run … --workspace wks_… --cwd ~/src/<repo> --label ade.lead=LEAD`, or --new-workspace local on the first launch
 ```
+
+A worker that judges untrusted GitHub artifacts for prompt injection (injection triage, reading an outside PR, issue or comment) takes
+`--label ade.kind=external-review` as its `ade.kind` (set it, replacing the dispatch's own value when it has one; never a second label): the peer-trust hook then frames its messages and notifications as evidence, not instruction
+(docs/orchestration-practices.md section 3).
 
 `--label ade.lead=LEAD` (LEAD = the lead's own full agent id) is mandatory for every worker, and above all for a
 top-level worker the lead starts with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`:
@@ -223,7 +236,7 @@ Labels are trusted local-agent scope markers, not an external security boundary.
 daemon lists, the lead included (audit reason `all-local`; no `--host`, so no remote agent). In every mode a question
 or plan approval for the operator (`AskUserQuestion`, `ExitPlanMode`, Pi/OMP `select|input|editor|confirm`, similar
 names; a best-effort name denylist, missing names fail closed) is logged `skip` / `operator-question` and left pending,
-and agents of providers outside claude/codex/opencode/pi/omp (ACP-backed) keep their prompts (`unclassified-provider`).
+and agents of providers outside claude/codex/opencode/pi/omp (ACP-backed) keep their prompts (`unclassified-provider`). An agent labelled `ade.kind=external-review` (it reads outside GitHub text, so a steered one could ask for anything) is never approved, in any mode, and neither is its descendant: logged `skip` / `sensitive-sender`, its requests stay for the lead or the operator. Only that label counts: config/peer-trust.toml ids and title patterns are not read here, and no launcher sets the label yet, so today an unlabelled triage agent is still approved; a child that merely carries `ade.lead` is too.
 
 Only explicit pending `(agentId, requestId)` pairs are allowed; no `--all`.
 Failed/malformed discovery fails closed. JSONL records skips, attempts, confirmations
