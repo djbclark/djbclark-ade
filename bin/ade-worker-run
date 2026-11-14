@@ -522,11 +522,17 @@ def add_footer(rest: list[str]) -> list[str]:
     return [*rest[:-1], f"{last}\n\nAlso follow every item of {FOOTER}."]
 
 
+def names_path(brief: str, paths: list[str]) -> bool:
+    """True when the brief carries one of `paths` as a whole absolute path (not a prefix of a longer name); every path passed is already absolute."""
+    return any(re.search(r"(?<![\w/.-])" + re.escape(p.rstrip("/")) + r"(?![\w-])", brief) for p in paths)
+
+
 def launch(opts, rest: list[str]) -> int:
     lead, name = opts.lead, opts.slice
     check_names(lead, name)
     check_caller(lead, opts.on_behalf_of_lead)
     passthrough_check(rest)
+    brief = rest[-1] if rest else ""  # before the footer line: the footer names paths of its own
     if not opts.no_footer:
         rest = add_footer(rest)
     main_place = opts.placement == "main"
@@ -552,7 +558,7 @@ def launch(opts, rest: list[str]) -> int:
             win, rename_to = (found.row, found.rename_to) if found else (None, None)
             adopt = bool(found and not found.owned)  # an unclaimed, empty window of this exact name: recorded once the launch succeeds
         redirected = False  # the window's own cwd is the repo's primary checkout of --cwd: placed there, the brief names the worktree
-        if win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd \
+        if win is not None and not main_place and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd \
                 and wsn.primary_checkout_of(cwd) == os.path.realpath(win["cwd"]):
             redirected = True
         elif win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
@@ -563,6 +569,21 @@ def launch(opts, rest: list[str]) -> int:
                           f"--cwd {win['cwd']} (or none) and give the worktree {cwd} as an absolute path in the brief "
                           "(docs/workspace-layout.md item 5: a window's cwd is its primary checkout, the writer works in the "
                           "claimed worktree by absolute paths)")
+        # A minted window's cwd is its repo's primary checkout, never the claimed worktree the caller named (docs/workspace-layout.md
+        # item 5): every later worker of the window defaults to that directory, so a worktree there would hand another writer a
+        # claimed worktree (2026-11-14, wr-01). The worktree travels in the brief by absolute path, as for an existing window.
+        if win is None:
+            if opts.window_middle is None:
+                raise Refused("this lead has no WORKERS window yet: pass --window-middle (the current work, e.g. 'Wave 7') "
+                              "to open one")
+            eff_cwd = wsn.primary_checkout_of(cwd)
+        else:
+            eff_cwd = os.path.realpath(win["cwd"]) if redirected else (cwd if opts.cwd else win.get("cwd") or cwd)
+        if eff_cwd != cwd and opts.cwd and not main_place and not names_path(brief, [cwd, os.path.abspath(os.path.expanduser(opts.cwd))]):
+            # the worker starts in eff_cwd, the shared primary checkout where nothing may be edited: its brief must name the worktree
+            raise Refused(f"the worker would start in {eff_cwd} (the repo's primary checkout), not --cwd {cwd}, and the brief does "
+                          f"not name {cwd}: put that worktree in the brief as an absolute path so every repository operation runs "
+                          "there (docs/workspace-layout.md item 5), then launch again")
         if rename_to:  # retroactive migration of a legacy name; the window id does not change
             if any(r["name"] == rename_to for r in list_windows() if r.get("workspaceId") != win.get("workspaceId")):
                 raise Refused(f"cannot rename legacy window {win['name']!r} to {rename_to!r}: another window already has that "
@@ -579,18 +600,6 @@ def launch(opts, rest: list[str]) -> int:
         else:
             wname = win["name"]
         tab = f"worker {name} {lead}"
-        # A minted window's cwd is its repo's primary checkout, never the claimed worktree the caller named (docs/workspace-layout.md
-        # item 5): every later worker of the window defaults to that directory, so a worktree there would hand another writer a
-        # claimed worktree (2026-11-14, wr-01). The worktree travels in the brief by absolute path, as for an existing window.
-        if win is None:
-            eff_cwd = wsn.primary_checkout_of(cwd)
-        else:
-            eff_cwd = os.path.realpath(win["cwd"]) if redirected else (cwd if opts.cwd else win.get("cwd") or cwd)
-        if eff_cwd != cwd and opts.cwd and not main_place and cwd not in rest[-1] and opts.cwd not in rest[-1]:
-            # the worker starts in eff_cwd, the shared primary checkout where nothing may be edited: its brief must name the worktree
-            raise Refused(f"the worker would start in {eff_cwd} (the repo's primary checkout), not --cwd {cwd}, and the brief does "
-                          f"not name {cwd}: put that worktree in the brief as an absolute path so every repository operation runs "
-                          "there (docs/workspace-layout.md item 5), then launch again")
         if eff_cwd != cwd and opts.cwd:
             sys.stderr.write(f"ade-worker-run: the worker starts in {eff_cwd} (the window's primary checkout), not --cwd {cwd}; "
                              "the brief carries the worktree\n")

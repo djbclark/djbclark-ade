@@ -120,7 +120,7 @@ def primary_checkout_of(cwd: str, _depth: int = 0) -> str:
         top = _git(path, "rev-parse", "--show-toplevel")
         if top:
             cand = os.path.join(primary, os.path.relpath(os.path.realpath(top), sup))
-            if os.path.isdir(cand):
+            if os.path.isdir(cand) and _git(cand, "rev-parse", "--show-toplevel") == os.path.realpath(cand):  # not an empty, uninitialised dir
                 return os.path.realpath(cand)
         return path
     common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -133,32 +133,6 @@ def primary_checkout_of(cwd: str, _depth: int = 0) -> str:
         main = os.path.realpath(first[0][len("worktree "):])
         if os.path.isdir(main) and main != os.path.realpath(common):
             return main
-    return path
-    sup = _git(path, "rev-parse", "--show-superproject-working-tree")
-    if sup:
-        sup = os.path.realpath(sup)
-        primary = primary_checkout_of(sup, _depth + 1)
-        top = _git(path, "rev-parse", "--show-toplevel")
-        if top:
-            cand = os.path.join(primary, os.path.relpath(os.path.realpath(top), sup))
-            if os.path.isdir(cand):
-                return os.path.realpath(cand)
-        return path
-    common = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if not common:
-        return path
-    if Path(common).name == ".git":
-        return os.path.realpath(Path(common).parent) if Path(common).parent.is_dir() else path
-    wt = _git(common, "config", "--get", "core.worktree")  # a --separate-git-dir repo records its work tree
-    if wt:
-        wt = os.path.realpath(os.path.join(common, wt))
-        if os.path.isdir(wt):
-            return wt
-    first = _git(path, "worktree", "list", "--porcelain").splitlines()[:3]
-    if first and first[0].startswith("worktree ") and "bare" not in first[1:]:
-        main = first[0][len("worktree "):]
-        if os.path.isdir(main):
-            return os.path.realpath(main)
     return path
 
 

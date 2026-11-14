@@ -1536,3 +1536,54 @@ def test_a_legacy_row_without_a_workspace_id_is_a_refusal_not_a_traceback(env):
     env.data["workspaces"] = [{"name": f"workers Wave 6 {LEAD}", "cwd": "/libntech"}]
     r = other_repo_launch(env, "x", "/libntech")
     assert "Traceback" not in r.stderr
+
+
+def test_a_relative_cwd_or_a_longer_name_does_not_satisfy_the_brief_check(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.flush()
+    # `--cwd .` run from the worktree: the brief must still carry the absolute path ("." is in almost any text)
+    r = subprocess.run([sys.executable, str(SCRIPT), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", ".",
+                        "--", "--no-wait", "Fix the parser."], capture_output=True, text=True, cwd=wt)
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    r = subprocess.run([sys.executable, str(SCRIPT), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", ".",
+                        "--", "--no-wait", "Fix . the parser"], capture_output=True, text=True, cwd=wt)  # a lone "." in the text
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    r = mint(env, wt, brief=f"work in {wt}2/x and {wt}-other")  # a longer name is not the worktree
+    assert r.returncode == 1 and "brief" in r.stderr and not placed(env)
+    assert mint(env, wt, brief=f"work in {wt}/src, then {wt}.").returncode == 0  # a path under it, a trailing full stop
+
+
+def test_main_placement_keeps_refusing_a_cwd_other_than_its_windows(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN libntech (lead)", "cwd": str(os.path.realpath(main))}]
+    env.state(LEAD, LEAD_WKS, {})
+    r = env.run("--lead", LEAD, "--slice", "s", "--placement", "main", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
+    assert r.returncode == 1 and "paseo ignores --cwd" in r.stderr and not placed(env)
+
+
+def test_a_refused_brief_check_renames_nothing(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(os.path.realpath(main))}]
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "Wave 6", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
+    assert r.returncode == 1 and "brief" in r.stderr
+    assert ["workspace", "rename"] not in env.verbs() and not placed(env) and registry(LEAD) == set()
+
+
+def test_an_uninitialised_submodule_directory_is_not_a_primary_checkout(tmp_path):
+    sys.path.insert(0, str(ROOT / "bin"))
+    import ade_ws_names as wsn
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git("init", "-q", "-b", "master", cwd=sub)
+    git("commit", "-q", "--allow-empty", "-m", "i", cwd=sub)
+    main = tmp_path / "super"
+    main.mkdir()
+    git("init", "-q", "-b", "master", cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "libs/sub", cwd=main)
+    git("commit", "-q", "-m", "s", cwd=main)
+    wt = tmp_path / "super-wt"
+    git("worktree", "add", "-q", "-b", "w", str(wt), cwd=main)
+    git("-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", cwd=wt)
+    subprocess.run(["rm", "-rf", str(main / "libs/sub")], check=True)
+    (main / "libs/sub").mkdir()  # the primary checkout never initialised its submodule: an empty directory
+    assert wsn.primary_checkout_of(str(wt / "libs/sub")) == os.path.realpath(wt / "libs/sub")
