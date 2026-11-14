@@ -455,6 +455,14 @@ test("equality-as-default holds only while the first agent is young; later only 
   const sl = fakeDaemon({ windowTitle: "Same text", agents: [slight] });
   await handleAgentEvent(hookAgent(slight), { paseo: sl.paseo }, baseDeps());
   assert.deepEqual(sl.state.titles, ["MAIN my-repo (Same text)"]);
+  for (const [offsetMs, expectRename] of [[-60_000, true], [-60_001, false], [300_000, true], [300_001, false]]) {
+    // age = now - createdAt: -60 000 = createdAt a minute ahead (skew still young), 300 000 = exactly five minutes old
+    const created = Date.parse(T0);
+    const e = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: T0 });
+    const ed = fakeDaemon({ windowTitle: "Same text", agents: [e] });
+    await handleAgentEvent(hookAgent(e), { paseo: ed.paseo }, baseDeps({ now: () => created + offsetMs }));
+    assert.deepEqual(ed.state.titles, expectRename ? ["MAIN my-repo (Same text)"] : [], `age ${offsetMs} ms`);
+  }
   const nodate = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: undefined });
   const nd = fakeDaemon({ windowTitle: "Same text", agents: [nodate] });
   await handleAgentEvent(hookAgent(nodate), { paseo: nd.paseo }, baseDeps());

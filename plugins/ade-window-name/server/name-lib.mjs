@@ -208,7 +208,7 @@ export async function handleAgentEvent(agent, context, deps = {}) {
 
 /** Defence in depth on the decision script's output: a string in the scheme, within the window-name limit. */
 export function validName(name) {
-  return typeof name === "string" && [...name].length <= NAME_MAX && !/\p{C}/u.test(name) && SCHEME_NAME.test(name);
+  return typeof name === "string" && [...name].length <= NAME_MAX && !/[\p{Cc}\p{Cf}\p{Cs}\p{Co}]/u.test(name) && SCHEME_NAME.test(name);
 }
 
 function remember(settled, wid) {
