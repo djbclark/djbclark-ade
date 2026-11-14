@@ -48,7 +48,7 @@ owner PR still counts when the last editor is the owner or a login in `BODY_TRUS
 COLLABORATOR PRs** still need a live APPROVE in an issue comment the owner posted (not through a GitHub App) that
 nobody but the owner has edited (GraphQL `editor`, `lastEditedAt` and `userContentEdits`; unknown history, or one
 longer than 100 edits, fails closed). A body APPROVE on those PRs never counts; editing their body approves nothing
-(2026-11-07, Argon review F-HIGH-1). Agents must not write a live APPROVE marker. A BLOCK in the body or in any
+(2026-11-07, Argon review F-HIGH-1). Agents must not write a live APPROVE marker (code-review.md rule 14: `claude/hooks/adversary_marker_gate.py` denies the `gh` write). A BLOCK in the body or in any
 comment fails the check, and a dispatch judges every open PR at the same head, with both lookups paginated to the end
 (F-CRIT-2; pagination from the Codex review of PR 300).
 

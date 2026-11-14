@@ -331,6 +331,16 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/adversary_marker_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Bash",
         "hooks": [
           {
