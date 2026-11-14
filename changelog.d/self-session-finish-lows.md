@@ -1,0 +1,3 @@
+### Changed
+
+- `ade-self-session finish` follow-ups from the PR 714 reviews: a long commit subject in `head_advanced` keeps its short sha (the end is cut, not the start); a proven descendant whose `git log` fails records `log_unavailable`; one stderr progress line and a handoff-prompt sentence tell the successor to read `head_advanced`; a stale `head_advanced` is removed when HEAD returns to the recorded head; any native failure during the wait or a re-check (including `ls -g`) is recorded as `native_error`; the post-refusal timeout message says `running (archive refused)`; `--poll` is capped at 1 h and `--wait-timeout` at 24 h so `time.sleep` cannot overflow. (#725)
