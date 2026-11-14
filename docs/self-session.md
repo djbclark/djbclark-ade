@@ -134,6 +134,17 @@ preserved"), records `native_error.code = PREDECESSOR_NOT_IDLE`, exits non-zero 
 `finish` when the predecessor is quiet. Successor, checkpoint and HEAD are checked at the start and again
 immediately before each archive attempt.
 
+**HEAD may move forward (2026-11-14).** The checkpoint digest stays strict, but the repository HEAD no longer has to
+equal the recorded one: the shared checkout is fast-forwarded by whichever lead merges a PR (`git merge --ff-only`),
+so a handoff that waits for an idle predecessor can see a newer HEAD through no fault of either session (the
+6621fe2b -> 54b15a51 handoff blocked with "checkpoint or HEAD changed" for this reason). `finish` passes when
+the recorded head is an ancestor of the current one (`git merge-base --is-ancestor RECORDED CURRENT`, rc 0) and
+records `head_advanced` (`from`, `to`, up to 20 `commits` as `short-sha subject`, `more`) in the transaction record and
+in its JSON output, so the successor sees what landed; `head` itself is never rewritten. It still blocks on a non-ancestor
+(rewind, rebase, another branch's history; rc 1), on a git error or timeout, and on a repository that appeared or
+vanished since the record. `accept` stays exact: the acknowledgement attests the head the checkpoint was written at.
+The checked-out branch name is not compared.
+
 Only the acknowledged successor may retire its predecessor. The helper rechecks
 checkpoint/HEAD and mode drift, requires predecessor idle/no pending permissions,
 archives **only that agent without `--force`**, then verifies archived readback.

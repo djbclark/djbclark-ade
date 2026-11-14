@@ -55,6 +55,7 @@ class IdleTimeout(SessionError):
 FINISH_STABLE = 45.0    # seconds of consecutive idle samples with no permission wait
 FINISH_TIMEOUT = 1500.0  # overall bound, seconds, for the waits and archive retries together
 FINISH_POLL = 5.0       # seconds between samples
+DRIFT_COMMITS = 20       # commits listed in `head_advanced`
 MIN_POLL = 0.5          # a floor: each sample spawns `paseo agent inspect`
 AGENT_RUNNING = 'AGENT_RUNNING'  # Paseo's structured archive refusal for an agent mid-turn; nothing archived
 
@@ -507,12 +508,53 @@ class Service:
             self.save(target, record)
             return record
 
-    def check_retirement(self, record):
-        """The successor, checkpoint and HEAD still match the record: asked at the start and again right before every archive."""
+    def head_drift(self, record):
+        """None while HEAD is the recorded head; {'to', 'commits', 'more'} when it moved forward; else SessionError.
+
+        Forward = the recorded head is an ancestor of the current one (`git merge-base --is-ancestor`, rc 0). Any
+        other answer blocks: not an ancestor (rewind, rebase, other history; rc 1), a git error, a timeout, a
+        recorded or current "no repository" that is not the other's (2026-11-14: another lead fast-forwarded the
+        shared checkout after a merge while a handoff waited, and the strict equality blocked the retirement).
+        """
+        cwd, recorded, current = record['cwd'], record['head'], self.git_head(record['cwd'])
+        if current == recorded:
+            return None
+        blocked = SessionError('checkpoint or HEAD changed; HEAD is not a fast-forward of the recorded head; '
+                               'preserve predecessor')
+        if current is None or not isinstance(recorded, str) or not re.fullmatch(r'[0-9a-f]{40}', recorded):
+            raise blocked
+        env = {k: v for k, v in self.env.items() if not k.startswith('GIT_')}
+        env['LC_ALL'] = 'C'
+
+        def git(*args):
+            try:
+                return self.runner(['git', '-C', cwd, *args], env=env, capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+
+        ancestor = git('merge-base', '--is-ancestor', recorded, current)
+        if ancestor is None or ancestor.returncode != 0:
+            raise blocked
+        log = git('log', '--format=%h %s', '-n', str(DRIFT_COMMITS + 1), f'{recorded}..{current}', '--')
+        lines = (log.stdout or '').splitlines() if log is not None and log.returncode == 0 else []
+        return {'to': current, 'commits': [bounded(x, 120) for x in lines[:DRIFT_COMMITS]],
+                'more': len(lines) > DRIFT_COMMITS}
+
+    def check_retirement(self, record, target=None):
+        """The successor, checkpoint and HEAD still match the record: asked at the start and again right before every archive.
+
+        HEAD may have moved forward (head_drift); that is recorded as `head_advanced` so the successor sees what landed.
+        """
         self.verify_successor(record)
-        if (digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']
-                or self.git_head(record['cwd']) != record['head']):
+        if digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']:
             raise SessionError('checkpoint or HEAD changed; preserve predecessor')
+        drift = self.head_drift(record)
+        if drift:
+            advanced = {'from': record['head'], **drift}
+            if record.get('head_advanced') != advanced:
+                record['head_advanced'] = advanced
+                if target is not None:
+                    self.save(target, record)
 
     def wait_for_idle(self, agent, deadline, stable, poll):
         """Inspect `agent` until it is archived, or idle with `PendingPermissions == []` for `stable` seconds.
@@ -554,7 +596,7 @@ class Service:
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
                 return record
-            self.check_retirement(record)
+            self.check_retirement(record, target)
             deadline = self.clock() + timeout
             refused_running = 0
 
@@ -588,7 +630,7 @@ class Service:
                     raise timed_out(error.last.get('Status')) from None
                 if predecessor.get('Archived') is True:
                     break
-                guarded(self.check_retirement, record)  # time passed since the check above
+                guarded(self.check_retirement, record, target)  # time passed since the check above
                 if not self.listed(record['predecessor']):
                     # paseo#9668: `agent archive ID` resolves client-side from this listing and, when ID is
                     # missing (its workspace deleted), falls back to a partial title match: a live worker.

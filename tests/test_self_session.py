@@ -42,6 +42,8 @@ class Clock:
 class Native:
     def __init__(self, root):
         self.clock = Clock()
+        self.ancestor_rc = 1        # `git merge-base --is-ancestor RECORDED CURRENT`: 0 yes, 1 no, other = git error
+        self.git_log = ''           # stdout of `git log RECORDED..CURRENT`
         self.status_at = None       # callable(now) -> predecessor `Status`, scripting what `agent inspect` reads
         self.archive_queue = []     # (returncode, stdout, stderr) answers to successive `agent archive` calls
         self.calls = []
@@ -65,6 +67,13 @@ class Native:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
+        if argv[0] == 'git' and 'merge-base' in argv:
+            assert argv[-3] == '--is-ancestor' and re.fullmatch('[0-9a-f]{40}', argv[-2])
+            if isinstance(self.ancestor_rc, BaseException):
+                raise self.ancestor_rc
+            return subprocess.CompletedProcess(argv, self.ancestor_rc, '', '' if self.ancestor_rc in (0, 1) else 'fatal: bad object')
+        if argv[0] == 'git' and 'log' in argv:
+            return subprocess.CompletedProcess(argv, 0, self.git_log, '')
         if argv[0] == 'git':
             if isinstance(self.git_result, BaseException):
                 raise self.git_result
@@ -1221,3 +1230,113 @@ def test_malformed_permission_count_is_not_idle_and_does_not_crash_the_progress_
     with pytest.raises(ss.SessionError, match='never stayed idle'):
         service.finish(path, stable=10, timeout=20)
     assert any('unknown permission wait' in m for m in saw) and native.archived == 0
+
+
+# --- a moved HEAD: fast-forward tolerated, anything else blocks (fw-01 repair, 2026-11-14) ---------
+
+NEW_HEAD = 'b' * 40
+
+
+def moved(setup, **kw):
+    service, native, path = finished_up_to_archive(setup)
+    native.head = NEW_HEAD
+    for k, v in kw.items():
+        setattr(native, k, v)
+    return service, native, path
+
+
+def test_fast_forwarded_head_is_tolerated_and_recorded(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log='bbbbbbb second\naaaaaaa first\n')
+    done = service.finish(path)
+    assert done['status'] == 'archived' and native.archived == 1
+    assert done['head_advanced'] == {'from': HEAD, 'to': NEW_HEAD, 'commits': ['bbbbbbb second', 'aaaaaaa first'],
+                                     'more': False}
+    assert json.loads(path.read_text())['head_advanced'] == done['head_advanced']
+    assert done['head'] == HEAD  # the recorded head is never rewritten
+    argv = next(a for a, k in native.calls if 'merge-base' in a)
+    assert argv[-3:] == ['--is-ancestor', HEAD, NEW_HEAD] and argv[:3] == ['git', '-C', done['cwd']]
+
+
+def test_long_fast_forward_lists_a_capped_log(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log=''.join(f'{i:07x} c{i}\n' for i in range(25)))
+    drift = service.finish(path)['head_advanced']
+    assert len(drift['commits']) == ss.DRIFT_COMMITS and drift['more'] is True
+
+
+@pytest.mark.parametrize('rc', [1, 128, 2])
+def test_head_that_is_not_a_descendant_or_a_git_error_blocks(setup, rc):
+    service, native, path = moved(setup, ancestor_rc=rc)
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed.*not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0 and 'head_advanced' not in json.loads(path.read_text())
+
+
+@pytest.mark.parametrize('error', [OSError('no git'), subprocess.TimeoutExpired('git', 10)])
+def test_ancestry_check_that_cannot_run_blocks(setup, error):
+    service, native, path = moved(setup, ancestor_rc=error)
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_checkpoint_change_still_blocks_with_a_fast_forwarded_head(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    Path(json.loads(path.read_text())['checkpoint']).write_text('edited')
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_repository_that_vanished_or_appeared_blocks(setup):
+    service, native, path = moved(setup, ancestor_rc=0, head=None)  # recorded a head, now no repository
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert not any('merge-base' in a for a, k in native.calls)
+
+
+def test_null_recorded_head_with_a_repository_now_blocks(setup):
+    service, native, checkpoint = setup
+    native.head = None
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    assert record['head'] is None
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.head, native.ancestor_rc = NEW_HEAD, 0
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0 and not any('merge-base' in a for a, k in native.calls)
+
+
+def test_head_advancing_during_the_wait_is_recorded_before_the_archive(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.ancestor_rc = 0
+    def lands(now):
+        native.head = NEW_HEAD if now >= 30 else HEAD
+        return 'running' if now < 10 else 'idle'
+    native.status_at = lands
+    done = service.finish(path)
+    assert done['status'] == 'archived' and done['head_advanced']['to'] == NEW_HEAD
+
+
+def test_malformed_recorded_head_blocks_without_reaching_git(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    record = json.loads(path.read_text())
+    record['head'] = '--upload-pack=x'
+    path.write_text(json.dumps(record))
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert not any('merge-base' in a for a, k in native.calls)
+
+
+def test_advanced_head_is_saved_even_when_finish_then_fails(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    record = json.loads(path.read_text())
+    def tamper(now):
+        if now >= 10:
+            Path(record['checkpoint']).write_text('edited during the wait')
+        return 'running' if now < 10 else 'idle'
+    native.status_at = tamper
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert json.loads(path.read_text())['head_advanced']['to'] == NEW_HEAD
