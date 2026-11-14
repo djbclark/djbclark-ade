@@ -57,22 +57,30 @@ def strip_heredocs(command: str) -> str:
 
 
 def strip_comments(text: str) -> str:
-    """The text without shell comments: a `#` that starts a word outside quotes runs to the end of its line. A `#` inside a
-    word (a URL fragment) or a quote is text. (shlex's own comment handling cuts at any `#`, so it is switched off.)"""
+    """The command as one logical line per simple command, without shell comments. A `#` that starts a word outside quotes
+    runs to the end of its line; a `#` inside a word (a URL fragment) or a quote is text. `\\`+newline is a line continuation
+    (removed outside quotes and inside double quotes, as the shell does). A newline outside quotes becomes ` ; ` (a command
+    separator); inside quotes it stays. (shlex's own comment handling cuts at any `#`, so it is switched off.)"""
     out, quote, i, n = [], None, 0, len(text)
     while i < n:
         c = text[i]
-        if quote:
+        if quote == "'":
             out.append(c)
-            if c == "\\" and quote == '"' and i + 1 < n:
-                i += 1
-                out.append(text[i])
-            elif c == quote:
+            if c == "'":
                 quote = None
+        elif quote == '"':
+            if c == "\\" and i + 1 < n:
+                i += 1
+                if text[i] != "\n":  # a continuation vanishes; any other escaped pair stays
+                    out.append(c + text[i])
+            else:
+                out.append(c)
+                if c == '"':
+                    quote = None
         elif c == "\\" and i + 1 < n:
-            out.append(c)
             i += 1
-            out.append(text[i])
+            if text[i] != "\n":
+                out.append(c + text[i])
         elif c in "'\"":
             quote = c
             out.append(c)
@@ -80,6 +88,8 @@ def strip_comments(text: str) -> str:
             while i < n and text[i] != "\n":
                 i += 1
             continue
+        elif c == "\n":
+            out.append(" ; ")
         else:
             out.append(c)
         i += 1
@@ -89,7 +99,7 @@ def strip_comments(text: str) -> str:
 def targets_in_command(command: str, depth: int = 0) -> list[tuple[str, str | None]]:
     """[(target, allow)] for every `paseo [agent] send` found in a shell command line. `allow` is the value of an
     ADE_ALLOW_ARCHIVED_SEND=... assignment seen before it (the agent id the operator allowed), else None."""
-    text = strip_comments(strip_heredocs(command)).replace("\n", " ; ").replace("`", " ; ").replace("$(", " ; ")
+    text = strip_comments(strip_heredocs(command)).replace("`", " ; ").replace("$(", " ; ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""  # comments were removed above, with the shell's rule

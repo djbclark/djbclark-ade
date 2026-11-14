@@ -516,9 +516,10 @@ def current_lead(lead: str) -> str:
         return lead
 
 
-def archived_lead(lead, paseo):
-    """The reason `lead` must not be sent to (archived, nothing replaced it), else None. Fails open: a missing module or
-    an unreadable Paseo never blocks a wake (ls-02, bin/ade_send_guard.py)."""
+def guarded_lead(lead, paseo):
+    """(agent to send to, refusal reason or None). A refused lead (archived, nothing replaced it, or a cyclic ledger) is not sent
+    to; a lead the guard says was replaced (e.g. one filed by an id prefix, which the ledger lookup does not resolve) is sent to its
+    successor. Fails open: a missing module or an unreadable Paseo never blocks a wake (ls-02, bin/ade_send_guard.py)."""
     try:
         here = str(Path(__file__).resolve().parent)
         if here not in sys.path:
@@ -526,9 +527,10 @@ def archived_lead(lead, paseo):
         import ade_send_guard  # noqa: PLC0415 - lazy: this script is copied alone in a test
         d = ade_send_guard.guard(lead, paseo=paseo[0])
     except Exception:  # noqa: BLE001
-        return None
-    # a redirect here means current_lead() and the guard disagree about the ledger: send to neither
-    return d.reason if d.action in (ade_send_guard.REFUSE, ade_send_guard.REDIRECT) else None
+        return lead, None
+    if d.action == ade_send_guard.REFUSE:
+        return lead, d.reason
+    return (d.target if d.action == ade_send_guard.REDIRECT else lead), None
 
 
 def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
@@ -542,12 +544,12 @@ def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
             report["leads"][lead] = {"status": "paseo missing"}
             failed += 1
             continue
-        blocked = archived_lead(lead, paseo)
+        target, blocked = guarded_lead(lead, paseo)
         if blocked:  # ls-02: a send would un-archive and run it; the items stay open for the next wake
             report["leads"][lead] = {"status": "refused", "items": [i["id"] for i in its], "error": blocked[:200]}
             failed += 1
             continue
-        rc, out, err = run(paseo + ["send", "--json", "--no-wait", "--", lead, message_for(its, wake_id)], 60)
+        rc, out, err = run(paseo + ["send", "--json", "--no-wait", "--", target, message_for(its, wake_id)], 60)
         status = None
         try:
             parsed = json.loads(out)

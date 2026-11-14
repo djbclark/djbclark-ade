@@ -610,3 +610,22 @@ def test_fire_refuses_a_lead_that_is_archived_and_sends_to_the_live_one(fw):
     assert targets == [LEAD2], r.stderr
     report = json.loads(r.stdout.splitlines()[-1])
     assert report["leads"][LEAD]["status"] == "refused" and "archived" in report["leads"][LEAD]["error"]
+
+
+def test_fire_sends_a_prefix_filed_lead_to_its_successor(fw, tmp_path):
+    """A lead filed by an id prefix is resolved by the guard (inspect), found replaced, and the wake goes to the successor."""
+    new = "cccccccc-0000-4000-8000-00000000000c"
+    ledger = tmp_path / "self-session"
+    ledger.mkdir()
+    home = tmp_path / "paseo-home"
+    (ledger / f"handoff-{LEAD}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": LEAD, "successor": new, "home": str(home.resolve()), "status": "archived",
+         "ack": {"agent_id": new}}))
+    fw.env.update(ADE_SELF_SESSION_STATE=str(ledger), PASEO_HOME=str(home))
+    prefix = LEAD[:8]
+    fw.add("alpha", prefix)
+    (fw.dir / f"inspect_{prefix}.json").write_text(json.dumps({"Id": LEAD, "Archived": True}))
+    (fw.dir / f"inspect_{new}.json").write_text(json.dumps({"Id": new, "Archived": False}))
+    due = datetime.fromisoformat(arm(fw)["fire_at"]).timestamp()
+    r = fw.run("fire", now=due)
+    assert [x[x.index("--") + 1] for x in fw.calls("paseo") if x[0] == "send"] == [new], r.stderr

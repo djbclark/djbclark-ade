@@ -173,6 +173,11 @@ def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     (f"paseo send --host=other {A} hi", []),
     (f"paseo send --image a.png {A} hi", [(A, None)]),
     (f"paseo send {A} ADE_ALLOW_ARCHIVED_SEND={A}", [(A, None)]),  # the override is not a word of the message
+    (f"paseo send --json --no-wait \\\n  {A} --prompt hi", [(A, None)]),  # a line continuation
+    (f"paseo \\\n send {A} hi", [(A, None)]),
+    (f"paseo send --no-wait \\\n --prompt \"x\" \\\n {A}", [(A, None)]),
+    (f"paseo send {A} \"a \\\nb\"", [(A, None)]),  # a continuation inside double quotes
+    (f"bash -c '# c\npaseo send -- {A} hi'", [(A, None)]),  # a comment inside a multi-line -c payload
     ("paseo ls -g --json", []),
     (f"echo paseo send {A}", []),
     ("paseo send", []),

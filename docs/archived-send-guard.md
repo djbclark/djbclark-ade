@@ -41,7 +41,7 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    (`$VAR`, a substitution, a glob) is not judged, nor a send inside a heredoc fed to a shell (`bash <<EOF`). Any error or missing module allows the call.
 2. `bin/completion-notice --send` and `--lead-ack` (exit 4 `BLOCKED` on a refusal, redirect to the successor otherwise; an ack
    to an archived worker is skipped), `bin/fable-wait fire` (a refused lead, including one with a cyclic ledger, is reported
-   `refused` and its items stay open; the chain redirect of #669 is unchanged) and `bin/deadline` (redirects the owner; a
+   `refused` and its items stay open; a lead the guard finds replaced, e.g. one filed by an id prefix, is sent to its successor; the chain redirect of #669 is unchanged) and `bin/deadline` (redirects the owner; a
    refused owner gets exit 2 `not sent`).
 3. Not guarded: other TUIs' own tools (no hook there: this page and AGENTS.md are the rule), `bin/load-watch`, `bin/ade-tidy`
    and `bin/ade-net-resume` (they message live agents they just listed), and `ade_self_session` (it messages its own live
@@ -57,7 +57,7 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    (`agent-prompt.ts`, `session.ts` resume/refresh handlers); none of those is checked here. `paseo agent inspect` itself does not
    un-archive, so the guard's probe is safe.
 5. The hook strips shell comments (a `#` that starts a word, outside quotes) before it looks for a send, so a leading comment
-   line never hides a later send; a heredoc fed to a shell (`bash <<EOF`) is still not parsed.
+   line never hides a later send; a heredoc fed to a shell (`bash <<EOF`) is still not parsed, nor are the shell's rarer quoting forms (`$'it\'s'`, a ` #` inside `${x:- #y}`): such a line may hide a later send on it.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).
