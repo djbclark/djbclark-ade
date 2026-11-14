@@ -176,8 +176,7 @@ git add .ignore   # commit it: portable (operator ruling 2026-11-14, below); not
 ```
 
 Applied to `~/.hermes/hermes-agent` and all three `~/ops` repos. `/.ignore` left the excludes of
-`site-public-djbclark` and `site-private-djbclark` on 2026-11-14; `stayturgid` still excluded it on that day
-(reported to the applying agent). `~/.hermes/hermes-agent` keeps excluding it: a fork keeps its upstream's layout. Re-apply
+`site-public-djbclark`, `site-private-djbclark` and `stayturgid` on 2026-11-14. `~/.hermes/hermes-agent` keeps excluding it: a fork keeps its upstream's layout. Re-apply
 after any `graft build` in a new repo — or check `git status` afterwards,
 which is the cheap habit.
 
@@ -200,7 +199,7 @@ option is saved): that one has no switch in 0.23.0.
 
 **Answered locally 2026-11-14: commit `.ignore`** (operator: commit graft files usable by other people, i.e. with no
 `/Users/djbclark` in them; ignore the rest; AGENTS.md "Graft files in git"; forks excepted). Applied: `cfengine-all` 7f31545,
-`site-public-djbclark` 6040584, `site-private-djbclark` 50ad061; `djbclark-ade` already did (`df8c0860`). The history
+`site-public-djbclark` 6040584, `site-private-djbclark` 50ad061, `stayturgid` 40dd22f; `djbclark-ade` already did (`df8c0860`). The history
 below is kept. Upstream, ask for the missing `/.graft/` switch, and ask graft to document that committing `.ignore` is
 intended.
 
