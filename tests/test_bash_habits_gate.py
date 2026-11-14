@@ -533,6 +533,14 @@ def test_serial_or_non_gh_xargs_gives_no_fanout_warning(command):
     "gh run watch 9 --interval 060",                                                # octal in pflag
     "gh run watch 9 --interval 0x3c",
     "gh run watch 9 --interval " + "9" * 5000 + "x",                               # B5 fails closed
+    "bin/gh-pr-checks -- 123 --watch",                                              # N2
+    "bin/gh-pr-checks --budget 5m -- 123 --watch --required",
+    "gh-pr-checks --no-deadline -- 5 --watch",
+    "echo \"$(bash -c 'gh run watch 9')\"",                                         # N3
+    "out=\"$(sh -c 'gh pr checks 5 --watch')\"",
+    "echo it\\'s; bash -c 'gh run watch 9'",                                        # N4
+    "# don't spam the API\nbash -c 'gh run watch 9'",
+    "cat <<'EOF' | bash\ngh run watch 9\nEOF",                                      # N7
     "/bin/bash -c 'gh run watch 9'",                                                # B7a
     "bash -o pipefail -c 'gh run watch 9'",                                         # B7b
     "bash --norc -c 'gh run watch 9'",
@@ -560,3 +568,14 @@ def test_adversary_round1_watchers_are_denied(command):
 ])
 def test_adversary_round1_false_positives_and_documented_forms_pass(command):
     assert not denied(command), command
+
+
+def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
+    import time
+    for cmd in ("gh run watch 9 --interval " + "9" * 5000,            # int() limit: no crash
+                "bash " + "--a " * 60 + "x",                           # SHELL_C must not backtrack
+                "git commit -m \"; bash " + "--no-verify " * 60 + " done\""):
+        t0 = time.monotonic()
+        out = run(cmd)
+        assert time.monotonic() - t0 < 5, cmd[:40]
+        assert not out or out.get("permissionDecision") != "deny" or "gh run watch" in cmd

@@ -420,12 +420,44 @@ GH_FANOUT_CMD = re.compile(r"\bgh\s+(?:(?:-R|--repo)\s+\S+\s+)?"
                            r"(?:api|pr|run|issue|repo|search|release|workflow)\b")
 SHELL_C = re.compile(
     r"""(?:^|[;&|(\n{]|\$\()\s*(?:[\w=./{}%-]+\s+){0,4}(?P<sh>(?:[\w./-]*/)?(?:ba|z|da)?sh)\s+"""
-    r"""(?:--?[\w-]+(?:\s+\w+)?\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
+    r"""(?:-{1,2}[A-Za-z0-9][\w-]*(?:\s+\w+)?\s+)*?-[A-Za-z]*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""")
 SHELL_HEREDOC = re.compile(
     r"""(?:^|[;&|(]|&&)\s*(?:[\w=./-]+\s+){0,3}(?:[\w./-]*/)?(?:ba|z|da)?sh\b[^<\n]*<<-?\s*"""
     r"""['"]?(\w+)['"]?""")
-QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+SHELL_PIPED_HEREDOC = re.compile(
+    r"""<<-?\s*['"]?(\w+)['"]?[^\n]*\|\s*(?:[\w./-]*/)?(?:ba|z|da)?sh\b""")
 QUOTED_NUMBER = re.compile(r"""(?<=[\s=])(['"])([0-9]{1,9})\1""")
+
+
+def quoted_spans(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, opener) of each single- or double-quoted span, left to right: a backslash
+    escapes the next character outside single quotes, and a `#` at a word start is a comment."""
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif ch in "'\"":
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if (ch == '"' and text[j] == "\\") else 1
+            spans.append((i, min(j + 1, n), ch))
+            i = j + 1
+        else:
+            i += 1
+    return spans
+
+
+def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
+    """True when `pos` sits in quoted text that is not run: a double-quoted span holding a
+    `$(` or backtick substitution before `pos` does run it."""
+    for a, b, q in spans:
+        if a <= pos < b:
+            return not (q == '"' and re.search(r"\$\(|`", text[a:pos]))
+    return False
 
 
 def _drop_heredocs(c: str) -> str:
@@ -454,6 +486,9 @@ def gh_args(stage: str) -> list[str] | None:
         if base == "gh-pr-checks":                    # bin/gh-pr-checks forwards to `gh pr checks`
             fwd, k = [], 0
             while k < len(rest):
+                if rest[k] == "--":                   # everything after goes to gh as is
+                    fwd += rest[k + 1:]
+                    break
                 if rest[k] == "--budget":
                     k += 1
                 elif rest[k] != "--no-deadline" and not rest[k].startswith("--budget="):
@@ -530,9 +565,9 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
                     return reason
     if depth < 3:
         raw = _drop_heredocs(text)
-        quoted = [(q.start(), q.end()) for q in QUOTED.finditer(raw)]
+        spans = quoted_spans(raw)
         for m in SHELL_C.finditer(raw):
-            if any(a <= m.start("sh") < b for a, b in quoted):
+            if _in_prose(raw, spans, m.start("sh")):
                 continue                              # `sh -c` written inside a quoted string
             reason = gh_watch_in(m.group(2)[1:-1], depth + 1)
             if reason:
@@ -540,8 +575,9 @@ def gh_watch_in(text: str, depth: int = 0) -> str | None:
         lines = text.split("\n")
         n = 0
         while n < len(lines):
-            fed = SHELL_HEREDOC.search(lines[n])
-            m = fed or re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[n])
+            fed = (SHELL_HEREDOC.search(lines[n]) or SHELL_PIPED_HEREDOC.search(lines[n])) \
+                if "<<" in lines[n] else None
+            m = fed or (re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[n]) if "<<" in lines[n] else None)
             n += 1
             if not m:
                 continue
