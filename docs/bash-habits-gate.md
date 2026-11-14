@@ -44,10 +44,11 @@ assignment value, rare), `--x=y`, `-d=`, heredoc bodies, comments, and the insid
 a worker's `"... the `foo` call ..."` ran `foo` and the message arrived with a hole in it. Denied for `paseo [opts] send` and
 `paseo agent send` (found past wrappers such as `env -u X`, `timeout`, `bg` and `VAR=x`), when any double-quoted word after the
 verb holds an unescaped backtick or `$(`; an unquoted `${ID}`, `$(cat id)` or backtick target before the message is read as part of
-its word, so it does not hide the send. Passes: single quotes, `"\`x\`"` and `"\$(x)"` (escaped, literal), arithmetic
+its word, so it does not hide the send; the body of every `$(...)`, `<(...)`, `>(...)` and backtick span (quoted or not) is checked as a command line of
+its own, so `r=$(paseo send --json ab "...`x`...")` is denied too. Passes: single quotes, `"\`x\`"` and `"\$(x)"` (escaped, literal), arithmetic
 `"$((n*2))"` (unless it holds a substitution), `--prompt-file FILE` (write it with `cat > FILE <<'EOF'`; `--prompt-file -` reads a
 file named `-`, not stdin), python argv, a substitution in some other command (`echo "`date`"; paseo send ab ok`), and a command
-that starts with `echo`, `printf`, `rg`, `grep`, `git`, `cat`, `gh` or `jq` (`echo paseo send "$(date)"` only prints text). Known false
+that starts with `echo`, `printf`, `print`, `rg`, `grep`, `git`, `cat`, `gh` or `jq` (`echo paseo send "$(date)"` only prints text). Known false
 positives: a deliberate `"$(cat FILE)"` or `"$(paseo ls ...)"` target is denied too (assign it first: `ID=$(cat f); paseo send "$ID" ...`);
 a redirect target `> "$(mktemp)"` after the send. Not detected: `bash -c 'paseo send ...'`, `P=paseo; $P send`, a send built by a script or
 `eval`, unquoted backticks inside a message word, and a quote the scanner cannot pair (it fails open). Pre-existing, not changed here:

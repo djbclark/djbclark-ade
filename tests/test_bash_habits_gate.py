@@ -838,6 +838,13 @@ SEND_DENY = [
     'paseo --json send ab "`z`"',
     'env -u A -u B paseo send ab "`z`"',
     'ADE_ALLOW_ARCHIVED_SEND=ab paseo send ab "fix `x`"',
+    'r=$(paseo send --json --no-wait ab "the `foo` call")',    # a send inside a substitution body
+    'echo $(paseo send ab "`foo`")',
+    'cat <(paseo send ab "`foo`")',
+    'r="$(paseo send ab "the `foo` call")"',
+    'x=`paseo send ab "$(date)"`',
+    'echo "`paseo send ab "$(date)"`"',                          # a backtick body inside double quotes
+    'paseo send ab "$(echo $(paseo send c "`z`"))"',
     'paseo send ${LEAD} "the `foo` call"',                     # an unquoted ${..} / $(..) target must not end the command
     'paseo send --json --no-wait $(cat id) "the `foo` call"',
     'paseo send $(cat "id file") "the `foo` call"',
@@ -878,6 +885,9 @@ def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denie
     'echo paseo send "$(date)"',                                  # only prints text
     'printf "%s\\n" paseo send "`x`"',
     'paseo send ${LEAD} ok; echo "`date`"',
+    'r=$(paseo send --json ab ok); echo "`date`"',
+    'echo $(echo send "`x`")',
+    '(paseo send ab ok)',
     'paseo agent inspect "$(cat /tmp/id)" --json',
     'paseo run "`x`" --name a',
     "cat > /tmp/m.txt <<'EOF'\nsee `foo` and $(bar)\nEOF\npaseo send ab --prompt-file /tmp/m.txt",

@@ -894,10 +894,11 @@ def _skip_dollar_paren(s: str, j: int) -> int:
     return j
 
 
-def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
+def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tuple[str, bool]]]:
     """`raw` split into simple commands; each is a list of (word, risky). `risky` is True for a word with an unescaped
     backtick or `$(` inside double quotes: the shell runs it before the program starts. Heredoc bodies are dropped by the
-    caller. An unterminated quote makes the structure unclear: [] (fail open)."""
+    caller. An unterminated quote makes the structure unclear: [] (fail open). The text of every `$(...)`, `<(...)`,
+    `>(...)` and backtick span (quoted or not) is appended to `bodies`: it is a command line of its own."""
     cmds: list[list[tuple[str, bool]]] = []
     words_: list[tuple[str, bool]] = []
     cur: list[str] = []
@@ -937,6 +938,8 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
                 elif raw[j] == "`":
                     risky = True
                     k = raw.find("`", j + 1)
+                    if bodies is not None:
+                        bodies.append(raw[j + 1:n if k < 0 else k])
                     j = n if k < 0 else k + 1
                 elif raw.startswith("$((", j):          # arithmetic runs no command, unless it holds a substitution
                     k = _skip_dollar_paren(raw, j + 2)
@@ -944,7 +947,10 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
                     j = k
                 elif raw.startswith("$(", j):
                     risky = True
-                    j = _skip_dollar_paren(raw, j + 2)
+                    k = _skip_dollar_paren(raw, j + 2)
+                    if bodies is not None:
+                        bodies.append(raw[j + 2:k - 1 if raw[k - 1:k] == ")" else k])
+                    j = k
                 else:
                     j += 1
             if j >= n:
@@ -957,6 +963,12 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
         elif c in " \t":
             end_word()
             i += 1
+        elif (c == "$" or c in "<>") and raw[i + 1:i + 2] == "(" and not raw.startswith("$((", i):
+            k = _skip_dollar_paren(raw, i + 2)            # `$(...)`, `<(...)`, `>(...)`: a command line of its own
+            if bodies is not None:
+                bodies.append(raw[i + 2:k - 1 if raw[k - 1:k] == ")" else k])
+            cur.append(raw[i:k])
+            i = k
         elif c == "$" and raw[i + 1:i + 2] in ("(", "{"):
             # an unquoted `$(...)` / `${...}` is part of the word (`paseo send $(cat id) "msg"`): its parentheses and braces
             # must not end the command
@@ -966,6 +978,8 @@ def simple_commands(raw: str) -> list[list[tuple[str, bool]]]:
             i = k
         elif c == "`":
             k = raw.find("`", i + 1)
+            if bodies is not None:
+                bodies.append(raw[i + 1:len(raw) if k < 0 else k])
             k = len(raw) if k < 0 else k + 1
             cur.append(raw[i:k])
             i = k
@@ -987,7 +1001,20 @@ def risky_send_reason(cmd: str) -> str | None:
     shell would run it, not send it)."""
     if "send" not in cmd:
         return None
-    for words_ in simple_commands(_drop_heredocs(cmd)):
+    todo, seen = [_drop_heredocs(cmd)], 0
+    while todo and seen < 200:                       # a worklist: a substitution body is a command line too
+        seen += 1
+        bodies: list[str] = []
+        parsed = simple_commands(todo.pop(), bodies)
+        todo.extend(b for b in bodies if "send" in b)
+        reason = _send_in(parsed)
+        if reason:
+            return reason
+    return None
+
+
+def _send_in(parsed: list[list[tuple[str, bool]]]) -> str | None:
+    for words_ in parsed:
         names = [os.path.basename(w) for w, _ in words_]
         if names[0] in NOT_A_SENDER:                    # `echo paseo send "$(date)"` only prints text
             continue
