@@ -13,7 +13,7 @@ only absolute `*-report.md` path it names, never one whose `.done` exists, else
 and the hook's `additionalContext` both name it. If the footer cannot be built, the old deny stands.
 Exempt: claude-code-guide and statusline-setup (short answers by design). AGENT_FOOTER_GATE_OFF=1
 disables it. Fills `docs/dispatch-footer.md` inline (2026-11-09: no longer shells out to
-`acp-dispatch footer`, which Wave 6 deletes). Fails open on any other error.
+`acp-dispatch footer`, deleted 2026-11-14). Fails open on any other error.
 """
 
 import json

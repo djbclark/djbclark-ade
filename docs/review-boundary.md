@@ -68,7 +68,7 @@ review-launch --check [--mode review|read-only] [--allow-web] [--json]
 | Mode | Tools (`--tools`) | The init event must list exactly |
 |---|---|---|
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
-| `read-only` (Claude restricted tools; also used by the transitional `acp-dispatch` shim until ~2026-11-20) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
+| `read-only` (Claude restricted tools) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
 
 | `trusted` (YOLO, 2026-11-12; `bin/review-pr` for an owner-authored PR) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
 

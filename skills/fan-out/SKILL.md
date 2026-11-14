@@ -2,7 +2,7 @@
 name: fan-out
 description: >-
   Slice parallel work, assign owners and verify reports. Prefer native Paseo agent/workspace
-  operations; Wave 6 dispatch shims are transitional only. Use for "fan this out",
+  operations (the Wave 6 dispatch shims were deleted 2026-11-14). Use for "fan this out",
   "parallelize this", or an explicit delegation request. Select the destination host for remote work.
 ---
 

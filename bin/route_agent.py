@@ -95,7 +95,7 @@ preferences, because they encode consequences a score cannot see:
 
 Every route comes with a `--model [--effort]` suggestion and the native
 `paseo run --provider …` launch line (`cursor-cloud launch` for the Cursor Cloud row;
-the Wave 6 `acp-dispatch` shim is transitional only);
+the Wave 6 `acp-dispatch` shim was deleted 2026-11-14);
 the context window is the caller's choice (the agent's default unless the slice reads a whole corpus or a
 long log).
 
@@ -1877,7 +1877,7 @@ class Choice:
 
     @property
     def dispatch(self) -> str:
-        """Launch template: native `paseo run` (Wave 6; acp-dispatch is transitional only).
+        """Launch template: native `paseo run` (Wave 6; the acp-dispatch shim was deleted 2026-11-14).
         Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
         agent = self.service.acp_agent
         mode = DISPATCH_MODES.get(agent)

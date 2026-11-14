@@ -1,5 +1,7 @@
 # Wave 6 follow-up — shim and `acp-run` deletion readiness
 
+**Done 2026-11-14:** the three shims were deleted (PR `wave6-delete-shims`, `docs/slim/log.md`); this file is now the record of the checklist and its evidence. Everything below describes the state before the deletion.
+
 Snapshot: 2026-11-10 (status: in-repo §A LIVE_RE callers cleared on
 `origin/master` after `#498` — `wave6-delete-check --inventory` →
 `callers_remaining=0` / `gate_exits.callers=0`; C3 `--dry-run` FIXTURE

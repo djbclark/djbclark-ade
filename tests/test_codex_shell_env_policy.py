@@ -273,18 +273,6 @@ class DetachedChildren(unittest.TestCase):
     def caller_env(self) -> dict[str, str]:
         return {**base_env(self.home), **IN_HERDR, "PASEO_AGENT_ID": "a1", "ORCA_TERMINAL_HANDLE": "t1"}
 
-    def test_acp_run_drops_the_callers_owner_ids_before_the_agent_starts(self) -> None:
-        try:
-            mod = load("acp_run_under_test", ROOT / "tools" / "acp-run" / "acp-run")
-        except ImportError as e:
-            self.skipTest(f"acp-run needs its ACP SDK: {e}")
-        scrubbed = {k: v for k, v in self.caller_env().items() if k not in mod.SCRUB_ENV}
-        self.assertEqual([k for k in scrubbed if k in OWNER], [])
-        got = tool_env(self.toml, scrubbed)
-        self.assertEqual([k for k in got if k in OWNER], [])
-        self.assertLessEqual({k for k in got if k.startswith("HERDR_")}, set(ROUTING))  # nothing but service paths
-        self.assertNotIn("PASEO_AGENT_ID", got)
-
     def test_the_unscrubbed_caller_environment_would_leak_the_ids(self) -> None:
         # Why the scrub matters now: without it the same Codex hands all six names to its tools.
         got = tool_env(self.toml, self.caller_env())

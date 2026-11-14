@@ -65,7 +65,7 @@ A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, o
 | B2. `omp` (retired transport) | omp, disabled | the Claude Max plan's monthly API credits (an expiring grant) | `api-only` first, then judgment (adversary rounds), code, bulk; skipped while omp has no enabled Anthropic login |
 | B3. `codex` | codex | subscription ($100 plan, aiuse `prolite`) | astra for frontier only; everyday models while every window has `plenty_min` left |
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
-| B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; acp-dispatch stopped launching it with the Paseo shim |
+| B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; the deleted acp-dispatch shim stopped launching it with Paseo |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
 | B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
@@ -82,7 +82,7 @@ C1. `route_agent.py` builds the service list from the curated rows plus `paseo p
 is `"Enabled"` and whose `status` is `available` (read with a 15 s timeout; never raises). Right after the daemon starts a
 row reads `loading`: the call is repeated twice, 3 s apart, and a row still loading is treated as absent with a note on
 stderr. Names pass through `[routing].aliases` (Paseo's `opencode` provider is the `opencode-go` pool) and
-`never_route`. It replaced acp-run's agent table, the non-ACP headless list and Orca's roster.
+`never_route`. It replaced the deleted acp-run's agent table, the non-ACP headless list and Orca's roster.
 C2. `paseo provider models <provider> --json` gives the provider's model ids; `route_agent.py services --check-models`
 checks every suggested model against it (exit 1 when one is not listed, 2 when Paseo cannot list a provider). Not yet run
 against the Mac's daemon: run it there after the merge.

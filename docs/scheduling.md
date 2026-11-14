@@ -377,7 +377,7 @@ dry-run and render are allowed.
 
 ## API (for installers)
 
-Callers run under `python3 -I`, so they put the script's directory on `sys.path` first, as `bin/acp-dispatch` does for `route_agent.py`:
+Callers run under `python3 -I`, so they put the script's directory on `sys.path` first, as the deleted `bin/acp-dispatch` did for `route_agent.py`:
 
 ```python
 sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]

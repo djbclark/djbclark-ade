@@ -41,7 +41,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the transitional `acp-dispatch` shim leaves ~2026-11-20). | "fan this out", "split this across agents". |
+| `fan-out` | Fans separable work out and collects it: the Agent tool or a Workflow in process, or native `paseo run --no-wait` for a slice in its own worktree, then `paseo wait` / `paseo send` to collect and steer (2026-11-09; Wave 6; the `acp-dispatch` shim was deleted 2026-11-14). | "fan this out", "split this across agents". |
 | `tidy` | Tidies one repo's Paseo agents and windows with `bin/ade-tidy` (observe-only; `--apply` acts): reconnects agents with no proven contact (one plain send, once an hour), lists workers waiting on the lead and agents waiting on the operator, renames windows to `MAIN\|WORKERS\|USER <repo> (<current work>)`, reports tabs in the wrong window (Paseo has no move), archives finished workers and empty windows (2026-11-13). | `/tidy`; "tidy the workspaces", "reconnect the agents", "any workers waiting on me". |
 | `model-routing` | The Claude tier for a role, effort, which pool takes a slice (`route_agent.py plan`), reading quota (aiuse, `paseo usage ls`), the frontier allowance, fallback chains (effort-routing and fallback-chains folded in, 2026-11-07). | Before a multi-agent run or when a quota window is tight. |
 | `watch` | Low-token terminal load inspection, memory churn check, and incident triage (`/watch load`, `/watch`, `/loadwatch`). | `/watch load`, "check load", "triage load spikes". |
@@ -65,8 +65,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 `skills/session-finder/` was restored 2026-11-08 for Pi-first transcript history search (`session-history.py`;
 data only — it does not launch retired clients). `skills/watch/` (with `/loadwatch` alias) was restored 2026-11-11
 (#539) for low-token terminal load inspection, memory churn check, and incident triage, superseding its earlier
-slim-down deletion. The one-cycle relay shim `relay.py` over `paseo send` remains until
-2026-11-20; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
+slim-down deletion. The one-cycle relay shim `relay.py` over `paseo send` was deleted 2026-11-14; `claude_identity.py` is a stub (the module is `bin/claude_identity.py`). Paseo's own skills (`paseo`,
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin`) are installed from Paseo (`npx skills
 add getpaseo/paseo`, `docs/skill-everywhere.md` 3a); the Claude template keeps them `user-invocable-only`.
 

@@ -101,8 +101,8 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    `bin/pr-policy` (an unattended launchd job) holds its two tokens in
    memory while its children (`hermes-ping`) inherit none; presence is proved by length or hash, never
    by printing the value.
-4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
-   `tools/acp-run`'s `--verify`, an operator-supplied command, gone with acp-run in Wave 6). Where a shell string
+4. **`subprocess` gets argv lists, never `shell=True`** (there is no exception since
+   `tools/acp-run`'s `--verify` went with acp-run, 2026-11-14). Where a shell string
    is unavoidable (launchd runner scripts, printed resume and rearm hints) every interpolated value goes through
    `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare

@@ -1,5 +1,5 @@
 # Machine-readable routing policy. Consumed by bin/route_agent.py and
-# bin/acp-dispatch. Edit here; do not restate the data in Python.
+# (formerly also bin/acp-dispatch). Edit here; do not restate the data in Python.
 # Profiles from docs/model-routing.md "Which AI for which work", rewritten
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.2 and codex's top frontier model (gpt-6-astra today) are reached
@@ -291,7 +291,7 @@ access = "cli-only"
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
 # easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
-# dispatcher (now native `paseo run`; Wave 6 shims transitional) also reserves in-flight
+# dispatcher (native `paseo run`; the Wave 6 shims were deleted 2026-11-14) also reserves in-flight
 # estimates per service. max_parallel = 1 keeps one codex slice per wave.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
 # and the in-flight rule await re-calibration from `route_agent.py calibrate`.

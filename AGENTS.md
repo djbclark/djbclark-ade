@@ -24,8 +24,8 @@ Each doc carries its own summary.
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
 | [docs/dynamic-model-effort.md](docs/dynamic-model-effort.md) | design (2026-11-10): measured token efficiency → route/effort policy; gates; no live auto-route / no Jev nudge / no Pi acceptance writes (queue #24) |
-| [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, the shim's exit codes, messaging, the stagger rule |
-| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (`bin/wave6-delete-check`, soft deadline 2026-11-20, queue Carried 1) |
+| [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, report classes, messaging, the stagger rule |
+| [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (`bin/wave6-delete-check`; the three shims were deleted 2026-11-14) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
 | [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |
@@ -49,7 +49,7 @@ Each doc carries its own summary.
 | [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/claude-denyread-trial.md](docs/claude-denyread-trial.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; Claude `sandbox.filesystem.denyRead` operator trial (no live `~/.claude` apply); who may open PRs on djbclark's repositories |
-| [docs/dispatch-footer.md](docs/dispatch-footer.md), [docs/agent-guard-contract.md](docs/agent-guard-contract.md) | the delivery footer every brief carries; the dispatch shim's per-agent argument guard (both go with the shim in Wave 6) |
+| [docs/dispatch-footer.md](docs/dispatch-footer.md) | the delivery footer every brief carries (`bin/ade-worker-run` and the Agent-tool footer hook append it) |
 | [docs/skill-everywhere.md](docs/skill-everywhere.md), [docs/skills.md](docs/skills.md) | how skills are linked into every TUI; the skill inventory. [skills/](skills/) is the canonical copy: **edit and add skills here**, never via a TUI path |
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
@@ -142,14 +142,14 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    one stash stack, so a pop can apply another writer's WIP (2026-11-12: two workers swapped uncommitted edits); set work
    aside with `git diff > PATCH` and `git checkout -- PATHS`, or a WIP commit on your own branch.
 
-10. **A message to another agent is sent with `paseo send --json` or the session-finder relay shim (Wave 6 delete by
-   2026-11-20), and not delivered until you have proof** (operator, 2026-10-25: "we always need to verify that the other agent
+10. **A message to another agent is sent with `paseo send --json` (the session-finder relay shim was deleted
+   2026-11-14), and not delivered until you have proof** (operator, 2026-10-25: "we always need to verify that the other agent
    got our message otherwise we may be on a broken one-way receive-only link"; mechanics re-based on Paseo 2026-11-06). A
    sourceless send (deadline, load-watch) is delivered when `.status` reads `sent` or `completed` (exit 0); an agent's send
    is accepted (exit 5: Paseo queues every agent-to-agent message and reports no later delivery) and proven only by the
    peer's `ack <your agent id>`; exit 2 is not delivered; `paseo send`'s `$?` is never read as delivery. Writing an answer
    in your own turn does not reach a peer: a message from a peer is answered by sending to that peer, not in prose. Every
-   message that needs to be known delivered asks for the named ack (the relay shim's `--ack <your id>` appends the request; `paseo send` has no `--ack`, so write
+   message that needs to be known delivered asks for the named ack (`paseo send` has no `--ack`, so write
    `Please reply: ack <your id>` into the text and pass `--no-wait`, since a send to a busy peer can block for minutes); the first
    message to a new peer always asks for one, to prove the return path; check your own inbox for it, re-send when none
    arrives, and report a peer you cannot reach to the operator, never assume it read. For completion notices (operator
@@ -175,9 +175,9 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
 - **Paseo is the only harness (2026-10-31).** `paseo ls -a -g --json` / `paseo run` /
   `paseo permit ls`; Paseo GUI checks via headless Playwright (`skills/paseo-screen`; the plugin is disabled). Registry:
   `paseo provider ls --json` (docs/model-routing.md).
-- **Two shims, one cycle each** (then Paseo directly): session-finder relay over
-  `paseo send` (Wave 6 delete by 2026-11-20); dispatch shim under `bin/` + acp runner
-  under `tools/` (Wave 6 follow-up delete after one live cycle).
+- **No shims (2026-11-14).** The session-finder relay, `bin/acp-dispatch` and `tools/acp-run` were deleted in the Wave 6
+  follow-up (operator: "Let's get rid of that shim"); agents launch with native `paseo run` / `bin/ade-worker-run`
+  and message with `paseo send`.
 - Master is **PR-only** (branch protection includes admins). Work in a worktree
   (order 9); merge when `adversary-marker` and Tests are green
   (`gh pr merge --squash --match-head-commit`); before `--delete-branch`, `gh pr list --base <head-branch>` must be empty:

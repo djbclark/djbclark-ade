@@ -105,8 +105,8 @@ native path. At a finished-task boundary, write an owned durable handoff; cycle
 to a new session only through a supported, acknowledged host controller.
 
 This plugin controls context growth, not model entitlement. The expensive-model
-advisory gate lives in `acp-dispatch` and `acp-run`; direct native UI selection
-is outside that gate. Do not use native UI or `opencode run` to evade it.
+advisory gate lived in `acp-dispatch` and `acp-run` (deleted 2026-11-14); `route_agent.py` still refuses costly Go routing rows, and direct native UI selection
+is outside any gate. Do not use native UI or `opencode run` to evade it.
 Do not enable speculative background compaction or Go balance overage.
 
 ## Offline verification
@@ -135,7 +135,7 @@ For admission diagnostics, use the structured `load-watch` fields (`load1`,
 `per_core`, `cores`); the raw load average printed by a `bg` hold is not itself
 a per-core reading.
 
-On 2026-10-25, a second native OpenCode 2.1.4 read-only probe used the actual
+On 2026-10-25, a second native OpenCode 2.1.4 read-only probe used the then-current
 `acp-run` sanitizer's temporary `OPENCODE_CONFIG_DIR`, with project config
 disabled and only the trusted guard symlink retained. Native auto-discovery
 returned `ready: true`, `known: false`; no inference or compaction was requested.

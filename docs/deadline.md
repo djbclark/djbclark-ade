@@ -25,7 +25,7 @@ deadline install [--ade DIR] [--dry-run] [--backend auto|launchd|systemd|cron] [
 
 `--on-expire`: `kill` (default: SIGTERM to the process group, SIGKILL after `--grace`, default 60 s; Hermes is pinged), `notify` (owner and Hermes
 only, nothing killed), `relay` (kill, then tell the owner through native sourceless `paseo send` with inspect/steer/status gates — or `DEADLINE_RELAY` / the Wave 6 shim while it remains — with the name, budget, overrun and checkpoint). `reroute:RECORD`
-was retired on 2026-11-07 (slim-down E7; the acp-dispatch shim has no `reroute`): `start` and `run` refuse it with exit 2 pointing at `relay`,
+was retired on 2026-11-07 (slim-down E7; the dispatch shim had no `reroute`, and it was deleted 2026-11-14): `start` and `run` refuse it with exit 2 pointing at `relay`,
 whose owner re-dispatches the slice on the next rung (`model-routing` D2). A record registered with it before then is stopped, nothing is
 dispatched, and the owner and the operator are told "reroute FAILED ... nothing replaced it".
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
@@ -74,7 +74,7 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) registers a deadline for its own
 wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
 **its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it).
-One exception: `load-watch admit`'s callers (`acp-dispatch` shim, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
+One exception: `load-watch admit`'s callers (`bg`, any launcher) fail OPEN on an exit they do not know, so a deadline stop is
 answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
@@ -85,7 +85,7 @@ The 60 s margin lets the waiter's own timeout path (it writes its result files) 
 never outlives its own `--timeout`/`--wait` by more than the margin plus the sweep's worst overrun (about two minutes). Owner: the caller's
 `PASEO_AGENT_ID`, else none (`-`: the sweep pings Hermes). The record is the same `kind: run` record as any `deadline run`.
 
-`bin/acp-dispatch-wait` (bash; exit **76** vs 124 so a lead does not re-task a still-running slice) is **DELETE** with the `acp-dispatch` shim in the Wave 6 follow-up (ledger E6/D6, C7 drain first). Do not teach or re-arm it for new work; its contract lives only on the shim/delete path until then.
+`bin/acp-dispatch-wait` (bash; exit **76** vs 124) was deleted 2026-11-14 with the `acp-dispatch` shim (Wave 6 follow-up); only `load-watch admit --wait` self-registers now.
 
 1. **Why a supervisor.** `deadline start --pid` refuses the registrar's own parent (safety rule 3), so a process cannot register itself. The waiter
    runs *itself* under `deadline run --name N --budget B --heartbeat H --on-expire kill -- SELF ARGS` and returns its exit code; the inner copy
@@ -109,9 +109,9 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 ## Known gaps (follow-ups)
 
 1. **Sweep owner delivery still names "relay"** (2026-11-09, after slim-down E8 and Wave 6 #340): `--on-expire relay` and expiry notices use
-   `skills/session-finder/relay.py` (shim over `paseo send --json`; removal tracked in `docs/queue.md` Carried Wave 6 shim
-   deletion, soft 2026-11-20). `bin/deadline_wait.py` never called relay; only `load-watch admit --wait` and
-   `acp-dispatch-wait` self-register after the shared PR waiter was removed (E8).
+   the native sourceless `paseo send` below (the `skills/session-finder/relay.py` shim was deleted 2026-11-14).
+   `bin/deadline_wait.py` never called relay; only `load-watch admit --wait` self-registers after the shared PR waiter
+   was removed (E8) and `acp-dispatch-wait` went with its shim.
 
 Shipped (kept here so the Known gaps history is searchable): `bin/gh-pr-checks --watch` self-registers (#448);
 `bin/review-pr` wraps its Claude step in `deadline run` by default (#361 / #393; `--no-deadline` opts out; no
@@ -179,12 +179,11 @@ hand: two schedulers are safe (every record is under its own flock) but they dou
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
 3. The owner notice defaults to the native sourceless-send contract (2026-11-09, Wave 6; same gates as
-   `skills/session-finder/relay.py`): `paseo agent inspect` refuses pending permission/question cards and
+   the deleted `relay.py` shim): `paseo agent inspect` refuses pending permission/question cards and
    non-steerable running turns; then `paseo send OWNER --prompt-file PATH --behavior steer --no-wait --json`.
    Delivery is the JSON `.status` ∈ `{sent,completed}` only (`paseo send` exits 0 for every status). Other
-   outcomes stay pending and are retried. `DEADLINE_RELAY` still selects the transitional shim
-   (`relay.py OWNER --message-file -`) for tests until Wave 6 deletes it. `RELAY_SENDER_NAME` remains set for
-   the shim path when a launchd job has no Paseo id.
+   outcomes stay pending and are retried. `DEADLINE_RELAY` stays a test hook: it names a stand-in program run as
+   `PROGRAM OWNER --message-file -`. `RELAY_SENDER_NAME` remains set for a launchd job with no Paseo id.
 4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
    members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.
 5. `deadline run` keeps enforcing after its command's leader exits: while the process group has survivors it sends SIGKILL after the grace and runs the

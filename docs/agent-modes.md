@@ -70,7 +70,7 @@ trusted work remains separate, unbuilt work. See
 [docs/review-boundary.md](review-boundary.md).
 
 B5. The installed plugin applies to UI/CLI/MCP creates and resume/refresh/import
-opens. The transitional `acp-dispatch --perm all` and dialogue launchers pass
+opens. The dialogue launchers and `bin/ade-worker-run` pass
 source-backed native modes, then verify inspect before accepting the launch;
 unverified new agents receive a native stop request and a refused result.
 The first pointer may already have reached that new runtime; this is not a

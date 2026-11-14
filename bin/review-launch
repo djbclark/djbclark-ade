@@ -8,7 +8,7 @@
   review-launch --check [--mode review|read-only] [--allow-web] [--json]
 
 The permanent review boundary of the slim-down (PLAN E8, 2026-11-06; docs/review-boundary.md). AGENTS.md
-review rule 11's local review (`bin/review-pr`) and the dispatch shim's Claude restricted modes launch Claude
+review rule 11's local review (`bin/review-pr`) and any restricted Claude run launch Claude
 through this and nothing else: a bare `claude -p` inherits the operator's settings (bypassPermissions, Bash,
 MCP servers), so a PR's diff or AGENTS.md could prompt-inject a mandatory review into operator-level actions.
 

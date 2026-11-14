@@ -1,10 +1,9 @@
-"""Cost policy rejects expensive execution before a provider process starts."""
+"""OpenCode Go cost policy (bin/go_model_policy.py) and the router rows that consume it.
+
+The acp-run / acp-dispatch enforcement tests left with those shims (Wave 6 deletion, 2026-11-14)."""
 
 import importlib.util
-import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
@@ -53,67 +52,6 @@ def test_curated_go_default_routes_use_only_routine_models():
     go = next(s for s in data["service"] if s["name"] == "opencode-go")
     assert go["billing"] == "subscription"
     assert all(policy.classification(m.split()[0]) == "routine" for m in go["models"].values())
-
-
-@pytest.mark.parametrize("model,extra", [
-    ("opencode-go/kimi-k3", []),
-    ("opencode-go/kimi-k3", ["--go-advisory", "--perm", "read-only", "--timeout", "0"]),
-    ("opencode-go/kimi-k3", ["--go-advisory", "--perm", "read-only", "--timeout", "600", "--interactive"]),
-    ("opencode-go/new-model", ["--go-advisory", "--perm", "read-only", "--timeout", "600"]),
-    ("grok-4.7", []),
-])
-def test_direct_acp_refuses_before_handshake(tmp_path, model, extra):
-    result = subprocess.run([sys.executable, str(ROOT / "tools/acp-run/acp-run"),
-                             "opencode", "--model", model, "-p", "should never launch", *extra],
-                            capture_output=True, text=True, timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path)})
-    assert result.returncode == 2, result.stderr
-    assert "Go" in result.stderr or "provider/model" in result.stderr
-
-
-@pytest.mark.parametrize("extra", [
-    ["--kind", "code"],
-    ["--kind", "judgment", "--role", "advise", "--perm", "read-only", "--timeout", "0"],
-    ["--kind", "judgment", "--role", "advise", "--timeout", "600"],
-])
-def test_dispatch_cannot_bypass_cost_gate_with_route_override(tmp_path, extra):
-    state = tmp_path / "jobs"
-    result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
-                             "--model", "opencode-go/kimi-k3", "--name", "never-launch",
-                             "--task", "cost-policy-test", "-p", "do not run", "--dry-run",
-                             *extra], capture_output=True, text=True,
-                            timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path), "ACP_DISPATCH_STATE": str(state),
-                                 "ACP_OPERATOR_APPROVED": "route-override"})
-    assert result.returncode == 2, result.stderr
-    assert "Go" in result.stderr
-    assert not list(state.glob("**/jobs/*.json"))
-
-
-def test_bounded_advice_runs_best_effort_read_only(tmp_path):
-    # The acp-dispatch Paseo shim (slim-down E6) cannot restrict opencode's tools: under the operator's 2026-11-07 ruling
-    # a Go advisor with --perm read-only runs best effort (the provider's default mode, a brief note, `perm_note`).
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    (bindir / "paseo").symlink_to(ROOT / "tests" / "fakes" / "paseo")
-    # Dry-run validates existing placement too; provide a hermetic selected catalog row.
-    result = subprocess.run([sys.executable, str(ROOT / "bin/acp-dispatch"), "opencode",
-                             "--model", "opencode-go/kimi-k3", "--name", "safe-advice",
-                             "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run", "--json",
-                             "--workspace", "wks_cost_policy", "-C", str(ROOT),
-                             "--kind", "judgment", "--role", "advise",
-                             "--perm", "read-only", "--timeout", "600",
-                             "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
-                            timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path), "FAKE_PASEO_STATE": str(tmp_path / "st"),
-                                 "FAKE_PASEO_WORKSPACES": json.dumps([
-                                     {"id": "wks_cost_policy", "cwd": str(ROOT)}]),
-                                 "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
-    assert result.returncode == 0, result.stderr
-    rec = json.loads(result.stdout)
-    assert rec["go_advisory"] is True and "best effort for opencode" in rec["perm_note"]
-    assert rec["selected_workspace_id"] == "wks_cost_policy"
-    assert not (tmp_path / "jobs").exists()
 
 
 def test_routine_router_refuses_a_costly_config_regression():

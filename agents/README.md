@@ -37,8 +37,8 @@ HERDR_BIN_PATH`, and multiplexer and runtime variables such as `TERM`, `TMUX` an
 `KEY`/`SECRET`/`TOKEN` name exclusions kept on (`ignore_default_excludes = false`) and the `set` keys applied after
 them. There is no `include_only` allowlist: an arbitrary terminal environment reaches tools by decision. Outside Herdr
 no `HERDR_*` variable exists, so none appears; no value is written into the file. Prefer native `paseo run` for new
-agents; the Wave 6 shims `tools/acp-run` (via `bin/acp-dispatch`) and `skills/session-finder/relay.py` still drop the
-four owner ids / keep no owner id until deletion. `tests/test_codex_shell_env_policy.py` pins the policy, including a
+agents; the Wave 6 shims (`tools/acp-run`, `bin/acp-dispatch`, `skills/session-finder/relay.py`; deleted 2026-11-14) used to drop the
+four owner ids / keep no owner id. `tests/test_codex_shell_env_policy.py` pins the policy, including a
 read-back through the installed `codex app-server` (no model call).
 
 1. `ignore_default_excludes = false` is the one filter: it removes variables whose names contain `KEY`, `SECRET` or
@@ -56,8 +56,8 @@ read-back through the installed `codex app-server` (no model call).
    Table headers may have trailing TOML comments; their comments remain hidden in the diff.
     Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
    A running Codex keeps the policy it started with; only sessions started after the change see it.
-4. Detached fallback. Native `paseo run` and the transitional `acp-run` / relay deliverer already drop the four owner
-   ids. A headless command started any other way from a Codex tool (for example `codex exec` or a worker script outside
+4. Detached fallback. Native `paseo run` already drops the four owner
+   ids (the deleted `acp-run` / relay deliverer did too). A headless command started any other way from a Codex tool (for example `codex exec` or a worker script outside
    ACP) inherits the whole Codex environment (including the six Herdr names), so it must clear the owner ids itself:
    `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID COMMAND`. `HERDR_SOCKET_PATH` and
    `HERDR_BIN_PATH` are service routing, not identity, and may stay.

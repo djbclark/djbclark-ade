@@ -94,7 +94,7 @@ armed → run(argv) under deadline+bg → rc==0? → passed
    log=…; fix and end the turn"). No auto-steer storm: one message per
    attempt, idle-gated like orch §5a.
 3. **Exhausted:** `state=failed`, no further nudge; report / Stop path surfaces
-   `BLOCKED: verifyCmd exhausted after 3` (or the dispatch shim's exit 4
+   `BLOCKED: verifyCmd exhausted after 3` (or a launcher's exit 4
    shape once wired).
 4. **Missing command / refuse:** exit 2 from the runner (bad argv, workspace
    claim mismatch — shared/primary checkout, no active claim, expired claim,
@@ -108,7 +108,7 @@ armed → run(argv) under deadline+bg → rc==0? → passed
 | Surface | Trigger | MVP? |
 |---|---|---|
 | **Interactive** | Stop hook (`claude/hooks/goal_stop_nudge.py` sketch) and/or `skills/goal` that arms argv and, on Stop, calls the runner; if fail and attempts left, nudge instead of ending | Yes (Claude Stop first; other TUIs later) |
-| **Dispatched / jobs** | Opt-in on finish: after the report ends `DONE` (and before `.done` is authoritative for waiters), the harness runs verifyCmd; only then treat delivery as verified | Yes for the acp-dispatch / fan-out finish path once the shim or its Paseo replacement owns finish; "ade-jobs G1" from 284 stays a later consumer of the same runner |
+| **Dispatched / jobs** | Opt-in on finish: after the report ends `DONE` (and before `.done` is authoritative for waiters), the harness runs verifyCmd; only then treat delivery as verified | Yes for the fan-out finish path once `ade-worker-run` or its Paseo replacement owns finish; "ade-jobs G1" from 284 stays a later consumer of the same runner |
 
 Both share max 3, `deadline`+`bg`, and the state file. Interactive never arms
 on a fan-out worker slice that the orchestrator already verifies centrally
