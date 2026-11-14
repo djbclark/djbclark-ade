@@ -842,6 +842,7 @@ SEND_DENY = [
     'echo $(paseo send ab "`foo`")',
     'cat <(paseo send ab "`foo`")',
     'r="$(paseo send ab "the `foo` call")"',
+    'r=$(echo $(paseo send ab "`x`"))',                           # nested bodies: only the worklist reaches the inner send
     'x=`paseo send ab "$(date)"`',
     'echo "`paseo send ab "$(date)"`"',                          # a backtick body inside double quotes
     'paseo send ab "$(echo $(paseo send c "`z`"))"',
