@@ -4,6 +4,7 @@
   ade-tidy [--repo DIR] [--lead ID] [--json] [--reports-dir DIR ...] [--handled ID,...] [--work KIND=TEXT ...]
            [--apply]
   ade-tidy ack AGENT_ID [--lead ID]        record proven contact (the agent's `ack <lead id>` reached the lead)
+  ade-tidy prune [--apply] [--json] [--min-idle S]   machine-wide: archive finished Baton `[Handoff writer]` helpers (below)
 
 Observe-only by default: it prints the plan and changes nothing. `--apply` prints the plan first, then acts, with each
 precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
@@ -25,6 +26,14 @@ precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
      when empty (every unarchived agent record, no terminal), `isolation` is local, it is not MAIN and it is provably
      this lead's; occupancy is read last. Other empty windows are listed.
 
+`prune` (2026-11-14) is a separate, machine-wide mode (no repo, no lead): it archives only Baton helpers (title `[Handoff writer]` AND
+label `baton-writer=1`; parent in label `paseo.parent-agent-id`) that are idle for --min-idle seconds (default 300), have no pending
+permission, are not a lead/MAIN agent or the caller, and whose work is done: the parent is archived, closed or gone, or Baton's
+state (`plugin-data/baton/baton-state.json`) records the parent's handoff as done in a non-empty file written after the helper was
+created. Everything else is skipped with a reason code. Observe-only by default; `--apply` re-reads the machine, archives with
+`paseo agent archive ID` and appends one JSON line per attempt to ~/.local/state/ade/helper-prune.log (ADE_HELPER_PRUNE_LOG).
+Scheduled every 30 minutes by config/launchd/com.djbclark.ade-helper-prune.plist (docs/scheduling.md).
+
 Exit 0: ok (also when nothing to do); 1: refused or a paseo call failed; 2: usage.
 """
 from __future__ import annotations
@@ -41,7 +50,7 @@ import tempfile
 import stat
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
@@ -1061,6 +1070,230 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
     return results
 
 
+# ----------------------------------------------------------------------------------------------- helper prune
+
+# Machine-wide prune of finished Baton "[Handoff writer]" helpers (2026-11-14). Baton (djbclark/paseo-baton, server/controller.ts
+# spawnHandoffWriter) creates one writer agent per idle parent at its context threshold, titled `[Handoff writer]`, labelled
+# `baton-writer=1` and `paseo.parent-agent-id=<parent>`, in the parent's workspace; it keeps the writer idle so its prompt can be
+# read, and only Paseo's cascade (the parent's archive) or the next handoff of the same parent removes it. 83 of them filled swap.
+HELPER_TITLE = "[Handoff writer]"
+BATON_LABEL = "baton-writer"
+PARENT_LABEL = "paseo.parent-agent-id"
+PRUNE_MIN_IDLE = 300  # seconds an idle helper must have been quiet: Baton reads the writer's reply and usage after it goes idle
+ARCHIVE_TIMEOUT = 30
+
+
+def prune_log_path() -> Path:
+    return Path(os.environ.get("ADE_HELPER_PRUNE_LOG") or Path.home() / ".local/state/ade/helper-prune.log")
+
+
+def prune_lock_path() -> Path:
+    return prune_log_path().with_name("helper-prune.lock")
+
+
+def log_archive(entry: dict) -> None:
+    """One JSON line per archive attempt, appended with one O_APPEND write (a line under PIPE_BUF is never interleaved)."""
+    p = prune_log_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(entry, sort_keys=True) + "\n").encode()
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def iso_epoch(v) -> float | None:
+    """Epoch seconds of a UTC ISO string (`...Z`), None when absent or unparsable."""
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def baton_entries() -> dict | None:
+    """Baton's own state (`plugin-data/baton/baton-state.json`, keyed by the parent agent id); None when unreadable."""
+    try:
+        d = json.loads((paseo_home() / "plugin-data/baton/baton-state.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def handoff_unproven(parent: str, created: float | None, baton: dict | None) -> str | None:
+    """None when the parent's handoff is provably written by THIS helper's round, else why not: a Baton entry for the
+    parent with status done, an absolute `path` naming a non-empty regular file, and `savedAt` no earlier than the
+    helper's creation (an older round's file proves nothing about this helper)."""
+    e = baton.get(parent) if isinstance(baton, dict) else None
+    if not isinstance(e, dict):
+        return "no Baton entry for the parent" if baton is not None else "Baton state unreadable"
+    if e.get("status") != "done":
+        return f"Baton entry status {clean(e.get('status'), 20)}"
+    path, saved = e.get("path"), e.get("savedAt")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return "Baton entry has no absolute handoff path"
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "handoff file missing"
+    if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+        return "handoff file is empty or not a regular file"
+    if created is None or not isinstance(saved, (int, float)) or isinstance(saved, bool) or saved / 1000 < created - 1:
+        return "handoff predates this helper"
+    return None
+
+
+def prune_plan(min_idle: float, now: float) -> dict:
+    """Read the whole machine and decide, per helper, archive or skip with a reason code. Only Baton helpers are rows:
+    an agent is one only when its title starts `[Handoff writer]` AND it carries the label `baton-writer=1` (a title alone
+    or a label alone is skipped, reported, never archived)."""
+    live = live_agents()
+    permits = pending_permissions()
+    recs = {d["id"]: d for d in agent_state_files(refresh=True) if isinstance(d.get("id"), str)}
+    unreadable_records = any(d.get("_bad") for d in agent_state_files())
+    live_by_id = {a["id"]: a for a in live}
+    lead_ids = {d["labels"]["ade.lead"] for d in recs.values()
+                if isinstance(d.get("labels"), dict) and isinstance(d["labels"].get("ade.lead"), str) and d["labels"]["ade.lead"]}
+    baton = baton_entries()
+    me = os.environ.get("PASEO_AGENT_ID", "")
+    selected: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    if permits is None:
+        errors.append({"id": "", "what": "permission list unreadable: no helper is selected"})
+    helpers = 0
+    for a in live:
+        aid = a["id"]
+        title = str(a.get("name") or "").startswith(HELPER_TITLE)
+        rec = recs.get(aid)
+        labels = rec.get("labels") if isinstance(rec, dict) and isinstance(rec.get("labels"), dict) else {}
+        tagged = labels.get(BATON_LABEL) == "1"
+        if not title and not tagged:
+            continue  # not a helper: never touched, never listed
+        helpers += 1
+        parent = labels.get(PARENT_LABEL)
+        row = {"id": aid, "parent": parent if isinstance(parent, str) else None, "status": clean(a.get("status"), 20),
+               "workspace": (rec or {}).get("workspaceId")}
+
+        def skip(code: str, detail: str = ""):
+            skipped.append({**row, "reason": code, "detail": detail})
+
+        if not title:
+            skip("title-mismatch", clean(a.get("name") or "", 60))
+        elif not tagged:
+            skip("no-baton-label", "no state record" if rec is None else "title only, no baton-writer=1 label")
+        elif aid == me:
+            skip("self", "never a lifecycle verb on the caller's own id")
+        elif aid in lead_ids or re.match(r"(?i)(lead|main)\b", str(a.get("name") or "")):
+            skip("main-kind", "a lead or MAIN agent")
+        elif not (isinstance(parent, str) and UUID_RE.fullmatch(parent)):
+            skip("no-parent", "no valid paseo.parent-agent-id label")
+        elif a.get("status") != "idle":
+            skip("not-idle", clean(a.get("status"), 20))
+        elif permits is None:
+            skip("permits-unreadable")
+        elif aid in permits:
+            skip("permission-pending", permits[aid])
+        elif (act := iso_epoch(rec.get("lastActivityAt"))) is None:
+            skip("activity-unreadable")
+        elif now - act < min_idle:
+            skip("recently-active", f"{int(now - act)}s < {int(min_idle)}s")
+        else:
+            prec = recs.get(parent)
+            lp = live_by_id.get(parent)
+            if lp is not None and lp.get("status") == "closed":
+                done = "parent-closed"
+            elif prec is not None and prec.get("archivedAt"):
+                done = "parent-archived"
+            elif lp is None and prec is None and not unreadable_records and recs:
+                done = "parent-gone"
+            elif lp is None and prec is None:
+                skip("parent-unproven", "parent absent from the list and the records could not be fully read")
+                continue
+            else:
+                why = handoff_unproven(parent, iso_epoch(rec.get("createdAt")), baton)
+                if why is not None:
+                    skip("handoff-unproven", why)
+                    continue
+                done = "handoff-written"
+            selected.append({**row, "reason": done, "idle_s": int(now - act)})
+    return {"agents_seen": len(live), "helpers": helpers, "selected": selected, "skipped": skipped, "errors": errors}
+
+
+def prune(apply_: bool, min_idle: float = PRUNE_MIN_IDLE) -> dict:
+    """Observe (default) or act. Apply takes a lock, plans, then re-reads the whole machine right before archiving and
+    archives only a helper both plans selected. Each archive is `paseo agent archive ID` (argv list, rc checked, timeout)
+    and one log line."""
+    summary = {"mode": "apply" if apply_ else "observe", "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "min_idle_s": int(min_idle), "archived": [], "locked": False}
+    lock = None
+    try:
+        if apply_:
+            try:
+                lock = flock_timeout(prune_lock_path(), 5)
+            except Refused:
+                summary.update(locked=True, selected=[], skipped=[], errors=[], agents_seen=0, helpers=0)
+                summary["counts"] = {"agents_seen": 0, "helpers": 0, "selected": 0, "archived": 0, "skipped": 0, "errors": 0}
+                return summary
+        first = prune_plan(min_idle, time.time())
+        summary.update({k: first[k] for k in ("agents_seen", "helpers", "selected", "skipped", "errors")})
+        if apply_ and first["selected"]:
+            again = {r["id"] for r in prune_plan(min_idle, time.time())["selected"]}  # re-read right before acting
+            for row in first["selected"]:
+                if row["id"] not in again:
+                    summary["skipped"].append({**row, "reason": "changed-before-archive", "detail": "no longer selected on the re-read"})
+                    continue
+                entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "helper": row["id"], "parent": row["parent"],
+                         "reason": row["reason"]}
+                try:
+                    rc, out, err = paseo(["agent", "archive", row["id"]], timeout=ARCHIVE_TIMEOUT)
+                except Refused as e:
+                    rc, err = -1, str(e)
+                entry["rc"] = rc
+                if rc != 0:
+                    entry["error"] = clean(err, 160)
+                    summary["errors"].append({"id": row["id"], "what": f"archive failed (rc {rc}): {clean(err, 120)}"})
+                else:
+                    summary["archived"].append(row)
+                log_archive(entry)
+    finally:
+        if lock is not None:
+            lock.close()
+    summary["counts"] = {"agents_seen": summary["agents_seen"], "helpers": summary["helpers"], "selected": len(summary["selected"]),
+                         "archived": len(summary["archived"]), "skipped": len(summary["skipped"]), "errors": len(summary["errors"])}
+    return summary
+
+
+def render_prune(s: dict) -> str:
+    c = s["counts"]
+    out = [f"helper-prune ({s['mode']}, {s['at']}): {c['helpers']} helpers of {c['agents_seen']} agents; selected {c['selected']}, "
+           f"archived {c['archived']}, skipped {c['skipped']}, errors {c['errors']}" + (" (another prune holds the lock)" if s["locked"] else "")]
+    done = {r["id"] for r in s["archived"]}
+    for r in s["selected"]:
+        out.append(f" {'archived' if r['id'] in done else 'would archive'} {r['id'][:8]} parent {str(r['parent'])[:8]} {r['reason']}")
+    for r in s["skipped"]:
+        out.append(f" skip {r['id'][:8]} parent {str(r['parent'])[:8]} {r['reason']} {r.get('detail', '')}".rstrip())
+    out.extend(f" ERROR {e.get('id', '')[:8]} {e['what']}" for e in s["errors"])
+    return "\n".join(out)
+
+
+def main_prune(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ade-tidy prune", description="archive finished Baton [Handoff writer] helpers, machine-wide")
+    p.add_argument("--apply", action="store_true", help="archive (default: observe only)")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--min-idle", type=float, default=PRUNE_MIN_IDLE, help="seconds a helper must have been idle (default 300)")
+    o = p.parse_args(argv)
+    try:
+        s = prune(o.apply, o.min_idle)
+    except Refused as e:
+        sys.stderr.write(f"ade-tidy: {e}\n")
+        return 1
+    print(json.dumps(s, indent=1, sort_keys=True) if o.json else render_prune(s))
+    return 1 if s["errors"] else 0
+
+
 # ----------------------------------------------------------------------------------------------- main
 
 def resolve_lead(arg: str | None) -> str:
@@ -1074,6 +1307,8 @@ def resolve_lead(arg: str | None) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["prune"]:
+        return main_prune(argv[1:])
     if argv[:1] == ["ack"]:
         p = argparse.ArgumentParser(prog="ade-tidy ack")
         p.add_argument("agent")

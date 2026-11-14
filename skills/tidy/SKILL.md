@@ -98,6 +98,14 @@ operator's yes. `ade-tidy` therefore reports a misplaced tab (section F) and nam
 new agents correctly at launch (`bin/ade-worker-run`, operator-requested workers into MAIN) instead. The upstream
 feature request is drafted in [docs/upstream-issues.md](../../docs/upstream-issues.md).
 
+## Helper prune (2026-11-14)
+
+`bin/ade-tidy prune` is a second, machine-wide mode (no repo, no lead): it archives idle, finished Baton `[Handoff writer]` helpers
+(title and `baton-writer=1` label, parent provably archived/closed/gone or handoff provably written). Observe-only by default; `--apply`
+archives and logs one JSON line per archive to `~/.local/state/ade/helper-prune.log`. It runs every 30 minutes as the launchd job
+`com.djbclark.ade-helper-prune` once the operator installs it. Rules, reason codes and the install command:
+[docs/scheduling.md](../../docs/scheduling.md) "Helper prune". Never run it with `--apply` from a sub-agent.
+
 ## Do not
 
 1. Run `--apply` inside a worker or reviewer sub-agent (lifecycle actions are top-level only; `ade-tidy` refuses it for a labelled worker).

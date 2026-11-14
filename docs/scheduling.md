@@ -86,6 +86,42 @@ This command activates the dry-run job; it does not enable resumes. See
 | `--yes` | `reconcile`: execute ADE-scoped launchd/systemd/cron installs/removes and paseo create/delete; write the ownership ledger (default is dry-run) |
 | `--name NAME` | `reconcile`: limit to these logical job names (repeatable) |
 
+## Helper prune: `bin/ade-tidy prune` every 30 minutes (2026-11-14)
+
+Why: the Baton plugin ([djbclark/paseo-baton](https://github.com/djbclark/paseo-baton), `server/controller.ts` `spawnHandoffWriter`) starts one
+`[Handoff writer]` agent per parent at its context threshold, in the parent's workspace, and keeps it idle so its prompt can be
+read; only the parent's archive (Paseo's cascade) or the next handoff of the same parent removes it. On 2026-11-14 83 Claude sessions
+(57 that morning) filled swap (12.5 of 13.3 GB). What Baton records on a helper: title `[Handoff writer]`, labels `baton-writer=1`
+and `paseo.parent-agent-id=<parent id>` (`shared/baton.ts` 155-158), and, per parent, an entry in
+`~/.paseo/plugin-data/baton/baton-state.json` (`status: done`, `path` of the handoff file, `savedAt` epoch ms; `core.ts` `markDone`).
+
+`bin/ade-tidy prune [--apply] [--json] [--min-idle S]` (a machine-wide mode of `ade-tidy`: no repo, no lead; observe-only without
+`--apply`) selects a helper only when ALL hold: title starts `[Handoff writer]` AND label `baton-writer=1`; not a lead (an `ade.lead`
+value), not a `lead`/`main`-named agent, not the caller; status `idle` and quiet for `--min-idle` seconds (default 300); no pending
+permission (`paseo permit ls`); a valid parent id; and its work is done: the parent is **archived** (record `archivedAt`), **closed**
+(live status) or **gone** (no record anywhere), or Baton's state shows the parent's handoff `done` in a non-empty regular file saved
+no earlier than the helper's creation. Every other helper is skipped with a reason code (`title-mismatch`, `no-baton-label`, `self`,
+`main-kind`, `no-parent`, `not-idle`, `permission-pending`, `permits-unreadable`, `recently-active`, `activity-unreadable`,
+`parent-unproven`, `handoff-unproven`, `changed-before-archive`); a non-helper is never listed. `--apply` takes a lock
+(`~/.local/state/ade/helper-prune.lock`), re-reads the whole machine right before archiving and archives only helpers both reads selected,
+with `paseo agent archive FULL-ID` (argv list, 30 s timeout, rc checked; the full id is in the `paseo ls -g` listing it was just read from, so
+the title-fallback hazard of [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668) cannot pick another agent). One JSON line per
+attempt (`ts`, `helper`, `parent`, `reason`, `rc`, `error` on failure) is appended to `~/.local/state/ade/helper-prune.log`
+(`ADE_HELPER_PRUNE_LOG` overrides). A second run archives nothing new. Exit 0 ok, 1 a paseo call or an archive failed, 2 usage. A `closed`
+helper is skipped (`not-idle`): a daemon restart closes them and they hold no process.
+
+The job is `config/launchd/com.djbclark.ade-helper-prune.plist` (a deterministic script, no model prompt; summary to
+`~/.local/state/ade/helper-prune.out.log`; inventory row `ade-helper-prune`, class `optional`). It is not loaded by merging. After the
+merge, from the canonical checkout (`--ade` stays this checkout):
+
+```sh
+cd ~/src/djbclark-ade && bin/ade-sched install config/launchd/com.djbclark.ade-helper-prune.plist
+bin/ade-sched status com.djbclark.ade-helper-prune
+```
+
+Preview any time: `bin/ade-tidy prune` (observe-only) or `bin/ade-sched --dry-run install config/launchd/com.djbclark.ade-helper-prune.plist`.
+Remove: `bin/ade-sched uninstall com.djbclark.ade-helper-prune`.
+
 ## Inventory and drift (S4b, 2026-11-10)
 
 `config/install.toml` carries transitional `[install.jobs]` and `[install.retired_jobs]` (the setup-plan's
