@@ -593,12 +593,11 @@ class = "offered"
 chosen = true
 summary = "GitHub sidebar board: your issues, draft/open PRs and discussions; send a card to a new agent (gpambrozio/github-board)"
 source = "https://paseo.sh/plugins/gpambrozio/github-board"
-paseo_plugin = "github-board"
-install = "paseo plugin add gpambrozio/github-board (operator only; doctor/apply never install or enable)"
+install = "UNKNOWN"
 update = "UNKNOWN"
-probe = "paseo plugin ls --json (id=github-board → ok|disabled|missing)"
+probe = "UNKNOWN"
 platforms = ["mac", "linux"]
-notes = "2026-11-14: operator chose it; installed on the Mac at 0.11.0, running. Needs gh authenticated on the daemon host. Writes to GitHub: label edits and Update branch (merges base into a PR branch under the gh login, counted as an owner push)."
+notes = "2026-11-14: operator chose it; installed on the Mac by `paseo plugin add gpambrozio/github-board` (0.11.0, running). No paseo_plugin key, like the other offered plugin rows: with one, a chosen row makes ade-install apply/doctor fail wherever it is absent. Writes to GitHub with the gh login; see docs/install-catalog.md section G."
 
 [[component]]
 id = "paseo-plugin-skills"

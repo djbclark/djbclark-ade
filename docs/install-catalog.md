@@ -589,7 +589,11 @@ worktree (exit 1 / `blocked`) — run from the primary checkout, or use
 
 Offered `paseo-plugin-*` rows re-landed from stranded #354 (session-guard, baton, asks, questions-please, tell-agent, vitals, resources, skills, and siblings). **macOS host RAM:** `paseo-plugin-resources` chosen, not vitals (`docs/paseo-host-ram-plugins.md`). Install/probe argv stay UNKNOWN until Mac live `paseo plugin ls` (order 11). Doctor observes presence only.
 
-**`paseo-plugin-github-board`** (operator, 2026-11-14): chosen and installed on the Mac (`paseo plugin add gpambrozio/github-board`). It can edit labels and press **Update branch** on GitHub under the `gh` login, so an owner PR's head can be pushed by the operator's account (a merge of the base branch, never a rebase), which the merge gate counts as an owner push.
+**`paseo-plugin-github-board`** (operator, 2026-11-14): chosen and installed on the Mac (`paseo plugin add gpambrozio/github-board`, npm `@gpambrozio/paseo-github-board`, one author, tracks latest). Like the other offered plugin rows it has no `paseo_plugin` key, so doctor and apply do not observe it. What adopting it trusts:
+
+1. It writes to GitHub through `gh api graphql` with the operator's `gh` login: label edits, and **Update branch**, which merges the base branch into a PR head (never a rebase) with no expected-head check, so a push made minutes earlier is included and an adversary verdict naming the earlier head goes stale. The merge gate trusts an owner-authored PR whoever pushed its head (`docs/review-boundary.md`); on a non-owner PR the new head voids an owner APPROVE that named the old one. The board also lists PRs assigned to the operator, so the button can push onto someone else's PR under his login.
+2. Any client paired with the Paseo daemon can trigger those writes; plugin server code runs unsandboxed as the daemon user (`docs/threat-model.md`).
+3. To show comment images it fetches `github.com` / `*.githubusercontent.com` URLs taken from comment bodies anyone can write, sending `gh auth token` only to github.com hosts on each redirect hop.
 
 ## H. Next units
 
