@@ -934,7 +934,7 @@ chosen = false
 label = "com.djbclark.ade-helper-prune"
 plist = "config/launchd/com.djbclark.ade-helper-prune.plist"
 schedule = "StartInterval 1800"
-command = "bin/ade-tidy prune --apply --json"
+command = "bin/ade-tidy prune --apply --json-line"
 platforms = ["mac"]
 notes = "2026-11-14: archives idle, finished Baton [Handoff writer] helpers machine-wide (83 of them filled swap) and stops orphan provider processes of archived, closed agents; deterministic, no model prompt. Not chosen until the operator installs it (docs/scheduling.md). Log: ~/.local/state/ade/helper-prune.log."
 

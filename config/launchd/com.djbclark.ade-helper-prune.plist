@@ -13,7 +13,7 @@
     <string>__ADE__/bin/ade-tidy</string>
     <string>prune</string>
     <string>--apply</string>
-    <string>--json</string>
+    <string>--json-line</string>
   </array>
   <key>StartInterval</key><integer>1800</integer>
   <key>RunAtLoad</key><false/>

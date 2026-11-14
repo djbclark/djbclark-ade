@@ -95,7 +95,7 @@ class Env:
         self.data["ps"] = []
         for k, v in {"PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}", "FAKE_DATA": str(self.data_path),
                      "FAKE_CALLS": str(self.calls_path), "PASEO_HOME": str(self.home),
-                     "ADE_HELPER_PRUNE_LOG": str(self.log),
+                     "ADE_HELPER_PRUNE_LOG": str(self.log), "ADE_HELPER_PRUNE_PS": str(ps),
                      "ADE_HELPER_PRUNE_EXCLUDE": str(tmp_path / "state/helper-prune.exclude")}.items():
             monkeypatch.setenv(k, v)
         monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
@@ -119,6 +119,7 @@ class Env:
     def agent(self, aid, name, status="idle", labels=None, **kw):
         """A live agent (listed by `paseo ls -g`) plus its state record."""
         self.data["agents"].append({"id": aid, "name": name, "status": status, "cwd": "/x"})
+        self.data.setdefault("inspect", {})[aid] = {"Id": aid, "Archived": False, "Status": status, "PendingPermissions": []}
         self.record(aid, labels, **kw)
 
     def parent(self, n, status="idle", archived=False, live=True):
@@ -198,9 +199,9 @@ def test_json_shape_and_counts(env):
     env.agent(uid(50), "ordinary worker")
     s = env.go()
     assert set(s) == {"mode", "at", "min_idle_s", "agents_seen", "helpers", "selected", "skipped", "archived", "errors", "locked", "counts",
-                      "orphans", "orphan_skipped", "unmapped", "killed", "provider_live"}
+                      "orphans", "orphan_skipped", "unmapped", "killed", "provider_live", "deferred", "kill_plan"}
     assert s["counts"] == {"agents_seen": 4, "helpers": 2, "selected": 1, "archived": 0, "skipped": 1, "errors": 0,
-                           "orphans": 0, "orphan_skipped": 0, "unmapped": 0, "killed": 0}
+                           "orphans": 0, "orphan_skipped": 0, "unmapped": 0, "killed": 0, "deferred": 0}
     row = s["selected"][0]
     assert set(row) >= {"id", "parent", "status", "workspace", "reason", "idle_s"} and row["parent"] == p
     assert set(s["skipped"][0]) >= {"id", "parent", "status", "workspace", "reason", "detail"}
@@ -442,19 +443,24 @@ def provider_cmd(sid=SESS):
     return f"/Users/x/.local/bin/claude {FLAGS} --resume={sid}"
 
 
-def orphan_world(env, archived=True, last_status="closed", inspect=True):
-    """An agent record plus a provider process (and a graft child) for its session."""
-    aid = uid(70)
+def orphan_world(env, archived=True, last_status="closed", inspect=True, n=70, sess=SESS, prov=PROV, kid=KID, age=7200, active_ago=None):
+    """An agent record plus a provider process (and a graft child) for its session. Archived `age` seconds ago; its record's
+    last activity is `active_ago` (default: the same moment) seconds ago."""
+    aid = uid(n)
     p = env.home / "agents/proj" / f"{aid}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     rec = {"id": aid, "workspaceId": "wks_a", "labels": {}, "lastStatus": last_status,
-           "runtimeInfo": {"sessionId": SESS}, "persistence": {"sessionId": SESS, "nativeHandle": SESS}}
+           "runtimeInfo": {"sessionId": sess}, "persistence": {"sessionId": sess, "nativeHandle": sess},
+           "lastActivityAt": env.stamp(env.now - (age if active_ago is None else active_ago))}
     if archived:
-        rec["archivedAt"] = env.stamp(env.now - 600)
+        rec["archivedAt"] = env.stamp(env.now - age)
     p.write_text(json.dumps(rec))
-    env.data["inspect"] = {aid: {"Id": aid, "Archived": archived, "Status": last_status}} if inspect else {}
-    env.data["ps"] = [psl(1, 0, "/sbin/launchd", rss=100), psl(40000, 1, "/Applications/Paseo daemon", rss=500),
-                      psl(PROV, 40000, provider_cmd()), psl(KID, PROV, "node /Users/x/.local/bin/graft mcp", T0, 3904)]
+    inspects = env.data.setdefault("inspect", {})
+    if inspect:
+        inspects[aid] = {"Id": aid, "Archived": archived, "Status": last_status, "PendingPermissions": []}
+    if not env.data["ps"]:
+        env.data["ps"] = [psl(1, 0, "/sbin/launchd", rss=100), psl(40000, 1, "/Applications/Paseo daemon", rss=500)]
+    env.data["ps"] += [psl(prov, 40000, provider_cmd(sess)), psl(kid, prov, "node /Users/x/.local/bin/graft mcp", T0, 3904)]
     return aid
 
 
@@ -640,3 +646,165 @@ def test_exclusion_added_between_orphan_plan_and_kill_is_honoured(env, mod, kill
     monkeypatch.setattr(mod, "orphan_plan", late)
     s = mod.prune(True, 300)
     assert kills == [] and [o["reason"] for o in s["orphan_skipped"]] == ["changed-before-kill"]
+
+
+# ----------------------------------------------------------------------------------------------- round 3: kill budget, grace, re-checks
+
+def sess_n(n):
+    return f"0c7d97fa-06a1-4694-a660-eff3aa17{n:04d}"
+
+
+def three_orphans(env, **kw):
+    return [orphan_world(env, n=70 + i, sess=sess_n(i), prov=PROV + 10 * i, kid=KID + 10 * i, **kw) for i in range(3)]
+
+
+def test_grace_defers_a_recently_archived_orphan(env, mod, kills):
+    orphan_world(env, age=600)                                   # archived 10 minutes ago, default grace 30
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and s["orphans"] == [] and [(d["pid"], d["reason"]) for d in s["deferred"]] == [(PROV, "grace")]
+    assert s["kill_plan"]["deferred_grace"] == 1 and s["kill_plan"]["actionable"] == 0
+    assert [k[0] for k in (kills if mod.prune(True, 300, (), 10, 300) else [])] == [KID, PROV]   # a shorter grace admits it
+
+
+def test_quiet_gate_defers_an_orphan_with_recent_activity(env, mod, kills):
+    orphan_world(env, age=7200, active_ago=60)                   # archived 2 h ago but the record shows activity a minute ago
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and [(d["pid"], d["reason"]) for d in s["deferred"]] == [(PROV, "grace")]
+
+
+def test_unreadable_activity_time_fails_closed(env, mod, kills):
+    aid = orphan_world(env)
+    rp = env.home / "agents/proj" / f"{aid}.json"
+    rec = json.loads(rp.read_text())
+    rec["lastActivityAt"] = "yesterday-ish"
+    rp.write_text(json.dumps(rec))
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and [d["reason"] for d in s["deferred"]] == ["grace"]
+
+
+def test_kill_cap_defers_the_rest_and_the_next_run_picks_them_up(env, mod, kills):
+    three_orphans(env)
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300, (), 2, 1800)
+    assert [k[0] for k in kills] == [KID, PROV, KID + 10, PROV + 10]       # two providers, each child first
+    assert [(d["pid"], d["reason"]) for d in s["deferred"]] == [(PROV + 20, "kill-cap")]
+    assert s["kill_plan"] == {"found": 3, "actionable": 2, "deferred_grace": 0, "deferred_cap": 1, "max_kills": 2, "orphan_grace_s": 1800}
+    assert s["counts"]["killed"] == 4 and s["counts"]["deferred"] == 1     # providers and graft children are both counted as signalled
+    kills.clear()
+    env.data["ps"] = [x for x in env.data["ps"] if x.split()[0] not in map(str, (PROV, KID, PROV + 10, KID + 10))]   # they exited
+    env.data_path.write_text(json.dumps(env.data))
+    s2 = mod.prune(True, 300, (), 2, 1800)
+    assert [k[0] for k in kills] == [KID + 20, PROV + 20] and s2["deferred"] == []
+
+
+def test_max_kills_zero_reports_only_and_cli_flags_validate(env):
+    three_orphans(env)
+    s = env.go("--max-kills", "0")
+    assert s["orphans"] == [] and len(s["deferred"]) == 3 and s["kill_plan"]["max_kills"] == 0
+    assert env.run("--max-kills", "-1").returncode == 2 and env.run("--orphan-grace", "x").returncode == 2
+
+
+def test_kill_plan_is_in_the_observe_summary_and_the_json_line(env):
+    three_orphans(env)
+    s = env.go("--max-kills", "1")
+    assert s["kill_plan"]["actionable"] == 1 and s["kill_plan"]["deferred_cap"] == 2 and s["killed"] == []
+    r = env.run("--json-line")
+    (line,) = r.stdout.splitlines()
+    j = json.loads(line)
+    assert j["kill_plan"]["found"] == 3 and j["counts"]["orphans"] == 3 and "orphans" not in j and len(line) < 600
+
+
+def test_pre_kill_inspect_recheck(env, mod, kills, monkeypatch):
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    real, calls = mod.agent_archived_closed, []
+
+    def flaky(aid):
+        calls.append(aid)
+        return real(aid) and len(calls) < 3        # plan, re-read plan: true; the check right before the kill: the agent was un-archived
+
+    monkeypatch.setattr(mod, "agent_archived_closed", flaky)
+    s = mod.prune(True, 300)
+    assert len(calls) == 3 and kills == [] and [o["reason"] for o in s["orphan_skipped"]] == ["changed-before-kill"]
+
+
+def test_kill_time_replan_reads_fresh_agent_records(env, mod, kills, monkeypatch):
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    real, n = mod.orphan_plan, []
+
+    def twin_appears(*args, **kw):
+        n.append(1)
+        if len(n) == 2:   # between the first plan and the kill-time re-plan another record claims the same session
+            (env.home / "agents/proj" / f"{uid(71)}.json").write_text(json.dumps({"id": uid(71), "labels": {}, "runtimeInfo": {"sessionId": SESS}}))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(mod, "orphan_plan", twin_appears)
+    s = mod.prune(True, 300)
+    assert kills == [] and [o["reason"] for o in s["orphan_skipped"]] == ["changed-before-kill"]
+
+
+def flip_after_second_plan(mod, monkeypatch, env, change):
+    real, n = mod.prune_plan, []
+
+    def late(*args, **kw):
+        out = real(*args, **kw)
+        n.append(1)
+        if len(n) == 2:
+            change()
+            env.data_path.write_text(json.dumps(env.data))
+        return out
+
+    monkeypatch.setattr(mod, "prune_plan", late)
+
+
+@pytest.mark.parametrize("what", ["running", "permission", "archived"])
+def test_helper_is_rechecked_right_before_its_archive(env, mod, monkeypatch, what):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    env.data_path.write_text(json.dumps(env.data))
+
+    def change():
+        ins = env.data["inspect"][h]
+        if what == "running":
+            ins["Status"] = "running"
+        elif what == "permission":
+            ins["PendingPermissions"] = [{"id": "x"}]
+        else:
+            ins["Archived"] = True
+
+    flip_after_second_plan(mod, monkeypatch, env, change)
+    s = mod.prune(True, 300)
+    assert env.archives() == [] and [(r["id"], r["reason"]) for r in s["skipped"]] == [(h, "changed-before-archive")]
+
+
+def test_main_agent_with_a_baton_label_is_never_selected(env):
+    p = env.parent(1, archived=True)
+    env.agent(uid(80), "MAIN myrepo (Wave 7)", labels={"baton-writer": "1", "paseo.parent-agent-id": p})
+    s = env.go(apply=True)
+    assert reasons(s) == {uid(80): "title-mismatch"} and env.archives() == []
+
+
+def test_human_output_strips_control_characters(env):
+    p = env.parent(1, archived=True)
+    env.agent(uid(10), "[Handoff writer]", labels={"baton-writer": "1", "paseo.parent-agent-id": "\x1b[2J\x1b[Hevil"})
+    env.data_path.write_text(json.dumps(env.data))
+    r = subprocess.run([sys.executable, str(SCRIPT), "prune"], capture_output=True, text=True)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "no-parent" in r.stdout and "\x1b" not in r.stdout and "\x07" not in r.stdout
+
+
+def test_ps_is_called_by_absolute_path(env, monkeypatch):
+    monkeypatch.delenv("ADE_HELPER_PRUNE_PS")
+    loader = importlib.machinery.SourceFileLoader("ade_tidy_ps_default", str(SCRIPT))
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader("ade_tidy_ps_default", loader))
+    loader.exec_module(m)
+    assert m.PS_BIN == "/bin/ps"
+    seen = []
+    monkeypatch.setattr(m.subprocess, "run", lambda argv, **kw: seen.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
+    m.ps_rows()
+    m.ps_rows(123)
+    assert [a[0] for a in seen] == ["/bin/ps", "/bin/ps"]

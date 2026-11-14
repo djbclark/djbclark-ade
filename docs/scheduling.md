@@ -95,19 +95,19 @@ read; only the parent's archive (Paseo's cascade) or the next handoff of the sam
 and `paseo.parent-agent-id=<parent id>` (`shared/baton.ts` 155-158), and, per parent, an entry in
 `~/.paseo/plugin-data/baton/baton-state.json` (`status: done`, `path` of the handoff file, `savedAt` epoch ms; `core.ts` `markDone`).
 
-`bin/ade-tidy prune [--apply] [--json] [--min-idle S]` (a machine-wide mode of `ade-tidy`: no repo, no lead; observe-only without
+`bin/ade-tidy prune [--apply] [--json|--json-line] [--min-idle S] [--max-kills N] [--orphan-grace S]` (a machine-wide mode of `ade-tidy`: no repo, no lead; observe-only without
 `--apply`) selects a helper only when ALL hold: title starts `[Handoff writer]` AND label `baton-writer=1`; not a lead (an `ade.lead`
-value), not a `lead`/`main`-named agent, not the caller; status `idle` and quiet for `--min-idle` seconds (default 300); no pending
+value; a former lead that no longer leads is fine), not the caller; status `idle` and quiet for `--min-idle` seconds (default 300); no pending
 permission (`paseo permit ls`); a valid parent id; and its work is done: the parent is **archived** (record `archivedAt`), **closed**
 (live status) or **gone** (no record anywhere), or Baton's state shows the parent's handoff `done` in a non-empty regular file saved
 no earlier than the helper's creation. Every other helper is skipped with a reason code (`title-mismatch`, `no-baton-label`, `self`,
 `main-kind`, `no-parent`, `not-idle`, `permission-pending`, `permits-unreadable`, `recently-active`, `activity-unreadable`,
-`parent-unproven`, `handoff-unproven`, `changed-before-archive`); a non-helper is never listed. `--apply` takes a lock
+`parent-unproven`, `handoff-unproven`, `changed-before-archive`; the last also when `paseo agent inspect` no longer reads idle, unarchived and permission-free right before that archive); a non-helper is never listed. `--apply` takes a lock
 (`~/.local/state/ade/helper-prune.lock`), re-reads the whole machine right before archiving and archives only helpers both reads selected,
 with `paseo agent archive FULL-ID` (argv list, 30 s timeout, rc checked; the full id is in the `paseo ls -g` listing it was just read from, so
 the title-fallback hazard of [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668) cannot pick another agent). One JSON line per
 attempt (`ts`, `helper`, `parent`, `reason`, `rc`, `error` on failure) is appended to `~/.local/state/ade/helper-prune.log`
-(`ADE_HELPER_PRUNE_LOG` overrides). A second run archives nothing new. Exit 0 ok, 1 a paseo call or an archive failed, 2 usage. A `closed`
+(`ADE_HELPER_PRUNE_LOG` overrides; a `--json-line` run prints one compact summary line instead of the full object, which keeps the job's `out.log` small and unrotated). A second run archives nothing new. Exit 0 ok, 1 a paseo call or an archive failed, 2 usage. A `closed`
 helper is skipped (`not-idle`): a daemon restart closes them and they hold no process.
 
 **Exclude list (round 2, 2026-11-14).** `--exclude ID` (repeatable, full uuid) and `~/.local/state/ade/helper-prune.exclude`
@@ -126,10 +126,20 @@ the agent is excluded, is the caller, or the pid is in the caller's own process 
 below; a live agent's process is only counted (`provider_live`). Default and observe: report (`orphans[]` with pid, ppid, start time,
 rss_kb, agent, session, graft `children`, `other_children`). With `--apply`: the whole table is re-read, then per orphan the exclude
 list and inspect are re-checked, and SIGTERM goes by pid (`os.kill`, never `pkill`/`pgrep -f`) to its direct children whose argv is
-exactly `graft mcp` first, then to the provider. Before each signal `ps -o pid=,ppid=,lstart=,rss=,command= -p PID` is re-read and
+exactly `graft mcp` first, then to the provider. `ps` is always `/bin/ps` (`ADE_HELPER_PRUNE_PS` overrides for tests), never a PATH lookup. Before each signal `ps -o pid=,ppid=,lstart=,rss=,command= -p PID` is re-read and
 the pid, start time and (provider) session id, or (child) parent and `graft mcp` argv, must be unchanged (PID-reuse guard), else
 nothing is sent. Each attempt is a `kind: "process-kill"` line in `helper-prune.log` (`ts, pid, ppid, agent, session, rss_kb, role, rc`,
 `skipped` when the guard held it back); helper archives are `kind: "helper-archive"` lines.
+
+**Kill budget (round 3, 2026-11-14).** An orphan is *actionable* only when its agent was archived at least `--orphan-grace` seconds ago
+(default 1800) and its record shows no activity newer than that (an unreadable time fails closed: deferred). At most `--max-kills`
+provider processes (default 10, lowest pid first; each carries its direct `graft mcp` children, so a run signals at most 2 x that many
+pids; `--max-kills 0` signals none) are acted on per run; the rest are deferred and the 30-minute job picks them up. The summary
+lists them under `deferred[]` (`reason` `grace` or `kill-cap`) and carries `kill_plan` (`found`, `actionable`, `deferred_grace`,
+`deferred_cap`, `max_kills`, `orphan_grace_s`); `orphans[]` is the actionable set. Right before the kills the plan is rebuilt from freshly
+read agent records, and each agent is inspected once more (`changed-before-kill` when either read no longer agrees).
+Left as is on purpose: a sub-agent of an archived agent is only reached if it is itself archived and closed; `ExtraBar` children of a
+provider are not signalled (only `graft mcp`); no upstream issue is filed for the leak.
 
 The job is `config/launchd/com.djbclark.ade-helper-prune.plist` (a deterministic script, no model prompt; summary to
 `~/.local/state/ade/helper-prune.out.log`; inventory row `ade-helper-prune`, class `optional`). It is not loaded by merging. After the
