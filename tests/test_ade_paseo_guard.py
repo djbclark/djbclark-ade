@@ -588,6 +588,14 @@ def test_a_wrapper_that_starts_the_next_shim_in_the_background_ends_at_the_total
     assert "257 times in total" in p.stderr and sw.calls() == []
 
 
+@pytest.mark.parametrize("junk", ["08", "-5", "junk", ""])
+def test_a_junk_total_counts_from_zero_like_the_other_counters(sw, junk):
+    """716b1 r5 B3: kills dropping `to_count` on TOTAL (`-5` would stretch the cap, `08` would abort the sh arithmetic)."""
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": junk}, timeout=30)
+    want = "9" if junk == "08" else "1"  # `08` is eight
+    assert p.returncode == 0 and json.loads(sw.log.read_text().splitlines()[-1])["total"] == want
+
+
 def test_the_total_cap_is_exactly_256(sw):
     p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "255"}, timeout=30)
     assert p.returncode == 0 and json.loads(sw.log.read_text().splitlines()[-1])["total"] == "256"
