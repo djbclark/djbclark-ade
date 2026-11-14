@@ -398,6 +398,7 @@ test("Paseo's hook cancel (context.signal) aborts the run the same way", async (
   await p;
   assert.equal(seen.aborted, true);
   assert.deepEqual(d.state.calls, []);
+  assert.ok(lines.some((l) => l.includes('"outcome":"skip"') && l.includes("aborted")), "an aborted run logs a skip, not an error");
 });
 
 test("an abort that lands during the last re-read stops the write", async () => {
@@ -446,6 +447,22 @@ test("equality-as-default holds only while the first agent is young; later only 
   const young = fakeDaemon({ windowTitle: "Same text", agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo: young.paseo }, baseDeps({ now: () => Date.parse(T0) + 60_000 }));
   assert.deepEqual(young.state.titles, ["MAIN my-repo (Same text)"]);
+  const future = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: "2026-11-14T12:00:00.000Z" }); // 2 h ahead of now
+  const fu = fakeDaemon({ windowTitle: "Same text", agents: [future] });
+  await handleAgentEvent(hookAgent(future), { paseo: fu.paseo }, baseDeps());
+  assert.deepEqual(fu.state.titles, [], "a createdAt far in the future is a clock fault: not young");
+  const slight = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: "2026-11-14T10:00:30.000Z" }); // 25 s ahead: skew, still young
+  const sl = fakeDaemon({ windowTitle: "Same text", agents: [slight] });
+  await handleAgentEvent(hookAgent(slight), { paseo: sl.paseo }, baseDeps());
+  assert.deepEqual(sl.state.titles, ["MAIN my-repo (Same text)"]);
+  for (const [offsetMs, expectRename] of [[-60_000, true], [-60_001, false], [300_000, true], [300_001, false]]) {
+    // age = now - createdAt: -60 000 = createdAt a minute ahead (skew still young), 300 000 = exactly five minutes old
+    const created = Date.parse(T0);
+    const e = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: T0 });
+    const ed = fakeDaemon({ windowTitle: "Same text", agents: [e] });
+    await handleAgentEvent(hookAgent(e), { paseo: ed.paseo }, baseDeps({ now: () => created + offsetMs }));
+    assert.deepEqual(ed.state.titles, expectRename ? ["MAIN my-repo (Same text)"] : [], `age ${offsetMs} ms`);
+  }
   const nodate = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: undefined });
   const nd = fakeDaemon({ windowTitle: "Same text", agents: [nodate] });
   await handleAgentEvent(hookAgent(nodate), { paseo: nd.paseo }, baseDeps());
@@ -466,7 +483,7 @@ test("validName counts code points like Python's len(), not UTF-16 units", () =>
 
 test("an invalid name from the decision script is never written", async () => {
   assert.equal(validName("MAIN my-repo (Fix)"), true);
-  for (const bad of [undefined, null, 42, "", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
+  for (const bad of [undefined, null, 42, "", "MAIN r (a\tb)", "MAIN r (a\u202Eb)", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
     assert.equal(validName(bad), false, String(bad));
     const a = agentRec({ cwd: gitDir.repo });
     const d = fakeDaemon({ agents: [a] });

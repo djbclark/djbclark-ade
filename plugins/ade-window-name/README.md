@@ -21,7 +21,7 @@ are notifications (`waits: false`): a failure here can never block or delay an a
    name is derived from the branch or directory (`master`, `my-repo`). A window created with a first prompt (the app's new-workspace
    screen, a plain create) is pre-titled with the prompt's first line, which Paseo itself still treats as default (it replaces a title equal
    to that line with a generated one, `workspace-auto-name.ts`); so a title equal to the first agent's own title counts as default too, but only within five minutes of that agent's creation (a window and a
-   tab given the same text on purpose, `paseo workspace rename X` plus `paseo agent update --name X`, stays as it is; no `createdAt` counts as old).
+   tab given the same text on purpose, `paseo workspace rename X` plus `paseo agent update --name X`, stays as it is; no `createdAt`, or one more than a minute in the future, counts as old; the age is the agent's, so a window named on purpose long ago whose agents were all archived can be renamed when a new first agent carries the same title).
    A title already in the scheme (`<KIND> <repo> (<work>)`) is never re-wrapped, whatever the tab is called. Any other title (a human's, `ade-worker-run`'s, ours) is never touched. A launch with an explicit agent `--title` and a prompt keeps Paseo's prompt/generated window title (the two differ, so the window reads as named); name that one with `ade-tidy`. The title is read again right before the write, but Paseo has
    no compare-and-set: a name given in the few milliseconds after that read can still be overwritten.
 2. **First agent only.** The agent must be the earliest-created (ties by id) non-archived, non-background agent in the window; an agent
