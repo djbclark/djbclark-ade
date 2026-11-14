@@ -57,7 +57,8 @@ import sys
 import tempfile
 from typing import NamedTuple
 
-import ade_ws_names as wsn  # bin/ is sys.path[0] for a script run by path or through a symlink
+import ade_lead_succession as succ  # bin/ is sys.path[0] for a script run by path or through a symlink
+import ade_ws_names as wsn
 
 ROOT = Path(__file__).resolve().parents[1]
 FOOTER = ROOT / "docs/dispatch-footer.md"
@@ -136,16 +137,27 @@ def list_windows() -> list[dict]:
     return [r for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
 
 
-def lead_member_windows(lead: str) -> set[str]:
-    """Window ids that hold a live agent labelled ade.lead=<lead> (from its state file)."""
-    ids = [r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
+def lineage(lead: str) -> set[str]:
+    """`lead` plus the archived leads it replaced through completed self-handoffs (bin/ade_lead_succession.py). Their window
+    records and `ade.lead` labels are this lead's: an acknowledged handoff must not strand the predecessor's windows and
+    workers (2026-11-14). An inconsistent ledger (a cycle) resolves nothing: only `lead` itself."""
+    try:
+        return succ.lineage(lead)
+    except succ.SuccessionError:
+        return {lead}
+
+
+def lead_member_windows(leads: set[str]) -> set[str]:
+    """Window ids that hold a live agent labelled ade.lead=<one of leads> (from its state file)."""
+    ids = [r["id"] for lead in sorted(leads) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
            if isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("status") != "closed"]
     return {st["workspaceId"] for st in map(state_file, ids) if st and isinstance(st.get("workspaceId"), str)}
 
 
 def foreign_agents(wks: str, lead: str) -> list[str]:
     """Agents in window `wks` (closed ones too: a closed worker still says whose window it was) labelled
-    ade.lead=<another lead>."""
+    ade.lead=<another lead> (not this lead or one it replaced)."""
+    mine = lineage(lead)
     out = []
     for a in live_agents():
         st = state_file(a["id"])
@@ -153,13 +165,15 @@ def foreign_agents(wks: str, lead: str) -> list[str]:
             continue
         labels = st.get("labels")
         owner = labels.get("ade.lead") if isinstance(labels, dict) else None
-        if owner and owner != lead:
+        if owner and owner not in mine:
             out.append(f"{a['id']} (ade.lead={owner})")
     return out
 
 
 def unclaimed_agents(wks: str, lead: str) -> list[str]:
-    """Agents in window `wks` (any status) that are not labelled ade.lead=<lead>: the operator's or someone's hand launch."""
+    """Agents in window `wks` (any status) that are not labelled ade.lead=<lead or a lead it replaced>: the operator's or
+    someone's hand launch."""
+    mine = lineage(lead)
     out = []
     for a in live_agents():
         st = state_file(a["id"])
@@ -170,7 +184,7 @@ def unclaimed_agents(wks: str, lead: str) -> list[str]:
         if st.get("workspaceId") != wks:
             continue
         labels = st.get("labels")
-        if (labels.get("ade.lead") if isinstance(labels, dict) else None) != lead:
+        if (labels.get("ade.lead") if isinstance(labels, dict) else None) not in mine:
             out.append(f"{a['id']} ({a.get('status')})")
     return out
 
@@ -206,8 +220,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     included) labelled for another lead; a `middle` that matches nothing while the lead owns another window (a typo must not
     open a second one). A name match with no evidence either way is returned with owned=False: a launch may adopt it, an
     archive never does."""
-    members = lead_member_windows(lead) | read_registry(registry_path(lead))
-    others = other_leads_windows(lead)
+    mine = lineage(lead)
+    members = lead_member_windows(mine).union(*(read_registry(registry_path(x)) for x in mine))
+    others = other_leads_windows(mine)
     owned: list[dict] = []
     hits: list[tuple[dict, str | None, Refused | None]] = []
     for row in list_windows():
@@ -220,7 +235,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 owned.append(row)
             if by_name or (middle is None and by_member):
                 hits.append((row, None, None))
-        elif legacy and legacy.kind == "WORKERS" and legacy.lead == lead:
+        elif legacy and legacy.kind == "WORKERS" and legacy.lead in mine:
             owned.append(row)
             try:  # the new name is built for a hit only: an unbuildable legacy name must not block unrelated calls
                 new, err = legacy_target(row, legacy, repo, explicit), None
@@ -336,12 +351,12 @@ def register_window(lead: str, wks: str) -> None:
     write_registry(lead, read_registry(registry_path(lead)) | {wks})
 
 
-def other_leads_windows(lead: str) -> dict[str, str]:
-    """Window id -> the other lead that registered it."""
+def other_leads_windows(mine: set[str]) -> dict[str, str]:
+    """Window id -> the other lead that registered it (`mine`: the lead and the archived leads it replaced are not other)."""
     out: dict[str, str] = {}
     for path in state_dir().glob("*.windows.json"):
         owner = path.name[:-len(".windows.json")]
-        if owner != lead and LEAD_RE.fullmatch(owner):  # a stray file is not a lead's record
+        if owner not in mine and LEAD_RE.fullmatch(owner):  # a stray file is not a lead's record
             for wks in read_registry(path):
                 out.setdefault(wks, owner)
     return out
@@ -568,7 +583,7 @@ def live_agents() -> list[dict]:
 
 
 def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
-    labelled = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
+    labelled = {r["id"] for x in sorted(lineage(lead)) for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or [])
                 if isinstance(r, dict) and isinstance(r.get("id"), str)}
     in_main = {r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", "ade.placement=main"]) or [])
                if isinstance(r, dict) and isinstance(r.get("id"), str)} & labelled
@@ -617,7 +632,7 @@ def archive_locked(opts) -> int:
         raise Refused(f"window {win['workspaceId']} ({name!r}) has the right name but nothing shows it is lead {opts.lead}'s "
                       "(no window record, no live agent labelled for this lead): a name alone never confers ownership, "
                       "so it is not archived")
-    if not ((cur and cur.kind == "WORKERS") or (legacy and legacy.kind == "WORKERS" and legacy.lead == opts.lead)):
+    if not ((cur and cur.kind == "WORKERS") or (legacy and legacy.kind == "WORKERS" and legacy.lead in lineage(opts.lead))):
         raise Refused(f"window {win['workspaceId']} is not a WORKERS window ({name!r}); a MAIN or USER window is never archived here")
     blockers = archive_blockers(opts.lead, win["workspaceId"], opts.idle_handled)
     if blockers:
@@ -628,7 +643,10 @@ def archive_locked(opts) -> int:
         return 1
     if not opts.dry_run:
         run_ok(["workspace", "archive", win["workspaceId"]])
-        write_registry(opts.lead, read_registry(registry_path(opts.lead)) - {win["workspaceId"]})
+        for x in sorted(lineage(opts.lead)):  # the window may be recorded under a replaced lead (the global lock is held)
+            recorded = read_registry(registry_path(x))
+            if win["workspaceId"] in recorded:
+                write_registry(x, recorded - {win["workspaceId"]})
     print(json.dumps({"archived": not opts.dry_run, "workspaceId": win["workspaceId"], "windowName": name,
                       "blockers": []}))
     return 0

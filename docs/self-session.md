@@ -115,6 +115,29 @@ does not rearchive an already archived predecessor. Continue project writes only
 after verified retirement **and** reconciliation of the repository's exclusive
 workspace claim/ownership. This helper does not grant or rewrite claims.
 
+### C0. Lead ids pinned elsewhere follow the successor (2026-11-14)
+A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own
+`ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
+(read-only; no paseo call, no second ledger): a link counts only for a completed handoff of this daemon home, so an unfinished
+(`awaiting-ack`, `acknowledged`, `archive-unknown`), foreign-home, corrupt, symlinked or oversized record is no link and the
+chain stops there. A cycle or a chain over 64 hops is an error and resolves nothing. Consumers of an old lead id:
+
+1. `bin/ade-worker-run`: the successor's lineage (itself plus every archived predecessor) owns the predecessors' window
+   records (`<id>.windows.json`), their `ade.lead=<id>` labelled workers and their legacy window names; those are no longer
+   "another lead's". A different live lead is still refused. `archive-window` also clears the archived window from the
+   predecessors' records.
+2. `bin/ade-net-resume --lead <pinned id>` (the installed launchd job): follows the chain to the current lead, counts
+   descendants of any lead in the lineage, and when the chain ends at an archived or unknown lead logs
+   `skip-lead-retired`, prints one line and exits 0 (was exit 2 every minute). A Paseo outage is still exit 2.
+3. `bin/ade-auto-permit --lead <pinned id>`: the sweep covers the current lead's `ade.lead=` workers and the descendants of
+   every lead in the lineage.
+4. `bin/fable-wait fire`: an item filed by a lead that later handed off is sent to the current lead, never to the archived id.
+
+No re-install of a job and no hand edit of a registry is needed after a self-handoff. A job installed with a lead that was
+retired without a completed `finish` (or archived by hand) still needs `ade-sched` reinstalled with a live `--lead`.
+Not covered: `bin/ade-tidy` keeps comparing exact lead ids (a predecessor's windows read as another lead's, a refusal, never
+a mistaken archive) and workspace claims (`ade_claims.py --lead`) are informational and unchanged.
+
 ### C1. Agent-run fallback
 
 If the helper refuses **before any successor creation intent**, the predecessor

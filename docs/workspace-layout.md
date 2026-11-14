@@ -111,6 +111,11 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    `paseo run` of its own, `skills/handoff`) and, once it answers, archives its predecessor; it names its own window
    `MAIN <repo> (<work>)` and opens its own WORKERS window when it dispatches. Workers still carry `--label ade.lead=<lead id>` (#623), and an
    env-stripped launch still drops `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID`.
+   **Windows and workers survive the handoff (2026-11-14):** `ade-worker-run` treats an archived predecessor whose completed
+   `ade-self-session` chain ends at `--lead` as that lead: its window record, its `ade.lead=<predecessor>` workers and
+   its legacy-named windows are adoptable by the successor, with no hand step and no new window; a window registered to a
+   genuinely different live lead is still refused. The ledger is `handoff-<predecessor>.json`
+   ([self-session.md](self-session.md) C0).
 
 This supersedes the 2026-11-07 "temporary shared-tab arrangement" (workers as tabs in the lead's own window) for own-initiative
 workers only; operator-requested ones are tabs in the lead's MAIN window again (item 1 above).

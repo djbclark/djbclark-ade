@@ -537,3 +537,23 @@ def test_more_credential_shapes_are_redacted():
         assert module['tool_name']({'name': name}, 'claude') == '<redacted>', name
     for name in ['mcp__paseo__list_agents', 'Task-x', 'AIz', 'task_live_x']:
         assert module['tool_name']({'name': name}, 'claude') == name, name
+
+
+def test_a_handed_off_lead_keeps_its_workers_covered(tmp_path, monkeypatch):
+    """`--lead` pins the archived predecessor: the successor's labelled workers and the predecessor's descendants still pass."""
+    new, grandchild, worker = ("cccccccc-0000-4000-8000-00000000000c", "dddddddd-0000-4000-8000-00000000000d",
+                               "eeeeeeee-0000-4000-8000-00000000000e")
+    ledger, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    ledger.mkdir()
+    (ledger / f"handoff-{LEAD}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": LEAD, "successor": new, "home": str(home.resolve()), "status": "archived",
+         "ack": {"agent_id": new}}))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(ledger))
+    monkeypatch.setenv("PASEO_HOME", str(home))
+    result, calls = run_fake(tmp_path, {'requests': [req(grandchild, 'r1'), req(worker, 'r2'), req(OTHER, 'r3'), req(new, 'r4')],
+                                        'parents': {grandchild: LEAD, OTHER: None},
+                                        'labelled': {f'ade.lead={new}': [worker]}})
+    assert result.returncode == 0
+    allowed = [c[2] for c in calls if c[:2] == ['permit', 'allow']]
+    assert sorted(allowed) == sorted([grandchild, worker])  # the successor itself and a stranger stay excluded
+    assert ['ls', '-a', '-g', '--label', f'ade.lead={new}'] in calls and ['ls', '-a', '-g', '--label', f'ade.lead={LEAD}'] in calls

@@ -21,6 +21,9 @@ import sys
 import time
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ade_lead_succession as succ  # noqa: E402
+
 CLI_TIMEOUT = 15
 RESERVE_MARGIN = 1
 
@@ -147,7 +150,9 @@ def transient(provider, logs):
 class Scanner:
     def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30, quota=False,
                  only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None):
-        self.lead = agent_id(lead)
+        self.pinned = self.lead = agent_id(lead)  # --lead as installed; scan() follows it to the current lead
+        self.leads = frozenset({self.lead})  # the current lead and the archived leads it replaced
+        self.skipped = False
         self.state = state
         self.apply = apply
         self.max_error_age = max_error_age_minutes * 60
@@ -181,8 +186,31 @@ class Scanner:
             raise ScanError("invalid inspect response")
         return data
 
+    def resolve_lead(self):
+        """Follow `--lead` through completed self-handoffs (bin/ade_lead_succession.py) to the agent that holds the role now.
+        Returns its record, or None when that agent is archived or no longer exists: a lead retired without a successor must
+        end the scheduled job quietly, not crash-loop it (2026-11-14: exit 2 every minute until load-watch stopped it).
+        A Paseo outage still raises ScanError."""
+        try:
+            self.lead = succ.effective_lead(self.pinned)
+            self.leads = frozenset(succ.lineage(self.lead)) | {self.pinned}
+        except succ.SuccessionError:  # a cyclic ledger resolves nothing: the pinned id as given
+            self.lead, self.leads = self.pinned, frozenset({self.pinned})
+        try:
+            record = self.inspect(self.lead)
+        except (ScanError, ValueError):
+            listing = json.loads(self.cli("ls", "-a", "-g", "--json"))  # raises ScanError while Paseo is down
+            if not isinstance(listing, list) or any(isinstance(r, dict) and r.get("id") == self.lead for r in listing):
+                raise ScanError("lead is unreadable") from None
+            return None
+        if record.get("Archived") is True:
+            return None
+        if record.get("Archived") is not False:
+            raise ScanError("lead state unknown")
+        return record
+
     def descendant(self, aid):
-        seen = {self.lead}
+        seen = set(self.leads)
         while aid and aid not in seen:
             seen.add(aid)
             record = self.inspect(aid)
@@ -190,7 +218,7 @@ class Scanner:
             if "ParentAgentId" not in record:
                 return False
             parent = record.get("ParentAgentId")
-            if parent == self.lead:
+            if parent in self.leads:
                 return True
             aid = parent
         return False
@@ -579,9 +607,14 @@ class Scanner:
                        or not math.isfinite(e["time"]) for e in events):
                     raise ScanError("invalid event history")
                 history.seek(0, 2)
-                lead = self.inspect(self.lead)
-                if lead.get("Archived") is not False:
-                    raise ScanError("lead is archived or unknown")
+                if self.resolve_lead() is None:
+                    if not self.skipped:  # once per process: a --watch loop must not fill the ledger
+                        self.skipped = True
+                        self.event(history, None, "skip-lead-retired", pinned=self.pinned)
+                        print(f"ade-net-resume: lead {self.lead} (pinned {self.pinned}) is archived or unknown and no "
+                              "self-handoff replaced it; nothing to resume (reinstall the job with a live --lead)",
+                              file=sys.stderr)
+                    return 0
                 agents = json.loads(self.cli("ls", "-g", "--background", "--json"))
                 if not isinstance(agents, list):
                     raise ScanError("invalid agent listing")

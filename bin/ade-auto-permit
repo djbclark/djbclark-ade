@@ -12,8 +12,12 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ade_lead_succession as succ  # noqa: E402
 
 
 class ProbeError(Exception):
@@ -161,8 +165,19 @@ def log_event(log, decision, reason, agent=None, request=None, tool=None, rule=N
     log.flush()
 
 
+def lead_lineage(lead):
+    """The lead's current holder (`--lead` followed through completed self-handoffs) and every archived lead it replaced:
+    a handoff must not leave this job approving the dead lead's workers only (2026-11-14). A cyclic ledger resolves nothing."""
+    try:
+        current = succ.effective_lead(lead)
+        return current, {lead} | succ.lineage(current)
+    except succ.SuccessionError:
+        return lead, {lead}
+
+
 def descendant(agent, lead, cache):
-    if agent == lead:
+    leads = {lead} if isinstance(lead, str) else set(lead)  # one id, or the lineage of a handed-off lead
+    if agent in leads:
         return False
     seen = set()
     while agent not in seen:
@@ -177,13 +192,14 @@ def descendant(agent, lead, cache):
             return False
         if not identifier(parent):
             raise ProbeError("invalid parent id")
-        if parent == lead:
+        if parent in leads:
             return True
         agent = parent
     return False
 
 
 def sweep(lead, labels, log, all_local=False):
+    current, leads = lead_lineage(lead)
     requests = rows(call(["permit", "ls"]))
     eligible = {}
     # This host's daemon only (no --host): remote hosts' agents are never in this list. It also gives each
@@ -197,7 +213,8 @@ def sweep(lead, labels, log, all_local=False):
     # Installed CLI inspect/ls do not expose labels. Exact server-side filters prove them.
     # The lead's own `ade.lead=<lead>` label is always checked: a lead launches top-level
     # (env-stripped) workers that are not descendants, and they carry that label.
-    for reason, label in [("lead-label", f"ade.lead={lead}")] + [("ade-label", v) for v in labels]:
+    for reason, label in ([("lead-label", f"ade.lead={x}") for x in sorted(leads)]
+                          + [("ade-label", v) for v in labels]):
         for row in rows(call(["ls", "-a", "-g", "--label", label])):
             if not isinstance(row, dict) or not identifier(row.get("id")):
                 raise ProbeError("invalid labelled agent")
@@ -240,13 +257,13 @@ def sweep(lead, labels, log, all_local=False):
             log_event(log, "skip", "unclassified-provider", agent, request, **event)
             continue
         try:
-            if agent == lead:
+            if agent in leads:
                 reason = None
             elif agent in eligible:
                 reason = eligible[agent]
             else:
                 try:
-                    reason = "descendant" if descendant(agent, lead, cache) else None
+                    reason = "descendant" if descendant(agent, leads, cache) else None
                 except ProbeError:
                     if not all_local:
                         raise

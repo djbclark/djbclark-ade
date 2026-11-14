@@ -75,6 +75,7 @@ class Env:
         monkeypatch.setenv("FAKE_CALLS", str(self.calls_path))
         monkeypatch.setenv("PASEO_HOME", str(self.home))
         monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(tmp_path / "state"))
+        monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(tmp_path / "self-session"))
         monkeypatch.setenv("PASEO_AGENT_ID", LEAD)
         monkeypatch.setenv("PASEO_AGENT_CWD", "/ambient/cwd")
         monkeypatch.setenv("PASEO_WORKSPACE_ID", "wks_ambient")
@@ -925,3 +926,108 @@ def test_a_record_write_failure_after_launch_names_the_launched_agent(env, monke
     (d / f"{LEAD}.windows.json").mkdir()  # a directory where the record file belongs: reading it raises, not a clean refusal
     r = launch(env)
     assert r.returncode == 1 and "Traceback" not in r.stderr
+
+
+# --- lead succession (2026-11-14): windows and labelled workers of an archived predecessor are the successor's ---
+
+PRED1 = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+PRED2 = "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaa2"
+WORKER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def handoff(pred, nxt, status="archived"):
+    d = Path(os.environ["ADE_SELF_SESSION_STATE"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"handoff-{pred}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": pred, "successor": nxt, "status": status, "ack": {"agent_id": nxt},
+         "home": str(Path(os.environ["PASEO_HOME"]).resolve())}))
+
+
+def chain(*ids, status="archived"):
+    for pred, nxt in zip(ids, ids[1:]):
+        handoff(pred, nxt, status)
+
+
+def placed(env):
+    return [c["argv"] for c in env.calls() if c["argv"][0] == "run"]
+
+
+def test_window_registered_to_a_replaced_lead_is_adopted_by_the_successor(env):
+    """The 2026-11-14 failure: `window ... is registered to lead 8cd86203, not 994234ba` after two self-handoffs."""
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(PRED1, "wks_win1")
+    chain(PRED1, PRED2, LEAD)  # three steps: PRED1 -> PRED2 -> LEAD
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_win1" and f"ade.lead={LEAD}" in run
+    assert "--new-workspace" not in run
+
+
+def test_workers_labelled_for_a_replaced_lead_do_not_make_the_window_foreign(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    env.data["agents"] = [{"id": WORKER, "status": "idle", "labels": {"ade.lead": PRED2}}]
+    env.state(WORKER, "wks_win1", {"ade.lead": PRED2})  # no registry record at all: the label alone proves it
+    chain(PRED1, PRED2, LEAD)
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    assert placed(env)
+
+
+def test_without_a_completed_handoff_the_old_refusals_stand(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(PRED1, "wks_win1")
+    for status in ("awaiting-ack", "acknowledged", "archive-unknown"):  # a broken chain: the last hop never finished
+        chain(PRED1, PRED2, status=status)
+        handoff(PRED2, LEAD)
+        r = launch(env)
+        assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr, status
+    assert not placed(env)
+
+
+def test_a_different_live_lead_is_still_refused_even_beside_a_chain(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"},
+                              {"workspaceId": "wks_win2", "name": "WORKERS repo (Wave 9)", "cwd": "/repo"}]
+    chain(PRED1, LEAD)
+    own(OTHER_LEAD, "wks_win1")
+    own(PRED1, "wks_win2")
+    r = launch(env)  # Wave 7 is the stranger's
+    assert r.returncode == 1 and f"registered to lead {OTHER_LEAD}" in r.stderr
+    env.data["agents"] = [{"id": WORKER, "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
+    env.state(WORKER, "wks_win2", {"ade.lead": OTHER_LEAD})
+    r = env.run("--lead", LEAD, "--slice", "beta", "--window-middle", "Wave 9", "--cwd", "/repo", "--",
+                "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "another lead's agents" in r.stderr
+    assert not placed(env)
+
+
+def test_a_successors_registry_never_makes_a_predecessor_foreign_to_itself(env):
+    """The predecessor's lineage is itself only: a record under the successor is the predecessor's `other lead`."""
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_win1")
+    chain(PRED1, LEAD)
+    r = env.run("--lead", PRED1, "--on-behalf-of-lead", "--slice", "alpha", "--window-middle", "Wave 7", "--cwd", "/repo",
+                "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and f"registered to lead {LEAD}" in r.stderr
+
+
+def test_a_cyclic_ledger_adopts_nothing(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    own(PRED1, "wks_win1")
+    handoff(PRED1, LEAD)
+    handoff(LEAD, PRED1)
+    r = launch(env)
+    assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr
+
+
+def test_archive_window_covers_a_replaced_leads_window_and_clears_its_record(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    env.data["agents"] = [{"id": WORKER, "status": "idle", "labels": {"ade.lead": PRED1}}]
+    env.state(WORKER, "wks_win1", {"ade.lead": PRED1})
+    own(PRED1, "wks_win1")
+    chain(PRED1, LEAD)
+    assert archive(env).returncode == 1  # the predecessor's idle worker blocks, exactly as the lead's own would
+    r = archive(env, "--idle-handled")
+    assert r.returncode == 0, r.stderr
+    assert ["workspace", "archive"] in env.verbs()
+    assert registry(PRED1) == set()  # the stale id is gone from the replaced lead's record too
