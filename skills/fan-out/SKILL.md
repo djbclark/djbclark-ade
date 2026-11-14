@@ -141,7 +141,9 @@ Only a launch without `PASEO_AGENT_ID` may use `PASEO_WORKSPACE_ID` as its fallb
 Verify returned `cwd` and `workspaceId` against the assignment before treating a launch as correctly placed.
 
 For a review slice: Claude runs through `bin/review-launch` (the enforced review boundary; `--mode trusted`, YOLO, only for work the
-repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12); every other agent
+repository owner authored, which `bin/review-pr --runtime auto` decides, 2026-11-12). A direct trusted launch needs all of
+`--trusted-author <owner's GitHub login> --head <40-hex sha> --schema config/review-schema.json -C <clean worktree>`, else it
+refuses with exit 2; give each attempt a fresh `--evidence-dir`. Every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
 The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
