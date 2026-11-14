@@ -25,6 +25,11 @@ Every notice and ack carries a unique message ID (UUID) for deduplication.
 A requester of `main` or `team-lead` is the parent of a Claude Code Agent-tool sub-agent, not a Paseo agent:
 --send then sends nothing, says so, and exits 0 (the Agent tool already returns the final message).
 
+A `gh run list --commit <sha>` hint in the title or detail (the "CI running" line of docs/dispatch-footer.md rule 20)
+must carry the FULL commit SHA: gh matches only the full 40-character SHA, a short one prints [] with exit 0 and the
+requester's poll never finds the run (2026-11-14, tendcf). A short SHA there is expanded with `git rev-parse` in the
+current directory, or refused (exit 2) when it names no commit there; `gh run list --branch BRANCH` has no such trap.
+
 Exit codes:
   0: Success (printed, sourceless delivery, verified disk ack, or lead ack completed)
   5: Agent send accepted by Paseo (queued, delivery pending peer ack per order 10; not an error)
@@ -60,6 +65,37 @@ _DONE_LINE = re.compile(
 _ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?$")
 
 
+# `gh run list --commit SHA` (or `-c SHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the full SHA, so the
+# query prints [] and exits 0. 4-39 hex digits not followed by another word character; a full SHA never matches.
+_RUN_LIST_SHORT_SHA = re.compile(
+    r"""(?P<head>\bgh\s+run\s+list\b[^\n]*?(?:--commit(?:=|\s+)|(?<!\S)-c\s+)["']?)"""
+    r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z])"""
+)
+
+
+def _rev_parse(sha: str, cwd: str | None = None) -> str | None:
+    """The full commit SHA that `sha` names in `cwd` (the process directory by default), or None."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+                           capture_output=True, text=True, cwd=cwd, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    full = r.stdout.strip()
+    return full if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", full) else None
+
+
+def full_run_list_sha(text: str, *, cwd: str | None = None) -> str:
+    """Expand each short SHA of a `gh run list --commit SHA` hint in `text` to the full SHA, or raise ValueError."""
+    def expand(m: re.Match[str]) -> str:
+        full = _rev_parse(m.group("sha"), cwd)
+        if full is None:
+            raise ValueError(
+                f"`gh run list --commit {m.group('sha')}` finds nothing: gh matches only the full 40-character SHA "
+                "and this short one names no commit here; give the full SHA or use `gh run list --branch BRANCH`")
+        return m.group("head") + full
+    return _RUN_LIST_SHORT_SHA.sub(expand, text)
+
+
 def build_message(
     *,
     title: str,
@@ -67,10 +103,13 @@ def build_message(
     report: str | None,
     sender: str = "",
     msg_id: str | None = None,
+    git_cwd: str | None = None,
 ) -> str:
-    """Return the two-line completion message, or raise ValueError when the shape would be invalid."""
-    title = title.strip()
-    detail = detail.strip()
+    """Return the two-line completion message, or raise ValueError when the shape would be invalid.
+
+    A short SHA in a `gh run list --commit` hint of the title or detail is expanded (`git rev-parse` in `git_cwd`)."""
+    title = full_run_list_sha(title.strip(), cwd=git_cwd)
+    detail = full_run_list_sha(detail.strip(), cwd=git_cwd)
     sender = sender.strip()
     report_s = report.strip() if report else None
     if not title or "," in title or "\n" in title:
