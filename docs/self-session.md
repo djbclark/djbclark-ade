@@ -113,13 +113,22 @@ is never enough: peer messages wake a handed-off lead, and a single sample was s
 ran (2026-11-14 21:02Z: Paseo answered `AGENT_RUNNING`, `finish` failed with `archive-unknown`). The wait is
 read-only: it never forces, never archives a workspace and never sends the predecessor anything, and it holds the
 transaction lock, so a second `finish` on the same record answers "transaction busy". A progress line goes to
-stderr when the observed state changes. `--stable 0 --wait-timeout 0` is the old single-sample behaviour (refuse
-at once unless idle); `--stable` above `--wait-timeout` is refused.
+stderr when the observed state changes. `--stable 0 --wait-timeout 0` means no waiting: one sample, at most one
+archive attempt, then a `PREDECESSOR_NOT_IDLE` refusal (not today's silent single check: it also records
+`native_error`). Arguments must be finite, `--poll` at least 0.5 s, and `--stable` below `--wait-timeout` (or both 0);
+anything else is refused before any native call. A transient native failure during the wait (a daemon restart, an
+`inspect` timeout) ends it, with its own reason recorded; it is not retried.
+
+The wait can outlast a tool-call limit (Claude Code's Bash call defaults to 2 min, at most 10): start `finish` in the
+background or with a tool timeout of at least `--wait-timeout`. An interrupted `finish` is safe to re-run: the lock
+is released with the process and the record is always the last saved state.
 
 If `agent archive` answers the structured error code `AGENT_RUNNING` (the predecessor began a turn after the last
 sample; nothing was archived), `finish` returns to the stable-idle wait and retries inside the same bound; the
 refusal is kept as `native_error` meanwhile and moves to `resolved_native_error` on success. Classification is
-by the envelope `code`, never by message text. On timeout `finish` raises ("never stayed idle ... both sessions
+by the envelope `code`, never by message text, and an `AGENT_RUNNING` whose message names another agent (Paseo
+resolved the archive to a different one, the case below) is not retried; with `--stable 0` the retry still sleeps
+and still obeys the bound. On timeout `finish` raises ("never stayed idle ... both sessions
 preserved"), records `native_error.code = PREDECESSOR_NOT_IDLE`, exits non-zero and keeps the transaction status
 (`archive-unknown` once an archive was attempted, `acknowledged` when the predecessor never became idle); re-run
 `finish` when the predecessor is quiet. Successor, checkpoint and HEAD are checked at the start and again

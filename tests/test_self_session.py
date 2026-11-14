@@ -1027,7 +1027,7 @@ def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
 
 # --- finish waits for a stable idle predecessor (fw-01, 2026-11-14) ---------------------------------
 
-RUNNING = (1, '', envelope('AGENT_RUNNING', 'Agent 1111111 is running; wait for it to finish'))
+RUNNING = (1, '', envelope('AGENT_RUNNING', 'Agent 1111111 is currently running'))  # Paseo archive.ts wording, PRED's prefix
 
 
 def archive_calls(native):
@@ -1146,7 +1146,9 @@ def test_no_wait_flags_keep_the_old_single_sample_behaviour(setup):
     assert service.finish(path, stable=0, timeout=0)['status'] == 'archived' and native.clock.sleeps == []
 
 
-@pytest.mark.parametrize('kw', [{'stable': -1}, {'timeout': 10, 'stable': 11}, {'poll': 0}, {'timeout': float('nan')}])
+@pytest.mark.parametrize('kw', [{'stable': -1}, {'timeout': 10, 'stable': 11}, {'timeout': 10, 'stable': 10}, {'poll': 0},
+                                {'poll': 0.1}, {'timeout': float('nan')}, {'timeout': float('inf')},
+                                {'stable': float('inf'), 'timeout': float('inf')}, {'poll': float('inf')}])
 def test_nonsense_wait_arguments_are_refused_before_any_native_call(setup, kw):
     service, native, path = finished_up_to_archive(setup)
     before = len(native.calls)
@@ -1166,3 +1168,56 @@ def test_checkpoint_changed_during_the_wait_is_caught_before_archive(setup):
     with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
         service.finish(path)
     assert native.archived == 0
+
+
+def test_stable_zero_agent_running_retries_obey_the_bound(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 3
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*AGENT_RUNNING to 1 archive'):
+        service.finish(path, stable=0, timeout=0)
+    assert len(archive_calls(native)) == 1 and native.clock.sleeps == []
+    assert json.loads(path.read_text())['native_error']['code'] == 'PREDECESSOR_NOT_IDLE'
+
+
+def test_stable_zero_retries_sleep_between_attempts_and_stop_at_the_deadline(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 9
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=0, timeout=10, poll=5)
+    assert len(archive_calls(native)) == 3 and native.clock.sleeps == [5, 5] and native.clock.now == 10
+
+
+def test_agent_running_naming_another_agent_is_not_retried(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [(1, '', envelope('AGENT_RUNNING', 'Agent 3333333 is currently running'))]
+    with pytest.raises(ss.SessionError, match='different agent 3333333') as caught:
+        service.finish(path)
+    assert 'archive_agent' in str(caught.value) and len(archive_calls(native)) == 1
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'AGENT_RUNNING'
+
+
+def test_failure_after_an_agent_running_refusal_replaces_the_stale_reason(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    native.archive_queue = [RUNNING]
+    def tamper(now):
+        if now >= 50:
+            Path(record['checkpoint']).write_text('changed after the refusal\n')
+        return 'idle'
+    native.status_at = tamper
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'finish' and 'checkpoint or HEAD changed' in saved['native_error']['message']
+    assert len(archive_calls(native)) == 1
+
+
+def test_malformed_permission_count_is_not_idle_and_does_not_crash_the_progress_line(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['PendingPermissions'] = 3
+    saw = []
+    service.progress = saw.append
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=10, timeout=20)
+    assert any('unknown permission wait' in m for m in saw) and native.archived == 0

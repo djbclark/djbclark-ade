@@ -44,7 +44,7 @@ def main():
             q.add_argument('--ack-file', required=True, type=Path)
         if command == 'finish':
             q.add_argument('--stable', type=float, default=FINISH_STABLE, metavar='SECONDS', help='predecessor must stay idle (no permission waits) this long before archive (default %(default)g); 0 = one sample')
-            q.add_argument('--wait-timeout', type=float, default=FINISH_TIMEOUT, metavar='SECONDS', help='overall bound for the waits and AGENT_RUNNING retries (default %(default)g); with --stable 0, 0 = today\'s no-wait refusal')
+            q.add_argument('--wait-timeout', type=float, default=FINISH_TIMEOUT, metavar='SECONDS', help='overall bound for the waits and AGENT_RUNNING retries (default %(default)g); with --stable 0, 0 = no waiting: one sample, one archive attempt')
             q.add_argument('--poll', type=float, default=FINISH_POLL, metavar='SECONDS', help='seconds between samples (default %(default)g)')
     a = p.parse_args()
     service = Service(a.state_dir, a.paseo_home, progress=lambda message: print(message, file=sys.stderr, flush=True))

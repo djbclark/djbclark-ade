@@ -11,6 +11,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -54,6 +55,7 @@ class IdleTimeout(SessionError):
 FINISH_STABLE = 45.0    # seconds of consecutive idle samples with no permission wait
 FINISH_TIMEOUT = 1500.0  # overall bound, seconds, for the waits and archive retries together
 FINISH_POLL = 5.0       # seconds between samples
+MIN_POLL = 0.5          # a floor: each sample spawns `paseo agent inspect`
 AGENT_RUNNING = 'AGENT_RUNNING'  # Paseo's structured archive refusal for an agent mid-turn; nothing archived
 
 TAIL_LIMIT = 512
@@ -429,7 +431,8 @@ class Service:
                 f'checkpoint and scope yourself, then run {common} accept {record_arg} {ack_arg}. '
                 'If creation receipt is not yet saved, wait and retry accept only. '
                 f'After acknowledgement, run {common} finish {record_arg}: it waits (bounded; by default until the predecessor '
-                f'has stayed idle for 45 s, at most 25 min) while the predecessor finishes, so run it once and let it wait. '
+                f'has stayed idle for 45 s, at most 25 min) while the predecessor finishes, so run it once and let it wait: start it in the background or with a tool '
+                f'timeout of at least 25 min; an interrupted finish is safe to re-run. '
                 'Never force/archive a workspace. Continue project work only after finish confirms archived '
                 'and you have reconciled exclusive workspace ownership under the repository rules. '
                 'If any check fails, preserve both sessions and report it.'
@@ -531,17 +534,19 @@ class Service:
             else:
                 since = None
             if idle != last:
+                waits = row.get('PendingPermissions')
                 self.progress(f'predecessor {agent}: ' + (f'idle; waiting for {stable:g} s of stable idle' if idle else
-                              f'not idle (status {row.get("Status")}, {len(row.get("PendingPermissions") or [])} '
-                              'permission wait(s)); waiting'))
+                              f'not idle (status {bounded(row.get("Status"), 32)}, '
+                              f'{len(waits) if isinstance(waits, list) else "unknown"} permission wait(s)); waiting'))
                 last = idle
             if now >= deadline:
                 raise IdleTimeout('predecessor never stayed idle', row)
             self.sleep(min(poll, deadline - now))
 
     def finish(self, path, *, stable=FINISH_STABLE, timeout=FINISH_TIMEOUT, poll=FINISH_POLL):
-        if not (0 <= stable <= timeout and poll > 0):
-            raise SessionError('need 0 <= stable <= timeout and poll > 0 (seconds)')
+        if not (all(math.isfinite(x) for x in (stable, timeout, poll)) and 0 <= stable and poll >= MIN_POLL
+                and (stable < timeout or stable == timeout == 0)):
+            raise SessionError(f'need finite seconds with 0 <= stable < timeout (or both 0) and poll >= {MIN_POLL:g}')
         with self.transaction(self.load_record(path)) as (target, record):
             if not record or record.get('home') != str(self.home):
                 raise SessionError('transaction unavailable on this daemon home')
@@ -552,23 +557,38 @@ class Service:
             self.check_retirement(record)
             deadline = self.clock() + timeout
             refused_running = 0
+
+            def guarded(call, *args):
+                """A failure after an AGENT_RUNNING refusal replaces that now-stale `native_error` with its own reason."""
+                try:
+                    return call(*args)
+                except IdleTimeout:
+                    raise
+                except SessionError as error:
+                    if refused_running:
+                        record['native_error'] = native_error_record('finish', error)
+                        self.save(target, record)
+                    raise
+
+            def timed_out(seen):
+                message = (f'predecessor {record["predecessor"]} never stayed idle without permission waits for '
+                           f'{stable:g} s within {timeout:g} s (last status {bounded(seen, 32)}); nothing forced, sent or '
+                           'archived by the wait; both sessions preserved; re-run finish once it is idle')
+                if refused_running:
+                    message += f' (Paseo answered {AGENT_RUNNING} to {refused_running} archive attempt(s))'
+                record['native_error'] = {'op': 'agent inspect', 'code': 'PREDECESSOR_NOT_IDLE', 'rc': 0,
+                                          'stderr_tail': '', 'message': bounded(message, MESSAGE_LIMIT)}
+                self.save(target, record)
+                return SessionError(message)
+
             while True:
                 try:
-                    predecessor = self.wait_for_idle(record['predecessor'], deadline, stable, poll)
+                    predecessor = guarded(self.wait_for_idle, record['predecessor'], deadline, stable, poll)
                 except IdleTimeout as error:
-                    seen = error.last.get('Status')
-                    message = (f'predecessor {record["predecessor"]} never stayed idle without permission waits for '
-                               f'{stable:g} s within {timeout:g} s (last status {seen}); nothing forced, sent or '
-                               'archived by the wait; both sessions preserved; re-run finish once it is idle')
-                    if refused_running:
-                        message += f' (Paseo answered {AGENT_RUNNING} to {refused_running} archive attempt(s))'
-                    record['native_error'] = {'op': 'agent inspect', 'code': 'PREDECESSOR_NOT_IDLE', 'rc': 0,
-                                              'stderr_tail': '', 'message': bounded(message, MESSAGE_LIMIT)}
-                    self.save(target, record)
-                    raise SessionError(message) from None
+                    raise timed_out(error.last.get('Status')) from None
                 if predecessor.get('Archived') is True:
                     break
-                self.check_retirement(record)  # time passed since the check above
+                guarded(self.check_retirement, record)  # time passed since the check above
                 if not self.listed(record['predecessor']):
                     # paseo#9668: `agent archive ID` resolves client-side from this listing and, when ID is
                     # missing (its workspace deleted), falls back to a partial title match: a live worker.
@@ -587,14 +607,19 @@ class Service:
                 except SessionError as error:
                     record['native_error'] = native_error_record('agent archive', error)
                     self.save(target, record)
-                    if isinstance(error, NativeError) and error.info.get('code') == AGENT_RUNNING:
+                    other = self.archive_other_agent(error, record['predecessor'])  # also for AGENT_RUNNING: its message names the agent
+                    if (not other and isinstance(error, NativeError) and error.info.get('code') == AGENT_RUNNING):
                         # The predecessor started a turn after our last sample (peer messages wake it); Paseo
-                        # archived nothing. Wait for stable idle again, inside the same overall bound.
+                        # archived nothing. Wait for stable idle again, inside the same overall bound; the
+                        # sleep keeps time moving even with --stable 0.
                         refused_running += 1
                         self.progress(f'predecessor {record["predecessor"]}: archive answered {AGENT_RUNNING}; waiting again')
+                        now = self.clock()
+                        if now >= deadline:
+                            raise timed_out(predecessor.get('Status')) from None
+                        self.sleep(min(poll, deadline - now))
                         continue
                     # Every other error: no automatic retry, no --force, no workspace archive; the reason is kept.
-                    other = self.archive_other_agent(error, record['predecessor'])
                     if other:
                         raise SessionError(
                             f'Paseo resolved archive to a different agent {other}; preserve, archive by exact id '
