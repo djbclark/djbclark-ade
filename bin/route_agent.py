@@ -125,16 +125,16 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ade_gates  # noqa: E402  (the frontier gate: config/gates.toml [frontier], docs/gates.md)
-import ade_config  # noqa: E402  (versioned config and isolated legacy routing override)
-import model_tiers as _model_tiers  # noqa: E402  (config/model-tiers.toml roles → ids)
+import ade_config  # versioned config and isolated legacy routing override
+import ade_gates  # the frontier gate: config/gates.toml [frontier], docs/gates.md
+import model_tiers as _model_tiers  # config/model-tiers.toml roles → ids
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
@@ -247,9 +247,9 @@ class Service:
         for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
-        if (self.pool or self.pool_family or self.shares_pool) and not any_headroom:
-            if plenty_remaining((quota or {}).get(self.name)) is None:
-                return False
+        if ((self.pool or self.pool_family or self.shares_pool) and not any_headroom
+                and plenty_remaining((quota or {}).get(self.name)) is None):
+            return False
         if self.measured_only and not any_headroom:
             info = (quota or {}).get(self.name) or {}
             left, age = plenty_remaining(info), _clean_age(info.get("age_s"))
@@ -361,12 +361,12 @@ def load_policy(path: Path | str) -> dict[str, Any]:
     if services is None:
         raise ValueError(f"routing policy {path}: missing [[service]] entries")
     if not isinstance(services, list):
-        raise ValueError(f"routing policy {path}: 'service' must be an array of tables")
+        raise ValueError(f"routing policy {path}: 'service' must be an array of tables")  # noqa: TRY004  (ValueError is the loader's documented error)
 
     for i, entry in enumerate(services):
         label = entry.get("name") if isinstance(entry, dict) else i
         if not isinstance(entry, dict):
-            raise ValueError(f"routing policy {path}: [[service]] entry {i} is not a table")
+            raise ValueError(f"routing policy {path}: [[service]] entry {i} is not a table")  # noqa: TRY004  (ValueError is the loader's documented error)
         unknown = set(entry) - SERVICE_KEYS
         if unknown:
             raise ValueError(
@@ -689,9 +689,9 @@ def policy_markdown() -> str:
                   "", "| key | value |", "|---|---|"]
         lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_ALL_KEYS]
         lines.append(f"| lead.fable_lead | {'true' if LEAD_FABLE_ALLOWED else 'false'} |")
-        lines += ["", f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
-                      "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
-                      "back to the pipeline effort afterwards)."]
+        lines += ["", (f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
+                       "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
+                       "back to the pipeline effort afterwards).")]
     return "\n".join(lines) + "\n"
 
 
@@ -1016,14 +1016,13 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 sublimits[family or label] = rem_val
                 if w.get("resets_at"):
                     sub_resets.setdefault(key, {})[family or label] = w["resets_at"]
-            elif rem_val is not None:
-                if worst is None or rem_val < worst:
-                    worst = rem_val
-                    bind = {
-                        "pace_ratio": w.get("pace_ratio"),
-                        "resets_at": w.get("resets_at"),
-                        "window_minutes": w.get("window_minutes"),
-                    }
+            elif rem_val is not None and (worst is None or rem_val < worst):
+                worst = rem_val
+                bind = {
+                    "pace_ratio": w.get("pace_ratio"),
+                    "resets_at": w.get("resets_at"),
+                    "window_minutes": w.get("window_minutes"),
+                }
             per_key[key] = (worst, detail, sublimits, bind)
 
         if not per_key:
@@ -1083,7 +1082,7 @@ class QuotaSource:
     detail = ""
     fallback_reason = ""
     paseo = ""                 # "paseo usage ls --json" (or the canned path) when it was read, else why not
-    pools: dict[str, str] = {}  # service -> "aiuse" | "canned" | "snapshot" | "paseo" | "<aiuse source>+paseo"
+    pools: ClassVar[dict[str, str]] = {}  # service -> "aiuse" | "canned" | "snapshot" | "paseo" | "<aiuse source>+paseo"
 
 
 def _log(msg: str) -> None:
@@ -1098,9 +1097,7 @@ def _aiuse_wanted() -> bool:
     output, overrides all three; load_snapshot checks it first)."""
     if os.environ.get("ROUTE_AGENT_AIUSE", "").strip().lower() in ("off", "0", "no", "false"):
         return False
-    if os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT != DEFAULT_SNAPSHOT:
-        return False
-    return True
+    return not (os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT != DEFAULT_SNAPSHOT)
 
 
 AIUSE_MEMO_TTL = 30.0   # seconds a spawn result is reused (a blocking dispatch re-reads at finalize)
@@ -1429,7 +1426,7 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
                 continue
         report = row.get("report") if isinstance(row.get("report"), dict) else {}
         try:
-            fetched = datetime.fromisoformat(str(row.get("fetchedAt")).replace("Z", "+00:00"))
+            fetched = datetime.fromisoformat(str(row.get("fetchedAt")).replace("Z", "+00:00"))  # noqa: FURB162  (keeps the exact Z handling for malformed input)
             fetched = fetched if fetched.tzinfo else fetched.replace(tzinfo=UTC)
             age = _clean_age((now - fetched).total_seconds())
         except (ValueError, TypeError):
@@ -1707,7 +1704,7 @@ def hours_to_reset(resets_at: Any, *, now: datetime | None = None) -> float | No
     if not resets_at:
         return None
     try:
-        stamp = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+        stamp = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))  # noqa: FURB162  (keeps the exact Z handling for malformed input)
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=UTC)
         now = now or datetime.now(UTC)
@@ -2196,7 +2193,7 @@ def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
     url = git("remote", "get-url", "origin")
     if url:
         name = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-        name = name[:-4] if name.endswith(".git") else name
+        name = name.removesuffix(".git")
     if not name:
         common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
         if common:
@@ -2507,7 +2504,6 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
     to be written to config.yaml directly. The primary is the chain head; the
     remainder becomes fallback_providers.
     """
-    import re
     cfg = Path.home()/".hermes/config.yaml"
     text = cfg.read_text()
     backup = cfg.with_suffix(f".yaml.bak-generated-{datetime.now():%Y%m%d%H%M%S}")
@@ -2699,7 +2695,7 @@ def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
         return SUBSTRATE_EXIT_BAD_AGENT, "empty agent id"
     helper = Path(__file__).resolve().parent / "paseo-set-model"
     try:
-        proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True)
+        proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True, check=False)
     except OSError as e:
         return SUBSTRATE_EXIT_CANNOT_LIST, f"cannot run paseo-set-model: {e}"
     if proc.returncode != 0:
@@ -2723,12 +2719,12 @@ def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
     cur = match[0]
     if cur.get("provider") != primary["provider"]:
         return (SUBSTRATE_EXIT_CROSS_PROVIDER,
-                f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
-                f"start a NEW session on {primary['provider']}/{primary['model']} "
-                f"(set_agent_model cannot switch providers)")
+                (f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
+                 f"start a NEW session on {primary['provider']}/{primary['model']} "
+                 f"(set_agent_model cannot switch providers)"))
     try:
         proc = subprocess.run([str(helper), "set", str(cur["id"]), primary["model"]],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, check=False)
     except OSError as e:
         return SUBSTRATE_EXIT_CANNOT_LIST, f"cannot run paseo-set-model: {e}"
     return (proc.returncode,
@@ -2843,7 +2839,7 @@ def _record_when(rec: dict[str, Any]) -> datetime | None:
             except (ValueError, OSError, OverflowError):
                 continue
         try:
-            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))  # noqa: FURB162  (keeps the exact Z handling for malformed input)
             if stamp.tzinfo is None:
                 stamp = stamp.replace(tzinfo=UTC)
             return stamp
@@ -3066,8 +3062,8 @@ def format_calibrate_table(report: dict[str, Any]) -> str:
         + (f", since {report['since_days']}d" if report.get("since_days") else "")
         + ")",
         "",
-        f"{'service':18} {'model':28} {'kind':10} {'done':8} "
-        f"{'n':>4} {'nr':>3} {'q':>3} {'usage%':>7}",
+        (f"{'service':18} {'model':28} {'kind':10} {'done':8} "
+         f"{'n':>4} {'nr':>3} {'q':>3} {'usage%':>7}"),
     ]
     for g in report["groups"]:
         done = f"{g['done']}/{g['n']}"
@@ -3252,9 +3248,8 @@ def main(argv: list[str] | None = None) -> int:
         skip |= operator_disabled()
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
                     repo=(args.repo or repo_of(os.getcwd())))
-        if args.brief:
-            if len(args.brief) != len(kinds):
-                parser.error("--brief must be given once per kind, in --kinds order")
+        if args.brief and len(args.brief) != len(kinds):
+            parser.error("--brief must be given once per kind, in --kinds order")
         stale = (not quota) or age is None or age > STALE_SOFT
         if args.json:
             print(json.dumps({

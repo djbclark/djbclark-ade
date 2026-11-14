@@ -16,8 +16,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime, timedelta
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
@@ -864,7 +864,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         if claude is None:
             return None
         now = datetime.now(UTC)
-        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
         weekly = 20.0 if claude == "tight" else 70.0
         fetched = now - (timedelta(minutes=40) if claude == "stale" else timedelta(seconds=30))
         report: dict[str, Any] = ({"status": "unavailable", "problem": {"kind": "rejected", "status": 403}} if claude == "unknown"
@@ -1460,7 +1460,7 @@ class TestQualityBand(unittest.TestCase):
 
     # The live readings when `plan --kinds code` picked Gemini Flash (r40): every r11-r20 code
     # pool was under the 15% headroom floor, and Flash had 98% left.
-    CASE = {"antigravity": {"remaining": 97.8},
+    CASE: ClassVar[dict[str, Any]] = {"antigravity": {"remaining": 97.8},
             "opencode-go": {"remaining": 2.5}, "zai": {"remaining": 12.2},
             "cursor-auto": {"remaining": 0.0}, "cursor": {"remaining": 11.2},
             # claude was not a code pool then (code added 2026-10-18 by the operator); drained
@@ -1764,8 +1764,8 @@ class TestOmpCreditsTier(RestorableTransportPolicyCase):
 
     def test_late_month_unspent_credits_win_code_over_a_healthy_pool(self):
         soon = (datetime.now(UTC) + timedelta(days=3)).isoformat()
-        q = self.quota(**{"omp": {"remaining": 90.0, "resets_at": soon,
-                                  "window_minutes": None, "pace_ratio": None}})
+        q = self.quota(omp={"remaining": 90.0, "resets_at": soon,
+                            "window_minutes": None, "pace_ratio": None})
         q["claude"] = {"remaining": 60.0}
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "omp")
@@ -1877,7 +1877,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_missing_aiuse_falls_back_to_the_file_and_says_so(self):
         with mock.patch.object(r.shutil, "which", return_value=None):
-            quota, age, err = self.load({})
+            quota, _age, err = self.load({})
         self.assertEqual(quota["codex"]["remaining"], 60.0)
         self.assertEqual(r.QuotaSource.kind, "snapshot")
         self.assertIn("aiuse not on PATH", r.quota_source_info()["fallback_reason"])
@@ -1950,7 +1950,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         for name, rows in shapes.items():
             with self.subTest(name):
                 path = self.rows_payload(rows)
-                quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                quota, _, _err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
                 self.assertEqual(r.QuotaSource.kind, "snapshot")
                 self.assertRegex(r.quota_source_info()["fallback_reason"], "unparseable rows|invalid row")
                 self.assertEqual(quota["codex"]["remaining"], 60.0)
@@ -1964,7 +1964,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_invalid_utf8_falls_back(self):
         bad = self.tmp / "bad.json"
         bad.write_bytes(b'{"available": [], "x": "\xff\xfe"}')
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(bad)})
+        _quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(bad)})
         self.assertEqual(r.QuotaSource.kind, "snapshot")
         self.assertIn("malformed JSON", r.quota_source_info()["fallback_reason"])
         script = self.tmp / "aiuse"
@@ -2020,7 +2020,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_subprocess_with_valid_rows(self):
         body = r.json.dumps(self.payload([{"provider": "omp", "windows": [
             {"label": "c", "headroom_percent": 42.0, "state": "ok"}]}]))
-        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 0)})
+        quota, _age, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 0)})
         self.assertEqual(r.QuotaSource.kind, "aiuse")
         self.assertEqual(quota["omp"]["remaining"], 42.0)
         self.assertEqual(quota["codex"]["remaining"], 0.0)
@@ -2111,7 +2111,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     # -- the available-row contract: top-level fields, windows[] optional (Codex P1) ----------
 
-    FAILOVER_FIXTURE_ROWS = [   # tests/test_failover.py AIUSE, no windows[]; age added (see below)
+    FAILOVER_FIXTURE_ROWS: ClassVar[list[dict[str, Any]]] = [   # tests/test_failover.py AIUSE, no windows[]; age added (see below)
         {"provider": "opencode-go", "pool_family": None, "usable_now": True,
          "headroom_percent": 8.0},
         {"provider": "claude", "pool_family": "default", "usable_now": True,
@@ -2210,7 +2210,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         snap = Path.home() / ".cache/aiuse/snapshots/latest.json"
         if not exe or not snap.is_file():
             self.skipTest("no live aiuse on this host")
-        proc = _sp.run([exe, "--available", "--json"], capture_output=True, timeout=30)
+        proc = _sp.run([exe, "--available", "--json"], capture_output=True, timeout=30, check=False)
         if proc.returncode not in (0, 3):
             self.skipTest("aiuse --available failed")
         live = self.tmp / "live.json"
@@ -2320,7 +2320,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     # -- Codex P2s: the payload's `fresh` marker, and row validation ------------------------
 
-    GOOD_ROW = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
+    GOOD_ROW: ClassVar[dict[str, Any]] = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
 
     def test_fresh_false_reads_every_row_unknown_and_zeroes_nothing(self):
         path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=False, age_seconds=5))
@@ -2508,9 +2508,10 @@ class TestSubstrateChain(unittest.TestCase):
                                  disabled=disabled,
                                  lifeline=self.LIFELINE if lifeline is None else lifeline)
 
-    HEALTHY = [("OpenCode Go 5-hour", 98.0, "ok"),
-               ("OpenCode Go weekly", 96.0, "ok"),
-               ("OpenCode Go monthly", 55.0, "ok")]
+    HEALTHY: ClassVar[list[tuple[str, float, str]]] = [
+        ("OpenCode Go 5-hour", 98.0, "ok"),
+        ("OpenCode Go weekly", 96.0, "ok"),
+        ("OpenCode Go monthly", 55.0, "ok")]
 
     def test_healthy_opencode_go_is_primary_with_cline_fallback(self):
         chain = self._chain(self._opencode(self.HEALTHY))
@@ -2578,7 +2579,7 @@ class TestSubstrateChain(unittest.TestCase):
         self.assertEqual([e["pool"] for e in chain], ["clinepass"])
 
     # the lifeline is not collected by aiuse while disabled: absent from --available != exhausted
-    ABSENT = {"clinepass": {"remaining": 0.0, "absent_from_available": True}}
+    ABSENT: ClassVar[dict[str, Any]] = {"clinepass": {"remaining": 0.0, "absent_from_available": True}}
 
     def test_disabled_lifeline_absent_from_available_is_listed_unmeasured(self):
         chain = self._chain(self._opencode(self.HEALTHY), quota=self.ABSENT,
@@ -2646,7 +2647,7 @@ class TestSubstrateChain(unittest.TestCase):
 class TestSubstrateCommand(unittest.TestCase):
     """`route_agent.py substrate` end to end: output, exit codes, --apply."""
 
-    HEALTHY_ROWS = [{"provider": "opencode-go", "windows": [
+    HEALTHY_ROWS: ClassVar[list[dict[str, Any]]] = [{"provider": "opencode-go", "windows": [
         {"label": "OpenCode Go monthly", "remaining_percent": 55.0, "state": "ok"}]}]
 
     def _run(self, argv: list[str], *, disabled: set[str] | None = None,
@@ -2727,9 +2728,10 @@ class TestSubstrateCommand(unittest.TestCase):
 class TestApplySubstrate(unittest.TestCase):
     """`apply_substrate`: one agent, checked and set by the same id; failures carry exit codes."""
 
-    CHAIN = [{"role": "primary", "usable": True, "pool": "opencode-go",
-              "provider": "opencode", "model": "opencode-go/deepseek-v4.1-flash",
-              "remaining": 55.0, "monthly": 55.0}]
+    CHAIN: ClassVar[list[dict[str, Any]]] = [
+        {"role": "primary", "usable": True, "pool": "opencode-go",
+         "provider": "opencode", "model": "opencode-go/deepseek-v4.1-flash",
+         "remaining": 55.0, "monthly": 55.0}]
 
     @staticmethod
     def _helper(agents: Any, *, list_rc: int = 0, set_rc: int = 0, set_out: str = "ok"):
@@ -2873,7 +2875,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
         row = self.row("codex", windows=[])
         row["report"]["windows"] = 5
-        quota, _, info = self.load(aiuse, [row])
+        quota, _, _info = self.load(aiuse, [row])
         self.assertEqual(quota["codex"]["remaining"], 40.0)          # aiuse's reading stands
         self.assertIn("not read", quota["codex"]["paseo_unknown"])
 
@@ -2959,8 +2961,8 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(
             (c.service.name, c.dispatch),
             ("antigravity-argon",
-             "paseo run --provider antigravity/gemini-4-argon-high --mode full-access "
-             "--label ade.kind=frontier --no-wait"),
+             ("paseo run --provider antigravity/gemini-4-argon-high --mode full-access "
+              "--label ade.kind=frontier --no-wait")),
         )
         q.pop("antigravity-argon")
         self.assertIsNone(r.route("frontier", quota=q))          # a fallback with no reading fails closed
