@@ -225,10 +225,11 @@ def test_no_headroom_reason_goes_to_stderr_and_stdout_stays_empty(rig):
     assert proc.stderr == "no eligible service with headroom\n"
 
 
-def test_router_stderr_beats_its_stdout_reason(rig):
+def test_router_stdout_reason_leads_and_the_last_stderr_line_follows(rig):
+    """aiuse falling back to the snapshot file writes a note to stderr; it must not hide the no-headroom reason."""
     proc, _ = rig({"pr": {}}, mode="fail-both")
     assert proc.returncode == 4 and proc.stdout == ""
-    assert proc.stderr == "stderr reason\n"
+    assert proc.stderr == "stdout reason (router: stderr reason)\n"
 
 
 @pytest.mark.parametrize("mode", ["fail-noise", "fail-odd-reason"])
@@ -252,6 +253,14 @@ def test_template_dispatch_values_are_refused(rig, dispatch, field):
     assert proc.stdout == ""
     assert len(proc.stderr.splitlines()) == 1
     assert f"template {field}" in proc.stderr
+
+
+def test_cursor_cloud_launch_template_is_refused_not_turned_into_a_provider(rig):
+    """`cursor-cloud launch --repo <url> ...` has no --provider; its agent name is not a Paseo provider."""
+    dispatch = "cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief> --model composer-2"
+    proc, _ = rig({"pr": {}}, answer={"agent": "cursor-cloud", "dispatch": dispatch, "why": "w"})
+    assert proc.returncode == 1 and proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1 and "template dispatch" in proc.stderr
 
 
 def test_template_agent_fallback_is_refused(rig):

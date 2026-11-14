@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import shutil
 import subprocess
 import sys
@@ -60,6 +61,20 @@ def test_a_later_account_without_sublimits_does_not_drop_the_earlier_ones():
     assert pool["sublimit_resets"] == {"fable": "2026-11-18T00:00:00+00:00"}
 
 
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_a_known_reading_beats_an_unknown_one_in_either_order(order):
+    """Decision pinned (the same as `remaining` and `_merge_pool`): an account whose reading expired adds no number, and
+    does not blank the other account's windows or Fable cap either."""
+    known = {"provider": "claude", "age_seconds": 60,
+             "windows": [_window("weekly", 50), _fable(40, "2026-11-19T00:00:00+00:00")]}
+    unknown = {"provider": "claude", "age_seconds": 60, "reading_expired": True,
+               "windows": [_window("weekly", 90), _fable(10, "2026-11-18T00:00:00+00:00")]}
+    pool = r._providers_from_accounts([[known, unknown][i] for i in order], 60)["claude"]
+    assert pool["remaining"] == 50
+    assert pool["windows"]["weekly"] == 50
+    assert pool["sublimits"]["fable"] == 40
+
+
 def _standalone(tmp_path, *args):
     """bin/route_agent.py copied alone into an empty directory: no ade_config, ade_gates, model_tiers or config/."""
     lone = tmp_path / "lone"
@@ -82,7 +97,8 @@ def test_a_lone_copy_fails_with_one_line_not_a_traceback(tmp_path):
 
 
 def test_the_repo_copy_still_runs(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k not in ("ROUTING_POLICY", "AIUSE_SNAPSHOT")} | {"HOME": str(tmp_path)}
     proc = subprocess.run([sys.executable, str(ROOT / "bin" / "route_agent.py"), "--help"], capture_output=True, text=True,
-                          cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL)
+                          cwd=tmp_path, timeout=60, stdin=subprocess.DEVNULL, env=env)
     assert proc.returncode == 0, proc.stderr
     assert "route" in proc.stdout

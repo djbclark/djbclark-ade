@@ -47,8 +47,8 @@ and non-owner authors included) and `contextMode`/`profile` (pr-radar's field na
 (tests), else the sibling `route_agent.py` when the script's parent has `config/routing.toml` (an ADE checkout or
 worktree), else `~/src/djbclark-ade/bin/route_agent.py`, else the sibling (vendored copy). Only the named fields of the
 context are read; titles and comments are untrusted and never forwarded. On failure (bad stdin, timeout, router non-zero
-exit with its exit code and its stderr, else the `reason` of its JSON stdout (the no-headroom case), passed through; unparsable
-answer; template value) stdout stays empty and pr-radar falls back to its
+exit: its exit code, and as reason its JSON `reason` on stdout (the no-headroom case) with the last stderr line after it, else its
+stderr; unparsable answer; template dispatch or value, `cursor-cloud launch …` included) stdout stays empty and pr-radar falls back to its
 defaults. Tests: `tests/test_pr_radar_route.py` (stubbed router, no live quota).
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,

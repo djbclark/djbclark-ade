@@ -826,7 +826,8 @@ def _clean_age(value: Any) -> float | None:
 
 
 def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
-    """Per-key tighter of two sublimit maps (a cap never loosens by merge order)."""
+    """Per-key tighter of two sublimit/window maps (a cap never loosens by merge order). A known reading beats an unknown
+    (None) one, as `remaining` does when accounts are folded: an unmeasured account adds no headroom to the pool figure."""
     out = dict(a or {})
     for k, v in (b or {}).items():
         out[k] = _tighter(out.get(k), v) if k in out else v
