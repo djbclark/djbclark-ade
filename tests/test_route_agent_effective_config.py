@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -245,6 +246,10 @@ cli = "only-local"
 good_at = {}
 billing = "free"
 retired = true
+
+# the shipped tendcf `frontier_order` names services this overlay replaces; a dangling name fails the load (rt-01)
+[dispatch.repo_overrides.tendcf]
+frontier_order = ["only-local"]
 ''')
     pure = router.load_policy(root / "config/routing.toml")
     data, _ = router.load_effective_policy(root=root, home=home, environ={})
@@ -263,3 +268,27 @@ def test_unified_policy_keeps_optional_pipeline_effort_default(tree):
     path.write_text("".join(line for line in lines if not line.startswith("pipeline_effort =")))
     data, _ = router.load_effective_policy(root=root, home=home, environ={})
     assert data["lead"]["pipeline_effort"] == router.LEAD_PIPELINE_EFFORT_DEFAULT
+
+
+@pytest.mark.parametrize("text, match", [
+    ('[dispatch.repo_overrides.tendcf]\nfrontier_order = ["codexx", "claude"]', "names no known service: ['codexx']"),
+    ('[dispatch.repo_overrides.tendcf]\nfrontier_order = []', "non-empty array"),
+    ('[dispatch.repo_overrides.tendcf]\nfrontier_order = ["codex", "codex"]', "repeats a service"),
+])
+def test_a_bad_frontier_order_in_a_local_overlay_refuses_runtime(tree, text, match):
+    """rt-01 adversary M1: the runtime loader (not only `load_policy(path)`) checks a repo's `frontier_order`."""
+    root, home = tree
+    local_file(home, text)
+    with pytest.raises(ValueError, match=re.escape(match)):
+        router.load_effective_policy(root=root, home=home, environ={})
+    result = cli(tree, "policy")
+    assert result.returncode != 0
+    assert not result.stdout
+    assert match in result.stderr
+
+
+def test_a_good_frontier_order_in_a_local_overlay_applies_at_runtime(tree):
+    root, home = tree
+    local_file(home, '[dispatch.repo_overrides.nix2cf]\nfrontier_order = ["claude", "codex"]')
+    data, _ = router.load_effective_policy(root=root, home=home, environ={})
+    assert data["dispatch"]["repo_overrides"]["nix2cf"]["frontier_order"] == ["claude", "codex"]
