@@ -199,7 +199,9 @@ class Scanner:
             record = self.inspect(self.lead)
         except (ScanError, ValueError):
             listing = json.loads(self.cli("ls", "-a", "-g", "--json"))  # raises ScanError while Paseo is down
-            if not isinstance(listing, list) or any(isinstance(r, dict) and r.get("id") == self.lead for r in listing):
+            # positive evidence only: a listing whose rows lack a string `id` (a CLI schema change) proves nothing
+            if (not isinstance(listing, list) or any(not (isinstance(r, dict) and isinstance(r.get("id"), str)) for r in listing)
+                    or any(r["id"] == self.lead for r in listing)):
                 raise ScanError("lead is unreadable") from None
             return None
         if record.get("Archived") is True:

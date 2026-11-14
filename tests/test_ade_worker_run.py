@@ -1052,7 +1052,7 @@ def test_archive_blockers_name_the_matching_label_and_the_bound_is_documented_be
     env.state(far, "wks_other", {"ade.lead": ids[0]})  # 40 handoffs back, in another window: beyond the label bound
     r = archive(env)
     assert r.returncode == 1 and "Traceback" not in r.stderr and f"{near}: labelled ade.lead={ids[-2]}, status running" in r.stderr
-    assert far not in r.stderr  # documented bound (docs/self-session.md C0): not asked about, so not a blocker
+    assert far not in r.stderr  # documented bound (docs/self-session.md C0a): not asked about, so not a blocker
     env.state(far, "wks_win1", {"ade.lead": ids[0]})  # in the window itself it still blocks, whatever its label
     assert f"blocker: {far}: other live agent in the window" in archive(env).stderr
 

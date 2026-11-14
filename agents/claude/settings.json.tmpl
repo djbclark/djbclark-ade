@@ -321,6 +321,16 @@
         ]
       },
       {
+        "matcher": "Bash|mcp__.*send_agent_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/archived_send_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
         "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Bash",
         "hooks": [
           {

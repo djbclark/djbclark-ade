@@ -502,6 +502,16 @@ def relay_rc(owner: str, text: str) -> tuple[int, str]:
         return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
 
     # Native path: same gates as the Wave 6 relay shim (threat-model: sourceless send clears pending permissions).
+    try:  # ls-02: an owner replaced by a self-handoff is told through its successor (an archived one is refused below)
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import ade_send_guard  # noqa: PLC0415
+        decision = ade_send_guard.guard(owner, paseo=paseo_cmd()[0])
+    except Exception:  # noqa: BLE001 - the guard failing must not stop the notice; the inspect gate below still applies
+        decision = None
+    if decision is not None and decision.action == "refuse":  # a replaced owner with no live successor, or a cyclic ledger
+        return 2, f"not sent: {decision.reason}"
+    if decision is not None and decision.action == "redirect":
+        owner = decision.target
     rc, info, err = _paseo_json("agent", "inspect", owner, "--json", timeout=30)
     why = f"`paseo agent inspect` failed: {err}" if rc else _owner_send_refusal(info, owner)
     if why:

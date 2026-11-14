@@ -4,7 +4,8 @@ An acknowledged self-handoff replaces the lead: the predecessor is archived and 
 the old id (ade-worker-run's window records and `ade.lead` labels, a scheduled `ade-net-resume --lead ID`, ade-auto-permit,
 fable-wait) must follow the replacement without a hand step. The durable ledger already exists: `ade-self-session finish`
 leaves `handoff-<predecessor>.json` in its state directory with `status: archived` once the predecessor is confirmed
-archived, `successor` and the successor's own acknowledgement (`ack.agent_id`). This module only READS those records.
+archived, `successor` and `ack.agent_id` (the successor's acknowledgement, copied from the record: a consistency check only; the proof
+of a completed handoff is `status: archived`, which only `finish` sets after an archive readback). This module only READS those records.
 It never writes one and never calls paseo.
 
 A link `predecessor -> successor` counts only when the record is a completed handoff of that daemon home: kind `handoff`,
@@ -50,7 +51,9 @@ def _read_record(path: Path) -> dict | None:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            st = os.fstat(fd)
+            # B1 (lead review of #669): only our own, not group/world-writable files count (planted records widen scopes)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
                 return None
             raw = os.read(fd, MAX_RECORD_BYTES + 1)
         finally:
@@ -69,8 +72,11 @@ def _link(record: dict | None, predecessor: str, home: Path) -> str | None:
         return None
     successor = record.get("successor")
     ack = record.get("ack")
+    raw_home = record.get("home")
+    if not isinstance(raw_home, str) or not os.path.isabs(raw_home):  # ade-self-session writes an absolute resolved path
+        return None
     try:
-        same_home = Path(str(record.get("home"))).resolve() == home.resolve()
+        same_home = Path(raw_home).resolve() == home.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
     if (record.get("kind") != "handoff" or record.get("predecessor") != predecessor or not same_home

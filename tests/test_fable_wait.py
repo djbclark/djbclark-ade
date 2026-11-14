@@ -38,6 +38,12 @@ FAKE_PASEO = textwrap.dedent('''\
         if os.path.exists(d + "/usage_fail"):
             sys.exit(1)
         print(open(d + "/usage.json").read())
+    elif sys.argv[1:3] == ["agent", "inspect"]:  # the archived-send guard (ls-02): a file per agent makes it known
+        path = d + "/inspect_" + sys.argv[3] + ".json"
+        if not os.path.exists(path):
+            print("Agent not found: " + sys.argv[3], file=sys.stderr)
+            sys.exit(1)
+        print(open(path).read())
     elif sys.argv[1] == "send":
         lead = sys.argv[sys.argv.index("--") + 1]
         if os.path.exists(d + "/send_fail_" + lead):
@@ -422,7 +428,8 @@ def test_fire_spends_no_model_quota_and_starts_no_agent(fw):
     wake = arm(fw)
     due = datetime.fromisoformat(wake["fire_at"]).timestamp()
     fw.run("fire", now=due)
-    verbs = {x[0] for x in fw.calls("paseo")}
+    calls = fw.calls("paseo")
+    verbs = {x[0] for x in calls if x[:2] != ["agent", "inspect"]}                 # `agent inspect` is the archived-send guard (ls-02)
     assert verbs <= {"usage", "send"} and "run" not in verbs                       # it only tells leads; it launches nothing
 
 
@@ -589,3 +596,36 @@ def test_fire_delivers_to_the_successor_of_a_handed_off_lead(fw, tmp_path):
     by_lead = {s[s.index("--") + 1]: s[-1] for s in sends}
     assert set(by_lead) == {newer, LEAD2}  # nothing is sent to the archived ids
     assert a in by_lead[newer] and b in by_lead[newer] and c in by_lead[LEAD2]
+
+
+def test_fire_refuses_a_lead_that_is_archived_and_sends_to_the_live_one(fw):
+    """ls-02: a send would un-archive the archived lead; its items stay open and the live lead still gets its own."""
+    a = fw.add("alpha", LEAD)
+    b = fw.add("beta", LEAD2)
+    (fw.dir / f"inspect_{LEAD}.json").write_text(json.dumps({"Id": LEAD, "Archived": True}))
+    (fw.dir / f"inspect_{LEAD2}.json").write_text(json.dumps({"Id": LEAD2, "Archived": False}))
+    due = datetime.fromisoformat(arm(fw)["fire_at"]).timestamp()
+    r = fw.run("fire", now=due)
+    targets = [x[x.index("--") + 1] for x in fw.calls("paseo") if x[0] == "send"]
+    assert targets == [LEAD2], r.stderr
+    report = json.loads(r.stdout.splitlines()[-1])
+    assert report["leads"][LEAD]["status"] == "refused" and "archived" in report["leads"][LEAD]["error"]
+
+
+def test_fire_sends_a_prefix_filed_lead_to_its_successor(fw, tmp_path):
+    """A lead filed by an id prefix is resolved by the guard (inspect), found replaced, and the wake goes to the successor."""
+    new = "cccccccc-0000-4000-8000-00000000000c"
+    ledger = tmp_path / "self-session"
+    ledger.mkdir()
+    home = tmp_path / "paseo-home"
+    (ledger / f"handoff-{LEAD}.json").write_text(json.dumps(
+        {"kind": "handoff", "predecessor": LEAD, "successor": new, "home": str(home.resolve()), "status": "archived",
+         "ack": {"agent_id": new}}))
+    fw.env.update(ADE_SELF_SESSION_STATE=str(ledger), PASEO_HOME=str(home))
+    prefix = LEAD[:8]
+    fw.add("alpha", prefix)
+    (fw.dir / f"inspect_{prefix}.json").write_text(json.dumps({"Id": LEAD, "Archived": True}))
+    (fw.dir / f"inspect_{new}.json").write_text(json.dumps({"Id": new, "Archived": False}))
+    due = datetime.fromisoformat(arm(fw)["fire_at"]).timestamp()
+    r = fw.run("fire", now=due)
+    assert [x[x.index("--") + 1] for x in fw.calls("paseo") if x[0] == "send"] == [new], r.stderr

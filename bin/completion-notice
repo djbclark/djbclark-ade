@@ -30,6 +30,7 @@ Exit codes:
   5: Agent send accepted by Paseo (queued, delivery pending peer ack per order 10; not an error)
   1: Send failed, unreadable response, ack check timed out / unverified, or agent inspect failed
   2: Invalid arguments or message shape failure
+  4: BLOCKED: the target is archived and no handoff replaced it (bin/ade_send_guard.py, ls-02); nothing was sent
 """
 from __future__ import annotations
 
@@ -235,10 +236,14 @@ def lead_ack(
     is_idle = wait_for_idle(worker, timeout=timeout, paseo=paseo)
     if is_idle:
         ack_msg = f"ack {worker} {msg_id}"
-        argv = send_argv(worker, ack_msg, paseo=paseo)
-        rc, out, err = run_send(argv)
-        if rc == 0:
-            routes.append("prompt")
+        target, blocked = guard_target(worker, paseo)  # ls-02: an ack must not un-archive a worker that ade-tidy archived
+        if blocked:
+            sys.stderr.write(f"completion-notice: BLOCKED: no prompt ack: {blocked}\n")
+        else:
+            argv = send_argv(target, ack_msg, paseo=paseo)
+            rc, out, err = run_send(argv)
+            if rc == 0:
+                routes.append("prompt")
 
     result: dict[str, Any] = {
         "status": "acked" if routes else "failed",
@@ -272,6 +277,21 @@ def send_status(stdout: str) -> str:
         d = d["data"]
     st = d.get("status") if isinstance(d, dict) else None
     return st if isinstance(st, str) and st else "unknown"
+
+
+def guard_target(requester: str, paseo: str) -> tuple[str, str | None]:
+    """(target to send to, refusal reason or None): bin/ade_send_guard.py, failing open when it cannot be loaded."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ade_send_guard  # noqa: PLC0415 - lazy: this script is copied alone in tests
+        d = ade_send_guard.guard(requester, paseo=paseo)
+    except Exception:  # noqa: BLE001 - never block a completion notice on the guard's own failure
+        return requester, None
+    if d.action == ade_send_guard.REFUSE:
+        return requester, d.reason
+    if d.action == ade_send_guard.REDIRECT:
+        print(f"completion-notice: {d.reason}", file=sys.stderr)
+    return d.target, None
 
 
 def run_send(argv: Sequence[str]) -> tuple[int, str, str]:
@@ -385,7 +405,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parsed = parse_message(message)
     msg_id = parsed.get("msg_id")
 
-    argv_send = send_argv(args.requester.strip(), message, paseo=args.paseo)
+    requester = args.requester.strip()
+    if not args.do_print:  # ls-02: a lead replaced by a self-handoff gets its successor; an archived one gets nothing
+        requester, blocked = guard_target(requester, args.paseo)
+        if blocked:
+            print(f"completion-notice: BLOCKED: {blocked}", file=sys.stderr)
+            return 4
+    argv_send = send_argv(requester, message, paseo=args.paseo)
     if args.do_print:
         sys.stdout.write(message + "\n")
         if args.argv:

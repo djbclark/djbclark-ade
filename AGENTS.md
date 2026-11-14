@@ -31,6 +31,7 @@ Each doc carries its own summary.
 | [docs/s9-cloud-paseo.md](docs/s9-cloud-paseo.md) | design (2026-11-10): setup-plan S9 cloud ↔ Paseo — prerequisites, non-goals, phased experiments; no live wiring |
 | [docs/signed-agent-message.md](docs/signed-agent-message.md) | design (2026-11-12): item-24 signed-agent-message contract — versioned envelope (sender/provenance/recipient/payload hash/expiry/nonce), key registry, operator approval tokens, fail-closed verify order; paper only, no tool code or transport |
 | [docs/peer-trust.md](docs/peer-trust.md) | peer-agent trust (operator ruling 2026-11-13): `claude/hooks/peer_trust_gate.py`, per-TUI coverage, the accepted weakness |
+| [docs/archived-send-guard.md](docs/archived-send-guard.md) | archived-send guard (2026-11-14, ls-02): `bin/ade_send_guard.py` + `claude/hooks/archived_send_gate.py` redirect a send to a handed-off agent to its successor and refuse one to an archived agent (Paseo un-archives on a message); override `ADE_ALLOW_ARCHIVED_SEND=<its full id>` |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20, re-based 2026-11-07): assets, actors, entry points, ranked threats |
 | [docs/code-review.md](docs/code-review.md) | reviewer checklist (rules 1–13): adversary marker, secrets, subprocess, changelog fragments, `bin/review-pr` |
 | [docs/review-boundary.md](docs/review-boundary.md) | `bin/review-launch`, `bin/review-pr` and the `adversary-marker` Action (2026-11-06): the boundary, the merge gate, what is untrusted |

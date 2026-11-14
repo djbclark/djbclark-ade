@@ -495,7 +495,8 @@ _IMPORT_WARNED = False
 
 def current_lead(lead: str) -> str:
     """The agent holding `lead`'s role now: an item filed by a lead that later handed off (ade-self-session) is delivered to
-    its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed."""
+    its successor, not to the archived id (2026-11-14). A cyclic or unreadable ledger leaves the id as filed here, and then
+    `guarded_lead` (ls-02) refuses a cyclic one: nothing is delivered to it."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -515,6 +516,23 @@ def current_lead(lead: str) -> str:
         return lead
 
 
+def guarded_lead(lead, paseo):
+    """(agent to send to, refusal reason or None). A refused lead (archived, nothing replaced it, or a cyclic ledger) is not sent
+    to; a lead the guard says was replaced (e.g. one filed by an id prefix, which the ledger lookup does not resolve) is sent to its
+    successor. Fails open: a missing module or an unreadable Paseo never blocks a wake (ls-02, bin/ade_send_guard.py)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import ade_send_guard  # noqa: PLC0415 - lazy: this script is copied alone in a test
+        d = ade_send_guard.guard(lead, paseo=paseo[0])
+    except Exception:  # noqa: BLE001
+        return lead, None
+    if d.action == ade_send_guard.REFUSE:
+        return lead, d.reason
+    return (d.target if d.action == ade_send_guard.REDIRECT else lead), None
+
+
 def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
     by_lead: dict[str, list[dict]] = {}
     for i in items:
@@ -526,7 +544,12 @@ def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
             report["leads"][lead] = {"status": "paseo missing"}
             failed += 1
             continue
-        rc, out, err = run(paseo + ["send", "--json", "--no-wait", "--", lead, message_for(its, wake_id)], 60)
+        target, blocked = guarded_lead(lead, paseo)
+        if blocked:  # ls-02: a send would un-archive and run it; the items stay open for the next wake
+            report["leads"][lead] = {"status": "refused", "items": [i["id"] for i in its], "error": blocked[:200]}
+            failed += 1
+            continue
+        rc, out, err = run(paseo + ["send", "--json", "--no-wait", "--", target, message_for(its, wake_id)], 60)
         status = None
         try:
             parsed = json.loads(out)
@@ -537,6 +560,8 @@ def send_to_leads(items: list[dict], wake_id: str, report: dict) -> int:
         ok = status in ("sent", "completed")
         report["leads"][lead] = {"status": status or f"no status (exit {rc})", "items": [i["id"] for i in its],
                                  "error": None if ok else (err.strip()[:200] or None)}
+        if target != lead:
+            report["leads"][lead]["sent_to"] = target  # audited: a lead filed by prefix or replaced went to its successor
         failed += 0 if ok else 1
     return failed
 
