@@ -1480,10 +1480,12 @@ def decide(head: str, pr: dict, comments: list[dict]) -> tuple[str, str, str]:
 
 
 REF_UPDATES_OF_A_PUSHER = frozenset({"push", "force_push", "branch_creation", "pr_merge", "merge_queue_merge"})
+DIRECT_PUSHES = frozenset({"push", "force_push", "branch_creation"})    # what a person does with git: no merge of someone else's PR
 BRANCH_NAME = re.compile(r"[A-Za-z0-9_./-]+")    # used with fullmatch: ASCII only, no `$`-before-newline
 
 
-def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) -> tuple[bool, str]:
+def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool,
+                      allowed=REF_UPDATES_OF_A_PUSHER) -> tuple[bool, str]:
     """(ok, why) for owner trust of the head `head`: was the update that put the branch there made by the operator?
 
     Owner trust follows the PR *author*, so anyone who can push to the branch of an open operator PR (an org owner,
@@ -1497,7 +1499,9 @@ def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) 
     or an unexpected shape, no entry, a newest entry that is not this head or not a ref update, or anyone else as actor.
     The operator's own marker comment still approves such a PR (the outside path). Not covered: attacker commits
     the operator then pushed on top of (the operator vouches for what they push: that includes merging a child PR
-    into this branch, a `pr_merge` entry), and a deploy key's push, whose reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those)."""
+    into this branch, a `pr_merge` entry), and a deploy key's push, whose reported actor is unconfirmed (docs/review-boundary.md keeps the org precondition for those). `allowed` is the set of update types the newest
+    entry may have: the gate takes every ref update; `bin/review-pr`, which grants a model Bash on the Mac, passes
+    DIRECT_PUSHES, so a head that arrived by merging a child PR is reviewed restricted."""
     if cross_repo:
         return False, "the head branch lives in a fork, so its pusher is not read here"
     if not isinstance(branch, str) or not BRANCH_NAME.fullmatch(branch):
@@ -1510,7 +1514,7 @@ def head_pusher_check(api, repo: str, head: str, branch: str, cross_repo: bool) 
         return False, "the branch's ref history is empty or has an unexpected shape"
     newest = doc[0]
     if (newest.get("ref") != f"refs/heads/{branch}" or str(newest.get("after") or "").lower() != head.lower()
-            or newest.get("activity_type") not in REF_UPDATES_OF_A_PUSHER):
+            or newest.get("activity_type") not in allowed):
         return False, "the branch's newest ref update is not the update to this head"
     a = newest.get("actor")
     who = a.get("login") if isinstance(a, dict) else None

@@ -70,7 +70,7 @@ review-launch --check [--mode review|read-only] [--allow-web] [--json]
 | `review` (rule 11, `bin/review-pr`) | `Read,Grep,Glob` | `Glob, Grep, Read, StructuredOutput` |
 | `read-only` (Claude restricted tools; also used by the transitional `acp-dispatch` shim until ~2026-11-20) | `Read,Grep,Glob`; `--allow-web` adds `WebFetch,WebSearch` (2026-11-07) | those plus `StructuredOutput` |
 
-| `trusted` (YOLO, 2026-11-12; `bin/review-pr` for an owner-authored PR) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
+| `trusted` (YOLO, 2026-11-12; `bin/review-pr` for a PR the operator authored and pushed the head of, directly: a push, force-push or branch creation, not a child PR's merge) | `Read,Grep,Glob,Bash` with `--permission-mode bypassPermissions` | `Bash, Glob, Grep, Read, StructuredOutput`; `permissionMode == "bypassPermissions"` |
 
 **`trusted` is not a boundary** (operator, 2026-11-12; `docs/slim/audit-walk-decisions-2026-11-12.md` section 8: YOLO is the
 default for ordinary launches and trusted internal reviewers, restricted execution is reserved for external-security-critical
