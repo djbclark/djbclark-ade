@@ -70,7 +70,7 @@ export function isDryRun(env = process.env) {
 /** Run the decision script: JSON on stdin, JSON on stdout. Resolves to the parsed object; rejects on a non-zero exit or bad JSON. */
 export function runDecision({ python = "python3", script, info, timeoutMs = SCRIPT_TIMEOUT_MS, exec = execFile }) {
   return new Promise((resolve, reject) => {
-    const child = exec(python, [script], { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+    const child = exec(python, ["-I", script], { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
       if (err) return reject(new Error(`ade_ws_autoname failed: ${errText(err)}${stderr ? `: ${String(stderr).slice(0, 300)}` : ""}`));
       try {
         resolve(JSON.parse(stdout));
@@ -78,6 +78,7 @@ export function runDecision({ python = "python3", script, info, timeoutMs = SCRI
         reject(new Error(`ade_ws_autoname printed unreadable output: ${errText(e)}`));
       }
     });
+    child.stdin?.on("error", () => {}); // python gone before it read the input: the exit status reports it
     child.stdin?.end(JSON.stringify(info));
   });
 }
@@ -90,16 +91,27 @@ const createdMs = (a) => {
 };
 
 /**
- * True when `self` is the window's first live agent: no other agent in the window was created earlier (by `createdAt`); when a
- * time is missing on either side, the window holding no other agent decides.
+ * True when `self` is the window's first agent: no other (non-archived, non-background) agent in the window was created earlier
+ * by `createdAt`, ties broken by id. When a time is missing on either side, a window holding no other agent decides.
  */
 export function isFirstAgent(self, entries) {
   const others = entries.map(entryAgent).filter((a) => a && a.id !== self.id);
   const mine = createdMs(self);
   return others.every((o) => {
     const theirs = createdMs(o);
-    return mine !== null && theirs !== null ? theirs > mine : false;
+    if (mine === null || theirs === null) return false;
+    return theirs > mine || (theirs === mine && String(o.id) > String(self.id));
   });
+}
+
+/**
+ * Paseo gives a window created with a first prompt (the app's new-workspace screen, a plain create) the prompt's first line as
+ * its title at once, and later replaces a title equal to that line with a generated one (workspace-auto-name.ts, rule K4). So a
+ * title equal to the first agent's own title is still Paseo's default, not a name given on purpose.
+ */
+export function isDefaultTitle(windowTitle, agentTitle) {
+  if (blank(windowTitle)) return true;
+  return !blank(agentTitle) && windowTitle.trim() === agentTitle.trim();
 }
 
 /**
@@ -127,27 +139,25 @@ export async function handleAgentEvent(agent, context, deps = {}) {
     const handle = paseo.workspaces.ref(wid);
     const ws = await handle.refresh();
     if (!ws) return out("skip", { reason: "window not found" });
-    if (!blank(ws.title)) {
-      remember(settled, wid);
-      return out("skip", { reason: "window already has a title" });
-    }
     if (ws.background) {
       remember(settled, wid);
       return out("skip", { reason: "background window" });
     }
     const self = (await paseo.agents.ref(agent.id).refresh())?.agent ?? {};
+    const title = self.title ?? agent.title ?? null;
+    if (!isDefaultTitle(ws.title, title)) {
+      remember(settled, wid);
+      return out("skip", { reason: "window already has a title" });
+    }
     const listed = await paseo.agents.list({});
     const inWindow = (listed?.entries ?? []).filter((e) => entryAgent(e)?.workspaceId === wid);
+    if (!isFirstAgent({ ...self, id: agent.id }, inWindow)) return out("skip", { reason: "not the window's first agent" });
     const info = {
       cwd: agent.cwd,
-      windowTitle: ws.title ?? null,
-      firstAgent: isFirstAgent({ ...self, id: agent.id }, inWindow),
+      windowTitle: null, // default by the check above; the script's own title rule stays for a direct call
+      firstAgent: true,
       background: false,
-      agent: {
-        title: self.title ?? agent.title ?? null,
-        parentAgentId: agent.parentAgentId ?? self.parentAgentId ?? null,
-        labels: self.labels ?? {},
-      },
+      agent: { title, parentAgentId: agent.parentAgentId ?? null, labels: self.labels ?? {} },
     };
     const script = resolveDecisionScript({ env, pluginRoot: deps.pluginRoot });
     const run = deps.run ?? runDecision;
@@ -157,9 +167,10 @@ export async function handleAgentEvent(agent, context, deps = {}) {
       return out("skip", { reason: decision?.reason ?? "no decision" });
     }
     if (isDryRun(env)) return out("would-rename", { name: decision.name, kind: decision.kind });
-    // A last read right before the write: a name given in the meantime (ade-worker-run, a human) wins.
+    // A last read right before the write; Paseo has no compare-and-set, so a name given in the few milliseconds after this read
+    // can still be overwritten (bin/ade-worker-run's own launches are skipped by the script for that reason).
     const again = await handle.refresh();
-    if (!again || !blank(again.title)) {
+    if (!again || (!blank(again.title) && again.title !== ws.title)) {
       remember(settled, wid);
       return out("skip", { reason: "window was named while deciding" });
     }

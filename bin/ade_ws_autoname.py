@@ -46,7 +46,7 @@ import ade_ws_names as names  # noqa: E402
 WORK_LIMIT = 50  # characters of work text; the whole name stays under ade_ws_names.NAME_LIMIT
 _UUID = names.UUID_RE
 _WORKER_TAB_RE = re.compile(rf"^worker\s+(.+?)\s+{_UUID}$")
-_LEAD_TAB_RE = re.compile(r"^(?:lead|main)\s+(.+)$", re.IGNORECASE)
+_LEAD_TAB_RE = re.compile(r"^(?:LEAD|MAIN)\s+(.+)$")  # the tab names `LEAD <repo> <work>`; an ordinary "Lead the migration" stays
 PLACEMENT_KINDS = {"main": "MAIN", "workers": "WORKERS", "user": "USER"}
 
 
@@ -104,6 +104,9 @@ def decide(info: dict) -> dict:
     if not isinstance(cwd, str) or not cwd.strip():
         return skip("no cwd")
     agent = info.get("agent") if isinstance(info.get("agent"), dict) else {}
+    labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
+    if labels.get("slice") and labels.get("ade.lead"):
+        return skip("a bin/ade-worker-run launch (slice + ade.lead labels): it names its own window")
     repo = names.repo_of(cwd)
     try:
         names.check_repo(repo)

@@ -123,9 +123,9 @@ repo, the operator's own new chat and a plain `paseo run` kept Paseo's default n
 ([plugins/ade-window-name](../plugins/ade-window-name/README.md)) names every new window on this host when its first agent is
 created (`agent.create.after`, retried on `agent.turn.after` while the agent has no title); `bin/ade_ws_autoname.py` decides, on
 `bin/ade_ws_names.py` (the builder `ade-worker-run` and `ade-tidy` share). Rules: a window is **default-named when its Paseo
-`title` is null** and is then named `WORKERS` for an agent with a parent or an `ade.lead` label, else `MAIN` (`ade.placement`
+`title` is null** (or equals the first agent's own title: Paseo's prompt pre-title for a window the app created with a prompt) and is then named `WORKERS` for an agent with a parent or an `ade.lead` label, else `MAIN` (`ade.placement`
 overrides; `USER` is never guessed); `<repo>` as in Naming item 4, `<work>` the agent's title, short; **a window with any title is
-never touched**, and only the window's first agent names it. `paseo run --new-workspace` creates the window before the agent and
+never touched**, only the window's first agent names it, and `ade-worker-run` launches (labels `slice` + `ade.lead`) are left to it. `paseo run --new-workspace` creates the window before the agent and
 sends no prompt or label with it, which is why the hook is on the agent, not on `workspace.create.before`.
 
 ## Renaming

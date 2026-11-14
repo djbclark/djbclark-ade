@@ -75,6 +75,12 @@ def test_skips(tmp_path, over):
     assert an.decide(info(git_repo(tmp_path), **over))["action"] == "skip"
 
 
+def test_an_ade_worker_run_launch_is_skipped_because_it_names_its_own_window(tmp_path):
+    d = an.decide(info(git_repo(tmp_path), agent={"title": "x", "labels": {"ade.lead": LEAD, "slice": "s"}}))
+    assert d["action"] == "skip" and d["retry"] is False
+    assert an.decide(info(git_repo(tmp_path), agent={"title": "x", "labels": {"ade.lead": LEAD}}))["kind"] == "WORKERS"
+
+
 def test_not_first_agent_asks_for_a_retry(tmp_path):
     d = an.decide(info(git_repo(tmp_path), firstAgent=False))
     assert d["action"] == "skip" and d["retry"] is True
@@ -108,7 +114,9 @@ def test_no_agent_title_yet_asks_for_a_retry(tmp_path):
 @pytest.mark.parametrize("title,work", [
     (f"worker auto-naming {LEAD}", "auto-naming"),
     ("LEAD my-repo Wave 7", "Wave 7"),
-    ("main my-repo Wave 7", "Wave 7"),
+    ("MAIN my-repo Wave 7", "Wave 7"),
+    ("Lead the migration", "Lead the migration"),
+    ("Main menu crash", "Main menu crash"),
     ("my-repo cleanup", "cleanup"),
     ("fix (a) and (b)", "fix [a] and [b]"),
     ("two\nlines  here\t!", "two lines here !"),

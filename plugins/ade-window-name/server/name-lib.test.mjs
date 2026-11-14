@@ -21,16 +21,27 @@ const LEAD = "8cd86203-d33b-49db-abde-9baba52bcf61";
 const T0 = "2026-11-14T10:00:00.000Z";
 const T1 = "2026-11-14T10:00:05.000Z";
 
-/** One fake daemon: a window record, its agents, and a record of every setTitle. */
-function fakeDaemon({ windowTitle = null, windowBackground = false, agents }) {
-  const state = { ws: { id: "wks_0000000000000001", title: windowTitle, background: windowBackground }, agents, titles: [] };
+/**
+ * One fake daemon: windows keyed by id (so a call on the wrong id is caught), their agents, and a record of every setTitle as
+ * [windowId, title]. `windowTitle` sets the title of the primary window `wks_0000000000000001`.
+ */
+const WID = "wks_0000000000000001";
+function fakeDaemon({ windowTitle = null, windowBackground = false, agents, otherWindows = {} }) {
+  const state = {
+    windows: { [WID]: { id: WID, title: windowTitle, background: windowBackground }, ...otherWindows },
+    agents,
+    calls: [],
+    get titles() {
+      return this.calls.map((c) => c[1]);
+    },
+  };
   const paseo = {
     workspaces: {
-      ref: () => ({
-        refresh: async () => ({ ...state.ws }),
+      ref: (id) => ({
+        refresh: async () => (state.windows[id] ? { ...state.windows[id] } : null),
         setTitle: async (t) => {
-          state.titles.push(t);
-          state.ws.title = t;
+          state.calls.push([id, t]);
+          state.windows[id].title = t;
           return { title: t };
         },
       }),
@@ -143,7 +154,7 @@ test("a name given between the decision and the write wins", async () => {
   const a = agentRec({ cwd: gitDir.repo });
   const d = fakeDaemon({ agents: [a] });
   const run = async (args) => {
-    d.state.ws.title = "named by ade-worker-run meanwhile";
+    d.state.windows[WID].title = "named by ade-worker-run meanwhile";
     return runDecision(args);
   };
   const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps({ run }));
@@ -202,4 +213,66 @@ test("both hooks register, run one at a time per window, and unregister", async 
   assert.equal(d.state.titles.length, 1);
   off();
   assert.equal(offs, 2);
+});
+
+const OTHER = "wks_0000000000000002";
+
+test("an older agent in ANOTHER window does not stop naming, and setTitle hits the right window", async () => {
+  const older = agentRec({ id: "older", workspaceId: OTHER, cwd: gitDir.repo, title: "Elsewhere", createdAt: "2026-11-13T09:00:00.000Z" });
+  const mine = agentRec({ id: "mine", cwd: gitDir.repo, title: "Here", createdAt: T1 });
+  const d = fakeDaemon({ agents: [older, mine], otherWindows: { [OTHER]: { id: OTHER, title: "kept", background: false } } });
+  await handleAgentEvent(hookAgent(mine), { paseo: d.paseo }, baseDeps());
+  assert.deepEqual(d.state.calls, [[WID, "MAIN my-repo (Here)"]]);
+  assert.equal(d.state.windows[OTHER].title, "kept");
+});
+
+test("a window Paseo pre-titled with the agent's first prompt line is still default: named, not settled as titled", async () => {
+  const a = agentRec({ cwd: gitDir.repo, title: "Fix the flaky login test" });
+  const d = fakeDaemon({ windowTitle: "Fix the flaky login test", agents: [a] });
+  await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps());
+  assert.deepEqual(d.state.titles, ["MAIN my-repo (Fix the flaky login test)"]);
+  const b = agentRec({ cwd: gitDir.repo, title: "Fix the flaky login test" });
+  const e = fakeDaemon({ windowTitle: "a name somebody typed", agents: [b] });
+  await handleAgentEvent(hookAgent(b), { paseo: e.paseo }, baseDeps());
+  assert.deepEqual(e.state.titles, []);
+});
+
+test("a launch by bin/ade-worker-run (slice + ade.lead labels) is left to ade-worker-run", async () => {
+  const a = agentRec({ cwd: gitDir.repo, labels: { "ade.lead": LEAD, slice: "auto-naming" } });
+  const d = fakeDaemon({ agents: [a] });
+  const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps());
+  assert.equal(rec.outcome, "skip");
+  assert.deepEqual(d.state.titles, []);
+});
+
+test("agents created at the same instant: exactly one is first (ties break by id)", () => {
+  const a = { id: "a", createdAt: T0 };
+  const b = { id: "b", createdAt: T0 };
+  assert.equal(isFirstAgent(a, [{ agent: b }]), true);
+  assert.equal(isFirstAgent(b, [{ agent: a }]), false);
+});
+
+test("events for one window never overlap, even when the decision is slow", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: null });
+  const d = fakeDaemon({ agents: [a] });
+  let running = 0;
+  let maxRunning = 0;
+  const run = async (args) => {
+    running += 1;
+    maxRunning = Math.max(maxRunning, running);
+    await new Promise((r) => setTimeout(r, 40));
+    running -= 1;
+    return runDecision(args);
+  };
+  a.title = "Slow one";
+  registerAdeWindowNameHooks(server, baseDeps({ run }));
+  await Promise.all([
+    handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
+    handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
+    handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
+  ]);
+  assert.equal(maxRunning, 1);
+  assert.equal(d.state.titles.length, 1);
 });

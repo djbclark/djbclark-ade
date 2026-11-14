@@ -1,6 +1,6 @@
 # ade-window-name (Paseo plugin)
 
-Names every new window (Paseo workspace) on this host `<KIND> <repo> (<work>)` ([docs/workspace-layout.md](../../docs/workspace-layout.md)),
+Names every default-named window (Paseo workspace) on this host, when its first agent is created (or next ends a turn): `<KIND> <repo> (<work>)` ([docs/workspace-layout.md](../../docs/workspace-layout.md)),
 so no agent has to remember. Before this, only `bin/ade-worker-run` (our own launches) and `bin/ade-tidy` (one repo, manual) applied the
 scheme; a lead in another repo, the operator's own new chat and a plain `paseo run` kept Paseo's default names (operator, 2026-11-14).
 
@@ -17,20 +17,35 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 
 ## Rules (decided in `bin/ade_ws_autoname.py`, on `bin/ade_ws_names.py`, the builder `ade-worker-run` and `ade-tidy` share)
 
-1. **Default name = no title.** Paseo's workspace `title` is the user-set override; null (or blank) means the name is derived from the
-   branch or directory (`master`, `my-repo`). Any title at all (a human's, `ade-worker-run`'s, Paseo's own generator's, ours) is never touched.
-   The title is read again right before the write, so a name given in the meantime wins.
-2. **First agent only.** The agent must be the earliest-created live, non-background agent in the window (`createdAt`); an agent joining a
-   window does not name it. Background agents and windows are skipped.
+1. **Default name = no title, or Paseo's own prompt title.** Paseo's workspace `title` is the user-set override; null (or blank) means the
+   name is derived from the branch or directory (`master`, `my-repo`). A window created with a first prompt (the app's new-workspace
+   screen, a plain create) is pre-titled with the prompt's first line, which Paseo itself still treats as default (it replaces a title equal
+   to that line with a generated one, `workspace-auto-name.ts`); so a title equal to the first agent's own title counts as default too.
+   Any other title (a human's, `ade-worker-run`'s, ours) is never touched. The title is read again right before the write, but Paseo has
+   no compare-and-set: a name given in the few milliseconds after that read can still be overwritten.
+2. **First agent only.** The agent must be the earliest-created (ties by id) non-archived, non-background agent in the window; an agent
+   joining a window does not name it. A closed (not archived) first agent still counts as first. The agent list is read unpaged, so past
+   the server's 200-agent default page an older agent could be missing (32 non-archived agents on 2026-11-14).
 3. **KIND.** `WORKERS` when the agent has a parent (`parentAgentId`) or an `ade.lead` label; otherwise `MAIN`. The `ade.placement` label
    (`main`, `workers`, `user`) overrides; **`USER` is never guessed**: it is what a lead connects the operator's agents into (tidy skill).
 4. **`<repo>`** is the main checkout's name via git (a linked worktree `my-repo-x-wt` reads `my-repo`), else the directory's basename.
    A name that is not a valid window-name part (a space in the directory) leaves the window alone.
 5. **`<work>`** is the agent's title, at most 50 characters at a word boundary, one line, no parentheses: a `worker <slice> <lead id>`
-   title reduces to the slice, `LEAD|MAIN <repo> <work>` to the work, a leading `<repo> ` is dropped. No title yet: wait for the retry.
+   title reduces to the slice, `LEAD|MAIN <repo> <work>` (upper case, the tab names) to the work, a leading `<repo> ` is dropped. No title
+   yet: wait for the retry.
+6. **`bin/ade-worker-run` launches are skipped** (labels `slice` and `ade.lead`): it names its own windows right after the launch, and a
+   plugin write landing between its read and its rename could otherwise win.
 
-`bin/ade-worker-run` names its own windows right after the launch with an explicit `paseo workspace rename`: if this plugin named the
-window first, that rename replaces the name; if `ade-worker-run` was first, rule 1 leaves its name alone.
+## Interplay and limits
+
+1. **Backfill.** The plugin has no "new window" gate: after an install or reload, the next turn of the first agent of any default-named
+   window names it (a window deliberately reset to its default name in the app is renamed at the next reload too).
+2. **The first guess sticks.** The name is a placeholder from the first prompt line. `ade-worker-run rename-main` is a no-op on a window
+   that already has a MAIN name, and `ade-tidy` keeps an existing name's KIND and work; to change one, use `paseo workspace rename`.
+   A lead started with a parent label (a sub-lead launched without `env -u PASEO_AGENT_ID`) gets WORKERS, not MAIN.
+3. **Trust.** The daemon runs `bin/ade_ws_autoname.py` and `ade_ws_names.py` from the install path (the shared checkout, which order 9
+   says may sit on another session's branch), as `python3 -I`; `ade-claim` has the same property. `ADE_PYTHON` and `ADE_WS_AUTONAME_PY`
+   come from the daemon's environment.
 
 ## Install and configuration
 
@@ -42,8 +57,3 @@ Logs: `paseo plugin logs ade-window-name`, one line per event with `outcome` `re
 ## Tests
 
 `node --test server/name-lib.test.mjs` (also run by `tests/test_ade_ws_autoname.py`, with the decision script's own tests).
-
-## Limit
-
-A window created by Paseo's app with a first prompt gets an LLM-generated title asynchronously; if that lands before the first agent
-exists the window already has a title (rule 1) and stays as generated. `ade-tidy --apply` still renames such a window.
