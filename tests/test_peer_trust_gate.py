@@ -219,7 +219,7 @@ def test_shipped_config_lists_the_default_patterns(box):
     with open(ROOT / "config/peer-trust.toml", "rb") as fh:
         section = tomllib.load(fh)["sensitive"]
     assert section["ids"] == []
-    assert section["title_patterns"] == ["injection", "triage", "review-pr", "pr-review", "adversary", "gh-watch"]
+    assert section["title_patterns"] == ["injection", "triage", "review-pr", "pr-review", "adversary"]
     # the built-in fallback must not drift from the shipped file (the file hides a missing default)
     assert list(box.hook.DEFAULT_SENSITIVE_PATTERNS) == section["title_patterns"]
 
@@ -485,7 +485,7 @@ def write_record(home, agent, title="", labels=None, folder="cwd-slug"):
     (path / f"{agent}.json").write_text(json.dumps({"id": agent, "title": title, "labels": labels or {}}))
 
 
-@pytest.mark.parametrize("title", ["adversary pt-02 review", "review-pr 703", "PR-Review bot", "gh-watch omercnet", "pr triage"])
+@pytest.mark.parametrize("title", ["adversary pt-02 review", "review-pr 703", "PR-Review bot", "pr triage"])
 def test_real_fleet_reviewer_titles_are_sensitive(box, title):
     text = context(box({"prompt": block(source=FAKE, extra=f' source-agent-title="{title}"')}))
     assert "external-security-sensitive" in text

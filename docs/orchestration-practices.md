@@ -133,8 +133,8 @@ paseo run --provider PROVIDER/MODEL --no-wait \
 ```
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or
-discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (set it, replacing the dispatch's own `--label ade.kind=...` when it has
-one; never a second label; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
+discussion reviewer reading outside text) is launched with `--label ade.kind=external-review` as its `ade.kind` (it replaces the dispatch's own `--label ade.kind=...`: `paseo run` keeps the LAST `--label` for a duplicate key, so
+append `--label ade.kind=external-review` last, or drop the other; only the peer-trust hook reads the value). **Known gap until PR 710 (the `sweep()` skip, reason
 `sensitive-sender`) lands:** `bin/ade-auto-permit` ignores the label. It approves a triage worker's tool requests whenever the worker is a
 descendant of the lead, carries `ade.lead` or an `--ade-label`, or (the loaded launchd job passes `--all-local`, operator 2026-11-13) is any
 local agent of a classified provider, so within 60 s and before the lead can see the request in `paseo permit ls`. Launch such a worker in a mode
