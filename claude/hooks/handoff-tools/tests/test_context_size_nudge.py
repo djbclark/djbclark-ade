@@ -2,10 +2,8 @@
 the hook's messages (2026-10-18 rewrite: the old tests asserted
 SOFT_THRESHOLD/HARD_THRESHOLD and a `hermes send` call the hook no longer has)."""
 import json
-import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -13,8 +11,7 @@ import pytest
 HOOKS_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HOOKS_DIR))
 
-import context_size_nudge as nudge  # noqa: E402
-
+import context_size_nudge as nudge
 
 ALT = "the in-context alternative"
 _BOUNDARY_LINE = json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"

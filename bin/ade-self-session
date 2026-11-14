@@ -10,11 +10,13 @@ Checkpoint files are nonsecret agent-authored briefings. Creation/send receipts
 are requests, never completed handoffs or compactions. No force/workspace archive.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
+
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ade_self_session import Service, SessionError

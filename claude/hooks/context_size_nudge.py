@@ -87,7 +87,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path
 
@@ -364,6 +364,13 @@ def _compaction_floor_since(transcript_path, since, size):
     return COMPACTED if value is None else value
 
 
+def _loads_or_none(line):
+    try:
+        return json.loads(line)
+    except Exception:
+        return None
+
+
 def _last_assistant_model(transcript_path):
     """The newest non-sidechain assistant record's `message.model`, or None.
 
@@ -386,10 +393,7 @@ def _last_assistant_model(transcript_path):
                 for line in reversed(lines):
                     if b'"model"' not in line:
                         continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
+                    obj = _loads_or_none(line)
                     if not isinstance(obj, dict) or obj.get("isSidechain"):
                         continue
                     message = obj.get("message")
@@ -682,7 +686,7 @@ def _log_nudge(session_id, event, level, total, growth, kind):
     """
     try:
         line = (json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "session_id": session_id, "event": event, "level": level,
             "total": total, "growth": growth, "kind": kind,
         }) + "\n").encode("utf-8")
