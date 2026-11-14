@@ -1475,9 +1475,12 @@ def test_the_tests_workflow_it_follows_exists_under_that_name():
 def test_the_job_has_read_permissions_only_and_the_merge_gate_environment():
     doc = workflow()
     assert doc["permissions"] == {} and "concurrency" not in doc
-    for job in doc["jobs"].values():
-        assert job["permissions"] == {"pull-requests": "read", "contents": "read"}
+    read_only = {"pull-requests": "read", "contents": "read"}
     marker_job, resolve_job = doc["jobs"]["marker"], doc["jobs"]["resolve"]
+    assert resolve_job["permissions"] == read_only
+    # the marker job also lists the head's workflow runs (who pushed it, `head_pusher_check`): read only, nothing more
+    assert marker_job["permissions"] == {**read_only, "actions": "read"}
+    assert set(doc["jobs"]) == {"resolve", "marker"}
     assert marker_job["environment"] == "merge-gate"
     assert "default_branch" in resolve_job["if"], "a dispatch from another ref does nothing"
     assert marker_job["concurrency"]["cancel-in-progress"] is True
