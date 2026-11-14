@@ -301,3 +301,48 @@ test("a window already named in the scheme is never re-wrapped, even when the ta
   assert.equal(isDefaultTitle("Fix it", "Fix it"), true);
   assert.equal(isDefaultTitle("MAIN notes", "MAIN notes"), true); // not the scheme: no parenthesised work
 });
+
+test("a daemon call that never settles frees the window's slot and does not block another window", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: "Stuck then fine" });
+  const b = agentRec({ id: "agent-2", workspaceId: OTHER, cwd: gitDir.repo, title: "Other window" });
+  const d = fakeDaemon({ agents: [a, b], otherWindows: { [OTHER]: { id: OTHER, title: null, background: false } } });
+  let stuck = true;
+  const realRef = d.paseo.workspaces.ref;
+  d.paseo.workspaces.ref = (id) => {
+    const h = realRef(id);
+    return id === WID && stuck ? { ...h, refresh: () => new Promise(() => {}) } : h;
+  };
+  const logged = [];
+  registerAdeWindowNameHooks(server, baseDeps({ timeoutMs: 1500, log: (l) => logged.push(l) }));
+  const create = handlers.get("agent.create.after");
+  const t0 = Date.now();
+  await Promise.all([create({ agent: hookAgent(a) }, { paseo: d.paseo }), create({ agent: hookAgent(b) }, { paseo: d.paseo })]);
+  assert.ok(Date.now() - t0 < 2000);
+  assert.ok(logged.some((l) => l.includes("exceeded")), "the stuck handler is logged as an error");
+  assert.deepEqual(d.state.calls, [[OTHER, "MAIN my-repo (Other window)"]]);
+  stuck = false; // the daemon recovered: the same window is not parked
+  await handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo });
+  assert.deepEqual(d.state.calls.at(-1), [WID, "MAIN my-repo (Stuck then fine)"]);
+});
+
+test("while one event is in flight for a window, a second for the same window is dropped, not queued", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: "Once" });
+  const d = fakeDaemon({ agents: [a] });
+  let runs = 0;
+  const run = async (args) => {
+    runs += 1;
+    await new Promise((r) => setTimeout(r, 40));
+    return runDecision(args);
+  };
+  registerAdeWindowNameHooks(server, baseDeps({ run }));
+  await Promise.all([
+    handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
+    handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
+  ]);
+  assert.equal(runs, 1);
+  assert.equal(d.state.titles.length, 1);
+});

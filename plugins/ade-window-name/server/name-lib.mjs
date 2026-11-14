@@ -190,26 +190,40 @@ function remember(settled, wid) {
   settled.add(wid);
 }
 
+const HANDLER_BUDGET_MS = 25_000; // under Paseo's 30 s notification timeout
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`ade-window-name handler exceeded ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
- * Register both hooks. Handlers run one at a time per window (`create.after` and a quick `turn.after` must not both rename),
- * and a decided window is remembered so later turns cost nothing.
+ * Register both hooks. One event per window at a time: while one is in flight for a window, another event for it is dropped (a
+ * later `turn.after` comes anyway), so nothing queues behind Paseo's 30 s notification timeout. Each handler run is also capped
+ * (`timeoutMs`, default 25 s): a daemon call that never settles frees the window's slot instead of parking it until a reload.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
- * @param {Parameters<typeof handleAgentEvent>[2]} [deps]
+ * @param {Parameters<typeof handleAgentEvent>[2] & { timeoutMs?: number }} [deps]
  */
 export function registerAdeWindowNameHooks(server, deps = {}) {
   const settled = deps.settled ?? new Set();
   const pluginRoot = deps.pluginRoot ?? resolvePluginRoot({ metaUrl: import.meta?.url });
-  const chains = new Map();
+  const log = deps.log ?? ((line) => console.error(line));
+  const budget = deps.timeoutMs ?? HANDLER_BUDGET_MS;
+  const inFlight = new Set();
   const handler = async ({ agent }, context) => {
     const key = agent?.workspaceId ?? "";
-    const prev = chains.get(key) ?? Promise.resolve();
-    const next = prev.then(() => handleAgentEvent(agent, context, { ...deps, pluginRoot, settled }));
-    chains.set(key, next);
+    if (inFlight.has(key)) return;
+    inFlight.add(key);
     try {
-      await next;
+      await withTimeout(handleAgentEvent(agent, context, { ...deps, pluginRoot, settled }), budget);
+    } catch (err) {
+      log(`ade-window-name ${JSON.stringify({ hook: "window-name", agent: agent?.id, outcome: "error", error: errText(err) })}`);
     } finally {
-      if (chains.get(key) === next) chains.delete(key);
+      inFlight.delete(key);
     }
   };
   const offs = ["agent.create.after", "agent.turn.after"].map((name) => server.addHook(name, handler));

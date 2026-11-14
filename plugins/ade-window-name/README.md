@@ -46,6 +46,10 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 3. **Trust.** The daemon runs `bin/ade_ws_autoname.py` and `ade_ws_names.py` from the install path (the shared checkout, which order 9
    says may sit on another session's branch), as `python3 -I`; `ade-claim` has the same property. `ADE_PYTHON` and `ADE_WS_AUTONAME_PY`
    come from the daemon's environment.
+4. **Name collisions.** A plugin-made `WORKERS <repo> (<work>)` name is looked up by exact name by `ade-worker-run --window-middle`; if a
+   parent-labelled agent's first prompt line equals a lead's `--window-middle`, that lead is refused (ownership is checked, nothing is
+   misplaced). Pick distinctive `--window-middle` values.
+
 
 ## Install and configuration
 
@@ -57,6 +61,3 @@ Logs: `paseo plugin logs ade-window-name`, one line per event with `outcome` `re
 ## Tests
 
 `node --test server/name-lib.test.mjs` (also run by `tests/test_ade_ws_autoname.py`, with the decision script's own tests).
-4. **Name collisions.** A plugin-made `WORKERS <repo> (<work>)` name is looked up by exact name by `ade-worker-run --window-middle`; if a
-   parent-labelled agent's first prompt line equals a lead's `--window-middle`, that lead is refused (ownership is checked, nothing is
-   misplaced). Pick distinctive `--window-middle` values.
