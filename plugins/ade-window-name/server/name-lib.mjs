@@ -111,8 +111,10 @@ export function isFirstAgent(self, entries) {
  */
 export function isDefaultTitle(windowTitle, agentTitle) {
   if (blank(windowTitle)) return true;
+  if (SCHEME_NAME.test(windowTitle.trim())) return false; // already `<KIND> <repo> (<work>)`: never re-wrapped, whatever the tab is called
   return !blank(agentTitle) && windowTitle.trim() === agentTitle.trim();
 }
+const SCHEME_NAME = /^(?:MAIN|WORKERS|USER) \S+ \(.+\)$/;
 
 /**
  * Handle one agent event. Returns a short outcome record (also the log line) and never throws.
@@ -145,13 +147,14 @@ export async function handleAgentEvent(agent, context, deps = {}) {
     }
     const self = (await paseo.agents.ref(agent.id).refresh())?.agent ?? {};
     const title = self.title ?? agent.title ?? null;
+    // First-agent check before the title check: a joiner's event must not settle a prompt-titled window its first agent has yet to name.
+    const listed = await paseo.agents.list({});
+    const inWindow = (listed?.entries ?? []).filter((e) => entryAgent(e)?.workspaceId === wid);
+    if (!isFirstAgent({ ...self, id: agent.id }, inWindow)) return out("skip", { reason: "not the window's first agent" });
     if (!isDefaultTitle(ws.title, title)) {
       remember(settled, wid);
       return out("skip", { reason: "window already has a title" });
     }
-    const listed = await paseo.agents.list({});
-    const inWindow = (listed?.entries ?? []).filter((e) => entryAgent(e)?.workspaceId === wid);
-    if (!isFirstAgent({ ...self, id: agent.id }, inWindow)) return out("skip", { reason: "not the window's first agent" });
     const info = {
       cwd: agent.cwd,
       windowTitle: null, // default by the check above; the script's own title rule stays for a direct call

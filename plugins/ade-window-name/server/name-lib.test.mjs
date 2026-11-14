@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   handleAgentEvent,
+  isDefaultTitle,
   isDryRun,
   isFirstAgent,
   registerAdeWindowNameHooks,
@@ -275,4 +276,28 @@ test("events for one window never overlap, even when the decision is slow", asyn
   ]);
   assert.equal(maxRunning, 1);
   assert.equal(d.state.titles.length, 1);
+});
+
+test("a joiner's event does not settle a prompt-titled window before its first agent names it", async () => {
+  const first = agentRec({ id: "first", cwd: gitDir.repo, title: "Fix the login test", createdAt: T0 });
+  const joiner = agentRec({ id: "joiner", cwd: gitDir.repo, title: `worker s ${LEAD}`, createdAt: T1 });
+  const d = fakeDaemon({ windowTitle: "Fix the login test", agents: [first, joiner] });
+  const deps = baseDeps();
+  const rec = await handleAgentEvent(hookAgent(joiner), { paseo: d.paseo }, deps);
+  assert.equal(rec.reason, "not the window's first agent");
+  assert.equal(deps.settled.size, 0);
+  await handleAgentEvent(hookAgent(first), { paseo: d.paseo }, deps);
+  assert.deepEqual(d.state.titles, ["MAIN my-repo (Fix the login test)"]);
+});
+
+test("a window already named in the scheme is never re-wrapped, even when the tab carries the same text", async () => {
+  for (const t of ["MAIN my-repo (x)", "WORKERS my-repo (Wave 7)", "USER r (a (b))"]) {
+    assert.equal(isDefaultTitle(t, t), false, t);
+    const a = agentRec({ cwd: gitDir.repo, title: t });
+    const d = fakeDaemon({ windowTitle: t, agents: [a] });
+    await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps());
+    assert.deepEqual(d.state.titles, [], t);
+  }
+  assert.equal(isDefaultTitle("Fix it", "Fix it"), true);
+  assert.equal(isDefaultTitle("MAIN notes", "MAIN notes"), true); // not the scheme: no parenthesised work
 });

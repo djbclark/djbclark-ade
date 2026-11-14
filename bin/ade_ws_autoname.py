@@ -12,7 +12,7 @@ use), so there is no second copy of the format.
 
 Input keys (all but `cwd` optional):
   cwd            the new agent's working directory (repo = the main checkout's name via git, else the directory's basename)
-  windowTitle    the window's raw title: null or blank = Paseo's default name (derived from branch/directory); anything else
+  windowTitle    the window's raw title (the plugin sends null for Paseo's prompt pre-title too): null or blank = Paseo's default name (derived from branch/directory); anything else
                  was named on purpose (a human, an agent, `ade-worker-run`, or Paseo's own generator) and is never touched
   firstAgent     true when this is the window's first live, non-background agent; false = skip
   background     true = a hidden helper window/agent: skip
