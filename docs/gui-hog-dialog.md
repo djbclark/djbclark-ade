@@ -78,10 +78,16 @@ refusal measured was `pageins`). The samples also do not store RSS (`PSTATE` has
 C2. **Hold registry (new, written by `admit --wait`).** On each poll in which a waiting `admit` is refused, it writes
 `~/.local/state/load-watch/held/<pid>-<start>.json` atomically:
 `{"v":1,"pid":N,"start":"<lstart UTC>","caller":"<admit_caller()>","refused_since":<epoch>,"refused":["pageins",...],"updated":<epoch>}`.
-It removes the file in a `finally` when it returns. A file whose `updated` is more than 60 s old, or whose pid and start
+It removes the file in a `finally` when it returns. Like `admit_log`, the write and the removal sit in their own
+`try` and can **never raise, change the verdict or change the exit code**. `gui_hog` is imported lazily, inside that
+`try`. If the module breaks, `admit` still answers 0 or 75, and `bg` never falls back to its plain load check (`bg`
+~695), which would lose the churn gate and the valve. `refused_since` is checked before it is written: it must not be in
+the future, and it must not be before the caller's start time. A file whose `updated` is more than 60 s old, or whose pid and start
 no longer match, is stale and gets swept. `refused_since` is the start of the unbroken refusal run. It comes from the
-`--refused-since` argument when one is passed. The follow-ups slice (worker 6c092e3c) is adding that argument so that
-`bg`'s valve clock spans its 420 s chunks, and the 3-minute trigger uses the same clock. `admit` only **writes a file**.
+`--refused-since` argument when one is passed. The follow-ups slice (worker 6c092e3c) is adding that argument to
+`load-watch`, and the 3-minute trigger uses the same clock. It spans `bg`'s 420 s chunks only once `bg`
+(site-public-djbclark: the operator's yes, AGENTS.md order 11) passes it. Until then each chunk restarts the clock. The
+trigger still fires 3 min into a chunk, but not across a chunk boundary. `admit` only **writes a file**.
 Its docstring contract ("only ever decides; never kills, throttles or signals anything") stays true.
 
 C3. **Always-on app window (new, in the sampler).** Every sample adds one compact entry to
@@ -100,14 +106,20 @@ C4. **Decision (one pure function, `gui_hog.should_show(held, apps, now, snooze,
 (`min_rss_mb` 2048);
 (d) it is at least 30 min since the dialog was last shown (`rate_s` 1800), and Ignore's snooze (60 min) has expired.
 
-"Non-build" excludes three kinds of tree: any app tree whose ancestry reaches a held caller's pid, a Paseo agent CLI
-(`AGENT_CLIS`), or `bg`; any protected app (F6); and the dialog itself. That excludes Playwright's Chrome for Testing,
-Simulator from `xcodebuild`, and other GUI work that a build starts.
+"Non-build" excludes four kinds of tree. (a) Any app tree whose ancestry reaches a held caller's pid, a Paseo agent CLI
+(`AGENT_CLIS`) or `bg`. That covers Playwright's Chrome for Testing. (b) **Build subtrees inside an app**: the walk down
+an app's tree **stops** at any shell, pty-attached process, `bg`, agent CLI or process holding an admit reservation. The
+cores of those subtrees never count towards the app. So `make` in VS Code's or a JetBrains IDE's terminal, or a Gradle
+daemon an IDE started, is a build and not a GUI hog. (c) Build GUIs that LaunchServices starts with ppid 1
+(Simulator from `simctl` or `xcodebuild`, anything run through `open`). Ancestry cannot see these, so they are protected by
+bundle id (F6). (d) Any protected app (F6) and the dialog itself.
 
 C5. **Who calls it.** The sampler calls it on every tick (20 s). It runs as a launchd agent in the operator's `gui/502`
 domain, which is the Aqua session: exactly where a window can appear. When `should_show` is true and the dialog is not
-already running (its single-instance lock, D5), the sampler launches it **detached** (`subprocess.Popen` with an argv
-list, `start_new_session=True`, never waited on) and records `last_shown`. **The build never waits on the dialog.**
+already running (its single-instance lock, D5), the sampler launches it **detached** and records `last_shown`. The launch
+is `subprocess.Popen` with an argv list, `start_new_session=True`, explicit `close_fds=True`, and stdio set to
+`/dev/null` or a log file. It is never waited on. `bin/ade-job-run` makes its admission-lock fd inheritable, and a
+long-lived dialog or status item that kept that fd would make `ade-sched reconcile` defer forever. **The build never waits on the dialog.**
 Admission, the starvation valve and the CI offload run exactly as if the dialog did not exist.
 
 C6. **DECIDE C6: the trigger lives in the sampler (recommended), not in `admit` or `bg`.** `bg` lives in
@@ -158,16 +170,24 @@ D4. **Actions out.** Each click runs `bin/gui-hog` through `Process` with `execu
 (b) `freeze --pid P --start S --minutes 10|--indefinite`;
 (c) `resume --entry ID`;
 (d) `log --event ...`.
-Quit and Force Quit run `vet` first. Swift then re-checks `NSRunningApplication(processIdentifier:)` against the
-snapshot's bundle id and its `launchDate` against `start` (one-second tolerance), and only then calls
-`terminate()` / `forceTerminate()`.
+The bundle id, start and path on the argv are only **expected values**. `vet` and `freeze` read the bundle id, bundle
+path, executable and start time from the **live pid** (F3). They refuse on any mismatch, and they check the protected
+list against the live values, never the argv. `freeze` runs the `vet` checks itself, on the root and on every member it
+is about to stop, so it never relies on Swift having called `vet`. Quit and Force Quit run `vet` first. Swift then
+re-checks `NSRunningApplication(processIdentifier:)`: its bundle id against the snapshot, and its `launchDate` against
+`start` (one-second tolerance). A nil `launchDate` means refuse. Only then does it call `terminate()` or
+`forceTerminate()`.
 
-D5. **Exit codes of `ade-gui-hog`** (logged by the sampler on its next tick through a pid file; nothing blocks on them):
+D5. **Exit codes of `ade-gui-hog`.** The sampler is a one-shot process each tick (`StartInterval` 20 through
+`ade-job-run`), so no later tick can read a detached child's exit status. The dialog therefore records its own outcome:
+it writes `gui-hog/last-exit.json` atomically (`{"code":N,"at":epoch,"by":"dialog"}`), and Ignore runs
+`bin/gui-hog snooze --minutes 60` itself, which writes `snooze_until`. The sampler reads those files. The codes still
+matter for manual runs and tests (nothing blocks on them):
 
 | Code | Meaning | Sampler does |
 |---|---|---|
 | 0 | closed by Wait, by the window's close button, or because the hold ended | nothing; the 30-min rate limit stands |
-| 3 | Ignore | writes `snooze_until = now + 3600` |
+| 3 | Ignore | the dialog has already written `snooze_until = now + 3600` |
 | 4 | closed after Quit All or row actions | logs the event; the rate limit stands |
 | 69 | no window server (`NSApplication` could not connect) | logs `no-gui`, suppresses retries for 30 min |
 | 70 | internal error | logs it with stderr; retries after the rate limit |
@@ -181,13 +201,16 @@ valve still fires.
 ## E. The window
 
 E1. **Header.** "Load 9.8 / 10.4 / 11.2 (10 cores) · CPU 5-min avg 7.9 cores". Below it, one line per held build:
-"`bg pytest` in djbclark-ade, held 4 min for pageins, swapins". The caller label is untrusted text (J3).
+"`bg`, held 4 min for pageins, swapins". The caller label is only what `admit_caller()` gives, a program name from its
+`_CALLER_OK` set (`bin/load-watch` ~2541-2580), never a command line. It is untrusted text (J3).
 
 E2. **Rows** (busiest first, up to 12, then "+N more"): name, then bundle id in small type, cores (5-min, e.g. `1.84`),
 CPU now (top's units, `184%`) and RAM (`3.1 GB`, RSS sum). Each row's buttons, left to right: **Freeze 10 min**,
 **Freeze**, **Quit**, **Force Quit…** (it opens a confirm sheet). A frozen row shows a "frozen until 3:42 PM" badge (or
 "frozen") and only **Resume** and **Quit** (Quit resumes first, G3). Protected apps are not listed. A footer line counts
-them ("4 protected apps hidden").
+them ("4 protected apps hidden"). An app whose tree contains a build or terminal subtree (C4b), such as an IDE with a
+running terminal, is listed greyed out: "has a terminal or build inside: no actions". It has no buttons, and Quit All
+skips it, because freezing or quitting the IDE would stop or kill the build.
 
 E3. **Bottom row**, left to right: **Wait** (it closes with no action, and it is the initial first responder), **Ignore
 1 h**, **Quit All…**. No button has a key equivalent. The window swallows Return and Escape (`cancelOperation:` and
@@ -218,9 +241,9 @@ F1. **State file.** `~/.local/state/load-watch/gui-hog/frozen.json` (mode 0600),
 ```
 
 Writes use the temp file in the same directory, then `fsync`, then `os.replace` (atomic,
-`~/CLAUDE.md` item 2). The previous good file is kept as `frozen.json.prev`. Every read-modify-write holds an
-`fcntl.flock` on `frozen.lock` with a 5 s timeout. If the lock times out, no signal is sent and the error is shown in the
-row.
+`~/CLAUDE.md` item 2). The previous good file is kept as `frozen.json.prev`. Every `freeze`, `resume` and `thaw` holds an
+`fcntl.flock` on `frozen.lock` for the **whole operation**: the write-ahead record, the signals and the final rewrite.
+A 5 s timeout applies to acquiring the lock. If it times out, no signal is sent and the error is shown in the row.
 
 F2. **Write-ahead.** `freeze` writes the entry as `freezing`, with the root and the members it is about to stop, **before
 it sends any SIGSTOP**. After the pass, it rewrites the entry as `frozen`. `resume` marks the entry `thawing`, sends the
@@ -228,7 +251,9 @@ SIGCONTs, then deletes the entry. A crash at any point therefore leaves a record
 stopped. Any entry still `freezing` or `thawing` after 60 s is resumed by the next sampler tick.
 
 F3. **Process identity (pid-reuse defence).** A process is identified by four things: pid, start time, uid and
-executable path. Start time comes from `ps -o lstart= -p PID` under `LC_ALL=C TZ=UTC`, as in `bin/claude_identity.py`
+executable path. The executable path comes from the kernel, never from argv[0] or `ps comm`, which a process sets
+itself: `proc_pidpath` from `libproc.dylib` through stdlib `ctypes` on macOS, and `/proc/PID/exe` on Linux. Start time
+comes from `ps -o lstart= -p PID` under `LC_ALL=C TZ=UTC`, as in `bin/claude_identity.py`
 and `bin/ade_install.py:2958`. On Linux CI it comes from `/proc/PID/stat`. Swift reads it with
 `proc_pidinfo(PROC_PIDTBSDINFO)` (`pbi_start_tvsec`), the public libproc call that other macOS tools use for the same
 check. Before **every** SIGSTOP, SIGCONT, terminate or forceTerminate, all four are re-read and must match. A mismatch
@@ -237,7 +262,8 @@ stopped process with state `T`. `resume` checks that each member is still in `T`
 that is no longer stopped, which means something else resumed it.
 
 F4. **Whole-tree freeze and the fork race.** The order is:
-(a) list the tree (descendants by ppid, plus processes whose executable sits inside the bundle);
+(a) list the tree (descendants by ppid, plus processes whose executable sits inside the bundle). The walk stops at build
+and terminal subtrees (C4b), and an app that has one is refused outright (E2);
 (b) stop the **root first**, so it cannot spawn more helpers;
 (c) stop each listed member, after recording it (F2);
 (d) list the tree again and stop newcomers, at most 3 passes.
@@ -248,8 +274,11 @@ app (ppid 1, for example `com.apple.WebKit.WebContent` for Safari) are not in th
 "some helpers kept running".
 
 F5. **Every thaw path:**
-(a) **timed**: the sampler runs `gui-hog thaw --due` on every tick, so a 10-min freeze resumes within 20 s of its time.
-The `--status-only` menu item runs the same check on its own 20 s timer, which gives two independent clocks;
+(a) **timed**: the sampler runs `gui-hog thaw --due` **first** on every tick, in its own `try`, before `ps_table()`. A
+`ps` timeout makes `cmd_sample` return early (`bin/load-watch` ~1484-1488), and this order keeps a thaw from waiting on
+it. A due freeze resumes within one tick. That is normally 20 s, but launchd has run ticks 3-7 min apart under a
+load-60 stall (`bin/load-watch` ~1477), so 20 s is not a guarantee. The `--status-only` menu item runs the same check on
+its own 20 s timer, which gives two independent clocks;
 (b) **startup**: the dialog and the status item each run `thaw --due --stale` when they start;
 (c) **crash**: (a) and F2 cover it;
 (d) **reboot or logout**: the stopped processes are gone. The first tick after login drops every entry whose identity no
@@ -257,11 +286,13 @@ longer matches, and logs one line per entry;
 (e) **sleep**: `thaw_at` is wall-clock time, so a freeze that came due during sleep resumes on the first tick after
 wake;
 (f) **load-watch uninstalled**: `load-watch uninstall` runs `gui-hog thaw --all` first, and refuses to go on if that
-fails.
+fails. `ade-sched uninstall` or `reconcile`, or a bare `launchctl bootout`, bypasses this. The status item's timer (a)
+and the escape hatch (F7) cover that case. The PR 3c slice also adds the same thaw to `ade-sched`'s removal of this job.
 
 F6. **Protected list.** Built-in defaults live in `config/gui-hog.toml` `[protected]`. Local additions go in
-`~/.config/load-watch/gui-hog.toml`, which can **add**, never remove. Matching is by **bundle id**, by **bundle path
-prefix** or by **executable realpath**, never by display name, which anyone can set (J3). A **hard floor** in code that
+`~/.config/load-watch/gui-hog.toml`, which can **add**, never remove. Matching uses the **live** values (D4) and is by **bundle id**, by **bundle path prefix** or by **executable
+realpath**, never by display name, which anyone can set (J3). Prefix matching compares realpath **components**: a rule
+for `/Applications/Ghostty.app` matches `/Applications/Ghostty.app/Contents/...` but not `/Applications/Ghostty.app.x/`. A **hard floor** in code that
 config cannot lift:
 (a) pid 1, and any process whose uid is not the operator's;
 (b) WindowServer, Dock (`com.apple.dock`), loginwindow (`com.apple.loginwindow`), Finder (`com.apple.finder`),
@@ -272,7 +303,8 @@ SystemUIServer (`com.apple.systemuiserver`), Control Center (`com.apple.controlc
 (e) every ancestor or descendant of a held caller or of a Paseo agent CLI (the build itself).
 The configurable defaults are Paseo (`sh.paseo.desktop`, `sh.paseo.desktop.helper`), terminals (Ghostty, Terminal,
 iTerm2, WezTerm, kitty), Hermes, VPN and proxy apps (`io.tailscale.ipn.macsys` was running on 2026-11-14; WireGuard),
-CoreSimulator, Docker or container, password managers, and conferencing apps during a call. Bundle ids that were not
+Simulator and CoreSimulator (`com.apple.CoreSimulator.CoreSimulatorService` was running on 2026-11-14), Docker or
+container, password managers, and conferencing apps during a call. Bundle ids that were not
 seen running get checked against `lsappinfo` or `mdls` when the config is written, so no id is guessed.
 
 F7. **Manual escape hatch.** These do not depend on the dialog:
@@ -289,7 +321,7 @@ F8. **Failure-mode table.**
 | # | Failure | Effect | Defence |
 |---|---|---|---|
 | 1 | Dialog crashes while apps are frozen | timed apps still due | sampler `thaw --due` (F5a); the status item is relaunched (E5) |
-| 2 | Sampler not loaded | timed freezes would not resume | `freeze` refuses unless `launchctl print gui/502/com.djbclark.load-watch` shows the job loaded; the status-item timer is the second clock |
+| 2 | Sampler not loaded | timed freezes would not resume | `freeze` refuses unless `launchctl print gui/$(id -u)/com.djbclark.load-watch` shows the job loaded (the uid is read, never hard-coded); the status-item timer is the second clock |
 | 3 | Crash between SIGSTOP and the record | an unrecorded stopped process | write-ahead `freezing` entry (F2); swept after 60 s |
 | 4 | Pid reused after the app exits | SIGCONT or SIGSTOP hits a stranger | 4-part identity check before every signal (F3) |
 | 5 | Reboot or logout | entries point at dead pids | pruned at the first tick (F5d) |
@@ -304,6 +336,7 @@ F8. **Failure-mode table.**
 | 14 | Frozen app was in a call or playing audio | call drops, audio glitches | conferencing and audio apps are protected by default; Freeze has no confirm because Resume is one lossless click (**DECIDE F8-14: confirm before an indefinite Freeze? Recommended: no**) |
 | 15 | Lock timeout or hang | no action | 5 s `flock` timeout; error shown in the row; no signal sent |
 | 16 | An agent runs `gui-hog freeze` itself | breaks "never automatic" | rule in `skills/loadwatch/SKILL.md` and this doc; every event logs `by`; accepted because same-uid processes can already `kill -STOP` (J1) |
+| 17 | An IDE (VS Code, JetBrains) runs a build in its terminal or a Gradle daemon | Freeze or Quit would stop or kill the build; its compiler would count as a GUI hog | the tree walk stops at shells, ptys, `bg`, agent CLIs and reservation holders (C4b); such an app is listed without actions and skipped by Quit All (E2, G4) |
 
 F9. **What freezing does not do.** SIGSTOP frees **CPU**, not RAM. A stopped app's pages only go cold, and the
 compressor or swap may reclaim them over time. Resuming can then cause a burst of page-ins, which is the very gate that
@@ -328,8 +361,10 @@ G3. **Quitting a frozen app.** A stopped app cannot answer the Quit event, so Qu
 `terminate()`.
 
 G4. **Quit All** calls `terminate()` (graceful) on **only the rows shown** that are not frozen. A confirm sheet lists
-them, Cancel is its default, and it never Force Quits. Protected apps and the build's own tree are never rows (C4,
-F6), so Quit All cannot touch the build. Another app's unsaved state cannot be read without Accessibility permission:
+them, Cancel is its default, and it never Force Quits. Protected apps are never rows. The build's own tree is never a
+row either: a held build's ancestry is excluded, and an app with a build or terminal subtree inside it (an IDE running
+`make` in its terminal) is listed without actions and skipped (C4, E2, F6). So Quit All cannot quit an app that hosts a
+build. Another app's unsaved state cannot be read without Accessibility permission:
 `NSRunningApplication` has no "dirty" property. So the safety comes from graceful terminate's own save sheet, not from
 detection. **DECIDE G4: ask for Accessibility permission to pre-detect "Edited" windows? Recommended: no.** It adds a
 TCC grant and adds nothing, because graceful quit already protects unsaved work.
@@ -339,12 +374,15 @@ TCC grant and adds nothing, because graceful quit already protects unsaved work.
 H1. **Linux CI (pytest-linux, the required check) covers all Python:**
 (a) `should_show` as a table test: hold time, which gates refused, sum versus threshold, rate limit, snooze, the
 non-build exclusion;
-(b) app grouping from fixture `ps` and `lsappinfo` text;
+(b) app grouping from fixture `ps` and `lsappinfo` text, including an IDE fixture whose terminal runs `make`: its cores
+are not counted, and the app is listed without actions;
 (c) protected matching, including a spoofed display name, a config that tries to remove a hard-floor entry, and a
 bundle-path prefix;
 (d) the frozen-list state machine (freezing, frozen, thawing, gone), driven by a fake clock and a temp state directory;
 (e) identity mismatch for each of the four fields;
-(f) the hold registry's write, sweep and stale rules in `admit`.
+(f) the hold registry's write, sweep and stale rules in `admit`, plus a test that a broken `gui_hog` import or a failing
+write leaves `admit`'s verdict and exit code unchanged;
+(g) `vet` and `freeze` refusing when the argv's expected bundle id or path differs from the live values.
 H1a. **Real signals on Linux.** The freeze tests start a throwaway `sleep` parent with two children and SIGSTOP and
 SIGCONT them for real: Linux `ps` state `T`, and `/proc` start times. That proves the tree order, the 3-pass rescan and
 the write-ahead recovery with no Mac. They run as `bg bin/pytest -k gui_hog`, one tree at a time (footer rule 16). New
@@ -405,8 +443,9 @@ J2. **No shell anywhere.** Swift uses `Process` with an `arguments` array. Pytho
 `osascript` is used, and no name, bundle id or path is ever put into a command string.
 
 J3. **Untrusted display text.** An app sets its own name, so names, bundle ids and caller labels are untrusted. They are
-set as plain `NSTextField.stringValue` (never attributed or HTML), stripped of control and bidi-override characters
-(U+202A–U+202E, U+2066–U+2069) and clipped to 60 characters. Identity and protection never use the name. An app that
+set as plain `NSTextField.stringValue` (never attributed or HTML), stripped of C0 and C1 control characters, bidi and
+zero-width marks (U+061C, U+200B–U+200F, U+202A–U+202E, U+2066–U+2069) and line or paragraph separators (U+2028,
+U+2029), and clipped to 60 grapheme clusters, never in the middle of one. Identity and protection never use the name. An app that
 *claims* a protected bundle id becomes protected, which is the safe direction. A path match needs the realpath.
 
 J4. **The snapshot is data.** The dialog never signals or quits anything because the snapshot says so. Every action
