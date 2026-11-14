@@ -388,8 +388,12 @@ def test_an_app_absent_from_the_latest_sample_has_no_rss_but_keeps_its_cpu_mean(
     assert not gh.should_show(hold_, gh.window_means(st, NOW, cfg(min_cores=5.0)), NOW, None, None, cfg(min_cores=5.0))["show"]   # an exited 3 GB app no longer shows
     st["apps"].append({"t": NOW + 20, "cpu": 1, "a": {"800": [0.1, 3000]}})                                                        # back in the newest sample: RSS counts again
     assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 3000
-    st["apps"].reverse()                                                                                                           # list order is not time order
-    assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 3000
+    # list order is not time order: the newest sample by time (the 777 MB reading at NOW + 20) wins, wherever it sits in the list
+    st["apps"] = [{"t": NOW + 20, "cpu": 1, "a": {"800": [0.1, 777]}}, {"t": NOW, "cpu": 1, "a": {"800": [0.1, 3000]}},
+                  {"t": NOW - 20, "cpu": 1, "a": {"800": [0.1, 5000]}}]
+    assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 777
+    st["apps"].append({"t": NOW + 10, "cpu": 0, "a": {}})                  # a later list entry that is older than the newest by time changes nothing
+    assert gh.window_means(st, NOW + 20, cfg())[0]["rss_mb"] == 777
 
 
 def test_window_trims_to_window_s_and_drops_unused_meta():
