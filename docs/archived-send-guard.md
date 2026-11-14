@@ -68,8 +68,8 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    text is blanked, so a `paseo send` or an id inside a message is text, unless it is a quoted id or list of ids, a
    `"${VAR:-id}"` expansion, a `$(...)` or backtick body, the argument of such a runner (not after `echo`, `printf`, `grep`,
    `rg`, `sed`, `awk`), or the command has a shell word outside quotes (then nothing is blanked; a shell word inside message text does not count).
-   inside a message is text. A false denial needs an archived agent's id in a command that mentions `paseo send` outside
-   quotes. The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
+   A false denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, or one shell word
+   (`bash x.sh`) anywhere outside quotes, which un-blanks every string in the command (accepted: the denial says how to get out). The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
    Known limits of the backstop (adversary r5, ls-04 r1, accepted): only **full** ids are judged, so a prefix or a name inside
    such a form is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can
    push it out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; a command that merely *talks

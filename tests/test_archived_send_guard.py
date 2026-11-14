@@ -394,6 +394,18 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f'echo -e "old: paseo send {A}"; paseo send -- {B} hi', []),  # r3 A6: echo's -e takes text
     (f'paseo send --json --no-wait -- {B} --prompt "LEAD {B} took over from {A}. Reply with paseo send from bash: ack {B}"', []),  # r3 A3
     (f'git commit -m "fix: paseo send {A} in the sh wrapper"', []),
+    (f"echo 'paseo send {A} hi' | \"sh\"", [A]),  # r4 B1: a quoted shell name
+    (f"echo 'paseo send {A} hi' | \"/bin/bash\"", [A]),
+    (f"echo 'paseo send {A} hi' | '/bin/sh'", [A]),
+    (f"awk 'BEGIN {{ system(\"paseo send {A} hi\") }}'", [A]),  # r4 B2: awk and the GNU stream editor can run a command themselves
+    (f"s" + f"ed -e '1e paseo send {A} hi' f", [A]),
+    (f'printf -e "old: paseo send {A}"; paseo send -- {B} hi', []),  # r4 B6: NO_RUN holds printf and grep
+    (f'grep -e "paseo send {A}" log; paseo send -- {B} hi', []),
+    (f". <(echo 'paseo send {A} hi')", [A]),
+    (f"echo 'paseo send {A} hi' | ${{SHELL}}", [A]),
+    (f'SIBS=" {A} {B}"; for id in $SIBS; do paseo send "$id" hi; done', [A, B]),
+    (f'paseo send -- "$NEW" --prompt "took over from {A}"; ./run.sh', []),  # `.sh` is not a shell word
+    (f'cat bash.log; paseo send -- "$NEW" --prompt "took over from {A}"', []),
     (f"paseo send -- {A} hi", []),  # found by the parser: nothing extra
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
@@ -458,6 +470,8 @@ def test_the_backstop_scan_is_linear_on_a_long_command_without_blanks():
     t0 = time.monotonic()  # only the backstop is timed: the shlex pass in targets_in_command is not what r3 A2 measured
     gate.backstop_targets(blob, [(A, None)])
     gate.backstop_targets("echo '" + "x" * 300_000 + "' > f", [])  # no `paseo`: returns at once
+    many = "paseo send x; " + "echo 'a b' " * 4000  # r4 B4: every quoted string used to rescan its whole command
+    gate.backstop_targets(many, [])
     assert time.monotonic() - t0 < 1.0
 
 

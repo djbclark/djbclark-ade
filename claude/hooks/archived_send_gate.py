@@ -147,17 +147,19 @@ def strip_comments(text: str) -> str:
     return "".join(out)
 
 
-RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at", "tmux", "osascript"}  # words that run a string argument
-NO_RUN = {"echo", "printf", "grep", "rg", "sed", "awk"}  # their `-e`/`-c` flags take text, not a command: `echo -e "old: paseo send A"`
+RUNNERS = {"eval", "watch", "su", "fish", "script", "parallel", "ssh", "at", "tmux", "osascript", "awk", "gawk", "mawk"}  # words that run a string argument (awk: `system("...")`)
+NO_RUN = {"echo", "printf", "grep", "rg"}  # their `-e`/`-c` flags take text, not a command: `echo -e "old: paseo send A"`
 RUN_FLAG = re.compile(r"-[A-Za-z]*[ce][A-Za-z]*|--command(=.*)?|--run(=.*)?")  # `-c`, `-lc`, `-e`, `--run=`: the next word is a command string
 # A shell in the (already masked) text may read a script from stdin: `| sh`, `bash <<<`, `| $SHELL`, `source <(...)`. No `\S*/` prefix:
 # the lookbehind already matches after a `/`, and the prefix made the scan quadratic on a long blob without blanks.
 SHELL_WORD = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(SHELLS)) + r")(?![\w.-])|\$\{?SHELL\b\}?|(?<![\w.-])(?:source|\.)\s+<\(")
+SHELL_BODY = re.compile(r"(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")")  # a quoted shell name: `| "sh"`, `| '/bin/bash'`
 IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)+")
 
 
 def _mask(text: str) -> str:
-    out, words, word = [], [], []
+    out, word = [], []
+    first, runner = "", False  # the first word of this simple command; has a runner word or flag come before the string?
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -170,9 +172,11 @@ def _mask(text: str) -> str:
             if j >= n:
                 return text
             body = text[i + 1:j]
-            runs = (any(Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) for w in words + ["".join(word)])
-                    and not (words and Path(words[0]).name in NO_RUN))
-            keep = (runs or IDS_ONLY.fullmatch(body) is not None  # a quoted id (or a list of ids) is a target, not message text
+            cur = "".join(word)
+            runs = ((runner or Path(cur).name in RUNNERS or RUN_FLAG.fullmatch(cur) is not None)
+                    and Path(first or cur).name not in NO_RUN)
+            keep = (runs or SHELL_BODY.fullmatch(body) is not None  # `| "sh"` is still a shell reading stdin
+                    or IDS_ONLY.fullmatch(body) is not None  # a quoted id (or a list of ids) is a target, not message text
                     or (q == '"' and (("$(" in body or "`" in body)  # a real substitution
                                       or ("$" in body and not re.search(r"\s", body)))))  # `"${LEAD:-<id>}"`, `"$SHELL"`
             out.append(text[start:j + 1] if keep else "''")
@@ -185,10 +189,12 @@ def _mask(text: str) -> str:
         else:
             if c.isspace() or c in ";&|()":
                 if word:
-                    words.append("".join(word))
+                    w = "".join(word)
+                    first = first or w
+                    runner = runner or Path(w).name in RUNNERS or RUN_FLAG.fullmatch(w) is not None
                     word.clear()
                 if c in ";&|()":
-                    words.clear()
+                    first, runner = "", False
             else:
                 word.append(c)
             out.append(c)
