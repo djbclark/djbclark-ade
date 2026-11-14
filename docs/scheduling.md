@@ -420,15 +420,17 @@ without `--all-local` only those qualify and the lead is excluded. Only the loca
 `PASEO_HOST` is dropped), so a remote host's agents never qualify. **In every mode the job skips, and leaves for the operator, a request that looks like a question or plan
 approval** (`AskUserQuestion`, `ExitPlanMode`, Codex `request_user_input` / `CodexMcpElicitation`, Pi and OMP
 `select|input|editor|confirm`, ACP `switch_mode`, and any name carrying a question, plan, ask, mode, prompt or
-elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. Matching is on
-word boundaries (2026-11-14: `Task`, `TaskStop`, `task_user` are tools, `ask_user` is not), and a well-formed
-`mcp__<server>__<tool>` name is a third-party tool prompt: only a tool that is itself a question or elicitation
-(`question`, `elicit…`, `ask_user`, `user_input`, `exit_plan…`, `switch_mode`, …) stays pending, so `send_agent_prompt`,
-`set_agent_mode` and `browser_select` are approved. `EnterPlanMode` stays pending too (a mode change). Every audit row
-carries `tool` (the row's `name` field only, at most 200 characters, never arguments or descriptions) and `rule` (the
-denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`, `kind`, `missing-name`, `malformed-mcp-name`;
-`null` when no rule matched, i.e. an approved or out-of-scope tool prompt), so a skipped request can be told apart from a
-misclassified one. The check is a
+elicitation word, or a missing name): it is logged `skip` / `operator-question` and stays pending. Words are split on separators and camelCase
+(2026-11-14: `Task`, `TaskStop`, `task_user` are tools, `ask_user` is not; the long stems `question`, `elicit`, `exitplan`,
+`planapproval`, `switchmode`, `userinput`… still match inside a run-together or all-caps name). A well-formed
+`mcp__<server>__<tool>` name is a third-party tool prompt: only a tool that is itself a question or elicitation stays pending, so
+`browser_select`, `ask_gemini` and `create_agent` are approved. MCP tools that act on another agent's cards or mode
+(`respond_to_permission`, `set_agent_mode`, `send_agent_prompt`; rule `mcp-hold:<tool>`) stay pending too, and so does
+`EnterPlanMode` (a mode change). Every audit row carries `tool` (the row's `name` field only; `<redacted>` unless the agent's
+provider is classified and the name is an identifier, because ACP titles are free text and can be command lines; never
+arguments or descriptions) and `rule` (the denylist rule that matched: `stem:<stem>`, `token:<word>`, `ui-token:<word>`,
+`mcp-hold:<tool>`, `kind`, `missing-name`, `malformed-mcp-name`; `null` when no rule matched, i.e. an approved or out-of-scope
+tool prompt), so a skipped request can be told apart from a misclassified one. The check is a
 best-effort, name-based denylist (`permit ls --json` rows carry no `kind`; one is honoured when present): a missing or
 empty name fails closed, but a question whose name is not listed would be approved, so only agents whose provider is
 `claude`, `codex`, `opencode`, `pi` or `omp` (names read from Paseo's source) are served; agents of any other provider,

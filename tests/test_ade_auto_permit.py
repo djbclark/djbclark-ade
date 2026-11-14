@@ -342,8 +342,7 @@ def test_agent_missing_from_listing_is_outside_scope_in_every_mode(tmp_path):
 # tools whose names carry prompt/mode/plan/ask/select words, and Codex/OpenCode/OMP tool names.
 FALSE_POSITIVES = ['Task', 'TaskStop', 'TaskOutput', 'Agent', 'Skill', 'ToolSearch', 'EnterWorktree', 'ExitWorktree',
                    'CronCreate', 'SendMessage', 'CodexBash', 'CodexFileChange', 'external_directory', 'bash', 'edit',
-                   'task_user', 'Explanation', 'mcp__paseo__send_agent_prompt', 'mcp__paseo__set_agent_mode',
-                   'mcp__paseo__create_agent', 'mcp__paseo__browser_select', 'mcp__x__ask_gemini',
+                   'task_user', 'Explanation', 'mcp__paseo__create_agent', 'mcp__paseo__list_agents', 'mcp__paseo__browser_select', 'mcp__x__ask_gemini',
                    'mcp__plan-server__list_items', 'mcp__x__approve_pull_request', 'mcp__x__task_user_list',
                    'mcp__claude_ai_Gmail__create_draft', 'mcp__x__Ask']
 # Anything that is a question, plan or mode approval or elicitation must still be skipped, MCP-wrapped or not.
@@ -352,6 +351,8 @@ STILL_QUESTIONS = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode', 'request_
                    'CodexPlanApproval', 'switch_mode', 'question', 'Pi ask_user', 'Pi select', 'OMP ask', 'OMP confirm',
                    'mcp__x__AskUserQuestion', 'mcp__paseo__progress_question_ask', 'mcp__x__ask_user',
                    'mcp__x__elicitation', 'mcp__x__request_user_input', 'mcp__x__plan_approval', 'mcp__x__exit_plan_mode',
+                   'mcp__paseo__respond_to_permission', 'mcp__paseo__set_agent_mode', 'mcp__paseo__send_agent_prompt',
+                   'mcp__x__Send-Agent-Prompt', 'CODEXMCPELICITATION', 'codexplanapproval', 'requestuserinput', 'getuserinput',
                    'mcp__ask', 'mcp____mode', 'mcp__x__', 'mcp__', 'MCP__x__ask']
 
 
@@ -369,6 +370,7 @@ def test_stems_start_on_word_boundaries_only():
     assert module['classify']({'name': 'AskUser'}) == 'stem:askuser'
     assert module['classify']({'name': 'task_user'}) is None  # "askuser" inside "taskuser" is not a boundary
     assert module['classify']({'name': 'exitplanmode'}) == 'stem:exitplan'
+    assert module['classify']({'name': 'CODEXMCPELICITATION'}) == 'stem:elicit'  # long stems match inside the run-together name
     assert module['classify']({'name': 'Exit_Planmode'}) == 'stem:exitplan'
     assert module['classify']({'name': 'x', 'kind': 'question'}) == 'kind'
     assert module['classify']({'name': None}) == 'missing-name'
@@ -377,19 +379,36 @@ def test_stems_start_on_word_boundaries_only():
 
 def test_audit_rows_record_tool_name_and_rule_but_no_arguments(tmp_path):
     reqs = [req(OTHER, 'a', 'Bash'), req(OTHER, 'b', 'mcp__paseo__send_agent_prompt'),
-            req(OTHER, 'c', 'AskUserQuestion'), req(CHILD, 'd', 'x' * 500), req(CHILD, 'e', 'Bash')]
-    result, calls = run_fake(tmp_path, {'requests': reqs, 'local': [OTHER], 'providers': {OTHER: 'claude/x', CHILD: 'copilot'}},
+            req(OTHER, 'c', 'AskUserQuestion'), req(OTHER, 'd', 'Pi select'), req(CHILD, 'e', 'Bash'),
+            req(LEAD, 'f', 'mcp__x__' + 'y' * 300)]
+    result, calls = run_fake(tmp_path, {'requests': reqs, 'local': [OTHER, LEAD], 'providers': {OTHER: 'claude/x', LEAD: 'claude/x'}},
                              '--all-local')
     assert result.returncode == 0, result.stderr
     rows_ = audit_rows(tmp_path)
     assert [(r['request'], r['decision'], r['tool'], r['rule']) for r in rows_] == [
         ('a', 'allow-attempt', 'Bash', None), ('a', 'allowed', 'Bash', None),
-        ('b', 'allow-attempt', 'mcp__paseo__send_agent_prompt', None), ('b', 'allowed', 'mcp__paseo__send_agent_prompt', None),
-        ('c', 'skip', 'AskUserQuestion', 'stem:question'),
-        ('d', 'skip', 'x' * 200, None), ('e', 'skip', 'Bash', None)]
-    assert [r['reason'] for r in rows_ if r['decision'] == 'skip'] == ['operator-question', 'outside-scope', 'outside-scope']
+        ('b', 'skip', 'mcp__paseo__send_agent_prompt', 'mcp-hold:send_agent_prompt'),
+        ('c', 'skip', 'AskUserQuestion', 'stem:question'), ('d', 'skip', 'Pi select', 'ui-token:select'),
+        ('e', 'skip', '<redacted>', None), ('f', 'allow-attempt', '<redacted>', None), ('f', 'allowed', '<redacted>', None)]
+    assert [r['reason'] for r in rows_ if r['decision'] == 'skip'] == ['operator-question'] * 3 + ['outside-scope']
     assert 'SECRET' not in (tmp_path / 'audit.jsonl').read_text()
     assert all(set(r) == {'time', 'decision', 'reason', 'agent', 'request', 'tool', 'rule'} for r in rows_)
+
+
+def test_free_text_acp_titles_are_never_logged(tmp_path):
+    title = 'Run curl -H "Authorization: Bearer SECRET-TOKEN" https://example.invalid'
+    reqs = [req(OTHER, 'a', title), req(CHILD, 'b', 'Bash')]
+    result, calls = run_fake(tmp_path, {'requests': reqs, 'local': [OTHER, CHILD],
+                                        'providers': {OTHER: 'cursor-acp/auto', CHILD: 'claude/x'}}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert [(r['request'], r['reason'], r['tool']) for r in audit_rows(tmp_path) if r['decision'] == 'skip'] == \
+        [('a', 'unclassified-provider', '<redacted>')]
+    assert 'SECRET-TOKEN' not in (tmp_path / 'audit.jsonl').read_text()
+    module = runpy.run_path(str(SCRIPT))
+    assert module['tool_name']({'name': title}, 'claude') == '<redacted>'  # not an identifier even for a classified provider
+    assert module['tool_name']({'name': 'OMP ask'}, 'omp') == 'OMP ask'
+    assert module['tool_name']({'name': 'Bash'}, 'copilot') == '<redacted>'
+    assert module['tool_name']({'name': 7}, 'claude') is None
 
 
 def test_unnamed_and_non_string_names_log_a_null_tool_and_stay_pending(tmp_path):
