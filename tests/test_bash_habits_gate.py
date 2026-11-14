@@ -775,3 +775,107 @@ def test_gw04_lead_review_lows_are_denied(command):
 ])
 def test_gw04_lead_review_lows_compliant_and_one_shots_pass(command):
     assert not denied(command), command
+
+
+# --- gs-02 (2026-11-14): an unquoted `=word` (zsh `=cmd` expansion) and backticks / `$(` in a double-quoted `paseo send` argument ---
+@pytest.mark.parametrize("command", [
+    "echo ===",
+    "echo ====; echo next",
+    "echo a; echo ==; echo b",
+    "echo ==",
+    "echo =b",
+    'echo ="x"',
+    "echo ==$e",
+    "print -r -- ===",
+    'printf "%s\\n" ===',
+    "ls =nonexist",
+    "[ a == a ] && echo ok",
+    "test a == a",
+    "echo a | cat; echo === | cat",
+    "x=1 echo ===",
+    "echo $(echo ===)",
+    "bash -c 'true'; echo ===",
+    "echo a;===",                                   # glued to the operator
+    "true&&==x",
+    "echo a|===",
+])
+def test_gs02_unquoted_equals_word_is_denied(command):
+    assert denied(command), command
+    assert "starts with `=`" in run(command)["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "echo =",
+    "echo '==='",
+    'echo "==="',
+    "echo \\===",
+    "echo a=b --x=y c==d",
+    "x==y",
+    "echo =(true)",
+    "[[ a == a ]] && echo ok",
+    "[[ a == a && b == b ]]; echo ok",
+    "(( 1 == 1 )) && echo ok",
+    "echo $((1==1))",
+    "if [[ $x =~ ^a ]]; then echo y; fi",
+    "echo hi # ===",
+    "cat <<'EOF'\n===\n====\nEOF",
+    "git diff --stat -- a=b",
+    "echo '---'; echo --- ; echo -=-",
+    "[ a = a ]",
+])
+def test_gs02_equals_lookalikes_pass(command):
+    assert not denied(command), command
+
+
+SEND_DENY = [
+    'paseo send --json --no-wait ab "see `foo` call"',
+    'paseo send ab "x $(date)"',
+    'paseo send --json ab "x `y`" --no-wait',
+    'paseo agent send ab "run $(x)"',
+    'paseo --json send ab "`z`"',
+    'env -u A -u B paseo send ab "`z`"',
+    'ADE_ALLOW_ARCHIVED_SEND=ab paseo send ab "fix `x`"',
+    'python3 skills/session-finder/relay.py ab "a `b`"',
+    '~/src/djbclark-ade/skills/session-finder/relay.py --ack me ab "$(cat msg)"',
+    'echo hi; paseo send ab "text `x` more"; echo done',
+    'paseo send ab "nested $(echo "$(date)") text"',
+    'paseo send ab "a" "b `c`"',
+    'bg paseo send ab "`x`"',
+]
+
+
+@pytest.mark.parametrize("command", SEND_DENY)
+def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denied(command):
+    assert denied(command), command
+    assert "BEFORE paseo starts" in run(command)["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "paseo send ab 'see `foo` call'",
+    "paseo send ab 'x $(date)'",
+    'paseo send ab "plain text, no substitution"',
+    'paseo send ab "$LEAD"',
+    'paseo send ab "price is \\$5 and \\`quoted\\`"',
+    'paseo send ab "\\$(not run)"',
+    'paseo send ab "it\'s fine"',
+    'echo "`date`"; paseo send ab ok',
+    'echo "paseo send `x`"',
+    'git commit -m "paseo send `x`"',
+    'rg "paseo send `x`" docs',
+    "paseo send ab --prompt-file /tmp/m.txt",
+    'paseo agent inspect "$(cat /tmp/id)" --json',
+    'paseo run "`x`" --name a',
+    'cat <<\'EOF\' | paseo send ab --prompt-file -\nsee `foo` and $(bar)\nEOF',
+    "# paseo send ab \"`x`\"\necho ok",
+    'echo "unterminated paseo send ab "`x`',
+    'paseo run --name send "`x`"',                  # `send` appears, but the verb is `run`
+    'X="$(date)" paseo send ab ok',                  # before the verb: not an argument of the send
+    "cat <<'EOF'\npaseo send ab \"`x`\"\nEOF",        # a heredoc body is data
+    'paseo send ab ok; echo "`date`"',               # the substitution belongs to the next command
+    'paseo send ab ok && echo "$(date)"',
+    'paseo send ab ok | cat "`x`"',
+    '(paseo send ab ok) ; echo "`x`"',
+])
+def test_gs02_send_lookalikes_pass(command):
+    assert not denied(command), command
+

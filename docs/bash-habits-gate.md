@@ -30,3 +30,22 @@ a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before th
 `parallel gh run watch ::: 1 2` (only the fan-out warning fires), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
 loop that sleeps under 60 s). Known false positives (deny side): a compliant watcher after a branch named `env` or `nice` followed by a later word named `gh` (`gh pr checks env -i 60 --watch -R o/gh`), a `bash <<EOF` line, or `bash -c 'gh run watch N'` after a live `$(` in a double-quoted
 message, and `| sh` inside a comment after a data heredoc. The 5000/h quota counts REST and GraphQL separately (`gh pr checks` reads GraphQL).
+
+**Unquoted `=word` (2026-11-14, gs-02).** zsh, this Mac's Bash-tool shell, reads an unquoted word that starts with `=` as the
+path of a command (`=ls` is `/bin/ls`) and, when there is none, prints `zsh: == not found` and **aborts the rest of a `;`
+chain**: `echo ===; next` never ran `next` (the memory note `feedback_zsh_triple_equals_separator.md` did not stop it, so the
+gate does). Probed on this Mac: `echo ===`, `echo ==`, `echo =b`, `echo ="x"`, `echo ==$e`, `ls =nonexist`, `[ a == a ]`, `test a == a`
+and a `case` pattern `=*)` all fail. Denied: any unquoted word of more than one character that starts with `=` and is not `=(`.
+Passes: a lone `=`, `=(cmd)` (process substitution), quoted words (`'==='`), `\===`, `a=b`, `x==y` (not checked: zsh expands the
+assignment value, rare), `--x=y`, `-d=`, heredoc bodies, comments, and the inside of `[[ ... ]]`, `(( ... ))` and `$(( ... ))`
+(write `[ a = b ]` or `[[ a == b ]]`). Use `---` as a separator.
+
+**Backtick or `$(` in a double-quoted `paseo send` argument (2026-11-14, gs-02).** The shell runs that text before paseo starts:
+a worker's `"... the `foo` call ..."` ran `foo` and the message arrived with a hole in it. Denied for `paseo [opts] send`,
+`paseo agent send` and `relay.py` (found past wrappers such as `env -u X`, `bg` and `VAR=x`), when any double-quoted word after the
+verb holds an unescaped backtick or `$(`. Passes: single quotes, `"\`x\`"` and `"\$(x)"` (escaped, literal), `--prompt-file`,
+a quoted heredoc, python argv, a substitution in some other command (`echo "`date`"; paseo send ab ok`), and the words
+`paseo send` inside a quoted string or comment. Known false positive: a deliberate `"$(cat FILE)"` or `"$(paseo ls ...)"` target is
+denied too (the rule stays simple); write the text to a file and use `--prompt-file`, or `BASH_HABITS_GATE_OFF=1`. Not detected: an
+unquoted `$(...)` word, a send built by a script or `eval`, and a quote the scanner cannot pair (it fails open).
+
