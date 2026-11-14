@@ -14,8 +14,8 @@ Three layers:
 2. The installed Codex, through `codex app-server` and `thread/shellCommand` (the `!cmd` path): no model is
    called, a throwaway CODEX_HOME holds the rendered policy, and the tool's real environment is read back.
    Skipped where `codex` is not installed (hosted CI).
-3. The detached-child scrub: what `acp-run` and the relay deliverer would start a Codex with, run through the
-   same probe, shows none of the four owner ids.
+(A third layer, the detached-child scrub of `acp-run` and the relay deliverer, went with those shims on
+2026-11-14; a native Paseo agent is a daemon child and gets the daemon's environment, not the caller's.)
 """
 from __future__ import annotations
 
@@ -274,7 +274,7 @@ class DetachedChildren(unittest.TestCase):
         return {**base_env(self.home), **IN_HERDR, "PASEO_AGENT_ID": "a1", "ORCA_TERMINAL_HANDLE": "t1"}
 
     def test_the_unscrubbed_caller_environment_would_leak_the_ids(self) -> None:
-        # Why the scrub matters now: without it the same Codex hands all six names to its tools.
+        # Why a scrub matters: without one the same Codex hands all six names to its tools (a caller's environment reaches a Codex it launches directly).
         got = tool_env(self.toml, self.caller_env())
         self.assertEqual(sorted(k for k in got if k.startswith("HERDR_")), sorted(HERDR))
 

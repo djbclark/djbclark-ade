@@ -264,6 +264,15 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   The Action never executes, interpolates or checks out anything from a PR. Until the operator's ruleset requires
   the `adversary-marker` status pinned to the App (`docs/review-boundary.md`), nothing enforces any of this
   beyond branch protection's PR requirement.
+* **Gap 4 (2026-11-14, Wave 6 shim deletion).** No committer-identity guard remains. `tools/acp-run` injected a
+  config-based `reference-transaction` hook into every agent's git that refused a ref update to a fresh commit
+  (under 10 minutes old) whose committer was not the operator, and `--no-verify` could not skip it; it was added
+  after the 2026-10-18 incident where a slice copied an upstream maintainer's identity into `.git/config`, then
+  committed and pushed under it. It was off the live dispatch path since 2026-11-06 (acp-dispatch launched `paseo
+  run`), and `acp-run` itself is gone now. Nothing in `bin/ade-git-guard`, `libexec/git-hooks/*` or `claude/hooks/`
+  checks the committer. An agent, or injected content it reads, can set a repo-local `user.name`/`user.email` and
+  push under a third party's name to the operator's public repos. Accepted under the internal-trust ruling
+  (section 5 item 9), recorded so no one assumes the control exists; a port to the ade ref hooks is queue Carried 1c.
 
 ### 4.4 A cloud agent pushes where it should not, or opens a PR
 

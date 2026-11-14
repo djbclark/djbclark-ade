@@ -2298,8 +2298,7 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
     if len(ok) < len(svc.fallback_after):
         return None
     return (f"{svc.name} is a fallback behind {', '.join(svc.fallback_after)} (operator 2026-10-31) and "
-            f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota, or "
-            f"ACP_OPERATOR_APPROVED=route-override")
+            f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota")
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
