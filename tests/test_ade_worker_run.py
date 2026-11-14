@@ -37,6 +37,8 @@ elif a[:2] == ["workspace", "archive"]:
     pass
 elif a[:2] == ["agent", "update"]:
     pass
+elif a[:2] == ["agent", "stop"]:
+    sys.exit(d.get("stop_rc", 0))
 elif a[:2] == ["agent", "inspect"]:
     if "inspect_cwd" not in d or d.get("inspect_rc"):
         sys.exit(d.get("inspect_rc") or 1)
@@ -93,9 +95,9 @@ class Env:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"id": agent_id, "workspaceId": workspace_id, "labels": labels or {}}))
 
-    def run(self, *args):
+    def run(self, *args, cwd=None):
         self.flush()
-        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd)
 
     def calls(self):
         if not self.calls_path.exists():
@@ -706,8 +708,8 @@ def main_env(env):
     return env
 
 
-def interactive(env, *extra, slice_name="op1"):
-    return env.run("--lead", LEAD, "--slice", slice_name, *extra, "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
+def interactive(env, *extra, slice_name="op1", cwd=None):
+    return env.run("--lead", LEAD, "--slice", slice_name, *extra, "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF", cwd=cwd)
 
 
 @pytest.mark.parametrize("flag", [["--placement", "main"], ["--interactive"]])
@@ -850,6 +852,17 @@ def test_footer_refuses_when_the_last_argument_is_not_the_brief(env, rest):
 def test_interactive_legacy_main_migration_uses_the_windows_own_repo(main_env):  # F4
     main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
     r = interactive(main_env, "--interactive", "--cwd", "/somewhere/djbclark-ade")
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
+
+
+def test_interactive_legacy_main_migration_without_cwd_takes_the_windows_repo_not_the_callers(main_env, tmp_path):  # F4, kept
+    """No --cwd: the caller's own directory (here a repo named other-repo) is not checked against the window, so the rename must
+    still use the window's repo. Kills `repo or wsn.repo_of(row["cwd"])` in main_target (the caller's repo winning)."""
+    main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
+    elsewhere = tmp_path / "other-repo"
+    elsewhere.mkdir()
+    r = interactive(main_env, "--interactive", cwd=elsewhere)
     assert r.returncode == 0, r.stderr
     assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
 
@@ -1269,6 +1282,11 @@ def test_a_window_without_a_known_directory_is_checked_after_the_launch(env):
     env.data["inspect_cwd"] = "/repo-main"
     r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
     assert r.returncode == 1 and "started in /repo-main" in r.stderr and "was launched" in r.stderr
+    assert "stopped (interrupted" in r.stderr and ["agent", "stop", AGENT] in [c["argv"] for c in env.calls()]  # not left running
+    env.data["stop_rc"] = 1  # the stop itself failed: say so, the worker is still running
+    r = env.run("--lead", LEAD, "--slice", "s1", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
+    assert r.returncode == 1 and "NOT stopped" in r.stderr
+    del env.data["stop_rc"]
     env.data["inspect_cwd"] = "/repo-claimed-wt"
     r = env.run("--lead", LEAD, "--slice", "s2", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--", "--no-wait", "B")
     assert r.returncode == 0, r.stderr
@@ -1281,6 +1299,7 @@ def test_a_new_window_is_verified_too_and_a_dropped_cwd_is_reported(env):
     env.data["inspect_cwd"] = "/Users/someone"  # what paseo did with --cwd /repo
     r = launch(env)
     assert r.returncode == 1 and "started in /Users/someone" in r.stderr and "was launched" in r.stderr
+    assert "stopped (interrupted" in r.stderr and "dropped --cwd for the new window" in r.stderr
 
 
 def test_a_symlinked_window_cwd_with_a_trailing_slash_matches_the_real_directory(env, tmp_path):
