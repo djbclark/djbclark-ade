@@ -24,7 +24,7 @@ dispatch-footer item 26). Also unwrapped: `deadline run ... -- gh ...`, `bin/gh-
 started from a script or inline Python, `ssh host <<EOF`, `bash -c $'...'`, a shell with more than four words before it
 (`deadline run --on-expire kill -- bash -c ...`), `$'..\\'..'`, a quoted command word (`gh run 'watch'`, `"gh" run watch`), `timeout -k 10 600 gh ...` (options with values),
 a heredoc delimiter with non-word characters (`<<'X-Y'`), a `<<` that is a here-string, shift or quoted/commented text
-(it hides the lines after it), substitutions in an unquoted heredoc body, a comment ending in a backslash, `$(case a in a) ...)`,
+(it hides the lines after it), substitutions in an unquoted heredoc body, a comment ending in a backslash, a nested `"$(... "x's" ...)"` followed by a single-quoted word (the apostrophe pairs with it), `$(case a in a) ...)`,
 a comment holding `)` inside `$(...)`, `eval`, `\\gh`, an alias, flags before the subcommand, wrapper options with values
 (`nice -n 10 gh`, `env -u X gh`), and the same quota burn by another shape (`watch -n 3 gh run view`, a `gh run view`
 loop that sleeps under 60 s). Known false positives (deny side): a `bash <<EOF` line, or `bash -c 'gh run watch N'` after a live `$(` in a double-quoted

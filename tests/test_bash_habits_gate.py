@@ -614,6 +614,13 @@ def test_gh_watch_fixes_for_the_crash_and_the_backtracking_cases():
     "echo \"it's done\"; gh run watch 9; echo 'ok'",                                 # F1
     "git commit -m \"fix: don't block\" && gh run watch 9 && echo 'merged'",
     "git push && echo \"PR's up\"\ngh pr checks 5 --watch\necho 'done'",
+    "x=\"$(echo \"it's\")\"; gh run watch 9",                                        # G1
+    "gh pr comment 5 --body \"$(printf \"Don't merge\")\"; gh run watch 9",
+    "echo \"`echo \"it's\"`\"; gh run watch 9",
+    "printf $'it\\'s\\n'; gh run watch 9",
+    "x=\"$(echo \"it's\")\"; sed -i x f",
+    "gh pr comment 5 --body \"$(printf \"Don't merge\")\"; grep -r x .",
+    "printf $'it\\'s\\n'; sed -i x f",
     "# don't\ngh run watch 9\necho 'x'",
     "bash \\\n<<'EOF'\ngh run watch 9\nEOF",                                         # F2
     "bash -s \\\n  <<'EOF'\ngh run watch 9\nEOF",
@@ -640,6 +647,8 @@ def test_gw02_hidden_watchers_are_denied(command):
     "echo \"$(echo \"don't\") ok\"",
     "printf '%s\\n' \"it's\" '$(gh run watch 9)'",                                    # F1 reverse
     "git commit -m \"it's\" -m 'see $(gh run watch 9)'",
+    "true;# see 'a | sed -i x f'",                                                      # G2
+    "git merge x | tail -2;# $?",
 ])
 def test_gw02_prose_and_one_shots_pass(command):
     assert not denied(command), command

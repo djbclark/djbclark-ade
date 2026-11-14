@@ -120,7 +120,9 @@ FIND_BAD = frozenset({"-printf", "-fprint", "-fprint0", "-fprintf", "-fls", "-re
 def _blank_quotes(s: str) -> str:
     """Blank quoted strings in one left-to-right scan: an apostrophe inside "..." is text (two
     regexes paired it with the next real `'` and hid every command between them), a backslash
-    escapes the next character, and a comment is kept for the comment pass."""
+    escapes the next character (and inside `$'...'`), and a comment is dropped. An unterminated
+    quote stays as one character and the scan goes on after it, so the text after it is still
+    checked (it fails toward denying, as the old regexes did)."""
     out, i, n = [], 0, len(s)
     while i < n:
         ch = s[i]
@@ -129,20 +131,31 @@ def _blank_quotes(s: str) -> str:
             i += 2
         elif ch == "#" and (i == 0 or s[i - 1].isspace() or s[i - 1] in ";&|("):
             j = s.find("\n", i)
-            j = n if j < 0 else j
-            out.append(s[i:j])
-            i = j
+            i = n if j < 0 else j
         elif ch == "'":
-            j = s.find("'", i + 1)
-            j = n if j < 0 else j
-            out.append("''")
-            i = j + 1
+            j = i + 1
+            if out and out[-1] == "$":               # $'...': a backslash escapes the next character
+                while j < n and s[j] != "'":
+                    j += 2 if s[j] == "\\" else 1
+            else:
+                k = s.find("'", j)
+                j = n if k < 0 else k
+            if j >= n:
+                out.append("'")
+                i += 1
+            else:
+                out.append("''")
+                i = j + 1
         elif ch == '"':
             j = i + 1
             while j < n and s[j] != '"':
                 j += 2 if s[j] == "\\" else 1
-            out.append(f'"{RC}"' if "$?" in s[i:j] else '""')
-            i = j + 1
+            if j >= n:
+                out.append('"')
+                i += 1
+            else:
+                out.append(f'"{RC}"' if "$?" in s[i:j] else '""')
+                i = j + 1
         else:
             out.append(ch)
             i += 1
