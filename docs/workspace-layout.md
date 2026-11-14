@@ -65,7 +65,7 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    another lead, is refused, as are two matching windows. A name match with no evidence either way may be adopted by a launch only when no agent in it (any status)
    is unlabelled for this lead, and is recorded only after that launch succeeded; it is **never archived** before that. A window
    made by hand is unrecorded, so a lead that wants it archivable by the helper launches into it first while it is empty. A legacy window is renamed only if its new name is free, after its ownership
-   is recorded. A `--window-middle` that matches nothing while the lead owns another window is refused (never a second window).
+   is recorded. A `--window-middle` that matches nothing while the lead itself placed another window is refused (never a second window); windows only a predecessor placed (inherited through a handoff) do not count, so a successor opens a new window for new work, and with no `--window-middle` `--repo` (or the repo of `--cwd`, else the current directory) narrows several owned windows to that repo's (`archive-window` narrows only by an explicit `--repo`, never a derived one). A launch into an inherited window registers it under the successor, so from then on a mistyped `--window-middle` is refused for it too.
 2. **Why one window:** a top-level `paseo run` with the agent environment stripped (`skills/fan-out` section 3) creates a new
    "master" window per launch, because its cwd is the repo's `master` checkout; 11 piled up on 2026-11-13 and archiving an
    agent does not remove its window.
@@ -113,7 +113,7 @@ A lead's own-initiative workers and reviewers all go in **one new window per lea
    env-stripped launch still drops `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID`.
    **Windows and workers survive the handoff (2026-11-14):** `ade-worker-run` treats an archived predecessor whose completed
    `ade-self-session` chain ends at `--lead` as that lead: its window record, its `ade.lead=<predecessor>` workers and
-   its legacy-named windows are adoptable by the successor, with no hand step and no new window; a window registered to a
+   its legacy-named windows are adoptable by the successor, with no hand step (new work still gets a new window); a window registered to a
    genuinely different live lead is still refused. The ledger is `handoff-<predecessor>.json`
    ([self-session.md](self-session.md) C0a).
 
