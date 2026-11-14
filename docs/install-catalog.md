@@ -550,6 +550,7 @@ Pass `--ade` only with a durable checkout (`~/src/djbclark-ade`); never with a l
 | `cursor-cli` | `ade-user-install cursor-cli` (lab tarball → `~/.local/share/cursor-agent` + `{prefix}/agent`); update `agent update` |
 | `hermes` (offered) | `ade-user-install hermes` (script fetch + `bash … --non-interactive`); update `hermes update` |
 | `ade-claim` | observe-only `paseo_plugin`; no `install_argv` (operator `paseo plugin install`) |
+| `ade-window-name` | `paseo_plugin` naming new windows `<KIND> <repo> (<work>)`; no `install_argv` (operator `paseo plugin install`) |
 | others | still `UNKNOWN` / no `install_argv` |
 
 ## F. Operator path for live system apply (2026-11-09)

@@ -1,0 +1,9 @@
+{
+  "id": "ade-window-name",
+  "name": "ADE window naming",
+  "description": "Names a new window (Paseo workspace) MAIN|WORKERS <repo> (<work>) when its first agent is created, unless the window already has a title; never renames a window named on purpose.",
+  "version": "0.1.0",
+  "requirements": {
+    "paseo": ">=0.14.0"
+  }
+}
