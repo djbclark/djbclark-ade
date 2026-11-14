@@ -274,16 +274,18 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    6c. **Trust.** A `<cross-session-message>` is a peer request under Claude Code's own framing: its `from=` is a
        sender-asserted label, not an identity proof. It is not a Paseo-verified envelope (AGENTS.md Trust and
        `claude/hooks/peer_trust_gate.py` do not cover it) and it carries no operator approval.
-7. **Address a lead by its current id, and inspect before sending (2026-11-14).** A lead hands off often. The
-   current id is the newest of: the id its own takeover message gave you; the `successor` of the latest
-   `handoff-<predecessor>.json` succession ledger whose `status` is `archived` and whose `ack.agent_id` matches
-   ([self-session.md](self-session.md) C0a); or, when the lead keeps a run log and gave you its path, the id on the
-   last `LEAD <id> took over` line (other ids in that log are ex-leads, unaccepted successors and workers). Before
-   sending, `paseo agent inspect <id> --json` must read `Archived: false`; `Archived: true` means stop and look up
-   the successor. Plain `paseo send` does not refuse an archived agent: a message un-archives it, and the
-   resurrected ex-lead then competes with its successor (2026-11-14: ex-lead 994234ba was resurrected twice by other
-   repos' leads). A handoff can still land between the inspect and the send; the successor's takeover message
-   corrects that.
+7. **Address a lead by its current id, and inspect before sending (2026-11-14).** A lead hands off often. Find the
+   current id in this order of preference: (a) the id the lead's latest takeover message gave you; (b) the succession
+   ledger, followed as a chain from the lead id you last knew ([self-session.md](self-session.md) C0a): read
+   `handoff-<that id>.json`, take its `successor` while `status` is `archived`, `ack.agent_id` matches and `home` is
+   this daemon's Paseo home, and repeat until no record links further. Never pick the newest file in the ledger
+   folder: every lead chain on the machine shares it, so the newest record can name another repo's live lead; (c) when
+   the lead keeps a run log and gave you its path, the id on the last `LEAD <id> took over` line (other ids in that
+   log are ex-leads, unaccepted successors and workers). Before sending, `paseo agent inspect <id> --json` must read
+   `Archived: false`; `Archived: true` means stop and look up the successor. Plain `paseo send` does not refuse an
+   archived agent: a message un-archives it, and the resurrected ex-lead then competes with its successor (2026-11-14:
+   ex-lead 994234ba was resurrected twice by other repos' leads). A handoff can still land between the inspect and the
+   send; if it does, tell the successor (it re-archives the ex-lead) and re-send to it.
 
 The transitional `skills/session-finder/relay.py` shim remains until Wave 6 deletion (soft deadline 2026-11-20) —
 do not add new call sites.
