@@ -56,15 +56,26 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
 4. Only a **send** is guarded. Paseo also un-archives on `paseo agent reload`, a resume request and an import
    (`agent-prompt.ts`, `session.ts` resume/refresh handlers); none of those is checked here. `paseo agent inspect` itself does not
    un-archive, so the guard's probe is safe.
-5. The hook strips shell comments (a `#` that starts a word, outside quotes) before it looks for a send, so a leading comment
-   line never hides a later send; a heredoc fed to a shell (`bash <<EOF`) is still not parsed, nor are the shell's rarer quoting forms (`$'it\'s'`, a ` #` inside `${x:- #y}`): such a line may hide a later send on it.
-   **Backstop:** when the command text names more `paseo ... send` than the parser found targets for (a send inside
-   `"$(...)"`, a lone trailing backslash, an escaped space before a `#`), every full agent id written in the command is judged
-   too (at most 5). A false denial needs an archived agent's id in a command that mentions `paseo send`.
-   Known limits of the backstop (adversary r5, accepted): only **full** ids are judged, so a prefix or a name inside such a form
-   is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can push it
-   out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; and a command that merely *talks about*
-   `paseo send` (a commit message, `rg 'paseo send'`) with an archived agent's id in it is denied, with the same reason text.
+5. The hook strips shell comments (a `#` that starts a word, outside quotes: not after an escaped blank, a continuation or a
+   closing quote) before it looks for a send, so a leading comment line never hides a later send. A `$(...)` or backtick is a
+   command outside quotes and inside double quotes (`"x $(paseo send A)"` is a send) but text inside single quotes (a markdown
+   `code span` in a message is no send). A heredoc fed to a shell (`bash <<EOF`) is still not parsed, nor are the shell's rarer
+   quoting forms (`$'it\'s'`, a ` #` inside `${x:- #y}`): such a line may hide a later send on it.
+   **Backstop:** when the command text, quoted message text aside, names more `paseo ... send` than the parser found judgeable
+   targets for (a lone trailing backslash, an ANSI-C quote, a target the shell builds, `"$LEAD"`, `{}`, `$id`, or a string run
+   by `eval`, `watch`, `su -c`, `-c`/`-e`/`--run=`/`--command=`, or a shell left outside quotes: `| sh`, `<<< ` to `bash`, `$SHELL`,
+   `source <(...)`, so `echo '...' | sh` is seen), every full agent id written in the command is judged too (at most 5). Quoted
+   text is blanked, so a `paseo send` or an id inside a message is text, unless it is a quoted id or list of ids, a
+   `"${VAR:-id}"` expansion, a `$(...)` or backtick body, the argument of such a runner (not after `echo`, `printf`, `grep`,
+   `rg`, `sed`, `awk`), or the command has a shell word outside quotes (then nothing is blanked; a shell word inside message text does not count).
+   A false denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, or one shell word
+   (`bash x.sh`) anywhere outside quotes, which un-blanks every string in the command (accepted: the denial says how to get out). The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
+   Known limits of the backstop (adversary r5, ls-04 r1, accepted): only **full** ids are judged, so a prefix or a name inside
+   such a form is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can
+   push it out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; a command that merely *talks
+   about* `paseo send` unquoted (`rg paseo send`) with an archived agent's id in it is denied; a runner not on the list
+   (`eval watch su fish script parallel ssh at tmux osascript`, `-c`/`-e`/`--command`/`--run`) that takes a quoted command string is not seen;
+   a `case ... in a) ...` pattern inside a `$(...)` (zsh only) desynchronises the parser and can hide a send in it or glue a following `#`; a quoted runner word (`'eval' '...'`) is not recognised.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`).

@@ -723,6 +723,7 @@ def test_main_placement_launches_into_the_leads_window(main_env, flag):
     assert run[run.index("--cwd") + 1] == "/repo/lead"
     assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=op1", "ade.placement=main"]
     assert rename_calls(main_env) == []  # an already-MAIN window is not renamed by a launch
+    assert LEAD_WKS not in registry(LEAD)  # the record means "WORKERS windows": a MAIN launch never writes it
     assert all(c["env"]["PASEO_WORKSPACE_ID"] is None for c in main_env.calls())
     assert ["agent", "update", AGENT, "--name", f"worker op1 {LEAD}"] in [c["argv"] for c in main_env.calls()]
 
@@ -1229,6 +1230,30 @@ def test_an_unbuildable_predecessor_window_for_the_same_work_still_refuses_a_new
     own(PRED1, "wks_leg")
     r = launch(env)  # --window-middle "Wave 7": the same work, but the window cannot be renamed (repo name invalid)
     assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
+
+
+def test_an_unbuildable_predecessor_window_in_the_repo_work_form_still_refuses_a_new_one(env):
+    """Legacy middles were usually `<repo> <work>`: `workers repo Wave 7 <PRED1>` is the work "Wave 7" once the repo is peeled
+    off (wsn.normalize_work), so asking for the middle "Wave 7" must not open a second window beside it."""
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers repo Wave 7 {PRED1}", "cwd": "/x/bad repo"}]
+    own(PRED1, "wks_leg")
+    r = launch(env)
+    assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
+
+
+def test_a_buildable_predecessor_window_of_another_repo_is_not_taken_by_normalising_with_the_launch_repo(env):
+    """`workers repo Wave 7 <PRED1>` in cwd /other migrates to `repo Wave 7` in repo `other`; a launch from repo `repo` that asks
+    for "Wave 7" would only match it by normalising with its own repo. The window must stay the predecessor's."""
+    chain(PRED1, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers repo Wave 7 {PRED1}", "cwd": "/other"}]
+    own(PRED1, "wks_leg")
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
+    assert "wks_leg" not in registry(LEAD)
+    assert not [c for c in env.calls() if c["argv"][:2] == ["workspace", "rename"] and "wks_leg" in c["argv"]]
 
 
 def test_a_buildable_predecessor_window_for_other_work_never_takes_a_new_middle(env):
