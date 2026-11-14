@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  HANDLER_BUDGET_MS,
   handleAgentEvent,
   isDefaultTitle,
   isDryRun,
@@ -13,6 +14,7 @@ import {
   resolveDecisionScript,
   resolvePluginRoot,
   runDecision,
+  validName,
 } from "./name-lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -72,6 +74,7 @@ const baseDeps = (extra = {}) => ({
   env: { ADE_WS_AUTONAME_PY: SCRIPT },
   pluginRoot: PLUGIN_ROOT,
   log: (l) => lines.push(l),
+  now: () => Date.parse(T1), // the agents are seconds old
   settled: new Set(),
   ...extra,
 });
@@ -330,19 +333,136 @@ test("a daemon call that never settles frees the window's slot and does not bloc
 test("while one event is in flight for a window, a second for the same window is dropped, not queued", async () => {
   const handlers = new Map();
   const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
-  const a = agentRec({ cwd: gitDir.repo, title: "Once" });
+  // No agent title: the script answers retry, so nothing settles and a queued second event WOULD call run again.
+  const a = agentRec({ cwd: gitDir.repo, title: null });
   const d = fakeDaemon({ agents: [a] });
   let runs = 0;
+  let release;
+  const gate = new Promise((r) => (release = r));
   const run = async (args) => {
     runs += 1;
-    await new Promise((r) => setTimeout(r, 40));
+    await gate;
     return runDecision(args);
   };
   registerAdeWindowNameHooks(server, baseDeps({ run }));
-  await Promise.all([
-    handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
-    handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }),
-  ]);
+  const first = handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo });
+  await new Promise((r) => setTimeout(r, 30)); // the first run is parked inside `run`
+  let secondDone = false;
+  const second = handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }).then(() => (secondDone = true));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(secondDone, true, "the second event returns at once, it does not wait behind the first");
+  release();
+  await Promise.all([first, second]);
   assert.equal(runs, 1);
-  assert.equal(d.state.titles.length, 1);
+  assert.deepEqual(d.state.titles, []);
+  await handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo }); // slot freed: a later event runs again
+  assert.equal(runs, 2);
+});
+
+test("a run past its budget is aborted: its python child gets the signal and nothing is written afterwards", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: "Late" });
+  const d = fakeDaemon({ agents: [a] });
+  let seen;
+  const run = (args) =>
+    new Promise((resolve) => {
+      seen = args.signal;
+      setTimeout(() => resolve({ action: "rename", name: "MAIN my-repo (Late)", kind: "MAIN" }), 150); // answers after the budget
+    });
+  const logged = [];
+  registerAdeWindowNameHooks(server, baseDeps({ run, timeoutMs: 40, log: (l) => logged.push(l) }));
+  await handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo });
+  assert.equal(seen?.aborted, true, "the run's signal was aborted by the budget");
+  await new Promise((r) => setTimeout(r, 250)); // the abandoned run finishes its decision
+  assert.deepEqual(d.state.calls, [], "the abandoned run does not call setTitle");
+  assert.ok(logged.some((l) => l.includes("exceeded")));
+});
+
+test("Paseo's hook cancel (context.signal) aborts the run the same way", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: "Cancelled" });
+  const d = fakeDaemon({ agents: [a] });
+  const cancel = new AbortController();
+  let seen;
+  const run = (args) =>
+    new Promise((resolve) => {
+      seen = args.signal;
+      setTimeout(() => resolve({ action: "rename", name: "MAIN my-repo (Cancelled)", kind: "MAIN" }), 100);
+    });
+  registerAdeWindowNameHooks(server, baseDeps({ run }));
+  const p = handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo, signal: cancel.signal });
+  await new Promise((r) => setTimeout(r, 30));
+  cancel.abort();
+  await p;
+  assert.equal(seen.aborted, true);
+  assert.deepEqual(d.state.calls, []);
+});
+
+test("an abort that lands during the last re-read stops the write", async () => {
+  const handlers = new Map();
+  const server = { addHook: (name, fn) => (handlers.set(name, fn), () => {}) };
+  const a = agentRec({ cwd: gitDir.repo, title: "Race" });
+  const d = fakeDaemon({ agents: [a] });
+  const cancel = new AbortController();
+  const realRef = d.paseo.workspaces.ref;
+  let refreshes = 0;
+  d.paseo.workspaces.ref = (id) => {
+    const h = realRef(id);
+    return { ...h, refresh: async () => ((refreshes += 1) === 2 && cancel.abort(), h.refresh()) }; // 1: first look, 2: the re-read just before setTitle
+  };
+  registerAdeWindowNameHooks(server, baseDeps());
+  await handlers.get("agent.create.after")({ agent: hookAgent(a) }, { paseo: d.paseo, signal: cancel.signal });
+  assert.equal(refreshes, 2, "the window is read twice (first look, last look)");
+  assert.deepEqual(d.state.calls, []);
+});
+
+test("runDecision passes the signal to execFile", async () => {
+  let opts;
+  const exec = (_cmd, _args, o, cb) => {
+    opts = o;
+    cb(null, '{"action":"skip"}', "");
+    return { stdin: { on() {}, end() {} } };
+  };
+  const ac = new AbortController();
+  await runDecision({ script: "/x.py", info: {}, exec, signal: ac.signal });
+  assert.equal(opts.signal, ac.signal);
+});
+
+test("the default handler budget stays under Paseo's 30 s notification timeout", () => {
+  assert.ok(HANDLER_BUDGET_MS < 30_000 && HANDLER_BUDGET_MS > 0);
+});
+
+test("equality-as-default holds only while the first agent is young; later only a null title is default", async () => {
+  assert.equal(isDefaultTitle("Fix it", "Fix it", false), false);
+  assert.equal(isDefaultTitle(null, "Fix it", false), true);
+  assert.equal(isDefaultTitle("Fix it", "Fix it", true), true);
+  const a = agentRec({ cwd: gitDir.repo, title: "Same text" });
+  const old = fakeDaemon({ windowTitle: "Same text", agents: [a] });
+  const rec = await handleAgentEvent(hookAgent(a), { paseo: old.paseo }, baseDeps({ now: () => Date.parse(T0) + 3_600_000 }));
+  assert.equal(rec.outcome, "skip");
+  assert.deepEqual(old.state.titles, [], "a window deliberately titled like its tab is left alone an hour later (backfill)");
+  const young = fakeDaemon({ windowTitle: "Same text", agents: [a] });
+  await handleAgentEvent(hookAgent(a), { paseo: young.paseo }, baseDeps({ now: () => Date.parse(T0) + 60_000 }));
+  assert.deepEqual(young.state.titles, ["MAIN my-repo (Same text)"]);
+  const nodate = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: undefined });
+  const nd = fakeDaemon({ windowTitle: "Same text", agents: [nodate] });
+  await handleAgentEvent(hookAgent(nodate), { paseo: nd.paseo }, baseDeps());
+  assert.deepEqual(nd.state.titles, [], "no createdAt: not provably young, left alone");
+  const nulltitle = fakeDaemon({ windowTitle: null, agents: [a] });
+  await handleAgentEvent(hookAgent(a), { paseo: nulltitle.paseo }, baseDeps({ now: () => Date.parse(T0) + 3_600_000 }));
+  assert.deepEqual(nulltitle.state.titles, ["MAIN my-repo (Same text)"], "a null title is named at any age");
+});
+
+test("an invalid name from the decision script is never written", async () => {
+  assert.equal(validName("MAIN my-repo (Fix)"), true);
+  for (const bad of [undefined, null, 42, "", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
+    assert.equal(validName(bad), false, String(bad));
+    const a = agentRec({ cwd: gitDir.repo });
+    const d = fakeDaemon({ agents: [a] });
+    const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps({ run: async () => ({ action: "rename", name: bad, kind: "MAIN" }) }));
+    assert.equal(rec.outcome, "error", String(bad));
+    assert.deepEqual(d.state.calls, [], String(bad));
+  }
 });
