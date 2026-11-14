@@ -545,6 +545,14 @@ from its command line can only be missed, never wrongly counted.
 Tailscale, CoreSimulator, Xcode, Android Studio, 1Password, Zoom, Tart and the Virtualization host; JetBrains by the `com.jetbrains.` namespace; apps that are not installed
 (WezTerm, kitty, WireGuard, Docker, OrbStack, Simulator) by bundle path, never a guessed id.
 
+(l) Hardening after the adversary's first review (2026-11-14). Every file the sampler or `admit` reads from `held/` and `gui-hog/` is opened with `O_NOFOLLOW|O_NONBLOCK`, must be a regular
+file under a size cap, and sits in a real directory owned by this user (a FIFO or symlink there can no longer hang `admit` or the sampler, and the sweep never follows a symlinked directory);
+a hold's pid is bounded, its `updated` must be finite and not in the future, and a failed `ps` start-time read is not pid reuse unless the process is also gone. `clean` drops every
+control, format, surrogate, private-use and unassigned code point plus the invisible filler letters. Agent CLIs are recognised by their argv heads (`node /x/claude`, a version-named
+binary), not only the kernel exe. A process running an app's own in-bundle binary under a shell, pty, held caller or agent CLI (headless Chrome under a test run) is a build, not the app.
+A hold also records the caller's pid (`LW_ADMIT_CALLER_PID`, else the parent), so an app started under the real caller is excluded. Corrupt `state.json` sections heal on the next tick; a snooze
+never outlasts `snooze_s` and a `last_shown` in the future is ignored.
+
 M3. **Measured 2026-11-14 (M1 Pro, 10 cores).** `lsappinfo list` takes about 0.2 s of wall time with no CPU to speak of; a full `load-watch sample` ran in 0.65 s at load 57.
 `state.json` with the app window was 4 KB with 8 apps stored.
 

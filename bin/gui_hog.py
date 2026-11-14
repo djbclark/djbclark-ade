@@ -19,9 +19,11 @@ import json
 import os
 import plistlib
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import calendar
 import time
 import unicodedata
 from pathlib import Path
@@ -47,13 +49,14 @@ HARD_BUNDLE_IDS = frozenset({"com.apple.dock", "com.apple.loginwindow", "com.app
                              "com.apple.controlcenter", "com.apple.windowmanager", "com.apple.windowserver",
                              DIALOG_BUNDLE_ID.lower()})
 HARD_PATH_PREFIXES = ("/System", "/usr")
-HARD_EXE_NAMES = frozenset({"windowserver", "loginwindow", "dock", "finder", "load-watch", "bg", "gui-hog", "ade-gui-hog"})
+HARD_EXE_NAMES = frozenset({"windowserver", "loginwindow", "dock", "finder", "ade-gui-hog"})   # real executables; load-watch and bg are scripts, matched by argv in group_apps
 SHELLS = frozenset({"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh", "login"})
 GUI_TYPES = ("Foreground", "UIElement")
 
 
 # ---- untrusted text (J3) -----------------------------------------------------------------------------------------
-_BAD = re.compile("[\x00-\x1f\x7f-\x9f؜​-‏‪-‮  ⁦-⁩﻿]")
+_DROP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})   # controls, ALL format characters (bidi, zero-width, TAG, soft hyphen), surrogates, private, unassigned, line/paragraph separators
+_FILLERS = frozenset("\u034f\u115f\u1160\u3164\uffa0")   # invisible, but not in a dropped category
 
 
 def _markish(ch):
@@ -61,11 +64,11 @@ def _markish(ch):
 
 
 def clean(text, limit=60):
-    """`text` as one line of plain, printable text: C0/C1 controls, bidi marks and overrides, zero-width characters and
-    line or paragraph separators removed, then clipped to `limit` characters. The cut backs off any combining mark, so it
+    """`text` as one line of plain, printable text: every control (Cc), format (Cf: bidi marks and overrides, zero-width, TAG, soft hyphen),
+    surrogate, private-use and unassigned character, line and paragraph separator and invisible filler removed, then clipped to `limit` characters. The cut backs off any combining mark, so it
     never leaves half of a cluster (an approximation of a grapheme-cluster cut: ZWJ is removed, so a ZWJ emoji
     sequence degrades to its parts)."""
-    s = _BAD.sub("", str(text))
+    s = "".join(ch for ch in str(text) if unicodedata.category(ch) not in _DROP_CATEGORIES and ch not in _FILLERS)
     if len(s) <= limit:
         return s
     cut = limit
@@ -184,8 +187,33 @@ def _alive(pid):
         return True
     except PermissionError:
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return False
+
+
+def read_small(path, cap=65536):
+    """Text of a small regular file, never following a symlink and never blocking on a FIFO (the state directory is data, not trusted). Raises
+    OSError for anything else: a FIFO, a device, a symlink, a directory, a file over `cap` bytes."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > cap:
+            raise OSError("not a small regular file")
+        data = os.read(fd, cap + 1)
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        raise OSError("file grew past the cap")
+    return data.decode("utf-8", "replace")
+
+
+def safe_dir(path):
+    """True when `path` is a real directory (not a symlink) owned by this user: a state directory somebody else could redirect is not used."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
 
 
 # ---- the hold registry (C2) ----------------------------------------------------------------------------------------
@@ -197,14 +225,21 @@ def _slug(text):
     return re.sub(r"[^A-Za-z0-9]+", "-", str(text)).strip("-")[:48]
 
 
-def hold_write(state_dir, pid, start, caller, refused_since, refused, now, poll_s=15.0):
+_HOLD_NAME = re.compile(r"[0-9]+-[A-Za-z0-9-]*\.json\Z")
+
+
+def hold_write(state_dir, pid, start, caller, refused_since, refused, now, poll_s=15.0, caller_pid=None):
     """Write (atomically) this waiting `admit`'s hold file and return its path. `refused_since` is the epoch the unbroken run of
     refusals began; the caller has already passed it through parse_refused_since. Raises on an OS error: the caller
     wraps it, because the registry must never change admit's verdict or exit code."""
     d = held_dir(state_dir)
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not safe_dir(d):
+        raise OSError(f"{d} is not a real directory of this user")
     rec = {"v": 1, "pid": int(pid), "start": start or "", "caller": clean(caller or "", 80), "refused_since": int(refused_since),
            "refused": [clean(x, 40) for x in refused][:12], "updated": int(now), "poll_s": min(600, max(1, int(poll_s)))}
+    if caller_pid:
+        rec["caller_pid"] = int(caller_pid)
     path = d / f"{int(pid)}-{_slug(start or 'unknown')}.json"
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".hold-", suffix=".tmp")
     try:
@@ -228,46 +263,53 @@ def hold_remove(path):
         pass
 
 
-def read_holds(state_dir, now, sweep=True, start_of=proc_start, cap=HOLD_AGE_CAP_S):
-    """The live holds, newest data wins. A file is stale (and swept when `sweep`) when its `updated` is more than
-    max(60 s, 2 polls + 15 s) old, or its pid no longer has the recorded start time (pid reuse) or is gone. A file that does not parse, or
-    has the wrong types, is skipped (and swept when older than 2 min by mtime): the directory is data, never trusted.
-    `refused_since` is clamped to [now - cap, now]: a future or non-integer value counts as `now`."""
+def read_holds(state_dir, now, sweep=True, start_of=proc_start, cap=HOLD_AGE_CAP_S, check_start=True):
+    """The live holds. A file is stale (and swept when `sweep`) when its `updated` is more than max(60 s, 2 polls + 15 s) old or in the future,
+    or, when `check_start`, its pid is gone or now has another start time (pid reuse; a start time that cannot be read, such as a `ps` timeout
+    under load, counts as stale only when the pid is dead). Only files named `<digits>-<slug>.json` are looked at, and never deleted otherwise;
+    the directory must be a real directory of this user; each file is read as a small regular file (no symlink, no FIFO, 64 KB cap); a file that
+    does not parse or has wrong types is skipped (and swept when older than 2 min by mtime). `refused_since` is clamped to [now - cap, now]:
+    a future or non-integer value counts as `now`."""
     d = held_dir(state_dir)
     out = []
+    if not safe_dir(d):
+        return out
     try:
         names = sorted(os.listdir(d))
     except OSError:
         return out
     for name in names:
-        if not name.endswith(".json"):
+        if not _HOLD_NAME.match(name):
             continue
         p = d / name
         try:
-            rec = json.loads(p.read_text())
+            rec = json.loads(read_small(p))
             pid, upd, poll = rec["pid"], rec["updated"], rec.get("poll_s", 15)
-            ok = (rec.get("v") == 1 and type(pid) is int and pid > 0 and type(upd) in (int, float) and type(poll) in (int, float)
+            ok = (rec.get("v") == 1 and type(pid) is int and 0 < pid < 2 ** 31 and _fin(upd) and _fin(poll)
                   and isinstance(rec.get("start", ""), str) and isinstance(rec.get("refused", []), list))
             if not ok:
                 raise ValueError("shape")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        except Exception:  # noqa: BLE001 - the directory is data: any failure to read or parse one file is that file's problem
             try:
-                if sweep and now - p.stat().st_mtime > 120:
+                if sweep and now - os.lstat(p).st_mtime > 120:
                     p.unlink()
             except OSError:
                 pass
             continue
         stale = now - upd > max(HOLD_STALE_S, 2 * min(600, max(1, poll)) + 15) or upd > now + HOLD_STALE_S
-        if not stale:
+        if not stale and check_start:
             rec_start = rec.get("start", "")
-            stale = (start_of(pid) != rec_start) if rec_start else not _alive(pid)
+            cur = start_of(pid) if rec_start else None
+            stale = (cur != rec_start) if cur is not None else not _alive(pid)
         if stale:
             if sweep:
                 hold_remove(p)
             continue
         rs = rec.get("refused_since")
-        since = min(max(rs, now - cap), now) if type(rs) in (int, float) else now
+        since = min(max(rs, now - cap), now) if _fin(rs) else now
+        cp = rec.get("caller_pid")
         out.append({"pid": pid, "start": rec.get("start", ""), "caller": clean(rec.get("caller", ""), 80), "refused_since": since,
+                    "caller_pid": cp if type(cp) is int and 1 < cp < 2 ** 31 else None,
                     "refused": [clean(x, 40) for x in rec.get("refused", []) if isinstance(x, str)][:12], "updated": upd})
     return out
 
@@ -389,6 +431,20 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
         cmd = table[pid][3] if pid in table else ""
         return os.path.basename(cmd.split()[0]) if cmd.split() else ""
 
+    def argv_heads(pid):   # the program and its first argument (`node /x/claude`), as load-watch's cli_heads: a CLI's kernel exe is often `node` or a version number
+        return {os.path.basename(w).lstrip("-") for w in (table[pid][3].split()[:2] if pid in table else [])}
+
+    def is_agent(pid):
+        return bool(agent_clis & (argv_heads(pid) | {pname(pid)}))
+
+    def is_shell(pid):
+        words = table[pid][3].split() if pid in table else []
+        return bool(SHELLS & {pname(pid).lstrip("-"), os.path.basename(words[0]).lstrip("-") if words else ""})
+
+    def build_stop(pid, real):   # C4b: a shell, a pty-attached process, a held caller, `bg` or an agent CLI, or an executable outside the bundle
+        ex = exe(pid)
+        return is_shell(pid) or pid in ttys or pid in held_pids or is_agent(pid) or (ex is not None and not _under(ex, real))
+
     roots = {}
     for e in lsapps:
         bp = e.get("bundle_path") or ""
@@ -449,11 +505,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
             if c in visited or c not in table:
                 continue
             visited.add(c)
-            ex = exe(c)
-            name = pname(c)
-            stop = (name in SHELLS or c in ttys or c in held_pids or name in agent_clis
-                    or (ex is not None and not _under(ex, app.real)))
-            if stop:
+            if build_stop(c, app.real):
                 sub = subtree(c, seen_build)
                 app.build.update(sub)
                 app.build_cores += sum(table[p][2] for p in sub if p in table)
@@ -462,6 +514,16 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
             app.members.append(c)
             owner[c] = rid
             stack.extend(kids.get(c, []))
+    def build_ancestry(pid, real):   # does the chain up from `pid` reach the app (clean) or pass a build stop first?
+        a, hops = str(table[pid][0]), 0
+        while a in table and a not in ("0", "1") and hops < 64:
+            if a in owner or a in apps:
+                return False
+            if build_stop(a, real):
+                return True
+            a, hops = str(table[a][0]), hops + 1
+        return False
+
     for pid, (ppid, uid, _c, cmd) in table.items():   # helpers launchd started: their executable sits inside a bundle
         if pid in owner or pid in seen_build or uid != my_uid or ".app/" not in cmd:
             continue
@@ -470,8 +532,11 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
             continue
         for rid, app in apps.items():
             if _under(ex, app.real):
-                app.members.append(pid)
-                owner[pid] = rid
+                if build_stop(pid, app.real) or build_ancestry(pid, app.real):
+                    seen_build.add(pid)   # a build running the app's own binary (a headless browser under a test run): not the app's helper
+                else:
+                    app.members.append(pid)
+                    owner[pid] = rid
                 break
     out = []
     for rid, app in apps.items():
@@ -481,7 +546,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
         while excluded is None and anc in table and hops < 64:
             if anc in held_pids:
                 excluded = "held-ancestor"
-            elif pname(anc) in agent_clis:
+            elif is_agent(anc):
                 excluded = "agent-ancestor"
             anc, hops = str(table[anc][0]), hops + 1
         rex = exe(rid)
@@ -508,7 +573,8 @@ def window_update(st, t, apps, total_cores, cfg):
         if flag:
             item.append(flag)
         row[a["id"]] = item
-    keep = [x for x in st.get("apps", []) if isinstance(x, dict) and _fin(x.get("t")) and x["t"] >= t - tr["window_s"] and x["t"] <= t]
+    prev = st.get("apps") if isinstance(st.get("apps"), list) else []
+    keep = [x for x in prev if isinstance(x, dict) and _fin(x.get("t")) and x["t"] >= t - tr["window_s"] and x["t"] <= t]
     keep.append({"t": t, "cpu": round(total_cores, 2), "a": row})
     st["apps"] = keep
     meta = st.get("app_meta") if isinstance(st.get("app_meta"), dict) else {}
@@ -526,7 +592,8 @@ def _fin(x):
 def window_means(st, t, cfg):
     """[{id, name, bundle_id, bundle_path, cores_5m, rss_mb, protected, hosts_build}] from st["apps"]: cores are the mean over the
     samples in the window (an app missing from a sample counts 0), RSS is the latest reading."""
-    win = [x for x in st.get("apps", []) if isinstance(x, dict) and _fin(x.get("t")) and t - cfg["trigger"]["window_s"] <= x["t"] <= t
+    apps = st.get("apps") if isinstance(st.get("apps"), list) else []
+    win = [x for x in apps if isinstance(x, dict) and _fin(x.get("t")) and t - cfg["trigger"]["window_s"] <= x["t"] <= t
            and isinstance(x.get("a"), dict)]
     n = len(win)
     if not n:
@@ -555,6 +622,8 @@ def should_show(held, apps, now, snooze, last_shown, cfg):
     (an app that hosts a build counts without the build); (d) rate_s since the dialog was last shown, and the Ignore snooze
     (`snooze`, an epoch or None) expired. `reason` names the first check that failed, in that order."""
     tr = cfg["trigger"]
+    snooze = snooze if _fin(snooze) else None
+    last_shown = last_shown if _fin(last_shown) and last_shown <= now else None   # a clock set back must not silence the trigger
     rel = set(tr["relievable"])
     old = [h for h in held if now - h["refused_since"] >= tr["hold_s"]]
     live = [h for h in old if rel & set(h.get("refused", []))]
@@ -586,10 +655,27 @@ def gui_dir(state_dir):
 def read_snooze(state_dir):
     """snooze_until (epoch) from gui-hog/snooze.json, or None. The sampler only reads it (D5)."""
     try:
-        v = json.loads((gui_dir(state_dir) / "snooze.json").read_text()).get("snooze_until")
+        if not safe_dir(gui_dir(state_dir)):
+            return None
+        v = json.loads(read_small(gui_dir(state_dir) / "snooze.json")).get("snooze_until")
         return v if _fin(v) else None
-    except (OSError, ValueError, AttributeError):
+    except Exception:  # noqa: BLE001 - a corrupt or hostile file is no snooze
         return None
+
+
+def effective_snooze(gh_state, raw, t, snooze_s, record=False):
+    """The snooze epoch to honour: `raw` (the file's snooze_until) clamped to snooze_s after the moment it was FIRST seen, so a hostile or
+    garbled value never silences the trigger for longer than an Ignore lasts. The first sighting is kept in the sampler's state
+    (`snooze_seen`); a reader that cannot write (`gui-hog status`) clamps against `t`."""
+    if not _fin(raw):
+        return None
+    seen = gh_state.get("snooze_seen") if isinstance(gh_state, dict) else None
+    if isinstance(seen, dict) and seen.get("raw") == raw and _fin(seen.get("until")):
+        return seen["until"]
+    until = min(raw, t + snooze_s)
+    if record and isinstance(gh_state, dict):
+        gh_state["snooze_seen"] = {"raw": raw, "until": until}
+    return until
 
 
 def dry_run_path(state_dir):
@@ -600,14 +686,18 @@ def dry_run_append(state_dir, entry):
     """Append one JSON line to dry-run.jsonl (mode 0600; rotated at 1 MB to one `.1` file). Raises on an OS error: the caller wraps it."""
     p = dry_run_path(state_dir)
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not safe_dir(p.parent):
+        raise OSError(f"{p.parent} is not a real directory of this user")
     try:
-        if p.stat().st_size >= DRY_RUN_MAX_BYTES:
+        if os.lstat(p).st_size >= DRY_RUN_MAX_BYTES:
             os.replace(p, p.with_name(p.name + ".1"))
     except OSError:
         pass
     data = (json.dumps(entry, separators=(",", ":"), default=str) + "\n").encode()
-    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK, 0o600)
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("dry-run log is not a regular file")
         while data:
             data = data[os.write(fd, data):]
     finally:
@@ -621,13 +711,13 @@ def count_dry_run(state_dir, days, now):
     p = dry_run_path(state_dir)
     for f in (p.with_name(p.name + ".1"), p):
         try:
-            text = f.read_text(errors="replace")
+            text = read_small(f, 4 * DRY_RUN_MAX_BYTES)
         except OSError:
             continue
         for ln in text.splitlines():
             try:
                 r = json.loads(ln)
-                t = time.mktime(time.strptime(r["t"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+                t = calendar.timegm(time.strptime(r["t"], "%Y-%m-%dT%H:%M:%SZ"))
             except (ValueError, KeyError, TypeError, AttributeError, RecursionError, OverflowError):
                 continue
             if isinstance(r, dict) and r.get("event") == "would-show" and t >= cutoff:
@@ -636,7 +726,10 @@ def count_dry_run(state_dir, days, now):
 
 
 def _iso(t):
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    except (OverflowError, ValueError, OSError, TypeError):
+        return "?"
 
 
 def gui_session(my_uid):
@@ -667,7 +760,7 @@ def enabled():
 
 
 def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_cores=None, load1=None, dry=False,
-         cfg=None, lsapps=None, exe_of=kernel_exe, out=print):
+         cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=proc_start):
     """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, and on a `show` write the dry-run
     line (or, with `dry`, print it and change nothing but the window). Returns the decision dict, or None when LW_GUI_HOG=0.
     The caller wraps it in a `try`: a failure here never stops load sampling."""
@@ -676,16 +769,19 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
             st.pop(k, None)
         return None
     cfg = cfg or load_config()
-    held = read_holds(state_dir, t, sweep=not dry)
-    held_pids = [h["pid"] for h in held]
+    for key, kind in (("apps", list), ("app_meta", dict), ("gui_hog", dict)):   # corrupt state heals itself instead of killing every tick
+        if not isinstance(st.get(key), kind):
+            st[key] = kind()
+    held = read_holds(state_dir, t, sweep=not dry, start_of=start_of)
+    held_pids = [h["pid"] for h in held] + [h["caller_pid"] for h in held if h.get("caller_pid")]
     lsapps = collect_lsappinfo() if lsapps is None else lsapps
     apps = group_apps(table, rss_kb, ttys, lsapps, exe_of=exe_of, my_uid=my_uid, held_pids=held_pids, agent_clis=agent_clis, cfg=cfg)
     if total_cores is None:
         total_cores = sum(row[2] for row in table.values())
     window_update(st, t, apps, total_cores, cfg)
-    gh = st.setdefault("gui_hog", {})
+    gh = st["gui_hog"]
     means = window_means(st, t, cfg)
-    d = should_show(held, means, t, read_snooze(state_dir), gh.get("last_shown"), cfg)
+    d = should_show(held, means, t, effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"], record=True), gh.get("last_shown"), cfg)
     if d["show"]:
         line = would_show_line(d, means, t, load1, cfg, my_uid)
         if dry:
@@ -701,7 +797,8 @@ def status_lines(st, state_dir, now, cfg):
     tr = cfg["trigger"]
     held = read_holds(state_dir, now, sweep=False)
     means = window_means(st, now, cfg)
-    snooze, last = read_snooze(state_dir), (st.get("gui_hog") or {}).get("last_shown")
+    ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
+    snooze, last = effective_snooze(ghs, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"]), ghs.get("last_shown")
     d = should_show(held, means, now, snooze, last, cfg)
     lines = [f"gui-hog (PR 3a, dry-run only: no window exists yet) {'ENABLED' if enabled() else 'OFF (LW_GUI_HOG=0)'}",
              f"decision now: {'WOULD SHOW' if d['show'] else 'no'} ({d['reason']})",

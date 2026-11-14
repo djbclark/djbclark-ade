@@ -43,8 +43,14 @@ def hold(age, refused=("load",), pid=11, caller="bg"):
 # ---- untrusted text (J3) -------------------------------------------------------------------------------------------------------------------
 
 def test_clean_strips_controls_bidi_zero_width_and_separators():
-    dirty = "a\x00b\x1b[31mc‮d​e f g\x9bh⁦i﻿j\n\t"
+    dirty = "a\x00b\x1b[31mc\u202ed\u200be\u2028f\u2029g\x9bh\u2066i\ufeffj\n\t"
     assert gh.clean(dirty) == "ab[31mcdefghij"
+
+
+@pytest.mark.parametrize("ch", ["\U000e0049", "\u2060", "\u00ad", "\u180e", "\ufff9", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0",
+                                "\u200f", "\u061c", "\ue000", "\x7f", "\x85"])
+def test_clean_strips_invisible_and_filler_characters(ch):
+    assert gh.clean(f"ab{ch}cd") == "abcd" and gh.clean(ch * 5) == ""
 
 
 def test_clean_clips_without_splitting_a_combining_cluster():
@@ -65,7 +71,7 @@ def test_parse_lsappinfo_fixture():
     assert by[101]["bundle_id"] is None and by[101]["type"] == "BackgroundOnly"        # bundleID=[ NULL ]
     assert by[300]["bundle_path"] == "/Applications/Slack.app"
     assert by[400]["exe"].endswith("/Contents/MacOS/Electron")
-    assert by[500]["name"] == 'Evil "quoted" ‮app'   # quotes and a bidi mark survive parsing; `clean` is what strips them
+    assert by[500]["name"] == 'Evil "quoted" \u202eapp'   # quotes and a bidi mark survive parsing; `clean` is what strips them
 
 
 @pytest.mark.parametrize("text", ["", "garbage\nmore garbage", "1) no asn line\n pid = 4 type=\"Foreground\"", "\x00\x01"])
@@ -159,6 +165,33 @@ def test_an_app_started_under_a_held_caller_or_an_agent_cli_is_excluded():
     assert group(plain, exe)["500"]["excluded"] is None
 
 
+def test_an_agent_cli_is_recognised_by_its_argv_not_only_by_the_kernel_exe():
+    """Claude's own binary is named for its version, and a node script's kernel exe is `node`: the argv heads decide (load-watch's cli_heads)."""
+    exe = {"400": f"{CODE}/MacOS/Electron", "441": "/Users/x/.local/share/claude/versions/2.1.325", "442": "/usr/local/bin/node",
+           "443": "/bin/zsh", "444": f"{CODE}/Frameworks/h"}
+    table = tbl((400, 1, ME, 0.1, "x"), (441, 400, ME, 3.0, "claude --dangerously-skip-permissions"),
+                (442, 400, ME, 4.0, "node /opt/homebrew/bin/codex exec"), (443, 400, ME, 0.0, "-zsh"), (444, 400, ME, 0.2, "h"))
+    a = group(table, exe)["400"]
+    assert a["hosts_build"] and a["build_cores"] == pytest.approx(7.0) and a["cores"] == pytest.approx(0.3) and a["members"] == 2
+    under = tbl((50, 1, ME, 0.1, "claude"), (500, 50, ME, 2.0, "evil"))
+    assert group(under, {"500": "/Applications/Evil.app/Contents/MacOS/evil", "50": "/x/2.1.325"})["500"]["excluded"] == "agent-ancestor"
+
+
+def test_a_build_running_the_apps_own_binary_is_not_the_app():
+    """Headless Chrome for a test run: its executable lies in Chrome's bundle, but a shell/agent stands between it and the app."""
+    ch = "/Applications/Google Chrome.app/Contents"
+    ls = [{"name": "Chrome", "bundle_id": "com.google.Chrome", "bundle_path": "/Applications/Google Chrome.app", "exe": f"{ch}/MacOS/Google Chrome",
+           "pid": 600, "type": "Foreground"}]
+    exe = {"600": f"{ch}/MacOS/Google Chrome", "50": "/x/2.1.325", "51": "/usr/local/bin/node", "610": f"{ch}/MacOS/Google Chrome",
+           "611": f"{ch}/Frameworks/Helper.app/Contents/MacOS/Helper", "620": f"{ch}/Frameworks/Helper.app/Contents/MacOS/Helper"}
+    table = tbl((600, 1, ME, 0.5, f"{ch}/MacOS/Google Chrome"), (620, 600, ME, 0.3, f"{ch}/Frameworks/Helper.app/x"),
+                (50, 1, ME, 0.1, "claude"), (51, 50, ME, 0.1, "node run-tests.js"),
+                (610, 51, ME, 6.0, f"{ch}/MacOS/Google Chrome --headless"), (611, 610, ME, 2.0, f"{ch}/Frameworks/Helper.app/x --type=renderer"))
+    a = group(table, exe, lsapps=ls)["600"]
+    assert a["members"] == 2 and a["cores"] == pytest.approx(0.8)      # the real Chrome and its helper, nothing of the test run
+    assert not a["hosts_build"]
+
+
 def test_other_users_apps_are_not_apps_of_ours():
     table = tbl((100, 1, 0, 0.5, "loginwindow"), (300, 1, ME, 0.5, "x"))
     apps = group(table, {})
@@ -195,6 +228,13 @@ def test_protected_by_bundle_path_matches_components_not_text_prefixes():
     assert reason(None, "/Applications/Ghostty.app.x") is None                      # not a path prefix of it
     assert reason(None, "/Applications/Foo.app", exe="/Applications/Ghostty.app/Contents/MacOS/ghostty") == "cfg:bundle-path"
     assert reason(None, "/Applications/Foo.app", exe="/Applications/WezTerm.app/Contents/MacOS/wezterm-gui") == "cfg:bundle-path"
+
+
+def test_the_bundle_path_alone_protects_when_the_executable_is_unknown_or_elsewhere():
+    """The bundle check and the executable check are separate: an app whose exe cannot be read, or lies outside its bundle, is still protected by the bundle."""
+    for exe in (None, "/opt/elsewhere/helper"):
+        assert gh.protect_reason(None, "/Applications/Ghostty.app", exe, ME, ME, shipped()) == "cfg:bundle-path"
+        assert gh.protect_reason(None, "/Applications/Foo.app", exe, ME, ME, shipped()) is None
 
 
 def test_a_display_name_never_protects_and_never_unprotects():
@@ -385,12 +425,50 @@ def test_a_slow_poller_widens_its_own_staleness_window(tmp_path):
 def test_a_hold_whose_pid_start_changed_or_is_gone_is_stale(tmp_path):
     reused = put(tmp_path, 7, start="OLD")
     assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "NEW") == [] and not reused.exists()
-    gone = put(tmp_path, 8)
-    assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: None) == [] and not gone.exists()
+    gone = put(tmp_path, 2 ** 22 + 8)
+    assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: None) == [] and not gone.exists()      # no start and no process: gone
     nostart = put(tmp_path, os.getpid(), start="")   # no start recorded: alive is checked instead
     assert len(gh.read_holds(tmp_path, NOW, start_of=lambda pid: "x")) == 1 and nostart.exists()
     dead = put(tmp_path, 2 ** 22 + 12345, start="")
     assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "x")[0]["pid"] == os.getpid() and not dead.exists()
+
+
+def test_a_fifo_a_symlink_a_huge_pid_and_nan_in_the_held_directory_never_hang_or_crash(tmp_path):
+    d = tmp_path / "held"
+    d.mkdir()
+    os.mkfifo(d / "7-S1.json")
+    secret = tmp_path / "secret"
+    secret.write_text("keep me")
+    (d / "8-S1.json").symlink_to(secret)
+    (d / "9-S1.json").write_text(json.dumps({"v": 1, "pid": 10 ** 30, "start": "S1", "updated": NOW, "refused_since": NOW, "refused": ["load"]}))
+    (d / "10-S1.json").write_text('{"v": 1, "pid": 10, "start": "S1", "updated": NaN, "refused_since": NaN, "refused": ["load"]}')
+    (d / "11-S1.json").write_text(json.dumps({"v": 1, "pid": 11, "start": "S1", "updated": NOW + 10 ** 6, "refused_since": NOW, "refused": ["load"]}))
+    (d / "12-S1.json").write_text("x" * 10 ** 6)                                  # far beyond the size cap
+    assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1") == []
+    assert secret.read_text() == "keep me"
+
+
+def test_a_symlinked_held_directory_is_neither_read_nor_swept(tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    victim = real / "1-S1.json"
+    victim.write_text(json.dumps({"v": 1, "pid": 1, "start": "S1", "updated": NOW - 10 ** 5, "refused_since": NOW, "refused": ["load"]}))
+    (tmp_path / "held").symlink_to(real)
+    assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1") == [] and victim.exists()
+    with pytest.raises(OSError):
+        gh.hold_write(tmp_path, os.getpid(), "S1", "bg", NOW, ["load"], NOW)
+
+
+def test_a_failed_start_read_is_not_pid_reuse_unless_the_process_is_gone(tmp_path):
+    alive = put(tmp_path, os.getpid(), start="OLD")
+    assert len(gh.read_holds(tmp_path, NOW, start_of=lambda pid: None)) == 1 and alive.exists()   # `ps` timed out: keep the hold
+    assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "NEW") == [] and not alive.exists()   # a different start: reused
+
+
+def test_the_first_sweep_of_an_admit_does_not_compare_start_times(tmp_path):
+    put(tmp_path, os.getpid(), start="OLD")
+    calls = []
+    assert len(gh.read_holds(tmp_path, NOW, check_start=False, start_of=lambda pid: calls.append(pid) or "NEW")) == 1 and calls == []
 
 
 def test_refused_since_is_clamped_never_trusted(tmp_path):
@@ -415,10 +493,10 @@ def test_garbage_in_the_held_directory_is_skipped(tmp_path, body):
 
 
 def test_hold_text_is_cleaned_on_write_and_on_read(tmp_path):
-    put(tmp_path, 5, caller="b\x1bg‮", refused=["load\x00", "pageins"])
+    put(tmp_path, 5, caller="b\x1bg\u202e", refused=["load\x00", "pageins"])
     d = tmp_path / "held"
     rec = json.loads(next(d.iterdir()).read_text())
-    rec["caller"] = "ev‮il\x07"
+    rec["caller"] = "ev\u202eil\x07"
     next(d.iterdir()).write_text(json.dumps(rec))
     [h] = gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1")
     assert h["caller"] == "evil" and h["refused"] == ["load", "pageins"]
@@ -465,10 +543,14 @@ def test_a_waiting_admit_keeps_a_hold_file_and_removes_it_on_return(monkeypatch,
 def test_the_hold_start_credits_a_refused_since_through_parse_refused_since(monkeypatch, tmp_path, capsys):
     run = Run(monkeypatch, tmp_path, wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
     seen = spy(run)
-    rc, _rec, _ = run(capsys, wait=30.0, refused_since=str(int(NOW - 500)))
-    assert rc == 75 and seen[0][0]["refused_since"] == int(NOW - 500)       # a cross-chunk start is legitimately older than this admit
+    rc, _rec, _ = run(capsys, wait=30.0, refused_since=str(int(NOW - 100)))
+    assert rc == 75 and seen and seen[0][0]["refused_since"] == int(NOW - 100)       # a cross-chunk start is legitimately older than this admit
+    big = Run(monkeypatch, tmp_path / "big", wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
+    seen_big = spy(big)
+    assert big(capsys, wait=30.0, refused_since=str(int(NOW - 500)))[0] == 0 and seen_big == []   # the valve spends a 500 s credit at once: no wait, no hold file
     run2 = Run(monkeypatch, tmp_path / "b", wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
     seen2 = spy(run2)
+    monkeypatch.setattr(run2.lw, "STARVE_SOFT_S", 0.0)                      # valve off: the capped 3600 s credit would admit at once
     run2(capsys, wait=30.0, refused_since=str(int(NOW - 10 ** 6)))
     assert seen2[0][0]["refused_since"] == int(NOW - 3600)                  # capped at STARVE_REFUSED_SINCE_MAX_S
     run3 = Run(monkeypatch, tmp_path / "c", wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
@@ -494,6 +576,38 @@ def test_a_clean_reading_ends_the_run_and_removes_the_file(monkeypatch, tmp_path
     rc, rec, _ = run(capsys, wait=400.0)
     assert rc == 0 and rec["status"] == "ok"
     assert seen and seen[0] and held_files(run.state) == []
+
+
+def test_a_bare_check_never_touches_the_registry(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
+    calls = []
+    for name in ("hold_write", "proc_start", "read_holds"):
+        monkeypatch.setattr(gh, name, lambda *a, _n=name, **k: calls.append(_n))
+    rc, _rec, _ = run(capsys, wait=0.0)
+    assert rc == 75 and calls == [] and held_files(run.state) == []
+
+
+def test_the_first_refused_poll_sweeps_stale_files_of_dead_waiters(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
+    stale = put(run.state, 2 ** 22 + 77, upd=NOW - 5000)
+    seen = spy(run)
+    run(capsys, wait=30.0)
+    assert not stale.exists() and len(seen[0]) == 1
+
+
+def test_the_hold_names_the_caller_pid_and_a_supervising_parent_can_override_it(monkeypatch, tmp_path, capsys):
+    run = Run(monkeypatch, tmp_path, wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
+    seen = spy(run)
+    monkeypatch.delenv("LW_ADMIT_CALLER_PID", raising=False)
+    run(capsys, wait=30.0)
+    assert seen[0][0]["caller_pid"] == os.getppid() and run.lw.admit_caller_pid() == os.getppid()
+    monkeypatch.setenv("LW_ADMIT_CALLER_PID", "4242")
+    run2 = Run(monkeypatch, tmp_path / "b", wall0=NOW, **dict(SOFT, LW_STARVE_SOFT_S="0"))
+    seen2 = spy(run2)
+    run2(capsys, wait=30.0)
+    assert seen2[0][0]["caller_pid"] == 4242
+    monkeypatch.setenv("LW_ADMIT_CALLER_PID", "not-a-pid")
+    assert run2.lw.admit_caller_pid() == os.getppid()
 
 
 def test_a_broken_gui_hog_module_changes_neither_the_verdict_nor_the_exit_code(monkeypatch, tmp_path, capsys):
@@ -556,11 +670,12 @@ def test_ps_table_records_pty_attached_pids(monkeypatch, tmp_path):
     out = ("  10     1   502   1.5 S    31  1000 ??       /Applications/X.app/Contents/MacOS/X --flag\n"
            "  11    10   502  20.0 R    31  2000 ttys003  make -j8\n"
            "  12    10   502   0.0 S     4   500 -        helper with  spaces   in args\n"
+           "  13    10   502   0.0 S     4   500 ?        linux style no tty\n"
            "  bad line\n")
     monkeypatch.setattr(lw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
     lw.PTTY.clear()
     t = lw.ps_table()
-    assert set(t) == {"10", "11", "12"} and lw.PTTY == {"11"}
+    assert set(t) == {"10", "11", "12", "13"} and lw.PTTY == {"11"}
     assert t["10"][3] == "/Applications/X.app/Contents/MacOS/X --flag" and t["12"][3] == "helper with  spaces   in args"
     assert t["11"][2] == pytest.approx(0.2) and lw.PSTATE["11"] == ("R", 2000)
 
@@ -572,7 +687,7 @@ class World:
 
     def __init__(self, tmp_path, cores=1.0, rss_mb=300, protected=False):
         self.state = tmp_path / "state"
-        self.state.mkdir()
+        self.state.mkdir(parents=True)
         self.st = {}
         bid = "com.mitchellh.ghostty" if protected else "com.example.hog"
         self.ls = [{"name": "Hog", "bundle_id": bid, "bundle_path": "/Applications/Hog.app", "exe": "/Applications/Hog.app/Contents/MacOS/hog",
@@ -587,25 +702,11 @@ class World:
 
     def tick(self, t, dry=False, **kw):
         return gh.tick(self.st, t, self.table, self.rss, set(), state_dir=self.state, my_uid=ME, agent_clis={"claude"}, load1=7.5, dry=dry,
-                       cfg=cfg(), lsapps=self.ls, exe_of=lambda p: self.exe.get(str(p)), out=self.lines.append, **kw)
+                       start_of=lambda pid: "S1", cfg=shipped(), lsapps=self.ls, exe_of=lambda p: self.exe.get(str(p)), out=self.lines.append, **kw)
 
     def log(self):
         p = gh.dry_run_path(self.state)
         return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
-
-
-@pytest.fixture(autouse=True)
-def _own_start(monkeypatch):
-    """A held pid is alive for the sweeper: every start-time read answers the recorded "S1"."""
-    monkeypatch.setattr(gh, "proc_start", lambda pid: "S1")
-    monkeypatch.setattr(gh, "read_holds", _read_holds_with_s1)
-
-
-_orig_read_holds = gh.read_holds
-
-
-def _read_holds_with_s1(state_dir, now, sweep=True, start_of=None, cap=gh.HOLD_AGE_CAP_S):
-    return _orig_read_holds(state_dir, now, sweep=sweep, start_of=start_of or (lambda pid: "S1"), cap=cap)
 
 
 def test_tick_logs_a_would_show_line_once_per_30_minutes(tmp_path):
@@ -661,6 +762,55 @@ def test_tick_needs_a_hold_of_three_minutes_a_relievable_gate_and_enough_app_use
     assert prot.tick(NOW)["reason"] == "below-threshold"          # Ghostty's bundle id: protected apps never count
 
 
+def test_apps_under_the_callers_of_a_waiting_admit_are_excluded(tmp_path):
+    w = World(tmp_path)
+    w.table["700"] = (1, ME, 0.5, "bg")
+    w.table["800"] = (700, ME, 3.0, "/Applications/Hog.app/Contents/MacOS/hog")
+    w.exe["700"] = "/bin/bash"
+    gh.hold_write(w.state, os.getpid(), "S1", "bg", NOW - 400, ["pageins"], NOW, 15, caller_pid=700)   # the admit's pid is not the caller's
+    d = w.tick(NOW)
+    assert not d["show"] and d["reason"] == "below-threshold"
+
+
+@pytest.mark.parametrize("key,bad", [("apps", {"x": 1}), ("apps", "text"), ("app_meta", []), ("gui_hog", []), ("gui_hog", "x"), ("apps", [None, 3, "a"])])
+def test_corrupt_state_heals_instead_of_killing_every_tick(tmp_path, key, bad):
+    w = World(tmp_path)
+    w.hold(NOW)
+    w.st[key] = bad
+    assert w.tick(NOW)["show"]
+    assert isinstance(w.st["apps"], list) and isinstance(w.st["gui_hog"], dict) and isinstance(w.st["app_meta"], dict)
+
+
+def test_a_huge_snooze_is_clamped_and_a_future_last_shown_is_ignored(tmp_path):
+    w = World(tmp_path)
+    w.hold(NOW)
+    (w.state / "gui-hog").mkdir()
+    (w.state / "gui-hog" / "snooze.json").write_text(json.dumps({"snooze_until": NOW + 10 ** 12}))
+    assert w.tick(NOW)["reason"] == "snoozed"
+    w.hold(NOW + 3601)
+    assert w.tick(NOW + 3601)["show"]                              # the snooze never outlasts snooze_s
+    w2 = World(tmp_path / "w2")
+    w2.hold(NOW)
+    w2.st["gui_hog"] = {"last_shown": NOW + 10 ** 9}                # a clock that was set forward once
+    assert w2.tick(NOW)["show"]
+    assert gh._iso(float("inf")) == "?" and gh._iso(10 ** 30) == "?"
+
+
+def test_hostile_files_in_the_gui_hog_directory_are_ignored(tmp_path):
+    w = World(tmp_path)
+    w.hold(NOW)
+    g = w.state / "gui-hog"
+    g.mkdir()
+    os.mkfifo(g / "snooze.json")
+    outside = tmp_path / "outside.log"
+    outside.write_text("keep")
+    (g / "dry-run.jsonl").symlink_to(outside)
+    assert gh.read_snooze(w.state) is None
+    with pytest.raises(OSError):
+        gh.dry_run_append(w.state, {"t": gh._iso(NOW), "event": "would-show"})
+    assert outside.read_text() == "keep" and gh.count_dry_run(w.state, 7, NOW) == 0
+
+
 def test_the_trigger_fires_on_the_rss_sum_alone(tmp_path):
     w = World(tmp_path, cores=0.01, rss_mb=2100)
     w.hold(NOW)
@@ -709,12 +859,12 @@ def test_lw_gui_hog_0_in_the_sampler_wrapper(monkeypatch, tmp_path):
 
 def test_names_in_the_log_are_cleaned_and_clipped(tmp_path):
     w = World(tmp_path)
-    w.ls[0]["name"] = "Hog‮\x1b[2Jevil" + "z" * 200
-    w.ls[0]["bundle_id"] = "com.example.hog​\x07"
+    w.ls[0]["name"] = "Hog\u202e\x1b[2Jevil" + "z" * 200
+    w.ls[0]["bundle_id"] = "com.example.hog\u200b\x07"
     w.hold(NOW)
     w.tick(NOW)
     raw = gh.dry_run_path(w.state).read_text()
-    assert "‮" not in raw and "\\u202e" not in raw and "\\u001b" not in raw and "\\u0007" not in raw and "\\u200b" not in raw
+    assert "\u202e" not in raw and "\\u202e" not in raw and "\\u001b" not in raw and "\\u0007" not in raw and "\\u200b" not in raw
     assert len(w.log()[0]["apps"][0]["name"]) <= 61 and w.log()[0]["apps"][0]["bundle_id"] == "com.example.hog"
     assert (gh.dry_run_path(w.state).stat().st_mode & 0o777) == 0o600
 

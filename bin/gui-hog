@@ -34,7 +34,9 @@ def main(argv=None):
     if a.json:
         held = gui_hog.read_holds(STATE_DIR, now, sweep=False)
         means = gui_hog.window_means(st, now, cfg)
-        d = gui_hog.should_show(held, means, now, gui_hog.read_snooze(STATE_DIR), (st.get("gui_hog") or {}).get("last_shown"), cfg)
+        ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
+        snooze = gui_hog.effective_snooze(ghs, gui_hog.read_snooze(STATE_DIR), now, cfg["trigger"]["snooze_s"])
+        d = gui_hog.should_show(held, means, now, snooze, ghs.get("last_shown"), cfg)
         print(json.dumps({"enabled": gui_hog.enabled(), "decision": d, "holds": held, "apps": means,
                           "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now)}, indent=1))
     else:

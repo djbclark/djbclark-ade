@@ -287,7 +287,7 @@ def ps_table():
             continue
         cmd = parts[8] if len(parts) > 8 else ""
         PSTATE[parts[0]] = (parts[4], int(parts[6]) if parts[6].isdigit() else 0)
-        if parts[7] not in ("??", "-"):
+        if parts[7] not in ("??", "?", "-"):   # macOS says ??, Linux ?
             PTTY.add(parts[0])
         if parts[4].startswith("U"):  # uninterruptible wait: counts in load, uses no CPU
             STUCK.append(cmd[:80] or parts[0])
@@ -2629,6 +2629,18 @@ def admit_log_path():
     return p if p.is_absolute() else STATE_DIR / p   # never relative to the caller's cwd (bg runs in the repo under test)
 
 
+def admit_caller_pid():
+    """The pid of whoever called `admit` (the process whose build the hold registry names): LW_ADMIT_CALLER_PID when a supervising parent set it
+    (the supervised copy's own parent is the deadline wrapper), else the parent. 0 when unknown."""
+    v = os.environ.get("LW_ADMIT_CALLER_PID", "").strip()
+    if v.isdigit() and len(v) < 10:
+        return int(v)
+    try:
+        return os.getppid()
+    except OSError:
+        return 0
+
+
 def admit_caller():
     """The parent process's program, or "" when it is not cheaply known: LW_ADMIT_CALLER (a caller may name itself), else the first word
     of the parent's command line (`ps`, 2 s cap; /proc on Linux), with an interpreter replaced by the script it runs (`bash /x/bg` -> bg)."""
@@ -2848,9 +2860,10 @@ def hold_note(refused, run_start, waited, poll, wait, caller):
         first = "start" not in _HOLD
         if first:
             _HOLD["start"] = gh.proc_start(os.getpid()) or ""
-        _HOLD["path"] = gh.hold_write(STATE_DIR, os.getpid(), _HOLD["start"], caller, since if since is not None else int(t), refused, t, poll)
+        _HOLD["path"] = gh.hold_write(STATE_DIR, os.getpid(), _HOLD["start"], caller, since if since is not None else int(t), refused, t, poll,
+                                      caller_pid=admit_caller_pid())
         if first:
-            gh.read_holds(STATE_DIR, t)   # sweep other waiters' stale files once per call
+            gh.read_holds(STATE_DIR, t, check_start=False)   # sweep other waiters' stale files once per call
     except Exception:  # noqa: BLE001
         pass
 
@@ -2919,6 +2932,7 @@ def _cmd_admit(a):
     if getattr(a, "supervise", False) and a.wait > 0:
         if caller:
             os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
+        os.environ.setdefault("LW_ADMIT_CALLER_PID", str(admit_caller_pid()))   # likewise for the hold registry's caller pid
         rc = self_deadline(a, poll)
         if rc is not None:
             return rc
