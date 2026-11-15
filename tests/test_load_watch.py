@@ -972,3 +972,42 @@ def test_ci_attempt_cli(tmp_path):
         assert r.returncode == 0, r.stderr
     r = run(tmp_path, "ci", "route", str(tmp_path), *args)
     assert (r.returncode, r.stdout.strip()) == (0, "local\tbypass\t2")
+
+
+def test_damaged_row_refuses_before_any_dialog(tmp_path):
+    """rv-744 Low (c): a registry row with a control character must refuse before sudo-ask is shown, not after djbclark approved."""
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 0)
+    (tmp_path / "ci-only.tsv").write_text("/x/y\tlocal\tbad\x01reason\t2026-10-18\n")
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "needs Xcode")
+    assert r.returncode != 0 and "control character" in r.stderr and "nothing was written" in r.stderr
+    assert not calls.exists() or calls.read_text() == ""  # no dialog was invoked
+
+
+def test_registry_lock_wait_is_bounded(tmp_path):
+    """rv-744 Low (a): a held lock yields a clear refusal after the timeout, not an endless wait."""
+    import fcntl
+    repo = _repo(tmp_path)
+    (tmp_path / "ci-only.tsv").write_text("")
+    with open(str(tmp_path / "ci-only.tsv") + ".lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        t0 = time.monotonic()
+        r = run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run", LW_REGISTRY_LOCK_TIMEOUT_S="0.5")
+        assert time.monotonic() - t0 < 10
+    assert r.returncode != 0 and "registry lock" in r.stderr and "nothing was changed" in r.stderr
+    assert rows(tmp_path) == []
+
+
+def test_registry_lock_waits_for_a_release_and_ignores_a_bad_timeout(tmp_path):
+    """The bound must still WAIT (a lock released after 1 s is acquired), and a typo'd or nan timeout falls back to the default."""
+    import fcntl
+    import threading
+    repo = _repo(tmp_path)
+    (tmp_path / "ci-only.tsv").write_text("")
+    held = open(str(tmp_path / "ci-only.tsv") + ".lock", "a")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    threading.Timer(1.0, lambda: (fcntl.flock(held, fcntl.LOCK_UN), held.close())).start()
+    r = run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run", LW_REGISTRY_LOCK_TIMEOUT_S="nan")
+    assert r.returncode == 0, r.stderr
+    assert [x[1] for x in rows(tmp_path)] == ["ci"]
+    assert run(tmp_path, "ci", "list", LW_REGISTRY_LOCK_TIMEOUT_S="abc").returncode == 0

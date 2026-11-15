@@ -229,6 +229,21 @@ exit 5 stays a queued receipt. After a later success (`reconcile` to `awaiting-a
 `finish` to `archived`) the earlier reason moves to `resolved_native_error`.
 `creation-unknown` and `archive-unknown` are diagnosable from the record file alone.
 
+Creation outcome (`handoff`'s `agent run`; 2026-11-15, ss-49):
+
+| Status | When | Reconcile? | Predecessor | CLI exit |
+|---|---|---|---|---|
+| `awaiting-ack` | Paseo returned an `agentId` | no | keeps working until `finish` | 0 |
+| `creation-refused` | Paseo refused with a code it raises before creating anything (`PRE_CREATE_REFUSAL_CODES`: `INVALID_OPTIONS`, `INVALID_LABEL`, `INVALID_ENV`, `MISSING_PROMPT`, `INVALID_THINKING_OPTION`, `INVALID_TIMEOUT`, `MISSING_PROVIDER`, `INVALID_PROVIDER`, `INVALID_MODEL`, `CONFLICTING_MODEL_OPTIONS`, `WORKSPACE_NOT_FOUND` (see the note below), `INVALID_OUTPUT_SCHEMA`), returned no agent id, and `agent ls --label ade.handoff=TOKEN` lists none: nothing was created | never (`reconcile` returns the record unchanged) | never replaced; keeps working | 3 |
+| `creation-unknown` | anything less certain: timeout, `OSERROR`, no error code, any other code (`AGENT_CREATE_FAILED`, `UNKNOWN_ERROR`, `DAEMON_*`, `INVALID_CODE`: Paseo also raises them after creating the agent, e.g. when the initial prompt fails), a labelled agent present or a failed label probe, unparsable output, a malformed receipt | yes, read `native_error`, then `reconcile` | kept until the outcome is known | 1 |
+
+Note: `WORKSPACE_NOT_FOUND` stays `creation-unknown` in practice. On the `--workspace` path Paseo prints a text line (`Using workspace ...`) before its multi-line envelope, and `parse_envelope` reads no envelope after a text line (pre-existing; not changed here), so the failure reads as an unknown outcome.
+
+`creation-refused` is terminal and counts as dead everywhere: the send guard and `ade_lead_succession` read only
+`acknowledged`/`archive-unknown`/`archived` records, so a refused record never redirects a peer message and is no ledger
+link. Fix the `native_error` cause and run `handoff` again: unlike every other record, a `creation-refused` one is replaced by the
+new attempt (the earlier reason is kept as `refused_before`), but only after `agent ls --label ade.handoff=OLDTOKEN` lists no agent (else it is refused with "no create replayed"); a repeat of any other status still returns the record unchanged.
+
 Workspace pre-check: `handoff` reads `paseo workspace ls --json` before saving the intent. A
 failure there refuses with Paseo's reason and sends nothing. When the predecessor's
 `PASEO_WORKSPACE_ID` is no longer listed (`workspace ls` omits background workspaces, so one of
@@ -261,7 +276,7 @@ the status stays `archive-unknown` and nothing is retried.
 
 #### Manual fallbacks
 
-(a) Creation failed or stayed `creation-unknown`: read `native_error` in the record, then
+(a) Creation stayed `creation-unknown` (a `creation-refused` record needs no reconcile: see the table above): read `native_error` in the record, then
 FIRST run `bin/ade-self-session reconcile --record RECORD` (or `paseo ls -a -g --label
 ade.handoff=TOKEN --json`): a timeout, `OSERROR` or "no parseable output" may have created
 the successor. If reconcile finds one labelled agent, stop here: it is the successor. Only
@@ -368,7 +383,7 @@ bin/ade-self-session reconcile --record /absolute/state/handoff-PREDECESSOR_UUID
 `status` reads persisted state only, with no native probes or writes. A per-record
 nonblocking lock serializes effects; atomic fsynced intents/receipts survive
 interruption. Repeating handoff from the same predecessor never creates another
-successor. If native creation times out or returns an invalid receipt, retain
+successor (the one exception: a `creation-refused` record, which is replaced after a label probe finds no agent). If native creation times out or returns an invalid receipt, retain
 `creation-unknown`. The predecessor's explicit `reconcile` requires exactly one
 native agent matching the unique handoff label and verified identity/mode.
 Zero or multiple matches block; no create is replayed. A failed/ambiguous handoff
@@ -376,7 +391,7 @@ keeps the briefing, original files and predecessor available. Conflicting acks
 are refused. Do not delete transaction files to force an automatic retry.
 
 Exit 0 means the requested step reached its reported state (`requested`,
-`awaiting-ack`, `acknowledged`, `archived`); exit 1 means blocked/unknown. Only
+`awaiting-ack`, `acknowledged`, `archived`); exit 3 means `creation-refused` (definite refusal, nothing created); exit 1 means blocked/unknown. Only
 `archived` is completed handoff. Compaction has no completion-confirmed state.
 Missing CLI/daemon, unsupported provider/mode and malformed state fail explicitly.
 The default is ordinary YOLO; the supported mode helper is shared with the

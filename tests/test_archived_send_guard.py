@@ -195,7 +195,7 @@ def test_a_stuck_acknowledged_handoff_hands_the_predecessor_its_mail_back(world)
     ("archive-unknown", "AGENT_RUNNING", True), ("archive-unknown", "PREDECESSOR_NOT_IDLE", True),
     ("archive-unknown", None, False),  # a crashed archive with no recorded reason: unknown outcome
     ("archive-unknown", "ARCHIVE_FAILED", False), ("archive-unknown", "ARCHIVED_OTHER_AGENT", False),
-    ("creation-unknown", None, False), ("awaiting-ack", None, False), ("archive-failed", "AGENT_RUNNING", False),
+    ("creation-unknown", None, False), ("creation-refused", "INVALID_THINKING_OPTION", False), ("creation-refused", None, False), ("awaiting-ack", None, False), ("archive-failed", "AGENT_RUNNING", False),
 ])
 def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, status, code, redirects):
     over = {"native_error": {"op": "finish", "code": code}} if code else {}

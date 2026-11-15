@@ -42,6 +42,17 @@ class NativeError(SessionError):
         self.outcome = outcome
 
 
+# Codes Paseo's `agent run` raises BEFORE it contacts the daemon or creates anything (adversary, ss-49: the catch-all
+# `AGENT_CREATE_FAILED`, `UNKNOWN_ERROR`, `DAEMON_*` and a failed initial prompt can follow a created agent, so a code
+# alone is no proof). Checked against Paseo da7e3d94 (`runRunCommand`, packages/cli/src/commands/agent/run.ts): re-verify on a
+# Paseo upgrade. WORKSPACE_NOT_FOUND stays `creation-unknown` in practice: `--workspace` prints a text line before the
+# multi-line envelope and `parse_envelope` reads none after a text line (pre-existing). Only these make a refusal definite; every other code stays `creation-unknown`.
+PRE_CREATE_REFUSAL_CODES = frozenset((
+    'INVALID_OPTIONS', 'INVALID_LABEL', 'INVALID_ENV', 'MISSING_PROMPT', 'INVALID_THINKING_OPTION', 'INVALID_TIMEOUT',
+    'MISSING_PROVIDER', 'INVALID_PROVIDER', 'INVALID_MODEL', 'CONFLICTING_MODEL_OPTIONS', 'WORKSPACE_NOT_FOUND',
+    'INVALID_OUTPUT_SCHEMA'))
+
+
 class IdleTimeout(SessionError):
     """The predecessor never stayed idle for the whole stable window before the overall bound."""
 
@@ -444,6 +455,21 @@ class Service:
         explicit_title = None if requested_title is None else title_ident(requested_title)
         explicit_role = None if requested_role is None else role_ident(requested_role)
         with self.transaction('handoff-' + predecessor) as (path, existing):
+            # A `creation-refused` record proves nothing was created (Paseo's own refusal, no agent id): a new handoff
+            # replaces it, keeping the earlier reason as `refused_before`. Every other record is never replayed.
+            refused_before = None
+            if (isinstance(existing, dict) and existing.get('status') == 'creation-refused'
+                    and existing.get('home') == str(self.home) and existing.get('kind') == 'handoff'
+                    and existing.get('predecessor') == predecessor and existing.get('successor') is None
+                    and isinstance(existing.get('native_error'), dict)):
+                # Replace only when the token's label lists no agent: a probe that fails or finds one keeps the record.
+                rows = self.native('agent', 'ls', '-a', '-g', '--label', 'ade.handoff=' + existing['token'])
+                if not isinstance(rows, list) or rows:
+                    raise SessionError('creation-refused record, but the token-label probe answered ' + (
+                        'something other than a list' if not isinstance(rows, list)
+                        else 'an agent carrying its token label') + '; reconcile, no create replayed')
+                refused_before = existing['native_error']
+                existing = None
             if existing:
                 if (not isinstance(existing, dict) or existing.get('home') != str(self.home)
                         or existing.get('kind') != 'handoff' or existing.get('predecessor') != predecessor):
@@ -495,6 +521,8 @@ class Service:
                       'model': source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
+            if refused_before is not None:
+                record['refused_before'] = refused_before
             self.save(path, record)  # survives crash before/after unknown native effect
             tool = shlex.quote(str(Path(__file__).with_name('ade-self-session').resolve()))
             common = f"{tool} --state-dir {shlex.quote(str(self.state))} --paseo-home {shlex.quote(str(self.home))}"
@@ -538,10 +566,24 @@ class Service:
                 record['status'] = 'awaiting-ack'
             except SessionError as error:
                 record['native_error'] = native_error_record('agent run', error)
+                # A DEFINITE refusal (a pre-create Paseo code, no agent carries the token label) created nothing: terminal, no
+                # reconcile. A timeout, OSERROR, no code, unparsable output or a malformed receipt stays unknown.
+                if (isinstance(error, NativeError) and error.outcome == 'refused'
+                        and record['native_error'].get('code') in PRE_CREATE_REFUSAL_CODES
+                        and record.get('successor') is None and self.token_agents_absent(record['token'])):
+                    record['status'] = 'creation-refused'
                 self.save(path, record)
                 return record
             self.save(path, record)
             return record
+
+    def token_agents_absent(self, token):
+        """True only when `agent ls --label ade.handoff=TOKEN` answers a list with no agent (a failed probe is False)."""
+        try:
+            rows = self.native('agent', 'ls', '-a', '-g', '--label', 'ade.handoff=' + token)
+        except SessionError:
+            return False
+        return isinstance(rows, list) and not rows
 
     def chain_identity(self, agent):
         """The `identity` block of the record that made `agent` a successor on this daemon home, else None."""

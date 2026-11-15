@@ -65,6 +65,7 @@ class Native:
                            'Cwd': str(root), 'Mode': 'bypassPermissions', 'ParentAgentId': None,
                            'AvailableModes': [{'id': 'bypassPermissions', 'label': 'Bypass'}]}}
         self.labelled = []
+        self.probe = None           # BaseException to raise, or (rc, stdout, stderr), for an `agent ls --label ade.handoff=` probe
         self.labels = {}            # 'key=value' -> ids carrying it (every label but ade.handoff, which `labelled` serves)
         self.updates = []           # argv tails of `agent update`
         self.update_result = None   # (returncode, stdout, stderr) replacing the `agent update` answer
@@ -113,6 +114,10 @@ class Native:
                 raise self.create_error
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
+            if self.probe is not None and any(a.startswith('ade.handoff=') for a in args):
+                if isinstance(self.probe, BaseException):
+                    raise self.probe
+                return subprocess.CompletedProcess(argv, *self.probe)
             # `ls -a` adds includeBackground; a plain `ls -g` (what archive resolves from) hides it
             wanted = [args[i + 1] for i, a in enumerate(args) if a == '--label']
             if wanted and not any(w.startswith('ade.handoff=') for w in wanted):
@@ -809,13 +814,84 @@ def test_agent_send_rc_5_is_still_a_receipt(setup):
 
 def test_create_refusal_reason_is_recorded_not_hidden(setup):
     service, native, checkpoint = setup
-    native.run_result = (1, '', envelope('AGENT_CREATE_FAILED', 'provider rejected the mode'))
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
     record = service.handoff(checkpoint, quiesced=True)
-    assert record['status'] == 'creation-unknown' and native.created == 0
+    assert record['status'] == 'creation-refused' and native.created == 0 and record['successor'] is None
     assert record['native_error']['op'] == 'agent run'
-    assert record['native_error']['code'] == 'AGENT_CREATE_FAILED'
+    assert record['native_error']['code'] == 'INVALID_THINKING_OPTION'
     assert record['native_error']['rc'] == 1
     assert json.loads(Path(record['record']).read_text())['native_error'] == record['native_error']
+
+
+def test_refused_creation_never_reconciles_and_a_new_handoff_replaces_it(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    refused = service.handoff(checkpoint, quiesced=True)
+    assert refused['status'] == 'creation-refused'
+    calls = len(native.calls)
+    assert service.reconcile(Path(refused['record']))['status'] == 'creation-refused'
+    assert len(native.calls) == calls  # no `agent ls`: nothing to reconcile
+    native.run_result = None  # the cause is fixed: a new handoff is not blocked by the refusal
+    again = service.handoff(checkpoint, quiesced=True)
+    assert again['status'] == 'awaiting-ack' and again['successor'] == SUCC
+    assert again['refused_before']['code'] == 'INVALID_THINKING_OPTION' and again['token'] != refused['token']
+
+
+@pytest.mark.parametrize('result', [
+    (1, '', 'boom: no envelope here'),                              # no error code
+    (1, '', json.dumps({'error': {'message': 'no code'}})),          # envelope without a code
+    (1, '', envelope('AGENT_CREATE_FAILED', 'prompt stage failed after the agent existed')),  # outcome unknown (adversary A1)
+    (1, '', envelope('DAEMON_CONNECTION_LOST', 'lost')), (1, '', envelope('UNKNOWN_ERROR', 'x')),
+    (1, '', envelope('INVALID_CODE', 'unreadable code')),
+    (0, 'not json', ''),                                             # unparsable receipt
+])
+def test_create_failure_without_a_pre_create_code_stays_unknown(setup, result):
+    service, native, checkpoint = setup
+    native.run_result = result
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['status'] == 'creation-unknown'
+
+
+def test_create_timeout_stays_unknown(setup):
+    service, native, checkpoint = setup
+    native.create_error = subprocess.TimeoutExpired('paseo', 30)
+    assert service.handoff(checkpoint, quiesced=True)['status'] == 'creation-unknown'
+
+
+def test_cli_reports_creation_refused_with_exit_3(setup, monkeypatch, capsys):
+    import importlib.machinery, importlib.util
+    path = str(Path(ss.__file__).with_name('ade-self-session'))
+    loader = importlib.machinery.SourceFileLoader('ade_self_session_cli', path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    monkeypatch.setattr(cli, 'Service', lambda *a, **k: service)
+    monkeypatch.setattr(sys, 'argv', ['ade-self-session', '--state-dir', str(service.state), '--paseo-home', str(service.home),
+                                      'handoff', '--checkpoint', str(checkpoint), '--quiesced'])
+    assert cli.main() == 3
+    out = capsys.readouterr()
+    assert json.loads(out.out)['status'] == 'creation-refused' and 'creation-refused' in out.err
+
+
+def test_a_pre_create_code_with_an_agent_carrying_the_token_stays_unknown(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    native.labelled = [{'id': SUCC}]  # Paseo did create one after all
+    assert service.handoff(checkpoint, quiesced=True)['status'] == 'creation-unknown'
+
+
+def test_a_retry_over_a_refused_record_is_blocked_while_its_token_lists_an_agent(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    refused = service.handoff(checkpoint, quiesced=True)
+    assert refused['status'] == 'creation-refused'
+    native.labelled = [{'id': SUCC}]
+    with pytest.raises(ss.SessionError, match='no create replayed'):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0
+    assert json.loads(Path(refused['record']).read_text())['status'] == 'creation-refused'
 
 
 def test_malformed_creation_receipt_is_recorded(setup):
@@ -1859,3 +1935,40 @@ def test_a_first_finish_check_that_fails_records_why_and_ends_the_redirect_at_on
     assert saved['status'] == 'acknowledged' and saved['native_error']['op'] == 'finish'
     assert guard_says(service) == 'pass'
     assert native.archived == 0
+
+
+PROBES = [
+    (1, '', envelope('DAEMON_CONNECTION_LOST', 'down')),   # probe rc 1 with an envelope
+    subprocess.TimeoutExpired('paseo', 30),                # timeout
+    (0, '{}', ''),                                         # an empty dict answer (falsy, not a list)
+]
+
+
+@pytest.mark.parametrize('probe', PROBES)
+def test_a_failed_or_non_list_probe_after_a_refusal_stays_unknown(setup, probe):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    native.probe = probe
+    assert service.handoff(checkpoint, quiesced=True)['status'] == 'creation-unknown'
+
+
+@pytest.mark.parametrize('probe', PROBES)
+def test_a_failed_or_non_list_retry_probe_blocks_and_keeps_the_record(setup, probe):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    refused = service.handoff(checkpoint, quiesced=True)
+    assert refused['status'] == 'creation-refused'
+    before = Path(refused['record']).read_text()
+    native.run_result, native.probe = None, probe
+    with pytest.raises(ss.SessionError):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0 and Path(refused['record']).read_text() == before
+
+
+def test_a_non_list_retry_probe_is_named_as_such(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    service.handoff(checkpoint, quiesced=True)
+    native.run_result, native.probe = None, (0, '{}', '')
+    with pytest.raises(ss.SessionError, match='other than a list'):
+        service.handoff(checkpoint, quiesced=True)
