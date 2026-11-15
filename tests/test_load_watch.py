@@ -216,20 +216,55 @@ def test_local_decision_denied_cancelled_or_unaskable_writes_nothing(tmp_path):
     assert (tmp_path / "ci-only.tsv").read_text() == before
 
 
-def test_local_decision_over_pending_is_gated_and_ci_pending_are_not(tmp_path):
+def test_local_and_pending_decisions_are_gated_and_ci_is_not(tmp_path):
     repo = _repo(tmp_path)
     calls = stub_sudo_ask(tmp_path, 1)  # every ask is denied
-    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    asked = lambda: len(calls.read_text().splitlines()) if calls.exists() else 0
+    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0  # ci is never gated
+    assert asked() == 0
+    # ci -> pending downgrades CI-first to running here: gated like local (lead adversary, PR 744 B2a)
+    r = run(tmp_path, "ci", "decide", str(repo), "pending", "seeded")
+    assert r.returncode == 1 and "did not approve a `pending` decision" in r.stderr
+    assert rows(tmp_path)[0][1] == "ci" and asked() == 1
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why").returncode == 1  # ci -> local too
+    assert rows(tmp_path)[0][1] == "ci" and asked() == 2
+    # a pending row (approved once) <-> local is gated both ways; back to ci is not
+    stub_sudo_ask(tmp_path, 0)
     assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded").returncode == 0
-    assert run(tmp_path, "ci", "decide", str(repo), "local", "why").returncode == 1  # pending -> local is gated
     assert rows(tmp_path)[0][1] == "pending"
-    assert not calls.exists() or len(calls.read_text().splitlines()) == 1  # only that one local attempt asked
+    stub_sudo_ask(tmp_path, 1)
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why").returncode == 1  # pending -> local
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded, still").returncode == 0  # same mode: note only, no dialog
+    assert rows(tmp_path)[0][1:3] == ["pending", "seeded, still"]
     assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
     assert rows(tmp_path)[0][1] == "ci"
     assert run(tmp_path, "ci", "check", str(repo)).returncode == 0  # reads are ungated
     assert run(tmp_path, "ci", "list").returncode == 0
     assert run(tmp_path, "ci", "rm", str(repo)).returncode == 0
-    assert len(calls.read_text().splitlines()) == 1
+
+
+def test_pending_decision_approved_is_recorded_and_logged_as_pending(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 0)
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded").returncode == 0
+    assert rows(tmp_path)[0][1:3] == ["pending", "seeded"]
+    (ask,) = calls.read_text().splitlines()
+    assert "PENDING" in ask and os.path.realpath(repo) in ask
+    (log,) = approvals_log(tmp_path)
+    assert log[1] == "lw-local-approved" and log[3] == os.path.realpath(repo)
+
+
+def test_pending_glob_key_is_gated(tmp_path):
+    """PR 744 B2b: an ungated `pending` glob such as `DIR/*` made every undecided repo under it run here."""
+    repo = _repo(tmp_path)
+    glob = os.path.realpath(tmp_path) + "/*"
+    calls = stub_sudo_ask(tmp_path, 1)
+    r = run(tmp_path, "ci", "decide", glob, "pending", "everything")
+    assert r.returncode == 1 and not (tmp_path / "ci-only.tsv").exists() and calls.exists()
+    assert run(tmp_path, "ci", "check", str(repo)).returncode == 1  # still undecided, so bg still refuses
+    stub_sudo_ask(tmp_path, 0)
+    assert run(tmp_path, "ci", "decide", glob, "pending", "everything").returncode == 0
+    assert run(tmp_path, "ci", "check", str(repo)).stdout.split("\t")[:2] == ["pending", "everything"]
 
 
 def test_existing_local_row_keeps_working_and_edits_its_reason_without_a_dialog(tmp_path):
@@ -320,13 +355,13 @@ def test_changes_made_during_the_approval_wait_survive(tmp_path):
     try:
         _wait_for(started)  # the dialog is open and the first process has read the registry
         assert run(tmp_path, "ci", "decide", str(j), "ci", "scripts/ci-run").returncode == 0  # the operator moves J to CI meanwhile
-        assert run(tmp_path, "ci", "decide", str(k), "pending", "seeded").returncode == 0
+        assert run(tmp_path, "ci", "decide", str(k), "ci", "scripts/ci-run").returncode == 0
         flag.write_text("")
         assert p.wait(timeout=30) == 0
     finally:
         p.kill()
     got = {r[0]: r[1] for r in rows(tmp_path)}
-    assert got == {os.path.realpath(repo): "local", jt: "ci", kt: "pending"}, got
+    assert got == {os.path.realpath(repo): "local", jt: "ci", kt: "ci"}, got
 
 
 def test_concurrent_registry_writers_lose_no_update(tmp_path):

@@ -180,6 +180,7 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Done before (one line each; detail in git history)
 
+0. **`pending` gated like `local`** (operator 2026-11-15, lw-pending; rv-744 B2): `load-watch ci decide DIR pending` asks djbclark (Allow dialog + Touch ID) unless the row is already `pending`; `ci` stays ungated; `bg` needed no change (it already ran `pending` through the same load gate as `local`).
 1. **`bin/review-pr` and `bin/gh-pr-checks --watch` self-register deadlines** (#361 / #393 / #448, 2026-11-09/10): former Carried residual; see `docs/deadline.md`.
 2. **load-watch via ade_sched** (2026-11-10, #525): `load-watch install|uninstall` uses `ade_sched` with
    `__ADE__`/`__HOME__` templates (Linux systemd + Mac launchd); closes the #293 leftover without restoring
