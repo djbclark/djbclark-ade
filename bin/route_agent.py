@@ -1642,8 +1642,8 @@ def _note_unknown(out: dict[str, Any], seen: dict[str, list[tuple[str | None, An
     prior = out.get(key)
     if prior is None:
         out[key] = entry
-    elif _folds_as_accounts(seen.setdefault(key, []), who) and not prior.get("unknown"):
-        prior["windows"] = {**prior["windows"], UNMEASURED_WINDOW: None}
+    elif _folds_as_accounts(seen.setdefault(key, []), who):
+        prior["windows"] = {**(prior.get("windows") or {}), UNMEASURED_WINDOW: None}
     seen.setdefault(key, []).append(who)
 
 

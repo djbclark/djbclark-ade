@@ -129,6 +129,17 @@ def test_a_paseo_pool_that_measures_nothing_still_closes_the_aiuse_reading_when_
     assert r.UNMEASURED_WINDOW not in plain["claude"]["windows"]
 
 
+def test_two_unreadable_paseo_accounts_close_the_aiuse_reading_too():
+    """Adversary B1 of round 2: [unavailable a, unavailable b] carry the marker, so aiuse's 80 cannot open the gate."""
+    paseo = r.usage_from_paseo([_report("claude:a", status="unavailable"), _report("claude:b", status="unavailable")], now=NOW)
+    assert paseo["claude"]["remaining"] is None and paseo["claude"]["windows"][r.UNMEASURED_WINDOW] is None
+    aiuse = {"claude": {"remaining": 80.0, "windows": {"weekly": 80.0}, "sublimits": {}}}
+    r._fold_paseo(aiuse, paseo)
+    assert aiuse["claude"]["remaining"] == 80 and r.plenty_remaining(aiuse["claude"]) is None
+    same = r.usage_from_paseo([_report("claude:a", status="unavailable"), _report("claude:a", status="unavailable")], now=NOW)
+    assert r.UNMEASURED_WINDOW not in same["claude"]["windows"]
+
+
 def test_cap_only_is_gone_from_the_aiuse_fold():
     import inspect
     assert "cap_only" not in inspect.getsource(r._providers_from_available)
@@ -232,7 +243,7 @@ def test_one_unreadable_paseo_account_alone_is_unknown_as_before():
 
 def test_two_unreadable_paseo_accounts_stay_unknown():
     pool = _paseo(_report("claude:a", status="unavailable"), _report("claude:b", status="unavailable"))
-    assert pool["remaining"] is None and "unknown" in pool
+    assert pool["remaining"] is None and "unknown" in pool and r.plenty_remaining(pool) is None
 
 
 def test_a_paseo_report_without_an_id_cannot_be_shown_to_be_the_same_account():
