@@ -18,14 +18,18 @@ precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
      agent with no proven contact, asking for a one-line status and `ack <lead id>`; at most once per agent per hour
      (state file). Only from a session (PASEO_AGENT_ID set): a sourceless send would default to interrupt.
   3. Waiting report: workers waiting on the lead (answer first) and agents waiting on the operator.
-  4. Names: windows named `<KIND> <repo> (<work>)` (bin/ade_ws_names.py); MAIN is never archived.
+  4. Names and boxes: windows named `<KIND> <repo> (<work>)` (bin/ade_ws_names.py), KIND LEAD, WORKER or OTHER: per lead and repo at
+     most one window of each (the three boxes); MAIN, WORKERS and USER, the 2026-11-13 kinds, are renamed to them. LEAD is never
+     archived. Windows beyond the boxes (a second WORKER window of the lead's chain and repo, one named outside the scheme) are
+     reported; with --apply the empty or finished ones are archived like any empty window of the chain, never another lead's.
   5. Tabs: Paseo has no command to move an agent between windows (docs/workspace-layout.md), so a misplaced tab is
      reported, never relaunched.
   6. Finished: archive this lead's workers whose `unit-<slice>.md` ends DONE with `.done` present and the completion
      handled (`.done.ack` or --handled); a merely `closed` worker is listed, not archived (a daemon restart closes
      interrupted agents); operator agents are only listed; a running agent is never archived. A window is archived only
-     when empty (every unarchived agent record, no terminal), `isolation` is local, it is not MAIN and it is provably
-     this lead's; occupancy is read last. Other empty windows are listed.
+     when empty (every unarchived agent record, no terminal), `isolation` is local, it is not LEAD and it is provably
+     this lead's (or a predecessor's in its self-handoff chain); occupancy is read last. An agent holding an active claim
+     (bin/ade_claims.py owner) is never archived. Other empty windows are listed.
 
 `prune` (2026-11-14) is a separate, machine-wide mode (no repo, no lead): it archives only Baton helpers (title `[Handoff writer]` AND
 label `baton-writer=1`; parent in label `paseo.parent-agent-id`) that are idle for --min-idle seconds (default 300), have no pending
@@ -67,8 +71,9 @@ TAG_RE = re.compile(r"^\[[A-Za-z][A-Za-z ]*\]")
 INBOUND_TAGS = ("[User]", "[Message received]", "[Agent finished]", "[Agent errored]", "[Agent closed]", "[Agent needs permission]")
 ACK_BODY_RE = re.compile(r"\s*ack\s+\S+(\s+\S+)?\s*", re.I)  # a bare `ack <id> [<msg-id>]` body: the lead's receipt, not a re-task
 CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-KINDS = ("MAIN", "WORKERS", "USER")
-KIND_FOR_CLASS = {"self": "MAIN", "lead": "MAIN", "own-worker": "WORKERS", "operator": "USER"}
+KINDS = ("LEAD", "WORKER", "OTHER")  # the three boxes (operator ruling 2026-11-14); MAIN, WORKERS and USER are their 2026-11-13 names
+KIND_FOR_CLASS = {"self": "LEAD", "lead": "LEAD", "own-worker": "WORKER", "operator": "OTHER"}
+LEAD_NAME_RE = re.compile(r"(?:LEAD|MAIN)\b")
 SKIP_CLASSES = ("helper",)
 
 
@@ -281,7 +286,8 @@ def in_roots(cwd: str, roots: list[str]) -> bool:
     return any(c == r or c.startswith(r + os.sep) for r in roots)
 
 
-def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str], foreign_main: bool = False) -> str:
+def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str], foreign_main: bool = False,
+             chain: set[str] | None = None) -> str:
     aid, name = agent["id"], str(agent.get("name") or "")
     labels = (st or {}).get("labels") or {}
     owner = labels.get("ade.lead") if isinstance(labels, dict) else None
@@ -289,7 +295,7 @@ def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str], foreig
         return "self"
     if name.startswith("[Handoff writer]") or (st or {}).get("internal") is True:
         return "helper"
-    if owner == lead:
+    if owner == lead or (owner and chain and owner in chain):  # a predecessor's worker in the same self-handoff chain is ours
         return "own-worker"
     if owner:
         return "other-worker"
@@ -484,17 +490,53 @@ def occupants_of(wks: str, live_ids: set[str], refresh: bool = False) -> list[st
     return sorted(found | {i for i in live_ids if (state_file(i) or {}).get("workspaceId") == wks})
 
 
+def chain_of(lead: str) -> set[str]:
+    """`lead` plus the archived leads it replaced through completed self-handoffs (bin/ade_lead_succession.py): their windows,
+    window records and `ade.lead` labels are this lead's (the same lineage ade-worker-run uses). A cyclic ledger refuses."""
+    sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
+    try:
+        import ade_lead_succession as succ
+    except ImportError:
+        return {lead}
+    try:
+        return set(succ.lineage(lead)) | {lead}
+    except succ.SuccessionError as e:
+        raise Refused(f"{e}; fix or remove the handoff records by hand")
+
+
+def claim_holders() -> set[str]:
+    """Agent ids (owner agent, record or session) holding an ACTIVE claim (bin/ade_claims.py): such a tab is never archived.
+    Unreadable claims raise Refused: ownership of a worktree is unknown, so nothing is archived."""
+    sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
+    try:
+        import ade_claims
+    except ImportError:
+        return set()
+    try:
+        claims = ade_claims.list_claims("active")
+    except Exception as e:  # noqa: BLE001 - any registry failure must stop the archive, not be read as "no claims"
+        raise Refused(f"the claim registry cannot be read ({type(e).__name__}): nothing is archived")
+    out: set[str] = set()
+    for c in claims:
+        if isinstance(c, dict) and ade_claims.claim_state_active(c):
+            owner = c.get("owner") if isinstance(c.get("owner"), dict) else {}
+            out |= {v for v in (owner.get("agent"), owner.get("record"), owner.get("session"), c.get("id")) if isinstance(v, str) and v}
+    return out
+
+
 def window_is_ours(wks: str, name: str, lead: str) -> bool:
-    """Provably this lead's: every agent ever recorded in it (live or archived) carries ade.lead=<lead> and there is at
-    least one, or its name is the legacy `workers ... <lead id>` form. An empty window of unknown owner is only listed."""
+    """Provably this lead's (or a predecessor's in its self-handoff chain): every agent ever recorded in it (live or archived)
+    carries ade.lead=<one of them> and there is at least one, or it is in one of their window records, or its name is the legacy
+    `workers ... <lead id>` form. An empty window of unknown owner is only listed."""
+    mine = chain_of(lead)
     if wks in other_leads_windows(lead):
         return False
-    if wks in read_registry(lead):
+    if any(wks in read_registry(x) for x in mine):
         return True
-    if name.startswith(("workers ", "WORKERS ")) and name.endswith(f" {lead}"):
+    if name.startswith(("workers ", "WORKERS ")) and any(name.endswith(f" {x}") for x in mine):
         return True
     recs = [d for d in agent_state_files() if d.get("workspaceId") == wks]
-    return bool(recs) and not any(d.get("_bad") for d in agent_state_files()) and all((d.get("labels") or {}).get("ade.lead") == lead for d in recs)
+    return bool(recs) and not any(d.get("_bad") for d in agent_state_files()) and all((d.get("labels") or {}).get("ade.lead") in mine for d in recs)
 
 
 def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict], list[dict]]:
@@ -504,6 +546,7 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
     lead_ids = {s["labels"]["ade.lead"] for s in states.values()
                 if s and isinstance(s.get("labels"), dict) and s["labels"].get("ade.lead")}
     self_wks = (states.get(lead) or {}).get("workspaceId")
+    chain = chain_of(lead)
     permits = opts.permits or {}
     handled = set(filter(None, (opts.handled or "").split(",")))
     out = []
@@ -513,10 +556,10 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
         win = wmap.get(wks) if wks else None
         if not in_roots(a.get("cwd") or "", roots):  # by the agent's own directory only (a window's project is just its basename)
             continue
-        foreign_main = bool(win and wks != self_wks and re.match(r"MAIN\b", str(win.get("name") or "")))
+        foreign_main = bool(win and wks != self_wks and LEAD_NAME_RE.match(str(win.get("name") or "")))
         row = {"id": a["id"], "name": clean(a.get("name") or "", 120), "status": clean(a.get("status"), 20),
                "cwd": a.get("cwd"), "windowId": wks, "windowName": clean(win.get("name"), 120) if win else None,
-               "class": classify(a, st, lead, lead_ids, foreign_main), "slice": ((st or {}).get("labels") or {}).get("slice"),
+               "class": classify(a, st, lead, lead_ids, foreign_main, chain), "slice": ((st or {}).get("labels") or {}).get("slice"),
                "labels": (st or {}).get("labels") or {}}
         if row["class"] in SKIP_CLASSES:
             row.update(verdict="n/a", reason="", verified_done=False)
@@ -629,9 +672,10 @@ def read_registry(lead: str) -> set[str]:
 def other_leads_windows(lead: str) -> dict[str, str]:
     """Window id -> another lead that registered it (such a window is never renamed or archived from here)."""
     out: dict[str, str] = {}
+    mine = chain_of(lead)
     for path in worker_run_dir().glob("*.windows.json"):
         owner = path.name[: -len(".windows.json")]
-        if owner != lead and UUID_RE.fullmatch(owner):
+        if owner not in mine and UUID_RE.fullmatch(owner):  # a predecessor in the lead's own chain is not another lead
             for wks in read_registry(owner):
                 out.setdefault(wks, owner)
     return out
@@ -684,14 +728,14 @@ def reconnect_candidates(rows: list[dict], st: dict, now: float) -> list[dict]:
 
 
 def window_kind(agents: list[dict]) -> str | None:
-    """The window's kind by majority class of its live agents (ties: MAIN > WORKERS > USER); None = foreign/empty."""
+    """The window's kind by majority class of its live agents (ties: LEAD > WORKER > OTHER); None = foreign/empty."""
     counts = {k: 0 for k in KINDS}
     for r in agents:
         k = KIND_FOR_CLASS.get(r["class"])
         if k:
             counts[k] += 1
     if any(r["class"] == "self" for r in agents):
-        return "MAIN"
+        return "LEAD"
     best = max(KINDS, key=lambda k: (counts[k], -KINDS.index(k)))
     return best if counts[best] else None
 
@@ -709,8 +753,8 @@ def names_mod():
 
 
 def derive_work(kind: str, agents: list[dict], repo: str) -> str | None:
-    """A current-work text when the window name carries none: the lead tab's name for MAIN, slice names otherwise."""
-    if kind == "MAIN":
+    """A current-work text when the window name carries none: the lead tab's name for LEAD, slice names otherwise."""
+    if kind == "LEAD":
         for r in agents:
             if r["class"] in ("self", "lead"):
                 w = re.sub(r"^(?i:lead|main)\s+", "", r["name"]).strip()
@@ -756,7 +800,7 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
                  "occupants": len(occupants), "outsideRepoAgents": len(foreign)}
         out["windows"].append(entry)
         for r in agents:
-            ok_kinds = {"WORKERS", "MAIN"} if r["class"] == "own-worker" else {KIND_FOR_CLASS.get(r["class"])}
+            ok_kinds = set(KINDS) if r["class"] == "own-worker" else {KIND_FOR_CLASS.get(r["class"])}  # a lead's own worker may sit in any of its boxes
             if kind and r["class"] in KIND_FOR_CLASS and kind not in ok_kinds:
                 out["misplaced"].append({"agent": r["id"], "name": r["name"], "class": r["class"], "window": wks,
                                          "windowName": w.get("name"), "windowKind": kind,
@@ -774,11 +818,11 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
             out["notes"].append(f"{wks} is registered to another lead: not renamed")
             continue
         parsed, legacy = names.parse(cur), names.parse_legacy(cur)
-        if any(r["class"] in ("other-worker", "lead") for r in by_win.get(wks, [])) or (legacy and legacy.lead not in (None, opts.lead_id)):
+        if any(r["class"] in ("other-worker", "lead") for r in by_win.get(wks, [])) or (legacy and legacy.lead not in (None, *chain_of(opts.lead_id))):
             out["notes"].append(f"{wks} holds another lead's agent(s) or carries another lead's id: not renamed")
             continue
         if parsed or legacy:
-            kind = parsed.kind if parsed else legacy.kind  # an existing name keeps its KIND: only the repo/work part is fixed
+            kind = parsed.box if parsed else names.BOX_OF[legacy.kind]  # an existing name keeps its box (MAIN -> LEAD ...): only the repo/work part is fixed
         work = work_over.get(kind) or (parsed.work if parsed else None) \
             or (names.normalize_work(legacy.middle, repo) if legacy else None) or derive_work(kind, agents, repo)
         if not work:
@@ -795,7 +839,8 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
 
 
 def is_main_name(name: str) -> bool:
-    return bool(re.match(r"MAIN\b", name or ""))
+    """A LEAD window (or a 2026-11-13 MAIN one): never archived from here."""
+    return bool(LEAD_NAME_RE.match(name or ""))
 
 
 def _ours_or_unknown(wks: str, nm: str, lead: str) -> bool:
@@ -803,6 +848,39 @@ def _ours_or_unknown(wks: str, nm: str, lead: str) -> bool:
         return window_is_ours(wks, nm, lead)
     except Refused:
         return False
+
+
+def extra_windows(wins: list[dict], occupancy: dict, opts, lead: str, names, archiving: set[str]) -> list[dict]:
+    """Windows of this lead's chain beyond the three boxes: per (repo, box) every owned window but the keeper (most live agents;
+    ties: a current-form name, then the id), and an owned window whose name is outside the scheme (the lead's own LEAD window
+    excepted). Reported only; --apply archives those that are empty or finished (`archive_windows`), never another lead's."""
+    if names is None:
+        return []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    out = []
+    for w in wins:
+        wks, nm = w["windowId"], w.get("name") or ""
+        if wks in (opts.other_windows or {}) or not _ours_or_unknown(wks, nm, lead):
+            continue
+        parsed, legacy = names.parse(nm), names.parse_legacy(nm)
+        box = parsed.box if parsed else (names.BOX_OF[legacy.kind] if legacy else None)
+        if box is None:
+            if w.get("kind") != "LEAD":
+                out.append({"windowId": wks, "name": nm, "box": None, "live": len(occupancy.get(wks, [])), "why": "named outside the scheme"})
+            continue
+        if box == "LEAD":
+            continue  # a lead's own window; a successor's predecessor window is archived by the handoff, not here
+        groups.setdefault((parsed.repo if parsed else (names.repo_of(w["cwd"]) if w.get("cwd") else "?"), box), []).append(w)
+    for (repo_name, box), ws in sorted(groups.items()):
+        if len(ws) < 2:
+            continue
+        ws.sort(key=lambda w: (-len(occupancy.get(w["windowId"], [])), not (names.parse(w.get("name") or "") or names.Name("", "", "")).current, w["windowId"]))
+        for w in ws[1:]:
+            out.append({"windowId": w["windowId"], "name": w.get("name") or "", "box": box, "live": len(occupancy.get(w["windowId"], [])),
+                        "why": f"second {box} window for {repo_name} (keeper: {ws[0]['windowId']})"})
+    for e in out:
+        e["archive"] = e["windowId"] in archiving
+    return out
 
 
 def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
@@ -836,8 +914,11 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
         p["notes"].append("`paseo permit ls` failed: apply will send and archive nothing")
     # archive only a worker of this lead that is not running and whose DONE report is verified and handled (a `closed`
     # agent was often only interrupted by a daemon restart, so closed alone proves nothing)
+    held = claim_holders()  # an agent holding an active claim keeps its tab (and so its window)
+    p["claim_held"] = [{"agent": r["id"], "name": r["name"]} for r in mine if r["id"] in held and r["class"] == "own-worker"
+                       and r["status"] in ("idle", "closed") and r["verdict"] == "done" and r["verified_done"]]
     p["archive_agents"] = [{"agent": r["id"], "name": r["name"], "why": "done"}
-                           for r in mine if r["class"] == "own-worker" and r["status"] in ("idle", "closed")
+                           for r in mine if r["class"] == "own-worker" and r["status"] in ("idle", "closed") and r["id"] not in held
                            and r["verdict"] == "done" and r["verified_done"]
                            and (r["labels"].get("ade.placement") != "main" or r["id"] in set(filter(None, (opts.handled or "").split(","))))]
     p["list_only"] = [{"agent": r["id"], "name": r["name"], "class": r["class"], "status": r["status"],
@@ -849,7 +930,7 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
         p["notes"].append(f"{len(unplaced)} live agent(s) have no workspaceId in a state file: no window is archived")
     for w in win["windows"]:
         wks, nm = w["windowId"], w.get("name") or ""
-        if is_main_name(nm) or w["kind"] == "MAIN" or any(r["class"] == "self" for r in mine if r["windowId"] == wks):
+        if is_main_name(nm) or w["kind"] == "LEAD" or any(r["class"] == "self" for r in mine if r["windowId"] == wks):
             continue
         if [a for a in occupancy.get(wks, []) if a not in leaving]:
             continue  # someone stays in it
@@ -861,6 +942,7 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
             p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": "owner not provably this lead: operator's call"})
         else:
             p["archive_windows"].append({"windowId": wks, "name": nm, "conditional": bool(occupancy.get(wks))})
+    p["extra_windows"] = extra_windows(win["windows"], occupancy, opts, lead, names, {w["windowId"] for w in p["archive_windows"]})
     return p
 
 
@@ -919,8 +1001,17 @@ def render(p: dict) -> str:
         add(f" G{i}n. empty window {w['windowId']} {w['name']!r} left alone: {w['why']}")
     for i, w in enumerate(p["archive_windows"], 1):
         add(f" G{i}w. archive window {w['windowId']} {w['name']!r}" + (" once its agents are archived" if w["conditional"] else " (empty)"))
-    if not (p["archive_agents"] or p["list_only"] or p["archive_windows"] or p["empty_not_ours"]):
+    for i, a in enumerate(p.get("claim_held", []), 1):
+        add(f" G{i}c. {a['agent']} {a['name'][:40]} is done but holds an active claim: its tab stays")
+    if not (p["archive_agents"] or p["list_only"] or p["archive_windows"] or p["empty_not_ours"] or p.get("claim_held")):
         add(" G-. nothing finished")
+    add("")
+    add("H. Windows beyond the three boxes (LEAD, WORKER, OTHER per lead chain and repo)")
+    for i, e in enumerate(p.get("extra_windows", []), 1):
+        add(f" H{i}. {e['windowId']} {clean(e['name'], 60)!r}: {e['why']}; {e['live']} live agent(s); "
+            + ("--apply archives it" if e["archive"] else "stays (not empty or not provably finished)"))
+    if not p.get("extra_windows"):
+        add(" H-. none")
     return "\n".join(out)
 
 
@@ -1027,8 +1118,10 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         cur = nowrows.get(aid)
         stt = state_file(aid) or {}
         if not cur or cur.get("status") not in ("idle", "closed") or aid in fresh_permits \
-                or (stt.get("labels") or {}).get("ade.lead") != lead:
+                or (stt.get("labels") or {}).get("ade.lead") not in chain_of(lead):
             return rec("archive-agent", aid, False, "not idle/closed now, card pending, gone, or not this lead's: skipped")
+        if aid in claim_holders():
+            return rec("archive-agent", aid, False, "holds an active claim: skipped")
         freshrow = next((x for x in live_agents() if x["id"] == aid), None)  # re-read right before: status, text, retask
         log = log_tail(aid)
         text, card, lstate = last_text(log)

@@ -119,7 +119,7 @@ export function isDefaultTitle(windowTitle, agentTitle, young = true) {
   if (SCHEME_NAME.test(windowTitle.trim())) return false; // already `<KIND> <repo> (<work>)`: never re-wrapped, whatever the tab is called
   return young && !blank(agentTitle) && windowTitle.trim() === agentTitle.trim();
 }
-const SCHEME_NAME = /^(?:MAIN|WORKERS|USER) \S+ \(.+\)$/;
+const SCHEME_NAME = /^(?:LEAD|WORKER|OTHER|MAIN|WORKERS|USER) \S+ \(.+\)$/;
 
 /**
  * Handle one agent event. Returns a short outcome record (also the log line) and never throws.

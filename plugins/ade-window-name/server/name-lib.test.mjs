@@ -79,27 +79,27 @@ const baseDeps = (extra = {}) => ({
   ...extra,
 });
 
-test("operator-started first agent in a default-named window: MAIN <repo> (<work>), real decision script", async () => {
+test("operator-started first agent in a default-named window: LEAD <repo> (<work>), real decision script", async () => {
   const a = agentRec({ cwd: gitDir.repo, title: "Fix the thing" });
   const { state, paseo } = fakeDaemon({ agents: [a] });
   const rec = await handleAgentEvent(hookAgent(a), { paseo }, baseDeps());
   assert.equal(rec.outcome, "renamed");
-  assert.deepEqual(state.titles, ["MAIN my-repo (Fix the thing)"]);
+  assert.deepEqual(state.titles, ["LEAD my-repo (Fix the thing)"]);
 });
 
-test("a worker (parent id or ade.lead label) gets WORKERS, and a worker tab title reduces to its slice", async () => {
+test("a worker (parent id or ade.lead label) gets WORKER, and a worker tab title reduces to its slice", async () => {
   const a = agentRec({ cwd: gitDir.repo, title: `worker auto-naming ${LEAD}`, labels: { "ade.lead": LEAD } });
   const d1 = fakeDaemon({ agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo: d1.paseo }, baseDeps());
-  assert.deepEqual(d1.state.titles, ["WORKERS my-repo (auto-naming)"]);
+  assert.deepEqual(d1.state.titles, ["WORKER my-repo (auto-naming)"]);
   const b = agentRec({ cwd: gitDir.repo, title: "Review the diff", parentAgentId: "lead-1" });
   const d2 = fakeDaemon({ agents: [b] });
   await handleAgentEvent(hookAgent(b), { paseo: d2.paseo }, baseDeps());
-  assert.deepEqual(d2.state.titles, ["WORKERS my-repo (Review the diff)"]);
+  assert.deepEqual(d2.state.titles, ["WORKER my-repo (Review the diff)"]);
 });
 
 test("a window that already has a title (a human's, ade-worker-run's, or ours) is never renamed", async () => {
-  for (const title of ["my own name", "WORKERS my-repo (Wave 7)", "MAIN my-repo (x)", "  x "]) {
+  for (const title of ["my own name", "WORKER my-repo (Wave 7)", "LEAD my-repo (x)", "MAIN my-repo (x)", "WORKERS my-repo (Wave 7)", "  x "]) {
     const a = agentRec({ cwd: gitDir.repo });
     const { state, paseo } = fakeDaemon({ windowTitle: title, agents: [a] });
     const rec = await handleAgentEvent(hookAgent(a), { paseo }, baseDeps());
@@ -114,7 +114,7 @@ test("a non-git cwd names the window after the directory", async () => {
   const a = agentRec({ cwd: dir, title: "Look around" });
   const { state, paseo } = fakeDaemon({ agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo }, baseDeps());
-  assert.deepEqual(state.titles, ["MAIN plain-dir (Look around)"]);
+  assert.deepEqual(state.titles, ["LEAD plain-dir (Look around)"]);
 });
 
 test("a second agent joining an unnamed window does not name it; the earlier agent's retry still can", async () => {
@@ -127,7 +127,7 @@ test("a second agent joining an unnamed window does not name it; the earlier age
   assert.deepEqual(d.state.titles, []);
   assert.equal(deps.settled.size, 0);
   await handleAgentEvent(hookAgent(first), { paseo: d.paseo }, deps);
-  assert.deepEqual(d.state.titles, ["MAIN my-repo (First job)"]);
+  assert.deepEqual(d.state.titles, ["LEAD my-repo (First job)"]);
 });
 
 test("no agent title yet: skip with retry, not settled; the next event names it", async () => {
@@ -139,7 +139,7 @@ test("no agent title yet: skip with retry, not settled; the next event names it"
   assert.equal(deps.settled.size, 0);
   a.title = "Now titled";
   await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, deps);
-  assert.deepEqual(d.state.titles, ["MAIN my-repo (Now titled)"]);
+  assert.deepEqual(d.state.titles, ["LEAD my-repo (Now titled)"]);
   const again = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, deps);
   assert.equal(again.reason, "window settled");
 });
@@ -171,7 +171,7 @@ test("dry run logs the planned name and renames nothing", async () => {
   const d = fakeDaemon({ agents: [a] });
   const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps({ env: { ADE_WS_AUTONAME_PY: SCRIPT, ADE_WINDOW_NAME_DRY_RUN: "1" } }));
   assert.equal(rec.outcome, "would-rename");
-  assert.equal(rec.name, "MAIN my-repo (Fix the thing)");
+  assert.equal(rec.name, "LEAD my-repo (Fix the thing)");
   assert.deepEqual(d.state.titles, []);
 });
 
@@ -226,7 +226,7 @@ test("an older agent in ANOTHER window does not stop naming, and setTitle hits t
   const mine = agentRec({ id: "mine", cwd: gitDir.repo, title: "Here", createdAt: T1 });
   const d = fakeDaemon({ agents: [older, mine], otherWindows: { [OTHER]: { id: OTHER, title: "kept", background: false } } });
   await handleAgentEvent(hookAgent(mine), { paseo: d.paseo }, baseDeps());
-  assert.deepEqual(d.state.calls, [[WID, "MAIN my-repo (Here)"]]);
+  assert.deepEqual(d.state.calls, [[WID, "LEAD my-repo (Here)"]]);
   assert.equal(d.state.windows[OTHER].title, "kept");
 });
 
@@ -234,7 +234,7 @@ test("a window Paseo pre-titled with the agent's first prompt line is still defa
   const a = agentRec({ cwd: gitDir.repo, title: "Fix the flaky login test" });
   const d = fakeDaemon({ windowTitle: "Fix the flaky login test", agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps());
-  assert.deepEqual(d.state.titles, ["MAIN my-repo (Fix the flaky login test)"]);
+  assert.deepEqual(d.state.titles, ["LEAD my-repo (Fix the flaky login test)"]);
   const b = agentRec({ cwd: gitDir.repo, title: "Fix the flaky login test" });
   const e = fakeDaemon({ windowTitle: "a name somebody typed", agents: [b] });
   await handleAgentEvent(hookAgent(b), { paseo: e.paseo }, baseDeps());
@@ -290,11 +290,11 @@ test("a joiner's event does not settle a prompt-titled window before its first a
   assert.equal(rec.reason, "not the window's first agent");
   assert.equal(deps.settled.size, 0);
   await handleAgentEvent(hookAgent(first), { paseo: d.paseo }, deps);
-  assert.deepEqual(d.state.titles, ["MAIN my-repo (Fix the login test)"]);
+  assert.deepEqual(d.state.titles, ["LEAD my-repo (Fix the login test)"]);
 });
 
 test("a window already named in the scheme is never re-wrapped, even when the tab carries the same text", async () => {
-  for (const t of ["MAIN my-repo (x)", "WORKERS my-repo (Wave 7)", "USER r (a (b))"]) {
+  for (const t of ["LEAD my-repo (x)", "WORKER my-repo (Wave 7)", "OTHER r (a (b))", "USER r (a (b))", "MAIN my-repo (x)", "WORKERS my-repo (Wave 7)"]) {
     assert.equal(isDefaultTitle(t, t), false, t);
     const a = agentRec({ cwd: gitDir.repo, title: t });
     const d = fakeDaemon({ windowTitle: t, agents: [a] });
@@ -324,10 +324,10 @@ test("a daemon call that never settles frees the window's slot and does not bloc
   await Promise.all([create({ agent: hookAgent(a) }, { paseo: d.paseo }), create({ agent: hookAgent(b) }, { paseo: d.paseo })]);
   assert.ok(Date.now() - t0 < 2000);
   assert.ok(logged.some((l) => l.includes("exceeded")), "the stuck handler is logged as an error");
-  assert.deepEqual(d.state.calls, [[OTHER, "MAIN my-repo (Other window)"]]);
+  assert.deepEqual(d.state.calls, [[OTHER, "LEAD my-repo (Other window)"]]);
   stuck = false; // the daemon recovered: the same window is not parked
   await handlers.get("agent.turn.after")({ agent: hookAgent(a) }, { paseo: d.paseo });
-  assert.deepEqual(d.state.calls.at(-1), [WID, "MAIN my-repo (Stuck then fine)"]);
+  assert.deepEqual(d.state.calls.at(-1), [WID, "LEAD my-repo (Stuck then fine)"]);
 });
 
 test("while one event is in flight for a window, a second for the same window is dropped, not queued", async () => {
@@ -368,7 +368,7 @@ test("a run past its budget is aborted: its python child gets the signal and not
   const run = (args) =>
     new Promise((resolve) => {
       seen = args.signal;
-      setTimeout(() => resolve({ action: "rename", name: "MAIN my-repo (Late)", kind: "MAIN" }), 150); // answers after the budget
+      setTimeout(() => resolve({ action: "rename", name: "LEAD my-repo (Late)", kind: "LEAD" }), 150); // answers after the budget
     });
   const logged = [];
   registerAdeWindowNameHooks(server, baseDeps({ run, timeoutMs: 40, log: (l) => logged.push(l) }));
@@ -389,7 +389,7 @@ test("Paseo's hook cancel (context.signal) aborts the run the same way", async (
   const run = (args) =>
     new Promise((resolve) => {
       seen = args.signal;
-      setTimeout(() => resolve({ action: "rename", name: "MAIN my-repo (Cancelled)", kind: "MAIN" }), 100);
+      setTimeout(() => resolve({ action: "rename", name: "LEAD my-repo (Cancelled)", kind: "LEAD" }), 100);
     });
   const mine = [];
   registerAdeWindowNameHooks(server, baseDeps({ run, log: (l) => mine.push(l) }));
@@ -447,7 +447,7 @@ test("equality-as-default holds only while the first agent is young; later only 
   assert.deepEqual(old.state.titles, [], "a window deliberately titled like its tab is left alone an hour later (backfill)");
   const young = fakeDaemon({ windowTitle: "Same text", agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo: young.paseo }, baseDeps({ now: () => Date.parse(T0) + 60_000 }));
-  assert.deepEqual(young.state.titles, ["MAIN my-repo (Same text)"]);
+  assert.deepEqual(young.state.titles, ["LEAD my-repo (Same text)"]);
   const future = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: "2026-11-14T12:00:00.000Z" }); // 2 h ahead of now
   const fu = fakeDaemon({ windowTitle: "Same text", agents: [future] });
   await handleAgentEvent(hookAgent(future), { paseo: fu.paseo }, baseDeps());
@@ -455,14 +455,14 @@ test("equality-as-default holds only while the first agent is young; later only 
   const slight = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: "2026-11-14T10:00:30.000Z" }); // 25 s ahead: skew, still young
   const sl = fakeDaemon({ windowTitle: "Same text", agents: [slight] });
   await handleAgentEvent(hookAgent(slight), { paseo: sl.paseo }, baseDeps());
-  assert.deepEqual(sl.state.titles, ["MAIN my-repo (Same text)"]);
+  assert.deepEqual(sl.state.titles, ["LEAD my-repo (Same text)"]);
   for (const [offsetMs, expectRename] of [[-60_000, true], [-60_001, false], [300_000, true], [300_001, false]]) {
     // age = now - createdAt: -60 000 = createdAt a minute ahead (skew still young), 300 000 = exactly five minutes old
     const created = Date.parse(T0);
     const e = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: T0 });
     const ed = fakeDaemon({ windowTitle: "Same text", agents: [e] });
     await handleAgentEvent(hookAgent(e), { paseo: ed.paseo }, baseDeps({ now: () => created + offsetMs }));
-    assert.deepEqual(ed.state.titles, expectRename ? ["MAIN my-repo (Same text)"] : [], `age ${offsetMs} ms`);
+    assert.deepEqual(ed.state.titles, expectRename ? ["LEAD my-repo (Same text)"] : [], `age ${offsetMs} ms`);
   }
   const nodate = agentRec({ cwd: gitDir.repo, title: "Same text", createdAt: undefined });
   const nd = fakeDaemon({ windowTitle: "Same text", agents: [nodate] });
@@ -470,25 +470,25 @@ test("equality-as-default holds only while the first agent is young; later only 
   assert.deepEqual(nd.state.titles, [], "no createdAt: not provably young, left alone");
   const nulltitle = fakeDaemon({ windowTitle: null, agents: [a] });
   await handleAgentEvent(hookAgent(a), { paseo: nulltitle.paseo }, baseDeps({ now: () => Date.parse(T0) + 3_600_000 }));
-  assert.deepEqual(nulltitle.state.titles, ["MAIN my-repo (Same text)"], "a null title is named at any age");
+  assert.deepEqual(nulltitle.state.titles, ["LEAD my-repo (Same text)"], "a null title is named at any age");
 });
 
 test("validName counts code points like Python's len(), not UTF-16 units", () => {
   const work = "\u{1F600}".repeat(50); // 50 characters, 100 UTF-16 units
-  const name = `MAIN r (${work})`; // 59 characters, 109 units
+  const name = `LEAD r (${work})`; // 59 characters, 109 units
   assert.equal([...name].length, 59);
   assert.ok(name.length > 100);
   assert.equal(validName(name), true);
-  assert.equal(validName(`MAIN r (${"\u{1F600}".repeat(93)})`), false); // 102 characters
+  assert.equal(validName(`LEAD r (${"\u{1F600}".repeat(93)})`), false); // 102 characters
 });
 
 test("an invalid name from the decision script is never written", async () => {
-  assert.equal(validName("MAIN my-repo (Fix)"), true);
-  for (const bad of [undefined, null, 42, "", "MAIN r (a\tb)", "MAIN r (a\u202Eb)", "MAIN r (a\uD800b)", "MAIN r (a\uDC00b)", "MAIN r (a\uE000b)", "MAIN r (a\u{F0000}b)", "my own name", "MAIN my-repo (x)\nMAIN y (z)", "MAIN r (" + "x".repeat(100) + ")"]) {
+  assert.equal(validName("LEAD my-repo (Fix)"), true);
+  for (const bad of [undefined, null, 42, "", "LEAD r (a\tb)", "LEAD r (a\u202Eb)", "LEAD r (a\uD800b)", "LEAD r (a\uDC00b)", "LEAD r (a\uE000b)", "LEAD r (a\u{F0000}b)", "my own name", "LEAD my-repo (x)\nMAIN y (z)", "LEAD r (" + "x".repeat(100) + ")"]) {
     assert.equal(validName(bad), false, String(bad));
     const a = agentRec({ cwd: gitDir.repo });
     const d = fakeDaemon({ agents: [a] });
-    const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps({ run: async () => ({ action: "rename", name: bad, kind: "MAIN" }) }));
+    const rec = await handleAgentEvent(hookAgent(a), { paseo: d.paseo }, baseDeps({ run: async () => ({ action: "rename", name: bad, kind: "LEAD" }) }));
     assert.equal(rec.outcome, "error", String(bad));
     assert.deepEqual(d.state.calls, [], String(bad));
   }

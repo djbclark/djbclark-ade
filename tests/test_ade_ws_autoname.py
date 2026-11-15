@@ -31,10 +31,10 @@ def info(repo, **over):
     return base
 
 
-def test_operator_started_first_agent_is_main(tmp_path):
+def test_operator_started_first_agent_is_lead(tmp_path):
     d = an.decide(info(git_repo(tmp_path)))
-    assert d == {"action": "rename", "name": "MAIN my-repo (Fix the thing)", "kind": "MAIN", "repo": "my-repo", "work": "Fix the thing"}
-    assert wsn.parse(d["name"]) == ("MAIN", "my-repo", "Fix the thing")  # the builder/parser round trip: no second format
+    assert d == {"action": "rename", "name": "LEAD my-repo (Fix the thing)", "kind": "LEAD", "repo": "my-repo", "work": "Fix the thing"}
+    assert wsn.parse(d["name"]) == ("LEAD", "my-repo", "Fix the thing")  # the builder/parser round trip: no second format
 
 
 def test_linked_worktree_reads_as_its_main_repo(tmp_path):
@@ -51,20 +51,32 @@ def test_linked_worktree_reads_as_its_main_repo(tmp_path):
     {"title": "Review", "parentAgentId": "lead-agent"},
     {"title": "Review", "labels": {"ade.lead": LEAD}},
     {"title": "Review", "labels": {"ade.placement": "workers"}},
+    {"title": "Review", "labels": {"ade.placement": "worker"}},
 ])
-def test_worker_window_is_workers(tmp_path, agent):
-    assert an.decide(info(git_repo(tmp_path), agent=agent))["kind"] == "WORKERS"
+def test_worker_window_is_worker(tmp_path, agent):
+    assert an.decide(info(git_repo(tmp_path), agent=agent))["kind"] == "WORKER"
 
 
-def test_placement_label_can_say_main_or_user_but_user_is_never_a_guess(tmp_path):
+def test_placement_label_can_say_lead_or_other_but_other_is_never_a_guess(tmp_path):
     repo = git_repo(tmp_path)
-    assert an.decide(info(repo, agent={"title": "t", "labels": {"ade.placement": "user"}}))["kind"] == "USER"
-    assert an.decide(info(repo, agent={"title": "t", "parentAgentId": "p", "labels": {"ade.placement": "main"}}))["kind"] == "MAIN"
-    assert an.decide(info(repo, agent={"title": "t"}))["kind"] == "MAIN"
-    assert an.decide(info(repo, agent={"title": "t", "labels": {"ade.placement": "bogus"}}))["kind"] == "MAIN"
+    assert an.decide(info(repo, agent={"title": "t", "labels": {"ade.placement": "user"}}))["kind"] == "OTHER"
+    assert an.decide(info(repo, agent={"title": "t", "labels": {"ade.placement": "other"}}))["kind"] == "OTHER"
+    assert an.decide(info(repo, agent={"title": "t", "parentAgentId": "p", "labels": {"ade.placement": "main"}}))["kind"] == "LEAD"
+    assert an.decide(info(repo, agent={"title": "t", "parentAgentId": "p", "labels": {"ade.placement": "lead"}}))["kind"] == "LEAD"
+    assert an.decide(info(repo, agent={"title": "t"}))["kind"] == "LEAD"
+    assert an.decide(info(repo, agent={"title": "t", "labels": {"ade.placement": "bogus"}}))["kind"] == "LEAD"
 
 
-@pytest.mark.parametrize("title", ["my own name", "MAIN my-repo (x)", "WORKERS my-repo (Wave 7)", "master", " x"])
+@pytest.mark.parametrize("label,kind", [("main", "LEAD"), ("lead", "LEAD"), ("MAIN", "LEAD"), (" Lead ", "LEAD"),
+                                        ("workers", "WORKER"), ("worker", "WORKER"), ("user", "OTHER"), ("other", "OTHER")])
+def test_every_placement_label_spelling_maps_to_its_kind(tmp_path, label, kind):
+    d = an.decide(info(git_repo(tmp_path), agent={"title": "t", "labels": {"ade.placement": label}}))
+    assert d["kind"] == kind and d["name"] == f"{kind} my-repo (t)"
+    assert an.PLACEMENT_KINDS[label.strip().lower()] == kind
+    assert set(an.PLACEMENT_KINDS.values()) == set(wsn.KINDS)  # only current kinds are produced
+
+
+@pytest.mark.parametrize("title", ["my own name", "MAIN my-repo (x)", "LEAD my-repo (x)", "WORKERS my-repo (Wave 7)", "WORKER my-repo (Wave 7)", "OTHER my-repo (x)", "master", " x"])
 def test_a_title_set_on_purpose_is_left_alone(tmp_path, title):
     d = an.decide(info(git_repo(tmp_path), windowTitle=title))
     assert d["action"] == "skip" and d["retry"] is False
@@ -78,7 +90,7 @@ def test_skips(tmp_path, over):
 def test_an_ade_worker_run_launch_is_skipped_because_it_names_its_own_window(tmp_path):
     d = an.decide(info(git_repo(tmp_path), agent={"title": "x", "labels": {"ade.lead": LEAD, "slice": "s"}}))
     assert d["action"] == "skip" and d["retry"] is False
-    assert an.decide(info(git_repo(tmp_path), agent={"title": "x", "labels": {"ade.lead": LEAD}}))["kind"] == "WORKERS"
+    assert an.decide(info(git_repo(tmp_path), agent={"title": "x", "labels": {"ade.lead": LEAD}}))["kind"] == "WORKER"
 
 
 def test_not_first_agent_asks_for_a_retry(tmp_path):
@@ -94,7 +106,7 @@ def test_null_and_blank_window_title_count_as_default(tmp_path):
 def test_non_git_and_missing_cwd_use_the_directory_name(tmp_path):
     plain = tmp_path / "plain-dir"
     plain.mkdir()
-    assert an.decide(info(plain))["name"] == "MAIN plain-dir (Fix the thing)"
+    assert an.decide(info(plain))["name"] == "LEAD plain-dir (Fix the thing)"
     assert an.decide(info(tmp_path / "does-not-exist"))["repo"] == "does-not-exist"
 
 
@@ -113,6 +125,10 @@ def test_no_agent_title_yet_asks_for_a_retry(tmp_path):
 
 @pytest.mark.parametrize("title,work", [
     (f"worker auto-naming {LEAD}", "auto-naming"),
+    (f"worker s {LEAD} [wt: d]", "s"),
+    (f"worker my-slice {LEAD} [wt: djbclark-ade-foo-wt]", "my-slice"),
+    (f"other probe {LEAD}", "probe"),
+    (f"other probe {LEAD} [wt: d~]", "probe"),
     ("LEAD my-repo Wave 7", "Wave 7"),
     ("MAIN my-repo Wave 7", "Wave 7"),
     ("Lead the migration", "Lead the migration"),
@@ -143,7 +159,7 @@ def test_every_built_name_is_valid_for_the_shared_parser(tmp_path):
 def test_cli_reads_json_on_stdin_and_exits_nonzero_on_garbage(tmp_path):
     script = ROOT / "bin" / "ade_ws_autoname.py"
     ok = subprocess.run([sys.executable, str(script)], input=json.dumps(info(git_repo(tmp_path))), capture_output=True, text=True, timeout=30)
-    assert ok.returncode == 0 and json.loads(ok.stdout)["name"] == "MAIN my-repo (Fix the thing)"
+    assert ok.returncode == 0 and json.loads(ok.stdout)["name"] == "LEAD my-repo (Fix the thing)"
     bad = subprocess.run([sys.executable, str(script)], input="not json", capture_output=True, text=True, timeout=30)
     assert bad.returncode == 2 and bad.stdout == ""
 
