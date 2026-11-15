@@ -53,7 +53,7 @@ def test_unreplaced_lead_is_its_own_lineage(ledger):
 
 
 @pytest.mark.parametrize("bad", [
-    {"status": "awaiting-ack"}, {"status": "acknowledged"}, {"status": "archive-unknown"}, {"status": "creation-unknown"},
+    {"status": "awaiting-ack"}, {"status": "acknowledged"}, {"status": "archive-unknown"}, {"status": "creation-unknown"}, {"status": "creation-refused"},
     {"ack": None}, {"ack": {"agent_id": STRANGER}}, {"kind": "compact"}, {"predecessor": STRANGER},
     {"home": "/somewhere/else"}, {"successor": "not-a-uuid"}, {"successor": B}, {"successor": None},
 ])
