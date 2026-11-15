@@ -90,6 +90,23 @@ def bounded(text, limit):
     return text if len(text) <= limit else '...' + text[-(limit - 3):]
 
 
+_CODE_CHARS = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
+_ALNUM_RUN = re.compile(r'[A-Za-z0-9]{16,}')
+
+
+def valid_code(code):
+    """True for a code that is safe to record verbatim: a code is validated, never scrubbed.
+
+    Native codes seen: UPPER_SNAKE, `host_offline`, `commander.excessArguments`. A full match of the character
+    set, so no space, control character or newline (even a trailing one). The wider set must not let through
+    what the message scrub would redact (a code that `bounded()` changes is not a code: a bare token such as `ghp_...`, a
+    `keyword:value` or `cookie:value` secret such as `password:hunter2`, every current and future scrub pattern), or a prefix-less token, taken as any run of 16 or more letters and digits that holds a
+    digit (real codes are words and carry no such run).
+    """
+    return bool(_CODE_CHARS.fullmatch(code) and bounded(code, 64) == code
+                and not any(re.search(r'\d', run) for run in _ALNUM_RUN.findall(code)))
+
+
 def parse_envelope(*streams):
     """(code, message) from Paseo's `{"error": {"code", "message"}}` envelope in any stream.
 
@@ -115,7 +132,8 @@ def parse_envelope(*streams):
                 code, message = data.get('code'), error if isinstance(error, str) else data.get('message')
             # A code is validated, never scrubbed: scrubbing mangled TOKEN_EXPIRED.
             if isinstance(code, str) and code:
-                code = code if re.fullmatch(r'[A-Z0-9_]{1,64}', code) else 'INVALID_CODE'
+                ok = valid_code(code)
+                code = code if ok else 'INVALID_CODE'
             else:
                 code = None
             return code, bounded(message, MESSAGE_LIMIT) if isinstance(message, str) else None

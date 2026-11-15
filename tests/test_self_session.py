@@ -1050,6 +1050,42 @@ def test_code_is_validated_not_scrubbed():
     assert ss.parse_envelope(envelope('', 'm'))[0] is None
 
 
+@pytest.mark.parametrize('code', ['host_offline', 'commander.excessArguments', 'ns:code-1', 'A' * 64])
+def test_native_code_pattern_keeps_lowercase_dotted_and_colon_codes(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
+
+
+@pytest.mark.parametrize('code', ['ghp_' + 'a' * 36, 'sk-ant-abc123', 'github_pat_abc123', 'AKIA' + 'A' * 16, 'xoxb-1-abc', 'ns:ghp_abc', 'x.sk-abc'])
+def test_native_code_shaped_like_a_bare_token_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', [
+    'password:hunter2', 'token:abc123XYZ', 'api_key:sk_live_abc123', 'GITHUB_TOKEN:ghx_abc', 'secret=x', 'Password:Hunter2', 'cookie:sid123', 'set-cookie:abc', 'COOKIE:deadbeef',
+])
+def test_native_code_shaped_like_a_keyword_secret_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', [
+    'sk_live_' + 'a1b2c3d4' * 3, 'rk_live_51Habcdefghijklmn', 'glpat-' + 'a1b2c3d4e5f6a7b8c9d0', 'npm_' + 'a1b2c3d4' * 4,
+    'AIza' + 'Sy' + 'a1b2c3d4' * 4, 'hf_' + 'a1B2c3D4e5' * 3, 'x_ghp_' + 'a1B2c3D4e5' * 3 + 'a1B2c3', 'x-ghp_' + 'a1B2c3D4e5' * 3 + 'a1B2c3',
+    '0123456789abcdef0123456789abcdef01234567', 'eyJhbGciOiJIUzI1NiJ9', 'wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY',
+])
+def test_native_code_with_a_long_alphanumeric_run_holding_a_digit_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', ['TASK_SK_1', 'disk-sk-2', 'ghost_town', 'missingMandatoryOptionValue', 'commander.invalidArgument', 'secret_code', 'ns:code-1', 'abcdefghijklmnopqrstuvwxyz'])
+def test_native_code_with_token_lookalike_inside_is_kept(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
+
+
+@pytest.mark.parametrize('code', ['bad code','a\nb', 'trailing\n', 'tab\tx', 'nul\x00x', 'X' * 65, 'é', 'a/b'])
+def test_native_code_pattern_still_rejects_unsafe_codes(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
 def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
     service, native, _ = setup
     native.archive_result = (1, '', envelope('TOKEN_EXPIRED', 'login again'))
