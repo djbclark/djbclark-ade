@@ -1880,7 +1880,7 @@ def test_the_footer_path_never_names_the_worktree(env, tmp_path):
     main, wt = make_repo(tmp_path)
     for rel in ("bin", "docs"):
         (wt / rel).mkdir(exist_ok=True)
-    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py"):
+    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py", "ade_claims.py"):
         (wt / "bin" / f).write_text((ROOT / "bin" / f).read_text())
     (wt / "bin/ade-worker-run").chmod(0o755)
     (wt / "docs/dispatch-footer.md").write_text("footer\n")
@@ -2274,3 +2274,65 @@ def test_a_window_cwd_with_control_characters_is_escaped_in_the_cwd_refusal(env)
     r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--",
                 "--no-wait", "B")
     assert r.returncode == 1 and "runs in /repo" in r.stderr and "\x1b" not in r.stderr and "\\x1b[31m" in r.stderr, r.stderr
+
+
+# --- wr-50: rv-742 review Lows (2026-11-15) ---------------------------------------------------------------------------------
+
+def test_a_window_at_the_primary_checkout_places_a_worktree_launch_by_redirect(env, tmp_path):
+    """The redirect site: the window's cwd is the primary checkout of --cwd, so the worker is placed there and the brief names the worktree."""
+    main, wt = make_repo(tmp_path)
+    own_window_at(env, os.path.realpath(main))
+    env.data["inspect_cwd"] = os.path.realpath(main)
+    r = cwd_launch(env, "--cwd", str(wt))
+    assert r.returncode == 1 and "primary checkout" in r.stderr and "brief" in r.stderr and not placed(env)  # an unnamed worktree is refused, not redirected silently
+    r = env.run("--lead", LEAD, "--slice", "s2", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt)
+
+
+def test_a_window_at_a_case_variant_of_the_primary_checkout_still_redirects(env, tmp_path):
+    if not case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem is case-sensitive: a differently-cased path is another directory")
+    main, wt = make_repo(tmp_path)
+    variant = os.path.join(os.path.dirname(os.path.realpath(main)), "LIBNTECH")
+    own_window_at(env, variant)  # the window's cwd as paseo recorded it, in another case
+    env.data["inspect_cwd"] = variant
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr  # not "runs in LIBNTECH, but --cwd is <worktree>"
+    assert json.loads(r.stdout)["requestedCwd"] == os.path.realpath(wt)
+
+
+def test_a_new_window_for_a_case_variant_of_the_primary_checkout_is_not_a_move(env, tmp_path):
+    if not case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem is case-sensitive: a differently-cased path is another directory")
+    main, wt = make_repo(tmp_path)
+    variant = os.path.join(os.path.dirname(os.path.realpath(main)), "LIBNTECH")
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", variant, "--", "--no-wait", "just do the work")
+    assert r.returncode == 0, r.stderr  # not "the worker would start in <on-disk case>, not --cwd <variant>"
+    assert "requestedCwd" not in json.loads(r.stdout)
+
+
+@pytest.mark.parametrize("bad", ["/x\x00y", "/x\ud800y"])
+def test_an_unusable_window_cwd_is_refused_before_the_launch(env, tmp_path, bad):
+    own_window_at(env, bad)
+    r = cwd_launch(env, "--cwd", str(tmp_path))
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "not a usable path" in r.stderr
+    assert not placed(env)
+
+
+@pytest.mark.parametrize("bad", ["/x\x00y", "/x\ud800y"])
+def test_an_unusable_post_launch_cwd_stops_the_worker_instead_of_crashing(env, tmp_path, bad):
+    own_window_at(env, tmp_path)
+    env.data["inspect_cwd"] = bad
+    r = cwd_launch(env, "--cwd", str(tmp_path))
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "stopped (interrupted" in r.stderr
+
+
+def test_an_undecodable_cwd_argument_is_refused_before_the_launch(env):
+    """argv bytes that are no UTF-8 reach python as a lone surrogate (surrogateescape): a clean refusal, not a traceback."""
+    env.flush()
+    r = subprocess.run([sys.executable.encode(), str(SCRIPT).encode(), b"--lead", LEAD.encode(), b"--slice", b"s", b"--window-middle", b"Wave 7",
+                        b"--cwd", b"/x\xffy", b"--", b"--no-wait", b"B"], capture_output=True, cwd=env.tmp)
+    err = r.stderr.decode(errors="replace")
+    assert r.returncode == 1 and "Traceback" not in err and "not a usable path" in err and not placed(env)

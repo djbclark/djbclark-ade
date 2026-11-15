@@ -598,19 +598,25 @@ class Workspace:
         return self.gitdir / "ade-claim"
 
 
-def _same_path(a: Any, b: Any) -> bool:
+def same_path(a: Any, b: Any) -> bool:
     """True when two paths are one file: samefile (st_dev, st_ino) first, so a differently cased path on a
-    case-insensitive volume matches; a path that does not exist falls back to normalised real paths."""
+    case-insensitive volume matches; a path that does not exist falls back to normalised real paths. A path that
+    cannot be a file name (an embedded NUL, a lone surrogate: ValueError) never matches (wr-50)."""
     if not isinstance(a, (str, os.PathLike)) or not isinstance(b, (str, os.PathLike)) or not str(a) or not str(b):
         return False
     try:
         return os.path.samefile(a, b)
     except OSError:
         pass
+    except ValueError:
+        return False
     try:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
-    except OSError:
+    except (OSError, ValueError):
         return False
+
+
+_same_path = same_path  # the name the module's own callers use
 
 
 def _path_inside(root: Any, path: Any) -> bool:
