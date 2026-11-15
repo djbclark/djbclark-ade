@@ -907,12 +907,26 @@ def _identity(account: Any, family: Any = None) -> tuple[str | None, Any]:
     return (account.strip() or None) if isinstance(account, str) else None, family
 
 
+ORG_FIELDS = ("organization_id", "org_id", "organization", "org")   # none is emitted by aiuse today (checked 2026-11-15)
+
+
+def _aiuse_identity(row: dict[str, Any], family: Any) -> tuple[str | None, Any]:
+    """Identity of an aiuse row. The `account` label (an email) alone is no identity: one email can sit in two
+    organizations with separate quotas. A row is identified only when it also names its organization (`ORG_FIELDS`);
+    aiuse reports none today, so every aiuse row stays unidentified and folds as another account (fail closed)."""
+    acct = _identity(row.get("account"), family)
+    org = next((o.strip() for o in (row.get(f) for f in ORG_FIELDS) if isinstance(o, str) and o.strip()), None)
+    if acct[0] is None or org is None:
+        return None, family
+    return (acct[0], org), family
+
+
 def _folds_as_accounts(seen: list[tuple[str | None, Any]], who: tuple[str | None, Any]) -> bool:
     """Whether a reading folds into a pool key as ANOTHER account (`_merge_pool(accounts=True)`, fail closed).
 
     `seen` lists the identities already folded under the key. Only a reading of an identified account and family that is
     the SAME as every one already folded is a repeat of the same quota (known beats unknown); nothing folded yet is no
-    merge at all, and an unidentified account (no `account`/`id`) cannot be shown to be the same, so it counts as another
+    merge at all, and an unidentified account (no `account`/`id`, or an aiuse `account` with no organization field: `_aiuse_identity`) cannot be shown to be the same, so it counts as another
     one (rt-01 D1 behaviour, kept)."""
     return bool(seen) and not (who[0] is not None and all(s == who for s in seen))
 
@@ -965,7 +979,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
     foreign: list[tuple[str, float]] = []
     errored: set[str] = set()                       # providers with an error row: an account whose quota is unknown
     key_provider: dict[str, str] = {}               # pool key -> the provider whose rows built it
-    seen: dict[str, list[tuple[str | None, Any]]] = {}   # pool key -> (account, family) of each non-cap row folded in
+    seen: dict[str, list[tuple[str | None, Any]]] = {}   # pool key -> (account+organization, family) of each non-cap row folded in
     for row in rows:
         name = row.get("provider")
         if not name:
@@ -1037,11 +1051,11 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
                 if cap.get("available_at"):
                     entry["sublimit_resets"] = {**(entry.get("sublimit_resets") or {}),
                                                 cap["pool_family"]: cap["available_at"]}
-        # a model-cap row is no account (it has no reading of its own); every other row is one, told apart by `account`
+        # a model-cap row is no account (it has no reading of its own); every other row is one, told apart by `account` AND an organization field (`_aiuse_identity`)
         if cap_row:
             _merge_pool(pools, key, entry)
         else:
-            who = _identity(row.get("account"), family)
+            who = _aiuse_identity(row, family)
             _merge_pool(pools, key, entry, accounts=_folds_as_accounts(seen.setdefault(key, []), who))
             seen[key].append(who)
     for fkey, rem in foreign:
