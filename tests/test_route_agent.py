@@ -245,7 +245,7 @@ class TestDiscovery(unittest.TestCase):
         # discovered ones: measured-idle vs unmeasurable.
         q = {**{k: {"remaining": 0.0} for k in IDLE},
              "fresh-pool": {"remaining": 99.0}, "murky-pool": {}}
-        self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
+        self.assertEqual(r.route("bulk", quota=q, need_profile=False).service.name, "fresh-pool")
 
     def test_hermes_only_providers_never_win_claude_side_routing(self):
         """A provider with no Claude-invocable CLI must not win here.
@@ -266,10 +266,11 @@ class TestDiscovery(unittest.TestCase):
         self.assertFalse(svc.eligible("bulk"))
 
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
-        """All available agents should stay routable, just ranked last."""
+        """With the profile gate off (rt-bulk: `route` now queues rather than hand out an unprofiled placeholder), all
+        available agents stay routable, just ranked last."""
         drained = {k: {"remaining": 0.0} for k in IDLE}
         with sources(PASEO_ROWS):                         # not whatever providers the host's Paseo lists
-            choice = r.route("bulk", quota=drained)
+            choice = r.route("bulk", quota=drained, need_profile=False)
         self.assertIsNotNone(choice, "roster agents should still provide a fallback")
         self.assertNotEqual(choice.service.name, "clinepass")
 
@@ -1654,7 +1655,7 @@ class TestOmpReadyRoster(RestorableTransportPolicyCase):
         self.assertEqual(r.route("bulk", quota=q).service.name, "omp")
         # ...and a drained omp leaves the original ordering alone.
         q["omp"] = {"remaining": 0.0}
-        self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
+        self.assertEqual(r.route("bulk", quota=q, need_profile=False).service.name, "fresh-pool")
 
     def test_omp_is_the_room_when_every_other_code_pool_is_drained(self):
         drained = {k: {"remaining": 1.0} for k in IDLE}
