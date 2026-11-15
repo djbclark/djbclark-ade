@@ -103,7 +103,7 @@ D3. The two merge per pool by the same rule aiuse's own rows use (`_merge_pool`)
 unknown never loosens or replaces a reading. `route_agent.py show` and the `quota_source.pools` field of
 `plan --json`/`route --json` say which source each pool came from (`aiuse`, `snapshot`, `paseo`, `aiuse+paseo`).
 D3a. **Accounts of one pool (rq-37, 2026-11-15; PR 708 Lows 3 and 4).** Rows and reports are told apart by the account
-they read, not by the pool key. aiuse `--available` rows carry `account` (`account_id` if it is empty); Paseo reports
+they read, not by the pool key. aiuse `--available` rows carry `account`; Paseo reports
 carry `id` (`claude:<account>`; `sourceId` is only the provider). A non-cap row or report of an identified account and
 family that repeats what is already folded under the key is one reading of one quota: known beats unknown (`_merge_caps`).
 Any other second row (a different account, or one with no account at all, which cannot be shown to be the same) folds as

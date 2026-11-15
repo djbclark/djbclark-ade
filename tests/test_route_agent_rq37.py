@@ -65,6 +65,12 @@ def test_rows_without_an_account_cannot_be_shown_to_be_one_account_and_stay_fail
     assert r.plenty_remaining(pool) is None and r.UNMEASURED_WINDOW in pool["windows"]
 
 
+def test_account_id_is_not_read_aiuse_emits_only_account():
+    """aiuse `pool_entries` has no `account_id` producer: a row naming one is still an unidentified account."""
+    pool = _fold(_row(50, account="a@x"), {**_row(90, expired=True, bare=True), "account_id": "a@x"})
+    assert r.plenty_remaining(pool) is None
+
+
 def test_a_blank_account_counts_as_no_account():
     pool = _fold(_row(50, account="  "), _row(90, account="  ", expired=True, bare=True))
     assert r.plenty_remaining(pool) is None
@@ -96,7 +102,7 @@ def test_one_account_with_a_fable_cap_row_opens_the_gate_in_either_order():
 
 
 @pytest.mark.parametrize("order", list(itertools.permutations(range(4))))
-def test_two_accounts_each_with_a_fable_cap_row_close_only_for_the_unread_one(order):
+def test_two_measured_accounts_each_with_a_fable_cap_row_open_the_gate_on_the_tighter_in_every_order(order):
     """Two measured accounts and their cap rows, every order: the pool opens on the tighter account."""
     rows = [_row(50, account="a@x"), _row(70, account="b@x"),
             {**_row(35, account="a@x", family="fable"), "binding_window": "Claude Code weekly - Fable"},
@@ -105,6 +111,22 @@ def test_two_accounts_each_with_a_fable_cap_row_close_only_for_the_unread_one(or
     assert pool["remaining"] == 50 and pool["sublimits"] == {"fable": 35.0}
     assert r.UNMEASURED_WINDOW not in pool["windows"]
     assert r.plenty_remaining(pool) == 50
+
+
+def test_a_paseo_pool_that_measures_nothing_still_closes_the_aiuse_reading_when_an_account_is_unmeasured():
+    """Adversary B1 of round 1: Paseo reads claude:a stale and claude:b unavailable (remaining None, an `(unmeasured)`
+    window). Folded beside aiuse's 80, the marker must reach the aiuse pool, or Paseo may launch on account b unseen."""
+    stale = _report("claude:a", 60, age_min=60)
+    paseo = r.usage_from_paseo([stale, _report("claude:b", status="unavailable")], now=NOW)
+    assert paseo["claude"]["remaining"] is None and r.UNMEASURED_WINDOW in paseo["claude"]["windows"]
+    aiuse = {"claude": {"remaining": 80.0, "windows": {"weekly": 80.0}, "sublimits": {}}}
+    r._fold_paseo(aiuse, paseo)
+    assert aiuse["claude"]["remaining"] == 80 and aiuse["claude"]["windows"][r.UNMEASURED_WINDOW] is None
+    assert r.plenty_remaining(aiuse["claude"]) is None
+    lone = r.usage_from_paseo([stale], now=NOW)
+    plain = {"claude": {"remaining": 80.0, "windows": {"weekly": 80.0}, "sublimits": {}}}
+    r._fold_paseo(plain, lone)
+    assert r.UNMEASURED_WINDOW not in plain["claude"]["windows"]
 
 
 def test_cap_only_is_gone_from_the_aiuse_fold():

@@ -1041,7 +1041,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         if cap_row:
             _merge_pool(pools, key, entry)
         else:
-            who = _identity(row.get("account") or row.get("account_id"), family)
+            who = _identity(row.get("account"), family)
             _merge_pool(pools, key, entry, accounts=_folds_as_accounts(seen.setdefault(key, []), who))
             seen[key].append(who)
     for fkey, rem in foreign:
@@ -1659,6 +1659,9 @@ def _fold_paseo(providers: dict[str, Any], paseo: dict[str, Any]) -> None:
                 QuotaSource.pools[key] = "paseo"
             else:
                 prior["paseo_unknown"] = entry.get("unknown") or "paseo usage: no window reading"
+                if UNMEASURED_WINDOW in (entry.get("windows") or {}):
+                    # Paseo read several accounts and one could not be measured: that holds for the aiuse reading too
+                    prior["windows"] = {**(prior.get("windows") or {}), UNMEASURED_WINDOW: None}
             continue
         if prior is None or prior.get("unknown"):
             providers[key] = {k: v for k, v in entry.items() if k != "unknown"}
