@@ -644,6 +644,9 @@ def registry():
     return rows
 
 
+REGISTRY_LOCK_TIMEOUT_ENV = "LW_REGISTRY_LOCK_TIMEOUT_S"  # seconds, default 30 (read per call via _env_float: a typo must not crash); the lock is held only for a read-modify-write, never across a dialog
+
+
 @contextlib.contextmanager
 def registry_lock():
     """Serialize registry read-modify-write across processes (flock on a sibling file). Never held across the approval dialog: a stale
@@ -652,7 +655,17 @@ def registry_lock():
 
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     with open(str(REGISTRY) + ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        wait_s = _env_float(REGISTRY_LOCK_TIMEOUT_ENV, 30.0)
+        deadline = time.monotonic() + wait_s
+        while True:  # bounded: a holder that never exits (stuck process) must not hang every later `ci decide`/`rm` forever
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    sys.exit(f"load-watch: the registry lock {REGISTRY}.lock is held by another process and was not released within "
+                             f"{wait_s:g} s; nothing was changed. Find the holder (`lsof {REGISTRY}.lock`) or retry.")
+                time.sleep(0.05)
         yield
 
 
@@ -672,11 +685,16 @@ def bad_registry_field(*vals):
     return next((v for v in vals if any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or c in "\u2028\u2029" for c in str(v))), None)
 
 
-def write_registry(rows):
+def check_registry_rows(rows):
+    """Refuse (exit) when any row holds a control character: write_registry would refuse anyway, so callers check BEFORE any approval dialog."""
     for k, v in rows.items():
         if bad_registry_field(k, *v) is not None:
             sys.exit(f"load-watch: the registry row for {k.encode('unicode_escape').decode()!r} holds a control character (tab, newline, ...); "
                      "nothing was written. Fix or delete that row by hand.")
+
+
+def write_registry(rows):
+    check_registry_rows(rows)
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     tmp = REGISTRY.with_suffix(".tmp")
     tmp.write_text("# repo top-level (or DIR/*)\tci|local|pending\tCI command, or why local\tdecided\n" +
@@ -1894,7 +1912,7 @@ def helper_env():
     """A clean environment for the bash `sudo-ask`: the caller's own would let `BASH_ENV=<file with exit 0>` (or ENV, SHELLOPTS, BASH_FUNC_*) make it
     exit 0 before any dialog, which reads as approval (Codex review of PR 744). Only what the helper needs is passed."""
     env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(HOME)}
-    for k in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM"):  # not TMPDIR: bash 3.2 writes the dialog script there, a racer could swap it
+    for k in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM"):  # not TMPDIR: a caller-chosen dir for bash 3.2's heredoc temp files is attacker-steerable; unset, bash falls back to /tmp (fixed, not private)
         if k in os.environ:
             env[k] = os.environ[k]
     return env
@@ -1962,6 +1980,7 @@ def cmd_ci(a):
         def change(rows):
             # an existing `local` row at this key may only change its reason; ci and pending are never gated
             if a.mode == "local" and not approved and (rows.get(top) or [""])[0] != "local":
+                check_registry_rows(rows)  # a damaged row refuses now, not after djbclark has clicked Allow and touched the sensor
                 return "ask"
             rows[top] = [a.mode, a.text, time.strftime("%Y-%m-%d")]
 
