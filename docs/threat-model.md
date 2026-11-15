@@ -365,8 +365,12 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 * **Control.** PR 3b: Quit and Force Quit pass the live `vet` (identity, protected list, build subtree) and the dialog's own pid-plus-start-time re-check, so pid reuse inside the
   300 s window cannot redirect a click to a stranger; Force Quit needs a confirm sheet whose default is Cancel; Quit All is graceful only and skips build-hosting, absent and frozen
-  rows; Wait is the leftmost default and does nothing, and Return and Escape are swallowed (a stray key cannot press a button). PR 3c's controls for Freeze (the F6 floor and defaults,
-  the F5 thaw paths, the F7 escape hatch `gui-hog thaw --all`) are specified in docs/gui-hog-dialog.md and land with that PR.
+  rows; Wait is the leftmost default and does nothing, and Return and Escape are swallowed (a stray key cannot press a button). PR 3c's controls for Freeze (docs/gui-hog-dialog.md section O): Freeze is only ever a
+  button press (never automatic, B6); `gui_hog_freeze.py` re-reads the live pid and checks four fields (pid, start time, uid, kernel executable) before every signal, applies the F6 protected list
+  to the root and every member (in the Python core, not the view), writes the entry **before** the first SIGSTOP, and refuses when the sampler job that would resume it is not loaded.
+  Every thaw path exists: timed auto-resume (default 10 min, at most 24 h), the dialog's and the menu-bar item's Resume, the sampler's first step each tick (also with `LW_GUI_HOG=0`), crash
+  recovery of a half-written entry, a reboot (the processes are gone, the entry is pruned), removal of load-watch's job, and the escape hatch `gui-hog thaw --all` (`--stopped-apps` when the state file is
+  lost). `[freeze] enabled = false` hides the buttons and refuses `freeze`; thawing stays on. The state directory is opened through directory fds with `O_NOFOLLOW` and owner and mode checks.
 * **Gap.** The protected list is a name list: an app not on it (a VPN or password manager nobody listed) is a normal row, and a polite Quit of it is one click. Graceful Quit
   keeps the app's own save sheet; Force Quit loses unsaved work by design. Operator-run acceptance (H4) is required before each GUI PR merges.
 

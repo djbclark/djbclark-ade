@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gui-hog: the GUI-hog dialog's data, checks and launcher (docs/gui-hog-dialog.md; PR 3b: the window is live, Freeze is PR 3c).
+"""gui-hog: the GUI-hog dialog's data, checks and launcher (docs/gui-hog-dialog.md; PR 3b: the window is live; PR 3c: Freeze).
 
     gui-hog status [--json]     what the sampler sees now: holds, the 5-min app window, the decision, the bundle, the dry-run count
     gui-hog vet --pid P --start S --bundle-id B [--bundle-path X]
@@ -11,6 +11,12 @@
     gui-hog show [--all]        open the window now from the sampler's current data, no hold needed (the operator's manual run: real apps, real Quit);
                                 --all lists every unprotected app in the 5-min window, however small
     gui-hog demo                open the window on fixture rows in a temp directory; no button touches any app (H4a)
+
+    gui-hog freeze --pid P --start S [--minutes N | --indefinite] [--by dialog]
+                                (PR 3c) SIGSTOP an app's whole process tree: an operator click, never automatic; exit codes in bin/gui_hog_freeze.py
+    gui-hog resume --entry ID | --all      resume frozen entries
+    gui-hog thaw --due [--stale] | --all [--stopped-apps [--yes]]    the sampler's tick; the escape hatch (F7)
+    gui-hog frozen [--json]     the frozen entries
 
 `status`, `vet`, `show` and `demo` signal nothing. The Swift dialog quits and force-quits through NSRunningApplication, only after `vet` exits 0 and its own
 identity re-check. Reads and writes ~/.local/state/load-watch/ (LW_STATE_DIR) and reads config/gui-hog.toml.
@@ -25,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gui_hog  # noqa: E402
+import gui_hog_freeze  # noqa: E402
 
 STATE_DIR = Path(os.environ.get("LW_STATE_DIR", Path.home() / ".local/state/load-watch"))
 
@@ -74,9 +81,12 @@ def main(argv=None):
     p.add_argument("--bundle-id", default="")
     p.add_argument("--by", default="dialog")
     p = sub.add_parser("show", help="open the window now from the sampler's current data")
-    p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on TextEdit)")
+    p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on a harmless third-party app such as Syncthing or Contexts; TextEdit is protected and never listed)")
     sub.add_parser("demo", help="open the window on fixture rows; no button touches any app")
+    gui_hog_freeze.add_subcommands(sub)   # freeze, resume, thaw, frozen (PR 3c)
     a = ap.parse_args(argv)
+    if hasattr(a, "func"):
+        return a.func(a, STATE_DIR)
     cfg = gui_hog.load_config()
     now = time.time()
     if a.cmd == "status":

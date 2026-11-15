@@ -116,3 +116,9 @@ To release the role when done:
 ```sh
 ~/src/djbclark-ade/bin/load-watch watcher clear
 ```
+
+## 4. GUI-hog Freeze: never run it yourself
+
+`bin/gui-hog freeze` SIGSTOPs a GUI app's whole process tree and is an **operator click** (docs/gui-hog-dialog.md B6, F8-16): an agent never runs `gui-hog freeze`, never
+freezes or quits an app on its own judgment, and does not call `gui_hog_freeze.freeze`. Resuming is always allowed: `bin/gui-hog frozen` lists what is stopped, `bin/gui-hog thaw --all`
+resumes it, and `bin/gui-hog thaw --all --stopped-apps` is the last resort for a lost state file. Every freeze and thaw is logged with `by` in `~/.local/state/load-watch/gui-hog/events.jsonl`.

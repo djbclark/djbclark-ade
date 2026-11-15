@@ -1,4 +1,5 @@
 // SelfTest.swift: `ade-gui-hog --self-test` (H3). Pure logic only, no window, no process is touched. Exit 0 when every check passes, 1 otherwise.
+import AppKit
 import Foundation
 
 func runSelfTest() -> Int32 {
@@ -95,8 +96,64 @@ func runSelfTest() -> Int32 {
     check(gap.map { $0.appId } == full.map { $0.appId } && !gap[2].present, "at the cap, a row that just went absent keeps its slot (the new app is not shown yet): its button cannot turn into another app's")
     let gap2 = mergeRows(old: gap, new: drop)
     check(gap2.count == maxWindowRows && gap2[2].appId == "99" && gap2[3].appId == full[3].appId, "on the next refresh the new app takes the slot that was already absent; the rows around it stay")
+    let back = mergeRows(old: gap, new: Array(many.prefix(maxWindowRows)) + [mk("99", 3099, cores: 5)])
+    check(back.count == maxWindowRows && back[2].appId == "12" && back[2].present && !back.contains(where: { $0.appId == "99" }), "at the cap, an absent app that returns keeps its slot: a new app in the same refresh does not overwrite it")
     check(!clickAllowed(lastLayout: 100.0, now: 100.3) && clickAllowed(lastLayout: 100.0, now: 100.8), "a click right after a re-layout is ignored")
     check(!buttonRefusesFocus(.wait) && buttonRefusesFocus(.ignore) && buttonRefusesFocus(.quitAll) && buttonRefusesFocus(nil), "only Wait may take keyboard focus; row buttons never")
+
+    // Freeze (PR 3c): the buttons, the argv lists, the frozen list
+    let fzJson = """
+    {"v":1,"t":100,"header":{},"holds":[],"more":0,"protected_hidden":0,"rss_trigger":false,"freeze":{"enabled":true,"default_minutes":15},
+     "rows":[{"app_id":"812","name":"Slack","bundle_id":"com.tinyspeck.slackmacgap","bundle_path":"/Applications/Slack.app","root_pid":812,"root_start":"Fri Nov 14 18:02:11 2026","root_start_epoch":1794765731,"cores_5m":1.8,"cpu_now":1.9,"rss_mb":3170,"present":true,"hosts_build":false,"frozen":false},
+             {"app_id":"9","name":"Gone","bundle_id":"x","bundle_path":"/Applications/Gone.app","root_pid":9,"root_start":"","root_start_epoch":null,"cores_5m":0.3,"cpu_now":0,"rss_mb":0,"present":false,"hosts_build":false,"frozen":false},
+             {"app_id":"7","name":"IDE","bundle_id":"y","bundle_path":"/Applications/IDE.app","root_pid":7,"root_start":"s","root_start_epoch":5,"cores_5m":0.3,"cpu_now":0,"rss_mb":900,"present":true,"hosts_build":true,"frozen":false}]}
+    """
+    if let fs = parseSnapshot(Data(fzJson.utf8)) {
+        check(fs.freezeEnabled && fs.freezeMinutes == 15, "the snapshot carries [freeze] enabled and default_minutes")
+        check(rowFreezeAllowed(fs.rows[0], fs), "a present, idle-identity row offers Freeze")
+        check(!rowFreezeAllowed(fs.rows[1], fs), "a row absent from the newest sample gets no Freeze button (carry-over d)")
+        check(!rowFreezeAllowed(fs.rows[2], fs), "a build-hosting row gets no Freeze button")
+        var off = fs; off.freezeEnabled = false
+        check(!rowFreezeAllowed(off.rows[0], off), "[freeze] enabled = false hides the Freeze buttons")
+        let marked = markFrozen(fs.rows, rootPids: [812])
+        check(marked[0].frozen && !marked[1].frozen && !rowActionsAllowed(marked[0]) && !rowFreezeAllowed(marked[0], fs), "a frozen row offers no Quit, Force Quit or Freeze")
+        check(rowNote(marked[0]) == "frozen: use Resume below", "a frozen row says so")
+        check(quitAllTargets(marked).isEmpty, "Quit All never targets a frozen row")
+    } else { check(false, "the freeze snapshot parses") }
+    check(parseSnapshot(Data("{\"v\":1,\"rows\":[]}".utf8))?.freezeEnabled == false, "a snapshot without a freeze block hides Freeze")
+    check(freezeArgv(row, minutes: 10) == ["freeze", "--pid=812", "--start=Fri Nov 14 18:02:11 2026", "--bundle-id=com.tinyspeck.slackmacgap", "--bundle-path=/Applications/Slack.app", "--minutes=10", "--by", "dialog"], "timed freeze argv")
+    check(freezeArgv(row, minutes: nil).contains("--indefinite") && !freezeArgv(row, minutes: nil).contains(where: { $0.hasPrefix("--minutes") }), "indefinite freeze argv")
+    check(resumeArgv("e1", by: "menubar") == ["resume", "--entry=e1", "--by", "menubar"] && thawDueArgv(by: "menubar") == ["thaw", "--due", "--stale", "--by", "menubar"] && resumeAllArgv(by: "menubar") == ["resume", "--all", "--by", "menubar"] && frozenArgv() == ["frozen", "--json"], "resume and frozen argv")
+    let frozenJson = """
+    {"v":1,"notes":[],"entries":[{"id":"a1","state":"frozen","app":{"name":"Sl\\u200back","bundle_id":"c"},"mode":"timed","by":"dialog","frozen_at":1,"thaw_at":1000,"root_pid":812,"members":5,"alive":true,"kept_running":0},
+                                 {"id":"","state":"frozen","app":{},"root_pid":3},
+                                 {"id":"b2","state":"frozen","app":{"name":"X"},"mode":"indefinite","thaw_at":null,"root_pid":900,"members":1,"alive":false}]}
+    """
+    let fe = parseFrozen(Data(frozenJson.utf8))
+    check(fe?.count == 2 && fe?[0].name == "Slack" && fe?[0].thawAt == 1000 && fe?[1].thawAt == nil && fe?[1].alive == false, "the frozen list parses, drops an entry without an id and sanitizes names")
+    check(parseFrozenRoots(Data(frozenJson.utf8)) == [812, 3, 900], "the frozen root pids parse")
+    check(parseFrozen(Data("{\"v\":2}".utf8)) == nil && parseFrozen(Data("nope".utf8)) == nil, "another version or garbage is refused")
+    if let f0 = fe?.first, let f1 = fe?.last {
+        check(thawText(f1, now: 0) == "until you Resume", "an indefinite freeze says until you Resume")
+    }
+    // The resume time is a clock time (no countdown), New York 12-hour AM/PM, a 3-letter day name when not today; the zone is passed so the check never depends on this Mac's zone.
+    let clockJson = "{\"v\":1,\"entries\":[{\"id\":\"c1\",\"state\":\"frozen\",\"app\":{\"name\":\"X\"},\"mode\":\"timed\",\"thaw_at\":1794711120,\"root_pid\":5,\"members\":1,\"alive\":true}]}"
+    if let c = parseFrozen(Data(clockJson.utf8))?.first, let ny = TimeZone(identifier: "America/New_York"), let utc = TimeZone(identifier: "UTC") {
+        check(thawText(c, now: 1794704400, zone: ny) == "resumes at 9:52 PM", "same day in New York: no day name")
+        check(thawText(c, now: 1794582000, zone: ny) == "resumes at Sat 9:52 PM", "another day in New York: a 3-letter day name")
+        check(thawText(c, now: 1794704400, zone: utc) == "resumes at 2:52 AM" && thawText(c, now: 1794582000, zone: utc) == "resumes at Sun 2:52 AM", "the zone is the parameter, never this Mac's")
+        check(thawText(c, now: 1794704400, zone: ny) == thawText(c, now: 1794704460, zone: ny), "no countdown: the text does not change between refreshes")
+        let far = parseFrozen(Data(clockJson.replacingOccurrences(of: "1794711120", with: "999999999999999").utf8))?.first
+        let edge = { (secs: Int) -> String? in parseFrozen(Data(clockJson.replacingOccurrences(of: "1794711120", with: String(1794704400 + secs)).utf8))?.first.map { thawText($0, now: 1794704400, zone: ny) } }
+        check(edge(clockSpanS) != "resumes at ?" && edge(clockSpanS + 1) == "resumes at ?" && edge(-clockSpanS) != "resumes at ?" && edge(-clockSpanS - 1) == "resumes at ?", "the 7-day guard: exactly 7 days shows a time, one second more shows ?")
+        check(far.map { thawText($0, now: 1794704400, zone: ny) == "resumes at ?" } == true, "a far-off resume time shows ?, never a made-up clock time or an empty one")
+    } else { check(false, "the clock-time entry parses") }
+    let stRows = markFrozen(mergeRows(old: [], new: [mk("1", 1001, cores: 2), mk("2", 1002, cores: 1)]), rootPids: [1001])
+    let stKept = clearStaleFrozen(["1": "frozen", "2": "frozen", "3": "frozen", "9": "quitting…"], rows: stRows)
+    check(stKept["1"] == "frozen" && stKept["2"] == nil && stKept["3"] == nil && stKept["9"] == "quitting…", "a stale 'frozen' label is dropped once the row is not frozen; other labels stay")
+    check(dialogStyleMask.contains(.miniaturizable) && dialogStyleMask.contains(.closable) && dialogStyleMask.contains(.titled) && dialogWindowLevel == .floating, "the window can be minimized and closed and floats")
+    check(!thawDueTick(0) && !thawDueTick(9) && thawDueTick(10) && !thawDueTick(11) && thawDueTick(20), "the dialog re-runs thaw --due every 10th 2 s tick")
+    check(statusTitle(0) == "" && statusTitle(2) == "❄︎ 2", "menu-bar title")
 
     // identity (D4, F3)
     let ok = LiveProc(pid: 812, startEpoch: 1794765731, bundleId: "com.tinyspeck.slackmacgap", launchEpoch: 1794765732)

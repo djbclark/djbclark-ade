@@ -49,6 +49,8 @@ DEFAULTS = {
                 "min_row_cores": 0.05, "min_row_rss_mb": 200,
                 "relievable": ["load", "compressor", "free_mem", "pageins", "swapins"]},
     "protected": {"bundle_ids": [], "bundle_id_prefixes": [], "bundle_paths": [], "exe_paths": []},
+    # PR 3c (section F): Freeze. Only the shipped config can turn it off; `enabled = false` hides the buttons and refuses `gui-hog freeze`.
+    "freeze": {"enabled": True, "default_minutes": 10, "max_minutes": 1440, "passes": 3, "lock_timeout_s": 5},
 }
 
 # The hard floor (F6): code, not configuration. Config can add protected entries, never remove these.
@@ -619,6 +621,21 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
                 else:
                     app.members.append(pid)
                     owner[pid] = rid
+                    stack, visited = list(kids.get(pid, [])), {pid}   # what a helper launchd started runs is walked like the root's children (a shell in it is a build)
+                    while stack:
+                        c = stack.pop()
+                        if c in visited or c not in table or c in owner:
+                            continue
+                        visited.add(c)
+                        if build_stop(c, app.real):
+                            sub = subtree(c, seen_build) or [c]   # `c` may already be in seen_build (ps order): it is still a build, whatever order the pids came in
+                            app.build.update(sub)
+                            app.build_cores += sum(table[q][2] for q in sub if q in table)
+                            visited.update(sub)
+                            continue
+                        app.members.append(c)
+                        owner[c] = rid
+                        stack.extend(kids.get(c, []))
                 break
     out = []
     for rid, app in apps.items():
@@ -633,7 +650,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
             anc, hops = str(table[anc][0]), hops + 1
         rex = exe(rid)
         out.append({"id": rid, "name": app.name, "bundle_id": app.bundle_id, "bundle_path": app.bundle_path,
-                    "root_pid": app.root_pid, "members": len(app.members),
+                    "root_pid": app.root_pid, "members": len(app.members), "member_pids": [int(m) for m in app.members],
                     "cores": sum(table[p][2] for p in app.members if p in table),
                     "rss_mb": sum(rss_kb.get(p, 0) for p in app.members) / 1024.0,
                     "hosts_build": bool(app.build), "build_cores": app.build_cores, "excluded": excluded,
@@ -951,7 +968,8 @@ def build_snapshot(means, held, now, cfg, *, load=None, ncpu=None, cpu_5m=None, 
             "header": {"load": [round(x, 2) for x in load] if load else None, "ncpu": ncpu, "cpu_5m": None if cpu_5m is None else round(cpu_5m, 2)},
             "holds": [{"caller": h["caller"], "held_s": int(max(0, now - h["refused_since"])), "refused": h["refused"]} for h in held],
             "rows": out, "more": max(0, len(rows) - SNAPSHOT_MAX_ROWS), "protected_hidden": sum(1 for a in means if a["protected"]),
-            "rss_trigger": sum(a["rss_mb"] for a in means if not a["protected"]) >= tr["min_rss_mb"]}
+            "rss_trigger": sum(a["rss_mb"] for a in means if not a["protected"]) >= tr["min_rss_mb"],
+            "freeze": {"enabled": bool(cfg.get("freeze", {}).get("enabled", True)), "default_minutes": int(cfg.get("freeze", {}).get("default_minutes", 10))}}
 
 
 def write_snapshot(state_dir, snap):
@@ -1002,14 +1020,14 @@ def bundle_state(bundle=None, src=None):
     return ("ok", "") if want == have else ("stale", "sources changed since the bundle was built (run bin/ade-gui-build)")
 
 
-def dialog_running(state_dir):
+def dialog_running(state_dir, lock="dialog.lock"):
     """True when a dialog holds gui-hog/dialog.lock (the dialog flocks it for its whole life: F8-13). A flock dies with its process, so a crash never
-    leaves a stale lock. False when the directory does not exist yet."""
+    leaves a stale lock. False when the directory does not exist yet. `lock="status.lock"` asks about the menu-bar item of PR 3c (E5) instead."""
     d = gui_dir(state_dir)
     if not safe_dir(d):
         return False
     try:
-        fd = os.open(d / "dialog.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        fd = os.open(d / lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     except OSError:
         return False
     try:
@@ -1021,14 +1039,14 @@ def dialog_running(state_dir):
         os.close(fd)
 
 
-def launch_dialog(state_dir, *, bundle=None, extra=(), popen=subprocess.Popen, python=None):
+def launch_dialog(state_dir, *, bundle=None, extra=(), popen=subprocess.Popen, python=None, lock="dialog.lock"):
     """Start the dialog detached and return (True, "") or (False, why). Argv list, no shell; `start_new_session`, `close_fds`, stdin and stdout
     on /dev/null, stderr on gui-hog/dialog.log (mode 0600, cut at 256 KB); never waited on, so the build never waits on the dialog (C5). The
     dialog gets the interpreter and `bin/gui-hog` to run its actions with (D4); it never builds anything here (D2)."""
     state, detail = bundle_state(bundle)
     if state != "ok":
         return False, f"bundle-{state}"
-    if dialog_running(state_dir):
+    if dialog_running(state_dir, lock):
         return False, "running"
     d = _gui_dir_ready(state_dir)
     logp = d / "dialog.log"

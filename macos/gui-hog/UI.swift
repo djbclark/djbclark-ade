@@ -1,8 +1,13 @@
 // UI.swift: the window (E1-E4). Plain NSTextField.stringValue for every untrusted string (J3), NSStackView layout, no key equivalents anywhere on the
 // main window, Return/Escape swallowed. Buttons: per row Quit and Force Quit… (a confirm sheet whose default is Cancel); bottom Wait (leftmost, the
-// initial first responder, does nothing), Ignore 1 h, Quit All… (a confirm sheet, Cancel default). No Freeze here (PR 3c).
+// initial first responder, does nothing), Ignore 1 h, Quit All… (a confirm sheet, Cancel default). PR 3c adds Freeze N min and Freeze… (indefinite,
+// a confirm sheet, Cancel default) on a row, and a Resume line per frozen app; none is ever pressed for you (B6).
 import AppKit
 import Foundation
+
+/// The window's frame (E6): closable (that is Wait), miniaturizable (it stays reachable from the Dock and acts on nothing), and it floats above other windows.
+let dialogStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+let dialogWindowLevel: NSWindow.Level = .floating
 
 final class GuardedWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -28,20 +33,26 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastBytes = Data()
     var status: [String: String] = [:]
     var acted = false
+    var frozenEntries: [FrozenEntry] = []
+    var frozenRoots: Set<Int> = []
+    var dialogTicks = 0
+    var activity: NSObjectProtocol?   // keeps App Nap off while the window is open (a minimized window must keep refreshing and ticking the thaw clock)
+    var frozenBusy = false
     var noHoldSince: Date?
     var timer: Timer?
     let autoCloseS = 120.0            // E4 (K4): close 2 min after the hold ends
     let rowHeight: CGFloat = 36       // every row is this tall, whatever it shows
     let statusWidth: CGFloat = 260    // the note or status label never changes the window width
-    let rootWidth: CGFloat = 1010     // the window width is fixed (required constraint): a sheet never re-centres under the pointer
-    let rowAreaWidth: CGFloat = 978   // inner width of the lines below and above the rows
+    let rootWidth: CGFloat = 1190     // the window width is fixed (required constraint): a sheet never re-centres under the pointer
+    let rowAreaWidth: CGFloat = 1158   // inner width of the lines below and above the rows
 
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        window = GuardedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "ADE GUI Hog dialog is open: refresh and thaw clock")
+        window = GuardedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: dialogStyleMask, backing: .buffered, defer: false)
         window.title = cfg.demo ? "ADE GUI Hog (demo)" : "A build is waiting: desktop apps are busy"
-        window.level = .floating
+        window.level = dialogWindowLevel
         window.isReleasedWhenClosed = false
         window.delegate = self
         root.orientation = .vertical
@@ -61,7 +72,27 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             window.orderFrontRegardless()
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh(force: false) }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.dialogTicks += 1
+            if thawDueTick(self.dialogTicks) { DispatchQueue.global().async { self.runner.thawDue(by: "dialog"); DispatchQueue.main.async { self.pollFrozen() } } }   // F5: the window's own clock
+            self.refresh(force: false)
+        }
+        DispatchQueue.global().async { self.runner.thawDue(by: "dialog"); DispatchQueue.main.async { self.pollFrozen() } }   // F5b
+    }
+
+    /// Ask the Python core what is frozen (off the main thread), and redraw when it changed. Never overlaps itself.
+    func pollFrozen() {
+        if frozenBusy { return }
+        frozenBusy = true
+        DispatchQueue.global().async {
+            let res = self.runner.frozen()
+            DispatchQueue.main.async {
+                self.frozenBusy = false
+                guard let r = res else { return }
+                if r.entries != self.frozenEntries || r.roots != self.frozenRoots { self.frozenEntries = r.entries; self.frozenRoots = r.roots; self.rows = markFrozen(self.rows, rootPids: r.roots); self.status = clearStaleFrozen(self.status, rows: self.rows); self.rebuild() }
+            }
+        }
     }
 
     // The red close button is Wait: it leaves with no action of its own.
@@ -74,8 +105,9 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let h = try? FileHandle(forReadingFrom: url) {
             let data = (try? h.read(upToCount: 1_000_000)) ?? Data()
             try? h.close()
-            if (force || data != lastBytes), let s = parseSnapshot(data) { snap = s; rows = mergeRows(old: rows, new: s.rows); lastBytes = data; rebuild() }
+            if (force || data != lastBytes), let s = parseSnapshot(data) { snap = s; rows = mergeRows(old: rows, new: s.rows); rows = markFrozen(rows, rootPids: frozenRoots); lastBytes = data; rebuild() }
         }
+        pollFrozen()
         if snap.holds.isEmpty && !cfg.manual && !cfg.demo {
             if noHoldSince == nil { noHoldSince = Date(); rebuild() }
             if let t = noHoldSince, Date().timeIntervalSince(t) >= autoCloseS { finish(0) }
@@ -129,6 +161,10 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else {
                 views.append(button("Quit", tag: i, action: #selector(quitPressed(_:))))
                 views.append(button("Force Quit…", tag: i, action: #selector(forcePressed(_:))))
+                if rowFreezeAllowed(r, snap) {
+                    views.append(button("Freeze \(snap.freezeMinutes) min", tag: i, action: #selector(freezePressed(_:))))
+                    views.append(button("Freeze…", tag: i, action: #selector(freezeIndefinitePressed(_:))))
+                }
                 views.append(label(status[r.appId] ?? "", size: 11, color: .secondaryLabelColor, width: statusWidth))
             }
             let line = NSStackView(views: views)
@@ -138,6 +174,19 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             line.clipsToBounds = true   // an app-controlled name in a tall-fonted script can never draw over, or push, a neighbouring row
             line.setClippingResistancePriority(.defaultLow, for: .vertical)
             root.addArrangedSubview(line)
+        }
+        if !frozenEntries.isEmpty {
+            root.addArrangedSubview(NSBox.separator())
+            root.addArrangedSubview(label("Frozen (stopped, not quit): Resume undoes it", size: 11, color: .secondaryLabelColor))
+            let now = Int(Date().timeIntervalSince1970)
+            for (i, e) in frozenEntries.enumerated() {
+                let line = NSStackView(views: [label(e.name, weight: .medium, width: 250), label(e.alive ? thawText(e, now: now) : "root is gone", size: 11, color: .secondaryLabelColor, width: 200),
+                                               button("Resume", tag: i, action: #selector(resumePressed(_:)))])
+                if let s = status["entry:" + e.id] { line.addArrangedSubview(label(s, size: 11, color: .secondaryLabelColor)) }
+                line.spacing = 10
+                line.alignment = .centerY
+                root.addArrangedSubview(line)
+            }
         }
         var foot: [String] = []
         if snap.more > 0 { foot.append("+\(snap.more) more") }
@@ -234,6 +283,69 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    func freezeRefusal(_ v: VetResult) -> String {
+        switch v.code {
+        case 3: return "protected or part of a build: not frozen"
+        case 4: return "refused: the app changed since this window was drawn"
+        case 5: return "not frozen: " + (v.reason.isEmpty ? "it has a terminal, a build or a second instance inside" : v.reason)
+        case 6: return "Freeze is off or the app is gone" + (v.reason.isEmpty ? "" : " (\(v.reason))")
+        case 8: return "refused: the load sampler is not running, so nothing would resume it"
+        case 10: return "no answer in time: check the Frozen list"
+        default: return "refused: could not freeze it" + (v.reason.isEmpty ? "" : " (\(v.reason))")
+        }
+    }
+
+    /// Freeze (off the main thread; the Python core vets everything live). `minutes` nil is indefinite. Never automatic: only a button press gets here (B6).
+    func freeze(_ r: Row, minutes: Int?) {
+        status[r.appId] = "freezing…"
+        rebuild()
+        DispatchQueue.global().async {
+            let v = self.runner.freeze(r, minutes: minutes)
+            DispatchQueue.main.async {
+                if v.code == 0 { self.status[r.appId] = "frozen"; self.acted = true; self.frozenRoots.insert(r.rootPid); self.rows = markFrozen(self.rows, rootPids: self.frozenRoots) } else { self.status[r.appId] = self.freezeRefusal(v) }
+                self.rebuild()
+                self.pollFrozen()
+            }
+        }
+    }
+
+    @objc func freezePressed(_ sender: NSButton) {
+        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        let r = rows[sender.tag]
+        guard rowFreezeAllowed(r, snap) else { return }
+        freeze(r, minutes: snap.freezeMinutes)
+    }
+
+    @objc func freezeIndefinitePressed(_ sender: NSButton) {
+        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        let r = rows[sender.tag]
+        guard rowFreezeAllowed(r, snap) else { return }
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "Freeze \(r.name) with no timer?"
+        a.informativeText = "\(r.name) stops completely and does not wake up until you press Resume (here or in the menu bar). Its windows stop responding. Nothing is lost."
+        a.addButton(withTitle: "Cancel")          // the default
+        a.addButton(withTitle: "Freeze")
+        a.beginSheetModal(for: window) { resp in
+            if resp == .alertSecondButtonReturn { self.freeze(r, minutes: nil) }
+        }
+    }
+
+    @objc func resumePressed(_ sender: NSButton) {
+        guard sender.tag >= 0 && sender.tag < frozenEntries.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        let e = frozenEntries[sender.tag]
+        status["entry:" + e.id] = "resuming…"
+        rebuild()
+        DispatchQueue.global().async {
+            let ok = self.runner.resume(e.id, by: "dialog")
+            DispatchQueue.main.async {
+                self.status["entry:" + e.id] = ok ? "resumed" : "could not resume it: run `gui-hog thaw --all`"
+                self.rebuild()
+                self.pollFrozen()
+            }
+        }
+    }
+
     @objc func quitPressed(_ sender: NSButton) {
         guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
         let r = rows[sender.tag]
@@ -283,7 +395,7 @@ extension NSBox {
     static func separator() -> NSBox {
         let b = NSBox()
         b.boxType = .separator
-        b.widthAnchor.constraint(equalToConstant: 978).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 1158).isActive = true   // = rowAreaWidth (a static member has no access to the view controller)
         return b
     }
 }

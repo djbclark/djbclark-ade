@@ -1,4 +1,4 @@
-# GUI-hog dialog (docs/gui-hog-dialog.md; PR 3a = data and dry-run trigger, no window yet).
+# GUI-hog dialog (docs/gui-hog-dialog.md; PR 3a = data and dry-run trigger; PR 3c adds [freeze]).
 # Read by bin/gui_hog.py. ~/.config/load-watch/gui-hog.toml may ADD to [protected], never remove from it or from the
 # hard floor in code (pid 1 and other users, WindowServer, Dock, loginwindow, Finder, SystemUIServer, Control Center,
 # WindowManager, anything under /System or /usr, the dialog itself; `bg` and agent CLIs are builds, matched by argv, not apps). LW_GUI_HOG=0 turns the
@@ -43,3 +43,13 @@ bundle_paths = [
   "/Applications/Paseo.app", "/Applications/Hermes.app", "/Applications/HermesDesktop.app",
 ]
 exe_paths = []
+
+# Freeze (PR 3c, docs/gui-hog-dialog.md section F). SIGSTOP of an app's whole process tree, only on an operator click (B6); only
+# resuming is automatic. `enabled = false` hides the Freeze buttons and makes `gui-hog freeze` refuse (exit 6): the rollback of I3.
+# It does not touch `gui-hog thaw`, which keeps working so nothing can be left stopped.
+[freeze]
+enabled = true
+default_minutes = 10    # a timed freeze resumes by itself (the sampler's tick runs `thaw --due`)
+max_minutes = 1440      # the longest timed freeze `--minutes` accepts
+passes = 3              # rescans for helpers forked mid-freeze (F4d)
+lock_timeout_s = 5      # flock on frozen.lock (F1)

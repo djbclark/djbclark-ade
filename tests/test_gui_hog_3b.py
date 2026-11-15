@@ -595,7 +595,7 @@ def test_swift_nothing_above_or_between_the_rows_changes_height_or_width():   # 
 def test_swift_a_slot_is_reused_only_if_it_was_already_absent_before_this_refresh():   # adversary round 3, finding 1
     model = swift_text()["Model.swift"]
     body = model[model.index("func mergeRows"):model.index("let maxWindowRows")]
-    assert "old.prefix(cap).enumerated().filter { !$0.element.present }" in body   # the free slots come from OLD, not from the merged rows
+    assert "old.prefix(cap).enumerated().filter { !$0.element.present && !out[$0.offset].present }" in body   # free = absent in OLD (no button to aim at) AND still absent in the merge (a returning app keeps its slot; 3b round-4 LOW, folded into 3c)
     assert "out[free.removeFirst()] = n" in body
     ui = swift_text()["UI.swift"]
     assert "root.widthAnchor.constraint(equalToConstant: rootWidth).isActive = true" in ui and "line.clipsToBounds = true" in ui

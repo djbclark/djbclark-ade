@@ -1501,6 +1501,10 @@ def cmd_sample(a):
         st["hot_since"], st["samples"], st["streak"] = t, [], 0
     elif not hot:
         st["hot_since"], st["samples"], st["streak"] = None, [], 0
+    try:  # GUI-hog thaw (docs/gui-hog-dialog.md F5a, PR 3c): FIRST, before ps_table(), so a `ps` stall never delays a resume; it only ever resumes
+        gui_hog_thaw_due(a.dry_run, t)
+    except Exception as e:  # noqa: BLE001
+        log(f"gui-hog thaw error: {e!r}")
     table = ps_table()
     if table is None:  # a stall this bad is itself a hot sample: keep the streak going, add no CPU data
         log(f"ps timed out at load {load1:.0f}; sample counted, no CPU data")
@@ -1631,6 +1635,25 @@ def gui_hog_mod():
         sys.path.insert(0, d)
     import gui_hog
     return gui_hog
+
+
+def gui_hog_thaw_due(dry, t):
+    """Every tick (F5a): resume the Freeze entries that are due, prune the dead ones. Never freezes anything (B6). Cheap when nothing is frozen
+    (no frozen.json, no lock). LW_GUI_HOG=0 does not stop it: a freeze that exists must always be able to end."""
+    if not (STATE_DIR / "gui-hog" / "frozen.json").exists() and not (STATE_DIR / "gui-hog" / "frozen.json.prev").exists():
+        return
+    d = str(Path(__file__).resolve().parent)
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import gui_hog_freeze
+    r = gui_hog_freeze.thaw_due(STATE_DIR, by="sampler", dry=dry, now=t, out=lambda m: log(m))
+    if r["resumed"] or r["dropped"]:
+        log(f"gui-hog thaw: resumed {r['resumed']}, dropped {r['dropped']}, deferred {r['deferred']}")
+    if not dry:   # E5: a menu-bar item while anything is frozen (the same window-server and bundle checks as the dialog; never waited on)
+        gh = gui_hog_mod()
+        started, why = gui_hog_freeze.ensure_status_item(STATE_DIR, gui_ok=gh.gui_session(MY_UID))
+        if started:
+            log("gui-hog: menu-bar item started")
 
 
 def gui_hog_tick(st, t, table, load1, dry):

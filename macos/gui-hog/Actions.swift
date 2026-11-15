@@ -10,6 +10,7 @@ struct Config {
     var guiHog = ""
     var demo = false
     var manual = false
+    var statusOnly = false   // PR 3c (E5): the menu-bar item, no window
 }
 
 struct VetResult {
@@ -36,7 +37,7 @@ final class Runner {
         do { try p.run() } catch { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        if p.isRunning { p.terminate(); return nil }
+        if p.isRunning { p.terminate(); return (-2, "") }   // -2: cut off at the timeout (told apart from "could not start" = nil; no shared state between concurrent calls)
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return (p.terminationStatus, String(decoding: data, as: UTF8.self))
     }
@@ -48,6 +49,34 @@ final class Runner {
         var reason = ""
         if let d = res.out.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { reason = sanitize(o["reason"] as? String ?? "", limit: 100) }
         return VetResult(code: res.status, reason: reason)
+    }
+
+    /// Freeze one app (PR 3c). The Python core does every check again, live: identity, protected list, build hosts, the sampler running. Exit 0 is frozen;
+    /// 3 protected, 4 identity changed, 5 hosts a build, 6 Freeze turned off, 8 the sampler is not loaded, 9 refused. `reason` is cleaned text.
+    func freeze(_ r: Row, minutes: Int?) -> VetResult {
+        if cfg.demo { return VetResult(code: 0, reason: "demo") }
+        guard let res = gui(freezeArgv(r, minutes: minutes), timeout: 120) else { return VetResult(code: 6, reason: "the freeze did not run") }
+        // 10: no answer in time (SIGTERM makes the Python side roll back what it stopped; the Frozen list shows what is left)
+        if res.status == -2 { return VetResult(code: 10, reason: "no answer in time") }
+        var reason = ""
+        if let d = res.out.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { reason = sanitize(o["reason"] as? String ?? "", limit: 100) }
+        return VetResult(code: res.status, reason: reason)
+    }
+
+    /// The frozen entries and their root pids (`gui-hog frozen --json`), or nil when the call failed.
+    func frozen() -> (entries: [FrozenEntry], roots: Set<Int>)? {
+        if cfg.demo { return ([], []) }
+        guard let res = gui(frozenArgv(), timeout: 10), res.status == 0, let data = res.out.data(using: .utf8), let e = parseFrozen(data) else { return nil }
+        return (e, parseFrozenRoots(data))
+    }
+
+    /// Resume what is due (and orphaned): the dialog's and the menu-bar item's own clock. Quiet; the result is read from `frozen` afterwards.
+    func thawDue(by: String) { if !cfg.demo { _ = gui(thawDueArgv(by: by), timeout: 60) } }
+
+    /// Resume one entry (`id`) or all of them (nil). Resuming is always allowed: it can only undo a freeze.
+    func resume(_ id: String?, by: String) -> Bool {
+        if cfg.demo { return true }
+        return gui(id.map { resumeArgv($0, by: by) } ?? resumeAllArgv(by: by), timeout: 40)?.status == 0
     }
 
     func log(_ event: String, _ r: Row?) { if !cfg.demo { _ = gui(logArgv(event, r), timeout: 5) } }
