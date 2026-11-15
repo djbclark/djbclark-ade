@@ -2050,6 +2050,7 @@ class Choice:
     model: str = ""                 # "<model> [--effort L]" for paseo run --thinking
     kind: str = ""                  # recorded as --label ade.kind=… on paseo run
     placement: Placement | None = None   # set by `plan` / `adjust`; None (the single-slice `route`) = a bare launch template
+    skipped: list[str] = field(default_factory=list)   # pools passed over for lacking a model profile for `kind` (rt-bulk)
 
     @property
     def dispatch_warnings(self) -> list[str]:
@@ -2167,23 +2168,39 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
 
 def quality_best(kind: str, services: list[Service],
                  exclude: frozenset[str] | set[str] = frozenset(),
-                 quota: dict[str, Any] | None = None) -> Service | None:
+                 quota: dict[str, Any] | None = None, *, need_profile: bool = False) -> Service | None:
     """The best-ranked pool eligible for `kind` (headroom aside, bar the `plenty_kinds` gate,
     which reads `quota`) that anchors the quality band ([routing].quality_max_rank_gap).
     Reserves and excluded pools never anchor it."""
     pool = [s for s in services
-            if s.eligible(kind, quota) and s.name not in exclude and not s.reserve_floor]
+            if s.eligible(kind, quota) and s.name not in exclude and not s.reserve_floor
+            and not (need_profile and not s.models.get(kind))]
     return min(pool, key=lambda s: (s.rank_for(kind), s.name), default=None)
+
+
+def profile_skips(kind: str, quota: dict[str, Any] | None = None,
+                  exclude: frozenset[str] | set[str] = frozenset()) -> list[str]:
+    """Pools that can take `kind` but have no model profile for it (what `route` passes over), e.g.
+    `herdr-generic skipped: no model profile for bulk`."""
+    return [f"{s.name} skipped: no model profile for {kind}" for s in discover(quota or {})
+            if s.eligible(kind, quota) and s.name not in exclude and not s.models.get(kind)]
 
 
 def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
-    """Why route() found nothing for `kind`, for plan's queued line."""
+    """Why route() found nothing for `kind`, for plan's queued line (naming the pools passed over for lacking a profile)."""
+    text = _unrouted_why(kind, quota, exclude)
+    skips = profile_skips(kind, quota, exclude)
+    return f"{text} ({'; '.join(skips)})" if skips else text
+
+
+def _unrouted_why(kind: str, quota: dict[str, Any] | None = None,
+                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     fable = fable_wait_why((quota or {}).get("claude")) if kind == "frontier" else None
     if fable:
         return fable
-    best = quality_best(kind, list(discover(quota or {})), exclude, quota)
+    best = quality_best(kind, list(discover(quota or {})), exclude, quota, need_profile=True)
     if gap is None or best is None:
         return "no pool has room: keep queued"
     return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
@@ -2544,8 +2561,12 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
           exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
-          avoid: frozenset[str] | set[str] = frozenset()) -> Choice | None:
+          avoid: frozenset[str] | set[str] = frozenset(), need_profile: bool = True) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
+
+    A pool with no model profile for `kind` (`models[kind]`) is passed over (rt-bulk: its dispatch line would carry a
+    `--provider` placeholder and `dispatch_warnings` would block the slice) and named in `Choice.skipped`; only when no
+    other pool can take the kind is it chosen anyway, placeholder and warning as before (`need_profile=False`).
 
     Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
     (2026-10-18): burn_first_bonus when expected waste at reset is high (or the
@@ -2558,13 +2579,22 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
     services = list(discover(quota))
-    best = quality_best(kind, services, exclude, quota)
+    best = quality_best(kind, services, exclude, quota, need_profile=need_profile)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     by_name = {s.name: s for s in services}
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
+    skipped: list[str] = []
+    profiled = False                       # some pool that can take `kind` has a model profile (headroom aside)
     for svc in services:
-        if not svc.eligible(kind, quota) or svc.name in exclude or svc.name in avoid:
+        if not svc.eligible(kind, quota):
+            continue
+        has_profile = bool(svc.models.get(kind))
+        profiled = profiled or has_profile     # counted before exclude/avoid: a full, held or disabled profiled pool still queues
+        if svc.name in exclude or svc.name in avoid:
+            continue
+        if need_profile and not has_profile:
+            skipped.append(f"{svc.name}: no model profile for {kind}")
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
@@ -2629,6 +2659,11 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         scored.append((rank, svc, remaining, tags))
 
     if not scored:
+        if need_profile and skipped and not profiled:
+            # NO pool that can take the kind has a profile: an unprofiled one stays reachable, placeholder and warning intact.
+            # A profiled pool that is merely full queues the slice instead (a placeholder line would only be blocked)
+            return route(kind, quota=quota, min_headroom=min_headroom, exclude=exclude, repo=repo, avoid=avoid,
+                         need_profile=False)
         return None
     # A fallback (Argon) sorts behind every candidate it sits behind, whatever the scores say: ordering is structural, not
     # a tie of rank + pressure + penalties (Codex review of PR 224, round 6: codex 60% left at pace 1.6 scored 5, tied Argon,
@@ -2659,7 +2694,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind)
+                  kind=kind, skipped=skipped)
 
 
 def canary_pool(svc: Service) -> str | None:
@@ -3566,6 +3601,7 @@ def main(argv: list[str] | None = None) -> int:
                             "model": c.model if c else None,
                             "dispatch": c.dispatch if c else None,
                             "dispatch_warnings": c.dispatch_warnings if c else [],
+                            "skipped": c.skipped if c else [],
                             "remaining": c.remaining if c else None,
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
@@ -3589,6 +3625,8 @@ def main(argv: list[str] | None = None) -> int:
                     rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
                     print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]"
                           f"  {c.dispatch}")
+                    for note in c.skipped:
+                        print(f"   skipped {note}")
         return 0
 
     if args.command == "adjust":
@@ -3729,7 +3767,8 @@ def main(argv: list[str] | None = None) -> int:
                    repo=(args.repo or repo_of(os.getcwd())))
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
-                          "reason": "no eligible service with headroom"}))
+                          "reason": unrouted_why(args.kind, quota, operator_disabled()),
+                          "skipped": profile_skips(args.kind, quota, operator_disabled())}))
         return 1
     if args.json:
         print(json.dumps({
@@ -3739,6 +3778,7 @@ def main(argv: list[str] | None = None) -> int:
             "dispatch_warnings": choice.dispatch_warnings,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
+            "skipped": choice.skipped,
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),
         }, indent=2))
