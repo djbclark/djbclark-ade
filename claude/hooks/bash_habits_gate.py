@@ -1127,6 +1127,34 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
     return None
 
 
+BG_REASON = (
+    "A job-control `&` (`cmd &`, also `nohup cmd &`, `setsid cmd &`, `( cmd & )`) leaves an orphaned, "
+    "untracked process (ppid 1) that notifies nobody when it exits (2026-11-15: a `python3 wait_check.py "
+    "> out 2>&1 &` was orphaned). Do not background inside the command: set the Bash tool's "
+    "`run_in_background: true` parameter instead; it tracks the job and notifies on exit. Set the call's "
+    "`timeout` to the run's need, at most 7200000 (2 h): the default 30 min stops the job. Longer jobs: "
+    "CI (~/CLAUDE.md item 37), a `bin/ade-sched` one-shot or a Paseo terminal. Parallel work that ends "
+    "with `wait` in the same command (`a & b & wait`) is allowed. A sub-agent that is not woken by the "
+    "exit notice waits with `bin/wait-file` on its log. Nothing ran.")
+
+
+def bg_operator(plain: str) -> bool:
+    """True when `strip_literals` output holds a lone `&` control operator (a background job).
+
+    Quotes, heredoc bodies, comments and the redirections `2>&1`, `>&2`, `&>`, `&>>`, `<&3`, `|&`
+    are already gone from `plain`. Also dropped here: backslash-escaped characters, `${...}`
+    (`${x//&/y}`), arithmetic `((...))` (bitwise `&`) and `&&`."""
+    s = re.sub(r"\\.", "", plain, flags=re.S)
+    s = re.sub(r"\$?\(\([^)]*\)\)", " ", s)
+    s = re.sub(r"\$\{[^}]*\}", " ", s)
+    s = s.replace(";;&", ";;").replace(";&", ";").replace("&&", "  ")   # case-arm terminators, AND
+    if "&" not in s:
+        return False
+    # bounded fan-out: every `&` is followed later in the same command by a `wait` builtin
+    tail = s[s.rindex("&") + 1:]
+    return not re.search(r"(?:^|[;&|(){\n]|\b(?:do|then)\b)\s*wait(?=$|[\s;&|)}])", tail)
+
+
 def check(cmd: str) -> tuple[str | None, str | None]:
     """(deny reason, warning) for a Bash command line."""
     # Raw-command check first: strip_literals skips heredoc bodies, so this cannot live in the
@@ -1178,6 +1206,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                                 "(this Mac's timestamp is global), so it proves nothing about a "
                                 "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
                                 "it ignores the cache without clearing it.")
+    if bg_operator(plain):          # after the per-stage checks: their specific reasons win
+        return BG_REASON, None
     if fanout and GH_FANOUT_CMD.search(_drop_heredocs(cmd)):
         warn = (warn + " " if warn else "") + GH_FANOUT_WARNING
     # the pipe-status check reads the whole command, substitutions and all, as it always did
