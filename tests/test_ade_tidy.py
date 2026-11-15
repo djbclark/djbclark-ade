@@ -1200,7 +1200,28 @@ def test_corrupt_claim_file_stops_the_apply_and_archives_nothing(env):
     r = env.run(apply=True)
     assert r.returncode == 1 and "claim" in r.stderr and "nothing is archived" in r.stderr and "Traceback" not in r.stderr
     assert env.mutating() == []
-    assert env.run().returncode == 1                                            # observe-only refuses the same way
+
+
+def test_corrupt_claim_file_is_a_listed_warning_in_a_dry_run_not_a_refusal(env):
+    """am-02 (wb-01 review B3): the read-only plan still prints sections A to H; it lists no archive it cannot clear and says why."""
+    done_worker(env)
+    d = Path(os.environ["ADE_STATE_DIR"]) / "claims"
+    d.mkdir(parents=True)
+    (d / "bad.json").write_text("{nope")
+    r = env.run(as_json=False)
+    assert r.returncode == 0 and "Traceback" not in r.stderr, r.stderr
+    assert "A. Inventory" in r.stdout and "H. Windows" in r.stdout
+    assert "WARNING: claims unknown" in r.stdout and "bad.json" in r.stdout and "--apply refuses" in r.stdout
+    assert "archive agent" not in r.stdout and "archive window" not in r.stdout
+    p = env.plan()
+    assert p["archive_agents"] == [] and p["archive_windows"] == [] and p["claim_held"] == []
+    assert any(n.startswith("WARNING: claims unknown") for n in p["notes"])
+    assert env.mutating() == []
+    r = env.run(apply=True)                                                     # --apply still fails closed, before any change
+    assert r.returncode == 1 and "bad.json" in r.stderr and "nothing is archived" in r.stderr and "Traceback" not in r.stderr
+    assert env.mutating() == []
+    (d / "bad.json").unlink()                                                   # a good registry: the same plan archives again
+    assert [x["agent"] for x in env.plan()["archive_agents"]] == [W1]
 
 
 def test_unreadable_claims_dir_stops_the_apply_and_archives_nothing(env):

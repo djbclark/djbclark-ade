@@ -40,7 +40,7 @@ this gate lets through is what the Action reads as documentation:
 
 Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
 without naming `gh pr`/`gh api`); a body or body-file path held in a variable set in ANOTHER tool call (`F=raw.md; gh ... --body-file "$F"` in ONE command is seen);
-a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; `gh pr create --fill*`
+a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`; `D=sub; cd $D` in one command is expanded); `gh pr create --fill*`
 (the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
 (`$'\\x3c'`, a shell-built `verdict` key beside a decoy BLOCK); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
@@ -60,6 +60,7 @@ Design and limits: docs/code-review.md rule 14.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -227,8 +228,10 @@ class Pipeline:
         self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
-def split_pipelines(tokens, cwd: str):
-    """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside."""
+def split_pipelines(tokens, cwd: str, expand=None):
+    """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
+    `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`); a name it cannot
+    resolve stays literal, so the tracked cwd is wrong and the file read falls back to the event cwd (docs/code-review.md rule 14)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     want_dir = redirect = None
     stack = []
@@ -266,7 +269,7 @@ def split_pipelines(tokens, cwd: str):
         if want_dir:
             want_dir = None
             if not tok.startswith("-"):
-                nd = Path(os.path.expanduser(tok))
+                nd = Path(os.path.expanduser(expand(tok) if expand else tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
                 seg["cwd"] = cur
             continue
@@ -336,7 +339,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env, self.write_args = [], {}, set()
+        self.raw_texts, self.env = [], {}
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -368,8 +371,17 @@ class Scan:
                         for v in node:
                             leaves(v, depth + 1)
                 leaves(json.loads(full))
-                chunk = ""
-                for t in strings:              # small strings are joined into texts of at most MAX_TEXT, so none is lost
+                chunk, alone, rest = "", 0, []
+                for t in strings:              # a string that names a verdict is its own text: a decoy fence in a neighbour leaf
+                    if not VERDICT_WORD.search(t):   # (`{"title":"```","body":"\u003c!-- ..."}`) cannot swallow it (am-02, C1)
+                        rest.append(t)
+                    elif alone < MAX_STARTS:
+                        alone += 1
+                        self.texts.append(t[:MAX_TEXT])
+                    else:
+                        rest.append(t)         # past the cap: joined as before, and denied beside APPROVE
+                        self.truncated = self.truncated or bool(APPROVE_WORD.search(t))
+                for t in rest:                 # the other strings are joined into texts of at most MAX_TEXT, so none is lost
                     if len(chunk) + len(t) + 1 > MAX_TEXT and chunk:
                         self.texts.append(chunk)
                         chunk = ""
@@ -524,7 +536,8 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             scan.add(body)
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files
             collect(body, cwd, scan, depth + 1)
-    pipes = split_pipelines(tokens, cwd)
+    pipes = split_pipelines(tokens, cwd, scan.expand)
+    own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
         """Files a `$( ... )`/backtick inside `w` reads: a lone `cat F` keeps its fence, a filter's output does not."""
@@ -573,7 +586,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                                            for seg in feeders)
         for seg, g in gh:
             if g and is_write(g[0], g[1], g[2]):
-                scan.write_args.update(g[2])
+                own.update(g[2])
                 for shown in prefix_stripped(g[2]):
                     scan.add(shown, force=True)
                 for f in operand_files(g[0], g[2]):
@@ -591,7 +604,9 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
         for w in words_all:                    # a body file or variable the same command writes first
-            if w not in scan.write_args:       # a write's own words went in above (a fence prefix removed)
+            if own[w] > 0:                     # a write's own words went in above (a fence prefix removed); one use each,
+                own[w] -= 1                    # so a word that only equals a flag word elsewhere is scanned as written (am-02, C3)
+            else:
                 scan.add(w)
         cwds = []                              # `cd DIR && BODY="$(cat raw.md)"; gh ... "$BODY"`: each segment's own cwd
         for pipe in pipes:

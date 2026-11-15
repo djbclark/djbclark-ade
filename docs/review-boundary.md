@@ -236,6 +236,14 @@ There is no flag, env var or config that skips it; tests stub the function or `s
 **It guards** honest mistakes (a wrong PR or head, a stale selection) and an agent approving its own PR through this tool.
 **It does not guard** against a determined agent that holds djbclark's `gh` token (it can post the comment with `gh`
 directly; `claude/hooks/adversary_marker_gate.py` denies that for Claude sessions only, docs/code-review.md rule 14) or one that can write `~/.local/bin/sudo-ask`.
+**Manual probe (the live scrubbed-env path; no CI test can show it, every test stubs `subprocess.run`; ap-01 review B3, am-02).** The real
+Allow dialog and Touch ID under the scrubbed environment are checked once by djbclark, by hand (an agent never runs the dialog): in
+a terminal, `env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin:/usr/sbin:/sbin ~/.local/bin/sudo-ask -k /usr/bin/true`, which
+must show the Allow dialog and then the Touch ID sheet and exit 0 after both (a missing `TMPDIR`, `__CF*` or XPC variable would show
+here as a dialog that never appears or an error); or one real `approve-post --yes` for a PR that needs it. **It fails closed:** if
+the dialog or Touch ID does not work without the caller's environment, `approve-post` posts nothing and exits 3 every time, which
+is a usability failure, never a bypass; the fix then goes in `_auth_env()` (bin/ade-merge-ready), widening the allow-list by one
+named variable, never by passing the caller's environment through.
 
 `merge-now` is the only merge path in this tool: refuses unless classify is
 `merge_now` (pytest-linux pass + adversary-marker success). Dry-run unless

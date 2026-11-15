@@ -602,3 +602,69 @@ def test_adversary_agent_no_longer_tells_anyone_to_paste_a_live_marker():
     assert "for the teammate to paste into the PR body" not in text
     assert "raw line in your" not in text
     assert "fenced block" in text and "adversary_marker_gate" in text
+
+
+# ---- am-02: the round-9 Lows of the PR 724 adversary (C1-C3) ---------------------------------------------------
+
+
+def _escaped(obj, hyphen=False):
+    """A JSON payload with `<` and `>` (and with `hyphen`, `-`) as \\u escapes, so the gate must decode it."""
+    out = json.dumps(obj).replace("<", "\\u003c").replace(">", "\\u003e")
+    return out.replace("-", "\\u002d") if hyphen else out
+
+
+def test_a_decoy_fence_leaf_does_not_hide_an_escaped_marker_leaf(live):
+    """C1: `{"title":"```","body":<escaped APPROVE>}` joined the leaves into one text, and the title's fence swallowed the body."""
+    payload = _escaped({"title": "```", "body": APPROVE})
+    (live / "decoy.json").write_text(payload)
+    assert run("gh api repos/o/r/issues/1/comments --input decoy.json", cwd=live)
+    assert run("gh api repos/o/r/issues/1/comments --input=decoy.json", cwd=live)
+    assert run("echo %s | gh api repos/o/r/issues/1/comments --input -" % q(payload), cwd=live)
+    both = _escaped({"a": "~~~", "title": "```", "body": "intro\n" + APPROVE, "z": "```"})
+    (live / "decoy2.json").write_text(both)
+    assert run("gh api repos/o/r/issues/1/comments --input decoy2.json", cwd=live)
+
+
+def test_decoy_fence_leaves_still_let_fenced_and_block_leaves_pass(live):
+    (live / "fenced.json").write_text(_escaped({"title": "```", "body": "```\n%s\n```" % APPROVE}))
+    assert run("gh api repos/o/r/issues/1/comments --input fenced.json", cwd=live) is None
+    (live / "block.json").write_text(_escaped({"title": "```", "body": BLOCK}))
+    assert run("gh api repos/o/r/issues/1/comments --input block.json", cwd=live) is None
+    (live / "prose.json").write_text(_escaped({"title": "```", "body": "Verdict: no findings <!-- note -->"}))
+    assert run("gh api repos/o/r/issues/1/comments --input prose.json", cwd=live) is None
+
+
+def test_more_marker_leaves_than_the_one_by_one_cap_are_denied_beside_approve(live):
+    leaves = ["```\n%s\n```" % APPROVE for _ in range(gate.MAX_STARTS + 1)]     # each fenced: harmless alone
+    (live / "flood.json").write_text(_escaped({"x": leaves}, hyphen=True))     # the raw text has no verdict word: only the decoded leaves do
+    reason = run("gh api repos/o/r/issues/1/comments --input flood.json", cwd=live)
+    assert reason and "more operand text" in reason
+    (live / "flood-ok.json").write_text(_escaped({"x": leaves[:gate.MAX_STARTS]}, hyphen=True))
+    assert run("gh api repos/o/r/issues/1/comments --input flood-ok.json", cwd=live) is None
+
+
+def test_a_cd_target_the_command_assigns_is_expanded(live):
+    """C2, the part that is fixed: `D=sub; cd $D` reads sub/only.md (the file only exists there)."""
+    assert run("D=sub; cd $D && gh pr edit 41 --body-file only.md", cwd=live)
+    assert run('D=sub; cd "$D" && gh pr edit 41 --body-file only.md', cwd=live)
+    assert run("D=sub; cd ${D} && gh pr edit 41 --body-file only.md", cwd=live)
+    assert run("cd sub && gh pr edit 41 --body-file only.md", cwd=live)         # the plain form, unchanged
+    (live / "sub" / "calm.md").write_text("prose only")
+    assert run("D=sub; cd $D && gh pr edit 41 --body-file calm.md", cwd=live) is None
+
+
+def test_a_cd_target_set_in_another_tool_call_is_a_documented_limit(live):
+    """C2, the part that is a known limit (docs/code-review.md rule 14): `$D` is unknown to this command, so the tracked cwd
+    is wrong; the read falls back to the event cwd. A body file that exists only under the unresolved target is not read."""
+    assert run("cd $D && gh pr edit 41 --body-file only.md", cwd=live) is None           # LIMIT: only.md is under sub/
+    assert run("cd $D && gh pr edit 41 --body-file live.md", cwd=live)                    # the fallback still finds this one
+    assert run("cd $(pwd)/sub && gh pr edit 41 --body-file only.md", cwd=live) is None   # LIMIT: command substitution
+
+
+def test_a_word_equal_to_a_flag_word_elsewhere_is_scanned_as_written(live):
+    """C3: `-b<fence>` is a flag word of the write (stripped: a fence), but the same word in a `printf` that writes the body file
+    is the body itself: `-b` stays and the fence is not at a line start."""
+    word = "-b```\n%s\n```" % APPROVE
+    assert run("gh pr comment 1 " + q(word)) is None                                       # as a flag word alone: a fence
+    assert run("printf %s " + q(word) + " > nb.md; gh pr comment 1 " + q(word) + " --body-file nb.md", cwd=live)
+    assert run("gh pr comment 1 " + q(word) + " " + q(word)) is None                       # both are the write's own words
