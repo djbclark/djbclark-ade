@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import json
 import os
 from pathlib import Path
@@ -144,22 +145,82 @@ def list_windows() -> list[dict]:
     return [r for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
 
 
+def predecessor_acting(pred: str) -> str | None:
+    """Why `pred` (an agent that handed off to the lead but is not archived yet) may still be acting, None when it is not:
+    `paseo agent inspect --json` reads Archived true, or Archived false with Status idle or closed. Anything else (running,
+    another status, an unreadable or mismatched answer, a failed inspect) is a reason: fail closed (hf-38c)."""
+    try:
+        rc, out, err = paseo(["agent", "inspect", pred, "--json"])
+    except Refused as e:
+        return f"its state cannot be read ({e})"
+    if rc != 0:
+        return f"its state cannot be read (paseo agent inspect exited {rc})"
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return "its state cannot be read (paseo agent inspect did not print JSON)"
+    if not isinstance(data, dict) or data.get("Id") != pred or not isinstance(data.get("Archived"), bool):
+        return "its state cannot be read (unexpected paseo agent inspect answer)"
+    if data["Archived"]:
+        return None
+    status = data.get("Status")
+    pending = data.get("PendingPermissions")  # `finish`'s own idle test needs [] too (ade_self_session.py): a card open means it may still act
+    if status in ("idle", "closed") and pending == []:
+        return None
+    if status in ("idle", "closed"):
+        return f"it has pending permission requests or an unreadable permission list ({pending!r:.60})"
+    return f"it is not archived and its status is {status!r}"
+
+
+@functools.lru_cache(maxsize=None)  # one reading per process: a launch decides and explains from the same inspect
+def ack_adoption(lead: str) -> tuple[set[str], dict[str, str]]:
+    """(ids adopted, {predecessor: reason not adopted}) for the fresh acknowledged self-handoffs that name THIS lead as successor
+    (ade_lead_succession.acknowledged_predecessors; a stale record or one naming another agent is no link). An adopted predecessor
+    is one that is no longer acting (predecessor_acting) and brings its own completed chain; the rest stay foreign (hf-38c)."""
+    adopted: set[str] = set()
+    blocked: dict[str, str] = {}
+    for pred in succ.acknowledged_predecessors(lead):
+        why = predecessor_acting(pred)
+        if why is not None:
+            blocked[pred] = why
+            continue
+        try:
+            chain_ids = succ.lineage(pred)
+        except succ.SuccessionError as e:
+            raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
+        if lead in chain_ids:
+            raise Refused(f"lead succession from {pred} reaches {lead} again: the ledger is cyclic")
+        adopted |= chain_ids
+    return adopted, blocked
+
+
 def lineage(lead: str) -> set[str]:
-    """`lead` plus the archived leads it replaced through completed self-handoffs (bin/ade_lead_succession.py). Their window
+    """`lead` plus the archived leads it replaced through completed self-handoffs (bin/ade_lead_succession.py), plus the
+    predecessors of a fresh acknowledged self-handoff that have stopped acting (ack_adoption). Their window
     records and `ade.lead` labels are this lead's: an acknowledged handoff must not strand the predecessor's windows and
     workers (2026-11-14). A cyclic ledger is refused loudly, never read as "no predecessors"."""
     try:
-        return succ.lineage(lead)
+        base = succ.lineage(lead)
     except succ.SuccessionError as e:
         raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
+    return base | ack_adoption(lead)[0]
 
 
 def label_queries(lead: str) -> list[str]:
-    """The ids worth one `paseo ls --label ade.lead=<id>` call: the lead and its nearest predecessors (bounded)."""
+    """The ids worth one `paseo ls --label ade.lead=<id>` call: the lead and its nearest predecessors (bounded), plus any
+    adopted acknowledged predecessor."""
     try:
-        return succ.recent_lineage(lead)
+        ids = succ.recent_lineage(lead)
     except succ.SuccessionError as e:
         raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
+    adopted = ack_adoption(lead)[0]
+    try:
+        for pred in succ.acknowledged_predecessors(lead):  # bounded like the base path: each adopted predecessor's nearest ones
+            if pred in adopted:
+                ids += [x for x in succ.recent_lineage(pred) if x not in ids]
+    except succ.SuccessionError as e:
+        raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
+    return ids
 
 
 def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
@@ -362,7 +423,9 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         raise err
     wks = row_wks(row)
     if wks in others:
-        raise Refused(f"window {wks} ({row['name']!r}) is registered to lead {others[wks]}, not {lead} "
+        why = ack_adoption(lead)[1].get(others[wks])  # an acknowledged predecessor not adopted: say why (hf-38c)
+        note = f"; its acknowledged handoff to {lead} is not followed because {why}" if why else ""
+        raise Refused(f"window {wks} ({row['name']!r}) is registered to lead {others[wks]}, not {lead}{note} "
                       "(pick a different --window-middle)")
     owned_here = new is not None or wks in members
     if new is None:  # a current-form name: prove it is not another lead's

@@ -101,6 +101,16 @@ windows, carry the slice, and a tab may mention its worktree. Never one window p
    (`bin/ade_lead_succession.py`, [self-session.md](self-session.md) C0a) finds the box its predecessors made by the same
    evidence (their window records, their `ade.lead=<predecessor>` workers, their legacy-named windows) and launches into it; it
    does not open its own box beside it. A window registered to a genuinely different live lead is still refused.
+   **Acknowledged, not yet archived (hf-38c, 2026-11-15):** a predecessor whose fresh `acknowledged` (or wait-only `archive-unknown`)
+   handoff record names THIS lead as successor (`ade_lead_succession.acknowledged_predecessors`, which applies `_ack_is_fresh`: under
+   an hour, no failure but a wait) is adopted the same way (its window records, `ade.lead=<predecessor>` labels and completed chain),
+   but only when it is no longer acting: `paseo agent inspect <predecessor> --json` reads `Archived: true`, or `Archived: false`
+   with `Status` `idle` or `closed` and `PendingPermissions` `[]` (as `finish`'s own idle test). One reading per launch; the single `idle` sample is not the stable idle `finish` waits for (accepted gap). A `running` (or any other) status, a failed or unparsable inspect, an answer for another id,
+   a stale record or one naming another agent keeps the refusal, and the message names the predecessor and the reason. `archive-window --lead <successor>` follows the same adoption: it finds, owns and archives that box (an idle
+   predecessor's workers go with it under `--idle-handled`; running ones block) and removes it from the predecessor's record. The send
+   redirect ([archived-send-guard.md](archived-send-guard.md)) is unchanged. If the record then goes stale before `finish` ends, the
+   adopted box sits in both registries and both leads are refused it: fix by hand: remove the box from the `<id>.windows.json` (worker-run state dir) of the lead that is NOT current,
+   the predecessor's if the handoff will still finish, the successor's if it was abandoned.
 3. **Why boxes:** a top-level `paseo run` with the agent environment stripped (`skills/fan-out` section 3) creates a new
    "master" window per launch, because its cwd is the repo's `master` checkout; 11 piled up on 2026-11-13, and archiving an
    agent does not remove its window. The per-work-text window of 2026-11-13 made it worse (tendcf 9, djbclark-ade about 15 by

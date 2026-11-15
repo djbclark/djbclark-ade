@@ -45,6 +45,12 @@ elif a[:2] == ["agent", "update"]:
 elif a[:2] == ["agent", "stop"]:
     sys.exit(d.get("stop_rc", 0))
 elif a[:2] == ["agent", "inspect"]:
+    if a[2] in d.get("inspect_agents", {}):
+        row = d["inspect_agents"][a[2]]
+        if row is None:
+            sys.exit(1)
+        print(json.dumps({"Id": a[2], **{k: v for k, v in row.items() if k != "_rc"}}))  # a row may carry its own Id (another agent's)
+        sys.exit(row.get("_rc", 0))
     if "inspect_cwd" not in d or d.get("inspect_rc"):
         sys.exit(d.get("inspect_rc") or 1)
     print(json.dumps({"Id": a[2], "Cwd": d["inspect_cwd"]}))
@@ -1084,6 +1090,109 @@ def test_a_successors_registry_never_makes_a_predecessor_foreign_to_itself(env):
                 "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
     assert r.returncode == 0, r.stderr  # not the predecessor's box: it opens its own and leaves the successor's alone
     assert "--new-workspace" in placed(env)[0] and registry(LEAD) == {"wks_win1"}
+
+
+def ack_handoff(pred, nxt, *, age=60, status="acknowledged", successor=None, error=None):
+    """A self-handoff record the successor accepted but `finish` has not archived: `acknowledged_at` is `age` seconds ago."""
+    import time
+    handoff(pred, successor or nxt, status)
+    path = Path(os.environ["ADE_SELF_SESSION_STATE"]) / f"handoff-{pred}.json"
+    rec = json.loads(path.read_text())
+    rec["acknowledged_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+    if successor:
+        rec["ack"] = {"agent_id": successor}
+    if error:
+        rec["native_error"] = {"code": error}
+    path.write_text(json.dumps(rec))
+
+
+def acked_window(env, pstate):
+    """PRED1's WORKER window, PRED1 acknowledged-handoff to LEAD; `pstate` is PRED1's `agent inspect` row (None: inspect fails)."""
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
+    env.data["inspect_agents"] = {PRED1: pstate}
+    own(PRED1, "wks_win1")
+
+
+@pytest.mark.parametrize("pstate", [{"Archived": False, "Status": "idle", "PendingPermissions": []},
+                                    {"Archived": False, "Status": "closed", "PendingPermissions": []},
+                                    {"Archived": True, "Status": "closed"}, {"Archived": True, "Status": "running"}])
+def test_fresh_acknowledged_handoff_with_a_stopped_predecessor_adopts_its_window(env, pstate):
+    acked_window(env, pstate)
+    ack_handoff(PRED1, LEAD)
+    r = launch(env)
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_win1" and "--new-workspace" not in run
+    assert registry(LEAD) == {"wks_win1"}
+
+
+def test_archive_state_wait_error_record_still_adopts_when_predecessor_is_idle(env):
+    acked_window(env, {"Archived": False, "Status": "idle", "PendingPermissions": []})
+    ack_handoff(PRED1, LEAD, status="archive-unknown", error="AGENT_RUNNING")  # finish is waiting on a stale running flag
+    r = launch(env)
+    assert r.returncode == 0 and "--new-workspace" not in placed(env)[0]
+
+
+@pytest.mark.parametrize("pstate, why", [({"Archived": False, "Status": "running"}, "'running'"), (None, "cannot be read"),
+                                         ({"Archived": True, "_rc": 1}, "exited 1"), ({"Id": OTHER_LEAD, "Archived": True}, "unexpected"), ({"Archived": False, "Status": "idle", "PendingPermissions": [{"id": "p1"}]}, "pending permission"),
+                                         ({"Archived": False, "Status": "idle"}, "pending permission"), ({"Archived": False}, "None"), ({"Status": "idle"}, "cannot be read")])
+def test_acknowledged_handoff_with_an_acting_or_unreadable_predecessor_is_refused(env, pstate, why):
+    acked_window(env, pstate)
+    ack_handoff(PRED1, LEAD)
+    r = archive(env)
+    assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr and why in r.stderr
+    assert PRED1 in r.stderr and "acknowledged handoff" in r.stderr
+    r = launch(env)  # a launch opens its own window instead, and never takes the predecessor's
+    assert r.returncode == 0 and "--new-workspace" in placed(env)[0] and registry(PRED1) == {"wks_win1"}
+
+
+def test_a_stale_acknowledged_record_adopts_nothing(env):
+    acked_window(env, {"Archived": False, "Status": "idle", "PendingPermissions": []})
+    ack_handoff(PRED1, LEAD, age=7200)
+    r = archive(env)
+    assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr
+    assert not any(c["argv"][:2] == ["agent", "inspect"] for c in env.calls())  # no link: nothing to check
+
+
+def test_a_record_naming_another_successor_never_adopts_for_this_lead(env):
+    acked_window(env, {"Archived": True, "Status": "closed"})
+    ack_handoff(PRED1, OTHER_LEAD)
+    r = archive(env)
+    assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr
+
+
+def test_a_completed_record_is_adopted_without_inspecting_the_predecessor(env):
+    acked_window(env, None)  # inspect would fail: the completed path never asks
+    handoff(PRED1, LEAD)
+    r = launch(env)
+    assert r.returncode == 0 and "--new-workspace" not in placed(env)[0]
+    assert not any(c["argv"][:2] == ["agent", "inspect"] and c["argv"][2] == PRED1 for c in env.calls())
+
+
+def test_an_acknowledged_predecessor_whose_chain_reaches_the_lead_again_is_refused_loudly(env):
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    handoff(LEAD, PRED1)  # the predecessor's completed chain comes back to LEAD
+    r = launch(env)
+    assert r.returncode == 1 and "cyclic" in r.stderr and not placed(env)
+
+
+def test_label_queries_stay_bounded_behind_an_acknowledged_predecessor(env):
+    ids = [f"{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa" for i in range(1, 41)]
+    chain(*ids, PRED1)  # a long completed chain ending at the predecessor
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    assert launch(env).returncode == 0
+    label_calls = [c for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
+    assert 1 <= len(label_calls) <= 18  # the lead and the predecessor, each with its 8 nearest predecessors
+
+
+def test_one_launch_reads_the_acknowledged_predecessor_once(env):
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    assert launch(env).returncode == 0
+    reads = [c for c in env.calls() if c["argv"][:3] == ["agent", "inspect", PRED1]]
+    assert len(reads) == 1
 
 
 def test_a_cyclic_ledger_adopts_nothing(env):
