@@ -15,7 +15,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | Server | Transport / command | Scope | What it is |
 |---|---|---|---|
 | `hermes` | stdio: `hermes mcp serve` | user | The **Hermes Agent** as an MCP server — see below |
-| `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated, operator-interactive only (`/mcp` → beeper → Authenticate); may need re-registering; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
+| `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated: only the operator approves it (`/mcp` → beeper → Authenticate in an interactive tab, or `claude mcp login beeper` from a shell); may need re-registering; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
 | `graft` | stdio: `graft mcp` | **removed 2026-10-18** from every TUI (this repo's `.mcp.json` still lists it, neutralised by `disabledMcpjsonServers`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back. graft 0.23.0's SessionStart reconcile re-added the user-scope entry after the 2026-10-16 upgrade; removed again 2026-10-20 (`claude mcp remove graft -s user`), and the Hermes watchdog `check-graft-wiring-invariants.sh` now fails when any TUI registers it (94e8d95) |
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
@@ -88,8 +88,8 @@ per machine and can vanish**: on 2026-11-14 `beeper` was missing from the user
 config and had to be added again; do not assume it is there. Check with
 `claude mcp list` / `claude mcp get beeper`. Re-registering changes the live
 user-scope Claude config, so **an agent that finds `beeper` missing asks the
-operator before running `claude mcp add`** (and reports that it is missing; an
-agent cannot complete the OAuth afterwards anyway). With the operator's yes, or
+operator before running `claude mcp add`** (and reports that it is missing; the
+OAuth that follows needs the operator too). With the operator's yes, or
 run by the operator, register at user scope with:
 
 ```
@@ -97,14 +97,23 @@ claude mcp add --scope user --transport http beeper http://127.0.0.1:23373/v0/mc
 ```
 
 A fresh registration shows "! Needs authentication" until OAuth is completed.
-**OAuth can only be completed interactively, by the operator**: in an interactive
-Claude Code tab, `/mcp` → `beeper` → Authenticate, then approve in the browser /
-Beeper Desktop (the callback is local, `localhost:3118/callback`). It is **not**
-doable "from any session" (the 2026-08-23 wording was wrong): a headless,
-`claude -p` or Paseo-launched Claude session gets no `authenticate` tool for a
-server that still needs authentication (Claude Code treats it as unavailable
-until credentials exist; the old auth-stub tools are gone), so such an agent
-cannot start or finish the flow. A session that never had the operator
+**Only the operator can approve the OAuth** (Claude Code 2.1.325, 2026-11-15;
+https://code.claude.com/docs/en/mcp names both routes). Route 1: in an interactive
+Claude Code tab, `/mcp` → `beeper` → Authenticate. Route 2: `claude mcp login beeper`
+from any shell (`--no-browser` prints the authorization URL instead of opening a
+browser, for SSH or headless use; paste the redirect URL back at the prompt, which
+needs an interactive terminal). In both routes the operator alone approves in the
+browser / Beeper Desktop (the callback is local, `localhost:3118/callback`). It is
+**not** doable "from any session" by the agent itself (the 2026-08-23 wording was
+wrong): a headless, `claude -p` or Paseo-launched Claude session has no `/mcp` panel
+and gets no `authenticate` tool for a server that still needs authentication (Claude
+Code treats it as unavailable until credentials exist; the old auth-stub tools are
+gone, fixed in Claude Code 2.1.183, per
+[anthropics/claude-code#69620](https://github.com/anthropics/claude-code/issues/69620),
+which quotes that release note). An agent therefore cannot authorize Beeper on its
+own. **`claude mcp login beeper` writes live credentials, so it falls under the same
+ask rule as `claude mcp add`: an agent runs it only with the operator's yes, hands
+the operator the URL, and never approves.** A session that never had the operator
 authorize Beeper cannot use it; do not retry, tell the operator. Once authorized,
 the real tools (`search`, `search_chats`, `search_messages`, `list_messages`,
 `send_message`, `get_accounts`, reminders, archive, `focus_app`, `search_docs`)
@@ -212,7 +221,7 @@ running, and the operator uses it only occasionally — so it is not a
 dependable path for an agent. Reach for it only when the operator explicitly
 asks, or when you need cross-network *search* that Hermes cannot do and you
 have confirmed Beeper is up (`claude mcp list` shows it Connected, not
-"Needs authentication"; an agent cannot fix that itself, see the Beeper section).
+"Needs authentication"; only the operator can approve the OAuth, see the Beeper section).
 
 Hermes covers the agent-facing cases: `messages_send` / `channels_list` to
 send, `conversations_list` / `messages_read` to read, `events_wait` to react
