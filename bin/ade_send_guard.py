@@ -8,6 +8,11 @@ target, what a sender should do instead:
   pass      the target is live (or unknown to Paseo, which then reports it): send as asked.
   redirect  a completed self-handoff replaced the target: send to the current holder of its role instead. Applies even when
             the old agent is already running again (`Archived=false`): the chain says it was replaced.
+            An `acknowledged` handoff (the successor attested, `finish` has not archived the predecessor yet) redirects too
+            (rq-38, 2026-11-15: five done notices to the acknowledged 6621fe2b stretched `finish`'s idle wait ~15 min), but only to
+            a successor (and the holder of its role) Paseo knows and reports `Archived: false`, and only while the record is fresh
+            (`ade_lead_succession.ACK_WINDOW_SECONDS` after `accept`, no `finish` failure but waiting); otherwise the hop is
+            ignored and the target passes as before.
   refuse    the target is archived and nothing replaced it, or its succession ledger is cyclic, or the successor itself is
             archived: nothing is sent. `allow_archived` (operator override, deliberate resume of an archived agent) turns
             a plain archived target into `pass` when it is True or equals that agent's full id; it never overrides a
@@ -63,6 +68,35 @@ def _record(inspect, ident: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _follow(ident: str, inspect, state_dir: Path | None, home: Path | None) -> str:
+    """The current holder of `ident`'s role: the end of its completed chain, then across `acknowledged` hops (each only to a
+    successor that is live, so a crashed successor never leaves the predecessor unreachable), then that agent's completed chain."""
+    current = succ.effective_lead(ident, state_dir, home)
+    seen = {ident, current}
+    while True:
+        nxt = succ.successor_of(current, state_dir, home, statuses=succ.ACKNOWLEDGED)
+        if nxt is None:
+            return current
+        try:
+            live = _record(inspect, nxt)
+        except Exception:  # noqa: BLE001 - cannot tell whether the successor lives: do not redirect on a guess
+            return current
+        if live is None or live.get("Archived") is not False:
+            return current
+        end = succ.effective_lead(nxt, state_dir, home)
+        if end != nxt:  # the successor itself was replaced since: its holder must be live too
+            try:
+                live = _record(inspect, end)
+            except Exception:  # noqa: BLE001
+                return current
+            if live is None or live.get("Archived") is not False:
+                return current
+        current = end
+        if current in seen:
+            raise succ.SuccessionError(f"lead succession from {ident} is cyclic")
+        seen.update((nxt, current))
+
+
 def decide(target: str, inspect, allow_archived: bool | str | None = False, state_dir: Path | None = None,
            home: Path | None = None, allow_replaced: str | None = None) -> Decision:
     """What to do about a send to `target` (an id, an id prefix or a name Paseo resolves)."""
@@ -76,7 +110,7 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
         return Decision(PASS, target, "unknown to paseo: not guarded")
     ident = record["Id"]
     try:
-        current = succ.effective_lead(ident, state_dir, home)
+        current = _follow(ident, inspect, state_dir, home)
     except succ.SuccessionError as exc:
         return Decision(REFUSE, target, f"{exc}: the succession ledger is inconsistent; ask the operator")
     if current != ident:
@@ -89,7 +123,8 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
         if allow_replaced == ident and record.get("Archived") is False:  # live: the send cannot un-archive it
             return Decision(PASS, target, f"{ident} was replaced by {current}, but {ALLOW_REPLACED_ENV} names it and it is live: "
                             "sent as asked", replaced_by=current)
-        return Decision(REDIRECT, current, f"{ident} was replaced through a completed self-handoff; send to {current}")
+        return Decision(REDIRECT, current, f"{ident} was replaced through a self-handoff (completed, or acknowledged and not yet "
+                        f"archived); send to {current}")
     if record.get("Archived") is True and not (allow_archived is True or allow_archived == ident):
         return Decision(REFUSE, target, f"{ident} is archived and no completed handoff replaced it: a send would un-archive "
                         f"and run it. Send to its live owner; resuming an archived agent needs the operator's explicit "

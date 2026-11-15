@@ -1,10 +1,12 @@
 """bin/ade_send_guard.py and claude/hooks/archived_send_gate.py: a send to an archived or replaced agent is redirected or
 denied, never delivered (ls-02). Offline: a fake `paseo` on PATH, a throwaway succession ledger."""
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -116,6 +118,122 @@ def test_an_unfinished_handoff_is_no_redirect(world):
     write_link(world.state, world.home, A, B, status="awaiting-ack")
     assert decide(world, A, {A: False}).action == guard.PASS
     assert decide(world, A, {A: True}).action == guard.REFUSE
+
+
+def stamp(age=0.0):
+    """`acknowledged_at` as `ade-self-session accept` writes it, `age` seconds ago."""
+    return datetime.fromtimestamp(time.time() - age, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_an_acknowledged_handoff_redirects_while_the_predecessor_still_runs(world):
+    """rq-38 (a): a peer's send to the acknowledged, not yet archived predecessor goes to the successor."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    d = decide(world, A, {A: False, B: False})
+    assert (d.action, d.target) == (guard.REDIRECT, B) and "acknowledged" in d.reason
+
+
+def test_an_awaiting_ack_handoff_is_not_redirected_yet(world):
+    write_link(world.state, world.home, A, B, status="awaiting-ack", ack=None)
+    assert decide(world, A, {A: False, B: False}).action == guard.PASS
+
+
+def test_an_acknowledged_handoff_with_a_dead_or_unknown_successor_leaves_the_predecessor_reachable(world):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    assert decide(world, A, {A: False, B: True}).action == guard.PASS  # successor archived: not a place to send
+    assert decide(world, A, {A: False}).action == guard.PASS  # successor unknown to paseo
+
+    def flaky(ident):
+        if ident == B:
+            raise OSError("daemon hiccup")
+        return {"Id": ident, "Archived": False}
+    assert guard.decide(A, flaky, state_dir=world.state, home=world.home).action == guard.PASS
+
+
+def test_acknowledged_hops_chain_with_completed_ones(world):
+    write_link(world.state, world.home, A, B)  # completed
+    write_link(world.state, world.home, B, C, status="acknowledged", acknowledged_at=stamp())
+    write_link(world.state, world.home, C, D)  # completed
+    d = decide(world, A, {A: True, B: False, C: False, D: False})
+    assert (d.action, d.target) == (guard.REDIRECT, D)
+
+
+def test_an_acknowledged_cycle_is_refused(world):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    write_link(world.state, world.home, B, A, status="acknowledged", acknowledged_at=stamp())
+    assert decide(world, A, {A: False, B: False}).action == guard.REFUSE
+
+
+def test_the_replaced_override_still_sends_to_an_acknowledged_predecessor(world):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    d = decide(world, A, {A: False, B: False}, allow_replaced=A)
+    assert (d.action, d.target, d.replaced_by) == (guard.PASS, A, B)
+
+
+def test_other_consumers_still_see_an_acknowledged_handoff_as_no_link(world):
+    import ade_lead_succession as succ
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    assert succ.effective_lead(A, world.state, world.home) == A
+
+
+def test_a_stuck_acknowledged_handoff_hands_the_predecessor_its_mail_back(world):
+    """adversary M1: `finish` refused for good and nothing ends the record: only its age (or a recorded failure) can."""
+    agents = {A: False, B: False}
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(7200))
+    assert decide(world, A, agents).action == guard.PASS  # older than the window
+    write_link(world.state, world.home, A, B, status="acknowledged")  # no stamp at all (written before rq-38)
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at="yesterday")
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(-3600))  # from the future
+    assert decide(world, A, agents).action == guard.PASS
+
+
+@pytest.mark.parametrize("status,code,redirects", [
+    ("acknowledged", None, True), ("acknowledged", "PREDECESSOR_NOT_IDLE", True),
+    ("acknowledged", "LISTING_GAP", False), ("acknowledged", "ARCHIVE_FAILED", False),
+    # `finish` saves archive-unknown before every archive call and keeps it after Paseo's AGENT_RUNNING refusal (lead review B1)
+    ("archive-unknown", "AGENT_RUNNING", True), ("archive-unknown", "PREDECESSOR_NOT_IDLE", True),
+    ("archive-unknown", None, False),  # a crashed archive with no recorded reason: unknown outcome
+    ("archive-unknown", "ARCHIVE_FAILED", False), ("archive-unknown", "ARCHIVED_OTHER_AGENT", False),
+    ("creation-unknown", None, False), ("awaiting-ack", None, False), ("archive-failed", "AGENT_RUNNING", False),
+])
+def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, status, code, redirects):
+    over = {"native_error": {"op": "finish", "code": code}} if code else {}
+    write_link(world.state, world.home, A, B, status=status, acknowledged_at=stamp(), **over)
+    assert (decide(world, A, {A: False, B: False}).action == guard.REDIRECT) is redirects
+
+
+def test_an_unfinished_link_with_a_wrong_predecessor_or_ack_or_successor_record_is_no_redirect(world):
+    """lead review B3: the acknowledged path shares `_link`'s checks with the completed one; a regression that splits them shows here."""
+    agents = {A: False, B: False, C: False}
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(), predecessor=C)  # B3a
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(), ack={"agent_id": C})  # B3b
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    assert decide(world, A, agents).action == guard.REDIRECT  # the same record, sound: the fixtures above are what differ
+
+    def no_archived_key(ident):  # B3c: Paseo answered, but without an Archived field: not known to be live
+        return {"Id": ident} if ident == B else {"Id": ident, "Archived": False}
+    assert guard.decide(A, no_archived_key, state_dir=world.state, home=world.home).action == guard.PASS
+
+
+def test_the_liveness_check_covers_the_end_of_the_successors_own_chain(world):
+    """adversary L2: A ack -> B (live), B completed -> C, C archived: A stays reachable, not refused."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    write_link(world.state, world.home, B, C)
+    assert decide(world, A, {A: False, B: False, C: True}).action == guard.PASS
+    d = decide(world, A, {A: False, B: False, C: False})
+    assert (d.action, d.target) == (guard.REDIRECT, C)
+
+
+def test_the_hook_denies_an_acknowledged_predecessor_send_but_not_to_oneself_twice(world):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    world.live(**{A: False, B: False})
+    reason = denial(run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}))
+    assert f"Re-send to {B}" in reason
+    reason = denial(run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}, env={**world.env, "PASEO_AGENT_ID": B}))
+    assert "is you" in reason and "Re-send" not in reason
 
 
 def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
@@ -498,6 +616,18 @@ def test_a_backstop_denial_is_worded_for_the_backstop_not_as_a_resend(world):
     assert "could not parse" in reason and A in reason and "Re-send" not in reason and f"send to {B}." in reason
     plain = denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))  # the parser's own denial keeps its text
     assert "Re-send to" in plain and "could not parse" not in plain
+
+
+def test_a_backstop_denial_never_tells_the_successor_to_send_to_itself(world):
+    """lead review B4 / adversary N3: the unparseable-command branch ran before the self check."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    world.live(**{A: False, B: False})
+    command = f"paseo send -- {C} ok; echo took over from {A}; ls \\"
+    world.live(**{A: False, B: False, C: False})
+    other = denial(run_hook(world, "Bash", {"command": command}))
+    assert f"send to {B}." in other
+    mine = denial(run_hook(world, "Bash", {"command": command}, env={**world.env, "PASEO_AGENT_ID": B}))
+    assert "that is you" in mine and f"send to {B}." not in mine
 
 
 def test_a_backstop_denial_for_an_archived_id_names_the_override_free_exits(world):

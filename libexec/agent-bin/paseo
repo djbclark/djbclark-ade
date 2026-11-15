@@ -23,7 +23,7 @@
 #   2. Otherwise `python3 -I bin/ade-paseo-guard ARGS...`, which parses `[global opts] [agent] send [opts] TARGET` (options may also
 #      follow `agent` and `send`), asks `paseo agent inspect` (the real paseo by absolute path, so the probe never re-enters this
 #      shim), and execs the real paseo: as asked (a live or unknown target, an explicit --host/--home), with the target rewritten
-#      to its successor (a completed self-handoff replaced it), or not at all (exit 4: archived with no successor, a cyclic
+#      to its successor (a completed or acknowledged self-handoff replaced it), or not at all (exit 4: archived with no successor, a cyclic
 #      ledger, a redirect that would be a send to oneself).
 # The real paseo is the first `paseo` on PATH (or ADE_REAL_PASEO) that is a regular executable file and not a shim: every copy of
 # this file is skipped, wherever it lives, so two checkouts' agent-bin directories on one PATH do not call each other.
