@@ -86,6 +86,92 @@ This command activates the dry-run job; it does not enable resumes. See
 | `--yes` | `reconcile`: execute ADE-scoped launchd/systemd/cron installs/removes and paseo create/delete; write the ownership ledger (default is dry-run) |
 | `--name NAME` | `reconcile`: limit to these logical job names (repeatable) |
 
+## Helper prune: `bin/ade-tidy prune` every 30 minutes (2026-11-14)
+
+Why: the Baton plugin ([djbclark/paseo-baton](https://github.com/djbclark/paseo-baton), `server/controller.ts` `spawnHandoffWriter`) starts one
+`[Handoff writer]` agent per parent at its context threshold, in the parent's workspace, and keeps it idle so its prompt can be
+read; only the parent's archive (Paseo's cascade) or the next handoff of the same parent removes it. On 2026-11-14 83 Claude sessions
+(57 that morning) filled swap (12.5 of 13.3 GB). What Baton records on a helper: title `[Handoff writer]`, labels `baton-writer=1`
+and `paseo.parent-agent-id=<parent id>` (`shared/baton.ts` 155-158), and, per parent, an entry in
+`~/.paseo/plugin-data/baton/baton-state.json` (`status: done`, `path` of the handoff file, `savedAt` epoch ms; `core.ts` `markDone`).
+
+`bin/ade-tidy prune [--apply] [--json|--json-line] [--min-idle S] [--max-kills N] [--orphan-grace S]` (numbers must be finite and non-negative; a machine-wide mode of `ade-tidy`: no repo, no lead; observe-only without
+`--apply`) selects a helper only when ALL hold: title starts `[Handoff writer]` AND label `baton-writer=1`; not a lead (an `ade.lead`
+value; a former lead that no longer leads is fine), not the caller; status `idle` and quiet for `--min-idle` seconds (default 300); no pending
+permission (`paseo permit ls`); a valid parent id; and its work is done: the parent is **archived** (record `archivedAt`), **closed**
+(live status; this means "no live provider", not "finished": a daemon restart also leaves a lead `closed`, so the helper's own idle and quiet gates are what protect it) or **gone** (no record anywhere), or Baton's state shows the parent's handoff `done` in a non-empty regular file saved
+no earlier than the helper's creation. Every other helper is skipped with a reason code (`title-mismatch`, `no-baton-label`, `self`,
+`main-kind`, `no-parent`, `not-idle`, `permission-pending`, `permits-unreadable`, `recently-active`, `activity-unreadable`,
+`parent-unproven`, `handoff-unproven`, `has-children`, `children-unproven`, `changed-before-archive`; the last also when `paseo agent inspect` no longer reads idle, unarchived and permission-free right before that archive); right before each archive the helper's record is read again and a helper active within `--min-idle` since the plans (another turn during an earlier archive in the loop) is skipped `recently-active` (an unreadable or future time fails closed); a non-helper is never listed. `--apply` takes a lock
+(`~/.local/state/ade/helper-prune.lock`), re-reads the whole machine right before archiving and archives only helpers both reads selected,
+with `paseo agent archive FULL-ID` (argv list, 30 s timeout, rc checked; the full id is in the `paseo ls -g` listing it was just read from, so
+the title-fallback hazard of [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668) cannot pick another agent). One JSON line per
+attempt (`ts`, `helper`, `parent`, `reason`, `rc`, `error` on failure) is appended to `~/.local/state/ade/helper-prune.log`
+(`ADE_HELPER_PRUNE_LOG` overrides; a `--json-line` run prints one compact summary line instead of the full object, which keeps the job's `out.log` small and unrotated). A second run archives nothing new. Exit 0 ok, 1 a paseo call or an archive failed, 2 usage. A `closed`
+helper is skipped (`not-idle`): a daemon restart closes them and they hold no process.
+
+**Exclude list (round 2, 2026-11-14).** `--exclude ID` (repeatable, full uuid) and `~/.local/state/ade/helper-prune.exclude`
+(`ADE_HELPER_PRUNE_EXCLUDE` overrides; one full uuid per line, `#` comments, read afresh on every run) name agents prune never touches:
+skip reason `excluded` for a helper, and an excluded agent's orphan process is skipped too. The list is read when planning, again for
+the re-read plan, and once more right before each archive or kill. A line that is not a full uuid, or an unreadable file, refuses the
+run (exit 1, nothing done): a typo must not silently unprotect an agent.
+
+**Orphan provider processes (round 2, 2026-11-14).** Paseo can leave an archived, closed agent's provider process (and its
+`graft mcp` child) running: on 2026-11-14 the dry run found 45 such `claude` processes (about 5 GB resident). `prune` maps a process to an
+agent only by session id, and only for a provider Paseo itself launched. `--input-format stream-json` is not proof of that (every
+Claude Agent SDK host uses it), so all of these must hold or the process is `unmapped` (reasons `not-paseo-launched`, `no-agent-record`,
+`ambiguous-session`, `not-paseo-parent`, `no-caller`, `caller-mismatch`) and is never signalled: (1) the session id comes from a real
+`--resume`/`--session-id` argument (one flag in the whole argv; text inside another argument's value, such as a `--settings` JSON, is
+not read) and matches exactly one agent record's `runtimeInfo`/`persistence` `sessionId`; (2) the process's parent is the Paseo daemon,
+found structurally: a process titled exactly `Paseo Daemon` that is the supervisor named in `$PASEO_HOME/paseo.pid` or that supervisor's
+direct child (a dev daemon under another home, or a process that only borrows the title, does not count; without `paseo.pid` nothing
+is acted on); (3) the `--mcp-config` argument carries exactly one `callerAgentId=<uuid>` and it equals the mapped agent id. Only that
+uuid is read from the argument: it holds a Bearer token, so argv is never stored, logged or printed (a non-`graft mcp` child is shown
+by the basename of its argv[0] only). Parent and caller are checked again, with the pid and start time, right before each provider
+signal (`not-paseo-parent`, `caller-changed`). If any agent record cannot be read at scan time, every orphan is deferred
+(`records-unreadable`, counted in `kill_plan`). A helper that an unarchived agent names as its `paseo.parent-agent-id` is skipped
+(`has-children`: Paseo's archive cascades to children); with an unreadable record it is `children-unproven`. A mid-run failure to read
+the exclude list stops further archives or kills with an error (exit 1), never a traceback. `ADE_HELPER_PRUNE_PS` replaces `ps` only
+when `ADE_HELPER_PRUNE_TEST=1` is also set (tests). A process is an **orphan** when its record says archived and
+`lastStatus` closed AND `paseo agent inspect ID --json` says `Archived: true`, `Status: closed`. It is skipped (`orphan_skipped`) when
+the agent is excluded, is the caller, or the pid is in the caller's own process tree (itself, its ancestors, its descendants) or is 1 or
+below; a live agent's process is only counted (`provider_live`). Default and observe: report (`orphans[]` with pid, ppid, start time,
+rss_kb, agent, session, graft `children`, `other_children`). With `--apply`: the whole table is re-read, then per orphan the exclude
+list and inspect are re-checked, and SIGTERM goes by pid (`os.kill`, never `pkill`/`pgrep -f`) to its direct children whose argv is
+exactly `graft mcp` first, then to the provider. `ps` is always `/bin/ps`, never a PATH lookup. Before each signal `ps -o pid=,ppid=,lstart=,rss=,command= -p PID` is re-read and
+the pid, start time and (provider) session id, or (child) parent and `graft mcp` argv, must be unchanged (PID-reuse guard), else
+nothing is sent. Each attempt is a `kind: "process-kill"` line in `helper-prune.log` (`ts, pid, ppid, agent, session, rss_kb, role, rc`,
+`skipped` when the guard held it back); helper archives are `kind: "helper-archive"` lines.
+
+**Kill budget (round 3, 2026-11-14).** An orphan is *actionable* only when its agent was archived at least `--orphan-grace` seconds ago
+(default 1800) and its record shows no activity newer than that (an unreadable time fails closed: deferred). At most `--max-kills`
+provider processes (default 10, lowest pid first; each carries every direct `graft mcp` child of its provider, with no per-provider cap on children: today
+one each; `--max-kills 0` signals none) are acted on per run; the rest are deferred and the 30-minute job picks them up. The summary
+lists them under `deferred[]` (`reason` `grace` or `kill-cap`) and carries `kill_plan` (`found`, `actionable`, `deferred_grace`,
+`deferred_cap`, `max_kills`, `orphan_grace_s`); `orphans[]` is the actionable set. Right before the kills the plan is rebuilt from freshly
+read agent records, and each agent is inspected once more (`changed-before-kill` when either read no longer agrees). Per orphan the provider's own
+checks (pid, start time, session, daemon parent, caller) run first; only if they pass are its graft children signalled, then the provider
+(`changed-before-kill` with the failed check, children left alone, when they fail).
+
+**Errors and the log (round 5, 2026-11-14).** An unreadable agent record is an `errors` entry (exit 1) and `counts.records_unreadable`: every helper is then
+`children-unproven` and every orphan `records-unreadable` until it is fixed, so the job fails loudly instead of doing nothing quietly. Under
+`--apply` the log is opened (created or touched) before the first action; if that fails, or the lock file cannot be opened, nothing is done and
+the run exits 1. A log write that fails mid-run is one `errors` entry (`log write failed`); the remaining actions continue unlogged.
+Left as is on purpose: a sub-agent of an archived agent is only reached if it is itself archived and closed; `ExtraBar` children of a
+provider are not signalled (only `graft mcp`); no upstream issue is filed for the leak.
+
+The job is `config/launchd/com.djbclark.ade-helper-prune.plist` (a deterministic script, no model prompt; summary to
+`~/.local/state/ade/helper-prune.out.log`; inventory row `ade-helper-prune`, class `optional`). It is not loaded by merging. After the
+merge, from the canonical checkout (`--ade` stays this checkout):
+
+```sh
+cd ~/src/djbclark-ade && bin/ade-sched install config/launchd/com.djbclark.ade-helper-prune.plist
+bin/ade-sched status com.djbclark.ade-helper-prune
+```
+
+Preview any time: `bin/ade-tidy prune` (observe-only) or `bin/ade-sched --dry-run install config/launchd/com.djbclark.ade-helper-prune.plist`.
+Remove: `bin/ade-sched uninstall com.djbclark.ade-helper-prune`.
+
 ## Inventory and drift (S4b, 2026-11-10)
 
 `config/install.toml` carries transitional `[install.jobs]` and `[install.retired_jobs]` (the setup-plan's

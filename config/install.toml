@@ -926,6 +926,19 @@ platforms = ["mac", "linux"]
 notes = "Slice 1b (2026-11-12) of docs/persistent-progress-reminder-design.md: zero-token reminder scan, no model prompt. Chosen 2026-11-13 (operator): doctor expects the label, so install it (docs/scheduling.md). Setting chosen = false later makes doctor quiet and makes reconcile unload a ledger-owned install. Logs: ~/.local/state/djbclark-ade/progress/scan.log."
 
 [[install.jobs]]
+name = "ade-helper-prune"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "optional"
+chosen = false
+label = "com.djbclark.ade-helper-prune"
+plist = "config/launchd/com.djbclark.ade-helper-prune.plist"
+schedule = "StartInterval 1800"
+command = "bin/ade-tidy prune --apply --json-line"
+platforms = ["mac"]
+notes = "2026-11-14: archives idle, finished Baton [Handoff writer] helpers machine-wide (83 of them filled swap) and stops orphan provider processes of archived, closed agents; deterministic, no model prompt. Not chosen until the operator installs it (docs/scheduling.md). Log: ~/.local/state/ade/helper-prune.log."
+
+[[install.jobs]]
 name = "context-budget"
 kind = "paseo"
 owner = "djbclark-ade"
