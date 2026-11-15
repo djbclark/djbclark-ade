@@ -578,6 +578,18 @@ def add_footer(rest: list[str]) -> list[str]:
     return [*rest[:-1], f"{last}\n\nAlso follow every item of {FOOTER}."]
 
 
+def same_dir(a: str, b: str) -> bool:
+    """True when `a` and `b` name the same directory. Both existing: `os.path.samefile` (same device and inode), so a symlink, a
+    trailing slash and, on macOS's case-insensitive volume, a case-differing spelling all match, and a case-sensitive volume (Linux)
+    keeps its two spellings apart because they are two inodes. Either missing (a deleted window directory, a path paseo reported that
+    is gone): the textual `normcase(realpath)` compare. `normcase` is a no-op on POSIX, so a missing path is never matched across case
+    (it would be a guess, and wrong on Linux); two spellings of a directory that does not exist differ."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
 def names_path(brief: str, paths: list[str]) -> bool:
     """True when the brief carries one of `paths` as a whole absolute path (not a prefix of a longer name); every path passed is already absolute."""
     return any(re.search(r"(?<![\w/.-])" + re.escape(p.rstrip("/")) + r"(?![\w-]|\.[\w-])", brief) for p in paths if p)
@@ -620,10 +632,10 @@ def launch(opts, rest: list[str]) -> int:
             win, rename_to = (found.row, found.rename_to) if found else (None, None)
             adopt = bool(found and not found.owned)  # an unclaimed, empty window of this exact name: recorded once the launch succeeds
         redirected = False  # the window's own cwd is the repo's primary checkout of --cwd: placed there, the brief names the worktree
-        if win is not None and not main_place and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd \
-                and wsn.primary_checkout_of(cwd) == os.path.realpath(win["cwd"]):
+        if win is not None and not main_place and opts.cwd and win.get("cwd") and not same_dir(win["cwd"], cwd) \
+                and same_dir(wsn.primary_checkout_of(cwd), win["cwd"]):
             redirected = True
-        elif win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
+        elif win is not None and opts.cwd and win.get("cwd") and not same_dir(win["cwd"], cwd):
             # `paseo run --workspace` takes the agent's cwd from the workspace and ignores --cwd (getpaseo/paseo#9699): a worker
             # started here would silently run in the window's directory, not the claimed worktree the caller named.
             raise Refused(f"window {row_wks(win)} ({win['name']!r}) runs in {esc(win['cwd'])}, but --cwd is {esc(cwd)}: paseo ignores --cwd "
@@ -705,7 +717,7 @@ def launch(opts, rest: list[str]) -> int:
             if requested:  # paseo drops --cwd in an existing window and from inside an agent (getpaseo/paseo#9699): check where it landed
                 got = agent_cwd(agent_id)
                 want = eff_cwd if (win is None or redirected) else cwd
-                if got and os.path.realpath(got) != want:
+                if got and not same_dir(got, want):
                     stopped = stop_agent(agent_id)  # a fresh worker has done no work yet; running its brief in the wrong checkout is the harm
                     again = ("relaunch with the window's own --cwd" if win is not None else
                              "relaunch from the repo's primary checkout (paseo dropped --cwd for the new window)")
@@ -900,7 +912,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--slice", required=True)
         p.add_argument("--window-middle")
         p.add_argument("--repo")
-        p.add_argument("--cwd")
+        p.add_argument("--cwd", type=os.path.expanduser)  # a leading `~` is the caller's home even when no shell expanded it (--cwd=~/x, a quoted ~)
         p.add_argument("--no-footer", action="store_true")
         p.add_argument("--worktree", help="the worktree the worker writes in, named in its tab (`[wt: <dir>]`); a --cwd that is a "
                        "linked worktree is named without this")

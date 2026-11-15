@@ -1404,6 +1404,90 @@ def test_a_symlinked_window_cwd_with_a_trailing_slash_matches_the_real_directory
     assert r.returncode == 0, r.stderr
 
 
+# --- cq-41: --cwd spellings of one directory compare equal (`~`, case on a case-insensitive volume) -------------------------
+
+def cwd_launch(env, *cwd_args, slice_name="s"):
+    """A launch into the lead's owned window WIN (no `inspect_cwd` unless the test sets it), `--cwd` given as `cwd_args`."""
+    return env.run("--lead", LEAD, "--slice", slice_name, "--repo", "repo", "--window-middle", "Wave 7", *cwd_args, "--", "--no-wait", "B")
+
+
+def own_window_at(env, cwd):
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": str(cwd)}]
+    own(LEAD, "wks_win1")
+
+
+def case_insensitive(tmp_path):
+    """Whether the filesystem under tmp_path folds case (macOS APFS default), probed, never assumed from the platform."""
+    (tmp_path / "CaseProbe").mkdir()
+    return (tmp_path / "caseprobe").exists()
+
+
+def test_a_tilde_cwd_is_the_callers_home_in_both_spellings(env, tmp_path, monkeypatch):
+    """`--cwd ~/x` reaches the script unexpanded when quoted, and always as `--cwd=~/x` via a tool's argv: it is the home directory's."""
+    home = tmp_path / "home"
+    (home / "work").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    real = os.path.realpath(home / "work")
+    own_window_at(env, real)
+    env.data["inspect_cwd"] = real
+    for n, args in enumerate((("--cwd", "~/work"), ("--cwd=~/work",))):
+        r = cwd_launch(env, *args, slice_name=f"s{n}")
+        assert r.returncode == 0, r.stderr  # not "runs in <real>, but --cwd is <caller's cwd>/~/work"
+        run = placed(env)[-1]
+        assert run[run.index("--cwd") + 1] == real and "~" not in run[run.index("--cwd") + 1]
+    assert cwd_launch(env, "--cwd", "~/elsewhere", slice_name="s9").returncode == 1  # still a different directory
+
+
+def test_a_case_differing_cwd_spelling_matches_the_window_on_a_case_insensitive_volume(env, tmp_path):
+    if not case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem is case-sensitive: a differently-cased path is another directory")
+    (tmp_path / "RepoDir").mkdir()
+    own_window_at(env, tmp_path / "RepoDir")  # the window's cwd, as paseo recorded it
+    r = cwd_launch(env, "--cwd", str(tmp_path / "repodir"))  # the window check
+    assert r.returncode == 0, r.stderr
+    own_window_at(env, tmp_path / "repodir")
+    env.data["inspect_cwd"] = str(tmp_path / "RepoDir")  # the post-launch check: paseo reports the other spelling
+    r = cwd_launch(env, "--cwd", str(tmp_path / "repodir"), slice_name="s2")
+    assert r.returncode == 0, r.stderr
+    assert ["agent", "stop", AGENT] not in [c["argv"] for c in env.calls()]
+
+
+def test_cwd_spellings_differing_only_in_case_are_two_directories_on_a_case_sensitive_volume(env, tmp_path):
+    if case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem folds case: the two spellings are one directory")
+    (tmp_path / "Dup").mkdir()
+    (tmp_path / "dup").mkdir()
+    own_window_at(env, tmp_path / "Dup")
+    r = cwd_launch(env, "--cwd", str(tmp_path / "dup"))
+    assert r.returncode == 1 and "runs in" in r.stderr and not placed(env)
+    own_window_at(env, tmp_path / "dup")
+    env.data["inspect_cwd"] = str(tmp_path / "Dup")
+    r = cwd_launch(env, "--cwd", str(tmp_path / "dup"), slice_name="s2")
+    assert r.returncode == 1 and "started in" in r.stderr and "stopped (interrupted" in r.stderr
+
+
+def test_a_genuinely_different_cwd_still_mismatches_at_both_checks(env, tmp_path):
+    for d in ("one", "two"):
+        (tmp_path / d).mkdir()
+    own_window_at(env, tmp_path / "one")
+    r = cwd_launch(env, "--cwd", str(tmp_path / "two"))  # the window check
+    assert r.returncode == 1 and "runs in" in r.stderr and not placed(env)
+    own_window_at(env, tmp_path / "two")
+    env.data["inspect_cwd"] = str(tmp_path / "one")  # the post-launch check
+    r = cwd_launch(env, "--cwd", str(tmp_path / "two"), slice_name="s2")
+    assert r.returncode == 1 and "started in" in r.stderr and "stopped (interrupted" in r.stderr
+    assert ["agent", "stop", AGENT] in [c["argv"] for c in env.calls()]
+
+
+def test_directories_that_do_not_exist_are_compared_as_text_never_across_case(env, tmp_path):
+    """The `same_dir` fallback (no inode to compare): a documented limit, case is not folded for a missing path on any platform."""
+    own_window_at(env, tmp_path / "Gone")
+    r = cwd_launch(env, "--cwd", str(tmp_path / "gone"))
+    assert r.returncode == 1 and "runs in" in r.stderr and not placed(env)
+    own_window_at(env, tmp_path / "gone")  # the same spelling still matches without an inode
+    assert cwd_launch(env, "--cwd", str(tmp_path / "gone"), slice_name="s2").returncode == 0
+
+
 def test_an_unreadable_inspect_never_fails_a_good_launch(env):
     env.data["inspect_rc"] = 1
     r = launch(env)
