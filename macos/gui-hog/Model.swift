@@ -139,6 +139,7 @@ func rowFreezeAllowed(_ r: Row, _ s: Snapshot) -> Bool { s.freezeEnabled && rowA
 /// ("resumes at Sun 9:52 PM"). No countdown, so the text never changes between refreshes. `zone` is a parameter so the self-test is timezone-independent.
 func thawText(_ e: FrozenEntry, now: Int, zone: TimeZone = TimeZone(identifier: "America/New_York") ?? TimeZone(identifier: "UTC")!) -> String {
     guard let t = e.thawAt else { return "until you Resume" }
+    if abs(t - now) > clockSpanS { return "resumes at ?" }   // a timed freeze is at most 24 h: a far-off time is a hand-edited file (the same limit as the Python side)
     var cal = Calendar(identifier: .gregorian)
     cal.timeZone = zone
     let when = Date(timeIntervalSince1970: TimeInterval(t)), today = Date(timeIntervalSince1970: TimeInterval(now))
@@ -146,8 +147,10 @@ func thawText(_ e: FrozenEntry, now: Int, zone: TimeZone = TimeZone(identifier: 
     f.locale = Locale(identifier: "en_US_POSIX")
     f.timeZone = zone
     f.dateFormat = cal.isDate(when, inSameDayAs: today) ? "h:mm a" : "EEE h:mm a"
-    return "resumes at " + f.string(from: when)
+    let shown = f.string(from: when)
+    return "resumes at " + (shown.isEmpty ? "?" : shown)
 }
+let clockSpanS = 7 * 24 * 3600
 
 func statusTitle(_ n: Int) -> String { n == 0 ? "" : "❄︎ \(n)" }
 

@@ -855,6 +855,7 @@ def test_clock_text_is_new_york_12_hour_with_a_day_name_when_not_today():   # op
     assert gf.clock_text(due, same_day, zone="UTC") == "2:52 AM" and gf.clock_text(due, other_day, zone="UTC") == "Sun 2:52 AM"   # the zone is a parameter
     assert gf.clock_text(due, same_day, zone="America/New_York") == gf.clock_text(due, same_day + 60, zone="America/New_York")   # no countdown
     assert gf.clock_text(1794744000, 1794744000, zone="UTC") == "12:00 PM" and gf.clock_text(1794700800, 1794700800, zone="UTC") == "12:00 AM"
+    assert gf.clock_text(999999999999999, same_day) == "?" and gf.clock_text(1e13, same_day) == "?"   # far off: a hand-edited file, same as the Swift side
     assert gf.clock_text(float("nan"), same_day) == "?" and gf.clock_text(10**30, same_day) == "?"
     assert gf.clock_text(due, same_day, zone="Not/AZone").endswith("UTC")   # a zone that cannot load says so
 
@@ -870,6 +871,8 @@ def test_cli_frozen_prints_the_resume_clock_time_or_until_you_resume(tmp_path):
     timed = next(ln for ln in out.splitlines() if ln.startswith("t-1"))
     assert "resumes at " in timed and "Z " not in timed and "indefinitely" not in out   # a clock time, not the ISO UTC stamp
     assert "until you Resume" in next(ln for ln in out.splitlines() if ln.startswith("i-1"))
+    (g / "frozen.json").write_text(json.dumps({"v": 1, "entries": [entry_dict(id="t-0", mode="timed", frozen_at=now, thaw_at=0, root=root)]}))
+    assert "until you Resume" not in cli(tmp_path, "frozen").stdout   # a timed entry with thaw_at 0 is a time (already due), not an indefinite freeze
 
 
 def test_cli_freeze_takes_a_dash_leading_bundle_id_joined_with_equals(tmp_path):   # adversary round 4, C2: the Swift side joins values with `=`

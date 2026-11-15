@@ -39,6 +39,7 @@ FROZEN, LOCK, EVENTS = "frozen.json", "frozen.lock", "events.jsonl"
 MAX_PID = 2 ** 31
 MAX_TIMED_S = 24 * 3600
 CLOCK_ZONE = "America/New_York"
+CLOCK_SPAN_S = 7 * 24 * 3600   # the same limit as the Swift `thawText`
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
@@ -51,6 +52,8 @@ def clock_text(ts, now, zone=CLOCK_ZONE):
     except Exception:   # no tz database, or a bad name: say so rather than lie about the zone
         tz, mark = timezone.utc, " UTC"
     try:
+        if abs(float(ts) - float(now)) > CLOCK_SPAN_S:   # a timed freeze is at most 24 h; anything far off is a hand-edited file: show no time
+            return "?"
         t, n = datetime.fromtimestamp(float(ts), tz), datetime.fromtimestamp(float(now), tz)
     except (OverflowError, ValueError, OSError, TypeError):
         return "?"
@@ -952,7 +955,7 @@ def cmd_frozen(a, state_dir):
     if not v["entries"]:
         print("nothing is frozen")
     for e in v["entries"]:
-        until = "resumes at " + clock_text(e["thaw_at"], time.time()) if e["thaw_at"] else "until you Resume"
+        until = "resumes at " + clock_text(e["thaw_at"], time.time()) if e["thaw_at"] is not None else "until you Resume"
         print(f"{e['id']}  {e['app']['name'] or '?'}  [{e['state']}] {until}  {e['members']} processes, root pid {e['root_pid']}"
               + ("" if e["alive"] else "  (root is gone: its helpers are resumed at the next tick)") + f"  by {e['by']}")
     for n in v["notes"]:

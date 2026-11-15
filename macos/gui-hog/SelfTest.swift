@@ -142,6 +142,8 @@ func runSelfTest() -> Int32 {
         check(thawText(c, now: 1794582000, zone: ny) == "resumes at Sat 9:52 PM", "another day in New York: a 3-letter day name")
         check(thawText(c, now: 1794704400, zone: utc) == "resumes at 2:52 AM" && thawText(c, now: 1794582000, zone: utc) == "resumes at Sun 2:52 AM", "the zone is the parameter, never this Mac's")
         check(thawText(c, now: 1794704400, zone: ny) == thawText(c, now: 1794704460, zone: ny), "no countdown: the text does not change between refreshes")
+        let far = parseFrozen(Data(clockJson.replacingOccurrences(of: "1794711120", with: "999999999999999").utf8))?.first
+        check(far.map { thawText($0, now: 1794704400, zone: ny) == "resumes at ?" } == true, "a far-off resume time shows ?, never a made-up clock time or an empty one")
     } else { check(false, "the clock-time entry parses") }
     check(statusTitle(0) == "" && statusTitle(2) == "❄︎ 2", "menu-bar title")
 
