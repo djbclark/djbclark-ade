@@ -145,11 +145,12 @@ func logArgv(_ event: String, _ r: Row?) -> [String] {
 
 /// The rows the window shows: the order they were first seen in, never re-sorted, so a Quit button never moves under the pointer. A row's numbers are
 /// refreshed from the newest snapshot; a row the newest snapshot no longer lists stays, marked absent (no actions); an app seen for the first time is
-/// appended at the bottom. At most `cap` rows: the oldest absent rows go first.
-func mergeRows(old: [Row], new: [Row], cap: Int = 30) -> [Row] {
+/// appended at the bottom. At most `cap` rows (the window must fit the screen): when full, a new app takes the place of an absent row (which offers
+/// no button, so nothing a click could hit moves), else it is not shown. No row is ever removed from the middle.
+func mergeRows(old: [Row], new: [Row], cap: Int = maxWindowRows) -> [Row] {
     var fresh: [String: Row] = [:]
     for r in new where !r.appId.isEmpty { fresh[r.appId] = r }
-    var out: [Row] = old.map { o in
+    var out: [Row] = old.prefix(cap).map { o in
         if let n = fresh[o.appId], n.rootPid == o.rootPid { return n }
         var gone = o
         gone.present = false
@@ -157,10 +158,13 @@ func mergeRows(old: [Row], new: [Row], cap: Int = 30) -> [Row] {
         return gone
     }
     let known = Set(old.map { $0.appId })
-    out += new.filter { !known.contains($0.appId) }
-    while out.count > cap, let i = out.firstIndex(where: { !$0.present }) { out.remove(at: i) }
-    return Array(out.prefix(cap))
+    for n in new where !known.contains(n.appId) {
+        if out.count < cap { out.append(n) } else if let i = out.firstIndex(where: { !$0.present }) { out[i] = n }
+    }
+    return out
 }
+
+let maxWindowRows = 16
 
 /// A click that lands within this many seconds of the last layout is ignored: the buttons may have moved since the pointer was aimed.
 let clickGraceS = 0.7

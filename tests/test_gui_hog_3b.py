@@ -576,3 +576,17 @@ def test_swift_argv_values_are_joined_to_their_option(tmp_path):   # finding 5
     model = swift_text()["Model.swift"]
     for opt in ('"--pid="', '"--start="', '"--bundle-id="', '"--bundle-path="', '"--event="', '"--app="'):
         assert opt in model
+
+
+def test_swift_nothing_above_or_between_the_rows_changes_height_or_width():   # adversary round 2, findings 1, 2, 3, 5
+    ui, model = swift_text()["UI.swift"], swift_text()["Model.swift"]
+    body = ui[ui.index("func rebuild()"):ui.index("// MARK: actions")]
+    assert body.index("headerLine(snap)") < body.index("for (i, r) in rows.enumerated()") < body.index("for h in snap.holds") < body.index("var bottom")   # the hold lines sit below the rows
+    assert "heightAnchor.constraint(equalToConstant: rowHeight)" in body   # every row has one fixed height
+    assert body.count("width: statusWidth") == 2   # a note or status text never widens the window
+    assert "let maxWindowRows = 16" in model and "cap: Int = maxWindowRows" in model
+    assert "remove(at:" not in model[model.index("func mergeRows"):model.index("let maxWindowRows")]   # no row is ever removed from the middle
+    for fn in ("forcePressed", "confirmQuitAll"):
+        sheet = ui[ui.index(f"func {fn}"):]
+        sheet = sheet[:sheet.index("beginSheetModal")]
+        assert "buttons[1].refusesFirstResponder = true" in sheet and "initialFirstResponder = a.buttons[0]" in sheet   # Tab then Space cannot reach the destructive button

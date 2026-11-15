@@ -86,7 +86,12 @@ func runSelfTest() -> Int32 {
     check(reused[0].rootPid == 1001 && !reused[0].present, "an id that now has another pid never takes over the old row")
     var many: [Row] = []
     for i in 0..<40 { many.append(mk(String(i + 10), 2000 + i, cores: 1)) }
-    check(mergeRows(old: [], new: many).count == 30, "the window is capped")
+    check(mergeRows(old: [], new: many).count == maxWindowRows, "the window is capped")
+    let full = mergeRows(old: [], new: Array(many.prefix(maxWindowRows)))
+    let still = mergeRows(old: full, new: Array(many.prefix(maxWindowRows)) + [mk("99", 3099, cores: 5)])
+    check(still.map { $0.appId } == full.map { $0.appId }, "at the cap a new app takes no live row's place and no row moves")
+    let gap = mergeRows(old: full, new: Array(many.prefix(maxWindowRows)).filter { $0.appId != "12" } + [mk("99", 3099, cores: 5)])
+    check(gap.count == maxWindowRows && gap[2].appId == "99" && gap[3].appId == full[3].appId, "at the cap a new app reuses the slot of an absent row; the rows around it stay")
     check(!clickAllowed(lastLayout: 100.0, now: 100.3) && clickAllowed(lastLayout: 100.0, now: 100.8), "a click right after a re-layout is ignored")
     check(!buttonRefusesFocus(.wait) && buttonRefusesFocus(.ignore) && buttonRefusesFocus(.quitAll) && buttonRefusesFocus(nil), "only Wait may take keyboard focus; row buttons never")
 

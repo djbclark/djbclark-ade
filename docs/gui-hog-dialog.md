@@ -611,3 +611,11 @@ program (only the operator's own `show` and `demo` activate). A click still work
 app); the vet timeout is 45 s (ps 15 s + lsappinfo 5 s + ps 2 s + start-up). (d) *Low, accepted and documented:* between `vet`'s live process walk and `terminate()` (seconds under load) a terminal or build started
 inside the app is not seen again by the Swift re-check (which covers pid, start time, bundle id, launch date, not children); a Force Quit in that window kills it. The operator clicked on a named app and
 confirmed; the window is short. (e) *Low, not changed:* the window keeps refreshing numbers after the hold ends (until it closes itself 2 min later, E4), which is harmless.
+
+N8. **Adversary round 2 (head b243c9dc, BLOCK; repaired).** (a) *Medium: the rows still moved when a second build was held,* because the hold lines sat above them (the N7(a) wording "the rows above never
+move" was too strong). Now one fixed header line sits above the rows; every row is a fixed 36 pt tall; the hold lines, the notice and the footer sit below the rows; the note and status labels have a fixed
+width, so the window width never changes (a sheet no longer re-centres under the pointer). (b) *Low, fixed:* at the cap (16 rows, so the bottom buttons stay on screen) a new app takes the slot of an absent
+row, else it is not shown; no row is removed from the middle. (c) *Low, fixed:* both confirm sheets set `buttons[1].refusesFirstResponder` and an initial first responder on Cancel, so Tab then Space cannot press
+Force Quit or Quit N; add to N6(e): press Tab then Space in the sheet: it cancels. (d) *Low, kept on purpose:* the first click on the sampler's window only activates the app (the window never took focus, N7(b)),
+which also protects a click aimed at another window that the dialog appears over; click again. Check in N6 that a click on Wait works within two clicks and that a window shown under the pointer does not act on
+the first click. (e) *Info:* `mergeRows` matches by id and pid, not start time; the row shows what `vet` would check anyway.

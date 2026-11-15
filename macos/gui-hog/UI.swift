@@ -30,7 +30,10 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var acted = false
     var noHoldSince: Date?
     var timer: Timer?
-    let autoCloseS = 120.0   // E4 (K4): close 2 min after the hold ends
+    let autoCloseS = 120.0
+    let rowHeight: CGFloat = 36       // every row is this tall, whatever it shows
+    let statusWidth: CGFloat = 260    // the note or status label never changes the window width
+    let rowAreaWidth: CGFloat = 940   // the window width is fixed: a sheet never re-centres under the pointer   // E4 (K4): close 2 min after the hold ends
 
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
@@ -101,13 +104,9 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func rebuild() {
         for v in root.arrangedSubviews { root.removeArrangedSubview(v); v.removeFromSuperview() }
-        root.addArrangedSubview(label(headerLine(snap), size: 14, weight: .semibold))
-        if cfg.demo {
-            root.addArrangedSubview(label("DEMO: these apps are made up; no button touches anything.", color: .systemOrange))
-        } else if snap.holds.isEmpty {
-            root.addArrangedSubview(label(cfg.manual ? "Opened by hand: no build is waiting." : "No build is waiting now.", color: .secondaryLabelColor))
-        }
-        for h in snap.holds { root.addArrangedSubview(label(holdLine(h), color: .secondaryLabelColor)) }
+        // Everything above the rows is one fixed line, and every row has a fixed height: nothing a click could be aimed at ever moves when a build
+        // is held or released (adversary round 2, finding 1). The hold lines and notices sit BELOW the rows.
+        root.addArrangedSubview(label(headerLine(snap), size: 14, weight: .semibold, width: rowAreaWidth))
         root.addArrangedSubview(NSBox.separator())
         let head = NSStackView(views: [label("App", size: 11, color: .secondaryLabelColor, width: 250), label("cores (5 min)", size: 11, color: .secondaryLabelColor, width: 85, align: .right),
                                        label("CPU now", size: 11, color: .secondaryLabelColor, width: 70, align: .right), label("RAM", size: 11, color: .secondaryLabelColor, width: 70, align: .right)])
@@ -124,22 +123,29 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var views: [NSView] = [nameBox, label(fmtCores(r.cores5m), color: dim, width: 85, align: .right), label(fmtCPU(r.cpuNow), color: dim, width: 70, align: .right),
                                    label(fmtRAM(r.rssMb), color: dim, width: 70, align: .right)]
             if let n = note {
-                views.append(label(n, size: 11, color: .secondaryLabelColor))
+                views.append(label(n, size: 11, color: .secondaryLabelColor, width: statusWidth))
             } else {
                 views.append(button("Quit", tag: i, action: #selector(quitPressed(_:))))
                 views.append(button("Force Quit…", tag: i, action: #selector(forcePressed(_:))))
-                if let s = status[r.appId] { views.append(label(s, size: 11, color: .secondaryLabelColor)) }
+                views.append(label(status[r.appId] ?? "", size: 11, color: .secondaryLabelColor, width: statusWidth))
             }
             let line = NSStackView(views: views)
             line.spacing = 10
             line.alignment = .centerY
+            line.heightAnchor.constraint(equalToConstant: rowHeight).isActive = true
             root.addArrangedSubview(line)
         }
         var foot: [String] = []
         if snap.more > 0 { foot.append("+\(snap.more) more") }
         if snap.protectedHidden > 0 { foot.append("\(snap.protectedHidden) protected apps hidden") }
-        if !foot.isEmpty { root.addArrangedSubview(label(foot.joined(separator: " · "), size: 11, color: .secondaryLabelColor)) }
+        if !foot.isEmpty { root.addArrangedSubview(label(foot.joined(separator: " · "), size: 11, color: .secondaryLabelColor, width: rowAreaWidth)) }
         root.addArrangedSubview(NSBox.separator())
+        if cfg.demo {
+            root.addArrangedSubview(label("DEMO: these apps are made up; no button touches anything.", color: .systemOrange, width: rowAreaWidth))
+        } else if snap.holds.isEmpty {
+            root.addArrangedSubview(label(cfg.manual ? "Opened by hand: no build is waiting." : "No build is waiting now.", color: .secondaryLabelColor, width: rowAreaWidth))
+        }
+        for h in snap.holds { root.addArrangedSubview(label(holdLine(h), color: .secondaryLabelColor, width: rowAreaWidth)) }
         var bottom: [NSView] = []
         for (i, spec) in bottomButtons.enumerated() {
             let b = button(spec.title, tag: i, action: #selector(bottomPressed(_:)), enabled: !(spec.action == .quitAll && quitAllTargets(rows).isEmpty))
@@ -242,6 +248,8 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         a.addButton(withTitle: "Cancel")          // first button = the default (Return); Escape also means Cancel
         a.addButton(withTitle: "Force Quit")
         a.buttons[1].hasDestructiveAction = true
+        a.buttons[1].refusesFirstResponder = true   // Tab then Space cannot reach Force Quit
+        a.window.initialFirstResponder = a.buttons[0]
         a.beginSheetModal(for: window) { resp in
             if resp == .alertSecondButtonReturn { self.quit(r, kind: .force) {} }
         }
@@ -256,6 +264,8 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         a.informativeText = targets.map { "• " + $0.name }.joined(separator: "\n") + "\n\nEach app is asked to quit normally and may show its own save sheet. Nothing is force quit."
         a.addButton(withTitle: "Cancel")          // the default
         a.addButton(withTitle: "Quit \(targets.count)")
+        a.buttons[1].refusesFirstResponder = true
+        a.window.initialFirstResponder = a.buttons[0]
         a.beginSheetModal(for: window) { resp in
             guard resp == .alertSecondButtonReturn else { return }
             var rest = targets
@@ -269,7 +279,7 @@ extension NSBox {
     static func separator() -> NSBox {
         let b = NSBox()
         b.boxType = .separator
-        b.widthAnchor.constraint(equalToConstant: 728).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 940).isActive = true
         return b
     }
 }
