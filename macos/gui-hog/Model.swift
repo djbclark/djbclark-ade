@@ -146,7 +146,7 @@ func logArgv(_ event: String, _ r: Row?) -> [String] {
 /// The rows the window shows: the order they were first seen in, never re-sorted, so a Quit button never moves under the pointer. A row's numbers are
 /// refreshed from the newest snapshot; a row the newest snapshot no longer lists stays, marked absent (no actions); an app seen for the first time is
 /// appended at the bottom. At most `cap` rows (the window must fit the screen): when full, a new app takes the place of an absent row (which offers
-/// no button, so nothing a click could hit moves), else it is not shown. No row is ever removed from the middle.
+/// no button, so nothing a click could hit moves; only a slot that was already absent before this refresh), else it is not shown. No row is ever removed from the middle.
 func mergeRows(old: [Row], new: [Row], cap: Int = maxWindowRows) -> [Row] {
     var fresh: [String: Row] = [:]
     for r in new where !r.appId.isEmpty { fresh[r.appId] = r }
@@ -158,8 +158,10 @@ func mergeRows(old: [Row], new: [Row], cap: Int = maxWindowRows) -> [Row] {
         return gone
     }
     let known = Set(old.map { $0.appId })
+    // A slot is reused only if it was ALREADY absent in `old` (so it had no button for a click to be aimed at): never in the same merge that marks its row absent.
+    var free = old.prefix(cap).enumerated().filter { !$0.element.present }.map { $0.offset }
     for n in new where !known.contains(n.appId) {
-        if out.count < cap { out.append(n) } else if let i = out.firstIndex(where: { !$0.present }) { out[i] = n }
+        if out.count < cap { out.append(n) } else if !free.isEmpty { out[free.removeFirst()] = n }
     }
     return out
 }

@@ -30,10 +30,11 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var acted = false
     var noHoldSince: Date?
     var timer: Timer?
-    let autoCloseS = 120.0
+    let autoCloseS = 120.0            // E4 (K4): close 2 min after the hold ends
     let rowHeight: CGFloat = 36       // every row is this tall, whatever it shows
     let statusWidth: CGFloat = 260    // the note or status label never changes the window width
-    let rowAreaWidth: CGFloat = 940   // the window width is fixed: a sheet never re-centres under the pointer   // E4 (K4): close 2 min after the hold ends
+    let rootWidth: CGFloat = 1010     // the window width is fixed (required constraint): a sheet never re-centres under the pointer
+    let rowAreaWidth: CGFloat = 978   // inner width of the lines below and above the rows
 
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
@@ -47,6 +48,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.alignment = .leading
         root.spacing = 8
         root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        root.widthAnchor.constraint(equalToConstant: rootWidth).isActive = true   // required priority: the window never grows or shrinks sideways
         window.contentView = root
         refresh(force: true)
         window.center()
@@ -133,6 +135,8 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             line.spacing = 10
             line.alignment = .centerY
             line.heightAnchor.constraint(equalToConstant: rowHeight).isActive = true
+            line.clipsToBounds = true   // an app-controlled name in a tall-fonted script can never draw over, or push, a neighbouring row
+            line.setClippingResistancePriority(.defaultLow, for: .vertical)
             root.addArrangedSubview(line)
         }
         var foot: [String] = []
@@ -279,7 +283,7 @@ extension NSBox {
     static func separator() -> NSBox {
         let b = NSBox()
         b.boxType = .separator
-        b.widthAnchor.constraint(equalToConstant: 940).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 978).isActive = true
         return b
     }
 }

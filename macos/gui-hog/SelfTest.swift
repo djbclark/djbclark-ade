@@ -90,8 +90,11 @@ func runSelfTest() -> Int32 {
     let full = mergeRows(old: [], new: Array(many.prefix(maxWindowRows)))
     let still = mergeRows(old: full, new: Array(many.prefix(maxWindowRows)) + [mk("99", 3099, cores: 5)])
     check(still.map { $0.appId } == full.map { $0.appId }, "at the cap a new app takes no live row's place and no row moves")
-    let gap = mergeRows(old: full, new: Array(many.prefix(maxWindowRows)).filter { $0.appId != "12" } + [mk("99", 3099, cores: 5)])
-    check(gap.count == maxWindowRows && gap[2].appId == "99" && gap[3].appId == full[3].appId, "at the cap a new app reuses the slot of an absent row; the rows around it stay")
+    let drop = Array(many.prefix(maxWindowRows)).filter { $0.appId != "12" } + [mk("99", 3099, cores: 5)]
+    let gap = mergeRows(old: full, new: drop)
+    check(gap.map { $0.appId } == full.map { $0.appId } && !gap[2].present, "at the cap, a row that just went absent keeps its slot (the new app is not shown yet): its button cannot turn into another app's")
+    let gap2 = mergeRows(old: gap, new: drop)
+    check(gap2.count == maxWindowRows && gap2[2].appId == "99" && gap2[3].appId == full[3].appId, "on the next refresh the new app takes the slot that was already absent; the rows around it stay")
     check(!clickAllowed(lastLayout: 100.0, now: 100.3) && clickAllowed(lastLayout: 100.0, now: 100.8), "a click right after a re-layout is ignored")
     check(!buttonRefusesFocus(.wait) && buttonRefusesFocus(.ignore) && buttonRefusesFocus(.quitAll) && buttonRefusesFocus(nil), "only Wait may take keyboard focus; row buttons never")
 

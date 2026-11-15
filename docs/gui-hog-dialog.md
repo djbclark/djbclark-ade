@@ -619,3 +619,8 @@ row, else it is not shown; no row is removed from the middle. (c) *Low, fixed:* 
 Force Quit or Quit N; add to N6(e): press Tab then Space in the sheet: it cancels. (d) *Low, kept on purpose:* the first click on the sampler's window only activates the app (the window never took focus, N7(b)),
 which also protects a click aimed at another window that the dialog appears over; click again. Check in N6 that a click on Wait works within two clicks and that a window shown under the pointer does not act on
 the first click. (e) *Info:* `mergeRows` matches by id and pid, not start time; the row shows what `vet` would check anyway.
+
+N9. **Adversary round 3 (head 1c97da60, BLOCK; repaired).** (a) *Medium: a new app could take a running app's button position in one refresh.* At the cap a slot is now reused only if it was already absent in the
+previous merge, never in the same merge that marks its row absent (the new app waits one refresh, 20 s). (b) *Low, fixed:* the root width is a required constraint (1010 pt, rows about 951 pt), so the main window
+never changes width and a sheet never re-centres; each row clips to its 36 pt and has the lowest vertical clipping resistance, so an app name in a tall-fonted script cannot push or paint over a neighbour.
+(c) *Info:* an app that only dropped out of the busiest-12 list shows "no longer running", as for one that quit; 16 rows plus 8 hold lines can be tall, and the red close button acts as Wait.

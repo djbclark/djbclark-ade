@@ -590,3 +590,12 @@ def test_swift_nothing_above_or_between_the_rows_changes_height_or_width():   # 
         sheet = ui[ui.index(f"func {fn}"):]
         sheet = sheet[:sheet.index("beginSheetModal")]
         assert "buttons[1].refusesFirstResponder = true" in sheet and "initialFirstResponder = a.buttons[0]" in sheet   # Tab then Space cannot reach the destructive button
+
+
+def test_swift_a_slot_is_reused_only_if_it_was_already_absent_before_this_refresh():   # adversary round 3, finding 1
+    model = swift_text()["Model.swift"]
+    body = model[model.index("func mergeRows"):model.index("let maxWindowRows")]
+    assert "old.prefix(cap).enumerated().filter { !$0.element.present }" in body   # the free slots come from OLD, not from the merged rows
+    assert "out[free.removeFirst()] = n" in body
+    ui = swift_text()["UI.swift"]
+    assert "root.widthAnchor.constraint(equalToConstant: rootWidth).isActive = true" in ui and "line.clipsToBounds = true" in ui
