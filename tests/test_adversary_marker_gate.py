@@ -990,3 +990,82 @@ def test_a_decoded_marker_in_a_later_text_is_still_judged(live):
     """Lead review B6c: an earlier text with an escape (and no marker) must not end the decoded scan."""
     assert run("gh api graphql -f note=" + q("one\\ntwo") + " -f query=" + q(_query(APPROVE)), cwd=live)
     assert run("gh api graphql -f note=" + q("one\\ntwo") + " -f query=" + q(_query(BLOCK)), cwd=live) is None
+
+
+# ---- mg-51 repair round 2 (adversary of 45c31a93: A1, A2, A3, B1-B4) -----------------------------------------------------
+
+
+def test_many_cds_that_do_not_run_before_the_real_one_cannot_push_it_out_of_the_read(live):
+    """A1: the visited directories are not capped, so 7+ decoy `cd`s cannot hide the real directory."""
+    (live / "real").mkdir()
+    (live / "real" / "b.md").write_text(APPROVE)
+    decoys = "; ".join("false && cd /nonexistent/d%d" % i for i in range(12))
+    assert run("%s; cd real; false && cd /nonexistent/last; gh pr create --body-file b.md" % decoys, cwd=live)
+    subshells = "; ".join("(cd /n%d)" % i for i in range(12))
+    assert run("%s; (cd real; false && cd /q; gh pr create --body-file b.md)" % subshells, cwd=live)
+
+
+@pytest.mark.parametrize("command", [
+    "[ -n x ] && gh api graphql -f query=%s # don't",
+    "{ gh api graphql -f query=%s; } # don't",
+    "[[ -n x ]] && gh api graphql -f query=%s # don't",
+])
+def test_an_unparseable_command_that_starts_with_a_bracket_is_decoded_like_any_other(live, command):
+    """A2: the GraphQL decode skips only texts `Scan.add` parsed as a whole JSON payload, not texts that merely start with `{` or `[`."""
+    assert run(command % q(_query(APPROVE)), cwd=live)
+    assert run(command % q(_query(BLOCK)), cwd=live) is None
+
+
+def test_a_repeated_operand_is_read_once_per_directory(live, monkeypatch):
+    """A3: 3000 operands naming one file cost one read per visited directory, not 3000 x 10."""
+    calls = []
+    real_read = gate.read_file
+    monkeypatch.setattr(gate, "read_file", lambda path, cwd: calls.append((path, cwd)) or real_read(path, cwd))
+    cmd = "cd sub; cd ..; gh api repos/o/r/issues/1/comments " + " ".join("-F a%d=@live.md" % i for i in range(3000))
+    gate.judge(cmd, str(live), gate._checker)
+    assert len(calls) <= 20, len(calls)
+
+
+def test_a_nul_byte_in_a_path_is_not_a_crash(live):
+    """B1: `expanduser` raises on an embedded NUL; the gate used to fail open on it, with a diagnostic on stderr."""
+    assert run("gh pr create --body %s --body-file ~\x00x" % q(APPROVE), cwd=live)
+    assert run("echo ~\x00x | gh pr comment 1 --body %s" % q(APPROVE), cwd=live)
+
+
+def test_a_shell_heredoc_after_a_cd_reads_its_operands_under_that_directory(live):
+    """B2: `cd real && bash <<X` ran the body under the event cwd."""
+    (live / "real").mkdir()
+    (live / "real" / "b.md").write_text(APPROVE)
+    for delim in ("'X'", "X"):
+        assert run("cd real && bash <<%s\ngh pr create --body-file b.md\nX\n" % delim, cwd=live)
+    (live / "real" / "b.md").write_text("prose only")
+    assert run("cd real && bash <<'X'\ngh pr create --body-file b.md\nX\n", cwd=live) is None
+
+
+def test_a_braced_graphql_escape_verdict_is_denied_past_the_one_by_one_cap(live):
+    """B3: `\\u{41}PPROVE` is APPROVE to GitHub and the checker; past 100 verdict leaves the leaf joins a decoy fence's chunk."""
+    leaves = {"f%d" % i: BLOCK for i in range(gate.MAX_STARTS)}
+    brace = ESC_APPROVE.replace("\\u0041", "\\u{41}")
+    (live / "brace.json").write_text(json.dumps({**leaves, "t": "```", "query": brace, "u": "```"}))
+    assert run("gh api graphql --input brace.json", cwd=live)
+    (live / "brace-ok.json").write_text(json.dumps({**leaves, "t": "```", "query": BLOCK, "u": "```"}))
+    assert run("gh api graphql --input brace-ok.json", cwd=live) is None
+
+
+def test_a_gh_api_read_does_not_decode_the_text_of_a_pr_comment(live):
+    """B4: GitHub stores a pr comment body literally, so quoting the escaped form there is not a live marker."""
+    (live / "r.md").write_text(_gql_literal(APPROVE))
+    assert run("gh api user -q .login; gh pr comment 1 --body-file r.md", cwd=live) is None
+    assert run("gh pr comment 1 --body-file r.md", cwd=live) is None
+
+
+def test_no_operand_file_is_read_once_the_operand_cap_is_spent(live, monkeypatch):
+    """A3: `add` drops a text past the cap, so reading it first only burns the hook's 15 s."""
+    for i in range(10):
+        (live / ("f%d.md" % i)).write_text("prose %d" % i)
+    calls = []
+    real_read = gate.read_file
+    monkeypatch.setattr(gate, "read_file", lambda path, cwd: calls.append(path) or real_read(path, cwd))
+    monkeypatch.setattr(gate, "MAX_FORCED", 2)
+    gate.judge("gh api repos/o/r/issues/1/comments " + " ".join("-F a%d=@f%d.md" % (i, i) for i in range(10)), str(live), gate._checker)
+    assert len(calls) <= 4, calls
