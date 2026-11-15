@@ -973,3 +973,71 @@ def test_gs02_unclosed_test_blocks_are_linear():
         mod.drop_test_blocks(blob + " echo ok")
         assert time.monotonic() - t0 < 2, blob[:3]
 
+
+
+@pytest.mark.parametrize("command", [
+    "python3 wait_check.py > out 2>&1 &",
+    "sleep 5 &",
+    "sleep 5 & echo next",
+    "sleep 5 &\necho next",
+    "nohup sleep 5 &",
+    "setsid sleep 5 > log 2>&1 &",
+    "( sleep 5 & )",
+    "{ sleep 5 & }",
+    "echo $(sleep 5 &)",
+    "curl http://h/x?a=1&b=2",
+    "echo a && sleep 5 &",
+    "sleep 1 & wait; sleep 5 &",
+    "job > log 2>&1 & wait-file --timeout 600 log",
+    "sleep 1 & wait.sh",
+    "sleep 1 & wait-for x",
+    "sleep 1 &\nsleep 5 &\nwait\nsleep 9 &",
+])
+def test_job_control_background_is_denied(command):
+    out = run(command)
+    assert out and out["permissionDecision"] == "deny", command
+    assert "run_in_background" in out["permissionDecisionReason"]
+    assert "Nothing ran" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "a && b",
+    "make 2>&1 | tail -3",
+    "echo x >&2",
+    "cmd &>file",
+    "cmd &>>file",
+    "a |& b",
+    "cat <&3",
+    "x=${y//&/z}; echo $x",
+    "[[ a == a && b == b ]] && echo ok",
+    "echo 'a & b'",
+    'echo "a & b"',
+    "echo $'a & b'",
+    "curl 'http://h/x?a=1&b=2'",
+    "cat <<'EOF'\nsleep 5 &\nEOF",
+    "echo hi # sleep 5 &",
+    "echo kill %1 and disown",
+    "echo 'disown; sleep 5 &'",
+    "echo a\\&b",
+    "echo $((6 & 3))",
+    "sleep 1 & sleep 2 & wait",
+    "for n in 1 2; do sleep $n & done\nwait",
+    "sleep 1 &\nwait $!",
+    "sleep 1 & wait",
+    "sleep 1 & wait; echo done",
+    "(sleep 1 & wait)",
+    "case $x in a) echo a;& b) echo b;; esac",
+    "case $x in a) echo a;;& b) echo b;; esac",
+])
+def test_non_background_ampersands_pass(command):
+    assert not denied(command), command
+
+
+def test_specific_reason_wins_over_background_deny():
+    out = run("open x &")
+    assert out and "bin/open-clean" in out["permissionDecisionReason"]
+
+
+def test_background_reason_names_timeout_and_long_job_routes():
+    reason = run("sleep 5 &")["permissionDecisionReason"]
+    assert "7200000" in reason and "bin/ade-sched" in reason

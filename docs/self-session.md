@@ -166,7 +166,7 @@ If `agent archive` answers the structured error code `AGENT_RUNNING` (the predec
 sample; nothing was archived), `finish` returns to the stable-idle wait and retries inside the same bound; the
 refusal is kept as `native_error` meanwhile and moves to `resolved_native_error` on success. Classification is
 by the envelope `code`, never by message text, and an `AGENT_RUNNING` whose message names another agent (Paseo
-resolved the archive to a different one, the case below) is not retried; with `--stable 0` the retry still sleeps
+resolved the archive to a different one, the case below) is not retried and is recorded as `ARCHIVE_RESOLVED_OTHER_AGENT`, which is not a wait (the send guard's redirect ends at once). A non-waiting earlier reason (`LISTING_GAP`, drift) is moved to `resolved_native_error` when a re-run's first check passes; a waiting one (`AGENT_RUNNING`, `PREDECESSOR_NOT_IDLE`) stays, so the redirect holds while the re-run waits; with `--stable 0` the retry still sleeps
 and still obeys the bound. On timeout `finish` raises ("never stayed idle ... both sessions
 preserved"), records `native_error.code = PREDECESSOR_NOT_IDLE`, exits non-zero and keeps the transaction status
 (`archive-unknown` once an archive was attempted, `acknowledged` when the predecessor never became idle); re-run
