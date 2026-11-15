@@ -902,11 +902,27 @@ def _later_resets(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[st
 UNMEASURED_WINDOW = "(unmeasured)"
 
 
+def _identity(account: Any, family: Any = None) -> tuple[str | None, Any]:
+    """Who a quota reading belongs to: (account, pool family). A blank or non-string account is None (unidentified)."""
+    return (account.strip() or None) if isinstance(account, str) else None, family
+
+
+def _folds_as_accounts(seen: list[tuple[str | None, Any]], who: tuple[str | None, Any]) -> bool:
+    """Whether a reading folds into a pool key as ANOTHER account (`_merge_pool(accounts=True)`, fail closed).
+
+    `seen` lists the identities already folded under the key. Only a reading of an identified account and family that is
+    the SAME as every one already folded is a repeat of the same quota (known beats unknown); nothing folded yet is no
+    merge at all, and an unidentified account (no `account`/`id`) cannot be shown to be the same, so it counts as another
+    one (rt-01 D1 behaviour, kept)."""
+    return bool(seen) and not (who[0] is not None and all(s == who for s in seen))
+
+
 def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any], *, accounts: bool = False) -> None:
     """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind.
 
-    `accounts=False` (several readings of one pool that are not known to be accounts: aiuse + Paseo, two Paseo reports): windows
-    fold with `_merge_caps`, the tighter KNOWN reading. `accounts=True` (two ACCOUNTS of one pool, `--available` rows): windows fold with `_merge_windows`, a window
+    `accounts=False` (several readings of the SAME quota: aiuse + Paseo, a repeated report of one account): windows
+    fold with `_merge_caps`, the tighter KNOWN reading. `accounts=True` (two ACCOUNTS of one pool, or readings that
+    cannot be shown to be one: `_folds_as_accounts`): windows fold with `_merge_windows`, a window
     either account cannot measure stays None, and when either row's `remaining` is unknown the pool also gets one
     `UNMEASURED_WINDOW` None window, so the measured account cannot open the plenty gate alone while Paseo may launch on
     the unmeasured one (D1 of the PR 698 review, 2026-11-14)."""
@@ -949,7 +965,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
     foreign: list[tuple[str, float]] = []
     errored: set[str] = set()                       # providers with an error row: an account whose quota is unknown
     key_provider: dict[str, str] = {}               # pool key -> the provider whose rows built it
-    cap_only: set[str] = set()                      # pool keys whose entry so far is a model-cap row alone, no account
+    seen: dict[str, list[tuple[str | None, Any]]] = {}   # pool key -> (account, family) of each non-cap row folded in
     for row in rows:
         name = row.get("provider")
         if not name:
@@ -1021,13 +1037,13 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
                 if cap.get("available_at"):
                     entry["sublimit_resets"] = {**(entry.get("sublimit_resets") or {}),
                                                 cap["pool_family"]: cap["available_at"]}
-        # a cap-only row is no account: two real rows of one pool key are two accounts (an account has one row per family)
-        first = key not in pools
-        _merge_pool(pools, key, entry, accounts=not cap_row and key not in cap_only)
-        if cap_row and first:
-            cap_only.add(key)
-        elif not cap_row:
-            cap_only.discard(key)
+        # a model-cap row is no account (it has no reading of its own); every other row is one, told apart by `account`
+        if cap_row:
+            _merge_pool(pools, key, entry)
+        else:
+            who = _identity(row.get("account") or row.get("account_id"), family)
+            _merge_pool(pools, key, entry, accounts=_folds_as_accounts(seen.setdefault(key, []), who))
+            seen[key].append(who)
     for fkey, rem in foreign:
         cur = pools.get(fkey)
         if cur is not None and cur.get("remaining") is not None and rem < cur["remaining"]:
@@ -1514,9 +1530,15 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
     binding window's `resetsAt`; a window naming a SUBLIMIT_FAMILIES model (Claude's Fable) is a cap of that model, not
     a window of the pool. A report older than STALE_SOFT (`fetchedAt`) keeps only an exhausted window. Any other status,
     or a row without a report, is UNKNOWN: `remaining` None and `unknown` saying why, never a pass. `icon` (inline SVG)
-    and `loginErrors` are dropped."""
+    and `loginErrors` are dropped.
+
+    Reports of one service are told apart by the row's `id` (`claude:<account>`; `sourceId` is only the provider): a
+    repeat of the same `id` re-reads one account (known beats unknown, `_merge_caps`), a different or missing `id` is
+    ANOTHER account, folded as one (`_merge_pool(accounts=True)`: the tighter figure, and a report that cannot be read
+    leaves an unmeasured window so the measured account cannot open the plenty gate alone, the D1 rule of `--available`)."""
     now = now or datetime.now(UTC)
     out: dict[str, Any] = {}
+    seen: dict[str, list[tuple[str | None, Any]]] = {}      # service key -> the account `id` of each report folded in
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1524,6 +1546,7 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
         if not isinstance(source, str) or not source:
             continue
         key = _usage_service(source)
+        who = _identity(row.get("id"))
         # Paseo's native Claude report is the subscription's default pool and
         # currently omits family metadata (verified 2026-11-12). Normalize only
         # that source; other providers and explicit families stay fail-closed.
@@ -1553,16 +1576,13 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
             problem = report.get("problem") if isinstance(report.get("problem"), dict) else {}
             entry["unknown"] = (f"paseo usage {source}: report {status or 'missing'}"
                                 + (f" ({problem.get('kind')})" if problem.get("kind") else ""))
-            prior = out.get(key)
-            if prior is None:
-                out[key] = entry
+            _note_unknown(out, seen, key, who, entry)
             continue
         windows, balances = report.get("windows") or [], report.get("balances") or []
         if not isinstance(windows, list) or not isinstance(balances, list):
             # a malformed report measures nothing: this pool reads as Paseo "not read", never a pass
             entry["unknown"] = f"paseo usage {source}: not read (windows or balances is not a list)"
-            if out.get(key) is None:
-                out[key] = entry
+            _note_unknown(out, seen, key, who, entry)
             continue
         stale = age is None or age > STALE_SOFT
         worst: float | None = None
@@ -1603,11 +1623,28 @@ def usage_from_paseo(rows: list[Any], now: datetime | None = None) -> dict[str, 
                 worst, entry["resets_at"] = rem, b.get("resetsAt")
         entry["remaining"] = None if worst is None else round(worst, 1)
         prior = out.get(key)
+        another = _folds_as_accounts(seen.setdefault(key, []), who)
         if prior is not None and prior.get("unknown"):
-            out[key] = entry                        # one available report of a source beats an unknown one
+            out[key] = entry                        # one available report of an account beats an unknown one of it
+            if another:                             # ...but another account's unknown report keeps the pool closed
+                out[key]["windows"] = {**entry["windows"], UNMEASURED_WINDOW: None}
         else:
-            _merge_pool(out, key, entry)
+            _merge_pool(out, key, entry, accounts=another)
+        seen[key].append(who)
     return out
+
+
+def _note_unknown(out: dict[str, Any], seen: dict[str, list[tuple[str | None, Any]]], key: str,
+                  who: tuple[str | None, Any], entry: dict[str, Any]) -> None:
+    """A Paseo report that cannot be read (`entry` carries `unknown`): it stands alone for a service nothing else read, and
+    never loosens or replaces a reading. When the reading beside it is ANOTHER account's, that account is unmeasured, so
+    the pool gets one `UNMEASURED_WINDOW` None window (the plenty gate stays closed) instead of the report being dropped."""
+    prior = out.get(key)
+    if prior is None:
+        out[key] = entry
+    elif _folds_as_accounts(seen.setdefault(key, []), who) and not prior.get("unknown"):
+        prior["windows"] = {**prior["windows"], UNMEASURED_WINDOW: None}
+    seen.setdefault(key, []).append(who)
 
 
 def _fold_paseo(providers: dict[str, Any], paseo: dict[str, Any]) -> None:

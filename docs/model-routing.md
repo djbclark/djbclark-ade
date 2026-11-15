@@ -102,6 +102,21 @@ an exhausted window, as aiuse's own `fresh` rule does.
 D3. The two merge per pool by the same rule aiuse's own rows use (`_merge_pool`): the tightest known reading wins and an
 unknown never loosens or replaces a reading. `route_agent.py show` and the `quota_source.pools` field of
 `plan --json`/`route --json` say which source each pool came from (`aiuse`, `snapshot`, `paseo`, `aiuse+paseo`).
+D3a. **Accounts of one pool (rq-37, 2026-11-15; PR 708 Lows 3 and 4).** Rows and reports are told apart by the account
+they read, not by the pool key. aiuse `--available` rows carry `account` (`account_id` if it is empty); Paseo reports
+carry `id` (`claude:<account>`; `sourceId` is only the provider). A non-cap row or report of an identified account and
+family that repeats what is already folded under the key is one reading of one quota: known beats unknown (`_merge_caps`).
+Any other second row (a different account, or one with no account at all, which cannot be shown to be the same) folds as
+**another account** (`_merge_pool(accounts=True)`, `_folds_as_accounts`): the tighter figure, a window either cannot measure
+stays None, and an unreadable row leaves an `(unmeasured)` None window so the measured account cannot open the plenty
+gate alone. A Fable cap row is no account of its own, so `cap_only` is gone. An unreadable Paseo report of another account
+adds that same marker to a measured pool (before, it was dropped and the pool could open on the other account).
+A2c. **Default frontier order (rq-37, 2026-11-15; PR 708 Low 5).** `plan --kinds frontier` orders the pools that passed
+every gate by `[dispatch.repo_overrides.REPO] frontier_order` when the repository declares one (only tendcf: Astra,
+Fable, Argon). A repository with none (the default, and `--repo` omitted) has no order: the router's score decides, so a
+claude burn-first bonus can put Fable ahead of a usable Astra, and a fallback (Argon) always sorts behind the pools it
+sits behind. That default is intended (a fixed order is a per-repository rule, not a fleet rule); it is pinned by
+`tests/test_route_agent_rt01.py`.
 D4. Pausing a session at a quota limit and continuing it after the reset is the Paseo plugins' job (session-guard,
 usage-auto-resume; PLAN D4). The fleet governor (`level` → no claude code slices), the quota guard (`ok/watch/tight/
 critical` and its state file) and gate profiles (the `away` profile) were deleted on 2026-11-07.
