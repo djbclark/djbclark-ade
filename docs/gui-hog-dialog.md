@@ -594,10 +594,20 @@ N6. **The operator's H4 run (NOT DONE; 3b must not merge without it).** Use a sc
 `export LW_GUI_HOG_BUNDLE="$HOME/gui-hog-test/ADE GUI Hog.app"`, `bin/ade-gui-build --force`, then in the same shell:
 (a) `bin/gui-hog demo`: a window with the header `Load 9.8 / 10.4 / 11.2 (10 cores) · CPU 5-min avg 7.9 cores`, an orange DEMO line, `bg, held 4 min for pageins, swapins`, four made-up rows (the
 second greyed with "has a terminal or build inside: no actions", the fourth "no longer running" and its name shown without the control and bidi characters), `+3 more · 4 protected apps hidden`; Quit on a
-row says "demo: nothing was touched". (b) Press Return, keypad Enter and Escape: nothing happens. Tab to Wait (focus ring) and press Space: the window closes (with Full Keyboard Access off, click Wait):
+row says "demo: nothing was touched". (b) Press Return, keypad Enter and Escape: nothing happens. Wait is the only control that takes keyboard focus (round 1, N7): press Tab, then Space: the window closes (or click Wait); no other control ever shows a focus ring:
 exit 0, `cat ~/.local/state/load-watch/gui-hog/last-exit.json` is not written by demo. (c) Ignore needs a real window: `bin/gui-hog status` (sampler running), then `bin/gui-hog show --all`, click
 Ignore 1 h: the window closes; `cat ~/.local/state/load-watch/gui-hog/snooze.json` has `snooze_until` about an hour ahead and `last-exit.json` has code 3. (d) Open TextEdit, type text without saving,
 let the sampler see it (a few ticks), `bin/gui-hog show --all`, click Quit on TextEdit: TextEdit's own save sheet appears and nothing is lost; a row for TextEdit appears only if the sampler saw it.
 (e) Click Force Quit… on any harmless app: a sheet naming the app and the loss, **Cancel highlighted**; Return and Escape both cancel; the app keeps running. (h) Ghostty (protected) never appears as a
 row; the footer counts it under "N protected apps hidden". (i) The window is shown only by the sampler when the operator owns `/dev/console` (tested by `gui_ok=False` in pytest); over SSH from another
 machine `bin/gui-hog show` has no window server: check that it does not hang and `last-exit.json` reads code 69. Rollback after the run: `unset LW_GUI_HOG_BUNDLE; rm -rf ~/gui-hog-test`.
+
+N7. **Adversary round 1 (head f3abd9cd, BLOCK; repaired).** (a) *Medium: a click could land on another app.* The window re-sorted its rows on every 20 s snapshot and kept the bottom-left corner on a
+resize, so a row could slide under the pointer. Now `mergeRows` keeps the first-seen order (a row that leaves the snapshot stays, marked "no longer running", with no actions; a new app is appended at the
+bottom; 30 rows at most), a resize keeps the top-left corner, and a click within 0.7 s of a re-layout is ignored (`clickAllowed`; Wait is exempt). (b) *Medium: Tab then Space could press Ignore or a row's Quit* (Full Keyboard Access is on
+on this Mac). Every button except Wait now has `refusesFirstResponder`; the sampler's window is shown with `orderFrontRegardless()` and does not activate the app, so it cannot take typed keys from another
+program (only the operator's own `show` and `demo` activate). A click still works and activates it. (c) *Low, fixed:* `dialog.log` opens `O_NONBLOCK` and must be a regular file (else `launch` reads `log-unsafe`);
+`last_shown` is set before the launch and the log line; option values are passed as `--app=NAME` so a name starting with `-` still logs; the stored bundle path is clipped at 200, not 120 (a longer one made `vet` refuse the
+app); the vet timeout is 45 s (ps 15 s + lsappinfo 5 s + ps 2 s + start-up). (d) *Low, accepted and documented:* between `vet`'s live process walk and `terminate()` (seconds under load) a terminal or build started
+inside the app is not seen again by the Swift re-check (which covers pid, start time, bundle id, launch date, not children); a Force Quit in that window kills it. The operator clicked on a named app and
+confirmed; the window is short. (e) *Low, not changed:* the window keeps refreshing numbers after the hold ends (until it closes itself 2 min later, E4), which is harmless.

@@ -513,3 +513,66 @@ def test_the_sampler_leaves_a_manual_snapshot_alone_while_its_window_is_open(tmp
         os.close(fd)
     run_ticks(state, {}, table, ls, 1, NOW + 460, launch=False)   # the window is closed: the sampler writes its own snapshot again
     assert json.loads((state / "gui-hog" / "snapshot.json").read_text())["manual"] is False
+
+
+# ---- adversary round 1 repairs ------------------------------------------------------------------------------------------------------------------------
+def test_a_fifo_at_dialog_log_does_not_block_the_sampler_or_start_a_dialog(tmp_path, monkeypatch):   # finding 4
+    state, table, ls = setup_live(tmp_path, monkeypatch)
+    (state / "gui-hog").mkdir(mode=0o700, exist_ok=True)
+    os.mkfifo(state / "gui-hog" / "dialog.log")
+    launches = []
+    run_ticks(state, {}, table, ls, 3, NOW + 400, popen=lambda *a, **k: launches.append(1))   # would hang forever without O_NONBLOCK
+    assert launches == [] and json.loads((state / "gui-hog" / "dry-run.jsonl").read_text().splitlines()[0])["launch"] == "log-unsafe"
+
+
+def test_the_dialog_does_not_come_back_every_tick_when_the_log_line_fails(tmp_path, monkeypatch):   # finding 6
+    state, table, ls = setup_live(tmp_path, monkeypatch)
+    launches = []
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(gh, "dry_run_append", boom)
+    st = {}
+    for i in range(4):
+        try:
+            run_ticks(state, st, table, ls, 1, NOW + 400 + i * 20, popen=lambda *a, **k: launches.append(1))
+        except OSError:
+            pass
+        gh.hold_write(state, os.getpid(), "S", "bg", NOW - 400, ["pageins"], NOW + 400 + i * 20)
+    assert len(launches) == 1
+
+
+def test_a_long_bundle_path_is_not_clipped_so_vet_can_still_match_it(tmp_path):   # finding 7
+    long = "/Applications/" + "x" * 150 + ".app"
+    assert len(long) > 120 and gh.clean(long, 200) == long
+    src = (BIN / "gui_hog.py").read_text()
+    assert src.count('clean(a["bundle_path"] or "", 200)') == 1 and src.count('clean(m.get("p", ""), 200)') == 1
+
+
+def test_the_cli_takes_an_app_name_that_starts_with_a_dash(tmp_path):   # finding 5
+    state = tmp_path / "s"
+    state.mkdir(mode=0o700)
+    r = subprocess.run([sys.executable, str(BIN / "gui-hog"), "log", "--event=quit", "--app=-x", "--bundle-id=-y"], capture_output=True, text=True,
+                       env=dict(os.environ, LW_STATE_DIR=str(state)))
+    assert r.returncode == 0, r.stderr
+    ev = json.loads((state / "gui-hog" / "events.jsonl").read_text().splitlines()[0])
+    assert ev["app"] == "-x" and ev["bundle_id"] == "-y"
+
+
+def test_swift_rows_keep_their_order_and_buttons_never_move_under_the_pointer():   # findings 1 and 2
+    model, ui = swift_text()["Model.swift"], swift_text()["UI.swift"]
+    assert "func mergeRows(" in model and "let clickGraceS = 0.7" in model and "func clickAllowed(" in model
+    assert "rows = mergeRows(old: rows, new: s.rows)" in ui and "snap.rows" not in ui   # the window shows the merged rows, never the re-sorted snapshot
+    assert ui.count("clickAllowed(lastLayout:") >= 3   # Quit, Force Quit and the non-Wait bottom buttons
+    assert "setFrameTopLeftPoint(" in ui
+    assert "b.refusesFirstResponder = true" in ui and "refusesFirstResponder = buttonRefusesFocus(spec.action)" in ui
+    ob = ui[ui.index("if cfg.manual || cfg.demo {"):]
+    assert "NSApp.activate(" in ob[:ob.index("} else {")] and "orderFrontRegardless()" in ob[ob.index("} else {"):][:80]   # a sampler-opened window never steals focus
+    assert ui.count("NSApp.activate(") == 1
+    assert "timeout: 45" in swift_text()["Actions.swift"]
+
+
+def test_swift_argv_values_are_joined_to_their_option(tmp_path):   # finding 5
+    model = swift_text()["Model.swift"]
+    for opt in ('"--pid="', '"--start="', '"--bundle-id="', '"--bundle-path="', '"--event="', '"--app="'):
+        assert opt in model

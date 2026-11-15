@@ -23,6 +23,8 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var root = NSStackView()
     var waitButton: NSButton?
     var snap = Snapshot(t: 0, load: nil, ncpu: nil, cpu5m: nil, holds: [], rows: [], more: 0, protectedHidden: 0, rssTrigger: false)
+    var rows: [Row] = []        // the rows on screen: first-seen order, never re-sorted (mergeRows)
+    var lastLayout = Date()     // when the buttons were last laid out (clickAllowed)
     var lastBytes = Data()
     var status: [String: String] = [:]
     var acted = false
@@ -45,9 +47,15 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentView = root
         refresh(force: true)
         window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        if let w = waitButton { window.makeFirstResponder(w) }
+        // A window the sampler opens must not take the keyboard from whatever the operator is typing into (adversary round 1, finding 2):
+        // it is shown at the floating level without activating the app. A click on it activates it. The operator's own `show`/`demo` activates.
+        if cfg.manual || cfg.demo {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if let w = waitButton { window.makeFirstResponder(w) }
+        } else {
+            window.orderFrontRegardless()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh(force: false) }
     }
 
@@ -61,7 +69,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let h = try? FileHandle(forReadingFrom: url) {
             let data = (try? h.read(upToCount: 1_000_000)) ?? Data()
             try? h.close()
-            if (force || data != lastBytes), let s = parseSnapshot(data) { snap = s; lastBytes = data; rebuild() }
+            if (force || data != lastBytes), let s = parseSnapshot(data) { snap = s; rows = mergeRows(old: rows, new: s.rows); lastBytes = data; rebuild() }
         }
         if snap.holds.isEmpty && !cfg.manual && !cfg.demo {
             if noHoldSince == nil { noHoldSince = Date(); rebuild() }
@@ -87,6 +95,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         b.tag = tag
         b.keyEquivalent = ""
         b.isEnabled = enabled
+        b.refusesFirstResponder = true   // only Wait takes focus (buttonRefusesFocus): Tab then Space can press nothing else
         return b
     }
 
@@ -104,7 +113,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                        label("CPU now", size: 11, color: .secondaryLabelColor, width: 70, align: .right), label("RAM", size: 11, color: .secondaryLabelColor, width: 70, align: .right)])
         head.spacing = 10
         root.addArrangedSubview(head)
-        for (i, r) in snap.rows.enumerated() {
+        for (i, r) in rows.enumerated() {
             let note = rowNote(r)
             let dim: NSColor = note == nil ? .labelColor : .tertiaryLabelColor
             let nameBox = NSStackView(views: [label(r.name, weight: .medium, color: dim), label(r.bundleId.isEmpty ? "no bundle id" : r.bundleId, size: 10, color: .secondaryLabelColor)])
@@ -133,8 +142,9 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addArrangedSubview(NSBox.separator())
         var bottom: [NSView] = []
         for (i, spec) in bottomButtons.enumerated() {
-            let b = button(spec.title, tag: i, action: #selector(bottomPressed(_:)), enabled: !(spec.action == .quitAll && quitAllTargets(snap.rows).isEmpty))
+            let b = button(spec.title, tag: i, action: #selector(bottomPressed(_:)), enabled: !(spec.action == .quitAll && quitAllTargets(rows).isEmpty))
             b.keyEquivalent = spec.keyEquivalent
+            b.refusesFirstResponder = buttonRefusesFocus(spec.action)
             if spec.action == .wait { waitButton = b }
             bottom.append(b)
         }
@@ -142,8 +152,13 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         bar.spacing = 12
         root.addArrangedSubview(bar)
         window?.layoutIfNeeded()
-        if let w = window, let c = w.contentView { w.setContentSize(c.fittingSize) }
-        if let w = waitButton { window?.makeFirstResponder(w) }
+        if let w = window, let c = w.contentView {
+            let topLeft = NSPoint(x: w.frame.minX, y: w.frame.maxY)   // a resize keeps the TOP-left fixed, so the rows above never move
+            w.setContentSize(c.fittingSize)
+            if w.isVisible { w.setFrameTopLeftPoint(topLeft) }
+        }
+        if let w = waitButton, window?.isKeyWindow == true { window?.makeFirstResponder(w) }
+        lastLayout = Date()
     }
 
     // MARK: actions
@@ -158,6 +173,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func bottomPressed(_ sender: NSButton) {
         guard sender.tag >= 0 && sender.tag < bottomButtons.count else { return }
+        if bottomButtons[sender.tag].action != .wait && !clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) { return }
         for e in effects(for: bottomButtons[sender.tag].action) {
             switch e {
             case .close(let c): finish(c)
@@ -209,15 +225,15 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func quitPressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < snap.rows.count else { return }
-        let r = snap.rows[sender.tag]
+        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        let r = rows[sender.tag]
         guard rowActionsAllowed(r) else { return }
         quit(r, kind: .polite) {}
     }
 
     @objc func forcePressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < snap.rows.count else { return }
-        let r = snap.rows[sender.tag]
+        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        let r = rows[sender.tag]
         guard rowActionsAllowed(r) else { return }
         let a = NSAlert()
         a.alertStyle = .warning
@@ -232,7 +248,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func confirmQuitAll() {
-        let targets = quitAllTargets(snap.rows)
+        let targets = quitAllTargets(rows)
         guard !targets.isEmpty else { return }
         let a = NSAlert()
         a.alertStyle = .warning

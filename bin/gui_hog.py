@@ -662,7 +662,7 @@ def window_update(st, t, apps, total_cores, cfg):
     meta = st.get("app_meta") if isinstance(st.get("app_meta"), dict) else {}
     for a in apps:
         if a["id"] in row:
-            meta[a["id"]] = {"n": clean(a["name"]), "b": clean(a["bundle_id"] or "", 80), "p": clean(a["bundle_path"] or "", 120)}
+            meta[a["id"]] = {"n": clean(a["name"]), "b": clean(a["bundle_id"] or "", 80), "p": clean(a["bundle_path"] or "", 200)}
     live = {pid for x in keep for pid in x["a"]}
     st["app_meta"] = {k: v for k, v in meta.items() if k in live}
 
@@ -696,7 +696,7 @@ def window_means(st, t, cfg):
         it, m = last[pid], meta.get(pid, {}) if isinstance(meta.get(pid, {}), dict) else {}
         flag = it[2] if len(it) > 2 and isinstance(it[2], int) else 0
         here = pid in latest and isinstance(latest[pid], list) and len(latest[pid]) >= 2 and _fin(latest[pid][0]) and _fin(latest[pid][1])
-        out.append({"id": pid, "name": clean(m.get("n", pid)), "bundle_id": clean(m.get("b", ""), 80), "bundle_path": clean(m.get("p", ""), 120),
+        out.append({"id": pid, "name": clean(m.get("n", pid)), "bundle_id": clean(m.get("b", ""), 80), "bundle_path": clean(m.get("p", ""), 200),
                     "cores_5m": s / n, "rss_mb": int(it[1]) if here else 0, "cpu_now": float(latest[pid][0]) if here else 0.0, "present": bool(here),
                     "protected": bool(flag & 1), "hosts_build": bool(flag & 2), "excluded": None})
     out.sort(key=lambda a: -a["cores_5m"])
@@ -1037,7 +1037,13 @@ def launch_dialog(state_dir, *, bundle=None, extra=(), popen=subprocess.Popen, p
             os.unlink(logp)
     except OSError:
         pass
-    errfd = os.open(logp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:   # O_NONBLOCK: a FIFO planted at dialog.log must fail the open, not block the sampler (adversary round 1, finding 4)
+        errfd = os.open(logp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        return False, "log-unsafe"
+    if not stat.S_ISREG(os.fstat(errfd).st_mode):
+        os.close(errfd)
+        return False, "log-unsafe"
     try:
         argv = [str(bundle_exe(bundle)), "--state-dir", str(state_dir), "--python", python or sys.executable,
                 "--gui-hog", str(Path(__file__).resolve().parent / "gui-hog"), *extra]
@@ -1198,6 +1204,7 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
         else:
             ok = gui_session(my_uid) if gui_ok is None else gui_ok
             line["launch"] = "off" if not launch else ("no-gui" if not ok else "pending")
+            gh["last_shown"] = t   # before the launch and the log line: a failure in either must not make the dialog return every 20 s
             if launch and ok:
                 try:
                     started, why = launch_dialog(state_dir, popen=popen)

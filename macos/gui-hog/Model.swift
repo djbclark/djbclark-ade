@@ -131,14 +131,43 @@ func quitAllTargets(_ rows: [Row]) -> [Row] { rows.filter(rowActionsAllowed) }
 
 // MARK: argv lists for `bin/gui-hog` (D4, J2): arrays, never a shell string
 
+// Option values are joined with `=` so a value that starts with `-` (an app named "-x") is never read by argparse as another option.
 func vetArgv(_ r: Row) -> [String] {
-    ["vet", "--pid", String(r.rootPid), "--start", r.rootStart, "--bundle-id", r.bundleId, "--bundle-path", r.bundlePath]
+    ["vet", "--pid=" + String(r.rootPid), "--start=" + r.rootStart, "--bundle-id=" + r.bundleId, "--bundle-path=" + r.bundlePath]
 }
 func snoozeArgv() -> [String] { ["snooze", "--minutes", "60"] }
 func exitArgv(_ code: Int32) -> [String] { ["record-exit", "--code", String(code)] }
 func logArgv(_ event: String, _ r: Row?) -> [String] {
-    ["log", "--event", event, "--by", "dialog"] + (r.map { ["--app", $0.name, "--bundle-id", $0.bundleId] } ?? [])
+    ["log", "--event=" + event, "--by", "dialog"] + (r.map { ["--app=" + $0.name, "--bundle-id=" + $0.bundleId] } ?? [])
 }
+
+// MARK: a stable window (adversary round 1, finding 1)
+
+/// The rows the window shows: the order they were first seen in, never re-sorted, so a Quit button never moves under the pointer. A row's numbers are
+/// refreshed from the newest snapshot; a row the newest snapshot no longer lists stays, marked absent (no actions); an app seen for the first time is
+/// appended at the bottom. At most `cap` rows: the oldest absent rows go first.
+func mergeRows(old: [Row], new: [Row], cap: Int = 30) -> [Row] {
+    var fresh: [String: Row] = [:]
+    for r in new where !r.appId.isEmpty { fresh[r.appId] = r }
+    var out: [Row] = old.map { o in
+        if let n = fresh[o.appId], n.rootPid == o.rootPid { return n }
+        var gone = o
+        gone.present = false
+        gone.cpuNow = 0
+        return gone
+    }
+    let known = Set(old.map { $0.appId })
+    out += new.filter { !known.contains($0.appId) }
+    while out.count > cap, let i = out.firstIndex(where: { !$0.present }) { out.remove(at: i) }
+    return Array(out.prefix(cap))
+}
+
+/// A click that lands within this many seconds of the last layout is ignored: the buttons may have moved since the pointer was aimed.
+let clickGraceS = 0.7
+func clickAllowed(lastLayout: Double, now: Double) -> Bool { now - lastLayout >= clickGraceS }
+
+/// Only Wait may hold keyboard focus (so Return, Space and Tab never press Ignore, Quit All or a row's Quit). A click on any button still works.
+func buttonRefusesFocus(_ a: BottomAction?) -> Bool { a != .wait }
 
 // MARK: the bottom row (E3, B4)
 

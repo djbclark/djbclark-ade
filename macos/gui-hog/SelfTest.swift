@@ -52,9 +52,11 @@ func runSelfTest() -> Int32 {
     // argv tables (J2: arrays)
     let row = Row(appId: "812", name: "Slack", bundleId: "com.tinyspeck.slackmacgap", bundlePath: "/Applications/Slack.app", rootPid: 812,
                   rootStart: "Fri Nov 14 18:02:11 2026", rootStartEpoch: 1794765731, cores5m: 1, cpuNow: 1, rssMb: 1, present: true, hostsBuild: false, frozen: false)
-    check(vetArgv(row) == ["vet", "--pid", "812", "--start", "Fri Nov 14 18:02:11 2026", "--bundle-id", "com.tinyspeck.slackmacgap", "--bundle-path", "/Applications/Slack.app"], "vet argv")
+    check(vetArgv(row) == ["vet", "--pid=812", "--start=Fri Nov 14 18:02:11 2026", "--bundle-id=com.tinyspeck.slackmacgap", "--bundle-path=/Applications/Slack.app"], "vet argv")
     check(snoozeArgv() == ["snooze", "--minutes", "60"] && exitArgv(4) == ["record-exit", "--code", "4"], "snooze and exit argv")
-    check(logArgv("quit", row).contains("--app") && logArgv("ignore", nil) == ["log", "--event", "ignore", "--by", "dialog"], "log argv")
+    check(logArgv("quit", row).contains("--app=Slack") && logArgv("ignore", nil) == ["log", "--event=ignore", "--by", "dialog"], "log argv")
+    var dash = row; dash.name = "-x"; dash.bundleId = "-y"
+    check(logArgv("quit", dash).contains("--app=-x") && logArgv("quit", dash).contains("--bundle-id=-y") && vetArgv(dash).contains("--bundle-id=-y"), "a value that starts with a dash stays one argument with its option")
 
     // the bottom row: Wait is leftmost, the default, and does nothing (E3, B4)
     check(bottomButtons.map { $0.title } == ["Wait", "Ignore 1 h", "Quit All…"], "bottom buttons are Wait, Ignore, Quit All in that order")
@@ -64,6 +66,29 @@ func runSelfTest() -> Int32 {
     check(effects(for: .ignore) == [.run(["snooze", "--minutes", "60"]), .close(3)], "Ignore snoozes then leaves with code 3")
     check(effects(for: .quitAll) == [.confirmQuitAll], "Quit All asks first")
     check(swallowsKey(36) && swallowsKey(76) && swallowsKey(53) && !swallowsKey(49), "Return, Enter and Escape are swallowed; Space is not")
+
+    // a stable window: rows keep first-seen order, buttons never move under the pointer, only Wait takes focus (adversary round 1, findings 1 and 2)
+    func mk(_ id: String, _ pid: Int, cores: Double, present: Bool = true) -> Row {
+        Row(appId: id, name: "App" + id, bundleId: "b" + id, bundlePath: "/Applications/" + id + ".app", rootPid: pid, rootStart: "s", rootStartEpoch: 5,
+            cores5m: cores, cpuNow: 1, rssMb: 1, present: present, hostsBuild: false, frozen: false)
+    }
+    let first = mergeRows(old: [], new: [mk("1", 1001, cores: 2), mk("2", 1002, cores: 1.5), mk("3", 1003, cores: 1)])
+    check(first.map { $0.appId } == ["1", "2", "3"], "the first snapshot sets the order")
+    let swapped = mergeRows(old: first, new: [mk("2", 1002, cores: 3), mk("1", 1001, cores: 1.4), mk("3", 1003, cores: 1)])
+    check(swapped.map { $0.appId } == ["1", "2", "3"], "a new sort order never reorders the rows on screen")
+    check(swapped[1].cores5m == 3 && swapped[0].cores5m == 1.4, "the numbers are refreshed in place")
+    let dropped = mergeRows(old: first, new: [mk("1", 1001, cores: 2), mk("3", 1003, cores: 1)])
+    check(dropped.map { $0.appId } == ["1", "2", "3"] && !dropped[1].present && dropped[1].cpuNow == 0, "a row that left the snapshot stays, marked absent, so the rows below do not move")
+    check(!rowActionsAllowed(dropped[1]), "an absent row offers no actions")
+    let grown = mergeRows(old: first, new: [mk("4", 1004, cores: 9), mk("1", 1001, cores: 2), mk("2", 1002, cores: 1.5), mk("3", 1003, cores: 1)])
+    check(grown.map { $0.appId } == ["1", "2", "3", "4"], "a new app is appended at the bottom, never inserted above a row")
+    let reused = mergeRows(old: first, new: [mk("1", 7777, cores: 2)])
+    check(reused[0].rootPid == 1001 && !reused[0].present, "an id that now has another pid never takes over the old row")
+    var many: [Row] = []
+    for i in 0..<40 { many.append(mk(String(i + 10), 2000 + i, cores: 1)) }
+    check(mergeRows(old: [], new: many).count == 30, "the window is capped")
+    check(!clickAllowed(lastLayout: 100.0, now: 100.3) && clickAllowed(lastLayout: 100.0, now: 100.8), "a click right after a re-layout is ignored")
+    check(!buttonRefusesFocus(.wait) && buttonRefusesFocus(.ignore) && buttonRefusesFocus(.quitAll) && buttonRefusesFocus(nil), "only Wait may take keyboard focus; row buttons never")
 
     // identity (D4, F3)
     let ok = LiveProc(pid: 812, startEpoch: 1794765731, bundleId: "com.tinyspeck.slackmacgap", launchEpoch: 1794765732)

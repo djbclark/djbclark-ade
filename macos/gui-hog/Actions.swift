@@ -44,7 +44,7 @@ final class Runner {
     /// The Python core's verdict on this row (D4a): 0 allowed, 3 protected or part of a build, 4 identity changed, 5 hosts a build or terminal, 6 gone or ps failed.
     func vet(_ r: Row) -> VetResult {
         if cfg.demo { return VetResult(code: 0, reason: "demo") }
-        guard let res = gui(vetArgv(r)) else { return VetResult(code: 6, reason: "the check did not run") }
+        guard let res = gui(vetArgv(r), timeout: 45) else { return VetResult(code: 6, reason: "the check did not run") }
         var reason = ""
         if let d = res.out.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { reason = sanitize(o["reason"] as? String ?? "", limit: 100) }
         return VetResult(code: res.status, reason: reason)
