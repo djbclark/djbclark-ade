@@ -70,7 +70,10 @@ def _read_record(path: Path) -> dict | None:
 
 
 COMPLETED = ("archived",)  # a finished handoff: the only status every consumer but the send guard follows
-ACKNOWLEDGED = ("acknowledged",)  # the successor attested, the predecessor not yet archived (rq-38: peers must stop waking it)
+# The successor attested, the predecessor not yet archived (rq-38: peers must stop waking it). `finish` saves `archive-unknown`
+# before every `agent archive` call and keeps it after Paseo refuses with AGENT_RUNNING, so that status counts too, but only
+# with a waiting `native_error` (see _ack_is_fresh): a crashed archive with no recorded reason has an unknown outcome.
+ACKNOWLEDGED = ("acknowledged", "archive-unknown")
 # An `acknowledged` record is only a link while it can still be about to finish: `finish` waits at most 25 min for an idle
 # predecessor, so the window is generous at one hour. Past it (or after any recorded failure but a wait) the handoff is taken as
 # abandoned and the predecessor is the real lead again: no command ends an `acknowledged` record, so age is the only ending.
@@ -80,7 +83,7 @@ ACK_WAIT_CODES = ("PREDECESSOR_NOT_IDLE", "AGENT_RUNNING")  # the `native_error`
 
 
 def _ack_is_fresh(record: dict) -> bool:
-    """An `acknowledged` record counts as a handoff in progress: `acknowledged_at` (written by `accept`) is a recent UTC stamp and
+    """An `acknowledged` (or `archive-unknown` refused for waiting) record counts as a handoff in progress: `acknowledged_at` (written by `accept`) is a recent UTC stamp and
     `finish` has recorded no failure other than waiting for the predecessor. A record without the stamp is no link."""
     stamp = record.get("acknowledged_at")
     if not isinstance(stamp, str):
@@ -93,7 +96,9 @@ def _ack_is_fresh(record: dict) -> bool:
     if age > ACK_WINDOW_SECONDS or age < -ACK_CLOCK_SKEW:
         return False
     error = record.get("native_error")
-    return error is None or (isinstance(error, dict) and error.get("code") in ACK_WAIT_CODES)
+    if error is None:
+        return record.get("status") == "acknowledged"  # `archive-unknown` without a recorded reason: unknown outcome, no link
+    return isinstance(error, dict) and error.get("code") in ACK_WAIT_CODES
 
 
 def _link(record: dict | None, predecessor: str, home: Path, statuses: tuple = COMPLETED) -> str | None:

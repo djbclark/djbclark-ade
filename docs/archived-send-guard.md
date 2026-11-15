@@ -23,7 +23,11 @@ record's successor chain) or refused, and never resurrect it.
    Paseo cannot be asked about, leaves the predecessor reachable: a crashed successor must not strand its messages), and (2)
    while the record is fresh: `accept` stamps `acknowledged_at`, the hop ends `ade_lead_succession.ACK_WINDOW_SECONDS` (1 hour;
    `finish` waits at most 25 minutes) later, and ends at once when `finish` recorded a failure other than waiting for the
-   predecessor (`native_error` other than `PREDECESSOR_NOT_IDLE` / `AGENT_RUNNING`). No command ends an `acknowledged` record, so
+   predecessor (`native_error` other than `PREDECESSOR_NOT_IDLE` / `AGENT_RUNNING`; the very first `finish` check is recorded too, so
+   checkpoint, HEAD or mode drift ends the redirect immediately). The statuses that count are `acknowledged` and, because `finish`
+   saves `archive-unknown` before every archive call and keeps it after Paseo's `AGENT_RUNNING` refusal (the case a peer's message
+   causes), `archive-unknown` **only with** one of those two waiting errors: an `archive-unknown` with no recorded reason (a crashed
+   archive, unknown outcome) or any other error is no link. No command ends an `acknowledged` record, so
    a handoff that stays stuck (checkpoint or HEAD changed, mode drift) hands the predecessor its mail back after the hour; a
    record without the stamp (written before rq-38) is no link. Hops chain with completed ones, and a cycle among them is
    `refuse`. Only the send guard reads `acknowledged` records

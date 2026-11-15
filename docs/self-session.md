@@ -200,7 +200,7 @@ nothing itself, so there is no automatic notice at accept: decided, kept small).
 
 **Peers keep writing to the predecessor (rq-38, 2026-11-15).** From `acknowledged` on, `bin/ade_send_guard.py` redirects a send
 addressed to the predecessor to the successor (before that, `awaiting-ack`, it passes; after `finish`, the completed link redirects
-as before), while the record is fresh: `accept` stamps `acknowledged_at` once (a repeat keeps the first stamp), and the redirect ends an hour later or at once when `finish` records a failure other than waiting (a stuck handoff has no ending state, so age is the only way back). The wake-ups had stretched `finish`'s idle wait (five done notices, about 15 minutes). Details, the liveness check on the
+as before), while the record is fresh: `accept` stamps `acknowledged_at` once (a repeat keeps the first stamp), and the redirect ends an hour later or at once when `finish` records a failure other than waiting (a stuck handoff has no ending state, so age is the only way back; the first `finish` check is recorded too, so drift ends it at once). It also counts `archive-unknown` when `native_error` is `AGENT_RUNNING` or `PREDECESSOR_NOT_IDLE`, because `finish` saves that status before each archive call and keeps it after Paseo refuses with `AGENT_RUNNING`. The wake-ups had stretched `finish`'s idle wait (five done notices, about 15 minutes). Details, the liveness check on the
 successor and the unchanged readers of completed links only: docs/archived-send-guard.md.
 
 Only the acknowledged successor may retire its predecessor. The helper rechecks

@@ -188,12 +188,34 @@ def test_a_stuck_acknowledged_handoff_hands_the_predecessor_its_mail_back(world)
     assert decide(world, A, agents).action == guard.PASS
 
 
-@pytest.mark.parametrize("code,redirects", [("PREDECESSOR_NOT_IDLE", True), ("AGENT_RUNNING", True),
-                                            ("LISTING_GAP", False), ("ARCHIVE_FAILED", False)])
-def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, code, redirects):
-    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(),
-               native_error={"op": "finish", "code": code})
+@pytest.mark.parametrize("status,code,redirects", [
+    ("acknowledged", None, True), ("acknowledged", "PREDECESSOR_NOT_IDLE", True),
+    ("acknowledged", "LISTING_GAP", False), ("acknowledged", "ARCHIVE_FAILED", False),
+    # `finish` saves archive-unknown before every archive call and keeps it after Paseo's AGENT_RUNNING refusal (lead review B1)
+    ("archive-unknown", "AGENT_RUNNING", True), ("archive-unknown", "PREDECESSOR_NOT_IDLE", True),
+    ("archive-unknown", None, False),  # a crashed archive with no recorded reason: unknown outcome
+    ("archive-unknown", "ARCHIVE_FAILED", False), ("archive-unknown", "ARCHIVED_OTHER_AGENT", False),
+    ("creation-unknown", None, False), ("awaiting-ack", None, False), ("archive-failed", "AGENT_RUNNING", False),
+])
+def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, status, code, redirects):
+    over = {"native_error": {"op": "finish", "code": code}} if code else {}
+    write_link(world.state, world.home, A, B, status=status, acknowledged_at=stamp(), **over)
     assert (decide(world, A, {A: False, B: False}).action == guard.REDIRECT) is redirects
+
+
+def test_an_unfinished_link_with_a_wrong_predecessor_or_ack_or_successor_record_is_no_redirect(world):
+    """lead review B3: the acknowledged path shares `_link`'s checks with the completed one; a regression that splits them shows here."""
+    agents = {A: False, B: False, C: False}
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(), predecessor=C)  # B3a
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(), ack={"agent_id": C})  # B3b
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    assert decide(world, A, agents).action == guard.REDIRECT  # the same record, sound: the fixtures above are what differ
+
+    def no_archived_key(ident):  # B3c: Paseo answered, but without an Archived field: not known to be live
+        return {"Id": ident} if ident == B else {"Id": ident, "Archived": False}
+    assert guard.decide(A, no_archived_key, state_dir=world.state, home=world.home).action == guard.PASS
 
 
 def test_the_liveness_check_covers_the_end_of_the_successors_own_chain(world):
@@ -594,6 +616,18 @@ def test_a_backstop_denial_is_worded_for_the_backstop_not_as_a_resend(world):
     assert "could not parse" in reason and A in reason and "Re-send" not in reason and f"send to {B}." in reason
     plain = denial(run_hook(world, "Bash", {"command": f"paseo send -- {A} hi"}))  # the parser's own denial keeps its text
     assert "Re-send to" in plain and "could not parse" not in plain
+
+
+def test_a_backstop_denial_never_tells_the_successor_to_send_to_itself(world):
+    """lead review B4 / adversary N3: the unparseable-command branch ran before the self check."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    world.live(**{A: False, B: False})
+    command = f"paseo send -- {C} ok; echo took over from {A}; ls \\"
+    world.live(**{A: False, B: False, C: False})
+    other = denial(run_hook(world, "Bash", {"command": command}))
+    assert f"send to {B}." in other
+    mine = denial(run_hook(world, "Bash", {"command": command}, env={**world.env, "PASEO_AGENT_ID": B}))
+    assert "that is you" in mine and f"send to {B}." not in mine
 
 
 def test_a_backstop_denial_for_an_archived_id_names_the_override_free_exits(world):

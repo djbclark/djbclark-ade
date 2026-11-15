@@ -769,7 +769,6 @@ class Service:
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
                 return record
-            self.check_retirement(record, target)
             deadline = self.clock() + timeout
             refused_running = 0
 
@@ -785,6 +784,10 @@ class Service:
                     record['native_error'] = native_error_record('finish', error)
                     self.save(target, record)
                     raise
+
+            # Recorded like every later re-check (rq-38 B2): a first check that fails (checkpoint, HEAD or mode drift) leaves a
+            # native_error, which ends the send guard's acknowledged redirect at once instead of after its hour.
+            guarded(self.check_retirement, record, target)
 
             def timed_out(seen):
                 message = (f'predecessor {record["predecessor"]} never stayed idle without permission waits for '

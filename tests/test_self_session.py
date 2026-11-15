@@ -1781,3 +1781,45 @@ def test_accept_stamps_acknowledged_at_once_and_a_repeat_keeps_it(setup):
     path.write_text(json.dumps(data))
     accept(service, record, path)
     assert json.loads(path.read_text())['acknowledged_at'] == '2026-01-01T00:00:00Z'
+
+
+def guard_says(service):
+    """What the send guard decides for a send to PRED from the record `finish` has saved so far (paseo stubbed: both live)."""
+    import ade_send_guard as guard
+
+    def inspect(ident):
+        if ident not in (PRED, SUCC):
+            raise LookupError(ident)
+        return {'Id': ident, 'Archived': False}
+    return guard.decide(PRED, inspect, state_dir=service.state, home=service.home).action
+
+
+def test_the_send_guard_redirects_through_every_state_finish_actually_saves_while_waiting(setup):
+    """lead review B1: AGENT_RUNNING leaves `archive-unknown` + native_error AGENT_RUNNING; then PREDECESSOR_NOT_IDLE on timeout."""
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 50
+    seen = []
+    service.progress = lambda message: seen.append((message, json.loads(path.read_text()), guard_says(service)))
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=20, timeout=100, poll=5)
+    refused = [x for x in seen if 'answered AGENT_RUNNING' in x[0]]
+    assert refused
+    for _, saved, action in refused:
+        assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'AGENT_RUNNING'
+        assert action == 'redirect'
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'PREDECESSOR_NOT_IDLE'
+    assert guard_says(service) == 'redirect'
+
+
+def test_a_first_finish_check_that_fails_records_why_and_ends_the_redirect_at_once(setup):
+    """lead review B2 / adversary N1: checkpoint drift on the first `finish` used to leave no native_error (redirect for an hour)."""
+    service, native, path = finished_up_to_archive(setup)
+    assert guard_says(service) == 'redirect'
+    Path(json.loads(path.read_text())['checkpoint']).write_text('tampered before finish\n')
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'acknowledged' and saved['native_error']['op'] == 'finish'
+    assert guard_says(service) == 'pass'
+    assert native.archived == 0

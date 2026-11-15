@@ -433,12 +433,17 @@ def judge(target: str, allow: str | None, backstop: bool = False, replaced: str 
     d = guard.guard(target, env=env, source="hook-precheck")
     if d.action not in (guard.REDIRECT, guard.REFUSE):
         return None
+    me = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if backstop and d.action == guard.REDIRECT and d.target == me:
+        return (f"Blocked by archived_send_gate: this command writes the id {target}, which {d.reason}; that is you, so nothing "
+                f"is to be sent (a message to oneself queues a spurious turn). Only the operator messages the replaced agent "
+                f"({guard.ALLOW_REPLACED_ENV}=<its full id> while it is live).")
     if backstop:
         return (f"Blocked by archived_send_gate: this command mentions `paseo send` in a form the hook could not parse and "
                 f"writes the id {target}, which is not a live agent ({d.reason}). If no send to {target} is meant, leave its "
                 f"id out of the command or split the command; if one is, send to " +
                 (f"{d.target}." if d.action == guard.REDIRECT else "a live agent (it would un-archive and run it)."))
-    if d.action == guard.REDIRECT and d.target == (os.environ.get("PASEO_AGENT_ID") or "").strip():
+    if d.action == guard.REDIRECT and d.target == me:
         return (f"Blocked by archived_send_gate: {d.reason}. {d.target} is you: nothing was sent (a message to oneself queues a "
                 f"spurious turn). Only the operator messages the replaced agent ({guard.ALLOW_REPLACED_ENV}=<its full id> while it is live).")
     if d.action == guard.REDIRECT:
