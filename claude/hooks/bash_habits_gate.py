@@ -1005,7 +1005,8 @@ NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat",
 SEND_WRAPPERS = frozenset({
     "env", "sudo", "timeout", "gtimeout", "bg", "nice", "rtk", "command", "builtin", "exec", "time", "nohup", "deadline",
     "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "noglob", "nocorrect", "coproc",
-    "flock", "watch", "script", "direnv", "secretspec", "op", "ssh",     # `ssh host paseo send "`x`"`: the LOCAL shell runs it
+    "flock", "watch", "script", "direnv", "secretspec", "sudo-secretspec", "op", "ssh", "doas", "genv", "gnohup", "gstdbuf",
+    "gnice", "unbuffer", "chronic", "mosh", "uv",     # `ssh host paseo send "`x`"`: the LOCAL shell runs it
     "if", "then", "do", "else", "elif", "while", "until", "!", "case",
 })
 

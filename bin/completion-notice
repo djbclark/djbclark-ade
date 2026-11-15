@@ -66,9 +66,10 @@ _DONE_LINE = re.compile(
 _ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?$")
 
 
-# `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the
-# full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character (7-39 are expanded,
-# 4-6 refused: MIN_SHA); a full SHA never matches. The flag must follow `gh run list` in the same shell segment (no `;`, `|` or `&` in between).
+# `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only
+# the full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character (7-39 are
+# expanded, 4-6 refused: MIN_SHA); a full SHA never matches. The flag must follow `gh run list` in the same shell
+# segment (no `;`, `|` or `&` in between).
 _RUN_LIST_SHORT_SHA = re.compile(
     r"""(?P<head>\bgh\s+run\s+(?:list|ls)\b[^\n;|&]*?(?:--commit(?:=|\s+)|(?<!\S)-c(?:=|\s*))["']?)"""
     r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z_])"""

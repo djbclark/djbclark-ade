@@ -891,6 +891,16 @@ SEND_DENY = [
     'direnv exec . paseo send ab "`x`"',
     'op run -- paseo send ab "`x`"',
     '{paseo send ab "`x`";}',                                      # no space: zsh reads `{paseo` as the command word
+    'nocorrect paseo send ab "`x`"',
+    'coproc paseo send ab "`x`"',
+    'script -q /dev/null paseo send ab "`x`"',
+    'secretspec run -- paseo send ab "`x`"',
+    'sudo-secretspec run -- paseo send ab "`x`"',
+    'doas paseo send ab "`x`"',
+    'gnohup paseo send ab "`x`" &',
+    'gnice -n 5 paseo send ab "`x`"',
+    'unbuffer paseo send ab "`x`"',
+    'uv run paseo send ab "`x`"',
 ]
 
 
