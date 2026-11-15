@@ -1205,6 +1205,9 @@ def test_corrupt_claim_file_stops_the_apply_and_archives_nothing(env):
 def test_corrupt_claim_file_is_a_listed_warning_in_a_dry_run_not_a_refusal(env):
     """am-02 (wb-01 review B3): the read-only plan still prints sections A to H; it lists no archive it cannot clear and says why."""
     done_worker(env)
+    env.window(W_EMPTY, "master")
+    env.record("0000000b-0000-0000-0000-000000000000", W_EMPTY)           # an empty window of this lead's: archivable with a good registry
+    assert {w["windowId"] for w in env.plan()["archive_windows"]} == {W_WORK, W_EMPTY}     # the done worker's too, once it is archived
     d = Path(os.environ["ADE_STATE_DIR"]) / "claims"
     d.mkdir(parents=True)
     (d / "bad.json").write_text("{nope")
@@ -1214,6 +1217,7 @@ def test_corrupt_claim_file_is_a_listed_warning_in_a_dry_run_not_a_refusal(env):
     assert "WARNING: claims unknown" in r.stdout and "bad.json" in r.stdout and "--apply refuses" in r.stdout
     assert "archive agent" not in r.stdout and "archive window" not in r.stdout
     p = env.plan()
+    assert [w for w in p["archive_windows"]] == []
     assert p["archive_agents"] == [] and p["archive_windows"] == [] and p["claim_held"] == []
     assert any(n.startswith("WARNING: claims unknown") for n in p["notes"])
     assert env.mutating() == []
@@ -1221,7 +1225,8 @@ def test_corrupt_claim_file_is_a_listed_warning_in_a_dry_run_not_a_refusal(env):
     assert r.returncode == 1 and "bad.json" in r.stderr and "nothing is archived" in r.stderr and "Traceback" not in r.stderr
     assert env.mutating() == []
     (d / "bad.json").unlink()                                                   # a good registry: the same plan archives again
-    assert [x["agent"] for x in env.plan()["archive_agents"]] == [W1]
+    p = env.plan()
+    assert [x["agent"] for x in p["archive_agents"]] == [W1] and {w["windowId"] for w in p["archive_windows"]} == {W_WORK, W_EMPTY}
 
 
 def test_unreadable_claims_dir_stops_the_apply_and_archives_nothing(env):
