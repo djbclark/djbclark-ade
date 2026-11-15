@@ -11,6 +11,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var item: NSStatusItem!
     var entries: [FrozenEntry] = []
     var timer: Timer?
+    var activity: NSObjectProtocol?   // App Nap off: the 20 s thaw clock must not be slowed
     var empty = 0
     var failed = 0
     var busy = false
@@ -21,6 +22,7 @@ final class StatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "ADE GUI Hog menu-bar item: thaw clock")
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "❄︎"
         item.button?.toolTip = "ADE GUI Hog: frozen apps"

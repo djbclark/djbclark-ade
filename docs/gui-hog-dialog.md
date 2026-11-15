@@ -240,7 +240,7 @@ even after the dialog closes. Its menu lists each frozen app with its thaw time,
 dialog". The sampler relaunches it, in `--status-only` mode, whenever the list is non-empty and it is not running. It
 quits when the list empties. This is the "visible frozen-apps list" of B5(c), and it stays quiet: no pop-ups.
 
-E6. **Window frame.** Titled, closable (the red button is Wait) and miniaturizable (operator ruling 2026-11-14): the yellow button sends the window to the Dock, acts on nothing (no Wait, Ignore, snooze, quit or signal), and a minimized window still refreshes and ticks the thaw clock; the level stays `.floating`.
+E6. **Window frame.** Titled, closable (the red button is Wait) and miniaturizable (operator ruling 2026-11-14): the yellow button sends the window to the Dock, acts on nothing (no Wait, Ignore, snooze, quit or signal), and a minimized window still refreshes and ticks the thaw clock; the level stays `.floating`. Both the window and the menu-bar item hold a `ProcessInfo` activity (`.userInitiatedAllowingIdleSystemSleep`) while they run, so App Nap cannot slow the refresh or the 20 s thaw clock of a minimized window. A forgotten minimized manual window (`gui-hog show`) keeps `dialog.lock` until someone closes it: the sampler shows no other dialog meanwhile, and a manual window never closes itself.
 
 ## F. Freeze safety
 

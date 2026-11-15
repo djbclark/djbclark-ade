@@ -891,6 +891,7 @@ def test_the_dialog_window_is_closable_miniaturizable_and_floating():   # operat
     assert "let dialogStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]" in ui and "let dialogWindowLevel: NSWindow.Level = .floating" in ui
     assert "styleMask: dialogStyleMask" in ui and "window.level = dialogWindowLevel" in ui
     assert "windowShouldClose(_ sender: NSWindow) -> Bool { finish(0); return false }" in ui   # closing keeps its meaning (Wait)
+    assert "beginActivity(options: [.userInitiatedAllowingIdleSystemSleep]" in ui and "beginActivity(options: [.userInitiatedAllowingIdleSystemSleep]" in (BIN.parent / "macos" / "gui-hog" / "StatusItem.swift").read_text()   # no App Nap
     assert "windowWillMiniaturize" not in ui and "windowDidMiniaturize" not in ui   # minimizing is the window server's: no handler, so no action of ours
 
 

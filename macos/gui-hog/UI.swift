@@ -36,6 +36,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var frozenEntries: [FrozenEntry] = []
     var frozenRoots: Set<Int> = []
     var dialogTicks = 0
+    var activity: NSObjectProtocol?   // keeps App Nap off while the window is open (a minimized window must keep refreshing and ticking the thaw clock)
     var frozenBusy = false
     var noHoldSince: Date?
     var timer: Timer?
@@ -48,6 +49,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+    activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "ADE GUI Hog dialog is open: refresh and thaw clock")
         window = GuardedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: dialogStyleMask, backing: .buffered, defer: false)
         window.title = cfg.demo ? "ADE GUI Hog (demo)" : "A build is waiting: desktop apps are busy"
         window.level = dialogWindowLevel
