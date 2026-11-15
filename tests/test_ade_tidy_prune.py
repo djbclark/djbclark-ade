@@ -204,9 +204,9 @@ def test_json_shape_and_counts(env):
     env.agent(uid(50), "ordinary worker")
     s = env.go()
     assert set(s) == {"mode", "at", "min_idle_s", "agents_seen", "helpers", "selected", "skipped", "archived", "errors", "locked", "counts",
-                      "orphans", "orphan_skipped", "unmapped", "killed", "provider_live", "deferred", "kill_plan"}
+                      "orphans", "orphan_skipped", "unmapped", "killed", "provider_live", "deferred", "kill_plan", "records_unreadable"}
     assert s["counts"] == {"agents_seen": 4, "helpers": 2, "selected": 1, "archived": 0, "skipped": 1, "errors": 0,
-                           "orphans": 0, "orphan_skipped": 0, "unmapped": 0, "killed": 0, "deferred": 0}
+                           "orphans": 0, "orphan_skipped": 0, "unmapped": 0, "killed": 0, "deferred": 0, "records_unreadable": 0}
     row = s["selected"][0]
     assert set(row) >= {"id", "parent", "status", "workspace", "reason", "idle_s"} and row["parent"] == p
     assert set(s["skipped"][0]) >= {"id", "parent", "status", "workspace", "reason", "detail"}
@@ -271,6 +271,8 @@ def test_permit_list_unreadable_selects_nothing(env):
 def test_skip_recently_active_and_min_idle_option(env):
     p = env.parent(1, archived=True)
     h = env.helper(10, p, last_activity=time.time() - 30)
+    observed = env.go()                      # the plan itself (not only the last-moment re-check) must hold it back
+    assert observed["selected"] == [] and reasons(observed) == {h: "recently-active"}
     assert reasons(env.go(apply=True)) == {h: "recently-active"} and env.archives() == []
     s = env.go("--min-idle", "5", apply=True)   # a smaller floor accepts the same helper
     assert [r["id"] for r in s["archived"]] == [h]
@@ -559,7 +561,8 @@ def test_reused_pid_is_not_killed(env, mod, kills):
                               str(KID): psl(KID, PROV, "node /Users/x/.local/bin/graft mcp", lstart=T0)}
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
-    assert kills == [(KID, signal.SIGTERM)] and [k["pid"] for k in s["killed"]] == [KID]
+    assert kills == [] and s["killed"] == []         # the provider's own checks run first: its graft child is left alone too
+    assert [o["reason"] for o in s["orphan_skipped"]] == ["changed-before-kill"]
     skipped = [x for x in env.log_lines() if x.get("skipped")]
     assert [(x["pid"], x["skipped"], x["rc"]) for x in skipped] == [(PROV, "start-time-changed", None)]
 
@@ -928,12 +931,12 @@ def test_caller_changed_or_parent_changed_before_the_signal_is_not_killed(env, m
                               str(KID): psl(KID, PROV, "node /Users/x/.local/bin/graft mcp", T0, 3904)}
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
-    assert PROV not in [k[0] for k in kills] and "caller-changed" in [x.get("skipped") for x in env.log_lines()]
+    assert kills == [] and "caller-changed" in [x.get("skipped") for x in env.log_lines()]   # the child too: provider checks come first
     env.data["ps_recheck"] = {str(PROV): psl(PROV, 777, provider_cmd(SESS, uid(70)))}
     env.data_path.write_text(json.dumps(env.data))
     kills.clear()
     mod.prune(True, 300)
-    assert PROV not in [k[0] for k in kills] and "not-paseo-parent" in [x.get("skipped") for x in env.log_lines()]
+    assert kills == [] and "not-paseo-parent" in [x.get("skipped") for x in env.log_lines()]
 
 
 def test_the_daemon_changed_before_the_signal_is_not_killed(env, mod, kills):
@@ -1020,8 +1023,19 @@ def test_helper_is_not_archived_when_a_record_is_unreadable(env):
     p = env.parent(1, archived=True)
     h = env.helper(10, p)
     (env.home / "agents/proj/broken.json").write_text("{not json")
-    s = env.go(apply=True)
-    assert reasons(s)[h] == "children-unproven" and env.archives() == []
+    r = env.run(apply=True)
+    s = json.loads(r.stdout)
+    assert r.returncode == 1 and reasons(s)[h] == "children-unproven" and env.archives() == []
+    assert [e["what"].split()[0] for e in s["errors"]] == ["1"] and "unreadable" in s["errors"][0]["what"]
+    assert s["counts"]["records_unreadable"] == 1 and s["counts"]["errors"] == 1
+
+
+def test_unreadable_record_is_an_error_in_observe_mode_too(env):
+    three_orphans(env)
+    (env.home / "agents/proj/broken.json").write_text("{not json")
+    r = env.run()
+    s = json.loads(r.stdout)
+    assert r.returncode == 1 and s["counts"]["records_unreadable"] == 1 and s["kill_plan"]["records_unreadable"] == 1
 
 
 def test_other_children_print_only_the_basename_of_argv0(env):
@@ -1074,3 +1088,90 @@ def test_exclude_file_breaking_at_the_orphan_scan_refuses_the_run(env, mod, kill
     with pytest.raises(mod.ExcludeRefused):   # not downgraded to "orphan scan skipped"
         mod.prune(True, 300)
     assert kills == []
+
+
+# ----------------------------------------------------------------------------------------------- round 5
+
+def test_helper_active_again_during_an_earlier_archive_is_skipped_recently_active(env, mod, monkeypatch):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    env.data_path.write_text(json.dumps(env.data))
+
+    def active_again():
+        rp = env.home / "agents/proj" / f"{h}.json"
+        rec = json.loads(rp.read_text())
+        rec["lastActivityAt"] = env.stamp(time.time() - 5)      # it ran another turn after the plans were read
+        rp.write_text(json.dumps(rec))
+
+    flip_after_second_plan(mod, monkeypatch, env, active_again)
+    s = mod.prune(True, 300)
+    assert env.archives() == [] and [(r["id"], r["reason"]) for r in s["skipped"]] == [(h, "recently-active")]
+
+
+@pytest.mark.parametrize("value", ["not-a-time", None, "future"])
+def test_helper_with_unreadable_or_future_activity_is_not_archived_at_the_last_read(env, mod, monkeypatch, value):
+    p = env.parent(1, archived=True)
+    h = env.helper(10, p)
+    env.data_path.write_text(json.dumps(env.data))
+
+    def change():
+        rp = env.home / "agents/proj" / f"{h}.json"
+        rec = json.loads(rp.read_text())
+        if value is None:
+            rec.pop("lastActivityAt")
+        else:
+            rec["lastActivityAt"] = env.stamp(time.time() + 3600) if value == "future" else value
+        rp.write_text(json.dumps(rec))
+
+    flip_after_second_plan(mod, monkeypatch, env, change)
+    s = mod.prune(True, 300)
+    assert env.archives() == [] and [r["reason"] for r in s["skipped"]] == ["recently-active"]
+
+
+def test_log_that_cannot_be_opened_stops_every_action_with_an_error(env, mod, kills, monkeypatch, tmp_path):
+    p = env.parent(1, archived=True)
+    env.helper(10, p)
+    orphan_world(env)
+    (tmp_path / "logdir").mkdir()
+    monkeypatch.setenv("ADE_HELPER_PRUNE_LOG", str(tmp_path / "logdir"))   # the log path is a directory: it cannot be appended to
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert env.archives() == [] and kills == [] and s["archived"] == [] and s["killed"] == []
+    assert [e["what"].startswith("log not writable") for e in s["errors"]] == [True]
+    r = env.run(apply=True)
+    assert r.returncode == 1 and "Traceback" not in r.stderr and env.archives() == []
+
+
+def test_lock_that_cannot_be_opened_is_an_error_not_a_traceback(env, mod, kills, monkeypatch, tmp_path):
+    orphan_world(env)
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    monkeypatch.setenv("ADE_HELPER_PRUNE_LOG", str(blocker / "sub" / "helper-prune.log"))   # its parent is a file
+    env.data_path.write_text(json.dumps(env.data))
+    s = mod.prune(True, 300)
+    assert kills == [] and [e["what"].startswith("lock not available") for e in s["errors"]] == [True] and s["counts"]["errors"] == 1
+    r = env.run(apply=True)
+    assert r.returncode == 1 and "Traceback" not in r.stderr
+
+
+def test_log_write_failure_mid_run_is_an_error_and_the_rest_continues(env, mod, kills, monkeypatch):
+    p = env.parent(1, archived=True)
+    h1, h2 = env.helper(10, p), env.helper(11, p)
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+
+    def broken(entry):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mod, "log_archive", broken)
+    s = mod.prune(True, 300)
+    assert sorted(env.archives()) == sorted([h1, h2]) and [k[0] for k in kills] == [KID, PROV]    # nothing aborted
+    assert [e["what"].startswith("log write failed") for e in s["errors"]] == [True]               # reported once
+
+
+def test_non_finite_saved_at_proves_nothing(env, mod):
+    f = env.tmp / "h.md"
+    f.write_text("# x")
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert mod.handoff_unproven("p", time.time() - 100, {"p": {"status": "done", "path": str(f), "savedAt": bad}}) == "handoff predates this helper"
+    assert mod.handoff_unproven("p", time.time() - 100, {"p": {"status": "done", "path": str(f), "savedAt": int(time.time() * 1000)}}) is None

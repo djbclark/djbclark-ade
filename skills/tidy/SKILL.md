@@ -102,7 +102,7 @@ feature request is drafted in [docs/upstream-issues.md](../../docs/upstream-issu
 
 `bin/ade-tidy prune` is a second, machine-wide mode (no repo, no lead): it archives idle, finished Baton `[Handoff writer]` helpers
 (title and `baton-writer=1` label, parent provably archived/closed/gone or handoff provably written). Observe-only by default; `--apply`
-archives and logs one JSON line per archive to `~/.local/state/ade/helper-prune.log`. It runs every 30 minutes as the launchd job
+archives and kills, and logs one JSON line per archive or kill to `~/.local/state/ade/helper-prune.log`. It runs every 30 minutes as the launchd job
 `com.djbclark.ade-helper-prune` once the operator installs it. `--exclude ID` and `~/.local/state/ade/helper-prune.exclude` protect named agents. Kills are budgeted per run (`--max-kills`, default 10 providers; `--orphan-grace`, default 1800 s since archive and last activity); the summary's `kill_plan` and `deferred[]` show what waits, and the scheduled job logs the compact `--json-line` form. The same mode reports (and with `--apply` SIGTERMs by pid, after a pid/start-time/session re-read) orphan provider processes and their direct `graft mcp` children for archived, closed agents (`orphans[]`; unprovable ones are `unmapped` and never touched: a process counts as Paseo's only when its parent is the Paseo daemon and its `callerAgentId` is the mapped agent, since `--input-format stream-json` is also what every Agent-SDK host runs). Rules, reason codes and the install command:
 [docs/scheduling.md](../../docs/scheduling.md) "Helper prune". Never run it with `--apply` from a sub-agent.
 

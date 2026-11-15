@@ -99,10 +99,10 @@ and `paseo.parent-agent-id=<parent id>` (`shared/baton.ts` 155-158), and, per pa
 `--apply`) selects a helper only when ALL hold: title starts `[Handoff writer]` AND label `baton-writer=1`; not a lead (an `ade.lead`
 value; a former lead that no longer leads is fine), not the caller; status `idle` and quiet for `--min-idle` seconds (default 300); no pending
 permission (`paseo permit ls`); a valid parent id; and its work is done: the parent is **archived** (record `archivedAt`), **closed**
-(live status) or **gone** (no record anywhere), or Baton's state shows the parent's handoff `done` in a non-empty regular file saved
+(live status; this means "no live provider", not "finished": a daemon restart also leaves a lead `closed`, so the helper's own idle and quiet gates are what protect it) or **gone** (no record anywhere), or Baton's state shows the parent's handoff `done` in a non-empty regular file saved
 no earlier than the helper's creation. Every other helper is skipped with a reason code (`title-mismatch`, `no-baton-label`, `self`,
 `main-kind`, `no-parent`, `not-idle`, `permission-pending`, `permits-unreadable`, `recently-active`, `activity-unreadable`,
-`parent-unproven`, `handoff-unproven`, `has-children`, `children-unproven`, `changed-before-archive`; the last also when `paseo agent inspect` no longer reads idle, unarchived and permission-free right before that archive); a non-helper is never listed. `--apply` takes a lock
+`parent-unproven`, `handoff-unproven`, `has-children`, `children-unproven`, `changed-before-archive`; the last also when `paseo agent inspect` no longer reads idle, unarchived and permission-free right before that archive); right before each archive the helper's record is read again and a helper active within `--min-idle` since the plans (another turn during an earlier archive in the loop) is skipped `recently-active` (an unreadable or future time fails closed); a non-helper is never listed. `--apply` takes a lock
 (`~/.local/state/ade/helper-prune.lock`), re-reads the whole machine right before archiving and archives only helpers both reads selected,
 with `paseo agent archive FULL-ID` (argv list, 30 s timeout, rc checked; the full id is in the `paseo ls -g` listing it was just read from, so
 the title-fallback hazard of [getpaseo/paseo#9668](https://github.com/getpaseo/paseo/issues/9668) cannot pick another agent). One JSON line per
@@ -145,11 +145,18 @@ nothing is sent. Each attempt is a `kind: "process-kill"` line in `helper-prune.
 
 **Kill budget (round 3, 2026-11-14).** An orphan is *actionable* only when its agent was archived at least `--orphan-grace` seconds ago
 (default 1800) and its record shows no activity newer than that (an unreadable time fails closed: deferred). At most `--max-kills`
-provider processes (default 10, lowest pid first; each carries its direct `graft mcp` children, so a run signals at most 2 x that many
-pids; `--max-kills 0` signals none) are acted on per run; the rest are deferred and the 30-minute job picks them up. The summary
+provider processes (default 10, lowest pid first; each carries every direct `graft mcp` child of its provider, with no per-provider cap on children: today
+one each; `--max-kills 0` signals none) are acted on per run; the rest are deferred and the 30-minute job picks them up. The summary
 lists them under `deferred[]` (`reason` `grace` or `kill-cap`) and carries `kill_plan` (`found`, `actionable`, `deferred_grace`,
 `deferred_cap`, `max_kills`, `orphan_grace_s`); `orphans[]` is the actionable set. Right before the kills the plan is rebuilt from freshly
-read agent records, and each agent is inspected once more (`changed-before-kill` when either read no longer agrees).
+read agent records, and each agent is inspected once more (`changed-before-kill` when either read no longer agrees). Per orphan the provider's own
+checks (pid, start time, session, daemon parent, caller) run first; only if they pass are its graft children signalled, then the provider
+(`changed-before-kill` with the failed check, children left alone, when they fail).
+
+**Errors and the log (round 5, 2026-11-14).** An unreadable agent record is an `errors` entry (exit 1) and `counts.records_unreadable`: every helper is then
+`children-unproven` and every orphan `records-unreadable` until it is fixed, so the job fails loudly instead of doing nothing quietly. Under
+`--apply` the log is opened (created or touched) before the first action; if that fails, or the lock file cannot be opened, nothing is done and
+the run exits 1. A log write that fails mid-run is one `errors` entry (`log write failed`); the remaining actions continue unlogged.
 Left as is on purpose: a sub-agent of an archived agent is only reached if it is itself archived and closed; `ExtraBar` children of a
 provider are not signalled (only `graft mcp`); no upstream issue is filed for the leak.
 
