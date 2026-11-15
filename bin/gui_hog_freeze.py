@@ -904,8 +904,14 @@ def cmd_freeze(a, state_dir):
         return _fail(r)
     except Terminated:
         return _fail(Refusal(REFUSED, "interrupted; anything stopped was resumed"))
+    # The freeze starts its own clock (H4 run 2026-11-14: a dialog opened by hand and a sampler without the thaw tick left a timed freeze stopped for
+    # good): the menu-bar item runs `thaw --due` every 20 s whoever opened the dialog and whatever load-watch is loaded. Never raises, never fails the freeze.
+    try:
+        _started, why = ensure_status_item(state_dir, gui_ok=gh.gui_session(os.getuid()))
+    except Exception as ex:  # noqa: BLE001 - the app is already stopped and recorded; the exit code must say so
+        why = f"error: {ex!r}"[:120]
     print(json.dumps({"ok": True, "entry": e["id"], "state": e["state"], "mode": e["mode"], "thaw_at": e["thaw_at"], "members": len(e["members"]) + 1,
-                      "kept_running": e.get("kept_running", 0)}))
+                      "kept_running": e.get("kept_running", 0), "status_item": why}))
     return OK
 
 

@@ -31,6 +31,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var acted = false
     var frozenEntries: [FrozenEntry] = []
     var frozenRoots: Set<Int> = []
+    var dialogTicks = 0
     var frozenBusy = false
     var noHoldSince: Date?
     var timer: Timer?
@@ -65,7 +66,12 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             window.orderFrontRegardless()
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh(force: false) }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.dialogTicks += 1
+            if thawDueTick(self.dialogTicks) { DispatchQueue.global().async { self.runner.thawDue(by: "dialog"); DispatchQueue.main.async { self.pollFrozen() } } }   // F5: the window's own clock
+            self.refresh(force: false)
+        }
         DispatchQueue.global().async { self.runner.thawDue(by: "dialog"); DispatchQueue.main.async { self.pollFrozen() } }   // F5b
     }
 

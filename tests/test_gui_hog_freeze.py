@@ -848,6 +848,45 @@ def rfreeze(w, **kw):
     return gf.freeze(w.state, w.root, start=w.start, ops=w.ops, cfg=kw.pop("cfg", cfg()), check_sampler=False, agent_clis=(), **kw)
 
 
+# ---- a timed freeze always has a clock (H4 run 2026-11-14: a dialog opened by hand, an old sampler, nothing resumed the freeze) -------------------
+def _freeze_args(**kw):
+    import argparse
+    return argparse.Namespace(**{"pid": 5, "start": "s", "bundle_id": None, "bundle_path": None, "minutes": 10, "indefinite": False, "by": "dialog", **kw})
+
+
+def test_a_successful_freeze_starts_the_menu_bar_item_so_a_timed_freeze_never_depends_on_the_sampler(tmp_path, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(gf, "freeze", lambda *a, **k: {"id": "f-1", "state": "frozen", "mode": "timed", "thaw_at": 1.0, "members": [], "kept_running": 0})
+    monkeypatch.setattr(gf, "ensure_status_item", lambda sd, **k: calls.append(sd) or (True, "started"))
+    assert gf.cmd_freeze(_freeze_args(), tmp_path) == gf.OK
+    assert calls == [tmp_path]   # the second clock (the item's own 20 s timer) is started by the freeze itself, not only by a sampler tick
+    assert json.loads(capsys.readouterr().out)["status_item"] == "started"
+
+
+def test_a_menu_bar_item_that_cannot_start_never_fails_the_freeze(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(gf, "freeze", lambda *a, **k: {"id": "f-1", "state": "frozen", "mode": "indefinite", "thaw_at": None, "members": [], "kept_running": 0})
+    def boom(sd, **k):
+        raise RuntimeError("no window server")
+    monkeypatch.setattr(gf, "ensure_status_item", boom)
+    assert gf.cmd_freeze(_freeze_args(indefinite=True, minutes=None), tmp_path) == gf.OK   # the app is stopped: the record and the exit code must say so
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_a_refused_freeze_starts_no_menu_bar_item(tmp_path, monkeypatch):
+    calls = []
+    def refuse(*a, **k):
+        raise gf.Refusal(gf.PROTECTED, "protected")
+    monkeypatch.setattr(gf, "freeze", refuse)
+    monkeypatch.setattr(gf, "ensure_status_item", lambda sd, **k: calls.append(sd) or (True, "started"))
+    assert gf.cmd_freeze(_freeze_args(), tmp_path) != gf.OK and calls == []
+
+
+def test_the_dialog_ticks_a_thaw_clock_of_its_own():   # Swift side, structural: the window re-runs `thaw --due` every 20 s while it is open
+    ui, model = ((BIN.parent / "macos" / "gui-hog" / n).read_text() for n in ("UI.swift", "Model.swift"))
+    assert "func thawDueTick(" in model and "thawDueTick(" in ui and 'runner.thawDue(by: "dialog")' in ui
+    assert ui.count('runner.thawDue(by: "dialog")') >= 2   # at start (F5b) and on the tick
+
+
 def test_clock_text_is_new_york_12_hour_with_a_day_name_when_not_today():   # operator ruling 2026-11-14: a clock time, never a countdown
     due, same_day, other_day = 1794711120, 1794704400, 1794582000   # 2026-11-14 9:52 PM New York; 8:00 PM the same day; Fri 10:00 AM
     assert gf.clock_text(due, same_day, zone="America/New_York") == "9:52 PM"

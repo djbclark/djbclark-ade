@@ -208,6 +208,8 @@ func freezeArgv(_ r: Row, minutes: Int?) -> [String] {
 }
 func resumeArgv(_ id: String, by: String) -> [String] { ["resume", "--entry=\(id)", "--by", by] }   // `--entry=ID`: an id is never read as an option
 /// The belt and braces of F5a, b, f: the dialog and the menu-bar item resume what is due on their own clock too (the sampler is the first clock).
+/// The window re-runs `thaw --due` on its own 2 s refresh every 10th tick (20 s): a second clock inside the dialog, besides the menu-bar item and the sampler (F5).
+func thawDueTick(_ n: Int) -> Bool { n > 0 && n % 10 == 0 }
 func thawDueArgv(by: String) -> [String] { ["thaw", "--due", "--stale", "--by", by] }
 func resumeAllArgv(by: String) -> [String] { ["resume", "--all", "--by", by] }
 func frozenArgv() -> [String] { ["frozen", "--json"] }

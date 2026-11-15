@@ -147,6 +147,7 @@ func runSelfTest() -> Int32 {
         check(edge(clockSpanS) != "resumes at ?" && edge(clockSpanS + 1) == "resumes at ?" && edge(-clockSpanS) != "resumes at ?" && edge(-clockSpanS - 1) == "resumes at ?", "the 7-day guard: exactly 7 days shows a time, one second more shows ?")
         check(far.map { thawText($0, now: 1794704400, zone: ny) == "resumes at ?" } == true, "a far-off resume time shows ?, never a made-up clock time or an empty one")
     } else { check(false, "the clock-time entry parses") }
+    check(!thawDueTick(0) && !thawDueTick(9) && thawDueTick(10) && !thawDueTick(11) && thawDueTick(20), "the dialog re-runs thaw --due every 10th 2 s tick")
     check(statusTitle(0) == "" && statusTitle(2) == "❄︎ 2", "menu-bar title")
 
     // identity (D4, F3)
