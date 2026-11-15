@@ -204,6 +204,7 @@ reservation stays until LW_RESERVE_S; the launcher may retry or ignore it). `ren
 """
 import argparse
 import calendar
+import contextlib
 import json
 import math
 import os
@@ -643,6 +644,28 @@ def registry():
     return rows
 
 
+@contextlib.contextmanager
+def registry_lock():
+    """Serialize registry read-modify-write across processes (flock on a sibling file). Never held across the approval dialog: a stale
+    snapshot written back after minutes of waiting reverted other rows, even a `local` nobody approved (lead adversary, PR 744 B1)."""
+    import fcntl
+
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(REGISTRY) + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def mutate_registry(change):
+    """Under the lock: re-read the registry, let `change(rows)` edit it, write it back. A non-None return of `change` is passed on and nothing is written."""
+    with registry_lock():
+        rows = registry()
+        r = change(rows)
+        if r is None:
+            write_registry(rows)
+        return r
+
+
 def bad_registry_field(*vals):
     """The first value with a control character (tab, newline, DEL, C1 such as U+0085, U+2028/2029: all that `str.splitlines` splits on), else None: the registry is TSV, so such a value would write extra rows
     (adversary, PR 744: `ci decide X pending $'n\\n/home/*\\tlocal\\tx'` planted a `local` glob row without any approval)."""
@@ -650,8 +673,10 @@ def bad_registry_field(*vals):
 
 
 def write_registry(rows):
-    if bad_registry_field(*(x for k, v in rows.items() for x in (k, *v))) is not None:
-        sys.exit("load-watch: a registry key or text holds a control character (tab, newline, ...); nothing was written")
+    for k, v in rows.items():
+        if bad_registry_field(k, *v) is not None:
+            sys.exit(f"load-watch: the registry row for {k.encode('unicode_escape').decode()!r} holds a control character (tab, newline, ...); "
+                     "nothing was written. Fix or delete that row by hand.")
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     tmp = REGISTRY.with_suffix(".tmp")
     tmp.write_text("# repo top-level (or DIR/*)\tci|local|pending\tCI command, or why local\tdecided\n" +
@@ -1869,7 +1894,7 @@ def helper_env():
     """A clean environment for the bash `sudo-ask`: the caller's own would let `BASH_ENV=<file with exit 0>` (or ENV, SHELLOPTS, BASH_FUNC_*) make it
     exit 0 before any dialog, which reads as approval (Codex review of PR 744). Only what the helper needs is passed."""
     env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(HOME)}
-    for k in ("USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM"):
+    for k in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM"):  # not TMPDIR: bash 3.2 writes the dialog script there, a racer could swap it
         if k in os.environ:
             env[k] = os.environ[k]
     return env
@@ -1931,14 +1956,27 @@ def cmd_ci(a):
         if bad_registry_field(top, a.text) is not None:
             print("load-watch ci decide: the directory and the text must not hold a control character (tab, newline, ...)", file=sys.stderr)
             return 2
-        if a.mode == "local" and (rows.get(top) or [""])[0] != "local" and not approve_local_decision(top, a.text):
-            return 1  # an existing `local` row at this key may only change its reason; ci and pending are never gated
-        rows[top] = [a.mode, a.text, time.strftime("%Y-%m-%d")]
+        approved = False
+
+        def change(rows):
+            # an existing `local` row at this key may only change its reason; ci and pending are never gated
+            if a.mode == "local" and not approved and (rows.get(top) or [""])[0] != "local":
+                return "ask"
+            rows[top] = [a.mode, a.text, time.strftime("%Y-%m-%d")]
+
+        while (r := mutate_registry(change)) == "ask":  # ask djbclark WITHOUT the lock or a snapshot, then re-read and set only this row
+            if not approve_local_decision(top, a.text):
+                return 1
+            approved = True
+        if r is not None:
+            return r
     elif a.op == "rm":
-        if rows.pop(top, None) is None:
-            print(f"load-watch: {top} has no decision", file=sys.stderr)
-            return 1
-    write_registry(rows)
+        def drop(rows):
+            if rows.pop(top, None) is None:
+                print(f"load-watch: {top} has no decision", file=sys.stderr)
+                return 1
+        if (r := mutate_registry(drop)) is not None:
+            return r
     print(f"{a.op} {top}" + (f" {a.mode}" if a.op == "decide" else ""))
     return 0
 
@@ -1966,12 +2004,14 @@ def cmd_ci_only(a):
         if bad_registry_field(top, a.ci_cmd) is not None:
             print("load-watch ci-only add: the directory and the command must not hold a control character (tab, newline, ...)", file=sys.stderr)
             return 2
-        rows[top] = ["ci", a.ci_cmd, time.strftime("%Y-%m-%d")]
+        mutate_registry(lambda rows: rows.__setitem__(top, ["ci", a.ci_cmd, time.strftime("%Y-%m-%d")]))
     elif a.op == "rm":
-        if rows.pop(top, None) is None:
-            print(f"load-watch: {top} is not registered", file=sys.stderr)
-            return 1
-    write_registry(rows)
+        def drop(rows):
+            if rows.pop(top, None) is None:
+                print(f"load-watch: {top} is not registered", file=sys.stderr)
+                return 1
+        if (r := mutate_registry(drop)) is not None:
+            return r
     print(f"{a.op} {top}")
     return 0
 

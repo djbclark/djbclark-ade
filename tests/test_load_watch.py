@@ -7,15 +7,19 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LW = Path(__file__).resolve().parent.parent / "bin" / "load-watch"
 
 
-def run(tmp_path, *args, **extra_env):
+def lw_env(tmp_path, **extra_env):
     # HOME is a scratch directory: a `local` decision asks `$HOME/.local/bin/sudo-ask` (djbclark's Touch ID dialog), never the real one
-    env = dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **extra_env)
-    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=env, timeout=30)
+    return dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **extra_env)
+
+
+def run(tmp_path, *args, **extra_env):
+    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=lw_env(tmp_path, **extra_env), timeout=30)
 
 
 def stub_sudo_ask(tmp_path, rc):
@@ -282,6 +286,76 @@ def test_caller_environment_cannot_make_the_helper_approve(tmp_path):
     assert run(tmp_path, "ci", "decide", str(repo), "local", "why", BASH_ENV=str(hook)).returncode == 1
     assert run(tmp_path, "ci", "decide", str(repo), "local", "why", ENV=str(hook), SHELLOPTS="xtrace").returncode == 1
     assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def _slow_approver(tmp_path):
+    """A sudo-ask that waits for a flag file, then approves: the dialog is 'open' until the test creates the flag."""
+    flag, started = tmp_path / "flag", tmp_path / "started"
+    path = tmp_path / "home" / ".local" / "bin" / "sudo-ask"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n: > {started}\nwhile [ ! -e {flag} ]; do sleep 0.05; done\nexit 0\n")
+    path.chmod(0o755)
+    return flag, started
+
+
+def _wait_for(path):
+    for _ in range(200):
+        if path.exists():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{path} never appeared")
+
+
+def test_changes_made_during_the_approval_wait_survive(tmp_path):
+    """PR 744 B1: the registry snapshot must not be held across the dialog (a stale write-back restored an unapproved `local` row)."""
+    repo, j, k = _repo(tmp_path), tmp_path / "j", tmp_path / "k"
+    for d in (j, k):
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+    jt, kt = os.path.realpath(j), os.path.realpath(k)
+    (tmp_path / "ci-only.tsv").write_text(f"{jt}\tlocal\tgrandfathered\t2026-10-18\n")
+    flag, started = _slow_approver(tmp_path)
+    p = subprocess.Popen([sys.executable, str(LW), "ci", "decide", str(repo), "local", "needs Xcode"], env=lw_env(tmp_path),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_for(started)  # the dialog is open and the first process has read the registry
+        assert run(tmp_path, "ci", "decide", str(j), "ci", "scripts/ci-run").returncode == 0  # the operator moves J to CI meanwhile
+        assert run(tmp_path, "ci", "decide", str(k), "pending", "seeded").returncode == 0
+        flag.write_text("")
+        assert p.wait(timeout=30) == 0
+    finally:
+        p.kill()
+    got = {r[0]: r[1] for r in rows(tmp_path)}
+    assert got == {os.path.realpath(repo): "local", jt: "ci", kt: "pending"}, got
+
+
+def test_concurrent_registry_writers_lose_no_update(tmp_path):
+    dirs = []
+    for i in range(10):
+        d = tmp_path / f"r{i}"
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        dirs.append(d)
+    procs = [subprocess.Popen([sys.executable, str(LW), "ci-only", "add", str(d), "scripts/ci-run"], env=lw_env(tmp_path),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for d in dirs]
+    assert [p.wait(timeout=60) for p in procs] == [0] * 10
+    assert sorted(r[0] for r in rows(tmp_path)) == sorted(os.path.realpath(d) for d in dirs)
+
+
+def test_helper_gets_no_tmpdir(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path)
+    monkeypatch.setenv("TMPDIR", "/somewhere/evil")
+    monkeypatch.setenv("BASH_ENV", "/x")
+    env = lw.helper_env()
+    assert "TMPDIR" not in env and "BASH_ENV" not in env and env["HOME"] == str(tmp_path)
+
+
+def test_damaged_row_is_named_in_the_refusal(tmp_path):
+    repo = _repo(tmp_path)
+    (tmp_path / "ci-only.tsv").write_text("/damaged\x01repo\tci\tcmd\t2026-10-18\n")
+    r = run(tmp_path, "ci-only", "add", str(repo), "scripts/ci-run")
+    assert r.returncode == 1 and "damaged" in r.stderr and "nothing was written" in r.stderr
 
 
 def test_glob_local_decision_is_gated(tmp_path):
