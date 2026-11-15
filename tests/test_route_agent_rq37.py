@@ -176,6 +176,20 @@ def test_two_paseo_accounts_with_a_window_only_one_reads_keep_that_window_closed
 
 
 @pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_two_paseo_accounts_one_window_one_cannot_measure_stays_closed_but_a_repeat_of_one_account_does_not(order):
+    """Same window label: account b reads it as unknown. Another account: the unknown stays (closed); the same `id`
+    again: the known reading wins (`_merge_caps`)."""
+    unread = _report("claude:b", None)
+    unread["report"]["windows"] = [{"id": "Weekly", "label": "Weekly", "remainingPct": None, "usedPct": None}]
+    rows = [_report("claude:a", 60), unread]
+    pool = _paseo(*[rows[i] for i in order])
+    assert pool["windows"]["Weekly"] is None and r.plenty_remaining(pool) is None
+    again = dict(unread, id="claude:a")
+    pool = _paseo(*[[_report("claude:a", 60), again][i] for i in order])
+    assert pool["windows"]["Weekly"] == 60.0 and r.plenty_remaining(pool) == 60
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
 def test_a_repeated_paseo_report_of_one_account_is_unchanged(order):
     """Same `id` twice: one account re-read, known beats unknown, no marker (the pre-rq-37 behaviour)."""
     rows = [_report("claude:a", 60), _report("claude:a", status="unavailable")]
