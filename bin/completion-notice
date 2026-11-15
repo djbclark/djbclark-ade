@@ -28,7 +28,8 @@ A requester of `main` or `team-lead` is the parent of a Claude Code Agent-tool s
 A `gh run list --commit <sha>` hint in the title or detail (the "CI running" line of docs/dispatch-footer.md rule 20)
 must carry the FULL commit SHA: gh matches only the full 40-character SHA, a short one prints [] with exit 0 and the
 requester's poll never finds the run (2026-11-14, tendcf). A short SHA of 7 or more digits there is expanded with
-`git rev-parse` in the current directory; a 4-6 digit one, or one that names no commit there, is refused (exit 2); `gh run list --branch BRANCH` has no such trap.
+`git rev-parse` in the current directory; a 4-6 digit one, or one that names no commit there, is refused (exit 2);
+`gh run list --branch BRANCH` has no such trap.
 
 Exit codes:
   0: Success (printed, sourceless delivery, verified disk ack, or lead ack completed)
@@ -65,9 +66,10 @@ _DONE_LINE = re.compile(
 _ACK_LINE = re.compile(r"^Please reply: ack (?P<sender>\S+)(?: (?P<msg_id>\S+))?$")
 
 
-# `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only the
-# full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character (7-39 are expanded, 4-6 refused: MIN_SHA); a full SHA
-# never matches. The flag must follow `gh run list` in the same shell segment (no `;`, `|` or `&` in between).
+# `gh run list|ls --commit SHA` (or `-c SHA`, `-c=SHA`, `-cSHA`, `--commit=SHA`) with a SHORT hex SHA: gh matches only
+# the full SHA, so the query prints [] and exits 0. 4-39 hex digits not followed by another word character (7-39 are
+# expanded, 4-6 refused: MIN_SHA); a full SHA never matches. The flag must follow `gh run list` in the same shell
+# segment (no `;`, `|` or `&` in between).
 _RUN_LIST_SHORT_SHA = re.compile(
     r"""(?P<head>\bgh\s+run\s+(?:list|ls)\b[^\n;|&]*?(?:--commit(?:=|\s+)|(?<!\S)-c(?:=|\s*))["']?)"""
     r"""(?P<sha>[0-9a-fA-F]{4,39})(?![0-9A-Za-z_])"""
@@ -117,7 +119,8 @@ def build_message(
 ) -> str:
     """Return the two-line completion message, or raise ValueError when the shape would be invalid.
 
-    A short SHA in a `gh run list --commit` hint of the title or detail is expanded (`git rev-parse` in `git_cwd`)."""
+    A short SHA in a `gh run list --commit` hint of the title or detail is expanded (`git rev-parse` in `git_cwd`), or
+    refused with ValueError (fewer than MIN_SHA digits, or no such commit there)."""
     title, detail = title.strip(), detail.strip()
     if len(title) > MAX_FIELD or len(detail) > MAX_FIELD:
         raise ValueError(f"title and detail must each be at most {MAX_FIELD} characters")

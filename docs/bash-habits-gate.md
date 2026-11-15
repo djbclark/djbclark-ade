@@ -42,14 +42,14 @@ assignment value, rare), `--x=y`, `-d=`, heredoc bodies, comments, and the insid
 
 **Backtick or `$(` in a double-quoted `paseo send` argument (2026-11-14, gs-02).** The shell runs that text before paseo starts:
 a worker's `"... the `foo` call ..."` ran `foo` and the message arrived with a hole in it. Denied for `paseo [opts] send` and
-`paseo agent send` (`paseo` must be the command word, after `VAR=x` assignments, a shell keyword (`if`, `then`, `do`) or a known wrapper such as `env -u X`, `timeout`, `bg`, `sudo`, `deadline run --`; a `paseo` that is data for another command, `ls paseo send "$(date)"`, is not a send, and a `{}` placeholder is a word, not a group brace), when any double-quoted word after the
+`paseo agent send` (`paseo` must be the command word, after `VAR=x` assignments, a shell keyword (`if`, `then`, `do`) or a known wrapper such as `env -u X`, `timeout`, `gtimeout`, `bg`, `sudo`, `deadline run --`, `ssh host`, `flock F`, `watch -n N`, `direnv exec .`, `op run --` (the `SEND_WRAPPERS` set), a `case` command or a case-arm pattern word (`x) paseo send ...`; gs-03, 2026-11-15) or `{paseo` (no space after the brace); a `paseo` that is data for another command, `ls paseo send "$(date)"`, is not a send, and a `{}` placeholder is a word, not a group brace), when any double-quoted word after the
 verb holds an unescaped backtick or `$(`; an unquoted `${ID}`, `$(cat id)` or backtick target before the message is read as part of
 its word, so it does not hide the send; the body of every `$(...)`, `<(...)`, `>(...)` and backtick span (quoted or not) is checked as a command line of
 its own, so `r=$(paseo send --json ab "...`x`...")` is denied too. Passes: single quotes, `"\`x\`"` and `"\$(x)"` (escaped, literal), arithmetic
 `"$((n*2))"` (unless it holds a substitution), `--prompt-file FILE` (write it with `cat > FILE <<'EOF'`; `--prompt-file -` reads a
 file named `-`, not stdin), python argv, a substitution in some other command (`echo "`date`"; paseo send ab ok`), and a command
 that starts with `echo`, `printf`, `print`, `rg`, `grep`, `git`, `cat`, `gh` or `jq` (`echo paseo send "$(date)"` only prints text). Known false
-positives: a deliberate `"$(cat FILE)"` or `"$(paseo ls ...)"` target is denied too (assign it first: `ID=$(cat f); paseo send "$ID" ...`);
+positives: a wrapper or case arm lets the scan look past a data word (`case $a in x) ls paseo send "`y`"`, `ssh host ls paseo send "`x`"`, `watch ... paseo send ...`, `op item get paseo send "$(x)"`, `f() echo paseo send ...`, a `$(cmd) ls paseo send ...`), a deliberate `"$(cat FILE)"` or `"$(paseo ls ...)"` target is denied too (assign it first: `ID=$(cat f); paseo send "$ID" ...`);
 a redirect target `> "$(mktemp)"` after the send. Not detected: `bash -c 'paseo send ...'`, a wrapper missing from `SEND_WRAPPERS`, `P=paseo; $P send`, a send built by a script or
 `eval`, unquoted backticks inside a message word, and a quote the scanner cannot pair (it fails open). Pre-existing, not changed here:
 a here-string (`cat <<< x`) is read as an unterminated heredoc by the older heredoc checks. The old session-finder relay shim is gone, so

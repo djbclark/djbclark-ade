@@ -1002,9 +1002,13 @@ def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tupl
 
 NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat", "gh", "jq"})
 # commands that run another command given after their own options (the `paseo` may follow option values: `env -u X paseo`)
-SEND_WRAPPERS = frozenset({"env", "sudo", "timeout", "bg", "nice", "rtk", "command", "exec", "time", "nohup", "deadline",
-                           "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "if", "then", "do", "else",
-                           "elif", "while", "until", "!"})
+SEND_WRAPPERS = frozenset({
+    "env", "sudo", "timeout", "gtimeout", "bg", "nice", "rtk", "command", "builtin", "exec", "time", "nohup", "deadline",
+    "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "noglob", "nocorrect", "coproc",
+    "flock", "watch", "script", "direnv", "secretspec", "sudo-secretspec", "op", "ssh", "doas", "genv", "gnohup", "gstdbuf",
+    "gnice", "unbuffer", "chronic", "mosh", "uv",     # `ssh host paseo send "`x`"`: the LOCAL shell runs it
+    "if", "then", "do", "else", "elif", "while", "until", "!", "case",
+})
 
 
 def risky_send_reason(cmd: str) -> str | None:
@@ -1030,11 +1034,13 @@ def _send_in(parsed: list[list[tuple[str, bool]]]) -> str | None:
         lead = 0                                        # leading `VAR=x` assignments are not the command word
         while lead < len(names) - 1 and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words_[lead][0]):
             lead += 1
+        if names[lead].startswith("{") and len(names[lead]) > 1:
+            names[lead] = names[lead][1:]               # `{paseo send ...;}` (no space): zsh reads `{paseo` as the command word
         if names[lead] in NOT_A_SENDER:                 # `echo paseo send "$(date)"` only prints text
             continue
         # `paseo` is the command word, or comes after a wrapper (`env -u X`, `timeout 600`, `bg`): a `paseo` that is data
         # for another command (`ls paseo send "$(date)"`) is not a send
-        wrapped = names[lead] in SEND_WRAPPERS
+        wrapped = names[lead] in SEND_WRAPPERS or names[lead].endswith(")")      # `x) paseo send ...`: a case-arm pattern
         start = None
         for k, name in enumerate(names):
             if k > lead and not wrapped:
