@@ -61,7 +61,7 @@ performs it itself, including successor launch; no operator typing is required.
 Finish other writes/background jobs and prepare the briefing, then:
 
 ```
-bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced
+bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--title TEXT] [--role ROLE]
 ```
 
 `--quiesced` attests that other jobs/writes are finished. A running predecessor
@@ -82,6 +82,44 @@ unusable source level launches with no flag, as before (2026-11-14: a `high` lea
 had been handed off to an `auto` successor). The level is recorded in the
 transaction record as `thinking`; a duplicate call with a different explicit level
 is refused, never replayed. `compact` has no such option.
+
+### C-id. The successor keeps the predecessor's title and chain labels (st-01, 2026-11-14)
+
+A successor used to be titled by its bootstrap prompt ("Self-handoff TOKEN: ...") and carried only `ade.handoff`, so
+`paseo ls` could not say which agent leads a chain (twice on 2026-11-14 the cfengine-all lead lost the tendcf lead).
+Now `handoff` passes `agent run --title=TITLE` (Paseo keeps an explicit title through the first prompt; only an
+untitled agent gets the prompt-derived one) and these labels:
+
+- `ade.predecessor=<predecessor id>`, always.
+- `ade.chain=<first lead's id>`: the predecessor's own `ade.chain` from its handoff record, else the predecessor.
+  `paseo agent ls -g --label ade.chain=ID` lists every live member of a chain: its current lead.
+- `ade.role=<role>`, when known: `--role ROLE` (letters, digits, `_ . -`) or the predecessor's record.
+
+Title: `--title TEXT`; else the predecessor's live name (`agent inspect` `Name`), unless it is still a bootstrap
+`Self-handoff ...` title; else the title its own handoff record carried; else `Lead ROLE` (or `Lead (self-handoff
+successor)` with no role). A generated title never holds an agent id: `agent archive SHORTID` falls back to a partial
+title match when the id is missing from the listing (paseo#9668), and an id prefix in a lead's title would let it pick
+the live lead.
+**Paseo's CLI cannot read one agent's labels back** (`agent inspect` shows the name and parent only, `agent ls` rows
+carry no labels; `agent ls --label K=V` only filters), so labels travel in our records (reading the daemon's agent
+files, as `peer_trust_gate` does, is a possible later route): a chain's first handoff after this change names its role with `--role`, and
+every later one inherits it. A lead whose name is already a bootstrap title is renamed with `--title` once.
+
+The choice is recorded in the transaction record as `identity`: `title`, `title_source` (`requested`,
+`predecessor-name`, `chain-record`, `derived`), `labels`, `role_source`, and `checks` per stage (`create`, `accept`,
+`finish`: `requested`, `ok`, `repaired`, `failed`). `accept` and `finish` (both run in the successor) read the name
+back with `agent inspect` and the labels with one `agent ls -a -g --label K=V ...` (Paseo ANDs the filters; one
+listing per label only when one is missing), then repair a difference with one
+`agent update ID --name=TITLE --label K=V` (labels merge; nothing is removed). A Paseo refusal is not fatal: it is kept as
+`identity.error` (`stage` and a bounded `native_error`), the handoff proceeds, and a later successful check moves it to
+`identity.resolved_error`. The schema stays 1: `identity` is additive, and a record without it (made before st-01) is
+never touched by the readback. A record's labels are re-validated (only `ade.chain`, `ade.predecessor`, `ade.role`,
+each a UUID or role identifier) before any argv, and a malformed or forged `identity` is recorded as an error, never
+sent. `ade.kind` (the peer-trust marker) is **not** carried: a successor of an `ade.kind=external-review` agent starts
+unmarked, as before. A duplicate `handoff` with a different `--title` or `--role` is refused, like a different mode.
+Predecessor and successor share a title from creation until `finish` archives the predecessor;
+`finish` still archives by exact id and refuses when the predecessor is missing from the listing (paseo#9668), so the
+shared title cannot steer the archive.
 
 Creation is not acceptance. The successor reads the preserved checkpoint and
 transaction, writes its own nonsecret acknowledgement JSON, then runs:
