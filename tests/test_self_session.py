@@ -2113,3 +2113,29 @@ def test_a_rerun_of_finish_retries_the_rebind(setup, tmp_path):
     _claim('c-late', PRED, tmp_path)
     assert service.finish(path)['rebound_claims'] == ['c-late']
     assert ade_claims.read_claim('c-late')['owner']['agent'] == SUCC
+
+
+def test_a_rebind_failure_leaves_finish_archived_and_a_clean_rerun_clears_it(setup, tmp_path, monkeypatch):
+    import ade_claims
+    _claim('c-f', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    def boom(*a, **k):
+        raise ValueError('induced')
+    monkeypatch.setattr(ade_claims, 'rebind_successor', boom)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and 'induced' in out['claims_rebind_error']
+    assert json.loads(path.read_text())['claims_rebind_error'] == out['claims_rebind_error']
+    monkeypatch.undo()
+    monkeypatch.setenv('ADE_STATE_DIR', str(tmp_path / 'ade-state'))
+    out = service.finish(path)
+    assert out['rebound_claims'] == ['c-f'] and 'claims_rebind_error' not in out
+    assert ade_claims.read_claim('c-f')['owner']['agent'] == SUCC
+
+
+def test_rebound_claims_accumulate_across_finish_reruns(setup, tmp_path):
+    service, native, path = finished_up_to_archive(setup)
+    _claim('c-1', PRED, tmp_path)
+    assert service.finish(path)['rebound_claims'] == ['c-1']
+    assert service.finish(path)['rebound_claims'] == ['c-1']  # a no-op re-run keeps the earlier list
+    _claim('c-2', PRED, tmp_path)
+    assert service.finish(path)['rebound_claims'] == ['c-1', 'c-2']

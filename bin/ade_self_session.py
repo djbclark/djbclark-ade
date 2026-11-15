@@ -952,7 +952,8 @@ class Service:
             import ade_claims  # beside this module; absent when the module is copied alone
             ids = ade_claims.rebind_successor(record['predecessor'], caller=self.actor(), record_path=target,
                                               self_session_state=self.state)
-            record['rebound_claims'] = ids
+            earlier = record.get('rebound_claims')
+            record['rebound_claims'] = sorted(set(ids) | set(earlier if isinstance(earlier, list) else []))
             record.pop('claims_rebind_error', None)
         except Exception as error:  # noqa: BLE001 - recorded, never raised
             record['claims_rebind_error'] = bounded(f'{type(error).__name__}: {error}', MESSAGE_LIMIT)

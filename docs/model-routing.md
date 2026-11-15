@@ -120,6 +120,7 @@ Fable, Argon). A repository with none (the default, and `--repo` omitted) has no
 claude burn-first bonus can put Fable ahead of a usable Astra, and a fallback (Argon) always sorts behind the pools it
 sits behind. That default is intended (a fixed order is a per-repository rule, not a fleet rule); it is pinned by
 `tests/test_route_agent_rt01.py`.
+A2d. **Profile skip (rt-bulk, 2026-11-15):** `route` and `plan` pass over a pool with no model profile for the kind (no `models[kind]`: its line would carry a `--provider` placeholder that `dispatch_warnings` blocks) and name it under `skipped` (an additive key of the plan and route JSON; a queued slice's reason lists the same pools); the placeholder and its warning are emitted only when no pool that can take the kind has a profile, and a profiled pool with no headroom queues the slice instead.
 D4. Pausing a session at a quota limit and continuing it after the reset is the Paseo plugins' job (session-guard,
 usage-auto-resume; PLAN D4). The fleet governor (`level` → no claude code slices), the quota guard (`ok/watch/tight/
 critical` and its state file) and gate profiles (the `away` profile) were deleted on 2026-11-07.

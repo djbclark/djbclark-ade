@@ -157,9 +157,12 @@ generic `set-state` had no caller and are gone (the library functions `read_clai
     ade_claims.py list [--state S] [--json] one line per claim (id, state, branch, owner, path, expires_at), or a
                                             JSON array; what `ade-git-guard claim ls` runs
     ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]
-    ade_claims.py successor-of PRED --record handoff-<uuid>.json   (self-handoff takeover; caller = PASEO_AGENT_ID)
                                             merge owner fields on an active claim (W3 / ade-claim plugin);
                                             exit 2 when missing, inactive or usage error
+    ade_claims.py successor-of PRED --record handoff-<uuid>.json [--self-session-state DIR]
+                                            self-handoff takeover: rebind PRED's active claims to the caller
+                                            (PASEO_AGENT_ID); exit 2 and nothing changed unless the record is
+                                            an archived handoff naming PRED and the caller
     ade_claims.py release --id ID           mark a claim released (W2 follow-up / workspace.archive.after);
                                             idempotent when already released/merged; exit 2 when missing
     ade_claims.py guard -- GIT_ARGS...      decide one git call (what ade-git-guard runs)

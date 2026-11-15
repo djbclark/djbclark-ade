@@ -67,6 +67,16 @@ def test_old_session_key_of_the_predecessor_stops_being_an_owner_key(tmp_path, s
     assert "claude-sess-1" not in ade_claims.owner_ids(c)
 
 
+def test_claim_of_another_agent_that_names_the_predecessor_as_record_is_untouched(tmp_path, state):
+    claim(tmp_path)  # owner PRED
+    p = tmp_path / "wt-x"
+    p.mkdir()
+    ade_claims.create_claim(ade_claims.make_claim(id="c-x", path=p, branch="b", base_sha="a" * 40,
+                                                  owner_agent=THIRD, owner_record=PRED), pointer_for=None)
+    assert rebind(state) == ["c1"]
+    assert ade_claims.read_claim("c-x")["owner"]["agent"] == THIRD
+
+
 def test_other_owners_claim_is_untouched(tmp_path, state):
     claim(tmp_path, owner=THIRD)
     assert rebind(state) == []

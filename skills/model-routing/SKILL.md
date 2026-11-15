@@ -107,7 +107,7 @@ the Cursor Cloud row. `--lead` defaults to `$PASEO_AGENT_ID`, `--slice` is once 
 in the line (quoted, so a shell passes it on and `ade-worker-run` refuses it) and is named in each slice's `dispatch_warnings` (JSON) and on stderr; fix a missing lead or slice before launching (a missing `--cwd` is advisory: only a lead's first launch takes the current directory). `route --kind K` prints the bare `paseo run` template
 (PR Radar's adapter reads it). It spreads
 the wave over pools by `max_parallel`, and keeps a slice queued rather than buy a much weaker pool into code or judgment
-(`quality_max_rank_gap`). `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste
+(`quality_max_rank_gap`). `route` and `plan` pass over a pool with no model profile for the kind (no `models[kind]`: its line would carry a `--provider` placeholder that `dispatch_warnings` blocks) and name it under `skipped`; the placeholder and its warning are emitted only when no pool that can take the kind has a profile, and a profiled pool with no headroom queues the slice instead. `route --kind K [--json]` picks one; `show` prints each pool's headroom, pace, expected waste
 and source; `services [--check-models]` lists the roster with each provider's `paseo provider ls` status and checks
 every suggested model against `paseo provider models <provider>`.
 D2. **Start cheap, climb on a verified failure** (operator 2026-10-18): mechanical → bulk → code → judgment → frontier,
