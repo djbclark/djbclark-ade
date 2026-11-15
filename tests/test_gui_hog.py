@@ -445,7 +445,7 @@ def test_hold_write_is_atomic_private_and_readable(tmp_path):
 
 
 def test_a_hold_not_refreshed_for_60_seconds_is_stale_and_swept(tmp_path):
-    p = put(tmp_path, 1, upd=NOW - 61)
+    p = put(tmp_path, 3, upd=NOW - 61)
     assert gh.read_holds(tmp_path, NOW, sweep=False, start_of=lambda pid: "S1") == [] and p.exists()   # read-only status never sweeps
     assert gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1") == [] and not p.exists()
     fresh = put(tmp_path, 2, upd=NOW - 59)
@@ -453,7 +453,7 @@ def test_a_hold_not_refreshed_for_60_seconds_is_stale_and_swept(tmp_path):
 
 
 def test_a_slow_poller_widens_its_own_staleness_window(tmp_path):
-    put(tmp_path, 1, upd=NOW - 100, poll=60)   # 2 * 60 + 15 = 135 s
+    put(tmp_path, 3, upd=NOW - 100, poll=60)   # 2 * 60 + 15 = 135 s
     assert len(gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1")) == 1
 
 
@@ -510,10 +510,10 @@ def test_the_first_sweep_of_an_admit_does_not_compare_start_times(tmp_path):
 
 
 def test_refused_since_is_clamped_never_trusted(tmp_path):
-    put(tmp_path, 1, since=NOW - 10 ** 7)
+    put(tmp_path, 3, since=NOW - 10 ** 7)
     put(tmp_path, 2, since=NOW + 10 ** 6)
     by = {h["pid"]: h for h in gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1")}
-    assert by[1]["refused_since"] == NOW - 3600           # the age is capped at STARVE_REFUSED_SINCE_MAX_S
+    assert by[3]["refused_since"] == NOW - 3600           # the age is capped at STARVE_REFUSED_SINCE_MAX_S
     assert by[2]["refused_since"] == NOW                   # a future value counts as now
     (tmp_path / "held" / "3-S1.json").write_text(json.dumps({"v": 1, "pid": 3, "start": "S1", "updated": NOW, "refused_since": "soon", "refused": ["load"]}))
     assert {h["pid"]: h for h in gh.read_holds(tmp_path, NOW, start_of=lambda pid: "S1")}[3]["refused_since"] == NOW

@@ -25,6 +25,7 @@ tool describes the surface as it was.
   status with the `ade-merge-gate` App's token (4.3); (e) `bin/load-watch`, `bin/deadline` and `bin/pr-policy`, the
   remaining launchd jobs (`launchd/com.djbclark.load-watch.plist`, `config/launchd/com.djbclark.deadline-sweep.plist`,
   `config/launchd/com.djbclark.pr-policy.plist`, plus the herdr server's plist for the installed bridges).
+  (f) `ade-gui-hog` plus `bin/gui-hog` (GUI-hog dialog PR 3b, 2026-11-14): an operator-clicked local window that can quit or force-quit same-uid GUI apps (3c adds SIGSTOP).
 * **No shims (deleted 2026-11-14, Wave 6 follow-up)**: `bin/acp-dispatch`, `skills/session-finder/relay.py` and `tools/acp-run`
   are gone; live launches are native `paseo run` / `bin/ade-worker-run` (or `bin/review-launch` for a restricted Claude
   run) and messages are native `paseo send --json`.
@@ -157,6 +158,16 @@ What an attacker would want, in order of damage:
 13. **`bin/skillopt-night`**, the nightly launchd job: it feeds agent transcripts (which hold fetched web
     text and third-party content) to a model and stages edits to SKILL.md / CLAUDE.md files "for review"
     (file header). Injected text can become a staged instruction-file edit that every agent then follows.
+14. **`ade-gui-hog` and `bin/gui-hog`** (GUI-hog dialog PR 3b, docs/gui-hog-dialog.md J1-J5): a native window, started detached by the load-watch sampler, that
+    shows desktop apps while a build is held and lets the operator click Quit, Force Quit (with a confirm sheet) or Quit All. Any process of the operator's uid can
+    already `kill` its own processes, so it grants nothing new: no setuid, no sudo, no root helper, no listening socket, no network, no shell (Swift `Process` with an
+    arguments array, Python argv lists). Controls: every action runs `bin/gui-hog vet` against the LIVE pid and process table (protected list by live bundle id, bundle path
+    and executable realpath, never a display name; the hard floor in code; build and terminal subtrees; exit 0/3/4/5/6), then the dialog's own pid-plus-start-time,
+    bundle-id and launch-date check on the very process, then `NSRunningApplication.terminate()` or `forceTerminate()`; the snapshot (`gui-hog/snapshot.json`, mode 0600) is data and never
+    a command; app names, bundle ids and caller labels are untrusted text (control, bidi, zero-width characters stripped, clipped, set as plain `stringValue`); the bundle is built
+    only by `ade-gui-build` (`ade update`, never at trigger time), ad-hoc signed and stamped with the source hash, and a stale or missing bundle means no dialog; the sampler starts
+    it only when the operator owns the console. "Never automatic" is a rule plus the `events.jsonl` audit trail (`by`), not a boundary: a same-uid agent can run `gui-hog`
+    or `kill` itself.
 
 ## 4. Threats, ranked
 
@@ -349,6 +360,15 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Gap.** The `admit` gate fails open (entry point 4). PR 7's `admit` (merged 2026-10-20) adds admission with
   stagger and pending-runner accounting; a wave of dispatches overloaded the Mac on 2026-10-12, before `admit`
   existed.
+
+### 4.11 The GUI-hog dialog quits the wrong app, or (PR 3c) a stuck freeze stops a security or VPN app
+
+* **Control.** PR 3b: Quit and Force Quit pass the live `vet` (identity, protected list, build subtree) and the dialog's own pid-plus-start-time re-check, so pid reuse inside the
+  300 s window cannot redirect a click to a stranger; Force Quit needs a confirm sheet whose default is Cancel; Quit All is graceful only and skips build-hosting, absent and frozen
+  rows; Wait is the leftmost default and does nothing, and Return and Escape are swallowed (a stray key cannot press a button). PR 3c's controls for Freeze (the F6 floor and defaults,
+  the F5 thaw paths, the F7 escape hatch `gui-hog thaw --all`) are specified in docs/gui-hog-dialog.md and land with that PR.
+* **Gap.** The protected list is a name list: an app not on it (a VPN or password manager nobody listed) is a normal row, and a polite Quit of it is one click. Graceful Quit
+  keeps the app's own save sheet; Force Quit loses unsaved work by design. Operator-run acceptance (H4) is required before each GUI PR merges.
 
 ## 5. Out of scope and accepted risks
 

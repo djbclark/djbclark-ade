@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""ade-gui-build: compile the GUI-hog dialog (macos/gui-hog/*.swift) into ~/.local/libexec/djbclark-ade/ADE GUI Hog.app (docs/gui-hog-dialog.md D2).
+
+    ade-gui-build [--if-stale]   build the bundle when it is missing or its stamp differs from the sources; `ade update` runs it with --if-stale
+    ade-gui-build --force        rebuild now
+    ade-gui-build --status       print missing / stale / ok
+    ade-gui-build --check        `swiftc -typecheck` only (no bundle)
+    ade-gui-build --self-test    build into a temp directory and run `ade-gui-hog --self-test` (the view's logic, no window)
+    --dest DIR                   put the bundle at DIR (default: LW_GUI_HOG_BUNDLE, else ~/.local/libexec/djbclark-ade/ADE GUI Hog.app)
+
+Fails open: on Linux, without `swiftc`, or when the build fails it says why and exits 0 for the default and --if-stale runs, and leaves any existing bundle in
+place (the sampler shows no dialog for a missing or stale bundle and the build never waits on it). `--check` and `--self-test` exit 3 when there is no
+swiftc (nothing was checked) and 1 when the check fails. Never run at trigger time: only by hand or by `ade update`. No shell: argv lists only. The bundle
+is ad-hoc signed (`codesign -s -`) and stamped with the SHA-256 of the sources (Contents/Resources/source.sha256).
+"""
+import argparse
+import fcntl
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_hog  # noqa: E402
+
+TARGET_OS = "macosx15"
+SWIFTC_ARGS = ["-O", "-swift-version", "5", "-framework", "AppKit", "-framework", "CoreGraphics"]
+
+
+def say(msg):
+    print(f"ade-gui-build: {msg}")
+
+
+def have_swiftc():
+    if sys.platform != "darwin":
+        return None, "not macOS (no AppKit)"
+    swiftc = shutil.which("swiftc")
+    return (swiftc, "") if swiftc else (None, "swiftc not found (install the Xcode command line tools)")
+
+
+def sources():
+    src = gui_hog.swift_dir()
+    files = sorted(src.glob("*.swift"))
+    return src, files
+
+
+def target():
+    return f"{'arm64' if platform.machine() == 'arm64' else 'x86_64'}-apple-{TARGET_OS}"
+
+
+def run(argv, timeout):
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def compile_to(exe, files, swiftc):
+    rc, out = run([swiftc, *SWIFTC_ARGS, "-target", target(), "-o", str(exe), *map(str, files)], 600)
+    if rc != 0:
+        raise RuntimeError(f"swiftc failed (rc={rc}):\n{out[-3000:]}")
+
+
+def assemble(app, exe, src, digest):
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "Resources").mkdir(parents=True)
+    shutil.copy2(exe, app / "Contents" / "MacOS" / "ade-gui-hog")
+    shutil.copy2(src / "Info.plist", app / "Contents" / "Info.plist")
+    (app / "Contents" / "Resources" / "source.sha256").write_text(digest + "\n")
+    rc, out = run(["codesign", "--force", "-s", "-", str(app)], 120)
+    if rc != 0:
+        raise RuntimeError(f"codesign failed (rc={rc}): {out[-500:]}")
+
+
+def install(app_tmp, dest):
+    """Swap the new bundle in: a directory cannot be os.replace'd onto a non-empty one, so the old one moves aside first and goes after."""
+    old = None
+    if dest.exists() or dest.is_symlink():
+        old = dest.with_name(dest.name + f".old-{os.getpid()}")
+        os.rename(dest, old)
+    try:
+        os.rename(app_tmp, dest)
+    except OSError:
+        if old:
+            os.rename(old, dest)
+        raise
+    if old:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="ade-gui-build")
+    ap.add_argument("--if-stale", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--dest")
+    a = ap.parse_args(argv)
+    dest = Path(a.dest) if a.dest else gui_hog.bundle_dir()
+    src, files = sources()
+    if a.status:
+        state, detail = gui_hog.bundle_state(dest)
+        say(f"{state}" + (f": {detail}" if detail else "") + f" ({dest})")
+        return 0
+    swiftc, why = have_swiftc()
+    strict = a.check or a.self_test
+    if not swiftc:
+        say(f"skipped: {why}")
+        return 3 if strict else 0
+    if not files or not (src / "Info.plist").exists():
+        say(f"skipped: no Swift sources in {src}")
+        return 1 if strict else 0
+    if a.check:
+        rc, out = run([swiftc, "-typecheck", *SWIFTC_ARGS[2:], "-target", target(), *map(str, files)], 600)
+        say("typecheck ok" if rc == 0 else f"typecheck FAILED:\n{out[-3000:]}")
+        return 0 if rc == 0 else 1
+    if a.self_test:
+        with tempfile.TemporaryDirectory(prefix="ade-gui-selftest-") as td:
+            exe = Path(td) / "ade-gui-hog"
+            try:
+                compile_to(exe, files, swiftc)
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                say(str(e))
+                return 1
+            rc, out = run([str(exe), "--self-test"], 60)
+            print(out)
+            return 0 if rc == 0 else 1
+    state, detail = gui_hog.bundle_state(dest)
+    if state == "ok" and not a.force:
+        say(f"up to date ({dest})")
+        return 0
+    digest = gui_hog.source_hash(src)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(dest.parent / ".ade-gui-build.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state, _d = gui_hog.bundle_state(dest)   # another build may have finished while this one waited
+        if state == "ok" and not a.force:
+            say(f"up to date ({dest})")
+            return 0
+        say(f"building ({state}) -> {dest}")
+        with tempfile.TemporaryDirectory(prefix="ade-gui-build-") as td:
+            exe = Path(td) / "ade-gui-hog"
+            app = dest.parent / (dest.name + f".new-{os.getpid()}")
+            try:
+                compile_to(exe, files, swiftc)
+                assemble(app, exe, src, digest)
+                install(app, dest)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+                shutil.rmtree(app, ignore_errors=True)
+                say(f"build failed, any existing bundle is untouched: {e}")
+                return 0   # fail open: no dialog is better than a broken `ade update`
+        say(f"built {dest}")
+        return 0
+    finally:
+        os.close(lock)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

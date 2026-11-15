@@ -1,6 +1,6 @@
 # GUI-hog dialog: design (2026-11-14, PR 3 of the load-gate retune)
 
-Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M says what it does and where it departs from this text). PR 3b (the window) and 3c (Freeze) are not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design.
+Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M). **PR 3b is built (2026-11-14): the native window, Quit / Force Quit / Quit All, the trigger live** (section N says what it does, where it departs from this text, and the operator's H4 run, which has NOT been done: 3b must not merge without it). PR 3c (Freeze) is not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design.
 Rulings come from the operator's 2026-11-13 and 2026-11-14 `/steps` answers, recorded in the lead's memory note
 `project_load_gate_retune_proposal_2026-11-13.md`. Items marked **DECIDE** are open forks. Each one has a
 recommendation, and the build slices follow the recommendation unless the operator rules otherwise.
@@ -121,7 +121,7 @@ bundle id by default (F6). (c) **Known** build GUIs that LaunchServices starts w
 `xcodebuild`). Ancestry cannot see these, so they are protected by bundle id (F6). An arbitrary app opened through `open`
 cannot be told apart from an app the operator opened, so it is not claimed. (d) Any protected app (F6) and the dialog itself.
 
-C5. **Who calls it.** The sampler calls it on every tick (20 s). It runs as a launchd agent in the operator's `gui/502`
+C5. **Who calls it.** The sampler calls it on every tick (20 s). It runs as a launchd agent in the operator's `gui/$(id -u)`
 domain, which is the Aqua session: exactly where a window can appear. When `should_show` is true and the dialog is not
 already running (its single-instance lock, D5), the sampler launches it **detached** and records `last_shown`. The launch
 is `subprocess.Popen` with an argv list, `start_new_session=True`, explicit `close_fds=True`, and stdio set to
@@ -436,7 +436,7 @@ dialog: …" to `~/.local/state/load-watch/gui-hog/dry-run.jsonl`, and `load-wat
 those lines. The value: one week of evidence on how often the dialog would nag, before it exists. The tests are H1 (a),
 (b), (c) and (f). Rollback: `LW_GUI_HOG=0` turns the trigger off; reverting the PR removes the held directory writer.
 
-I2. **PR 3b: read-only and quit dialog.** `macos/gui-hog/`, `bin/ade-gui-build` and the `ade update` hook (D2), the
+I2. **PR 3b: read-only and quit dialog. BUILT 2026-11-14 (section N).** `macos/gui-hog/`, `bin/ade-gui-build` and the `ade update` hook (D2), the
 window (E1–E4), and Wait, Ignore, Quit, Force Quit with confirm, and Quit All with confirm. No Freeze buttons yet. The
 trigger switches from dry-run to live. It also updates `docs/threat-model.md` (J5). Tests: H3 and H4 (a) through (e),
 (h) and (i). Rollback: delete the bundle (fail open, D2) or set `LW_GUI_HOG=0`.
@@ -557,3 +557,47 @@ M3. **Measured 2026-11-14 (M1 Pro, 10 cores).** `lsappinfo list` takes about 0.2
 `state.json` with the app window was 4 KB with 8 apps stored.
 
 M4. **Prior art checked (2026-11-14).** See section L (the starting point) and the report of this PR for the `lsappinfo` output-format and macOS process-group CPU accounting searches.
+
+## N. PR 3b as built (2026-11-14)
+
+N1. **What shipped.** `macos/gui-hog/` (`main.swift` entry, lock and exit codes; `Model.swift` pure logic; `Actions.swift` the `Process` calls and `NSRunningApplication`; `UI.swift` the
+window; `SelfTest.swift`; `Info.plist`, bundle id `com.djbclark.ade.gui-hog`, `LSUIElement`), `bin/ade-gui-build` (D2; `--if-stale`, `--force`, `--status`, `--check`, `--self-test`, `--dest`),
+step 3b of `bin/ade-update` (fails open), the sampler's live launch (`gui_hog.tick(launch=True)`), `gui-hog` subcommands `vet`, `snooze`, `record-exit`, `log`, `show [--all]`, `demo`, and
+the dialog's snapshot (`gui-hog/snapshot.json`, D3). Buttons: per row **Quit** and **Force Quit…** (confirm sheet, default Cancel); bottom **Wait** (leftmost, initial first responder, only
+closes; Return, keypad Enter and Escape are swallowed; no key equivalents), **Ignore 1 h**, **Quit All…** (confirm sheet, default Cancel; graceful only). No Freeze (3c): rows carry
+`frozen: false` and the row builder is one function (`UI.swift` `rebuild`) where 3c adds buttons.
+
+N2. **The quit sequence (D4, carry-over e).** `vet` (Python, live: identity by pid plus start time, bundle id and bundle path from the live executable; protected list by LIVE values; the C4b
+build-subtree walk re-run now; exit 0 / 3 protected or part of a build / 4 identity changed / 5 hosts a build or terminal / 6 gone or `ps` failed) -> in Swift `NSRunningApplication(pid)` plus
+`proc_pidinfo(PROC_PIDTBSDINFO).pbi_start_tvsec` against the snapshot's `root_start_epoch`, the bundle id and the launch date (`identityMatches`; a nil launch date or unknown start refuses) ->
+`terminate()` or `forceTerminate()`. The row's `present` flag (in the newest sample) gates the buttons: an app that uses nothing also reads 0 MB, so `rss_mb == 0` is no sign of absence
+(carry-over d).
+
+N3. **Departures from the text above (all conservative).** (a) The snapshot row has no `members` count (the 300 s window does not store it); D3's list is otherwise followed, plus `present`,
+`cpu_now`, `root_start_epoch`. (b) The launch date may differ from the process start by 3 s, not 1 s (D4 says one second): measured 2026-11-14 on 26 running apps, `launchDate - pbi_start_tvsec`
+ranged from -0.003 s to +0.94 s, which is too close to 1 s for comfort; the pid start time, which is the strong check, keeps its one-second tolerance. (c) The dialog records its exit through
+`gui-hog record-exit` (stdlib Python writes the file with a unique temp name) rather than writing JSON from Swift. (d) E4 is implemented in the dialog: it closes 2 minutes after the
+snapshot shows no hold (K4); `--manual` (`gui-hog show`) and `--demo` never auto-close. (e) `gui-hog show` and `demo` are new (H4a needs a window without a hold; the operator's real-app
+checks need real rows). While a `show` window is open the sampler leaves its snapshot alone. (f) K8 (JetBrains and Xcode-class apps listed with no actions): there is no K8 in this
+document; those IDEs are protected by default (F6) and hidden, so nothing was built (the hosts-build row note covers an unprotected IDE). (g) A launch date tolerance and the
+`launch` field of the dry-run line (`started`, `bundle-missing`, `bundle-stale`, `running`, `no-gui`, `off`) are new. (h) `tick` takes `launch=False` by default: only the sampler passes
+`True`, so no test or `--dry-run` sample can start a window.
+
+N4. **Carry-overs folded from the PR 3a reviews.** (a) `status` formats RSS as an int and `window_means` coerces it. (b) `argv_head_words` skips leading option words (a space-separated option
+value is still taken for the script word, as in load-watch's own `cli_heads`). (c) a hold with pid 1 is refused (`1 < pid`). (d) `present`. (e) identity re-check before every signal
+(N2). (f) `.hold-*.tmp` files older than 2 min are swept. (g) one `ps -o pid=,lstart= -p a,b,c` call per `read_holds`. (h) `gui/$(id -u)` in this document; nothing else in 3b hard-codes the uid.
+
+N5. **Rollback.** Turn the trigger off: `launchctl setenv LW_GUI_HOG 0` (the next 20 s tick; undo with `launchctl unsetenv LW_GUI_HOG`). Remove the dialog: `rm -rf ~/.local/libexec/djbclark-ade/"ADE GUI Hog.app"`
+(the sampler then logs `bundle-missing` once a day and shows nothing; `ADE_GUI_BUILD=0` stops `ade update` from rebuilding it). Reverting the PR removes the code.
+
+N6. **The operator's H4 run (NOT DONE; 3b must not merge without it).** Use a scratch bundle so the live install is untouched: `cd /Users/djbclark/src/djbclark-ade-gui3b-wt`,
+`export LW_GUI_HOG_BUNDLE="$HOME/gui-hog-test/ADE GUI Hog.app"`, `bin/ade-gui-build --force`, then in the same shell:
+(a) `bin/gui-hog demo`: a window with the header `Load 9.8 / 10.4 / 11.2 (10 cores) · CPU 5-min avg 7.9 cores`, an orange DEMO line, `bg, held 4 min for pageins, swapins`, four made-up rows (the
+second greyed with "has a terminal or build inside: no actions", the fourth "no longer running" and its name shown without the control and bidi characters), `+3 more · 4 protected apps hidden`; Quit on a
+row says "demo: nothing was touched". (b) Press Return, keypad Enter and Escape: nothing happens. Tab to Wait (focus ring) and press Space: the window closes (with Full Keyboard Access off, click Wait):
+exit 0, `cat ~/.local/state/load-watch/gui-hog/last-exit.json` is not written by demo. (c) Ignore needs a real window: `bin/gui-hog status` (sampler running), then `bin/gui-hog show --all`, click
+Ignore 1 h: the window closes; `cat ~/.local/state/load-watch/gui-hog/snooze.json` has `snooze_until` about an hour ahead and `last-exit.json` has code 3. (d) Open TextEdit, type text without saving,
+let the sampler see it (a few ticks), `bin/gui-hog show --all`, click Quit on TextEdit: TextEdit's own save sheet appears and nothing is lost; a row for TextEdit appears only if the sampler saw it.
+(e) Click Force Quit… on any harmless app: a sheet naming the app and the loss, **Cancel highlighted**; Return and Escape both cancel; the app keeps running. (h) Ghostty (protected) never appears as a
+row; the footer counts it under "N protected apps hidden". (i) The window is shown only by the sampler when the operator owns `/dev/console` (tested by `gui_ok=False` in pytest); over SSH from another
+machine `bin/gui-hog show` has no window server: check that it does not hang and `last-exit.json` reads code 69. Rollback after the run: `unset LW_GUI_HOG_BUNDLE; rm -rf ~/gui-hog-test`.

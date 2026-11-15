@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
-"""gui-hog: the GUI-hog dialog's data and dry-run trigger (docs/gui-hog-dialog.md). PR 3a has no window and no actions.
+"""gui-hog: the GUI-hog dialog's data, checks and launcher (docs/gui-hog-dialog.md; PR 3b: the window is live, Freeze is PR 3c).
 
-    gui-hog status [--json]     what the sampler sees now: holds, the 5-min app window, the decision, the dry-run count
+    gui-hog status [--json]     what the sampler sees now: holds, the 5-min app window, the decision, the bundle, the dry-run count
+    gui-hog vet --pid P --start S --bundle-id B [--bundle-path X]
+                                the live checks before a Quit or Force Quit (D4); prints one JSON line; exit 0 allowed, 3 protected or part of a
+                                build, 4 identity changed (start time, bundle id or path differ), 5 hosts a build or terminal, 6 gone or ps failed
+    gui-hog snooze [--minutes 60]   Ignore: write gui-hog/snooze.json (the dialog runs this; the sampler only reads the file)
+    gui-hog record-exit --code N    the dialog's outcome, gui-hog/last-exit.json (D5)
+    gui-hog log --event E [--app NAME] [--by dialog]   one line in gui-hog/events.jsonl
+    gui-hog show [--all]        open the window now from the sampler's current data, no hold needed (the operator's manual run: real apps, real Quit);
+                                --all lists every unprotected app in the 5-min window, however small
+    gui-hog demo                open the window on fixture rows in a temp directory; no button touches any app (H4a)
 
-Reads ~/.local/state/load-watch/ (LW_STATE_DIR) and config/gui-hog.toml; writes nothing, signals nothing. Exit 0.
+`status`, `vet`, `show` and `demo` signal nothing. The Swift dialog quits and force-quits through NSRunningApplication, only after `vet` exits 0 and its own
+identity re-check. Reads and writes ~/.local/state/load-watch/ (LW_STATE_DIR) and reads config/gui-hog.toml.
 """
 import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -18,30 +29,108 @@ import gui_hog  # noqa: E402
 STATE_DIR = Path(os.environ.get("LW_STATE_DIR", Path.home() / ".local/state/load-watch"))
 
 
+def _state():
+    try:
+        st = json.loads(gui_hog.read_small(STATE_DIR / "state.json", 64 * 1024 * 1024))
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def demo_snapshot(now):
+    def row(i, name, bid, cores, cpu, rss, **kw):
+        r = {"app_id": str(9000 + i), "name": name, "bundle_id": bid, "bundle_path": f"/Applications/{name}.app", "root_pid": 9000 + i,
+             "root_start": "Fri Nov 14 18:02:11 2026", "root_start_epoch": gui_hog.parse_lstart("Fri Nov 14 18:02:11 2026"), "cores_5m": cores, "cpu_now": cpu, "rss_mb": rss,
+             "present": True, "hosts_build": False, "frozen": False}
+        r.update(kw)
+        return r
+    return {"v": 1, "t": int(now), "manual": False, "demo": True,
+            "header": {"load": [9.8, 10.4, 11.2], "ncpu": 10, "cpu_5m": 7.9},
+            "holds": [{"caller": "bg", "held_s": 240, "refused": ["pageins", "swapins"]}],
+            "rows": [row(1, "Demo Browser", "com.example.demo.browser", 1.84, 1.9, 3170),
+                     row(2, "Demo Editor", "com.example.demo.editor", 0.62, 0.4, 1480, hosts_build=True),
+                     row(3, "Demo Chat", "com.example.demo.chat", 0.31, 0.2, 960),
+                     row(4, "Demo ‮GnitseT​\x07 Notes", "com.example.demo.notes", 0.08, 0.1, 410, present=False)],
+            "more": 3, "protected_hidden": 4, "rss_trigger": True}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="gui-hog")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("status", help="holds, the app window, the decision now, the dry-run count")
+    p = sub.add_parser("status", help="holds, the app window, the decision now, the bundle, the dry-run count")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("vet", help="live checks before a Quit or Force Quit")
+    p.add_argument("--pid", required=True)
+    p.add_argument("--start", default="")
+    p.add_argument("--bundle-id", default="")
+    p.add_argument("--bundle-path", default="")
+    p = sub.add_parser("snooze", help="Ignore: snooze the dialog")
+    p.add_argument("--minutes", type=int, default=60)
+    p = sub.add_parser("record-exit", help="write gui-hog/last-exit.json")
+    p.add_argument("--code", type=int, required=True)
+    p = sub.add_parser("log", help="append one line to gui-hog/events.jsonl")
+    p.add_argument("--event", required=True)
+    p.add_argument("--app", default="")
+    p.add_argument("--bundle-id", default="")
+    p.add_argument("--by", default="dialog")
+    p = sub.add_parser("show", help="open the window now from the sampler's current data")
+    p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on TextEdit)")
+    sub.add_parser("demo", help="open the window on fixture rows; no button touches any app")
     a = ap.parse_args(argv)
     cfg = gui_hog.load_config()
-    try:
-        st = json.loads((STATE_DIR / "state.json").read_text())
-        st = st if isinstance(st, dict) else {}
-    except (OSError, ValueError):
-        st = {}
     now = time.time()
-    if a.json:
-        held = gui_hog.read_holds(STATE_DIR, now, sweep=False)
+    if a.cmd == "status":
+        st = _state()
+        if a.json:
+            held = gui_hog.read_holds(STATE_DIR, now, sweep=False)
+            means = gui_hog.window_means(st, now, cfg)
+            ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
+            snooze = gui_hog.effective_snooze(ghs, gui_hog.read_snooze(STATE_DIR), now, cfg["trigger"]["snooze_s"])
+            d = gui_hog.should_show(held, means, now, snooze, ghs.get("last_shown"), cfg)
+            print(json.dumps({"enabled": gui_hog.enabled(), "decision": d, "holds": held, "apps": means, "bundle": gui_hog.bundle_state()[0],
+                              "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now)}, indent=1))
+        else:
+            print("\n".join(gui_hog.status_lines(st, STATE_DIR, now, cfg)))
+        return 0
+    if a.cmd == "vet":
+        code, why, info = gui_hog.vet(a.pid, a.start, a.bundle_id, a.bundle_path, state_dir=STATE_DIR, my_uid=os.getuid(), cfg=cfg)
+        print(json.dumps({"ok": code == 0, "code": code, "reason": why, **info}, separators=(",", ":")))
+        return code
+    if a.cmd == "snooze":
+        until = gui_hog.write_snooze(STATE_DIR, now, a.minutes)
+        gui_hog.events_append(STATE_DIR, "ignore", by="dialog", snooze_until=until)
+        print(json.dumps({"snooze_until": until}))
+        return 0
+    if a.cmd == "record-exit":
+        gui_hog.record_exit(STATE_DIR, a.code, now)
+        return 0
+    if a.cmd == "log":
+        gui_hog.events_append(STATE_DIR, a.event, by=a.by, app=a.app, bundle_id=a.bundle_id)
+        return 0
+    if a.cmd == "show":
+        st = _state()
+        if a.all:
+            cfg["trigger"].update(min_row_cores=0, min_row_rss_mb=0)
         means = gui_hog.window_means(st, now, cfg)
-        ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
-        snooze = gui_hog.effective_snooze(ghs, gui_hog.read_snooze(STATE_DIR), now, cfg["trigger"]["snooze_s"])
-        d = gui_hog.should_show(held, means, now, snooze, ghs.get("last_shown"), cfg)
-        print(json.dumps({"enabled": gui_hog.enabled(), "decision": d, "holds": held, "apps": means,
-                          "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now)}, indent=1))
-    else:
-        print("\n".join(gui_hog.status_lines(st, STATE_DIR, now, cfg)))
-    return 0
+        if not means:
+            print("gui-hog: no app window yet; the sampler (`load-watch sample`, every 20 s) fills it (`gui-hog status`)", file=sys.stderr)
+            return 1
+        rows = [m for m in means if m.get("present") and not m["protected"]][:gui_hog.SNAPSHOT_MAX_ROWS * 2]
+        la = os.getloadavg() if hasattr(os, "getloadavg") else None
+        snap = gui_hog.build_snapshot(means, gui_hog.read_holds(STATE_DIR, now, sweep=False), now, cfg, load=la, ncpu=os.cpu_count(),
+                                      cpu_5m=gui_hog.window_total(st, now, cfg),
+                                      starts=gui_hog.proc_starts([int(m["id"]) for m in rows if str(m["id"]).isdigit()]), manual=True)
+        gui_hog.write_snapshot(STATE_DIR, snap)
+        started, why = gui_hog.launch_dialog(STATE_DIR, extra=("--manual",))
+        print("gui-hog: window started" if started else f"gui-hog: not started: {why}")
+        return 0 if started else 1
+    if a.cmd == "demo":
+        tmp = Path(tempfile.mkdtemp(prefix="gui-hog-demo-"))
+        gui_hog.write_snapshot(tmp, demo_snapshot(now))
+        started, why = gui_hog.launch_dialog(tmp, extra=("--demo",))
+        print(("gui-hog demo: window started (state dir %s, removed by the OS later)" % tmp) if started else f"gui-hog demo: not started: {why}")
+        return 0 if started else 1
+    return 2
 
 
 if __name__ == "__main__":

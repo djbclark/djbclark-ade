@@ -92,7 +92,7 @@ the alert itself is never suppressed. No incident row, nothing is signalled or k
 records nothing. Test hook: LW_FAKE_COMPRESSOR (a comma list of cumulative counters, one per read, the last
 repeating; set, it replaces vm_stat, `admit` ignores it).
 
-GUI-hog trigger (2026-11-14, PR 3a of docs/gui-hog-dialog.md; DRY-RUN ONLY, no window, nothing is quit, frozen or signalled): `bin/gui_hog.py` (stdlib; `bin/gui-hog status`
+GUI-hog trigger (2026-11-14, PRs 3a and 3b of docs/gui-hog-dialog.md; 3b makes it LIVE: a yes starts the native window `ADE GUI Hog.app` detached, never waited on, never built here; nothing is signalled by load-watch): `bin/gui_hog.py` (stdlib; `bin/gui-hog status`
 shows it) is imported lazily, inside a `try`, in two places. (1) Hold registry (C2): while `admit --wait S` (S > 0) is refused it keeps
 held/<pid>-<start>.json in the state dir fresh on every refused poll (caller program, the refused gate names, `refused_since` = the epoch the unbroken run of refusals began, which
 goes through `parse_refused_since` like the valve's clock, and the caller's `--refused-since` credit when given), and removes it when a clean reading ends the run or the call
@@ -101,8 +101,11 @@ or change the exit code: `admit` still only decides. (2) Every sample, whatever 
 type Foreground/UIElement with an .app bundle; their process trees and in-bundle helpers; a subtree under a shell, a pty, `bg`, an agent CLI or an executable outside the
 bundle is a build and never counts) to a 300 s window in state.json (`apps`, `app_meta`), then decides (K1): a hold refused for >= 180 s on a gate quitting an app can relieve
 (load, compressor, free_mem, pageins, swapins), and the SUM over unprotected non-build apps of their 5-min mean cores >= 0.75 or of their RSS >= 2048 MB, at most once per 30 min
-(`gui_hog.last_shown` in state.json), and not within the Ignore snooze (gui-hog/snooze.json, written by the dialog in PR 3b). A yes appends "would-show" to gui-hog/dry-run.jsonl
-(app names and bundle ids stripped of control and bidi characters); `admit-log summary` counts those lines. Protected apps (config/gui-hog.toml; a hard floor in code: Dock, Finder,
+(`gui_hog.last_shown` in state.json), and not within the Ignore snooze (gui-hog/snooze.json, written by the dialog's Ignore button). A yes appends "would-show" to gui-hog/dry-run.jsonl
+(app names and bundle ids stripped of control and bidi characters; `launch` says started / bundle-missing / bundle-stale / running / no-gui); `admit-log summary` counts those lines. While a hold is active
+or the dialog runs, each tick rewrites gui-hog/snapshot.json, the window's only input. In a GUI session (the operator owns /dev/console) with a fresh bundle the sampler then starts the dialog
+(single instance by flock; the build never waits on it; admission, the valve and the CI offload run as if it did not exist). A missing bundle or one older than macos/gui-hog is logged once a
+day and means no dialog (`bin/ade-gui-build`, run by `ade update`). Protected apps (config/gui-hog.toml; a hard floor in code: Dock, Finder,
 WindowServer, loginwindow, the dialog, other users, /System, /usr) are counted as protected, never as hogs. LW_GUI_HOG=0 turns the window and the trigger off.
 State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json, held/, gui-hog/).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
@@ -1631,13 +1634,14 @@ def gui_hog_mod():
 
 
 def gui_hog_tick(st, t, table, load1, dry):
-    """Every sample, whatever the load (C3): the per-app 5-minute window, then the dry-run decision (K1). LW_GUI_HOG=0: off."""
+    """Every sample, whatever the load (C3): the per-app 5-minute window, then the decision (K1); a `show` is logged to gui-hog/dry-run.jsonl and, in a GUI
+    session with a fresh bundle, starts the dialog detached (3b, C5: never waited on, never built here). LW_GUI_HOG=0: off."""
     if os.environ.get("LW_GUI_HOG", "").strip() == "0":
         st.pop("apps", None)
         st.pop("app_meta", None)
         return
     gui_hog_mod().tick(st, t, table, {p: v[1] for p, v in PSTATE.items()}, PTTY, state_dir=STATE_DIR, my_uid=MY_UID,
-                       agent_clis=AGENT_CLIS, load1=load1, dry=dry)
+                       agent_clis=AGENT_CLIS, load1=load1, dry=dry, launch=True)
 
 
 def operator_notice(st, t, key, msg):
@@ -2870,7 +2874,7 @@ def hold_note(refused, run_start, waited, poll, wait, caller):
 
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything (a waiting call also keeps its hold file in
-    ~/.local/state/load-watch/held/ for the GUI-hog trigger, and removes it when it returns: `hold_note`)."""
+    ~/.local/state/load-watch/held/ for the GUI-hog trigger, and removes it when it returns: `hold_note`; admit never starts the dialog: the sampler does, GUI-hog 3b)."""
     try:
         return _cmd_admit(a)
     finally:

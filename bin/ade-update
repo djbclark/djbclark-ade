@@ -50,6 +50,9 @@ Steps, in order:
    "new upstream" links (JSON `claude_links.new_upstream`; not counted as problems, no fix yet), the same as
    upstream-only skills; apply pulls first, so it reports them with their fix. `CLAUDE.md` is a property of the
    checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
+3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
+   `macos/gui-hog` (`--check` only says it would). Fails open: no swiftc, a failed or slow build is a note, never a problem or an exit code (the sampler shows no dialog without
+   a fresh bundle). `ADE_GUI_BUILD=0` skips it.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
    new), or every Unreleased entry when nothing is recorded; plus the entries of `changelog.d/` fragments
@@ -772,6 +775,23 @@ def update(rep, args, repo):
         for p in links["problems"]:
             p.pop("fix", None)
         rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
+
+    # 3b. the GUI-hog dialog bundle (docs/gui-hog-dialog.md D2). FAIL OPEN: a missing swiftc, a failed build or a timeout is a note, never a problem; the
+    # sampler shows no dialog for a missing or stale bundle. Only the canonical checkout builds (it is the one whose sources the live sampler matches), only on
+    # macOS, and ADE_GUI_BUILD=0 skips it. The script beside this ade-update is run, never one inside a non-canonical checkout.
+    gui_build = Path(__file__).resolve().parent / "ade-gui-build"
+    if can_link and sys.platform == "darwin" and os.environ.get("ADE_GUI_BUILD", "") != "0" and gui_build.exists() and (Path(repo) / "macos" / "gui-hog").is_dir():
+        if check:
+            rep.say("GUI-hog dialog: would run: " + shlex.join([sys.executable, str(gui_build), "--if-stale"]))
+        else:
+            try:
+                r = subprocess.run([sys.executable, str(gui_build), "--if-stale"], capture_output=True, text=True, timeout=900)
+                tail = ((r.stdout + r.stderr).strip().splitlines() or ["no output"])[-1][:300]
+                rep.say(f"GUI-hog dialog: {tail}" + ("" if r.returncode == 0 else f" (rc={r.returncode}; not a problem, the sampler shows no dialog without a fresh bundle)"))
+                d["gui_bundle"] = {"rc": r.returncode, "note": tail}
+            except (OSError, subprocess.TimeoutExpired) as e:
+                rep.say(f"GUI-hog dialog: build skipped ({e.__class__.__name__}); not a problem, rerun bin/ade-gui-build")
+                d["gui_bundle"] = {"rc": None, "note": e.__class__.__name__}
 
     # 4. changelog and state
     base, marked = read_state_record(state_path, repo)
