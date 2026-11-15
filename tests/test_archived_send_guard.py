@@ -777,3 +777,17 @@ def test_one_decision_inspects_each_agent_once(world):
         return {"Id": ident, "Archived": False}
     assert guard.decide(A, inspect, state_dir=world.state, home=world.home).action == guard.REDIRECT
     assert sorted(calls) == sorted(set(calls)) and set(calls) == {A, B}
+
+
+def test_a_not_found_answer_is_cached_within_one_decision(world):
+    """sr-43 rv-753 B5b: a prefix target that Paseo does not know is looked up once, and still passes unguarded."""
+    calls = []
+
+    def inspect(ident):
+        calls.append(ident)
+        raise LookupError(ident)
+    cached = guard._cached(inspect)
+    for _ in range(2):
+        with pytest.raises(LookupError):
+            cached("nope")
+    assert calls == ["nope"]

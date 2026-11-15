@@ -74,6 +74,7 @@ AGENT_RUNNING = 'AGENT_RUNNING'  # Paseo's structured archive refusal for an age
 # An AGENT_RUNNING refusal whose message names a different agent: not a wait. Recorded under this code so the send guard
 # (ade_lead_succession.ACK_WAIT_CODES does not list it) stops redirecting at once (sr-43 a, rv-736r B1).
 ARCHIVE_RESOLVED_OTHER_AGENT = 'ARCHIVE_RESOLVED_OTHER_AGENT'
+WAIT_CODES = (AGENT_RUNNING, 'PREDECESSOR_NOT_IDLE')  # kept equal to ade_lead_succession.ACK_WAIT_CODES (a test asserts it)
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
@@ -851,7 +852,8 @@ class Service:
             # Recorded like every later re-check (rq-38 B2): a first check that fails (checkpoint, HEAD or mode drift) leaves a
             # native_error, which ends the send guard's acknowledged redirect at once instead of after its hour.
             guarded(self.check_retirement, record, target)
-            if record.get('native_error', {}).get('code') not in (AGENT_RUNNING, 'PREDECESSOR_NOT_IDLE'):
+            earlier = record.get('native_error')
+            if 'native_error' in record and not (isinstance(earlier, dict) and earlier.get('code') in WAIT_CODES):
                 # A re-run whose first check passes (a waiting reason stays true here and ends before the archive call): the earlier failure (drift since fixed) no longer holds the send guard's
                 # acknowledged redirect off (sr-43 c, rv-736r R2); the reason stays as history. A failure now records afresh.
                 self.resolve_native_error(record)
@@ -888,11 +890,6 @@ class Service:
                         'match, getpaseo/paseo#9668); nothing archived; archive by exact id via the Paseo MCP '
                         'archive_agent, verify with `paseo agent inspect`, then re-run finish')
                 record['status'] = 'archive-unknown'
-                # A refusal from an earlier loop pass (AGENT_RUNNING) must not outlive this call: if the process dies inside
-                # the archive call below the outcome is unknown, and a stale waiting code would keep the send guard
-                # redirecting (sr-43 b, rv-736r R1). The reason stays as history; this call's own refusal records afresh.
-                if 'native_error' in record:
-                    record['resolved_native_error'] = record.pop('native_error')
                 self.save(target, record)
                 try:
                     receipt = self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive

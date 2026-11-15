@@ -1975,26 +1975,41 @@ def test_a_non_list_retry_probe_is_named_as_such(setup):
         service.handoff(checkpoint, quiesced=True)
 
 
-def test_a_crash_inside_a_second_archive_call_leaves_no_stale_waiting_reason(setup):
-    """sr-43 b (rv-736r R1): AGENT_RUNNING, then the process dies inside the next archive call: unknown outcome, no redirect."""
+def test_wait_codes_equal_the_send_guards_waiting_codes():
+    """sr-43 rv-753 B3: one list of waiting codes; the new `ARCHIVE_RESOLVED_OTHER_AGENT` is not among them."""
+    import ade_lead_succession as succ
+    assert set(ss.WAIT_CODES) == set(succ.ACK_WAIT_CODES)
+    assert ss.ARCHIVE_RESOLVED_OTHER_AGENT not in succ.ACK_WAIT_CODES
+
+
+def test_a_rerun_with_a_null_native_error_does_not_crash_at_the_first_check(setup):
+    """sr-43 rv-753 B4: a hand-edited `native_error: null` is cleared, not an AttributeError."""
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    record['native_error'] = None
+    path.write_text(json.dumps(record))
+    done = service.finish(path)
+    assert done['status'] == 'archived'
+
+
+def test_a_rerun_after_a_kill_in_the_retry_sleep_keeps_the_stale_agent_running_redirect(setup):
+    """sr-43 rv-753 B5a: AGENT_RUNNING left by a kill during the retry sleep is still a wait at the re-run's first check."""
     service, native, path = finished_up_to_archive(setup)
     native.archive_queue = [RUNNING]
-    real, seen = service.native, []
 
-    def native_call(*args, **kw):
-        if args[:2] == ('agent', 'archive') and seen == ['first']:
-            seen.append(json.loads(path.read_text()))  # what a crash here would leave behind
-            raise KeyboardInterrupt
-        if args[:2] == ('agent', 'archive'):
-            seen.append('first')
-        return real(*args, **kw)
-    service.native = native_call
+    def killed(seconds):
+        raise KeyboardInterrupt
+    service.sleep = killed
     with pytest.raises(KeyboardInterrupt):
         service.finish(path, stable=0, timeout=100, poll=5)
-    left = seen[1]
-    assert left['status'] == 'archive-unknown' and 'native_error' not in left
-    assert left['resolved_native_error']['code'] == 'AGENT_RUNNING'
-    assert guard_says(service) == 'pass'
+    assert json.loads(path.read_text())['native_error']['code'] == 'AGENT_RUNNING'
+    assert guard_says(service) == 'redirect'
+    service.sleep = native.clock.sleep if hasattr(native.clock, 'sleep') else (lambda s: None)
+    seen = []
+    service.progress = lambda message: seen.append(guard_says(service))
+    native.status_at = lambda now: 'running' if now < 300 else 'idle'
+    service.finish(path, stable=20, timeout=1000, poll=5)
+    assert seen and set(seen) == {'redirect'}
 
 
 def test_a_rerun_after_a_failed_first_check_turns_the_redirect_back_on(setup):

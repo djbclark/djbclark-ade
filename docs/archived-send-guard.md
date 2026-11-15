@@ -23,7 +23,7 @@ record's successor chain) or refused, and never resurrect it.
    Paseo cannot be asked about, leaves the predecessor reachable: a crashed successor must not strand its messages), and (2)
    while the record is fresh: `accept` stamps `acknowledged_at`, the hop ends `ade_lead_succession.ACK_WINDOW_SECONDS` (1 hour;
    `finish` waits at most 25 minutes) later, and ends at once when `finish` recorded a failure other than waiting for the
-   predecessor (`native_error` other than `PREDECESSOR_NOT_IDLE` / `AGENT_RUNNING`, so an `AGENT_RUNNING` naming another agent, recorded as `ARCHIVE_RESOLVED_OTHER_AGENT`, ends it at once; a later `finish` re-run whose first check passes, or whose next archive call starts, moves an older reason to `resolved_native_error`; the very first `finish` check is recorded too, so
+   predecessor (`native_error` other than `PREDECESSOR_NOT_IDLE` / `AGENT_RUNNING`, so an `AGENT_RUNNING` naming another agent, recorded as `ARCHIVE_RESOLVED_OTHER_AGENT`, ends it at once; a later `finish` re-run whose first check passes moves an older non-waiting reason to `resolved_native_error`; a stale `AGENT_RUNNING` left by a crash stays a wait until the hour ends, which fails toward the live successor (Carried 43 b); the very first `finish` check is recorded too, so
    checkpoint, HEAD or mode drift ends the redirect immediately). The statuses that count are `acknowledged` and, because `finish`
    saves `archive-unknown` before every archive call and keeps it after Paseo's `AGENT_RUNNING` refusal (the case a peer's message
    causes), `archive-unknown` **only with** one of those two waiting errors: an `archive-unknown` with no recorded reason (a crashed
