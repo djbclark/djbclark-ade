@@ -2141,3 +2141,52 @@ def test_rename_main_of_a_window_with_an_untrimmed_work_text_is_refused_not_a_tr
     r = main_env.run("rename-main", "--lead", LEAD)
     assert r.returncode == 1 and "Traceback" not in r.stderr and "rename it by hand" in r.stderr and LEAD_WKS in r.stderr
     assert rename_calls(main_env) == [] and ["run"] not in main_env.verbs()
+
+
+# --- am-02 (reviews of PR 732 B1, B2): a closed agent with no state file blocks; names reach stderr escaped ----
+
+@pytest.mark.parametrize("box, wks, extra", [("other", "wks_o1", ["--placement", "other", "--repo", "repo"]),
+                                             ("worker", "wks_win1", [])])
+def test_a_closed_unlabelled_agent_with_no_readable_state_file_blocks_the_archive(two_boxes, box, wks, extra):
+    """B1: its window is unknown, so it may be the operator's session in this window: fail closed."""
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]       # no state file written for it
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and "blocker: op1: closed, not labelled for this lead, and no readable state file" in r.stderr
+    assert archive_calls(two_boxes) == []
+    (two_boxes.home / "agents/proj").mkdir(parents=True, exist_ok=True)
+    (two_boxes.home / "agents/proj" / "op1.json").write_text("{not json")               # an unparsable one is the same
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and "no readable state file" in r.stderr and archive_calls(two_boxes) == []
+    two_boxes.state("op1", "")                                                          # a state file without a usable workspaceId
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and "no readable state file" in r.stderr and archive_calls(two_boxes) == []
+    two_boxes.state("op1", "wks_elsewhere")                                             # its window is known and is not this one
+    assert two_boxes.run("archive-window", "--lead", LEAD, *extra).returncode == 0
+
+
+def test_a_closed_agent_labelled_for_the_lead_with_no_state_file_still_does_not_block(two_boxes):
+    two_boxes.data["agents"] = [{"id": "c1", "status": "closed", "labels": {"ade.lead": LEAD}}]
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo")
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_window_name_with_control_characters_is_escaped_in_a_refusal(env):
+    """B2: refusal texts show the name with `!r`, so an escape sequence cannot reach the terminal."""
+    weird = "WORKER repo (Wave 7\x1b[31m\x07)"
+    env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": weird, "cwd": "/repo"}]
+    own(LEAD, "wks_b1")
+    member(env, "o9", "wks_b1", lead=OTHER_LEAD)
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo",
+                "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF TEXT")
+    assert r.returncode == 1, r.stderr
+    assert "another lead's agents" in r.stderr and "\x1b" not in r.stderr and "\x07" not in r.stderr, r.stderr
+    assert "\\x1b[31m" in r.stderr
+
+
+def test_a_window_cwd_with_control_characters_is_escaped_in_the_cwd_refusal(env):
+    """am-02 round 1 L4a: the window's cwd comes from Paseo too."""
+    env.data["workspaces"] = [{"workspaceId": "wks_c1", "name": WIN, "cwd": "/repo\x1b[31m"}]
+    own(LEAD, "wks_c1")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--",
+                "--no-wait", "B")
+    assert r.returncode == 1 and "runs in /repo" in r.stderr and "\x1b" not in r.stderr and "\\x1b[31m" in r.stderr, r.stderr

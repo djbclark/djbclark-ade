@@ -206,6 +206,11 @@ def unclaimed_agents(wks: str, lead: str) -> list[str]:
     return out
 
 
+def esc(text) -> str:
+    """Text from Paseo for a refusal: control characters as escapes (a window name is `!r`; a path keeps its quotes off)."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
+
+
 def row_wks(row: dict) -> str:
     if not WKS_RE.fullmatch(str(row.get("workspaceId", ""))):
         raise Refused(f"window {row['name']!r} has no usable workspaceId")
@@ -305,7 +310,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
             return bool(mine_co and wc and os.path.isdir(wc) and wsn.primary_checkout_of(wc) == mine_co)
         same_repo = [r for r in owned_own if repo is None or by_name(r) or by_checkout(r)]
         if same_repo:
-            ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r in same_repo)
+            ids = ", ".join(f"{row_wks(r)} ({r['name']!r})" for r in same_repo)
             hint = "use that --window-middle (or none), not a second window"
             if repo is not None and not any(by_name(r) for r in same_repo):
                 hint = (f"it is the same checkout as --cwd, so a window for {repo} needs --cwd that repo's own checkout; "
@@ -346,7 +351,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         if for_repo:  # one match picks it; several are still ambiguous, but only among this repo's windows
             hits = for_repo
     if len(hits) > 1:
-        ids = ", ".join(f"{row_wks(r)} ({r['name']})" for r, _, _ in hits)
+        ids = ", ".join(f"{row_wks(r)} ({r['name']!r})" for r, _, _ in hits)
         raise Refused(f"{len(hits)} windows match the lead's {box} box: {ids}; pass --repo (or --window-middle, a work text "
                       "above) to pick one, or archive the extras (`ade-tidy --apply`, docs/workspace-layout.md)")
     if not hits:
@@ -356,18 +361,18 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         raise err
     wks = row_wks(row)
     if wks in others:
-        raise Refused(f"window {wks} ({row['name']}) is registered to lead {others[wks]}, not {lead} "
+        raise Refused(f"window {wks} ({row['name']!r}) is registered to lead {others[wks]}, not {lead} "
                       "(pick a different --window-middle)")
     owned_here = new is not None or wks in members
     if new is None:  # a current-form name: prove it is not another lead's
         foreign = foreign_agents(wks, lead)
         if foreign:
-            raise Refused(f"window {wks} ({row['name']}) holds another lead's agents: {', '.join(foreign)}; "
+            raise Refused(f"window {wks} ({row['name']!r}) holds another lead's agents: {', '.join(foreign)}; "
                           "it is not this lead's WORKERS window (pick a different --window-middle)")
         if not owned_here:  # an unclaimed name: adoptable only when nothing foreign to this lead is in it
             strangers = unclaimed_agents(wks, lead)
             if strangers:
-                raise Refused(f"window {wks} ({row['name']}) holds agents not labelled for this lead: {', '.join(strangers)}; "
+                raise Refused(f"window {wks} ({row['name']!r}) holds agents not labelled for this lead: {', '.join(strangers)}; "
                               "it may be the operator's or another lead's. Pick a different --window-middle, or archive "
                               "those agents first")
     cur_hit = wsn.parse(row["name"])
@@ -621,9 +626,9 @@ def launch(opts, rest: list[str]) -> int:
         elif win is not None and opts.cwd and win.get("cwd") and os.path.realpath(win["cwd"]) != cwd:
             # `paseo run --workspace` takes the agent's cwd from the workspace and ignores --cwd (getpaseo/paseo#9699): a worker
             # started here would silently run in the window's directory, not the claimed worktree the caller named.
-            raise Refused(f"window {row_wks(win)} ({win['name']}) runs in {win['cwd']}, but --cwd is {cwd}: paseo ignores --cwd "
-                          f"when it places an agent in an existing window, so the worker would start in {win['cwd']}. Pass "
-                          f"--cwd {win['cwd']} (or none) and give the worktree {cwd} as an absolute path in the brief "
+            raise Refused(f"window {row_wks(win)} ({win['name']!r}) runs in {esc(win['cwd'])}, but --cwd is {esc(cwd)}: paseo ignores --cwd "
+                          f"when it places an agent in an existing window, so the worker would start in {esc(win['cwd'])}. Pass "
+                          f"--cwd {esc(win['cwd'])} (or none) and give the worktree {esc(cwd)} as an absolute path in the brief "
                           "(docs/workspace-layout.md item 5: a window's cwd is its primary checkout, the writer works in the "
                           "claimed worktree by absolute paths)")
         # A minted window's cwd is its repo's primary checkout, never the claimed worktree the caller named (docs/workspace-layout.md
@@ -788,8 +793,13 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         if status == "closed":
             # a closed agent of this lead's lineage never blocks, but one nobody here launched (the operator's session in the
             # OTHER box, a daemon-restart casualty) is archived with the window: it blocks like a live one
-            if in_window and aid not in labelled:
-                blockers.append(f"{aid}: closed, but not labelled for this lead (the archive would archive it with the window)")
+            if aid not in labelled:
+                if in_window:
+                    blockers.append(f"{aid}: closed, but not labelled for this lead (the archive would archive it with the window)")
+                elif state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
+                    # no readable state file or workspaceId: its window is unknown, so it may be in this one (fail closed, am-02)
+                    blockers.append(f"{aid}: closed, not labelled for this lead, and no readable state file with a workspaceId, "
+                                    "so its window is unknown (archive it with `paseo agent archive`, or restore its state file)")
             continue
         if state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
             blockers.append(f"{aid}: live ({status}) with no usable workspaceId in a state file, so its window is unknown")

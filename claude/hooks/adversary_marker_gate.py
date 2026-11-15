@@ -40,7 +40,7 @@ this gate lets through is what the Action reads as documentation:
 
 Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
 without naming `gh pr`/`gh api`); a body or body-file path held in a variable set in ANOTHER tool call (`F=raw.md; gh ... --body-file "$F"` in ONE command is seen);
-a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; `gh pr create --fill*`
+a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`; `D=sub; cd $D` in one command is expanded); `gh pr create --fill*`
 (the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
 (`$'\\x3c'`, a shell-built `verdict` key beside a decoy BLOCK); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
@@ -60,6 +60,7 @@ Design and limits: docs/code-review.md rule 14.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -126,13 +127,21 @@ def _checker():
 # ---- live marker -----------------------------------------------------------------------------------------------
 
 
+def mentions_approve(text: str) -> bool:
+    """`approve` in the text, or in the text with its `\\uXXXX` escapes decoded: the checker reads a marker's JSON, so
+    `"verdict":"\\u0041PPROVE"` is APPROVE to it (am-02, adversary round 1 M2)."""
+    if APPROVE_WORD.search(text):
+        return True
+    return bool(U_ESCAPE.search(text) and APPROVE_WORD.search(U_ESCAPE.sub(lambda m: chr(int(m.group()[2:], 16)), text)))
+
+
 def live_approve(text: str, am, raw: bool = False) -> str:
     """A reason string when `text` carries a live APPROVE marker the Action could count (or cannot rule out), else "".
     `raw`: the text is a filter's output (`grep`/`sed`/`head` over a file), so a fence around the line in the file is gone."""
     if not VERDICT_WORD.search(text):
         return ""
     if len(VERDICT_WORD.findall(text)) > MAX_STARTS:
-        return "more than %d `adversary-verdict` marker starts" % MAX_STARTS if APPROVE_WORD.search(text) else ""
+        return "more than %d `adversary-verdict` marker starts" % MAX_STARTS if mentions_approve(text) else ""
     stripped = text if raw else am._strip_code(text)
     spans = am._marker_spans(stripped)
     for _start, js, je in spans:
@@ -142,7 +151,7 @@ def live_approve(text: str, am, raw: bool = False) -> str:
         try:
             doc = json.loads(body, object_pairs_hook=am._strict_object)
         except ValueError:
-            if APPROVE_WORD.search(body):
+            if mentions_approve(body):
                 return "an `adversary-verdict:v1` marker that does not parse as JSON and mentions APPROVE"
             continue
         if not isinstance(doc, dict):
@@ -155,7 +164,7 @@ def live_approve(text: str, am, raw: bool = False) -> str:
         if m.start() in valid or any(js <= m.start() < je for _s, js, je in spans):
             continue
         nxt = stripped.find("<!--", m.end())
-        if APPROVE_WORD.search(stripped[m.start():len(stripped) if nxt == -1 else nxt]):
+        if mentions_approve(stripped[m.start():len(stripped) if nxt == -1 else nxt]):
             return "a near-miss `adversary-verdict` marker spelling that mentions APPROVE"
     return ""
 
@@ -227,8 +236,10 @@ class Pipeline:
         self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
-def split_pipelines(tokens, cwd: str):
-    """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside."""
+def split_pipelines(tokens, cwd: str, expand=None):
+    """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
+    `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`); a name it cannot
+    resolve stays literal, so the tracked cwd is wrong and the file read falls back to the event cwd (docs/code-review.md rule 14)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     want_dir = redirect = None
     stack = []
@@ -266,7 +277,7 @@ def split_pipelines(tokens, cwd: str):
         if want_dir:
             want_dir = None
             if not tok.startswith("-"):
-                nd = Path(os.path.expanduser(tok))
+                nd = Path(os.path.expanduser(expand(tok) if expand else tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
                 seg["cwd"] = cur
             continue
@@ -336,7 +347,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env, self.write_args = [], {}, set()
+        self.raw_texts, self.env = [], {}
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -354,7 +365,7 @@ class Scan:
             return
         self.budget -= len(text)
         (self.raw_texts if raw else self.texts).append(text)
-        if full.lstrip()[:1] in ("{", "[") and (len(full) > MAX_TEXT or U_ESCAPE.search(full)):
+        if full.lstrip()[:1] in ("{", "["):    # any JSON payload: a decoy code span or fence reaches across leaves of the raw text (am-02, M1)
             try:                               # JSON: GitHub stores the decoded strings (`\\u003c` is `<`), each its own text
                 strings = []
 
@@ -368,28 +379,43 @@ class Scan:
                         for v in node:
                             leaves(v, depth + 1)
                 leaves(json.loads(full))
-                chunk = ""
-                for t in strings:              # small strings are joined into texts of at most MAX_TEXT, so none is lost
+                chunk, alone, rest = "", 0, []
+                for t in strings:              # a string that names a verdict is its own text: a decoy fence in a neighbour leaf
+                    if not VERDICT_WORD.search(t):   # (`{"title":"```","body":"\u003c!-- ..."}`) cannot swallow it (am-02, C1)
+                        rest.append(t)
+                    elif alone < MAX_STARTS:
+                        alone += 1
+                        self.texts.append(t[:MAX_TEXT])
+                    else:
+                        rest.append(t)         # past the cap: joined as before, and denied beside APPROVE
+                        self.truncated = self.truncated or mentions_approve(t)
+                for t in rest:                 # the other strings are joined into texts of at most MAX_TEXT, so none is lost
                     if len(chunk) + len(t) + 1 > MAX_TEXT and chunk:
                         self.texts.append(chunk)
                         chunk = ""
                     chunk += t[:MAX_TEXT] + "\n"
                 if chunk:
                     self.texts.append(chunk)
-            except ValueError:
+            except (ValueError, RecursionError):
                 pass
 
     def expand(self, path: str) -> str:
         """`$NAME` / `${NAME}` in a path, from the assignments the same command makes."""
         return ENV_REF.sub(lambda m: self.env.get(m.group(1) or m.group(2), m.group(0)), path) if "$" in path else path
 
-    def read(self, path: str, cwd: str) -> str:
-        """A file under the tracked cwd, else (a `cd` in a closed subshell, a `cd` we mis-tracked) under the event cwd."""
+    def reads(self, path: str, cwd: str) -> list[str]:
+        """The file under the tracked cwd AND, when that differs from the event cwd, under the event cwd: a `cd` in a closed
+        subshell, a `cd` target we mis-tracked or expanded from an assignment that does not apply (`cd $D ...; D=decoy`) must not
+        move the read away from the file the shell reads. Every distinct text is returned and scanned (am-02, adversary round 1 L1)."""
         path = self.expand(path)
-        text = read_file(path, cwd)
-        if not text and self.cwd0 and cwd != self.cwd0 and not os.path.isabs(os.path.expanduser(path)):
-            text = read_file(path, self.cwd0)
-        return text
+        texts = [read_file(path, cwd)]
+        if self.cwd0 and cwd != self.cwd0 and not os.path.isabs(os.path.expanduser(path)):
+            texts.append(read_file(path, self.cwd0))
+        return [t for k, t in enumerate(texts) if t and t not in texts[:k]]
+
+    def add_file(self, path: str, cwd: str, **kw) -> None:
+        for text in self.reads(path, cwd):
+            self.add(text, **kw)
 
 
 def loose_write(text: str) -> bool:
@@ -524,24 +550,26 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             scan.add(body)
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files
             collect(body, cwd, scan, depth + 1)
-    pipes = split_pipelines(tokens, cwd)
+    pipes = split_pipelines(tokens, cwd, scan.expand)
+    own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
         """Files a `$( ... )`/backtick inside `w` reads: a lone `cat F` keeps its fence, a filter's output does not."""
         if "$(" in w or "`" in w:
             plain, filt = sub_files(w)
             for f in plain:
-                scan.add(scan.read(f, at), operand=True)
+                scan.add_file(f, at, operand=True)
             for f in filt:
-                scan.add(scan.read(f, at), operand=True, raw=True)
+                scan.add_file(f, at, operand=True, raw=True)
 
     def feeder(w: str, seg, raw: bool = False) -> None:
         scan.add(w)
         if scan.incidental < MAX_FILES and len(w) < 4096 and "\n" not in w:
-            content = scan.read(w.split("=", 1)[-1] if "=" in w else w, seg["cwd"])
-            if content:
+            found = scan.reads(w.split("=", 1)[-1] if "=" in w else w, seg["cwd"])
+            if found:
                 scan.incidental += 1
-                scan.add(content, raw=raw)
+                for content in found:
+                    scan.add(content, raw=raw)
     for pipe in pipes:
         gh = [(seg, gh_invocation(seg["words"])) for seg in pipe.segments]
         writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
@@ -573,25 +601,27 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                                            for seg in feeders)
         for seg, g in gh:
             if g and is_write(g[0], g[1], g[2]):
-                scan.write_args.update(g[2])
+                own.update(g[2])
                 for shown in prefix_stripped(g[2]):
                     scan.add(shown, force=True)
                 for f in operand_files(g[0], g[2]):
-                    scan.add(scan.read(f, seg["cwd"]), operand=True)
+                    scan.add_file(f, seg["cwd"], operand=True)
                 for w in seg["words"][:g[3]]:  # `find . -name F -exec gh ...`, `xargs`: words before gh may name files
                     feeder(w, seg)
             else:                              # a feeder: echo/printf words, cat F, jq --rawfile b F
                 for w in seg["words"]:
                     feeder(w, seg, raw=filtered)
             for f in seg["stdin"]:
-                scan.add(scan.read(f, seg["cwd"]), operand=True, raw=filtered and not (g and is_write(g[0], g[1], g[2])))
+                scan.add_file(f, seg["cwd"], operand=True, raw=filtered and not (g and is_write(g[0], g[1], g[2])))
             for h in seg["here"]:
                 scan.add(h, operand=True)
     if not scan.token_write and loose_write(cleaned):
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
         for w in words_all:                    # a body file or variable the same command writes first
-            if w not in scan.write_args:       # a write's own words went in above (a fence prefix removed)
+            if own[w] > 0:                     # a write's own words went in above (a fence prefix removed); one use each,
+                own[w] -= 1                    # so a word that only equals a flag word elsewhere is scanned as written (am-02, C3)
+            else:
                 scan.add(w)
         cwds = []                              # `cd DIR && BODY="$(cat raw.md)"; gh ... "$BODY"`: each segment's own cwd
         for pipe in pipes:
@@ -624,7 +654,7 @@ def judge(command: str, cwd: str, am_loader) -> str:
         found = live_approve(t, am, raw=True)
         if found:
             return found
-    if any(APPROVE_WORD.search(t) for t in scan.texts):
+    if any(mentions_approve(t) for t in scan.texts):
         if scan.truncated:
             return "more operand text than this gate can scan in time (%d files or %d bytes) next to the word APPROVE" % (
                 MAX_FORCED, MAX_FORCED_BYTES)

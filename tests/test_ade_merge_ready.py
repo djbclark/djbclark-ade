@@ -2356,6 +2356,9 @@ def test_approve_post_authentication_runs_with_a_scrubbed_environment(
         "BASH_FUNC_zzz%%": "() { true; }",
         "SUDO_ASK_MAX_WAIT": "1",
         "HOME": str(tmp_path / "fake-home"),
+        "PATH": str(tmp_path / "planted-bin") + ":/usr/bin:/bin",   # a caller-controlled PATH could run a planted `mkdir`
+        "USER": "someone-else",
+        "LOGNAME": "someone-else",
     }.items():
         monkeypatch.setenv(k, v)
     calls: list = []
@@ -2366,8 +2369,14 @@ def test_approve_post_authentication_runs_with_a_scrubbed_environment(
     assert rc == 0, err
     assert len(AUTH_KWARGS) == 1
     env = AUTH_KWARGS[0]["env"]
+    import pwd
+
+    pw = pwd.getpwuid(os.getuid())
     assert set(env) <= {"PATH", "HOME", "USER", "LOGNAME", "LANG"}
-    assert env["HOME"] != str(tmp_path / "fake-home")
+    # the values, not only the keys (am-02, ap-01 review B2: a caller-controlled PATH survived the key-set check)
+    assert env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+    assert env["HOME"] == pw.pw_dir != str(tmp_path / "fake-home")
+    assert env["USER"] == env["LOGNAME"] == pw.pw_name
 
 
 def test_sudo_ask_path_comes_from_the_account_not_home(monkeypatch) -> None:

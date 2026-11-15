@@ -919,7 +919,13 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
         p["notes"].append("`paseo permit ls` failed: apply will send and archive nothing")
     # archive only a worker of this lead that is not running and whose DONE report is verified and handled (a `closed`
     # agent was often only interrupted by a daemon restart, so closed alone proves nothing)
-    held = claim_holders()  # an agent holding an active claim keeps its tab (and so its window)
+    claims_unknown = ""
+    try:
+        held = claim_holders()  # an agent holding an active claim keeps its tab (and so its window)
+    except Refused as e:
+        if opts.apply:
+            raise  # --apply fails closed: ownership of a worktree is unknown, nothing is archived
+        held, claims_unknown = set(), str(e)  # a dry run lists the rest of the plan and says what it could not judge (am-02)
     p["claim_held"] = [{"agent": r["id"], "name": r["name"]} for r in mine if r["id"] in held and r["class"] == "own-worker"
                        and r["status"] in ("idle", "closed") and r["verdict"] == "done" and r["verified_done"]]
     p["archive_agents"] = [{"agent": r["id"], "name": r["name"], "why": "done"}
@@ -929,6 +935,9 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
     p["list_only"] = [{"agent": r["id"], "name": r["name"], "class": r["class"], "status": r["status"],
                        "why": "operator agent: archive only on the operator's yes"}
                       for r in mine if r["class"] == "operator" and (r["status"] == "closed" or r["verdict"] == "done")]
+    if claims_unknown:  # no archive is proposed without the claims; the refusal names the file, and --apply would stop on it
+        p["archive_agents"], p["claim_held"] = [], []
+        p["notes"].append(f"WARNING: claims unknown, so no agent or window archive is listed and --apply refuses the whole run: {clean(claims_unknown, 300)}")
     leaving = {a["agent"] for a in p["archive_agents"]}
     p["archive_windows"], p["empty_not_ours"] = [], []
     if unplaced:
@@ -945,7 +954,7 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
             p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": f"isolation {w.get('isolation')!r}: archiving would delete its worktree"})
         elif not _ours_or_unknown(wks, nm, lead):
             p["empty_not_ours"].append({"windowId": wks, "name": nm, "why": "owner not provably this lead: operator's call"})
-        else:
+        elif not claims_unknown:
             p["archive_windows"].append({"windowId": wks, "name": nm, "conditional": bool(occupancy.get(wks))})
     p["extra_windows"] = extra_windows(win["windows"], occupancy, opts, lead, names, {w["windowId"] for w in p["archive_windows"]})
     return p
