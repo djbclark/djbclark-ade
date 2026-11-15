@@ -1060,7 +1060,23 @@ def test_native_code_shaped_like_a_bare_token_is_not_recorded(code):
     assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
 
 
-@pytest.mark.parametrize('code', ['TASK_SK_1', 'disk-sk-2', 'ghost_town'])
+@pytest.mark.parametrize('code', [
+    'password:hunter2', 'token:abc123XYZ', 'api_key:sk_live_abc123', 'GITHUB_TOKEN:ghx_abc', 'secret=x', 'Password:Hunter2',
+])
+def test_native_code_shaped_like_a_keyword_secret_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', [
+    'sk_live_' + 'a1b2c3d4' * 3, 'rk_live_51Habcdefghijklmn', 'glpat-' + 'a1b2c3d4e5f6a7b8c9d0', 'npm_' + 'a1b2c3d4' * 4,
+    'AIza' + 'Sy' + 'a1b2c3d4' * 4, 'hf_' + 'a1B2c3D4e5' * 3, 'x_ghp_' + 'a1B2c3D4e5' * 3 + 'a1B2c3', 'x-ghp_' + 'a1B2c3D4e5' * 3 + 'a1B2c3',
+    '0123456789abcdef0123456789abcdef01234567', 'eyJhbGciOiJIUzI1NiJ9', 'wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY',
+])
+def test_native_code_with_a_long_alphanumeric_run_holding_a_digit_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', ['TASK_SK_1', 'disk-sk-2', 'ghost_town', 'missingMandatoryOptionValue', 'commander.invalidArgument', 'secret_code', 'ns:code-1', 'abcdefghijklmnopqrstuvwxyz'])
 def test_native_code_with_token_lookalike_inside_is_kept(code):
     assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
 
