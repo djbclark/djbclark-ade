@@ -901,6 +901,10 @@ SEND_DENY = [
     'gnice -n 5 paseo send ab "`x`"',
     'unbuffer paseo send ab "`x`"',
     'uv run paseo send ab "`x`"',
+    'genv paseo send ab "`x`"',                                    # gs-04: the four wrappers rv-733 found without a deny row
+    'gstdbuf -o L paseo send ab "`x`"',
+    'chronic paseo send ab "`x`"',
+    'mosh host -- paseo send ab "`x`"',
 ]
 
 
