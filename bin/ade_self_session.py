@@ -45,7 +45,8 @@ class NativeError(SessionError):
 # Codes Paseo's `agent run` raises BEFORE it contacts the daemon or creates anything (adversary, ss-49: the catch-all
 # `AGENT_CREATE_FAILED`, `UNKNOWN_ERROR`, `DAEMON_*` and a failed initial prompt can follow a created agent, so a code
 # alone is no proof). Checked against Paseo da7e3d94 (`runRunCommand`, packages/cli/src/commands/agent/run.ts): re-verify on a
-# Paseo upgrade. Only these make a refusal definite; every other code stays `creation-unknown`.
+# Paseo upgrade. WORKSPACE_NOT_FOUND stays `creation-unknown` in practice: `--workspace` prints a text line before the
+# multi-line envelope and `parse_envelope` reads none after a text line (pre-existing). Only these make a refusal definite; every other code stays `creation-unknown`.
 PRE_CREATE_REFUSAL_CODES = frozenset((
     'INVALID_OPTIONS', 'INVALID_LABEL', 'INVALID_ENV', 'MISSING_PROMPT', 'INVALID_THINKING_OPTION', 'INVALID_TIMEOUT',
     'MISSING_PROVIDER', 'INVALID_PROVIDER', 'INVALID_MODEL', 'CONFLICTING_MODEL_OPTIONS', 'WORKSPACE_NOT_FOUND',
@@ -464,7 +465,9 @@ class Service:
                 # Replace only when the token's label lists no agent: a probe that fails or finds one keeps the record.
                 rows = self.native('agent', 'ls', '-a', '-g', '--label', 'ade.handoff=' + existing['token'])
                 if not isinstance(rows, list) or rows:
-                    raise SessionError('creation-refused record, but an agent carries its token label; reconcile, no create replayed')
+                    raise SessionError('creation-refused record, but the token-label probe answered ' + (
+                        'something other than a list' if not isinstance(rows, list)
+                        else 'an agent carrying its token label') + '; reconcile, no create replayed')
                 refused_before = existing['native_error']
                 existing = None
             if existing:

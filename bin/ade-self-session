@@ -9,6 +9,9 @@ ade-self-session accept --record FILE --ack-file FILE
 
 Checkpoint files are nonsecret agent-authored briefings. Creation/send receipts
 are requests, never completed handoffs or compactions. No force/workspace archive.
+
+Exit: 0 the step reached its reported state (requested, awaiting-ack, acknowledged, archived); 1 blocked or unknown
+(including creation-unknown: reconcile); 3 creation-refused (Paseo refused before creating anything; the predecessor keeps working).
 """
 from __future__ import annotations
 

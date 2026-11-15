@@ -65,6 +65,7 @@ class Native:
                            'Cwd': str(root), 'Mode': 'bypassPermissions', 'ParentAgentId': None,
                            'AvailableModes': [{'id': 'bypassPermissions', 'label': 'Bypass'}]}}
         self.labelled = []
+        self.probe = None           # BaseException to raise, or (rc, stdout, stderr), for an `agent ls --label ade.handoff=` probe
         self.labels = {}            # 'key=value' -> ids carrying it (every label but ade.handoff, which `labelled` serves)
         self.updates = []           # argv tails of `agent update`
         self.update_result = None   # (returncode, stdout, stderr) replacing the `agent update` answer
@@ -113,6 +114,10 @@ class Native:
                 raise self.create_error
             data = {'agentId': SUCC, 'status': 'running'}
         elif args[:2] == ['agent', 'ls']:
+            if self.probe is not None and any(a.startswith('ade.handoff=') for a in args):
+                if isinstance(self.probe, BaseException):
+                    raise self.probe
+                return subprocess.CompletedProcess(argv, *self.probe)
             # `ls -a` adds includeBackground; a plain `ls -g` (what archive resolves from) hides it
             wanted = [args[i + 1] for i, a in enumerate(args) if a == '--label']
             if wanted and not any(w.startswith('ade.handoff=') for w in wanted):
@@ -1930,3 +1935,40 @@ def test_a_first_finish_check_that_fails_records_why_and_ends_the_redirect_at_on
     assert saved['status'] == 'acknowledged' and saved['native_error']['op'] == 'finish'
     assert guard_says(service) == 'pass'
     assert native.archived == 0
+
+
+PROBES = [
+    (1, '', envelope('DAEMON_CONNECTION_LOST', 'down')),   # probe rc 1 with an envelope
+    subprocess.TimeoutExpired('paseo', 30),                # timeout
+    (0, '{}', ''),                                         # an empty dict answer (falsy, not a list)
+]
+
+
+@pytest.mark.parametrize('probe', PROBES)
+def test_a_failed_or_non_list_probe_after_a_refusal_stays_unknown(setup, probe):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    native.probe = probe
+    assert service.handoff(checkpoint, quiesced=True)['status'] == 'creation-unknown'
+
+
+@pytest.mark.parametrize('probe', PROBES)
+def test_a_failed_or_non_list_retry_probe_blocks_and_keeps_the_record(setup, probe):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    refused = service.handoff(checkpoint, quiesced=True)
+    assert refused['status'] == 'creation-refused'
+    before = Path(refused['record']).read_text()
+    native.run_result, native.probe = None, probe
+    with pytest.raises(ss.SessionError):
+        service.handoff(checkpoint, quiesced=True)
+    assert native.created == 0 and Path(refused['record']).read_text() == before
+
+
+def test_a_non_list_retry_probe_is_named_as_such(setup):
+    service, native, checkpoint = setup
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    service.handoff(checkpoint, quiesced=True)
+    native.run_result, native.probe = None, (0, '{}', '')
+    with pytest.raises(ss.SessionError, match='other than a list'):
+        service.handoff(checkpoint, quiesced=True)

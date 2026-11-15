@@ -234,8 +234,10 @@ Creation outcome (`handoff`'s `agent run`; 2026-11-15, ss-49):
 | Status | When | Reconcile? | Predecessor | CLI exit |
 |---|---|---|---|---|
 | `awaiting-ack` | Paseo returned an `agentId` | no | keeps working until `finish` | 0 |
-| `creation-refused` | Paseo refused with a code it raises before creating anything (`PRE_CREATE_REFUSAL_CODES`: `INVALID_OPTIONS`, `INVALID_LABEL`, `INVALID_ENV`, `MISSING_PROMPT`, `INVALID_THINKING_OPTION`, `INVALID_TIMEOUT`, `MISSING_PROVIDER`, `INVALID_PROVIDER`, `INVALID_MODEL`, `CONFLICTING_MODEL_OPTIONS`, `WORKSPACE_NOT_FOUND`, `INVALID_OUTPUT_SCHEMA`), returned no agent id, and `agent ls --label ade.handoff=TOKEN` lists none: nothing was created | never (`reconcile` returns the record unchanged) | never replaced; keeps working | 3 |
+| `creation-refused` | Paseo refused with a code it raises before creating anything (`PRE_CREATE_REFUSAL_CODES`: `INVALID_OPTIONS`, `INVALID_LABEL`, `INVALID_ENV`, `MISSING_PROMPT`, `INVALID_THINKING_OPTION`, `INVALID_TIMEOUT`, `MISSING_PROVIDER`, `INVALID_PROVIDER`, `INVALID_MODEL`, `CONFLICTING_MODEL_OPTIONS`, `WORKSPACE_NOT_FOUND` (see the note below), `INVALID_OUTPUT_SCHEMA`), returned no agent id, and `agent ls --label ade.handoff=TOKEN` lists none: nothing was created | never (`reconcile` returns the record unchanged) | never replaced; keeps working | 3 |
 | `creation-unknown` | anything less certain: timeout, `OSERROR`, no error code, any other code (`AGENT_CREATE_FAILED`, `UNKNOWN_ERROR`, `DAEMON_*`, `INVALID_CODE`: Paseo also raises them after creating the agent, e.g. when the initial prompt fails), a labelled agent present or a failed label probe, unparsable output, a malformed receipt | yes, read `native_error`, then `reconcile` | kept until the outcome is known | 1 |
+
+Note: `WORKSPACE_NOT_FOUND` stays `creation-unknown` in practice. On the `--workspace` path Paseo prints a text line (`Using workspace ...`) before its multi-line envelope, and `parse_envelope` reads no envelope after a text line (pre-existing; not changed here), so the failure reads as an unknown outcome.
 
 `creation-refused` is terminal and counts as dead everywhere: the send guard and `ade_lead_succession` read only
 `acknowledged`/`archive-unknown`/`archived` records, so a refused record never redirects a peer message and is no ledger
