@@ -41,7 +41,8 @@ def _fold(*rows):
 def test_a_repeated_reading_of_one_account_lets_the_known_one_win(order):
     """Same account and family twice (a fresh and an expired reading): one quota, the known reading opens the gate.
     Before, the second row counted as another account and closed the pool."""
-    rows = [_row(50, account="a@x"), _row(90, account="a@x", expired=True, bare=True)]
+    rows = [{**_row(50, account="a@x"), "organization_id": "o1"},
+            {**_row(90, account="a@x", expired=True, bare=True), "organization_id": "o1"}]
     pool = _fold(*[rows[i] for i in order])
     assert pool["remaining"] == 50
     assert r.UNMEASURED_WINDOW not in pool["windows"]
@@ -62,6 +63,21 @@ def test_rows_without_an_account_cannot_be_shown_to_be_one_account_and_stay_fail
     """Unidentified rows (older aiuse, hand-made fixtures) fold as accounts, as before this change."""
     rows = [_row(50), _row(90, expired=True, bare=True)]
     pool = _fold(*[rows[i] for i in order])
+    assert r.plenty_remaining(pool) is None and r.UNMEASURED_WINDOW in pool["windows"]
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_one_email_in_two_organizations_is_two_accounts(order):
+    """The `account` label alone is no identity: the same email in two orgs has two quotas and folds as accounts."""
+    rows = [{**_row(50, account="a@x"), "organization_id": "o1"},
+            {**_row(90, account="a@x", expired=True, bare=True), "organization_id": "o2"}]
+    pool = _fold(*[rows[i] for i in order])
+    assert r.plenty_remaining(pool) is None and r.UNMEASURED_WINDOW in pool["windows"]
+
+
+def test_an_account_label_without_an_organization_is_unidentified():
+    """aiuse emits no organization field today: a repeated label cannot be shown to be one quota, so it folds closed."""
+    pool = _fold(_row(50, account="a@x"), _row(90, account="a@x", expired=True, bare=True))
     assert r.plenty_remaining(pool) is None and r.UNMEASURED_WINDOW in pool["windows"]
 
 
@@ -155,6 +171,9 @@ def test_the_identity_helpers():
     assert r._folds_as_accounts([me], ("b@x", "f"))               # another account
     assert r._folds_as_accounts([me], ("a@x", "g"))               # another family of it
     assert r._folds_as_accounts([me, ("b@x", "f")], me)           # another account is folded beside it
+    b = ("b@x", "f")
+    assert r._folds_as_accounts([me, b, b], b)                    # a, b, b then b: only the LAST seen matches; kills `seen[-1] == who`
+    assert r._folds_as_accounts([b, me, me], me)                  # a repeat of the last seen, but b was folded first
     assert r._folds_as_accounts([(None, "f")], (None, "f"))       # unidentified: cannot be shown to be the same
     assert r._folds_as_accounts([me], (None, "f"))
 
