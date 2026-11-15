@@ -1865,6 +1865,16 @@ def local_approval_log(event, top, text):
         pass
 
 
+def helper_env():
+    """A clean environment for the bash `sudo-ask`: the caller's own would let `BASH_ENV=<file with exit 0>` (or ENV, SHELLOPTS, BASH_FUNC_*) make it
+    exit 0 before any dialog, which reads as approval (Codex review of PR 744). Only what the helper needs is passed."""
+    env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(HOME)}
+    for k in ("USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    return env
+
+
 def approve_local_decision(top, text):
     """Recording `local` skips the CI-first rule for every later build here, so djbclark must approve it afresh (operator, 2026-11-15):
     `sudo-ask -k` shows an Allow dialog (command and directory, mouse click only), then sudo asks for Touch ID or the password; `-k` ignores
@@ -1877,7 +1887,8 @@ def approve_local_decision(top, text):
         return False
     print(f"load-watch: asking djbclark to approve a `local` decision for {top}", file=sys.stderr)
     try:
-        r = subprocess.run([str(SUDO_ASK), "-k", "/usr/bin/printf", "%s\\n", msg], stdout=subprocess.DEVNULL, timeout=SUDO_ASK_TIMEOUT_S)
+        r = subprocess.run([str(SUDO_ASK), "-k", "/usr/bin/printf", "%s\\n", msg], stdout=subprocess.DEVNULL, timeout=SUDO_ASK_TIMEOUT_S,
+                           env=helper_env())
         ok = r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False

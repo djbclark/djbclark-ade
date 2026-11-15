@@ -12,9 +12,9 @@ from pathlib import Path
 LW = Path(__file__).resolve().parent.parent / "bin" / "load-watch"
 
 
-def run(tmp_path, *args):
+def run(tmp_path, *args, **extra_env):
     # HOME is a scratch directory: a `local` decision asks `$HOME/.local/bin/sudo-ask` (djbclark's Touch ID dialog), never the real one
-    env = dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"))
+    env = dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **extra_env)
     return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=env, timeout=30)
 
 
@@ -268,6 +268,19 @@ def test_write_registry_refuses_control_characters(tmp_path, monkeypatch):
         assert "control character" in str(e)
     else:
         raise AssertionError("write_registry accepted a control character")
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_caller_environment_cannot_make_the_helper_approve(tmp_path):
+    repo = _repo(tmp_path)
+    path = tmp_path / "home" / ".local" / "bin" / "sudo-ask"
+    path.parent.mkdir(parents=True)
+    path.write_text("#!/bin/bash\nexit 1\n")  # a bash helper that denies, like the real sudo-ask
+    path.chmod(0o755)
+    hook = tmp_path / "hook.sh"
+    hook.write_text("exit 0\n")  # BASH_ENV runs this first in a non-interactive bash: it would approve before the helper's own code
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why", BASH_ENV=str(hook)).returncode == 1
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why", ENV=str(hook), SHELLOPTS="xtrace").returncode == 1
     assert not (tmp_path / "ci-only.tsv").exists()
 
 
