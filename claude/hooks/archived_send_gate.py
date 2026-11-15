@@ -160,6 +160,30 @@ SHELL_BODY = re.compile(r"(?:\S*/)?(?:" + "|".join(sorted(SHELLS)) + r")")  # a 
 IDS_ONLY = re.compile(r"\s*(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)+")
 
 
+ANSI_ESCAPE = re.compile(r"\\(?:(?P<bs>\\)|(?P<name>[ntrvf])|x(?P<x>[0-9A-Fa-f]{1,2})|u(?P<u>[0-9A-Fa-f]{1,4})|U(?P<U>[0-9A-Fa-f]{1,8})"
+                         r"|(?P<o>[0-7]{1,3})|c(?P<c>[\x00-\x7f]))", re.S)  # `\c` + a non-ASCII character is no escape bash turns into a blank
+BLANKS = " \t\n\r\v\f"  # what splits a word list in a shell (not every character `str.isspace` knows)
+
+
+def ansi_blanks(body: str) -> str:
+    """`body` of a `$'...'` with each escape that bash turns into a blank (`\\n`, `\\t`, `\\x0a`, `\\u000a`, `\\012`, `\\cJ`, ...) replaced by
+    a space; `\\\\` stays a backslash, so `\\\\n` is no blank."""
+    def blank(m: re.Match) -> str:
+        g = m.groupdict()
+        if g["bs"]:
+            return m.group(0)
+        if g["name"]:
+            return " "
+        if g["c"]:  # `\\cJ`: a control character
+            code = ord(g["c"]) & 0x1F  # no .upper(): `ß`.upper() is two characters; `j` and `J` give the same low five bits
+        elif g["o"]:
+            code = int(g["o"], 8) % 256  # bash keeps the low 8 bits of an octal escape
+        else:
+            code = int(g["x"] or g["u"] or g["U"], 16)
+        return " " if code < 0x110000 and chr(code) in BLANKS else m.group(0)
+    return ANSI_ESCAPE.sub(blank, body)
+
+
 def _mask(text: str) -> str:
     out, word = [], []
     first, runner = "", False  # the first word of this simple command; has a runner word or flag come before the string?
@@ -176,7 +200,7 @@ def _mask(text: str) -> str:
             if j >= n:
                 return text
             body = text[i + 1:j]
-            ids_body = re.sub(r"\\[ntr]", " ", body) if ansi else body  # a backslash-n in `$'...'` is a blank
+            ids_body = ansi_blanks(body) if ansi else body  # a backslash-n, `\\x0a` or `\\012` in `$'...'` is a blank
             cur = "" if quoted_word else "".join(word)
             runs = ((runner or Path(cur).name in RUNNERS or RUN_FLAG.fullmatch(cur) is not None)
                     and Path(first or cur).name not in NO_RUN)
@@ -294,24 +318,36 @@ def _daemon_option(word: str) -> bool:
 REDIRECT = re.compile(r"&?[<>]+[&|]?")  # `>`, `>>`, `<<<`, `>&`, `&>`, `>|`: the lexer splits them from their operand
 
 
-def _scan(args: list[str]) -> tuple[int | None, bool]:
+def _after_redirect(args: list[str], j: int, shell: bool = True) -> int | None:
+    """Index after the redirect that starts at `args[j]` (an optional one or two digit fd number, the operator and its operand: the
+    operand is a file or text, never an option or the agent); None when none starts there. `shell=False`: `args` is a real argv (the
+    shell has removed its redirects), so `>` and `2` are plain words."""
+    if not shell:
+        return None
+    k = j + 1 if re.fullmatch(r"\d{1,2}", args[j]) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]) else j  # `2>x`: the lexer leaves the fd number behind
+    return k + 2 if REDIRECT.fullmatch(args[k]) else None
+
+
+def _scan(args: list[str], shell: bool = True) -> tuple[int | None, bool]:
     """(index of the agent word, whether a daemon selector was seen) in the arguments after `send`. Value options are skipped with
     their values; the first word after `--` is the agent when none came before it and the rest is message text. The whole option
     list is read, so `send A --host X` is seen too (an option word after the agent is still an option to Paseo)."""
     target, j = None, 0
     while j < len(args):
         a = args[j]
-        if re.fullmatch(r"\d{1,2}", a) and j + 1 < len(args) and REDIRECT.fullmatch(args[j + 1]):  # `2>x`: the lexer leaves the fd number behind
-            j += 1
-            continue
-        if REDIRECT.fullmatch(a):  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`: the operand is a file or text, not an option or the agent
-            j += 2
+        after = _after_redirect(args, j, shell)  # `paseo send A >--home=x.log`, `xargs paseo send <<< "A B"`, `paseo send 2>x A`
+        if after is not None:
+            j = after
             continue
         if _daemon_option(a):
             return None, True
         if a == "--":
-            if target is None and j + 1 < len(args):
-                target = j + 1
+            k = j + 1  # the shell still takes redirects after `--` (`paseo send -- 2>x A`): the first word that is none is the agent
+            while target is None and k < len(args):
+                after = _after_redirect(args, k, shell)
+                if after is None:
+                    target = k
+                k = k + 1 if after is None else after
             break
         if a in VALUE_FLAGS or _takes_value(a):
             j += 2
@@ -328,7 +364,7 @@ def _target_index(args: list[str]) -> int | None:
     return None if other else target
 
 
-def locate_send(args: list[str]) -> tuple[str, int | None]:
+def locate_send(args: list[str], shell: bool = True) -> tuple[str, int | None]:
     """Classify the arguments that follow the word `paseo`: ("send", index of the agent word or None), ("other", None) for an
     explicit daemon selector, ("none", None) for anything else. Global options may stand before `agent`, between `agent` and
     `send`, and after `send`: `paseo -o json send A`, `paseo agent --json send A`, `paseo agent -q send A`."""
@@ -348,7 +384,7 @@ def locate_send(args: list[str]) -> tuple[str, int | None]:
             return "none", None
     else:
         return "none", None
-    j, other = _scan(args[i + 1:])
+    j, other = _scan(args[i + 1:], shell)
     if other:
         return "other", None
     return "send", None if j is None else i + 1 + j
@@ -415,7 +451,10 @@ def main() -> int:
         extra: list[tuple[str, str | None]] = []  # ids the backstop picked out of text the parser could not follow
         if tool == "Bash" and isinstance(tin.get("command"), str):
             found = targets_in_command(tin["command"])
-            extra = backstop_targets(tin["command"], found)
+            try:
+                extra = backstop_targets(tin["command"], found)
+            except Exception as exc:  # noqa: BLE001 - a backstop bug must not un-judge a send the parser found
+                print(f"archived_send_gate: backstop {type(exc).__name__}: {exc}", file=sys.stderr)
         elif tool.startswith("mcp__") and tool.endswith("send_agent_prompt"):
             ident = next((tin[k] for k in MCP_ID_KEYS if isinstance(tin.get(k), str)), "")
             found = [(ident, None)] if ident else []  # another host's agent id is unknown here: decide() passes it

@@ -19,7 +19,7 @@ A pass-through is `os.execv`, so the exit code, signals, stdin and stdout are th
 hook: anything unexpected (an error here, no real paseo found for the probe) runs the real paseo unchanged. Only a refusal
 stops a command. The inspect probe calls the real paseo by its absolute path, so it never re-enters the shim.
 
-Environment: ADE_REAL_PASEO (the real paseo; the shim exports it), ADE_ALLOW_ARCHIVED_SEND=<id> and ADE_ALLOW_REPLACED_SEND=<id>
+Environment: ADE_REAL_PASEO (the real paseo; the shim passes it to this helper alone, which pops it before it runs anything), ADE_ALLOW_ARCHIVED_SEND=<id> and ADE_ALLOW_REPLACED_SEND=<id>
 (overrides, read through `ade_send_guard.guard`), ADE_SEND_GUARD_LOG (where a replaced-send override is logged).
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ def send_target_index(args: list[str]) -> int | None:
     """Index in `args` (paseo's arguments, no argv[0]) of the target word of a send; None when this is no send, an explicit
     daemon selector (`--host`, `--home`) is present, or there is no target."""
     import archived_send_gate as gate  # noqa: PLC0415 - the hook's parser, one copy
-    kind, idx = gate.locate_send(args)
+    kind, idx = gate.locate_send(args, shell=False)  # a real argv: the shell has taken its redirects out
     return idx if kind == "send" else None
 
 
