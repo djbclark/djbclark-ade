@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -16,8 +17,38 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "ade-merge-ready"
 
 
+def _bot_gate_stub(script: str) -> str:
+    """Case clauses answering the listed-reviewer-bot gate's `gh api` calls with a clean PR (rb-01, 2026-11-14).
+
+    A tip classified merge_now now also needs every listed reviewer bot triaged, so every fake that reaches
+    merge_now serves: no override file (HTTP 404), the PR's head (taken from the listing embedded in the script),
+    empty thread/review/comment connections and no check runs. A fake with its own `api` clauses wins (first match)."""
+    heads = dict(re.findall(r'"number": (\d+),[^{}]*?"headRefOid": "([0-9a-f]{40})"', script))
+    head_cases = "".join(f'      {n}) H={h} ;;\n' for n, h in heads.items())
+    empty = (
+        '{"data":{"repository":{"pullRequest":{"%s":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}'
+    )
+    return (
+        '              *"api repos/"*"/contents/"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '              *"api --paginate repos/"*"/check-runs"*) echo \'{"total_count":0,"check_runs":[]}\' ;;\n'
+        '              *"api --paginate repos/"*"/status"*) echo \'{"state":"success","statuses":[]}\' ;;\n'
+        '              *"api graphql"*"headRefOid"*)\n'
+        '                N=$(printf "%s" "$*" | grep -o "number=[0-9]*" | head -1 | cut -d= -f2); H=' + "0" * 40 + "\n"
+        '                case "$N" in\n' + head_cases + "                esac\n"
+        '                echo "{\\"data\\":{\\"repository\\":{\\"pullRequest\\":{\\"number\\":$N,\\"title\\":\\"t\\",'
+        '\\"state\\":\\"OPEN\\",\\"merged\\":false,\\"headRefOid\\":\\"$H\\",\\"baseRefName\\":\\"master\\",'
+        '\\"url\\":\\"u\\"}}}}" ;;\n'
+        "              *'$number){reviewThreads('*) echo '" + empty % "reviewThreads" + "' ;;\n"
+        "              *'$number){reviews('*) echo '" + empty % "reviews" + "' ;;\n"
+        "              *'$number){comments('*) echo '" + empty % "comments" + "' ;;\n"
+    )
+
+
 def write_fake_gh(tmp: Path, script: str) -> Path:
     path = tmp / "gh"
+    fallback = '              *) echo "unexpected: $*" >&2; exit 99 ;;'
+    if fallback in script and "api graphql" not in script:
+        script = script.replace(fallback, _bot_gate_stub(script) + fallback, 1)
     path.write_text("#!/usr/bin/env bash\n" + script)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path

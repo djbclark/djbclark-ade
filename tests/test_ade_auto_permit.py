@@ -34,7 +34,9 @@ elif a[0] == 'ls' and '--label' not in a:
     if s.get('bad_local'): print('bad'); sys.exit(0)
     ids = s['local'] if 'local' in s else sorted({r['agentId'] for r in s.get('requests', []) if isinstance(r, dict) and 'agentId' in r})
     print(json.dumps([{'id':x, 'provider':s.get('providers', {}).get(x, 'claude/sonnet')} for x in ids]))
-elif a[0] == 'ls': print(json.dumps([{'id':x} for x in s.get('labelled',{}).get(a[a.index('--label')+1], [])]))
+elif a[0] == 'ls':
+    if s.get('bad_sensitive') and a[a.index('--label')+1] == 'ade.kind=external-review': sys.exit(1)
+    print(json.dumps([{'id':x} for x in s.get('labelled',{}).get(a[a.index('--label')+1], [])]))
 elif a[:2] == ['permit','allow']:
     if s.get('allow_error'): sys.exit(1)
     print(json.dumps([{'agentId':a[2],'requestId':a[3],'result':'allowed'}]))
@@ -104,7 +106,8 @@ def test_unconfirmed_allow_audited(tmp_path):
 def test_watch_is_bounded(tmp_path):
     result, calls = run_fake(tmp_path, {'requests':[]}, '--watch','--interval','0.01','--duration','0.05')
     assert result.returncode == 0
-    assert calls and all(c in (['permit','ls'], ['ls','-a','-g'], ['ls','-a','-g','--label',f'ade.lead={LEAD}']) for c in calls)
+    assert calls and all(c in (['permit','ls'], ['ls','-a','-g'], ['ls','-a','-g','--label',f'ade.lead={LEAD}'],
+                               ['ls','-a','-g','--label','ade.kind=external-review']) for c in calls)
 
 
 def test_reject_foreign_selector(tmp_path):
@@ -600,5 +603,75 @@ def test_the_sweep_asks_for_at_most_ten_labels_on_a_long_chain(tmp_path, monkeyp
     monkeypatch.setenv("PASEO_HOME", str(home))
     result, calls = run_fake(tmp_path, {'requests': []}, '--lead', ids[0])  # argparse: the last --lead wins
     assert result.returncode == 0, result.stderr
-    labelled = [c for c in calls if c[:3] == ['ls', '-a', '-g'] and '--label' in c]
-    assert len(labelled) == 10 and labelled[0][-1] == f'ade.lead={ids[0]}'
+    labelled = [c for c in calls if c[:3] == ['ls', '-a', '-g'] and c[-2:-1] == ['--label'] and c[-1].startswith('ade.lead=')]
+    assert len(labelled) == 10 and labelled[0][-1] == f'ade.lead={ids[0]}'  # the fixed sensitive-label probe is not a lineage label
+
+
+SENSITIVE = 'ade.kind=external-review'
+
+
+def test_external_review_worker_is_never_auto_approved(tmp_path):
+    # an injection-triage worker carries ade.lead like every worker, and is a descendant, and runs under --all-local;
+    # none of that qualifies its (possibly steered) requests: they stay pending, a sibling worker is still approved
+    scenario = {'requests': [req(OTHER), req(CHILD)], 'parents': {OTHER: LEAD, CHILD: LEAD},
+                'labelled': {f'ade.lead={LEAD}': [OTHER, CHILD], SENSITIVE: [OTHER]}}
+    for extra in ([], ['--all-local']):
+        result, calls = run_fake(tmp_path, scenario, *extra)
+        assert result.returncode == 0, result.stderr
+        assert ['ls', '-a', '-g', '--label', SENSITIVE] in calls
+        allows = [c for c in calls if c[:2] == ['permit', 'allow']]
+        assert allows == [['permit', 'allow', CHILD, 'request']]
+        decisions = [(r['decision'], r['reason'], r['agent']) for r in audit_rows(tmp_path)]
+        assert ('skip', 'sensitive-sender', OTHER) in decisions
+        assert not any(r[0].startswith('allow') and r[2] == OTHER for r in decisions)
+        (tmp_path / 'calls.jsonl').unlink()
+        (tmp_path / 'audit.jsonl').unlink()
+
+
+def test_sensitive_label_probe_failure_never_approves(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: LEAD}, 'bad_sensitive': True})
+    assert result.returncode == 1
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+
+
+def test_invalid_sensitive_label_row_never_approves(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: LEAD},
+                                        'labelled': {SENSITIVE: ['not-a-uuid']}})
+    assert result.returncode == 1
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+
+
+def test_descendant_of_an_external_review_agent_is_not_approved(tmp_path):
+    # CHILD's parent is the sensitive OTHER, whose parent is the lead: the taint does not pass down
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD},
+                                        'labelled': {SENSITIVE: [OTHER]}})
+    assert result.returncode == 0, result.stderr
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'sensitive-sender')]
+    # --all-local (the installed job) must not take the child back through its fallback
+    (tmp_path / 'calls.jsonl').unlink()
+    (tmp_path / 'audit.jsonl').unlink()
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD},
+                                        'labelled': {SENSITIVE: [OTHER]}}, '--all-local')
+    assert result.returncode == 0, result.stderr
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+    assert [(r['decision'], r['reason']) for r in audit_rows(tmp_path)] == [('skip', 'sensitive-sender')]
+    # an ordinary intermediate parent still qualifies the child
+    (tmp_path / 'calls.jsonl').unlink()
+    (tmp_path / 'audit.jsonl').unlink()
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: OTHER, OTHER: LEAD}})
+    assert ['permit', 'allow', CHILD, 'request'] in calls
+
+
+def test_failed_ancestry_probe_never_falls_back_to_all_local_when_an_external_review_agent_exists(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': [req(CHILD)], 'parents': {CHILD: 'error'},
+                                        'labelled': {SENSITIVE: [OTHER]}}, '--all-local')
+    assert result.returncode == 1
+    assert not any(c[:2] == ['permit', 'allow'] for c in calls)
+
+
+def test_sensitive_probe_is_skipped_when_nothing_is_pending(tmp_path):
+    result, calls = run_fake(tmp_path, {'requests': []})
+    assert result.returncode == 0
+    assert ['ls', '-a', '-g', '--label', SENSITIVE] not in calls
+

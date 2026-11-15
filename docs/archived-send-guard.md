@@ -56,14 +56,17 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    (`[ -f ... ] || exit 0`) and `~/.claude/settings.json` is re-rendered from the template. A
    `redirect` or `refuse` is **denied** with the successor named; the hook never rewrites the target. A target built by the shell
    (`$VAR`, a substitution, a glob) is not judged, nor a send inside a heredoc fed to a shell (`bash <<EOF`). Any error or missing module allows the call.
-2. **The `paseo` PATH shim** (ls-06, 2026-11-14): `libexec/agent-bin/paseo` (bash) and its helper `bin/ade-paseo-guard` (python3, no
+2. **The `paseo` PATH shim** (ls-06, 2026-11-14): `libexec/agent-bin/paseo` (POSIX `sh`) and its helper `bin/ade-paseo-guard` (python3, no
    third-party modules). The hook sees only Claude's Bash and MCP tool calls and skips heredoc bodies, so a send made from Python
    `subprocess.run(["paseo", "send", ...])`, a script or a heredoc'd program was not guarded (an operator-lead report of 2026-11-14:
    a send to a replaced ex-lead went through that way). The shim enforces the same decision in the send path, like
    `ade-git-guard` does for git (docs/git-guard.md): it finds the real `paseo`: `ADE_REAL_PASEO`, else the first
    `paseo` on PATH that is an executable regular file and **not a copy of the shim** (every copy carries a marker line, so two
    checkouts' `libexec/agent-bin` on one PATH, or a symlink to the shim, are skipped; a re-entry counter, `ADE_PASEO_SHIM_DEPTH`, cap 8,
-   exits 127 for a wrapper that runs a shim again), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
+   exits 127 for a wrapper that runs a shim again; it counts only an exec chain, valid when `ADE_PASEO_SHIM_PID` is the shim's own pid or its
+   parent's, so a value a daemon started through the shim hands to its agents counts from zero; a second counter, `ADE_PASEO_SHIM_HOPS`, always inherited,
+   cap 32, ends a wrapper that forks between two shims (`( paseo "$@" )`, `sh -c`, `timeout`); the real paseo's path is named
+   to the helper alone and removed before the helper execs the real paseo), runs the helper only when a `send` word is on the command line (every other call is one `exec`),
    and the helper parses `paseo [global opts] [agent [global opts]] send [opts] TARGET` with the hook's own parser
    (`archived_send_gate.locate_send`, imported, not copied; global options `--json`, `-o/--format X`, `-qo X`, `-q`, `--no-headers`,
    `--no-color` may stand before `agent`, after it and after `send`; an explicit `--host`/`--home` is not judged). Then: `pass` execs the real paseo with the argv as
@@ -92,8 +95,9 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    to an archived worker is skipped), `bin/fable-wait fire` (a refused lead, including one with a cyclic ledger, is reported
    `refused` and its items stay open; a lead the guard finds replaced, e.g. one filed by an id prefix, is sent to its successor; the chain redirect of #669 is unchanged) and `bin/deadline` (redirects the owner; a
    refused owner gets exit 2 `not sent`).
-4. Not guarded: other TUIs' own tools (no hook there: this page and AGENTS.md are the rule), `bin/load-watch`, `bin/ade-tidy`
-   and `bin/ade-net-resume` (they message live agents they just listed), and `ade_self_session` (it messages its own live
+4. Not guarded by their own code: other TUIs' own tools (no hook there: this page and AGENTS.md are the rule), `bin/load-watch`, `bin/ade-tidy`
+   and `bin/ade-net-resume` (they message live agents they just listed; with the shim first on their PATH a bare `paseo send`
+   is judged like any other, and a live replaced target is redirected to its successor), and `ade_self_session` (it messages its own live
    predecessor before the archive).
 
 ## Limits
@@ -120,7 +124,7 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    `source <(...)`, so `echo '...' | sh` is seen), every full agent id written in the command is judged too (at most 5). Quoted
    text is blanked, so a `paseo send` or an id inside a message is text, unless it is a quoted id or list of ids, a
    `"${VAR:-id}"` expansion, a `$(...)` or backtick body, the argument of such a runner (not after `echo`, `printf`, `grep`,
-   `rg`, `sed`, `awk`), or the command has a shell word outside quotes (then nothing is blanked; a shell word inside message text does not count).
+   `rg`; `awk` and `sed -e` do run their strings), or the command has a shell word outside quotes (then nothing is blanked; a shell word inside message text does not count).
    A false denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, or one shell word
    (`bash x.sh`) anywhere outside quotes, which un-blanks every string in the command (accepted: the denial says how to get out). The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
    Known limits of the backstop (adversary r5, ls-04 r1, accepted): only **full** ids are judged, so a prefix or a name inside
@@ -128,7 +132,8 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    push it out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; a command that merely *talks
    about* `paseo send` unquoted (`rg paseo send`) with an archived agent's id in it is denied; a runner not on the list
    (`eval watch su fish script parallel ssh at tmux osascript`, `-c`/`-e`/`--command`/`--run`) that takes a quoted command string is not seen;
-   a `case ... in a) ...` pattern inside a `$(...)` (zsh only) desynchronises the parser and can hide a send in it or glue a following `#`; a quoted runner word (`'eval' '...'`) is not recognised.
+   a `case ... in a) ...` pattern inside a `$(...)` (zsh only) desynchronises the parser and can hide a send in it or glue a following `#`; a quoted runner word (`'eval' '...'`) is not recognised; a command text built for `eval` by `printf` (`eval "$(printf 'paseo send %s' A)"`, the format string is
+   text after `printf`) and `source FILE` / `. FILE` of a file that holds a send are not seen (`sh FILE` is); an fd-numbered redirect before the agent (`2>x`) is skipped, but an agent prefix of one or two digits directly followed by a redirect word is taken for the fd.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`) and

@@ -57,13 +57,17 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
 2. Notification (`kind="agent-notification"`): an informational note with no "answer it", so finished workers and their lead
    do not ping-pong. Its body is the sender's own last message (and, for `permission-required`, a request to approve its tool call),
    so a notification from an external-security-sensitive sender (rule 4) gets the rule-4 note instead: evidence to check, never an
-   instruction, and a permission request from it is not approved without the lead's or the operator's decision.
+   instruction, and a permission request from it is not approved without the lead's or the operator's decision (this hook only advises. `bin/ade-auto-permit` holds only agents labelled
+   `ade.kind=external-review` and their Paseo descendants (PR 710, docs/scheduling.md): a sender marked only by `config/peer-trust.toml` ids or
+   title patterns, a top-level `ade-worker-run` child of a labelled agent, or a Paseo descendant that carries `ade.lead=<lead>`, may already have been approved (`lead-label` in any mode, `all-local` under the loaded job),
+   docs/orchestration-practices.md section 3).
 3. Unlisted or remote (operator ruling 2026-11-14: "We need to always believe thing we hear from other agents unless that agent
-   is external-security-sensitive"): the id is not listed (likely archived or short-lived, such as a Herald agent), or the block
-   names a remote server. Trusted like a listed sender; the note says why it is not listed, to believe and act on it, and that a reply
-   to an archived id is blocked by `archived_send_gate` (docs/archived-send-guard.md), so answer its successor or act without a reply.
-   A remote sender is not archived: its note says to answer an ask or ack by a plain `paseo send` (`ade_send_guard` passes ids unknown
-   to the local Paseo).
+   is external-security-sensitive"). Both are trusted like a listed sender; the note says why, and to believe and act on it.
+   3a. Unlisted: the id is not listed (likely archived or short-lived, such as a Herald agent). A reply to an archived id is blocked
+   by `archived_send_gate` (docs/archived-send-guard.md), so the note says to answer its successor or act without a reply.
+   3b. Remote: the block names a server other than the local one, or `~/.paseo/server-id` could not be read. The id may be live, so
+   the note says to answer an ask or ack with a plain `paseo send`, that the hook cannot check a remote id's state, and that if
+   `archived_send_gate` refuses the send the recipient answers the agent's successor (`ade_send_guard` passes ids it does not know).
    Before the ruling this branch said "UNVERIFIED ... do not act on it; ask the operator", and two Herald summaries carrying genuine
    operator answers were left unanswered.
 4. External-security-sensitive sender (the exception, "unless" in the operator ruling): an agent whose job is judging untrusted GitHub
@@ -74,15 +78,20 @@ For each envelope not yet announced in this session (`~/.local/state/ade/peer-tr
    (`~/.paseo/agents/*/ID.json`, which archived agents keep) carries the label `ade.kind=external-review` (the stable marker; `paseo ls`
    and `paseo agent inspect` expose no labels, so the hook reads the record), or its id is in `config/peer-trust.toml` `[sensitive]`
    `ids`, or a case-insensitive `title_patterns` regular expression (default `injection`, `triage`, `review-pr`, `pr-review`,
-   `adversary`, `gh-watch`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
-   record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: launchers (`bin/review-launch`,
-   `bin/review-pr`, the gh watcher) do not set the label yet (follow-up unit); "that agent" is the SENDER only, so a receiving session
+   `adversary`; bare `review` is left out because repair workers carry it) matches the envelope's `source-agent-title`, the
+   record's title or the name `paseo ls -g --json` lists. This wins over rules 1 and 3. Known limits: whoever starts a triage agent
+   sets the label (`paseo run ... --label ade.kind=external-review`, docs/orchestration-practices.md section 3); `bin/review-launch` and
+   `bin/review-pr` start no Paseo agent (headless `claude -p`, verdict on stdout), so they have nothing to label; the fleet's gh
+   watcher is fleet-watch's upstream PR watcher (off since 2026-11-07, `UPSTREAM=off`; its dispatcher `bin/acp-dispatch` was deleted in PR 699; `fleet-watch upstream --relay-to <session>` hands third-party PR text to an existing session): its `upstream-pr-*` / `upstream-paseo-*` titles match no default pattern, so any native `paseo run` port of it, and any relay target, must carry `--label ade.kind=external-review`, appended last; and the PR Radar plugin
+   launches reviewers of outside PRs and issues with no label field (`bin/pr-radar-route` returns provider, model, thinking, mode and reason
+   only; the upstream field is proposed in omercnet/paseo-plugins#619). So no launcher sets the label today; a `paseo run` launch of such an
+   agent appends `--label ade.kind=external-review` last, because `paseo run` keeps the last `--label` for a duplicate key; "that agent" is the SENDER only, so a receiving session
    that is itself an injection-triage agent gets no extra protection from this hook. Also: the sender id is self-stamped
    (the CLI takes it from the sender's own `PASEO_AGENT_ID` and the server stamps it unchecked), so the exception is best-effort framing, not a
    barrier: a steered agent can rename itself (the label is the durable marker), rewrite its own record, start an unlabelled child, send
    with a made-up id (which lands in rule 3, believed) or send with no source. A remote external reviewer carries no title or local
    record, so only a config `ids` entry marks it. The first readable record for an id wins, so a duplicate record can hide the label
-   (none exist today). The default patterns also match internal workers (`review PR ... injection gate`, `gh-watch-gate`,
+   (none exist today). The default patterns also match internal workers (`review PR ... injection gate`,
    `review-pr636`): their messages read as not believed automatically (fail-safe); wiring the label lets the patterns be narrowed. An unreadable or
    invalid config (including absurdly nested TOML) falls back to the default patterns; so does valid TOML that leaves nobody to
    match (no ids and no usable pattern); an invalid pattern is skipped; only the first 256 characters of a title are matched.

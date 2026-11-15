@@ -23,8 +23,30 @@ HEAD = 'a' * 40
 NOT_A_REPO = 'fatal: not a git repository (or any of the parent directories): .git\n'
 
 
+class Clock:
+    """Injected time: `sleep` advances `now`, nothing sleeps for real; a runaway wait fails loudly."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds > 0 and self.now < 100000, 'runaway wait'
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class Native:
     def __init__(self, root):
+        self.clock = Clock()
+        self.ancestor_rc = 1        # `git merge-base --is-ancestor RECORDED CURRENT`: 0 yes, 1 no, other = git error
+        self.git_log = ''           # stdout of `git log RECORDED..CURRENT`
+        self.log_rc = 0
+        self.status_at = None       # callable(now) -> predecessor `Status`, scripting what `agent inspect` reads
+        self.archive_queue = []     # (returncode, stdout, stderr) answers to successive `agent archive` calls
         self.calls = []
         self.created = 0
         self.archived = 0
@@ -46,6 +68,13 @@ class Native:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
+        if argv[0] == 'git' and 'merge-base' in argv:
+            assert argv[-3] == '--is-ancestor' and re.fullmatch('[0-9a-f]{40}', argv[-2])
+            if isinstance(self.ancestor_rc, BaseException):
+                raise self.ancestor_rc
+            return subprocess.CompletedProcess(argv, self.ancestor_rc, '', '' if self.ancestor_rc in (0, 1) else 'fatal: bad object')
+        if argv[0] == 'git' and 'log' in argv:
+            return subprocess.CompletedProcess(argv, self.log_rc, self.git_log, '')
         if argv[0] == 'git':
             if isinstance(self.git_result, BaseException):
                 raise self.git_result
@@ -62,6 +91,8 @@ class Native:
             data = self.workspaces
         elif args[:2] == ['agent', 'inspect']:
             data = copy.deepcopy(self.rows[args[2]])
+            if args[2] == PRED and self.status_at and not data['Archived']:
+                data['Status'] = self.status_at(self.clock.now)
         elif args[:2] == ['agent', 'run']:
             if self.run_result is not None:
                 return subprocess.CompletedProcess(argv, *self.run_result)
@@ -80,6 +111,8 @@ class Native:
         elif args[:2] == ['agent', 'archive']:
             assert args == ['agent', 'archive', PRED]  # no force or workspace archive
             self.archived += 1
+            if self.archive_queue:
+                return subprocess.CompletedProcess(argv, *self.archive_queue.pop(0))
             if self.archive_result is not None:
                 return subprocess.CompletedProcess(argv, *self.archive_result)
             self.rows[PRED]['Archived'] = True
@@ -111,7 +144,8 @@ def setup(tmp_path):
     def verifier(plan, row):
         return {'ok': row['Mode'] == plan['mode_id'], 'reason': 'readback'}
     service = ss.Service(tmp_path / 'state', Path(env['PASEO_HOME']), env=env,
-                         runner=native, planner=planner, verifier=verifier)
+                         runner=native, planner=planner, verifier=verifier,
+                         clock=native.clock, sleep=native.clock.sleep)
     checkpoint = tmp_path / 'brief.md'
     checkpoint.write_text('Goal, existing authority, completed work, next action, dirty-state and ownership notes.\n')
     return service, native, checkpoint
@@ -151,7 +185,7 @@ def test_durable_checkpoint_top_level_creation_and_ack_before_archive(setup):
         service.finish(path)
     record = accept(service, record, path)
     assert record['ack']['agent_id'] == SUCC
-    with pytest.raises(ss.SessionError, match='idle'):
+    with pytest.raises(ss.SessionError, match='never stayed idle'):  # running for the whole bound
         service.finish(path)
     native.rows[PRED]['Status'] = 'idle'
     assert service.finish(path)['status'] == 'archived'
@@ -999,3 +1033,403 @@ def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
         service.native('agent', 'archive', PRED)
     assert caught.value.info['code'] == 'TOKEN_EXPIRED'
     assert caught.value.info['stderr_tail'] == envelope('TOKEN_EXPIRED', 'login again')
+
+
+# --- finish waits for a stable idle predecessor (fw-01, 2026-11-14) ---------------------------------
+
+RUNNING = (1, '', envelope('AGENT_RUNNING', 'Agent 1111111 is currently running'))  # Paseo archive.ts wording, PRED's prefix
+
+
+def archive_calls(native):
+    return [a for a, k in native.calls if a[4:6] == ['agent', 'archive']]
+
+
+def only_reads_and_archive(native):
+    """The wait never forces, never archives a workspace, never sends the predecessor anything."""
+    for argv, _ in native.calls:
+        if argv[0] == 'paseo':
+            assert argv[4:6] in (['agent', 'inspect'], ['agent', 'ls'], ['agent', 'archive'],
+                                 ['provider', 'ls'], ['workspace', 'ls'], ['agent', 'run']), argv
+            assert '--force' not in argv and 'send' not in argv
+
+
+def test_finish_waits_for_a_stable_idle_window_then_archives(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.status_at = lambda now: 'running' if now < 20 else 'idle'
+    saw = []
+    service.progress = saw.append
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+    assert native.clock.now >= 20 + 45  # idle only from t=20, then the whole window
+    assert native.clock.sleeps and all(x <= ss.FINISH_POLL for x in native.clock.sleeps)
+    assert any('not idle' in m for m in saw) and any('stable idle' in m for m in saw)
+    only_reads_and_archive(native)
+
+
+def test_a_busy_sample_restarts_the_window(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.status_at = lambda now: 'running' if 30 <= now < 40 else 'idle'  # idle 30 s, busy 10 s, idle again
+    assert service.finish(path)['status'] == 'archived'
+    assert native.clock.now >= 40 + 45  # the first 30 s of idle did not count
+    assert native.archived == 1
+
+
+def test_pending_permissions_are_not_stable_idle(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['PendingPermissions'] = [{'id': 'p'}]
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=10, timeout=60)
+    assert native.archived == 0 and native.clock.now == 60
+
+
+def test_agent_running_answer_goes_back_to_waiting_then_retries(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # the 2026-11-14 shape: idle for the whole window, a peer message starts a turn, archive is refused
+    native.status_at = lambda now: 'running' if 46 <= now < 70 else 'idle'
+    native.archive_queue = [RUNNING]
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 2
+    assert native.clock.now >= 70 + 45  # a fresh stable window after the refusal
+    done = json.loads(path.read_text())
+    assert done['status'] == 'archived' and 'native_error' not in done
+    assert done['resolved_native_error']['code'] == 'AGENT_RUNNING'
+    only_reads_and_archive(native)
+
+
+def test_timeout_before_any_archive_keeps_both_sessions(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'running'
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*both sessions preserved'):
+        service.finish(path, stable=30, timeout=100, poll=7)  # 7 does not divide 100: the last sleep is clamped
+    assert native.archived == 0 and native.clock.now == 100 and native.clock.sleeps[-1] == 2
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'acknowledged'  # nothing was attempted
+    assert saved['native_error']['code'] == 'PREDECESSOR_NOT_IDLE' and 'never stayed idle' in saved['native_error']['message']
+    only_reads_and_archive(native)
+    # the predecessor goes idle later: a re-run finishes
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+    assert 'native_error' not in json.loads(path.read_text())
+
+
+def test_timeout_after_agent_running_answers_stays_archive_unknown(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 50  # always refused
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*AGENT_RUNNING to \d+ archive'):
+        service.finish(path, stable=20, timeout=100, poll=5)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown'
+    assert saved['native_error']['code'] == 'PREDECESSOR_NOT_IDLE'
+    assert 2 <= native.archived <= 6 and native.clock.now <= 100
+
+
+def test_other_archive_errors_are_not_retried_even_when_the_message_says_running(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # classified by the structured code, not by prose
+    native.archive_queue = [(1, '', envelope('ARCHIVE_FAILED', 'AGENT_RUNNING elsewhere'))]
+    with pytest.raises(ss.NativeError, match='ARCHIVE_FAILED'):
+        service.finish(path)
+    assert native.archived == 1 and json.loads(path.read_text())['native_error']['code'] == 'ARCHIVE_FAILED'
+
+
+def test_agent_running_code_is_retried_whatever_the_message(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [(1, '', envelope('AGENT_RUNNING', 'busy'))]
+    assert service.finish(path)['status'] == 'archived' and native.archived == 2
+
+
+def test_already_archived_predecessor_finishes_at_once(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Archived'] = True
+    native.rows[PRED]['Status'] = 'running'  # irrelevant once archived
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 0 and native.clock.sleeps == []
+
+
+def test_no_wait_flags_keep_the_old_single_sample_behaviour(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'running'
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=0, timeout=0)
+    assert native.clock.sleeps == [] and native.archived == 0
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path, stable=0, timeout=0)['status'] == 'archived' and native.clock.sleeps == []
+
+
+@pytest.mark.parametrize('kw', [{'stable': -1}, {'timeout': 10, 'stable': 11}, {'timeout': 10, 'stable': 10}, {'poll': 0},
+                                {'poll': 0.1}, {'poll': 3601}, {'timeout': 86401}, {'timeout': 1e308, 'poll': 1e308}, {'timeout': float('nan')}, {'timeout': float('inf')},
+                                {'stable': float('inf'), 'timeout': float('inf')}, {'poll': float('inf')}])
+def test_nonsense_wait_arguments_are_refused_before_any_native_call(setup, kw):
+    service, native, path = finished_up_to_archive(setup)
+    before = len(native.calls)
+    with pytest.raises(ss.SessionError, match='stable'):
+        service.finish(path, **kw)
+    assert len(native.calls) == before
+
+
+def test_checkpoint_changed_during_the_wait_is_caught_before_archive(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    def flip(now):
+        if now >= 10:
+            Path(record['checkpoint']).write_text('tampered while we waited\n')
+        return 'running' if now < 10 else 'idle'
+    native.status_at = flip
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_stable_zero_agent_running_retries_obey_the_bound(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 3
+    with pytest.raises(ss.SessionError, match=r'never stayed idle.*last status running \(archive refused\).*AGENT_RUNNING to 1 archive'):
+        service.finish(path, stable=0, timeout=0)
+    assert len(archive_calls(native)) == 1 and native.clock.sleeps == []
+    assert json.loads(path.read_text())['native_error']['code'] == 'PREDECESSOR_NOT_IDLE'
+
+
+def test_stable_zero_retries_sleep_between_attempts_and_stop_at_the_deadline(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING] * 9
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=0, timeout=10, poll=5)
+    assert len(archive_calls(native)) == 3 and native.clock.sleeps == [5, 5] and native.clock.now == 10
+
+
+def test_agent_running_naming_another_agent_is_not_retried(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [(1, '', envelope('AGENT_RUNNING', 'Agent 3333333 is currently running'))]
+    with pytest.raises(ss.SessionError, match='different agent 3333333') as caught:
+        service.finish(path)
+    assert 'archive_agent' in str(caught.value) and len(archive_calls(native)) == 1
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown' and saved['native_error']['code'] == 'AGENT_RUNNING'
+
+
+def test_failure_after_an_agent_running_refusal_replaces_the_stale_reason(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    native.archive_queue = [RUNNING]
+    def tamper(now):
+        if now >= 50:
+            Path(record['checkpoint']).write_text('changed after the refusal\n')
+        return 'idle'
+    native.status_at = tamper
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'finish' and 'checkpoint or HEAD changed' in saved['native_error']['message']
+    assert len(archive_calls(native)) == 1
+
+
+def test_malformed_permission_count_is_not_idle_and_does_not_crash_the_progress_line(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['PendingPermissions'] = 3
+    saw = []
+    service.progress = saw.append
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=10, timeout=20)
+    assert any('unknown permission wait' in m for m in saw) and native.archived == 0
+
+
+# --- a moved HEAD: fast-forward tolerated, anything else blocks (fw-01 repair, 2026-11-14) ---------
+
+NEW_HEAD = 'b' * 40
+
+
+def moved(setup, **kw):
+    service, native, path = finished_up_to_archive(setup)
+    native.head = NEW_HEAD
+    for k, v in kw.items():
+        setattr(native, k, v)
+    return service, native, path
+
+
+def test_fast_forwarded_head_is_tolerated_and_recorded(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log='bbbbbbb second\naaaaaaa first\n')
+    done = service.finish(path)
+    assert done['status'] == 'archived' and native.archived == 1
+    assert done['head_advanced'] == {'from': HEAD, 'to': NEW_HEAD, 'commits': ['bbbbbbb second', 'aaaaaaa first'],
+                                     'more': False}
+    assert json.loads(path.read_text())['head_advanced'] == done['head_advanced']
+    assert done['head'] == HEAD  # the recorded head is never rewritten
+    argv = next(a for a, k in native.calls if 'merge-base' in a)
+    assert argv[-3:] == ['--is-ancestor', HEAD, NEW_HEAD] and argv[:3] == ['git', '-C', done['cwd']]
+
+
+def test_long_fast_forward_lists_a_capped_log(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log=''.join(f'{i:07x} c{i}\n' for i in range(25)))
+    drift = service.finish(path)['head_advanced']
+    assert len(drift['commits']) == ss.DRIFT_COMMITS and drift['more'] is True
+
+
+@pytest.mark.parametrize('rc', [1, 128, 2])
+def test_head_that_is_not_a_descendant_or_a_git_error_blocks(setup, rc):
+    service, native, path = moved(setup, ancestor_rc=rc)
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed.*not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0 and 'head_advanced' not in json.loads(path.read_text())
+
+
+@pytest.mark.parametrize('error', [OSError('no git'), subprocess.TimeoutExpired('git', 10)])
+def test_ancestry_check_that_cannot_run_blocks(setup, error):
+    service, native, path = moved(setup, ancestor_rc=error)
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_checkpoint_change_still_blocks_with_a_fast_forwarded_head(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    Path(json.loads(path.read_text())['checkpoint']).write_text('edited')
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_repository_that_vanished_or_appeared_blocks(setup):
+    service, native, path = moved(setup, ancestor_rc=0, head=None)  # recorded a head, now no repository
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert not any('merge-base' in a for a, k in native.calls)
+
+
+def test_null_recorded_head_with_a_repository_now_blocks(setup):
+    service, native, checkpoint = setup
+    native.head = None
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    assert record['head'] is None
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.head, native.ancestor_rc = NEW_HEAD, 0
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert native.archived == 0 and not any('merge-base' in a for a, k in native.calls)
+
+
+def test_head_advancing_during_the_wait_is_recorded_before_the_archive(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.ancestor_rc = 0
+    def lands(now):
+        native.head = NEW_HEAD if now >= 30 else HEAD
+        return 'running' if now < 10 else 'idle'
+    native.status_at = lands
+    done = service.finish(path)
+    assert done['status'] == 'archived' and done['head_advanced']['to'] == NEW_HEAD
+
+
+def test_malformed_recorded_head_blocks_without_reaching_git(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    record = json.loads(path.read_text())
+    record['head'] = '--upload-pack=x'
+    path.write_text(json.dumps(record))
+    with pytest.raises(ss.SessionError, match='not a fast-forward'):
+        service.finish(path)
+    assert not any('merge-base' in a for a, k in native.calls)
+
+
+def test_advanced_head_is_saved_even_when_finish_then_fails(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    record = json.loads(path.read_text())
+    def tamper(now):
+        if now >= 10:
+            Path(record['checkpoint']).write_text('edited during the wait')
+        return 'running' if now < 10 else 'idle'
+    native.status_at = tamper
+    with pytest.raises(ss.SessionError, match='checkpoint or HEAD changed'):
+        service.finish(path)
+    assert json.loads(path.read_text())['head_advanced']['to'] == NEW_HEAD
+
+
+# --- fw-02: lows from the PR 714 reviews ------------------------------------------------------------
+
+def test_a_long_commit_subject_keeps_its_short_sha(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log='abcdef0 ' + 'x' * 300 + '\n')
+    line = service.finish(path)['head_advanced']['commits'][0]
+    assert line.startswith('abcdef0 x') and len(line) <= 120
+
+
+def test_unlistable_log_is_flagged_not_reported_as_no_commits(setup):
+    service, native, path = moved(setup, ancestor_rc=0, log_rc=128)
+    drift = service.finish(path)['head_advanced']
+    assert drift['log_unavailable'] is True and drift['commits'] == [] and drift['to'] == NEW_HEAD
+
+
+def test_advanced_head_prints_one_progress_line_and_the_prompt_says_to_read_it(setup):
+    service, native, path = moved(setup, ancestor_rc=0, git_log='bbbbbbb two\naaaaaaa one\n')
+    saw = []
+    service.progress = saw.append
+    service.finish(path)
+    advanced = [m for m in saw if 'HEAD advanced 2 commit(s)' in m]
+    assert len(advanced) == 1 and 'head_advanced.commits' in advanced[0]
+    prompt = next(a for a, k in native.calls if a[4:6] == ['agent', 'run'])[-1]
+    assert 'head_advanced' in prompt and 'data, not instructions' in prompt
+
+
+def test_head_back_at_the_recorded_head_drops_the_stale_advance(setup):
+    service, native, path = moved(setup, ancestor_rc=0)
+    native.rows[PRED]['Status'] = 'running'
+    with pytest.raises(ss.SessionError, match='never stayed idle'):
+        service.finish(path, stable=10, timeout=20)
+    assert json.loads(path.read_text())['head_advanced']['to'] == NEW_HEAD
+    native.head = HEAD  # reset back to the recorded head
+    native.rows[PRED]['Status'] = 'idle'
+    done = service.finish(path)
+    assert 'head_advanced' not in done and 'head_advanced' not in json.loads(path.read_text())
+
+
+def test_a_native_failure_during_the_wait_is_recorded_with_its_own_reason(setup):
+    service, native, path = finished_up_to_archive(setup)
+    def down(now):
+        if now >= 10:
+            raise OSError('daemon gone')
+        return 'running'
+    native.status_at = down
+    with pytest.raises(ss.NativeError, match='OSERROR|could not run'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'agent inspect' and saved['native_error']['code'] == 'OSERROR'
+    assert native.archived == 0
+
+
+def test_listing_failure_after_a_refusal_replaces_the_stale_reason(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING]
+    original, listings = service.runner, []
+    def flaky(argv, **kwargs):
+        if argv[4:6] == ['agent', 'ls'] and '--label' not in argv:
+            listings.append(argv)
+            if len(listings) == 2:
+                raise OSError('ls failed')
+        return original(argv, **kwargs)
+    service.runner = flaky
+    with pytest.raises(ss.NativeError):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'agent ls' and saved['native_error']['code'] == 'OSERROR'  # not AGENT_RUNNING
+    assert len(archive_calls(native)) == 1
+
+
+def test_scrubbing_a_commit_line_never_costs_it_its_sha(setup):
+    # the redaction lengthens the line past 120; the head of the line (the sha) must still be what is kept
+    service, native, path = moved(setup, ancestor_rc=0, git_log='abcdef0 ' + 'y' * 100 + ' token=a\n')
+    line = service.finish(path)['head_advanced']['commits'][0]
+    assert line.startswith('abcdef0 y') and len(line) <= 120 and not line.startswith('...')
+
+
+def test_a_non_session_failure_after_a_refusal_is_recorded_too(setup):
+    service, native, path = finished_up_to_archive(setup)
+    record = json.loads(path.read_text())
+    native.archive_queue = [RUNNING]
+    def remove(now):
+        if now >= 50:
+            Path(record['checkpoint']).unlink(missing_ok=True)
+        return 'idle'
+    native.status_at = remove
+    with pytest.raises(OSError):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['native_error']['op'] == 'finish' and saved['native_error']['code'] is None
+    assert 'AGENT_RUNNING' not in json.dumps(saved['native_error'])

@@ -135,6 +135,12 @@ D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf 
 in-flight reservations across a parallel wave (that was the retired Wave 6 dispatch shim's write-and-recheck path).
 Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
 slices from one plan snapshot than the floor estimate fits in remaining.
+D5a. **A repo's frontier reviewer order (rt-01, 2026-11-14):** `[dispatch.repo_overrides.REPO] frontier_order` in `config/routing.toml`
+(tendcf: `codex`, `claude`, `antigravity-argon`, its standing rule 3) makes `route_agent.py plan --kinds frontier --repo REPO`
+sort the pools that already passed every gate by that order (unlisted ones after), the score only inside a position. It never
+admits a closed pool and Argon stays behind the pools it sits behind. A name that is no service fails the policy load, in the
+router and in `ade-config check` alike. **The order does not apply model-family independence**: for a Codex-authored slice, pass
+`--exclude codex` to `plan` (tendcf rule 3 counts only Fable or Argon then), or the plan puts same-family Astra first.
 D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
 `good_at` rank deltas from recent outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave

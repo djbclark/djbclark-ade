@@ -528,3 +528,53 @@ def test_a_long_prompt_of_decreasing_length_openers_is_fast(tmp_path):
     t0 = time.monotonic()
     assert f"report: {own}" in _own_report_of(tmp_path, prompt)
     assert time.monotonic() - t0 < 4      # linear: ~0.3 s; a per-opener rescan to the end took ~8 s
+
+
+def _updated(tmp_path, prompt):
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    return out["updatedInput"]["prompt"]
+
+
+@pytest.mark.parametrize("peer_running", [False, True])
+def test_a_peers_footer_pasted_in_a_fence_does_not_suppress_the_hooks_own(tmp_path, peer_running):
+    """Lead review 14760b15 B3 (P1, P1b): the pasted footer is the peer's, so the hook appends this launch's own footer on its own
+    path (fail closed), and a running peer's report is not a reason to deny: it is not this launch's."""
+    peer = tmp_path / "peer-x-report.md"
+    if peer_running:
+        peer.write_text("STATUS: working\n")
+    prompt = f"review the worker's output\n```\nthe peer's brief\n## Delivery contract (shared footer)\nWrite the full deliverable to `{peer}`.\n```\n"
+    updated = _updated(tmp_path, prompt)
+    own = tmp_path / "reports" / "s1" / "adv-report.md"
+    assert updated.count("## Delivery contract") == 2 and f"report: {own}" in updated and f"report: {peer}" not in updated
+
+
+def test_a_quoted_peer_footer_does_not_suppress_the_hooks_own(tmp_path):
+    peer = tmp_path / "peer-x-report.md"
+    updated = _updated(tmp_path, f"review it\n> ## Delivery contract (shared footer)\n> Write the full deliverable to `{peer}`.\n")
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated
+
+
+def test_the_words_delivery_contract_in_prose_do_not_suppress_the_footer(tmp_path):
+    updated = _updated(tmp_path, "follow the Delivery contract in docs/dispatch-footer.md when you report")
+    assert "## Delivery contract (test)" in updated
+
+
+def test_a_quoted_peer_label_beside_the_own_bare_label_is_not_a_conflict(tmp_path):
+    """Lead review B5 (M7): quoted lines are removed before the own-label levels, so `> Worker report:` does not turn the one
+    outside `Report:` into a conflict (the derived path would be safe but wrong)."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Report: {own}\n> Worker report: {peer}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_peers_pasted_report_label_does_not_hide_the_own_unfinished_report_behind_an_own_footer(tmp_path):
+    """The footer branch of the resume guard reads the text outside pasted blocks: a running peer's `Report path:` in a fence
+    must not turn this launch's own unfinished report into an ambiguous (two-path) case that is let through."""
+    own, peer = tmp_path / "own-report.md", tmp_path / "peer-report.md"
+    own.write_text("STATUS: wip\n")
+    peer.write_text("STATUS: wip\n")
+    prompt = f"Report path: {own}\n```\nthe peer's brief\nReport path: {peer}\n```\ntask\n## Delivery contract (shared footer)\n"
+    out = run({"description": "Own", "prompt": prompt}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]

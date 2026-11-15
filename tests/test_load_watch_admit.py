@@ -825,7 +825,7 @@ def test_reservations_count_with_live_agents_expire_release_and_can_be_skipped(t
     assert len(res_rows(tmp_path)) == 1
     unknown = subprocess.run([sys.executable, str(LW), "release", "nope"], capture_output=True, text=True,
                              env=dict(os.environ, LW_STATE_DIR=str(tmp_path / "state")))
-    assert unknown.returncode == 1
+    assert unknown.returncode == 66 and "no reservation nope" in unknown.stdout   # EX_NOINPUT: no such reservation (1 is a lock or write failure)
     # --no-reserve is a pure check: it records nothing; LW_RESERVE_S=0 turns reservations off
     before = f.read_text()
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).returncode == 0
@@ -855,7 +855,7 @@ def test_the_reservation_recounts_live_agents_inside_the_lock_and_fails_toward_w
     monkeypatch.setattr(lw, "STATE_DIR", tmp_path / "file")
     (tmp_path / "file").write_text("x")                           # the state dir cannot be created
     assert lw.agent_reserve(14, 0, 90) == ("agents_reserve_failed", None)
-    assert lw.release_reservation("x") is False
+    assert lw.release_reservation("x") is False and lw.release_reservation_status("x") is None   # a lock or write failure is None, not "not found"
 
 
 def test_a_hot_reading_resets_the_calm_clock_even_when_the_caller_disables_the_boost(tmp_path):

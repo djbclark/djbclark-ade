@@ -31,6 +31,9 @@ import sys
 from pathlib import Path
 
 MARK = "Delivery contract"
+# The footer's own heading at the start of a line (`## Delivery contract (...)`): a mention of the words in prose, or a peer's
+# whole footer pasted in a fence or quote, is not this prompt's footer (lead review 14760b15 B3: fail closed = append ours).
+FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK)
 EXEMPT = {"claude-code-guide", "statusline-setup"}
 DEFAULT_LEAD = "main"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -148,8 +151,11 @@ def named_report(prompt):
         if bare:
             paths = _uniq(bare, REPORT_LABELLED.findall(outside))
         else:
-            paths = (_uniq(REPORT_OWN.findall(prompt), REPORT_LABELLED.findall(prompt))
-                     or _uniq(REPORT_IN_PROMPT.findall(prompt)))
+            # a pasted peer footer's delivery line is the peer's report, not this prompt's (lead review B3)
+            theirs = set(FOOTER_DELIVERY.findall(prompt)) - set(FOOTER_DELIVERY.findall(outside))
+            paths = (_uniq([x for x in REPORT_OWN.findall(prompt) if x not in theirs],
+                           [x for x in REPORT_LABELLED.findall(prompt) if x not in theirs])
+                     or _uniq([x for x in REPORT_IN_PROMPT.findall(prompt) if x not in theirs]))
     if len(paths) != 1:
         return None
     return None if Path(paths[0] + ".done").exists() else paths[0]
@@ -179,9 +185,10 @@ def unfinished_report(data, tool_input, has_footer):
     try:
         prompt = str(tool_input.get("prompt") or "")
         if has_footer:
-            labelled = {x for x in set(REPORT_LABELLED.findall(prompt))
+            outside = _outside_pasted(prompt)        # a peer's pasted brief or footer is not this launch's
+            labelled = {x for x in set(REPORT_LABELLED.findall(outside))
                         if not Path(x + ".done").exists()}      # a finished background report is not this launch's
-            paths = labelled | set(FOOTER_DELIVERY.findall(prompt))   # the delivery line is always this launch's
+            paths = labelled | set(FOOTER_DELIVERY.findall(outside))   # the delivery line is always this launch's
             path = next(iter(paths)) if len(paths) == 1 else None      # two different paths: ambiguous, skip
         else:
             path = report_path(data, tool_input)
@@ -241,7 +248,7 @@ try:
     if str(tool_input.get("subagent_type") or "") in EXEMPT:
         sys.exit(0)
     prompt_text = str(tool_input.get("prompt") or "")
-    has_footer = MARK in prompt_text
+    has_footer = bool(FOOTER_HEADING.search(_outside_pasted(prompt_text)))
     stale = unfinished_report(data, tool_input, has_footer)
     note = ""
     if stale:

@@ -2,7 +2,12 @@
 """Approve pending tool-permission requests for a lead's descendants, its `ade.lead=<lead>` workers,
 selected ADE labels or, with `--all-local`, every agent this host's daemon lists. A request that is a question
 or plan approval meant for the operator is skipped in any mode (best-effort name denylist, and only for
-providers whose question names are known: claude, codex, opencode, pi, omp)."""
+providers whose question names are known: claude, codex, opencode, pi, omp). An agent labelled
+`ade.kind=external-review` (it judges untrusted GitHub artifacts for prompt injection, so a steered one could ask
+for anything) is never approved in any mode: its requests stay pending for the lead or the operator
+(`sensitive-sender`), and so is a descendant that has such an agent between it and the lead, unless the child also carries `ade.lead=<a lead in the lineage>` or a matching `--ade-label` (labels are checked before ancestry). Only that
+label counts here: the exact ids and title patterns of config/peer-trust.toml (which claude/hooks/peer_trust_gate.py
+honours) are not read by this job, and launchers do not set the label yet (docs/peer-trust.md rule 4)."""
 import argparse
 from datetime import datetime, timezone
 import fcntl
@@ -188,7 +193,7 @@ def lead_lineage(lead, log):
     return current, leads, queried
 
 
-def descendant(agent, lead, cache):
+def descendant(agent, lead, cache, sensitive=frozenset()):
     leads = {lead} if isinstance(lead, str) else set(lead)  # one id, or the lineage of a handed-off lead
     if agent in leads:
         return False
@@ -207,8 +212,13 @@ def descendant(agent, lead, cache):
             raise ProbeError("invalid parent id")
         if parent in leads:
             return True
+        if parent in sensitive:
+            return "sensitive"  # a child of an external-review agent does not inherit the lead's approval, in any mode
         agent = parent
     return False
+
+
+SENSITIVE_LABEL = "ade.kind=external-review"  # same marker as claude/hooks/peer_trust_gate.py SENSITIVE_LABEL
 
 
 def sweep(lead, labels, log, all_local=False):
@@ -234,6 +244,13 @@ def sweep(lead, labels, log, all_local=False):
             if row["id"] not in eligible:
                 eligible[row["id"]] = reason
                 via[row["id"]] = label
+    # Agents whose permission requests are never auto-approved, whatever qualified them above. A failed probe
+    # raises ProbeError out of the sweep, so an unknown label set never approves anything.
+    sensitive = set()
+    for row in (rows(call(["ls", "-a", "-g", "--label", SENSITIVE_LABEL])) if requests else []):
+        if not isinstance(row, dict) or not identifier(row.get("id")):
+            raise ProbeError("invalid labelled agent")
+        sensitive.add(row["id"])
     cache, seen, failed = {}, set(), False
     for row in requests:
         if not isinstance(row, dict):
@@ -263,6 +280,9 @@ def sweep(lead, labels, log, all_local=False):
             # A question or plan approval is the operator's to answer. Checked before scope, in every mode.
             log_event(log, "skip", "operator-question", agent, request, **event)
             continue
+        if agent in sensitive:
+            log_event(log, "skip", "sensitive-sender", agent, request, **event)
+            continue
         if agent not in providers:
             log_event(log, "skip", "outside-scope", agent, request, **event)
             continue
@@ -278,10 +298,14 @@ def sweep(lead, labels, log, all_local=False):
                 reason = eligible[agent]
             else:
                 try:
-                    reason = "descendant" if descendant(agent, leads, cache) else None
+                    found = descendant(agent, leads, cache, sensitive)
+                    if found == "sensitive":
+                        log_event(log, "skip", "sensitive-sender", agent, request, **event)
+                        continue
+                    reason = "descendant" if found else None
                 except ProbeError:
-                    if not all_local:
-                        raise
+                    if not all_local or sensitive:
+                        raise  # with an external-review agent pending, unknown ancestry never falls back to all-local
                     reason = None  # all-local does not depend on ancestry; local membership decides
             if reason is None and all_local and agent in providers:
                 reason = "all-local"

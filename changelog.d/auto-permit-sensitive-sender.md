@@ -1,0 +1,3 @@
+### Changed
+
+- `bin/ade-auto-permit`: an agent labelled `ade.kind=external-review` (one that judges untrusted GitHub artifacts for prompt injection) is never auto-approved, in any mode, even with `ade.lead`, as a descendant or under `--all-local`: its requests stay pending (`skip` / `sensitive-sender`), and neither is a descendant behind one; only the label counts (the config ids and title patterns the peer-trust gate honours are not read here, and no launcher sets the label yet, so this is a partial match of peer-trust rule 4). The sweep asks Paseo for that label when a request is pending and fails closed when the answer is missing or malformed. (#710)

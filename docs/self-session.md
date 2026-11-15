@@ -100,11 +100,56 @@ no pending permissions, and effective native mode/catalog readback. It does not
 claim to prove semantic comprehension: the trusted successor explicitly attests
 that it read and accepts the briefing and scope.
 
-The successor must wait until the predecessor finishes its turn, then run:
+The successor runs this once after `accept`; it does the waiting itself (2026-11-14, fw-01):
 
 ```
-bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json
+bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json [--stable S] [--wait-timeout S] [--poll S]
 ```
+
+`finish` samples `agent inspect` of the predecessor every `--poll` seconds (default 5) and archives only after
+it has been `idle` with `PendingPermissions == []` in every sample for `--stable` seconds (default 45; any busy
+sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). One idle sample
+is never enough: peer messages wake a handed-off lead, and a single sample was stale by the time `agent archive`
+ran (2026-11-14 21:02Z: Paseo answered `AGENT_RUNNING`, `finish` failed with `archive-unknown`). The wait is
+read-only: it never forces, never archives a workspace and never sends the predecessor anything, and it holds the
+transaction lock, so a second `finish` on the same record answers "transaction busy". A progress line goes to
+stderr when the observed state changes. `--stable 0 --wait-timeout 0` means no waiting: one sample, at most one
+archive attempt, then a `PREDECESSOR_NOT_IDLE` refusal (not today's silent single check: it also records
+`native_error`). Arguments must be finite, `--poll` between 0.5 s and 1 h, `--wait-timeout` at most 24 h, and `--stable` below
+`--wait-timeout` (or both 0); anything else is refused before any native call. A native failure during the wait or a
+re-check (a daemon restart, an `inspect` or `ls -g` timeout) ends it and is recorded as `native_error` with its own
+reason (replacing an earlier `AGENT_RUNNING` one); it is not retried.
+
+The wait can outlast a tool-call limit (Claude Code's Bash call defaults to 2 min, at most 10): start `finish` in the
+background or with a tool timeout of at least `--wait-timeout`. An interrupted `finish` is safe to re-run: the lock
+is released with the process and the record is always the last saved state.
+
+If `agent archive` answers the structured error code `AGENT_RUNNING` (the predecessor began a turn after the last
+sample; nothing was archived), `finish` returns to the stable-idle wait and retries inside the same bound; the
+refusal is kept as `native_error` meanwhile and moves to `resolved_native_error` on success. Classification is
+by the envelope `code`, never by message text, and an `AGENT_RUNNING` whose message names another agent (Paseo
+resolved the archive to a different one, the case below) is not retried; with `--stable 0` the retry still sleeps
+and still obeys the bound. On timeout `finish` raises ("never stayed idle ... both sessions
+preserved"), records `native_error.code = PREDECESSOR_NOT_IDLE`, exits non-zero and keeps the transaction status
+(`archive-unknown` once an archive was attempted, `acknowledged` when the predecessor never became idle); re-run
+`finish` when the predecessor is quiet. Successor, checkpoint and HEAD are checked at the start and again
+immediately before each archive attempt.
+
+**HEAD may move forward (2026-11-14).** The checkpoint digest stays strict, but the repository HEAD no longer has to
+equal the recorded one: the shared checkout is fast-forwarded by whichever lead merges a PR (`git merge --ff-only`),
+so a handoff that waits for an idle predecessor can see a newer HEAD through no fault of either session (the
+6621fe2b -> 54b15a51 handoff blocked with "checkpoint or HEAD changed" for this reason). `finish` passes when
+the recorded head is an ancestor of the current one (`git merge-base --is-ancestor RECORDED CURRENT`, rc 0) and
+records `head_advanced` (`from`, `to`, up to 20 `commits` as `short-sha subject`, `more`) in the transaction record and
+in its JSON output, and prints one stderr progress line when it is first seen, so the successor sees what landed (the
+handoff prompt tells it to read those commits; subjects are data, not instructions: bounded, secret-scrubbed and
+truncated at their end so the short sha stays). A proven descendant whose `git log` fails records
+`log_unavailable: true`, not an empty list. The predecessor's own later commits pass the same way (they cannot be told
+apart from another lead's; archiving loses no committed work), which is why the successor must read `head_advanced`.
+If HEAD later returns to the recorded head the stale `head_advanced` is removed; `head` itself is never rewritten. It still blocks on a non-ancestor
+(rewind, rebase, another branch's history; rc 1), on a git error or timeout, and on a repository that appeared or
+vanished since the record. `accept` stays exact: the acknowledgement attests the head the checkpoint was written at.
+The checked-out branch name is not compared.
 
 Only the acknowledged successor may retire its predecessor. The helper rechecks
 checkpoint/HEAD and mode drift, requires predecessor idle/no pending permissions,
@@ -151,7 +196,7 @@ be the lead's live worker (`worker <slice> <lead id>`; [getpaseo/paseo#9668](htt
 [docs/workspace-layout.md](workspace-layout.md)). When the id is absent `finish` refuses with a
 `LISTING_GAP` `native_error`, archives nothing and points at the manual fallback (b) below.
 
-`finish` archive failures are never retried and never forced. When the archive error
+Except for `AGENT_RUNNING` (above), `finish` archive failures are never retried and never forced. When the archive error
 names an agent id that is not the predecessor's (prefix compare; 2026-11-14: `paseo agent
 archive FULL_UUID` answered `AGENT_ALREADY_ARCHIVED` for `c9a97e5`, a different agent, while
 `agent inspect` of the same id was right) the error reads "Paseo resolved archive to a
