@@ -832,6 +832,7 @@ class Service:
             if self.actor() != record.get('successor') or not record.get('ack'):
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
+                self.rebind_claims(record, target)  # idempotent: a re-run after a failed rebind retries it
                 return record
             deadline = self.clock() + timeout
             refused_running = 0
@@ -941,7 +942,22 @@ class Service:
             record['status'] = 'archived'
             self.resolve_native_error(record)
             self.save(target, record)
+            self.rebind_claims(record, target)
             return record
+
+    def rebind_claims(self, record, target):
+        """cl-succ: the archived predecessor's active ade_claims claims become the successor's (same ids, history
+        line). Never fails finish: the archive already happened; an error is recorded as `claims_rebind_error`."""
+        try:
+            import ade_claims  # beside this module; absent when the module is copied alone
+            ids = ade_claims.rebind_successor(record['predecessor'], caller=self.actor(), record_path=target,
+                                              self_session_state=self.state)
+            earlier = record.get('rebound_claims')
+            record['rebound_claims'] = sorted(set(ids) | set(earlier if isinstance(earlier, list) else []))
+            record.pop('claims_rebind_error', None)
+        except Exception as error:  # noqa: BLE001 - recorded, never raised
+            record['claims_rebind_error'] = bounded(f'{type(error).__name__}: {error}', MESSAGE_LIMIT)
+        self.save(target, record)
 
     @staticmethod
     def archive_other_agent(error, predecessor):

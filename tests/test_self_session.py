@@ -157,6 +157,12 @@ class Native:
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), '')
 
 
+@pytest.fixture(autouse=True)
+def isolated_claims(tmp_path, monkeypatch):
+    """finish rebinds ade_claims claims: never read the real registry."""
+    monkeypatch.setenv('ADE_STATE_DIR', str(tmp_path / 'ade-state'))
+
+
 @pytest.fixture
 def setup(tmp_path):
     cwd = tmp_path / 'work tree'
@@ -2058,3 +2064,78 @@ def test_the_redirect_stays_on_during_a_retry_archive_call(setup):
     service.native = native_call
     service.finish(path, stable=0, timeout=100, poll=5)
     assert len(seen) == 2 and seen[1] == 'redirect'
+
+
+def _claim(claim_id, owner, tmp_path, **kw):
+    import ade_claims
+    p = tmp_path / ('ws-' + claim_id)
+    p.mkdir()
+    ade_claims.create_claim(ade_claims.make_claim(id=claim_id, path=p, branch='b', base_sha='a' * 40,
+                                                  owner_agent=owner, owner_record=owner, **kw), pointer_for=None)
+
+
+def test_finish_rebinds_the_predecessors_claims_to_the_successor(setup, tmp_path):
+    import ade_claims
+    _claim('c-pred', PRED, tmp_path)
+    _claim('c-other', OTHER, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['rebound_claims'] == ['c-pred']
+    c = ade_claims.read_claim('c-pred')
+    assert c['id'] == 'c-pred' and c['owner']['agent'] == SUCC and c['owner']['record'] == SUCC
+    assert c['state'] == 'active' and any(f'rebound from {PRED} by self-handoff {out["token"]}' in h for h in c['history'])
+    assert ade_claims.read_claim('c-other')['owner']['agent'] == OTHER
+    assert json.loads(path.read_text())['rebound_claims'] == ['c-pred']
+
+
+def test_finish_without_predecessor_claims_is_a_no_op(setup):
+    service, native, path = finished_up_to_archive(setup)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['rebound_claims'] == [] and 'claims_rebind_error' not in out
+
+
+def test_finish_does_not_rebind_an_expired_or_released_claim(setup, tmp_path):
+    import ade_claims
+    _claim('c-old', PRED, tmp_path, ttl_hours=None)
+    ade_claims.update_claim('c-old', expires_at='2000-01-01T00:00:00Z')
+    _claim('c-rel', PRED, tmp_path)
+    ade_claims.set_state('c-rel', 'released')
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['rebound_claims'] == []
+    assert ade_claims.read_claim('c-old')['owner']['agent'] == PRED
+    assert ade_claims.read_claim('c-rel')['owner']['agent'] == PRED
+
+
+def test_a_rerun_of_finish_retries_the_rebind(setup, tmp_path):
+    import ade_claims
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['status'] == 'archived'
+    _claim('c-late', PRED, tmp_path)
+    assert service.finish(path)['rebound_claims'] == ['c-late']
+    assert ade_claims.read_claim('c-late')['owner']['agent'] == SUCC
+
+
+def test_a_rebind_failure_leaves_finish_archived_and_a_clean_rerun_clears_it(setup, tmp_path, monkeypatch):
+    import ade_claims
+    _claim('c-f', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    def boom(*a, **k):
+        raise ValueError('induced')
+    monkeypatch.setattr(ade_claims, 'rebind_successor', boom)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and 'induced' in out['claims_rebind_error']
+    assert json.loads(path.read_text())['claims_rebind_error'] == out['claims_rebind_error']
+    monkeypatch.undo()
+    monkeypatch.setenv('ADE_STATE_DIR', str(tmp_path / 'ade-state'))
+    out = service.finish(path)
+    assert out['rebound_claims'] == ['c-f'] and 'claims_rebind_error' not in out
+    assert ade_claims.read_claim('c-f')['owner']['agent'] == SUCC
+
+
+def test_rebound_claims_accumulate_across_finish_reruns(setup, tmp_path):
+    service, native, path = finished_up_to_archive(setup)
+    _claim('c-1', PRED, tmp_path)
+    assert service.finish(path)['rebound_claims'] == ['c-1']
+    assert service.finish(path)['rebound_claims'] == ['c-1']  # a no-op re-run keeps the earlier list
+    _claim('c-2', PRED, tmp_path)
+    assert service.finish(path)['rebound_claims'] == ['c-1', 'c-2']
