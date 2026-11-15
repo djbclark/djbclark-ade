@@ -366,6 +366,74 @@ def test_a_block_comment_followed_by_prose_about_another_verdict_passes():
     assert run(head + 'gh pr comment 41 --body "%s"' % text) is None
 
 
+@pytest.fixture
+def report(live):
+    (live / "report.md").write_text("# report\n\nAPPROVE, no findings.\n\n```\n%s\n```\n" % APPROVE)
+    return live
+
+
+@pytest.mark.parametrize("command", [
+    'gh pr comment 1 --body "$(grep adversary-verdict report.md)"',
+    'gh pr comment 1 --body "$(gsed -n 6p report.md)"',
+    "gh pr comment 1 --body \"$(rg -o 'ad.*' report.md)\"",
+    "grep adversary-verdict report.md | gh pr comment 1 -F -",
+    "gsed -n 6p report.md | gh pr comment 1 --body-file -",
+    "grep adversary-verdict < report.md | gh pr comment 1 -F -",
+    "grep adversary-verdict report.md | head -n 1 | gh pr comment 1 -F -",
+    'gh pr comment 1 --body $(grep adversary-verdict report.md)',
+    'gh pr comment 1 --body "`grep adversary-verdict report.md`"',
+    'gh pr comment 1 --body "$(cat report.md | grep adversary-verdict)"',
+    'gh pr comment 1 --body "$(head -n 5 live.md)"',
+    'gh pr comment 1 --body $(cat live.md)',
+    'echo "$(grep adversary-verdict report.md)" | gh pr comment 1 -F -',
+    "printf %s $(gsed -n 6p report.md) | gh pr comment 1 --body-file -",
+])
+def test_a_filter_over_a_fenced_report_delivers_the_marker_unfenced(report, command):
+    assert run(command, cwd=report), command
+
+
+@pytest.mark.parametrize("command", [
+    'gh pr comment 1 --body "$(cat report.md)"',
+    'gh pr comment 1 --body $(cat report.md)',
+    "cat report.md | gh pr comment 1 -F -",
+    "gh pr comment 1 --body-file report.md",
+    "gh pr comment 1 --body \"$(grep -c APPROVE report.md | head -1)\" --title t" if False else "gh pr comment 1 --body done",
+])
+def test_a_whole_fenced_report_stays_documentation(report, command):
+    assert run(command, cwd=report) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    'F=live.md; gh pr edit 1 --body-file "$F"',
+    "F=live.md && gh pr edit 1 --body-file $F",
+    "D=.; F=live.md; gh pr edit 1 --body-file ${D}/${F}",
+    'F=live.md; gh pr comment 1 --body "$(cat $F)"',
+    'F=report.md; gh pr comment 1 --body "$(grep adversary-verdict $F)"',
+])
+def test_a_body_file_path_held_in_a_variable_of_the_same_command_is_read(report, command):
+    assert run(command, cwd=report), command
+
+
+def test_the_flag_prefix_is_not_part_of_a_fenced_body(live):
+    fenced = "```\n%s\n```" % APPROVE
+    assert run("gh pr comment 1 --body=" + q(fenced), cwd=live) is None
+    assert run("gh pr comment 1 -b" + q(fenced), cwd=live) is None
+    assert run("gh api repos/o/r/issues/1/comments -f body=" + q(fenced), cwd=live) is None
+    assert run("gh api repos/o/r/issues/1/comments -fbody=" + q(fenced), cwd=live) is None
+
+
+def test_json_escaped_markers_in_an_input_payload_are_decoded(live):
+    payload = json.dumps({"body": APPROVE})
+    assert "\\u003c" not in payload
+    escaped = payload.replace("<", "\\u003c").replace(">", "\\u003e")
+    assert "<" not in escaped
+    (live / "esc.json").write_text(escaped)
+    assert run("gh api repos/o/r/issues/1/comments --input esc.json", cwd=live)
+    assert run("echo %s | gh api repos/o/r/issues/1/comments --input -" % q(escaped), cwd=live)
+    (live / "ok.json").write_text(json.dumps({"body": "prose \u2713"}))
+    assert run("gh api repos/o/r/issues/1/comments --input ok.json", cwd=live) is None
+
+
 def test_a_budget_spent_on_feeders_never_hides_the_write_operands(live):
     for i in range(9):
         (live / ("big%d.txt" % i)).write_text("x" * 70000)
