@@ -179,8 +179,8 @@ def _ask(agent, model, what, note):
         "permissionDecisionReason": (
             f"Frontier sub-agent: {agent or 'model ' + model} runs on {what}, which is scarce (operator "
             "2026-10-18). Approve only if this really needs it; ordinary judgment is Opus at high first "
-            "(model: opus; next, route_agent.py plan --kinds judgment → paseo run --provider … while "
-            "codex gpt-6.1-sol quota is plentiful, 2026-10-25), everyday work goes through paseo run." + note)}}))
+            "(model: opus; next, route_agent.py plan --kinds judgment → its ade-worker-run … -- dispatch line while "
+            "codex gpt-6.1-sol quota is plentiful, 2026-10-25), everyday work goes through that dispatch line." + note)}}))
 
 
 try:

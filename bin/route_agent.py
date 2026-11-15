@@ -1983,6 +1983,7 @@ class Placement:
     cwd: str | None = None              # the window's own directory (the repo checkout); the slice's worktree goes in the brief
     window_middle: str | None = None    # the WORKERS window's `(<work>)` part; required on a lead's first launch
     repo: str | None = None             # window repo name when the cwd's own is not the one wanted
+    caller: str | None = None           # $PASEO_AGENT_ID when plan ran: ade-worker-run refuses any other --lead
 
 
 @dataclass
@@ -2007,6 +2008,12 @@ class Choice:
                     f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
                     "or the worker lands in the caller's own workspace (`paseo run --cwd` is ignored, getpaseo/paseo#9699)"]
         out = []
+        if not self.model.split():
+            out.append(f"no model profile for {self.kind or 'this kind'} on {self.service.acp_agent}: replace the quoted "
+                       f"--provider placeholder with an id from `paseo provider models {self.service.acp_agent}`")
+        if pl.lead and pl.caller and pl.lead != pl.caller:
+            out.append(f"lead {pl.lead} is not the caller's own id ({pl.caller}): ade-worker-run refuses it "
+                       "unless --on-behalf-of-lead is passed")
         if not pl.lead:
             out.append(f"no lead id: {LEAD_PLACEHOLDER} stays in the line (pass --lead; $PASEO_AGENT_ID was not set)")
         elif not LEAD_SHAPE.fullmatch(pl.lead):
@@ -2025,7 +2032,7 @@ class Choice:
         """Launch line: with a placement (`plan`, `adjust`) an `ade-worker-run` invocation whose arguments after `--` are the
         native `paseo run` flags; callers append only the positional brief (and any extra labels). Without one (`route`) the
         bare `paseo run` flags, a template. Cursor Cloud uses cursor-cloud launch. `dispatch_warnings` names what is missing."""
-        run = self._run_args()
+        run = self._run_args(quote_template=self.placement is not None)
         if run is None:
             return self._cursor_cloud_dispatch()
         if self.placement is None:
@@ -2044,7 +2051,7 @@ class Choice:
         return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
                 + (f" --model {shlex.quote(parts[0])}" if parts else ""))
 
-    def _run_args(self) -> str | None:
+    def _run_args(self, quote_template: bool = False) -> str | None:
         """The `paseo run` arguments (no leading `paseo run`, no brief); None for Cursor Cloud, which has no `paseo run`."""
         agent = self.service.acp_agent
         mode = DISPATCH_MODES.get(agent)
@@ -2069,7 +2076,9 @@ class Choice:
                 argv += ["--label", f"ade.kind={self.kind}"]
             return shlex.join(argv[2:] + ["--no-wait"])
         if not parts:
-            return (f"--provider {agent}/<id from: paseo provider models {agent}> "
+            # a placed line is a complete shell command: an unquoted `<id ...>` would be a redirection
+            provider = f"{agent}/<id from: paseo provider models {agent}>"
+            return (f"--provider {shlex.quote(provider) if quote_template else provider} "
                     + (shlex.join(mode_args) + " " if mode_args else "")
                     + (f"--label ade.kind={self.kind} " if self.kind else "")
                     + "--no-wait")
@@ -3310,7 +3319,8 @@ def apply_placement(rows: list[tuple[Any, ...]], args: argparse.Namespace, parse
         choice = row[1]
         if choice is not None:
             choice.placement = Placement(lead=lead, slice=args.slices[i] if args.slices else None, cwd=args.cwd,
-                                         window_middle=args.window_middle, repo=args.worker_repo)
+                                         window_middle=args.window_middle, repo=args.worker_repo,
+                                         caller=os.environ.get("PASEO_AGENT_ID") or None)
 
 
 def warn_dispatch(rows: list[tuple[Any, ...]]) -> None:

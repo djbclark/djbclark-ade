@@ -179,8 +179,44 @@ def WORKER_RUN_NOT_IN(line):
 
 def test_a_modelless_template_keeps_its_placeholder_inside_the_placed_line():
     c = r.Choice(r.BY_NAME["codex"], 80, 1, kind="code", placement=r.Placement(lead=LEAD, slice="s", cwd="/w"))
-    assert c.dispatch.startswith(f"{LAUNCHER} --lead {LEAD} --slice s --cwd /w -- --provider codex/<id from: ")
+    assert c.dispatch.startswith(f"{LAUNCHER} --lead {LEAD} --slice s --cwd /w -- --provider 'codex/<id from: ")
     assert c.dispatch.endswith("--no-wait")
+
+
+def test_a_modelless_placed_line_is_a_parsable_shell_command_and_warns():
+    """Lead review of PR 727 (B1): an unquoted `<id from: ...>` is an input redirection; bash must read the line as one command."""
+    import subprocess
+    c = r.Choice(r.BY_NAME["codex"], 80, 1, kind="code", placement=r.Placement(lead=LEAD, slice="s", cwd="/w"))
+    argv = shlex.split(c.dispatch)
+    assert argv[argv.index("--provider") + 1] == "codex/<id from: paseo provider models codex>"
+    assert subprocess.run(["bash", "-n", "-c", c.dispatch], capture_output=True).returncode == 0
+    assert any("no model profile" in w and "paseo provider models codex" in w for w in c.dispatch_warnings)
+    # a bare route template (placement None) is unchanged: pr-radar-route parses it
+    bare = r.Choice(r.BY_NAME["codex"], 80, 1, kind="code").dispatch
+    assert bare.startswith("paseo run --provider codex/<id from: paseo provider models codex> ")
+    ok = r.Choice(r.BY_NAME["claude"], 80, 1, model="sonnet --effort high", kind="code",
+                  placement=r.Placement(lead=LEAD, slice="s", cwd="/w"))
+    assert not any("no model profile" in w for w in ok.dispatch_warnings)
+
+
+def test_every_placed_line_of_a_plan_parses_in_bash():
+    import subprocess
+    slices, _ = _slices("plan", "--kinds", "code,research,frontier,bulk", "--lead", LEAD, "--cwd", WINDOW,
+                        *[a for n in "abcd" for a in ("--slice", n)])
+    for s in slices:
+        if s["dispatch"] and s["agent"] != "cursor-cloud":
+            assert subprocess.run(["bash", "-n", "-c", s["dispatch"]], capture_output=True).returncode == 0, s["dispatch"]
+
+
+def test_a_lead_that_is_not_the_callers_own_id_is_warned_about():
+    other = "0a371c1b-648d-483e-97af-d0b8bea8f731"
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", other, "--slice", "a", "--cwd", WINDOW,
+                        env={"PASEO_AGENT_ID": LEAD})
+    assert any("not the caller's own id" in w and "--on-behalf-of-lead" in w for w in slices[0]["dispatch_warnings"])
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", LEAD, "--slice", "a", "--cwd", WINDOW, env={"PASEO_AGENT_ID": LEAD})
+    assert slices[0]["dispatch_warnings"] == []
+    slices, _ = _slices("plan", "--kinds", "code", "--lead", other, "--slice", "a", "--cwd", WINDOW, env={"PASEO_AGENT_ID": ""})
+    assert slices[0]["dispatch_warnings"] == []      # no caller id to compare with (not running inside a Paseo agent)
 
 
 def test_placeholders_are_quoted_literals_a_shell_cannot_redirect_or_expand():
