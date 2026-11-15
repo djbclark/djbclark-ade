@@ -1903,7 +1903,8 @@ def helper_env():
 def approve_local_decision(top, text):
     """Recording `local` skips the CI-first rule for every later build here, so djbclark must approve it afresh (operator, 2026-11-15):
     `sudo-ask -k` shows an Allow dialog (command and directory, mouse click only), then sudo asks for Touch ID or the password; `-k` ignores
-    any cached sudo credential. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no."""
+    any cached sudo credential. Guards honest mistakes, not evasion, as in `bg`: $HOME picks the helper, LW_REGISTRY the registry, and a
+    user-owned file can be edited. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no."""
     msg = f"load-watch ci decide: record LOCAL (skip CI-first) for {top} because: {text}"
     if not (SUDO_ASK.is_file() and os.access(SUDO_ASK, os.X_OK)):
         local_approval_log("lw-local-unavailable", top, text)
