@@ -35,7 +35,6 @@ A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and pri
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 A2a. **Unattended dispatch (2026-11-12):** `Choice.dispatch` adds the provider-native mode from `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex and Antigravity `full-access`. Pi reports no selectable modes in `paseo provider ls --json`, so no mode is passed. This prevents workers from inheriting Default permissions.
 A2b. **PR Radar adapter (2026-11-14):** `bin/pr-radar-route` is the routing script of the pr-radar Paseo plugin (a third-party
-A2c. **Profile skip (rt-bulk, 2026-11-15):** `route` and `plan` pass over a pool with no model profile for the kind (no `models[kind]`: its line would carry a `--provider` placeholder that `dispatch_warnings` blocks) and name it under `skipped`; the placeholder and its warning are emitted only when no pool that can take the kind has a profile, and a profiled pool with no headroom queues the slice instead.
 plugin; it runs the script with its context JSON on stdin and reads launch overrides from stdout). It is the **single
 implementation**: pr-radar's `examples/pr-radar-route.py` is a synced copy of this file and **must stay byte-identical**
 (stdlib only, no ADE imports, so it runs from either place). The PR-signal to kind mapping lives in `pick_kind` (operator
@@ -121,6 +120,7 @@ Fable, Argon). A repository with none (the default, and `--repo` omitted) has no
 claude burn-first bonus can put Fable ahead of a usable Astra, and a fallback (Argon) always sorts behind the pools it
 sits behind. That default is intended (a fixed order is a per-repository rule, not a fleet rule); it is pinned by
 `tests/test_route_agent_rt01.py`.
+A2d. **Profile skip (rt-bulk, 2026-11-15):** `route` and `plan` pass over a pool with no model profile for the kind (no `models[kind]`: its line would carry a `--provider` placeholder that `dispatch_warnings` blocks) and name it under `skipped`; the placeholder and its warning are emitted only when no pool that can take the kind has a profile, and a profiled pool with no headroom queues the slice instead.
 D4. Pausing a session at a quota limit and continuing it after the reset is the Paseo plugins' job (session-guard,
 usage-auto-resume; PLAN D4). The fleet governor (`level` → no claude code slices), the quota guard (`ok/watch/tight/
 critical` and its state file) and gate profiles (the `away` profile) were deleted on 2026-11-07.

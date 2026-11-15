@@ -2572,12 +2572,15 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     skipped: list[str] = []
     profiled = False                       # some pool that can take `kind` has a model profile (headroom aside)
     for svc in services:
-        if not svc.eligible(kind, quota) or svc.name in exclude or svc.name in avoid:
+        if not svc.eligible(kind, quota):
             continue
-        if need_profile and not svc.models.get(kind):
+        has_profile = bool(svc.models.get(kind))
+        profiled = profiled or has_profile     # counted before exclude/avoid: a full, held or disabled profiled pool still queues
+        if svc.name in exclude or svc.name in avoid:
+            continue
+        if need_profile and not has_profile:
             skipped.append(f"{svc.name}: no model profile for {kind}")
             continue
-        profiled = True
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
         if kind == "frontier" and svc.name == "claude" and fable_short(quota.get("claude")):

@@ -64,7 +64,7 @@ def test_other_kinds_with_a_profile_are_unchanged():
 
 def test_explicit_exclude_still_applies_and_does_not_report_a_skip_for_an_excluded_pool():
     bare, good = _svc("aaa-bare", {}), _svc("zzz-good", {"bulk": "m1x"})
-    assert _route("bulk", [bare, good], exclude={"zzz-good"}).service.name == "aaa-bare"
+    assert _route("bulk", [bare, good], exclude={"zzz-good"}) is None
     assert _route("bulk", [bare, good], exclude={"aaa-bare"}).skipped == []
 
 
@@ -72,3 +72,17 @@ def test_plan_carries_the_skip():
     rows = _plan(["bulk"], [_svc("aaa-bare", {}), _svc("zzz-good", {"bulk": "m1x"})])
     (kind, c), = rows
     assert c.service.name == "zzz-good" and c.skipped
+
+
+def test_a_full_held_or_disabled_profiled_pool_queues_instead_of_handing_out_the_placeholder():
+    """adversary M1 (head 19f4d9eb): `exclude` (wave cap, disabled pools) and `avoid` (adjust holds) ran before the profile check."""
+    bare, good = _svc("aaa-bare", {}), _svc("zzz-good", {"bulk": "m1x"})
+    assert _route("bulk", [bare, good], exclude={"zzz-good"}) is None
+    assert _route("bulk", [bare, good], avoid={"zzz-good"}) is None
+
+
+def test_wave_cap_queues_the_next_bulk_slice_not_the_placeholder():
+    bare = _svc("aaa-bare", {})
+    good = r.Service("zzz-good", "zzz-good", {k: 1 for k in KINDS}, "subscription", models={"bulk": "m1x"}, max_parallel=1)
+    rows = _plan(["bulk", "bulk"], [bare, good])
+    assert rows[0][1].service.name == "zzz-good" and rows[1][1] is None
