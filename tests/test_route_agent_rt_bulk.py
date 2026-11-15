@@ -86,3 +86,22 @@ def test_wave_cap_queues_the_next_bulk_slice_not_the_placeholder():
     good = r.Service("zzz-good", "zzz-good", {k: 1 for k in KINDS}, "subscription", models={"bulk": "m1x"}, max_parallel=1)
     rows = _plan(["bulk", "bulk"], [bare, good])
     assert rows[0][1].service.name == "zzz-good" and rows[1][1] is None
+
+
+def test_a_queued_slice_names_the_skipped_pools():
+    """lead review B3: when route() returns None the reason still says which pool was passed over and why."""
+    bare, full = _svc("aaa-bare", {}), _svc("zzz-full", {"bulk": "m1x"})
+    with mock.patch.object(r, "discover", lambda q=None: [bare, full]):
+        why = r.unrouted_why("bulk", {"zzz-full": {"remaining": 0.0}})
+        assert "aaa-bare skipped: no model profile for bulk" in why
+        assert r.profile_skips("bulk") == ["aaa-bare skipped: no model profile for bulk"]
+        assert r.profile_skips("bulk", exclude={"aaa-bare"}) == []
+
+
+def test_quality_band_anchors_on_profiled_pools():
+    """lead review B4: an unprofiled best pool must not anchor the band (it can never be dispatched)."""
+    bare = _svc("aaa-bare", {}, rank=1)
+    good = _svc("zzz-good", {"bulk": "m1x"}, rank=5)
+    assert r.quality_best("bulk", [bare, good], need_profile=True).name == "zzz-good"
+    assert r.quality_best("bulk", [bare, good]).name == "aaa-bare"
+    assert r.quality_best("bulk", [bare], need_profile=True) is None

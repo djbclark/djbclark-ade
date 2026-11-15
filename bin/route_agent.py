@@ -2178,9 +2178,24 @@ def quality_best(kind: str, services: list[Service],
     return min(pool, key=lambda s: (s.rank_for(kind), s.name), default=None)
 
 
+def profile_skips(kind: str, quota: dict[str, Any] | None = None,
+                  exclude: frozenset[str] | set[str] = frozenset()) -> list[str]:
+    """Pools that can take `kind` but have no model profile for it (what `route` passes over), e.g.
+    `herdr-generic skipped: no model profile for bulk`."""
+    return [f"{s.name} skipped: no model profile for {kind}" for s in discover(quota or {})
+            if s.eligible(kind, quota) and s.name not in exclude and not s.models.get(kind)]
+
+
 def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
-    """Why route() found nothing for `kind`, for plan's queued line."""
+    """Why route() found nothing for `kind`, for plan's queued line (naming the pools passed over for lacking a profile)."""
+    text = _unrouted_why(kind, quota, exclude)
+    skips = profile_skips(kind, quota, exclude)
+    return f"{text} ({'; '.join(skips)})" if skips else text
+
+
+def _unrouted_why(kind: str, quota: dict[str, Any] | None = None,
+                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     fable = fable_wait_why((quota or {}).get("claude")) if kind == "frontier" else None
     if fable:
@@ -3752,7 +3767,8 @@ def main(argv: list[str] | None = None) -> int:
                    repo=(args.repo or repo_of(os.getcwd())))
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
-                          "reason": "no eligible service with headroom"}))
+                          "reason": unrouted_why(args.kind, quota, operator_disabled()),
+                          "skipped": profile_skips(args.kind, quota, operator_disabled())}))
         return 1
     if args.json:
         print(json.dumps({
