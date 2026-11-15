@@ -226,7 +226,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/.claude/hooks/context_size_nudge.py",
+            "command": "\"$HOME\"/ops/site-private-djbclark/bin/hook-deadline 2 \"$HOME\"/.claude/hooks/context_size_nudge.py",
             "timeout": 20
           }
         ]
@@ -256,12 +256,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" post-edit",
+            "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" post-edit",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/bin/post-edit-check --hook",
+            "command": "\"$HOME\"/ops/site-private-djbclark/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/bin/post-edit-check --hook",
             "timeout": 20
           }
         ]
@@ -271,7 +271,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" tool-savings",
+            "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" tool-savings",
             "timeout": 12
           }
         ]
@@ -428,7 +428,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-end",
+            "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-end",
             "timeout": 5
           }
         ]
@@ -458,7 +458,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-start",
+            "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" session-start",
             "timeout": 12
           }
         ]
@@ -487,7 +487,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" stop",
+            "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" stop",
             "timeout": 12
           }
         ]
@@ -560,12 +560,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 4 \"$HOME\"/.claude/hooks/context_size_nudge.py",
+            "command": "\"$HOME\"/ops/site-private-djbclark/bin/hook-deadline 4 \"$HOME\"/.claude/hooks/context_size_nudge.py",
             "timeout": 20
           },
           {
             "type": "command",
-            "command": "GRAFT_NO_REFRESH=1 {{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" prompt",
+            "command": "GRAFT_NO_REFRESH=1 {{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" prompt",
             "timeout": 60
           }
         ]
@@ -588,9 +588,9 @@
   "enableWorkflows": true,
   "statusLine": {
     "type": "command",
-    "command": "{{ .home }}/ops/site-private/bin/claude-statusline"
+    "command": "{{ .home }}/ops/site-private-djbclark/bin/claude-statusline"
   },
-  "footerLinksRegexes": [],
+  "footerLinksRegexes": ["graft/[\\w./-]+\\.md"],
   "subagentStatusLine": {
     "type": "command",
     "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
@@ -627,7 +627,7 @@
     "local": {
       "source": {
         "source": "directory",
-        "path": "{{ .home }}/ops/site-djbclark/claude/local-marketplace"
+        "path": "{{ .home }}/ops/site-public-djbclark/claude/local-marketplace"
       }
     },
     "mattpocock": {
