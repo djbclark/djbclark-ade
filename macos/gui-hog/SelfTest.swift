@@ -133,8 +133,16 @@ func runSelfTest() -> Int32 {
     check(parseFrozenRoots(Data(frozenJson.utf8)) == [812, 3, 900], "the frozen root pids parse")
     check(parseFrozen(Data("{\"v\":2}".utf8)) == nil && parseFrozen(Data("nope".utf8)) == nil, "another version or garbage is refused")
     if let f0 = fe?.first, let f1 = fe?.last {
-        check(thawText(f0, now: 400) == "resumes in 10 min" && thawText(f0, now: 950) == "resumes in 50 s" && thawText(f1, now: 0) == "frozen until you resume it", "thaw text")
+        check(thawText(f1, now: 0) == "until you Resume", "an indefinite freeze says until you Resume")
     }
+    // The resume time is a clock time (no countdown), New York 12-hour AM/PM, a 3-letter day name when not today; the zone is passed so the check never depends on this Mac's zone.
+    let clockJson = "{\"v\":1,\"entries\":[{\"id\":\"c1\",\"state\":\"frozen\",\"app\":{\"name\":\"X\"},\"mode\":\"timed\",\"thaw_at\":1794711120,\"root_pid\":5,\"members\":1,\"alive\":true}]}"
+    if let c = parseFrozen(Data(clockJson.utf8))?.first, let ny = TimeZone(identifier: "America/New_York"), let utc = TimeZone(identifier: "UTC") {
+        check(thawText(c, now: 1794704400, zone: ny) == "resumes at 9:52 PM", "same day in New York: no day name")
+        check(thawText(c, now: 1794582000, zone: ny) == "resumes at Sat 9:52 PM", "another day in New York: a 3-letter day name")
+        check(thawText(c, now: 1794704400, zone: utc) == "resumes at 2:52 AM" && thawText(c, now: 1794582000, zone: utc) == "resumes at Sun 2:52 AM", "the zone is the parameter, never this Mac's")
+        check(thawText(c, now: 1794704400, zone: ny) == thawText(c, now: 1794704460, zone: ny), "no countdown: the text does not change between refreshes")
+    } else { check(false, "the clock-time entry parses") }
     check(statusTitle(0) == "" && statusTitle(2) == "❄︎ 2", "menu-bar title")
 
     // identity (D4, F3)

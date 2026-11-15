@@ -81,7 +81,7 @@ def main(argv=None):
     p.add_argument("--bundle-id", default="")
     p.add_argument("--by", default="dialog")
     p = sub.add_parser("show", help="open the window now from the sampler's current data")
-    p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on TextEdit)")
+    p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on a harmless third-party app such as Syncthing or Contexts; TextEdit is protected and never listed)")
     sub.add_parser("demo", help="open the window on fixture rows; no button touches any app")
     gui_hog_freeze.add_subcommands(sub)   # freeze, resume, thaw, frozen (PR 3c)
     a = ap.parse_args(argv)

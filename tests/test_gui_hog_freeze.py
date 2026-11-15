@@ -848,6 +848,30 @@ def rfreeze(w, **kw):
     return gf.freeze(w.state, w.root, start=w.start, ops=w.ops, cfg=kw.pop("cfg", cfg()), check_sampler=False, agent_clis=(), **kw)
 
 
+def test_clock_text_is_new_york_12_hour_with_a_day_name_when_not_today():   # operator ruling 2026-11-14: a clock time, never a countdown
+    due, same_day, other_day = 1794711120, 1794704400, 1794582000   # 2026-11-14 9:52 PM New York; 8:00 PM the same day; Fri 10:00 AM
+    assert gf.clock_text(due, same_day, zone="America/New_York") == "9:52 PM"
+    assert gf.clock_text(due, other_day, zone="America/New_York") == "Sat 9:52 PM"
+    assert gf.clock_text(due, same_day, zone="UTC") == "2:52 AM" and gf.clock_text(due, other_day, zone="UTC") == "Sun 2:52 AM"   # the zone is a parameter
+    assert gf.clock_text(due, same_day, zone="America/New_York") == gf.clock_text(due, same_day + 60, zone="America/New_York")   # no countdown
+    assert gf.clock_text(1794744000, 1794744000, zone="UTC") == "12:00 PM" and gf.clock_text(1794700800, 1794700800, zone="UTC") == "12:00 AM"
+    assert gf.clock_text(float("nan"), same_day) == "?" and gf.clock_text(10**30, same_day) == "?"
+    assert gf.clock_text(due, same_day, zone="Not/AZone").endswith("UTC")   # a zone that cannot load says so
+
+
+def test_cli_frozen_prints_the_resume_clock_time_or_until_you_resume(tmp_path):
+    g = tmp_path / "gui-hog"
+    g.mkdir(mode=0o700)
+    now = time.time()
+    root = {"pid": 5000, "start": "start-5000", "uid": ME, "exe": "/bin/x"}   # a valid record needs a non-empty exe
+    (g / "frozen.json").write_text(json.dumps({"v": 1, "entries": [entry_dict(id="t-1", mode="timed", frozen_at=now, thaw_at=now + 3 * 3600, root=root),
+                                                                    entry_dict(id="i-1", mode="indefinite", frozen_at=now, thaw_at=None, root=root)]}))
+    out = cli(tmp_path, "frozen").stdout
+    timed = next(ln for ln in out.splitlines() if ln.startswith("t-1"))
+    assert "resumes at " in timed and "Z " not in timed and "indefinitely" not in out   # a clock time, not the ISO UTC stamp
+    assert "until you Resume" in next(ln for ln in out.splitlines() if ln.startswith("i-1"))
+
+
 def test_cli_freeze_takes_a_dash_leading_bundle_id_joined_with_equals(tmp_path):   # adversary round 4, C2: the Swift side joins values with `=`
     r = cli(tmp_path, "freeze", "--pid=5", "--start=x", "--bundle-id=-y", "--bundle-path=-z", "--minutes=5", "--by", "dialog")
     assert r.returncode != 2, r.stderr   # parsed (the pid is not ours, so it is refused for another reason)

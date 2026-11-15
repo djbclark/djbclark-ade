@@ -135,10 +135,18 @@ func parseFrozenRoots(_ data: Data) -> Set<Int> {
 /// is absent from the newest sample gets no button (carry-over from the 3a reviews).
 func rowFreezeAllowed(_ r: Row, _ s: Snapshot) -> Bool { s.freezeEnabled && rowActionsAllowed(r) }
 
-func thawText(_ e: FrozenEntry, now: Int) -> String {
-    guard let t = e.thawAt else { return "frozen until you resume it" }
-    let left = max(0, t - now)
-    return left >= 90 ? "resumes in \((left + 30) / 60) min" : "resumes in \(left) s"
+/// The resume time as a clock time in New York (operator ruling 2026-11-14): "resumes at 9:52 PM", with a 3-letter day name when it is not today
+/// ("resumes at Sun 9:52 PM"). No countdown, so the text never changes between refreshes. `zone` is a parameter so the self-test is timezone-independent.
+func thawText(_ e: FrozenEntry, now: Int, zone: TimeZone = TimeZone(identifier: "America/New_York") ?? TimeZone(identifier: "UTC")!) -> String {
+    guard let t = e.thawAt else { return "until you Resume" }
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = zone
+    let when = Date(timeIntervalSince1970: TimeInterval(t)), today = Date(timeIntervalSince1970: TimeInterval(now))
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = zone
+    f.dateFormat = cal.isDate(when, inSameDayAs: today) ? "h:mm a" : "EEE h:mm a"
+    return "resumes at " + f.string(from: when)
 }
 
 func statusTitle(_ n: Int) -> String { n == 0 ? "" : "❄︎ \(n)" }

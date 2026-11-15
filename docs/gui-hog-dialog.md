@@ -418,7 +418,7 @@ H4. **Manual acceptance checklist (the operator, once per GUI PR):**
 (a) `bin/gui-hog demo` shows the window from a fixture snapshot without a real hold;
 (b) Return, Escape and Space-on-Wait take no action;
 (c) Ignore suppresses the dialog for 60 min (check `snooze_until`);
-(d) Quit on TextEdit with an unsaved document shows TextEdit's save sheet;
+(d) Quit on an app with an unsaved document shows that app's own save sheet (not TextEdit: it lives under /System/Applications, so the hard floor protects it and it is never listed);
 (e) Force Quit opens a confirm sheet whose default is Cancel;
 (f) Freeze 10 min on a test app: `ps` shows `T` for its tree, the menu-bar item appears, and the app resumes by itself
 within 20 s of its time;
@@ -596,8 +596,8 @@ N6. **The operator's H4 run (NOT DONE; 3b must not merge without it).** Use a sc
 second greyed with "has a terminal or build inside: no actions", the fourth "no longer running" and its name shown without the control and bidi characters), `+3 more · 4 protected apps hidden`; Quit on a
 row says "demo: nothing was touched". (b) Press Return, keypad Enter and Escape: nothing happens. Wait is the only control that takes keyboard focus (round 1, N7): press Tab, then Space: the window closes (or click Wait); no other control ever shows a focus ring:
 exit 0, `cat ~/.local/state/load-watch/gui-hog/last-exit.json` is not written by demo. (c) Ignore needs a real window: `bin/gui-hog status` (sampler running), then `bin/gui-hog show --all`, click
-Ignore 1 h: the window closes; `cat ~/.local/state/load-watch/gui-hog/snooze.json` has `snooze_until` about an hour ahead and `last-exit.json` has code 3. (d) Open TextEdit, type text without saving,
-let the sampler see it (a few ticks), `bin/gui-hog show --all`, click Quit on TextEdit: TextEdit's own save sheet appears and nothing is lost; a row for TextEdit appears only if the sampler saw it.
+Ignore 1 h: the window closes; `cat ~/.local/state/load-watch/gui-hog/snooze.json` has `snooze_until` about an hour ahead and `last-exit.json` has code 3. (d) Open a harmless third-party app (Syncthing's tray app, Contexts; never a VPN, password manager, terminal or Quicksilver; TextEdit is protected by the hard floor and never listed),
+let the sampler see it (a few ticks), `bin/gui-hog show --all`, click Quit on it: the app quits politely (an app with an unsaved document shows its own save sheet and nothing is lost); a row appears only if the sampler saw it.
 (e) Click Force Quit… on any harmless app: a sheet naming the app and the loss, **Cancel highlighted**; Return and Escape both cancel; the app keeps running. (h) Ghostty (protected) never appears as a
 row; the footer counts it under "N protected apps hidden". (i) The window is shown only by the sampler when the operator owns `/dev/console` (tested by `gui_ok=False` in pytest); over SSH from another
 machine `bin/gui-hog show` has no window server: check that it does not hang and `last-exit.json` reads code 69. Rollback after the run: `unset LW_GUI_HOG_BUNDLE; rm -rf ~/gui-hog-test`.
@@ -666,6 +666,8 @@ milliseconds between `ade_sched uninstall`'s thaw and its bootout is resumed by 
 
 (j) **Round 4 (APPROVE at d1fa1a44 after the 3b merge; two lows, fixed).** After a successful Freeze the row is marked frozen at once (it no longer waits for the Frozen-list poll), so Quit, Force Quit and Freeze vanish immediately; the freeze command joins each value to its option (`--bundle-id=-y` works); Resume has the same click-grace guard as the other buttons. Not fixed on purpose: `gui_hog.vet` (the Quit path) does not read `frozen.json` (a Force Quit on a stopped app SIGKILLs only that root and the next tick resumes the helpers). The window is now 1190 pt wide with a 1158 pt row area (3b: 1010 and 951 in N9 (b)) to fit the Freeze buttons; the separators use the row-area width. Folded in from 3b's deferred round-4 LOW (operator, 2026-11-14): at the 16-row cap a free slot must be absent in `old` AND still absent after the merge, so an app that returns in the same refresh keeps its slot and a new app does not overwrite it (self-test case "an absent app that returns keeps its slot").
 
+(k) **Operator H4 run, 2026-11-14 (a real Freeze worked): the resume time is a clock time.** The frozen line used to read "resumes in 10 min" and never counted down. It now reads "resumes at 9:52 PM" in America/New_York, 12-hour AM/PM, with a 3-letter day name when the time is not today ("resumes at Sat 9:52 PM"); an indefinite freeze reads "until you Resume". The text depends on the entry's due time only, so there is no per-second redraw; the menu-bar item uses the same `thawText`, and `gui-hog frozen` prints the same clock time (`gui_hog_freeze.clock_text`; a zone that cannot load falls back to UTC, marked). Both formatters take the zone as an argument and are tested with it. The Freeze N min button label is unchanged. Left open (cosmetic): the dialog's own process can show in the app list under another app's helper name (e.g. `QuickLookUIService (DocumentPopoverViewService (TextEdit))` for `com.djbclark.ade.gui-hog`); it is excluded by its exe name regardless.
+
 O3. **Tests (H1 d, e, g, H1a, H4 f and g, Python side).** `tests/test_gui_hog_freeze.py`: the state machine on a fake clock and fake process table, the four identity fields, a reused pid,
 protected root and protected member, hard-floor names, a crash at each signal, a crash while thawing, a hand-edited `frozen.json`, symlinked directories and files, the lock, disabled,
 sampler-not-loaded, the rescan limit, the sampler and uninstall wiring, and **real** SIGSTOP/SIGCONT on disposable trees the test starts itself (a copy of `dash` with two `sleep` helpers
@@ -685,4 +687,4 @@ and a **Resume** button (`gui-hog resume --entry ID --by dialog`); Resume is off
 or a minute without an answer. The sampler starts it (`gui_hog_freeze.ensure_status_item`, after `thaw_due`, in a GUI session with a fresh bundle, never waited on and never built) while anything is frozen.
 (e) `by` gained `menubar`. Self-test (`bin/ade-gui-build --self-test`): the Freeze buttons' conditions (absent row, build host, frozen row, disabled), the argv lists, the frozen list and its sanitizing.
 
-O5. **Not done by the author.** The operator's H4 run (f), (g) with the real window and a real freeze is **not done**; the PR must not merge without it. The runbook is in the PR body.
+O5. **Not done by the author.** The operator's H4 run (f), (g) with the real window and a real freeze is **not done**; the PR must not merge without it. The runbook is in the PR body (its test app is a harmless third-party one such as Syncthing or Contexts: TextEdit is under /System/Applications, protected by the hard floor, and never listed; the first H4 run, 2026-11-14, showed that).

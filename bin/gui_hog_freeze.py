@@ -28,6 +28,7 @@ import stat
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,6 +38,24 @@ LABEL = "com.djbclark.load-watch"
 FROZEN, LOCK, EVENTS = "frozen.json", "frozen.lock", "events.jsonl"
 MAX_PID = 2 ** 31
 MAX_TIMED_S = 24 * 3600
+CLOCK_ZONE = "America/New_York"
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def clock_text(ts, now, zone=CLOCK_ZONE):
+    """A resume time for people, in `zone` (default New York, operator ruling 2026-11-14): `9:52 PM`, with a 3-letter day name (`Sun 9:52 PM`) when the
+    day is not today. The same words as the Swift side's `thawText`. A time that cannot be shown is `?`; a zone that cannot be loaded falls back to UTC, marked."""
+    try:
+        from zoneinfo import ZoneInfo
+        tz, mark = ZoneInfo(zone), ""
+    except Exception:   # no tz database, or a bad name: say so rather than lie about the zone
+        tz, mark = timezone.utc, " UTC"
+    try:
+        t, n = datetime.fromtimestamp(float(ts), tz), datetime.fromtimestamp(float(now), tz)
+    except (OverflowError, ValueError, OSError, TypeError):
+        return "?"
+    text = f"{t.hour % 12 or 12}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}{mark}"
+    return text if t.date() == n.date() else f"{_DAYS[t.weekday()]} {text}"
 STATES = ("freezing", "frozen", "thawing")
 BY = ("dialog", "cli", "sampler", "uninstall", "recovery", "menubar")
 EVENTS_MAX_BYTES = 1024 * 1024
@@ -933,7 +952,7 @@ def cmd_frozen(a, state_dir):
     if not v["entries"]:
         print("nothing is frozen")
     for e in v["entries"]:
-        until = "until " + gh._iso(e["thaw_at"]) if e["thaw_at"] else "indefinitely"
+        until = "resumes at " + clock_text(e["thaw_at"], time.time()) if e["thaw_at"] else "until you Resume"
         print(f"{e['id']}  {e['app']['name'] or '?'}  [{e['state']}] {until}  {e['members']} processes, root pid {e['root_pid']}"
               + ("" if e["alive"] else "  (root is gone: its helpers are resumed at the next tick)") + f"  by {e['by']}")
     for n in v["notes"]:
