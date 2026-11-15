@@ -18,7 +18,7 @@
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS [--no-deadline] [--refused-since EPOCH]] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
                                             `release` exits 0 released, 66 no such reservation, 1 lock or write failure (below)
-    load-watch admit-log summary [--days N]  the admit tuning log: calls per verdict and refused reason, p50/p90 of free_mb, pageins, swapins
+    load-watch admit-log summary [--days N]  the admit tuning log: calls per verdict and refused reason, p50/p90 of free_mb, pageins, swapins, and the GUI-hog dry-run count
     load-watch watcher set [--paseo ID] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one Paseo agent told about every spike
     load-watch install|uninstall [--backend auto|launchd|systemd|cron] [--ade DIR] [--dry-run] [--allow-no-linger]
@@ -92,7 +92,19 @@ the alert itself is never suppressed. No incident row, nothing is signalled or k
 records nothing. Test hook: LW_FAKE_COMPRESSOR (a comma list of cumulative counters, one per read, the last
 repeating; set, it replaces vm_stat, `admit` ignores it).
 
-State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json).
+GUI-hog trigger (2026-11-14, PR 3a of docs/gui-hog-dialog.md; DRY-RUN ONLY, no window, nothing is quit, frozen or signalled): `bin/gui_hog.py` (stdlib; `bin/gui-hog status`
+shows it) is imported lazily, inside a `try`, in two places. (1) Hold registry (C2): while `admit --wait S` (S > 0) is refused it keeps
+held/<pid>-<start>.json in the state dir fresh on every refused poll (caller program, the refused gate names, `refused_since` = the epoch the unbroken run of refusals began, which
+goes through `parse_refused_since` like the valve's clock, and the caller's `--refused-since` credit when given), and removes it when a clean reading ends the run or the call
+returns; a file not refreshed for 60 s (or whose pid no longer has that start time) is stale and swept. The write and the removal can never raise, change the verdict
+or change the exit code: `admit` still only decides. (2) Every sample, whatever the load (C3), adds the per-app sum of cores and RSS (apps from `lsappinfo list`
+type Foreground/UIElement with an .app bundle; their process trees and in-bundle helpers; a subtree under a shell, a pty, `bg`, an agent CLI or an executable outside the
+bundle is a build and never counts) to a 300 s window in state.json (`apps`, `app_meta`), then decides (K1): a hold refused for >= 180 s on a gate quitting an app can relieve
+(load, compressor, free_mem, pageins, swapins), and the SUM over unprotected non-build apps of their 5-min mean cores >= 0.75 or of their RSS >= 2048 MB, at most once per 30 min
+(`gui_hog.last_shown` in state.json), and not within the Ignore snooze (gui-hog/snooze.json, written by the dialog in PR 3b). A yes appends "would-show" to gui-hog/dry-run.jsonl
+(app names and bundle ids stripped of control and bidi characters); `admit-log summary` counts those lines. Protected apps (config/gui-hog.toml; a hard floor in code: Dock, Finder,
+WindowServer, loginwindow, the dialog, other users, /System, /usr) are counted as protected, never as hogs. LW_GUI_HOG=0 turns the window and the trigger off.
+State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json, held/, gui-hog/).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
 through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...).
@@ -217,6 +229,7 @@ WATCHER_NOCPU_S = 3600  # the watcher is told of unexplained sustained load at m
 MY_UID = os.getuid()
 STUCK = []  # commands ps saw in state U this sample
 PSTATE = {}  # pid -> (ps state, rss in KB) this sample, for the job guard
+PTTY = set()  # pids with a controlling terminal this sample (the GUI-hog tree walk stops at them, C4b)
 BGRUN = []  # commands runnable at background priority this sample
 
 
@@ -263,17 +276,19 @@ def ps_table():
     `time` difference misses every process that starts and exits between samples, and macOS `ps -S` does
     not fold exited children into the parent: checked 2026-10-18)."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,pri=,rss=,command="], capture_output=True,
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,pri=,rss=,tty=,command="], capture_output=True,
                              text=True, timeout=20).stdout
     except subprocess.TimeoutExpired:  # the machine is stalling (2026-10-18, load 77): skip this sample
         return None
     table = {}
     for line in out.splitlines():
-        parts = line.split(None, 7)
-        if len(parts) < 7 or not parts[0].isdigit():
+        parts = line.split(None, 8)
+        if len(parts) < 8 or not parts[0].isdigit():
             continue
-        cmd = parts[7] if len(parts) > 7 else ""
+        cmd = parts[8] if len(parts) > 8 else ""
         PSTATE[parts[0]] = (parts[4], int(parts[6]) if parts[6].isdigit() else 0)
+        if parts[7] not in ("??", "?", "-"):   # macOS says ??, Linux ?
+            PTTY.add(parts[0])
         if parts[4].startswith("U"):  # uninterruptible wait: counts in load, uses no CPU
             STUCK.append(cmd[:80] or parts[0])
         # runnable at background QoS (priority 4: E-cores only, throttled). A pile of these is load with idle
@@ -1499,6 +1514,10 @@ def cmd_sample(a):
         st["streak"] = st.get("streak", 0) + 1
     st["load1"] = load1
     st["cooldown"] = prune_cooldowns(st.get("cooldown", {}), t)
+    try:  # the GUI-hog window and dry-run trigger (docs/gui-hog-dialog.md, PR 3a): never stops load sampling
+        gui_hog_tick(st, t, table, load1, a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        log(f"gui-hog error: {e!r}")
     try:
         churn_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
@@ -1600,6 +1619,25 @@ def cmd_sample(a):
         st.pop("loose_logged", None)
     save_state(st)
     return 0
+
+
+def gui_hog_mod():
+    """bin/gui_hog.py, imported lazily so a broken module can never stop the sampler or `admit` (C2)."""
+    d = str(Path(__file__).resolve().parent)
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import gui_hog
+    return gui_hog
+
+
+def gui_hog_tick(st, t, table, load1, dry):
+    """Every sample, whatever the load (C3): the per-app 5-minute window, then the dry-run decision (K1). LW_GUI_HOG=0: off."""
+    if os.environ.get("LW_GUI_HOG", "").strip() == "0":
+        st.pop("apps", None)
+        st.pop("app_meta", None)
+        return
+    gui_hog_mod().tick(st, t, table, {p: v[1] for p, v in PSTATE.items()}, PTTY, state_dir=STATE_DIR, my_uid=MY_UID,
+                       agent_clis=AGENT_CLIS, load1=load1, dry=dry)
 
 
 def operator_notice(st, t, key, msg):
@@ -1967,7 +2005,7 @@ ADMIT_RESERVE_S = _env_float("LW_RESERVE_S", 1200.0)
 RELEASE_GRACE_S = 30.0
 CALM_GAP_S = ADMIT_FRESH_S  # calm.json's last reading older than this: nobody watched in between, the clock restarts
 EX_TEMPFAIL = 75
-EX_NOINPUT = 66   # `release` of a reservation that does not exist (already released or expired)
+EX_NOINPUT = 66   # `release` of a reservation that does not exist (released over 30 s ago, or expired)
 
 
 def _fake_list(name):
@@ -2343,7 +2381,7 @@ def cmd_renew(a):
 
 
 def cmd_release(a):
-    """`release ID`: exit 0 released, EX_NOINPUT (66) when no such reservation exists (already released or expired: harmless to a
+    """`release ID`: exit 0 released, EX_NOINPUT (66) when no such reservation exists (released over 30 s ago, or expired: harmless to a
     launcher), 1 when the reservation file could not be locked or written (the reservation stays until LW_RESERVE_S)."""
     found = release_reservation_status(a.id)
     if found is None:
@@ -2591,6 +2629,18 @@ def admit_log_path():
     return p if p.is_absolute() else STATE_DIR / p   # never relative to the caller's cwd (bg runs in the repo under test)
 
 
+def admit_caller_pid():
+    """The pid of whoever called `admit` (the process whose build the hold registry names): LW_ADMIT_CALLER_PID when a supervising parent set it
+    (the supervised copy's own parent is the deadline wrapper), else the parent. 0 when unknown."""
+    v = os.environ.get("LW_ADMIT_CALLER_PID", "").strip()
+    if v.isascii() and v.isdigit() and len(v) < 10:
+        return int(v)
+    try:
+        return os.getppid()
+    except OSError:
+        return 0
+
+
 def admit_caller():
     """The parent process's program, or "" when it is not cheaply known: LW_ADMIT_CALLER (a caller may name itself), else the first word
     of the parent's command line (`ps`, 2 s cap; /proc on Linux), with an interpreter replaced by the script it runs (`bash /x/bg` -> bg)."""
@@ -2687,6 +2737,16 @@ def _pct(vals, q):
     return vals[min(len(vals) - 1, max(0, round(q * (len(vals) - 1))))] if vals else None
 
 
+def gui_hog_dry_count(days):
+    """The summary line for the GUI-hog dry-run log (PR 3a): how often the dialog would have shown. "" when the module cannot be read."""
+    try:
+        gh = gui_hog_mod()
+        n = gh.count_dry_run(STATE_DIR, days, now())
+        return f"gui-hog dry-run: {n} would-show lines in the last {days:g} days ({gh.dry_run_path(STATE_DIR)}; `gui-hog status`)"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def cmd_admit_log(a):
     """`admit-log summary [--days N]`: counts per verdict and per refused reason, and p50 / p90 of free_mb, pageins and swapins, over the
     last N days of the log (and its .1 file)."""
@@ -2714,8 +2774,11 @@ def cmd_admit_log(a):
             if isinstance(r, dict) and t >= cutoff and isinstance(r.get("verdict"), str) \
                     and isinstance(ref, list) and all(isinstance(x, str) for x in ref):
                 rows.append(r)
+    hog = gui_hog_dry_count(a.days)
     if not rows:
         print(f"no admit calls in the last {a.days:g} days ({path})")
+        if hog:
+            print(hog)
         return 1
     verdicts, reasons = {}, {}
     for r in rows:
@@ -2730,6 +2793,8 @@ def cmd_admit_log(a):
     for key in ("free_mb", "pageins", "swapins"):
         vals = sorted(x[key] for x in rows if isinstance(x.get(key), (int, float)) and not isinstance(x.get(key), bool))
         print(f"{key}: n={len(vals)}" + (f" p50={_pct(vals, 0.5):g} p90={_pct(vals, 0.9):g}" if vals else " (no readings)"))
+    if hog:
+        print(hog)
     return 0
 
 
@@ -2765,8 +2830,54 @@ def self_deadline(a, poll):
         return None
 
 
+_HOLD = {}   # this process's hold file (path, start): the GUI-hog hold registry (C2)
+
+
+def hold_clear():
+    """Remove this process's hold file. Never raises."""
+    try:
+        path = _HOLD.pop("path", None)
+        if path:
+            os.unlink(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def hold_note(refused, run_start, waited, poll, wait, caller):
+    """The GUI-hog hold registry (docs/gui-hog-dialog.md C2): while this `admit --wait` is refused, keep ~/.local/state/load-watch/held/<pid>-<start>.json
+    fresh (written on every refused poll; removed when a clean reading ends the run or the call returns). `run_start` is the `waited` value the unbroken
+    refusal run began at (negative when a --refused-since credit was spent), so the epoch the run began at is now - (waited - run_start); it goes through
+    parse_refused_since like the valve's own clock (a cap of 0 means "no credit" for the valve, not "no registry": the default cap stands then). The
+    write and the removal can NEVER raise, change the verdict or change the exit code: `admit` still only decides, and bg never falls back to its
+    plain load check because of a broken registry. gui_hog is imported lazily, inside the try."""
+    try:
+        if not refused or run_start is None or wait <= 0:
+            hold_clear()
+            return
+        gh = gui_hog_mod()
+        t = now()
+        since, _note = parse_refused_since(str(int(t - (waited - run_start))), t, STARVE_REFUSED_SINCE_MAX_S or gh.HOLD_AGE_CAP_S)
+        first = "start" not in _HOLD
+        if first:
+            _HOLD["start"] = gh.proc_start(os.getpid()) or ""
+        _HOLD["path"] = gh.hold_write(STATE_DIR, os.getpid(), _HOLD["start"], caller, since if since is not None else int(t), refused, t, poll,
+                                      caller_pid=admit_caller_pid())
+        if first:
+            gh.read_holds(STATE_DIR, t, check_start=False)   # sweep other waiters' stale files once per call
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def cmd_admit(a):
-    """May new work start now? Only ever decides; never kills, throttles or signals anything."""
+    """May new work start now? Only ever decides; never kills, throttles or signals anything (a waiting call also keeps its hold file in
+    ~/.local/state/load-watch/held/ for the GUI-hog trigger, and removes it when it returns: `hold_note`)."""
+    try:
+        return _cmd_admit(a)
+    finally:
+        hold_clear()
+
+
+def _cmd_admit(a):
     lim = {"churn": getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S), "min_free_mb": getattr(a, "min_free_mb", ADMIT_MIN_FREE_MB),
            "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_swapins": getattr(a, "max_swapins", ADMIT_SWAPINS_S),
            "swapins_corroborated": ADMIT_SWAPINS_CORROBORATED_S, "max_agents": getattr(a, "max_agents", 0)}
@@ -2821,6 +2932,10 @@ def cmd_admit(a):
     if getattr(a, "supervise", False) and a.wait > 0:
         if caller:
             os.environ.setdefault("LW_ADMIT_CALLER", caller)   # the supervised copy's own parent is the deadline wrapper, not the caller
+        try:
+            os.environ.setdefault("LW_ADMIT_CALLER_PID", str(admit_caller_pid()))   # likewise for the hold registry's caller pid
+        except Exception:  # noqa: BLE001 - the registry never changes admit's exit code
+            pass
         rc = self_deadline(a, poll)
         if rc is not None:
             return rc
@@ -2874,6 +2989,7 @@ def cmd_admit(a):
             refused_since, credit = waited - credit, 0.0
             if used_since is None and since_epoch is not None and polls == 1:
                 used_since = since_epoch
+        hold_note(refused, refused_since, waited, poll, a.wait, caller)
         def reserve_forced():   # the forced admit still counts as one agent, like any admission under the cap; a failure refuses (hard)
             if not reserve_on:
                 return True

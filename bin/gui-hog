@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""gui-hog: the GUI-hog dialog's data and dry-run trigger (docs/gui-hog-dialog.md). PR 3a has no window and no actions.
+
+    gui-hog status [--json]     what the sampler sees now: holds, the 5-min app window, the decision, the dry-run count
+
+Reads ~/.local/state/load-watch/ (LW_STATE_DIR) and config/gui-hog.toml; writes nothing, signals nothing. Exit 0.
+"""
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_hog  # noqa: E402
+
+STATE_DIR = Path(os.environ.get("LW_STATE_DIR", Path.home() / ".local/state/load-watch"))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="gui-hog")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("status", help="holds, the app window, the decision now, the dry-run count")
+    p.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    cfg = gui_hog.load_config()
+    try:
+        st = json.loads((STATE_DIR / "state.json").read_text())
+        st = st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        st = {}
+    now = time.time()
+    if a.json:
+        held = gui_hog.read_holds(STATE_DIR, now, sweep=False)
+        means = gui_hog.window_means(st, now, cfg)
+        ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
+        snooze = gui_hog.effective_snooze(ghs, gui_hog.read_snooze(STATE_DIR), now, cfg["trigger"]["snooze_s"])
+        d = gui_hog.should_show(held, means, now, snooze, ghs.get("last_shown"), cfg)
+        print(json.dumps({"enabled": gui_hog.enabled(), "decision": d, "holds": held, "apps": means,
+                          "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now)}, indent=1))
+    else:
+        print("\n".join(gui_hog.status_lines(st, STATE_DIR, now, cfg)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

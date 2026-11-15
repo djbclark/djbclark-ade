@@ -1,6 +1,6 @@
-# GUI-hog dialog: design (2026-11-14, PR 3 of the load-gate retune; no code yet)
+# GUI-hog dialog: design (2026-11-14, PR 3 of the load-gate retune)
 
-Status: **design only**. The operator reads this before any implementation; no Swift and no Python ships with it.
+Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M says what it does and where it departs from this text). PR 3b (the window) and 3c (Freeze) are not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design.
 Rulings come from the operator's 2026-11-13 and 2026-11-14 `/steps` answers, recorded in the lead's memory note
 `project_load_gate_retune_proposal_2026-11-13.md`. Items marked **DECIDE** are open forks. Each one has a
 recommendation, and the build slices follow the recommendation unless the operator rules otherwise.
@@ -430,7 +430,7 @@ still needs the Aqua session.
 
 ## I. Phasing
 
-I1. **PR 3a: data and trigger, no window.** The hold registry in `admit` (C2), the always-on app window in the sampler
+I1. **PR 3a: data and trigger, no window. DONE 2026-11-14 (section M).** The hold registry in `admit` (C2), the always-on app window in the sampler
 (C3), `gui_hog.py` with `should_show`, grouping and the protected list, and `gui-hog status`. The trigger logs "would show
 dialog: …" to `~/.local/state/load-watch/gui-hog/dry-run.jsonl`, and `load-watch admit-log summary` gains a count of
 those lines. The value: one week of evidence on how often the dialog would nag, before it exists. The tests are H1 (a),
@@ -514,3 +514,46 @@ used for exactly this check ([memory_pilot audit](https://github.com/quangdang46
 L5. App Tamer 3 is in beta (St. Clair Software, r/macapps 2026-04). Our own A/B (2026-10-24) is the evidence against
 automatic throttling. The `app-pauser` repository (an automatic SIGSTOP pauser) returned 404 when fetched on
 2026-11-14, so it was not used.
+
+## M. PR 3a as built (2026-11-14)
+
+M1. **What shipped.** `bin/gui_hog.py` (stdlib; `load-watch` imports it lazily inside a `try`), `bin/gui-hog status [--json]`, `config/gui-hog.toml`,
+the hold registry in `admit --wait` (C2), the always-on app window in the sampler (C3), the decision `should_show` (C4), and the dry-run log
+`~/.local/state/load-watch/gui-hog/dry-run.jsonl` (I1). `load-watch admit-log summary` prints `gui-hog dry-run: N would-show lines in the last D days`.
+`LW_GUI_HOG=0` removes the app window and the trigger (the hold files keep being written: they are only data). Nothing is signalled, quit or frozen, and no window exists.
+Tests: `tests/test_gui_hog.py` (H1 a, b, c, f), fixture `tests/fixtures/gui_hog/lsappinfo.txt`.
+
+M2. **Where it departs from the text above (all conservative).**
+(a) The trigger decision is made in the sampler (K1) and the dry-run uses the **real** rate limit (`gui_hog.last_shown` in `state.json`) and the real snooze file,
+so the count is how often the dialog would have shown, not how often its conditions held.
+(b) Stop kind (4) of C4b, "a process holding an admit reservation", cannot be built: `agent-reservations.json` stores ids and expiry times, no pid. Held callers
+(their pid, from the hold files) and agent-CLI or `bg` ancestors cover the same builds.
+(c) `ps_table` gained the `tty=` column (`PTTY`, the pids with a controlling terminal), for the pty stop of C4b.
+(d) An app's id in 3a is its root pid (no start time yet); 3b's snapshot adds the root start for the identity checks of F3.
+(e) An app that hosts a build still counts toward the threshold **without** the build's cores (C4b says the subtree never counts towards the app); it is flagged
+`hosts_build` and a later PR lists it without actions. A **protected** app, or one whose ancestry reaches a held caller or an agent CLI, never counts.
+(f) The registry's `refused_since` goes through `parse_refused_since`; with `LW_STARVE_REFUSED_SINCE_MAX_S=0` (no credit for the valve) the registry uses the 3600 s default
+cap, so turning the valve credit off never turns the trigger off. `read_holds` clamps the age again when it reads, and ignores a non-integer or future value.
+(g) A hold file is stale after max(60 s, 2 polls + 15 s) without a refresh, or when its pid no longer has the recorded start time. The sampler sweeps; `gui-hog status` only reads.
+(h) A helper's own `lsappinfo` entry (a Chrome or Slack helper `.app` inside the main bundle, or a second entry for the same bundle whose parent is already a root) is folded into
+the outer app. If `lsappinfo` prints nothing parseable, apps come from the kernel executable path (`proc_pidpath` through `ctypes` on macOS, `/proc/PID/exe` on Linux) and the
+bundle's `Info.plist`.
+(i) The window stores an app at a sample when it uses 0.02 cores or holds 50 MB; smaller ones are dropped (they cannot reach a threshold unless there are dozens).
+(j) The kernel executable path is also read for every process that could be a helper (`.app/` in its command): the pre-filter reads argv, so a process that hides `.app/`
+from its command line can only be missed, never wrongly counted.
+(k) Protected defaults are by bundle id or path where an app is installed (checked 2026-11-14 against `Info.plist` and `lsappinfo`): Paseo, Ghostty, Terminal, iTerm2, both Hermes apps,
+Tailscale, CoreSimulator, Xcode, Android Studio, 1Password, Zoom, Tart and the Virtualization host; JetBrains by the `com.jetbrains.` namespace; apps that are not installed
+(WezTerm, kitty, WireGuard, Docker, OrbStack, Simulator) by bundle path, never a guessed id.
+
+(l) Hardening after the adversary's first review (2026-11-14). Every file the sampler or `admit` reads from `held/` and `gui-hog/` is opened with `O_NOFOLLOW|O_NONBLOCK`, must be a regular
+file under a size cap, and sits in a real directory owned by this user (a FIFO or symlink there can no longer hang `admit` or the sampler, and the sweep never follows a symlinked directory);
+a hold's pid is bounded, its `updated` must be finite and not in the future, and a failed `ps` start-time read is not pid reuse unless the process is also gone. `clean` drops every
+control, format, surrogate, private-use and unassigned code point plus the invisible filler letters. Agent CLIs are recognised by their argv heads (`node /x/claude`, a version-named
+binary), not only the kernel exe. A process running an app's own in-bundle binary under a shell, pty, held caller or agent CLI (headless Chrome under a test run) is a build, not the app.
+A hold also records the caller's pid (`LW_ADMIT_CALLER_PID`, else the parent), so an app started under the real caller is excluded. Corrupt `state.json` sections heal on the next tick; a snooze
+never outlasts `snooze_s` and a `last_shown` in the future is ignored. Round 2 added: variation selectors and a few more invisible fillers are dropped by `clean`; a window entry without a sample dict is dropped; a non-ASCII digit in `LW_ADMIT_CALLER_PID` is ignored.
+
+M3. **Measured 2026-11-14 (M1 Pro, 10 cores).** `lsappinfo list` takes about 0.2 s of wall time with no CPU to speak of; a full `load-watch sample` ran in 0.65 s at load 57.
+`state.json` with the app window was 4 KB with 8 apps stored.
+
+M4. **Prior art checked (2026-11-14).** See section L (the starting point) and the report of this PR for the `lsappinfo` output-format and macOS process-group CPU accounting searches.
