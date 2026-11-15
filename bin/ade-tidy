@@ -506,19 +506,24 @@ def chain_of(lead: str) -> set[str]:
 
 def claim_holders() -> set[str]:
     """Agent ids (owner agent, record or session) holding an ACTIVE claim (bin/ade_claims.py): such a tab is never archived.
-    Unreadable claims raise Refused: ownership of a worktree is unknown, so nothing is archived."""
+    Fails closed: a missing module, an unreadable claims directory or a claim file that does not parse raises Refused (ownership
+    of a worktree is unknown, so nothing is archived); a claims directory that does not exist means no claims."""
     sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
     try:
         import ade_claims
-    except ImportError:
-        return set()
+    except ImportError as e:
+        raise Refused(f"bin/ade_claims.py cannot be imported ({e}): claims are unknown, nothing is archived")
+    d = ade_claims.claims_dir()
     try:
-        claims = ade_claims.list_claims("active")
-    except Exception as e:  # noqa: BLE001 - any registry failure must stop the archive, not be read as "no claims"
-        raise Refused(f"the claim registry cannot be read ({type(e).__name__}): nothing is archived")
+        files = sorted(p for p in d.iterdir() if p.suffix == ".json" and not p.name.startswith(".")) if d.exists() else []
+    except OSError as e:
+        raise Refused(f"the claims directory {d} cannot be read ({type(e).__name__}): nothing is archived")
     out: set[str] = set()
-    for c in claims:
-        if isinstance(c, dict) and ade_claims.claim_state_active(c):
+    for f in files:
+        c = ade_claims.read_claim(f.stem)  # None for an invalid id, an unreadable file or a non-object: not "no claim"
+        if c is None:
+            raise Refused(f"the claim file {f} cannot be read: claims are unknown, nothing is archived (fix or remove it by hand)")
+        if ade_claims.claim_state_active(c):
             owner = c.get("owner") if isinstance(c.get("owner"), dict) else {}
             out |= {v for v in (owner.get("agent"), owner.get("record"), owner.get("session"), c.get("id")) if isinstance(v, str) and v}
     return out
@@ -1097,7 +1102,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         cur = next((w for w in workspaces() if w["workspaceId"] == r["windowId"]), None)
         if not cur or cur.get("name") != r["from"]:
             return rec("rename", r["windowId"], False, "window changed since the plan: skipped")
-        legacy_mine = cur["name"].startswith(("workers ", "WORKERS ")) and cur["name"].endswith(f" {lead}")
+        legacy_mine = cur["name"].startswith(("workers ", "WORKERS ")) and any(cur["name"].endswith(f" {x}") for x in chain_of(lead))
         if r["windowId"] in other_leads_windows(lead):
             return rec("rename", r["windowId"], False, "registered to another lead: skipped")
         was_registered = r["windowId"] in read_registry(lead)
@@ -1162,8 +1167,10 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
             return rec("archive-window", wks, False, f"{len(occupants)} agent(s) still in it: skipped")
         rc, out, err = paseo(["workspace", "archive", wks])
         rec("archive-window", wks, rc == 0, "" if rc == 0 else clean(err or out, 120))
-        if rc == 0 and wks in read_registry(lead):
-            unregister_window(lead, wks)  # as ade-worker-run archive-window does
+        if rc == 0:
+            for x in chain_of(lead):  # the window may be recorded under a replaced lead, as ade-worker-run archive-window handles
+                if wks in read_registry(x):
+                    _write_registry(x, read_registry(x) - {wks})
 
     for w in p["archive_windows"] if p.get("permits_ok") else []:
         attempt("archive-window", w["windowId"], lambda w=w: do_archive_window(w))

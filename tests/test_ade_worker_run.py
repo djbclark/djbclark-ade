@@ -2072,3 +2072,72 @@ def test_rename_lead_is_the_same_command_as_rename_main(main_env):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["renamed"] is True and out["windowName"] == LEAD_NAME and out["previousName"] == "MAIN repo (Wave 7)"
+
+
+# --- adversary round 1 of PR 732 (wb-01): closed strangers block an archive; unrenamable names are refused, not tracebacks ----
+
+@pytest.fixture
+def two_boxes(window):
+    window.data["workspaces"].append({"workspaceId": "wks_o1", "name": OTHER_WIN, "cwd": "/repo"})
+    own(LEAD, "wks_win1", "wks_o1")
+    return window
+
+
+def archive_calls(env):
+    return [c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "archive"]]
+
+
+@pytest.mark.parametrize("box, wks, extra", [("other", "wks_o1", ["--placement", "other", "--repo", "repo"]),
+                                             ("worker", "wks_win1", [])])
+def test_a_closed_agent_nobody_here_launched_blocks_the_archive(two_boxes, box, wks, extra):
+    """A1: a closed agent that is not labelled for the lead (the operator's interrupted session) would be archived with the window."""
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", wks)
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and "blocker: op1: closed, but not labelled for this lead" in r.stderr
+    assert json.loads(r.stdout)["archived"] is False and json.loads(r.stdout)["blockers"]
+    assert archive_calls(two_boxes) == []
+    two_boxes.data["agents"][0]["labels"] = {"ade.lead": OTHER_LEAD}                  # another lead's closed agent: still not ours
+    two_boxes.flush()
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and archive_calls(two_boxes) == []
+
+
+def test_a_closed_agent_labelled_for_the_lead_does_not_block_the_archive(two_boxes):
+    two_boxes.data["agents"] = [{"id": "c1", "status": "closed", "labels": {"ade.lead": LEAD}}]
+    two_boxes.state("c1", "wks_o1", {"ade.lead": LEAD})
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo")
+    assert r.returncode == 0, r.stderr
+    assert archive_calls(two_boxes) == [["workspace", "archive", "wks_o1"]]
+
+
+def test_a_closed_unlabelled_agent_in_another_window_does_not_block(two_boxes):
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", "wks_elsewhere")
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo")
+    assert r.returncode == 0, r.stderr
+
+
+def test_dry_run_with_a_closed_stranger_reports_the_blocker_and_archives_nothing(two_boxes):
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", "wks_o1")
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo", "--dry-run")
+    assert r.returncode == 1 and "op1" in r.stderr and "closed, but not labelled" in r.stderr
+    assert archive_calls(two_boxes) == []
+    assert registry(LEAD) == {"wks_win1", "wks_o1"}                                    # nothing was unregistered either
+
+
+def test_a_workers_window_with_an_untrimmed_work_text_is_refused_not_a_traceback(env):
+    """A5: `WORKERS repo ( x)` parses (the old kind) but its current-kind name cannot be built: refuse, launch nothing."""
+    env.data["workspaces"] = [{"workspaceId": "wks_bad", "name": "WORKERS repo ( x)", "cwd": "/repo"}]
+    own(LEAD, "wks_bad")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "rename it by hand" in r.stderr and "wks_bad" in r.stderr
+    assert ["run"] not in env.verbs() and rename_calls(env) == []
+
+
+def test_rename_main_of_a_window_with_an_untrimmed_work_text_is_refused_not_a_traceback(main_env):
+    main_env.data["workspaces"][0]["name"] = "MAIN repo ( x)"
+    r = main_env.run("rename-main", "--lead", LEAD)
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "rename it by hand" in r.stderr and LEAD_WKS in r.stderr
+    assert rename_calls(main_env) == [] and ["run"] not in main_env.verbs()

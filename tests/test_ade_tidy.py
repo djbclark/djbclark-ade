@@ -1131,16 +1131,6 @@ def test_done_worker_with_no_claim_is_archived_and_another_agents_claim_is_irrel
     assert [x["agent"] for x in p["archive_agents"]] == [W1] and p["claim_held"] == []
 
 
-def test_unreadable_claims_dir_still_plans(env):
-    """A missing registry is no claims; a claim file that is not JSON is skipped by the registry (list_claims), not a crash."""
-    env.report("s1", ack=True)
-    env.worker(1, text="finished")
-    d = Path(os.environ["ADE_STATE_DIR"]) / "claims"
-    d.mkdir(parents=True)
-    (d / "bad.json").write_text("{nope")
-    assert [x["agent"] for x in env.plan()["archive_agents"]] == [W1]
-
-
 def test_window_named_outside_the_scheme_is_extra_with_no_box_but_the_leads_own_window_never(env):
     env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
     rename_window(env, W_MAIN, "my-lead-window")                                # the lead's own window, off-scheme
@@ -1192,3 +1182,81 @@ def test_claim_taken_between_plan_and_apply_stops_the_agent_archive(env):
     r = env.run(apply=True)
     assert r.returncode == 0, r.stderr
     assert "holds an active claim: skipped" in r.stdout and archived_agents(env) == set()
+
+
+# ---- adversary round 1 of PR 732 (wb-01): fail-closed claims, chain-aware renames and unregistering ----------------
+
+def done_worker(env):
+    env.report("s1", ack=True)
+    env.worker(1, text="finished")
+
+
+def test_corrupt_claim_file_stops_the_apply_and_archives_nothing(env):
+    """A2: a claim file that does not parse leaves ownership of a worktree unknown: no agent and no window is archived."""
+    done_worker(env)
+    d = Path(os.environ["ADE_STATE_DIR"]) / "claims"
+    d.mkdir(parents=True)
+    (d / "bad.json").write_text("{nope")
+    r = env.run(apply=True)
+    assert r.returncode == 1 and "claim" in r.stderr and "nothing is archived" in r.stderr and "Traceback" not in r.stderr
+    assert env.mutating() == []
+    assert env.run().returncode == 1                                            # observe-only refuses the same way
+
+
+def test_unreadable_claims_dir_stops_the_apply_and_archives_nothing(env):
+    """A2: a claims directory that cannot be listed is not "no claims"."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 directory")
+    done_worker(env)
+    d = Path(os.environ["ADE_STATE_DIR"]) / "claims"
+    d.mkdir(parents=True)
+    d.chmod(0)
+    try:
+        r = env.run(apply=True)
+    finally:
+        d.chmod(0o700)
+    assert r.returncode == 1 and "claims directory" in r.stderr and "cannot be read" in r.stderr and "Traceback" not in r.stderr
+    assert env.mutating() == []
+
+
+def test_missing_claims_dir_is_no_claims_and_the_apply_archives_as_before(env):
+    done_worker(env)
+    assert not (Path(os.environ["ADE_STATE_DIR"]) / "claims").exists()
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert archived_agents(env) == {W1}
+
+
+def test_legacy_window_of_a_predecessor_is_registered_then_renamed(env):
+    """A3: `workers <middle> <predecessor id>` of a completed self-handoff chain: ownership is recorded under the successor
+    before the predecessor's id leaves the name."""
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    rename_window(env, W_WORK, "workers myrepo Wave 7 " + PRED)
+    env.worker(1, text="BLOCKED: x")                                            # this lead's worker keeps the window occupied
+    p = env.plan()                                                              # no completed handoff yet: another lead's window
+    assert not any(r["windowId"] == W_WORK for r in p["renames"])
+    link_handoff(PRED, LEAD)
+    assert [r["to"] for r in env.plan()["renames"] if r["windowId"] == W_WORK] == ["WORKER myrepo (Wave 7)"]
+    r = env.run(apply=True)
+    assert r.returncode == 0, r.stderr
+    assert ["workspace", "rename", W_WORK, "WORKER myrepo (Wave 7)"] in env.calls()
+    reg = json.loads((Path(os.environ["ADE_WORKER_RUN_STATE"]) / f"{LEAD}.windows.json").read_text())
+    assert W_WORK in reg["windows"]
+
+
+@pytest.mark.parametrize("also_current_leads", [False, True])
+def test_archiving_a_predecessors_empty_box_unregisters_it_from_the_predecessors_record(env, also_current_leads):
+    """A4: the window id leaves every chain member's `<lead>.windows.json`, as ade-worker-run archive-window does."""
+    env.agent(LEAD, W_MAIN, "LEAD myrepo", "running")
+    env.window(W_EMPTY, "WORKER myrepo (old wave)")
+    registry(env, PRED, [W_EMPTY, "wks_kept"])
+    if also_current_leads:
+        registry(env, LEAD, [W_EMPTY])
+    link_handoff(PRED, LEAD)
+    assert W_EMPTY in {w["windowId"] for w in env.plan()["archive_windows"]}
+    assert env.run(apply=True).returncode == 0
+    assert W_EMPTY in archived_windows(env)
+    wr = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    assert json.loads((wr / f"{PRED}.windows.json").read_text())["windows"] == ["wks_kept"]
+    if also_current_leads:
+        assert W_EMPTY not in json.loads((wr / f"{LEAD}.windows.json").read_text())["windows"]

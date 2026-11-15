@@ -372,7 +372,10 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                               "those agents first")
     cur_hit = wsn.parse(row["name"])
     if new is None and cur_hit and not cur_hit.current:  # `WORKERS r (w)` -> `WORKER r (w)`: renamed when a launch reuses it
-        new = wsn.current_name(cur_hit)
+        try:
+            new = wsn.current_name(cur_hit)
+        except ValueError as e:
+            raise Refused(f"window {wks} ({row['name']!r}) cannot be renamed to its current kind: {e}; rename it by hand")
     return Found(row, new, owned_here)
 
 
@@ -520,7 +523,12 @@ def main_target(row: dict, repo: str | None, explicit: bool, work: str | None) -
         if cur.box != "LEAD":
             raise Refused(f"the lead's own window {row['workspaceId']} is named {name!r} ({cur.kind}); a lead lives in a LEAD "
                           "window: rename it by hand if that is really the lead's window")
-        return None if cur.current else wsn.current_name(cur)
+        if cur.current:
+            return None
+        try:
+            return wsn.current_name(cur)
+        except ValueError as e:
+            raise Refused(f"the lead's own window {row['workspaceId']} ({name!r}) cannot be renamed to its current kind: {e}; rename it by hand")
     legacy = wsn.parse_legacy(name)
     if legacy and legacy.kind == "WORKERS":
         raise Refused(f"the lead's own window {row['workspaceId']} is named {name!r}, a workers window; rename it by hand")
@@ -778,6 +786,10 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         state = state_file(aid)
         in_window = bool(state) and state.get("workspaceId") == wks
         if status == "closed":
+            # a closed agent of this lead's lineage never blocks, but one nobody here launched (the operator's session in the
+            # OTHER box, a daemon-restart casualty) is archived with the window: it blocks like a live one
+            if in_window and aid not in labelled:
+                blockers.append(f"{aid}: closed, but not labelled for this lead (the archive would archive it with the window)")
             continue
         if state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
             blockers.append(f"{aid}: live ({status}) with no usable workspaceId in a state file, so its window is unknown")
