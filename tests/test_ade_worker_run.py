@@ -2181,3 +2181,12 @@ def test_a_window_name_with_control_characters_is_escaped_in_a_refusal(env):
     assert r.returncode == 1, r.stderr
     assert "another lead's agents" in r.stderr and "\x1b" not in r.stderr and "\x07" not in r.stderr, r.stderr
     assert "\\x1b[31m" in r.stderr
+
+
+def test_a_window_cwd_with_control_characters_is_escaped_in_the_cwd_refusal(env):
+    """am-02 round 1 L4a: the window's cwd comes from Paseo too."""
+    env.data["workspaces"] = [{"workspaceId": "wks_c1", "name": WIN, "cwd": "/repo\x1b[31m"}]
+    own(LEAD, "wks_c1")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", "/repo-claimed-wt", "--",
+                "--no-wait", "B")
+    assert r.returncode == 1 and "runs in /repo" in r.stderr and "\x1b" not in r.stderr and "\\x1b[31m" in r.stderr, r.stderr

@@ -1214,7 +1214,7 @@ def test_corrupt_claim_file_is_a_listed_warning_in_a_dry_run_not_a_refusal(env):
     r = env.run(as_json=False)
     assert r.returncode == 0 and "Traceback" not in r.stderr, r.stderr
     assert "A. Inventory" in r.stdout and "H. Windows" in r.stdout
-    assert "WARNING: claims unknown" in r.stdout and "bad.json" in r.stdout and "--apply refuses" in r.stdout
+    assert "WARNING: claims unknown" in r.stdout and "bad.json" in r.stdout and "--apply refuses the whole run" in r.stdout
     assert "archive agent" not in r.stdout and "archive window" not in r.stdout
     p = env.plan()
     assert [w for w in p["archive_windows"]] == []

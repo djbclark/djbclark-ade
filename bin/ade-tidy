@@ -937,7 +937,7 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
                       for r in mine if r["class"] == "operator" and (r["status"] == "closed" or r["verdict"] == "done")]
     if claims_unknown:  # no archive is proposed without the claims; the refusal names the file, and --apply would stop on it
         p["archive_agents"], p["claim_held"] = [], []
-        p["notes"].append(f"WARNING: claims unknown, so no agent or window archive is listed (--apply refuses): {clean(claims_unknown, 300)}")
+        p["notes"].append(f"WARNING: claims unknown, so no agent or window archive is listed and --apply refuses the whole run: {clean(claims_unknown, 300)}")
     leaving = {a["agent"] for a in p["archive_agents"]}
     p["archive_windows"], p["empty_not_ours"] = [], []
     if unplaced:
