@@ -31,6 +31,9 @@ import sys
 from pathlib import Path
 
 MARK = "Delivery contract"
+# The footer's own heading at the start of a line (`## Delivery contract (...)`): a mention of the words in prose, or a peer's
+# whole footer pasted in a fence or quote, is not this prompt's footer (lead review 14760b15 B3: fail closed = append ours).
+FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK)
 EXEMPT = {"claude-code-guide", "statusline-setup"}
 DEFAULT_LEAD = "main"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,8 +46,17 @@ _MD = r"[*_`]*"                                      # markdown around a label: 
 REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?" + _MD + r"\s*(?:is|:|=)" + _MD + r"\s*`?" + _LEFT
                              + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the prompt's OWN `Report path:` / `Report file:` line (at the start of a line), as opposed to a peer's `Worker report: ...`
-REPORT_OWN = re.compile(r"(?im)^[ \t]*(?:(?:\d+[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD + r"[ \t]*(?:is|:|=)"
+# At most 3 spaces of indent: 4+ spaces or a tab is a markdown code block, i.e. pasted text, not this prompt's own label
+# (accepted trade-off, adversary r1 B3: a `Report path:` line indented as a list continuation falls to the labelled tier). A list
+# marker may be `1.`, `1)`, `-`, `*` or the operator's own `A1.` / `A1a.` / `B2)` labels (lw-01 follow-up, ec-01 E2b).
+# `Report:` alone at the start of a line is the own label too, and a quote prefix is allowed (the outside-text pass has quotes
+# removed; the whole-prompt pass finds a quoted own line): adversary r2 B1.
+REPORT_OWN = re.compile(r"(?im)^ {0,3}(?:>[ \t]*)*(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report(?:[ \t]+(?:path|file))?" + _MD + r"[ \t]*(?:is|:|=)"
                         + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
+# The strict own label: `Report path:` / `Report file:` at the start of a line, no quote prefix, no bare `Report:`: what a
+# prompt writes about ITSELF. Only a unique hit of it is taken on sight (adversary r3 B1).
+REPORT_OWN_STRICT = re.compile(r"(?im)^ {0,3}(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?" + _MD + r"report[ \t]+(?:path|file)" + _MD
+                               + r"[ \t]*(?:is|:|=)" + _MD + r"[ \t]*`?" + _LEFT + r"(/[\w.@~+/-]+-report\.md)" + _END)
 # the footer's own delivery line ("Write the full deliverable to `{report}`"): the path a filled footer carries
 FOOTER_DELIVERY = re.compile(r"deliverable to `" + _LEFT + r"(/[\w.@~+/-]+-report\.md)`")
 # Same rule as acp-dispatch check_report_name: Claude Code refuses Write on these basenames.
@@ -79,17 +91,73 @@ def slug(text):
     return s or "subagent"
 
 
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")          # a CommonMark code fence line (opener or closer)
+_QUOTE_LINE = re.compile(r"^[ \t]*>")                            # a quoted line
+
+
+def _outside_pasted(prompt):
+    """The prompt without its closed fenced code blocks and `>` quoted lines (CommonMark fences: a backtick fence's info
+    string has no backtick; the closer is the same character, at least as long, with nothing after it). An opener with no
+    closer is plain text and the scan resumes on the line after it. Linear (adversary r3 B2): every line is matched once; one
+    backward pass records, per fence character, the longest closer at or after each line, so "does this opener have a
+    closer?" is one lookup and a failed opener costs nothing; a successful one searches forward to its first closer and
+    jumps past it."""
+    lines = prompt.split("\n")
+    info = [_FENCE_LINE.match(ln) for ln in lines]
+    best = {"`": [0] * (len(lines) + 1), "~": [0] * (len(lines) + 1)}
+    for k in range(len(lines) - 1, -1, -1):
+        for ch in best:
+            best[ch][k] = best[ch][k + 1]
+        m = info[k]
+        if m and not m.group(2).strip():
+            best[m.group(1)[0]][k] = max(best[m.group(1)[0]][k], len(m.group(1)))
+    out, i = [], 0
+    while i < len(lines):
+        m = info[i]
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            ch, n = m.group(1)[0], len(m.group(1))
+            if best[ch][i + 1] >= n:
+                i = next(k for k in range(i + 1, len(lines)) if (c := info[k]) and c.group(1)[0] == ch
+                         and len(c.group(1)) >= n and not c.group(2).strip()) + 1      # the block, opener to closer, is pasted
+                continue
+        if not _QUOTE_LINE.match(lines[i]):
+            out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _uniq(*lists):
+    return list(dict.fromkeys(x for xs in lists for x in xs))
+
+
 def named_report(prompt):
-    """The report path the prompt itself gives: its own `Report path:` line, else the only labelled one, else the only one
-    it mentions; two different labelled paths with no `Report path:` of its own give None (lw-01, #691 review B1: a
-    peer's `Worker report:` listed first was taken as this launch's report). A path whose
-    .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
-    background got that path), so it is never reused."""
-    own = list(dict.fromkeys(REPORT_OWN.findall(prompt)))       # the prompt's own `Report path:` beats a peer's labelled one
-    labelled = own or list(dict.fromkeys(REPORT_LABELLED.findall(prompt)))
-    paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(prompt)))
+    """The report path the prompt itself gives, or None (the hook then derives its own path, which never touches a peer's
+    file). Confidence levels, each tried only when the previous found nothing; a CONFLICT inside a level is ambiguous, never
+    a ranking, because mirror-image prompts (`Worker report: peer` outside + own `Report path:` fenced, vs `Your report:
+    own` outside + peer `Report path:` fenced) differ only in a qualifier word, so no fixed order is right for both
+    (adversary r3 B1; lw-01 #691 B1 and ec-01 E2c). The levels:
+      1. the strict own label (`Report path:` / `Report file:` at line start) in the text outside pasted blocks;
+      2. a bare own label (`Report:`) outside, merged with every labelled report outside;
+      3. the own and labelled reports of the whole prompt (a brief that names its report only inside pasted text);
+      4. a bare path mention anywhere (never outside-first: an unlabelled own path pasted in a fence against a peer's path in
+         prose, and its mirror image, are a conflict like any other; adversary r4 B1).
+    A path whose .done exists is someone's finished report (2026-10-18), so it is never reused."""
+    outside = _outside_pasted(prompt)
+    strict = _uniq(REPORT_OWN_STRICT.findall(outside))
+    if strict:
+        paths = strict
+    else:
+        bare = _uniq(REPORT_OWN.findall(outside))
+        if bare:
+            paths = _uniq(bare, REPORT_LABELLED.findall(outside))
+        else:
+            # a pasted peer footer's delivery line is the peer's report, not this prompt's (lead review B3)
+            theirs = set(FOOTER_DELIVERY.findall(prompt))      # no footer heading of its own outside pasted text: any delivery line is a peer's (fenced, quoted or indented)
+            paths = (_uniq([x for x in REPORT_OWN.findall(prompt) if x not in theirs],
+                           [x for x in REPORT_LABELLED.findall(prompt) if x not in theirs])
+                     or _uniq([x for x in REPORT_IN_PROMPT.findall(prompt) if x not in theirs]))
     if len(paths) != 1:
-        return None         # none, or two different ones with no `Report path:` of its own: the hook derives its own path
+        return None
     return None if Path(paths[0] + ".done").exists() else paths[0]
 
 
@@ -117,9 +185,10 @@ def unfinished_report(data, tool_input, has_footer):
     try:
         prompt = str(tool_input.get("prompt") or "")
         if has_footer:
-            labelled = {x for x in set(REPORT_LABELLED.findall(prompt))
+            outside = _outside_pasted(prompt)        # a peer's pasted brief or footer is not this launch's
+            labelled = {x for x in set(REPORT_LABELLED.findall(outside))
                         if not Path(x + ".done").exists()}      # a finished background report is not this launch's
-            paths = labelled | set(FOOTER_DELIVERY.findall(prompt))   # the delivery line is always this launch's
+            paths = labelled | set(FOOTER_DELIVERY.findall(outside))   # the delivery line is always this launch's
             path = next(iter(paths)) if len(paths) == 1 else None      # two different paths: ambiguous, skip
         else:
             path = report_path(data, tool_input)
@@ -179,7 +248,7 @@ try:
     if str(tool_input.get("subagent_type") or "") in EXEMPT:
         sys.exit(0)
     prompt_text = str(tool_input.get("prompt") or "")
-    has_footer = MARK in prompt_text
+    has_footer = bool(FOOTER_HEADING.search(_outside_pasted(prompt_text)))
     stale = unfinished_report(data, tool_input, has_footer)
     note = ""
     if stale:

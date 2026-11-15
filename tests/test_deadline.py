@@ -340,14 +340,30 @@ def test_install_agents_off_adds_no_agents_to_execstart(env, tmp_path):
 
 def test_install_agents_auto_looks_for_paseo_on_the_job_path(env, tmp_path):
     ade = _mk_ade(tmp_path)
+    # Hermetic: the shipped plist's PATH names /opt/homebrew/bin and /usr/local/bin, where a developer's real `paseo` may live
+    # (this test failed on a Mac with /opt/homebrew/bin/paseo). Pin the copied plist's PATH to one empty dir.
+    plist = ade / "config/launchd/com.djbclark.deadline-sweep.plist"
+    text = plist.read_text()
+    shipped = "__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    assert shipped in text, "the shipped plist PATH changed: update this test's pin"
+    (tmp_path / "emptybin").mkdir()
+    plist.write_text(text.replace(shipped, str(tmp_path / "emptybin")))      # no ~/.local/bin in the plist: want_agents adds it itself
     fk = _fake_sched(tmp_path)
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
     assert "--no-agents" in r.stdout and "paseo not found" in r.stderr
+    # a paseo in a directory only the plist's PATH names proves the job PATH is what is searched (adversary r1 B4c) ...
+    fake = tmp_path / "emptybin/paseo"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
+    assert "--no-agents" not in r.stdout and f"paseo found at {fake}" in r.stderr
+    # ... and ~/.local/bin, which only `want_agents` itself prepends (the plist PATH above does not name it), is searched too
+    fake.unlink()
     (tmp_path / "home/.local/bin").mkdir(parents=True)
     (tmp_path / "home/.local/bin/paseo").write_text("#!/bin/sh\n")
     (tmp_path / "home/.local/bin/paseo").chmod(0o755)
     r = env.run("install", "--backend", "systemd", "--ade", str(ade), "--dry-run", **fk)
-    assert "--no-agents" not in r.stdout and "paseo found at" in r.stderr
+    assert "--no-agents" not in r.stdout and "paseo found at" in r.stderr and ".local/bin/paseo" in r.stderr
 
 
 def test_install_systemd_writes_units_and_activates(env, tmp_path):

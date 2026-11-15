@@ -338,7 +338,8 @@ def test_an_indented_or_quoted_relaunch_reason_does_not_count(tmp_path, prompt):
 
 
 @pytest.mark.parametrize("label", ["Report path:", "**Report path:**", "- **Report path:**", "1. Report path:", "`Report path:`",
-                                   "Report  path:", "Report file:", "report path ="])
+                                   "Report  path:", "Report file:", "report path =",
+                                   "A1. Report path:", "A1a. **Report path:**", "B2) Report path:"])
 def test_the_own_report_path_is_found_through_markdown_and_list_markers(tmp_path, label):
     """lw-01 (#691 review B1, adversary r1 A2): the common spellings of the label still beat a peer's labelled report."""
     peer = tmp_path / "unit-x-report.md"
@@ -365,3 +366,232 @@ def test_a_quoted_peer_label_does_not_compete_with_the_own_report_path(tmp_path)
     out = run({"description": "Adv", "prompt": f"> Report path: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
     assert "permissionDecision" not in out, out
     assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "```text"])
+def test_a_report_path_inside_a_pasted_peer_brief_does_not_displace_the_own_one(tmp_path, fence):
+    """ec-01 E2c: a peer's brief pasted into this prompt carries its own column-0 `Report path:` line; it must not make the
+    prompt's own path ambiguous (the hook then derived a different path) or win over it."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    close = fence[:3]
+    prompt = f"Report path: {own}\nThe peer's brief, for context:\n{fence}\nReport path: {peer}\nWorker report: {peer}\n{close}\nreview it"
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+    assert str(peer) not in out["updatedInput"]["prompt"].split("Delivery contract", 1)[1]
+
+
+def test_a_pasted_peer_brief_before_a_report_label_that_is_not_report_path_does_not_win(tmp_path):
+    """The own path is only `Report: <path>` (a labelled path, not the `Report path:` form): a pasted brief's `Report path:` line must not outrank it."""
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    prompt = f"```\nReport path: {peer}\n```\nReport: {own}\nreview it"
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+def test_an_indented_code_block_label_is_not_the_own_report_path(tmp_path):
+    peer = tmp_path / "unit-x-report.md"
+    peer.write_text("STATUS: wip\n")
+    own = tmp_path / "adv-report.md"
+    out = run({"description": "Adv", "prompt": f"    Report path: {peer}\nReport path: {own}\nreview it"}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    assert f"report: {own}" in out["updatedInput"]["prompt"]
+
+
+def test_a_brief_that_is_wholly_fenced_still_names_its_report(tmp_path):
+    """Nothing outside the fence names a report: the path inside it is still taken (the pre-ec-01 behaviour)."""
+    own = tmp_path / "adv-report.md"
+    own.write_text("x")
+    out = run({"description": "Adv", "prompt": f"```\nReport path: {own}\n```\nreview it"}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
+
+
+def _own_report_of(tmp_path, prompt):
+    """The report path the hook puts in the footer of `prompt` (the launch is allowed), or the deny reason."""
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    return out["updatedInput"]["prompt"].split("Delivery contract", 1)[1]
+
+
+def test_a_fenced_own_report_path_beats_a_bare_mention_in_prose(tmp_path):
+    """Adversary r1 B1 (P1): the own `Report path:` line inside a fence, a peer's report merely mentioned outside it."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Review the worker's output at {peer}.\nYour own:\n```\nReport path: {own}\n```\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_quoted_own_report_path_beats_a_bare_mention_in_prose(tmp_path):
+    """Adversary r1 B1 (P2)."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"> Report path: {own}\nThe worker wrote {peer}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_an_inline_triple_backtick_line_does_not_open_a_fence(tmp_path):
+    """Adversary r1 B2 (P4): a line of inline code that starts with three backticks is not a fence opener."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    prompt = f"```git``` commands below\nReport path: {own}\n```\npeer brief:\nReport path: {peer}\n```\n"
+    # no fence opens at the first line, so the one that opens at the lone ``` closes nothing: both labels stay (ambiguous)
+    assert str(peer) not in _own_report_of(tmp_path, prompt)
+
+
+def test_a_longer_fence_wraps_a_shorter_one_and_the_closer_takes_no_info_string(tmp_path):
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    wrapped = f"Report path: {own}\n````\n```\nReport path: {peer}\n```\nReport path: {peer}\n````\nreview it"
+    assert f"report: {own}" in _own_report_of(tmp_path, wrapped)
+    # "```text" is not a closer: the fence never closes, so it is plain text and the two own lines are ambiguous (the hook's own
+    # derived path), never the peer's
+    unclosed_by_info = f"Report path: {own}\n```\npeer brief\nReport path: {peer}\n```text\nreview it"
+    foot = _own_report_of(tmp_path, unclosed_by_info)
+    assert str(peer) not in foot and f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in foot
+
+
+def test_an_unclosed_fence_is_plain_text(tmp_path):
+    """An opener with no closer swallows nothing: the own path after it is still found (and the prompt is scanned once)."""
+    own = tmp_path / "adv-report.md"
+    assert f"report: {own}" in _own_report_of(tmp_path, f"```\nReport path: {own}\nreview it")
+
+
+def test_an_unclosed_fence_is_plain_text_even_with_a_peer_label_before_it(tmp_path):
+    """The lines after an opener with no closer count as outside text: the own path there beats a peer's labelled report."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Worker report: {peer}\n```\nReport path: {own}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_fenced_own_report_path_against_a_peers_labelled_report_is_a_conflict_never_the_peer(tmp_path):
+    """Adversary r2 B1 (Q1) / r3 B1: `Worker report:` outside the fence vs a fenced `Report path:` cannot be told from their mirror
+    image (`Your report:` outside, a pasted peer's `Report path:` fenced): the answer is the hook's derived path, never the peer's."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Worker report: {peer}\n```\nReport path: {own}\n```\nreview it")
+    assert str(peer) not in foot and f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in foot
+
+
+def test_the_mirror_image_with_a_bare_own_label_outside_is_the_own_path(tmp_path):
+    """r3 R6: `Your report: own` outside and a pasted peer's `Report path:` fenced: the own label wins (level 2 outside, fence removed)."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Report: {own}\n```\nReport path: {peer}\n```\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+@pytest.mark.parametrize("prompt", [
+    "> Report path: {own}\nWorker report: {peer}\nreview it",                                   # Q2: master gave the derived path
+    "Your report path is {own}\n\nFrom the handoff:\n1. report: `{peer}`\nreview it",           # R1
+    "Your report: {own}\n> Report path: {peer}\nreview it",                                      # R5
+    "Report is {peer} (the worker's).\nYour report path is {own}\n",                             # R8
+    "Review the worker's output at {peer}.\n```\nwrite your report to {own}\n```\nreview it",       # M1: unlabelled own, fenced
+    "> Write your full report to {own}\nThe worker wrote {peer}\nreview it",                       # M2: unlabelled own, quoted
+    "Write your report to {own}\n```\npeer brief: {peer}\n```\nreview it",                       # M3: its mirror image
+])
+def test_conflicting_report_labels_never_resolve_to_the_peer(tmp_path, prompt):
+    """Adversary r3 B1: a prompt that gave the hook's own path on origin/master must not now name a peer's report."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, prompt.format(own=own, peer=peer))
+    assert str(peer) not in foot
+
+
+def test_a_fence_that_closes_after_an_unclosed_opener_is_still_removed(tmp_path):
+    """Adversary r2 B2 (Q7): the lone ``` never closes (plain text); the ~~~ block after it is a pasted peer brief."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Report path: {own}\n```\nnote\n~~~\nReport path: {peer}\n~~~\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_long_prompt_of_unclosed_openers_is_fast(tmp_path):
+    import time
+    own = tmp_path / "adv-report.md"
+    prompt = "```a\n" * 60000 + f"Report path: {own}\n"
+    t0 = time.monotonic()
+    assert f"report: {own}" in _own_report_of(tmp_path, prompt)
+    assert time.monotonic() - t0 < 10
+
+
+def test_a_long_prompt_of_decreasing_length_openers_is_fast(tmp_path):
+    """Adversary r3 B2: openers of strictly decreasing length defeat a shortest-failed memo (each scanned to the end)."""
+    import time
+    own = tmp_path / "adv-report.md"
+    prompt = "".join("`" * n + "\n" for n in range(700, 2, -1)) + "x\n" * 200000 + f"Report path: {own}\n"
+    t0 = time.monotonic()
+    assert f"report: {own}" in _own_report_of(tmp_path, prompt)
+    assert time.monotonic() - t0 < 4      # linear: ~0.3 s; a per-opener rescan to the end took ~8 s
+
+
+def _updated(tmp_path, prompt):
+    out = run({"description": "Adv", "prompt": prompt}, env=footer_env(tmp_path))
+    assert "permissionDecision" not in out, out
+    return out["updatedInput"]["prompt"]
+
+
+@pytest.mark.parametrize("peer_running", [False, True])
+def test_a_peers_footer_pasted_in_a_fence_does_not_suppress_the_hooks_own(tmp_path, peer_running):
+    """Lead review 14760b15 B3 (P1, P1b): the pasted footer is the peer's, so the hook appends this launch's own footer on its own
+    path (fail closed), and a running peer's report is not a reason to deny: it is not this launch's."""
+    peer = tmp_path / "peer-x-report.md"
+    if peer_running:
+        peer.write_text("STATUS: working\n")
+    prompt = f"review the worker's output\n```\nthe peer's brief\n## Delivery contract (shared footer)\nWrite the full deliverable to `{peer}`.\n```\n"
+    updated = _updated(tmp_path, prompt)
+    own = tmp_path / "reports" / "s1" / "adv-report.md"
+    assert updated.count("## Delivery contract") == 2 and f"report: {own}" in updated and f"report: {peer}" not in updated
+
+
+def test_a_quoted_peer_footer_does_not_suppress_the_hooks_own(tmp_path):
+    peer = tmp_path / "peer-x-report.md"
+    updated = _updated(tmp_path, f"review it\n> ## Delivery contract (shared footer)\n> Write the full deliverable to `{peer}`.\n")
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated
+
+
+def test_the_words_delivery_contract_in_prose_do_not_suppress_the_footer(tmp_path):
+    updated = _updated(tmp_path, "follow the Delivery contract in docs/dispatch-footer.md when you report")
+    assert "## Delivery contract (test)" in updated
+
+
+def test_a_quoted_peer_label_beside_the_own_bare_label_is_not_a_conflict(tmp_path):
+    """Lead review B5 (M7): quoted lines are removed before the own-label levels, so `> Worker report:` does not turn the one
+    outside `Report:` into a conflict (the derived path would be safe but wrong)."""
+    peer, own = tmp_path / "unit-x-report.md", tmp_path / "adv-report.md"
+    peer.write_text("STATUS: wip\n")
+    foot = _own_report_of(tmp_path, f"Report: {own}\n> Worker report: {peer}\nreview it")
+    assert f"report: {own}" in foot and str(peer) not in foot
+
+
+def test_a_peers_pasted_report_label_does_not_hide_the_own_unfinished_report_behind_an_own_footer(tmp_path):
+    """The footer branch of the resume guard reads the text outside pasted blocks: a running peer's `Report path:` in a fence
+    must not turn this launch's own unfinished report into an ambiguous (two-path) case that is let through."""
+    own, peer = tmp_path / "own-report.md", tmp_path / "peer-report.md"
+    own.write_text("STATUS: wip\n")
+    peer.write_text("STATUS: wip\n")
+    prompt = f"Report path: {own}\n```\nthe peer's brief\nReport path: {peer}\n```\ntask\n## Delivery contract (shared footer)\n"
+    out = run({"description": "Own", "prompt": prompt}, env=footer_env(tmp_path))
+    assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("indent", ["    ", "\t", "        "])
+def test_a_peers_footer_pasted_indented_does_not_become_the_launchs_report_path(tmp_path, indent):
+    """Adversary r6 A1: a footer pasted as an indented block (4+ spaces or a tab, or a fence nested in a list item) is not
+    seen by the heading check, so the hook appends its own footer; its delivery line must not name the report either."""
+    peer = tmp_path / "peer-x-report.md"
+    block = "".join(f"{indent}{ln}\n" for ln in ("## Delivery contract (shared footer)", f"Write the full deliverable to `{peer}`."))
+    updated = _updated(tmp_path, f"review the worker's brief below\n\n{block}")
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated
+
+
+def test_a_fence_nested_in_a_list_item_with_a_peer_footer_is_not_the_launchs_report_path(tmp_path):
+    peer = tmp_path / "peer-x-report.md"
+    prompt = f"steps:\n\n1. paste:\n\n    ```\n    ## Delivery contract (shared footer)\n    Write the full deliverable to `{peer}`.\n    ```\n"
+    updated = _updated(tmp_path, prompt)
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated
