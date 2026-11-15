@@ -15,6 +15,16 @@ record's successor chain) or refused, and never resurrect it.
 2. `redirect`: a completed self-handoff replaced the target (`ade_lead_succession.effective_lead`, the records
    `handoff-<id>.json`, `status: archived`). The decision names the chain's end. This applies even when the old agent is
    already running again: the ledger says it was replaced.
+   **From `acknowledged` on (rq-38, 2026-11-15)** the same redirect applies while the handoff is still unfinished (the
+   successor attested; `ade-self-session finish` has not archived the predecessor): peers kept sending done notices to the
+   predecessor and each one stretched `finish`'s idle wait (five notices, about 15 minutes, in the 6621fe2b -> 54b15a51
+   handoff). Not before: an `awaiting-ack` record is no link. The acknowledged hop is followed only to a successor that
+   `paseo agent inspect` reports as known and `Archived: false`; an archived or unknown successor, or one Paseo cannot be asked
+   about, leaves the predecessor reachable (a crashed successor must not strand its messages). Hops chain with completed
+   ones, and a cycle among them is `refuse`. Only the send guard reads `acknowledged` records
+   (`ade_lead_succession.successor_of(..., statuses=ACKNOWLEDGED)`): `ade-worker-run`, `ade-net-resume`, `ade-auto-permit`,
+   `ade-tidy` and `fable-wait` still follow completed links only. `ADE_ALLOW_REPLACED_SEND=<predecessor's full id>` reaches the
+   still-live predecessor as before (for example the successor asking it a question).
 3. `refuse`: the target is archived and nothing replaced it; or its replacement is archived too; or the ledger is cyclic. The
    reason names what to do.
 

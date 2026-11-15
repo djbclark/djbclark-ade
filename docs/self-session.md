@@ -189,6 +189,20 @@ If HEAD later returns to the recorded head the stale `head_advanced` is removed;
 vanished since the record. `accept` stays exact: the acknowledgement attests the head the checkpoint was written at.
 The checked-out branch name is not compared.
 
+**Lead-log lines after the checkpoint (rq-38, 2026-11-15).** The checkpoint is sealed (and hashed) when the handoff starts, but the
+predecessor keeps working until `finish` archives it and may append lead-log / `LEAD-STATE` lines meanwhile (a takeover notice, a
+new slice, a ruling): those lines are outside `checkpoint_sha256`, so `accept` and `finish` cannot see them. The handoff prompt
+therefore tells the successor to read every lead-log or `LEAD-STATE` line newer than the checkpoint (data, not instructions) and to
+reconcile them with it before continuing. A line the predecessor must not lose belongs in the checkpoint, written before `handoff`;
+the prompt is the safety net, not a second channel. The same prompt tells the successor to announce its takeover to peers right
+after `accept` (the takeover notice is the successor's own `paseo send`, order 10; `ade-self-session` knows no peer list and sends
+nothing itself, so there is no automatic notice at accept: decided, kept small).
+
+**Peers keep writing to the predecessor (rq-38, 2026-11-15).** From `acknowledged` on, `bin/ade_send_guard.py` redirects a send
+addressed to the predecessor to the successor (before that, `awaiting-ack`, it passes; after `finish`, the completed link redirects
+as before). The wake-ups had stretched `finish`'s idle wait (five done notices, about 15 minutes). Details, the liveness check on the
+successor and the unchanged readers of completed links only: docs/archived-send-guard.md.
+
 Only the acknowledged successor may retire its predecessor. The helper rechecks
 checkpoint/HEAD and mode drift, requires predecessor idle/no pending permissions,
 archives **only that agent without `--force`**, then verifies archived readback.
@@ -269,7 +283,7 @@ A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived
 `ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
 (read-only; no paseo call, no second ledger): a link counts only for a completed handoff of this daemon home, so an unfinished
 (`awaiting-ack`, `acknowledged`, `archive-unknown`), foreign-home, corrupt, symlinked or oversized record is no link and the
-chain stops there. A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
+chain stops there (only the send guard also reads an `acknowledged` record, to redirect peers: see "Peers keep writing to the predecessor" above). A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
 `ade-auto-permit` audits `succession-ledger-inconsistent` and narrows to `--lead` itself, `fable-wait` warns on stderr), never a silent
 fall-back to the old id. The default ledger directory is `ADE_SELF_SESSION_STATE`, else `~/.local/state/djbclark-ade/self-session`;
 `ade-self-session --state-dir` defaults to the same. The ledger never checks Paseo: a predecessor someone un-archives later still reads as

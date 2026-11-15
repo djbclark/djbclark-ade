@@ -118,6 +118,56 @@ def test_an_unfinished_handoff_is_no_redirect(world):
     assert decide(world, A, {A: True}).action == guard.REFUSE
 
 
+def test_an_acknowledged_handoff_redirects_while_the_predecessor_still_runs(world):
+    """rq-38 (a): a peer's send to the acknowledged, not yet archived predecessor goes to the successor."""
+    write_link(world.state, world.home, A, B, status="acknowledged")
+    d = decide(world, A, {A: False, B: False})
+    assert (d.action, d.target) == (guard.REDIRECT, B) and "acknowledged" in d.reason
+
+
+def test_an_awaiting_ack_handoff_is_not_redirected_yet(world):
+    write_link(world.state, world.home, A, B, status="awaiting-ack", ack=None)
+    assert decide(world, A, {A: False, B: False}).action == guard.PASS
+
+
+def test_an_acknowledged_handoff_with_a_dead_or_unknown_successor_leaves_the_predecessor_reachable(world):
+    write_link(world.state, world.home, A, B, status="acknowledged")
+    assert decide(world, A, {A: False, B: True}).action == guard.PASS  # successor archived: not a place to send
+    assert decide(world, A, {A: False}).action == guard.PASS  # successor unknown to paseo
+
+    def flaky(ident):
+        if ident == B:
+            raise OSError("daemon hiccup")
+        return {"Id": ident, "Archived": False}
+    assert guard.decide(A, flaky, state_dir=world.state, home=world.home).action == guard.PASS
+
+
+def test_acknowledged_hops_chain_with_completed_ones(world):
+    write_link(world.state, world.home, A, B)  # completed
+    write_link(world.state, world.home, B, C, status="acknowledged")
+    write_link(world.state, world.home, C, D)  # completed
+    d = decide(world, A, {A: True, B: False, C: False, D: False})
+    assert (d.action, d.target) == (guard.REDIRECT, D)
+
+
+def test_an_acknowledged_cycle_is_refused(world):
+    write_link(world.state, world.home, A, B, status="acknowledged")
+    write_link(world.state, world.home, B, A, status="acknowledged")
+    assert decide(world, A, {A: False, B: False}).action == guard.REFUSE
+
+
+def test_the_replaced_override_still_sends_to_an_acknowledged_predecessor(world):
+    write_link(world.state, world.home, A, B, status="acknowledged")
+    d = decide(world, A, {A: False, B: False}, allow_replaced=A)
+    assert (d.action, d.target, d.replaced_by) == (guard.PASS, A, B)
+
+
+def test_other_consumers_still_see_an_acknowledged_handoff_as_no_link(world):
+    import ade_lead_succession as succ
+    write_link(world.state, world.home, A, B, status="acknowledged")
+    assert succ.effective_lead(A, world.state, world.home) == A
+
+
 def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):
     assert decide(world, STRANGER, {}).action == guard.PASS
 

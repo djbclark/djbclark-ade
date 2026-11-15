@@ -12,7 +12,8 @@ A link `predecessor -> successor` counts only when the record is a completed han
 `predecessor` equal to the file's own id, `home` equal to this daemon's PASEO_HOME, `status` exactly `archived`, a UUID
 `successor` different from the predecessor, and `ack.agent_id` equal to that successor. Anything else (a handoff still
 awaiting its acknowledgement, an `archive-unknown` one, a record of another home, a corrupt or oversized file, a symlink)
-is no link, so the chain stops there and the callers keep their old refusals. A cycle is a
+is no link, so the chain stops there and the callers keep their old refusals (`successor_of(..., statuses=ACKNOWLEDGED)` reads
+an `acknowledged` record the same strict way; only `ade_send_guard` uses it, rq-38). A cycle is a
 SuccessionError, never an endless loop (every consumer reports it; none silently falls back to the old id).
 """
 from __future__ import annotations
@@ -66,8 +67,12 @@ def _read_record(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _link(record: dict | None, predecessor: str, home: Path) -> str | None:
-    """The successor id when `record` is a completed handoff of `predecessor` on this home, else None."""
+COMPLETED = ("archived",)  # a finished handoff: the only status every consumer but the send guard follows
+ACKNOWLEDGED = ("acknowledged",)  # the successor attested, the predecessor not yet archived (rq-38: peers must stop waking it)
+
+
+def _link(record: dict | None, predecessor: str, home: Path, statuses: tuple = COMPLETED) -> str | None:
+    """The successor id when `record` is a handoff of `predecessor` on this home in one of `statuses` (default: completed)."""
     if not record:
         return None
     successor = record.get("successor")
@@ -80,18 +85,20 @@ def _link(record: dict | None, predecessor: str, home: Path) -> str | None:
     except (OSError, RuntimeError, ValueError):
         return None
     if (record.get("kind") != "handoff" or record.get("predecessor") != predecessor or not same_home
-            or record.get("status") != "archived" or not isinstance(successor, str) or not UUID_RE.fullmatch(successor)
+            or record.get("status") not in statuses or not isinstance(successor, str) or not UUID_RE.fullmatch(successor)
             or successor == predecessor or not isinstance(ack, dict) or ack.get("agent_id") != successor):
         return None
     return successor
 
 
-def successor_of(lead: str, state_dir: Path | None = None, home: Path | None = None) -> str | None:
-    """The agent that replaced `lead` through a completed self-handoff, or None."""
+def successor_of(lead: str, state_dir: Path | None = None, home: Path | None = None,
+                 statuses: tuple = COMPLETED) -> str | None:
+    """The agent that replaced `lead` through a completed self-handoff, or None. `statuses=ACKNOWLEDGED` asks about a handoff
+    the successor accepted but whose predecessor `finish` has not archived yet (only ade_send_guard asks that)."""
     if not UUID_RE.fullmatch(lead):
         return None
     state = state_dir or default_state_dir()
-    return _link(_read_record(state / f"handoff-{lead}.json"), lead, home or default_home())
+    return _link(_read_record(state / f"handoff-{lead}.json"), lead, home or default_home(), statuses)
 
 
 def chain(lead: str, state_dir: Path | None = None, home: Path | None = None) -> list[str]:
