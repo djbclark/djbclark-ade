@@ -987,6 +987,8 @@ def test_gs02_unclosed_test_blocks_are_linear():
     "echo $(sleep 5 &)",
     "curl http://h/x?a=1&b=2",
     "echo a && sleep 5 &",
+    "sleep 1 & wait; sleep 5 &",
+    "sleep 1 &\nsleep 5 &\nwait\nsleep 9 &",
 ])
 def test_job_control_background_is_denied(command):
     out = run(command)
@@ -1015,6 +1017,21 @@ def test_job_control_background_is_denied(command):
     "echo 'disown; sleep 5 &'",
     "echo a\\&b",
     "echo $((6 & 3))",
+    "sleep 1 & sleep 2 & wait",
+    "for n in 1 2; do sleep $n & done\nwait",
+    "sleep 1 &\nwait $!",
+    "case $x in a) echo a;& b) echo b;; esac",
+    "case $x in a) echo a;;& b) echo b;; esac",
 ])
 def test_non_background_ampersands_pass(command):
     assert not denied(command), command
+
+
+def test_specific_reason_wins_over_background_deny():
+    out = run("open x &")
+    assert out and "bin/open-clean" in out["permissionDecisionReason"]
+
+
+def test_background_reason_names_timeout_and_long_job_routes():
+    reason = run("sleep 5 &")["permissionDecisionReason"]
+    assert "7200000" in reason and "bin/ade-sched" in reason

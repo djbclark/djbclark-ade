@@ -1131,8 +1131,11 @@ BG_REASON = (
     "A job-control `&` (`cmd &`, also `nohup cmd &`, `setsid cmd &`, `( cmd & )`) leaves an orphaned, "
     "untracked process (ppid 1) that notifies nobody when it exits (2026-11-15: a `python3 wait_check.py "
     "> out 2>&1 &` was orphaned). Do not background inside the command: set the Bash tool's "
-    "`run_in_background: true` parameter instead; it tracks the job and notifies on exit. A sub-agent that is not woken by that notice starts the job "
-    "the same way and waits with `bin/wait-file` on its log. Nothing ran.")
+    "`run_in_background: true` parameter instead; it tracks the job and notifies on exit. Set the call's "
+    "`timeout` to the run's need, at most 7200000 (2 h): the default 30 min stops the job. Longer jobs: "
+    "CI (~/CLAUDE.md item 37), a `bin/ade-sched` one-shot or a Paseo terminal. Parallel work that ends "
+    "with `wait` in the same command (`a & b & wait`) is allowed. A sub-agent that is not woken by the "
+    "exit notice waits with `bin/wait-file` on its log. Nothing ran.")
 
 
 def bg_operator(plain: str) -> bool:
@@ -1144,7 +1147,12 @@ def bg_operator(plain: str) -> bool:
     s = re.sub(r"\\.", "", plain, flags=re.S)
     s = re.sub(r"\$?\(\([^)]*\)\)", " ", s)
     s = re.sub(r"\$\{[^}]*\}", " ", s)
-    return "&" in s.replace("&&", "")
+    s = s.replace(";;&", ";;").replace(";&", ";").replace("&&", "  ")   # case-arm terminators, AND
+    if "&" not in s:
+        return False
+    # bounded fan-out: every `&` is followed later in the same command by a `wait` builtin
+    tail = s[s.rindex("&") + 1:]
+    return not re.search(r"(?:^|[;&|(){\n]|\b(?:do|then)\b)\s*wait\b", tail)
 
 
 def check(cmd: str) -> tuple[str | None, str | None]:
