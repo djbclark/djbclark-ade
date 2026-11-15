@@ -157,6 +157,7 @@ generic `set-state` had no caller and are gone (the library functions `read_clai
     ade_claims.py list [--state S] [--json] one line per claim (id, state, branch, owner, path, expires_at), or a
                                             JSON array; what `ade-git-guard claim ls` runs
     ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]
+    ade_claims.py successor-of PRED --record handoff-<uuid>.json   (self-handoff takeover; caller = PASEO_AGENT_ID)
                                             merge owner fields on an active claim (W3 / ade-claim plugin);
                                             exit 2 when missing, inactive or usage error
     ade_claims.py release --id ID           mark a claim released (W2 follow-up / workspace.archive.after);
@@ -177,6 +178,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import sys
 import time
 from pathlib import Path
@@ -461,6 +463,67 @@ def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
         updated = _update_unlocked(claim_id, owner=owner)
         assert updated is not None
         return updated
+
+
+HANDOFF_RECORD_RE = re.compile(r"handoff-[0-9a-f-]{36}\.json")
+
+
+def default_self_session_state() -> Path:
+    """The ade-self-session state dir (same default as bin/ade-self-session)."""
+    return Path(os.environ.get("ADE_SELF_SESSION_STATE") or (Path.home() / ".local/state/djbclark-ade/self-session"))
+
+
+def _verified_handoff(record_path: str | os.PathLike[str], predecessor: str, caller: str,
+                      self_session_state: Optional[Path]) -> dict[str, Any]:
+    """The self-handoff record, or ValueError: it must sit directly in the self-session state dir, be a regular
+    JSON handoff record, be acknowledged or archived, and name `predecessor` and `caller` (the successor)."""
+    state = (self_session_state or default_self_session_state()).resolve()
+    p = Path(record_path)
+    if p.parent.resolve() != state or not HANDOFF_RECORD_RE.fullmatch(p.name):
+        raise ValueError("handoff record must be a handoff-<uuid>.json inside the self-session state dir")
+    try:
+        if not stat.S_ISREG(os.lstat(p).st_mode):
+            raise ValueError("handoff record must be a regular file")
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        raise ValueError(f"handoff record unreadable: {type(e).__name__}") from None
+    if not isinstance(rec, dict) or rec.get("kind") != "handoff":
+        raise ValueError("not a handoff record")
+    if rec.get("status") not in ("acknowledged", "archived"):
+        raise ValueError(f"handoff record status {rec.get('status')!r}: need acknowledged or archived")
+    if not caller or rec.get("successor") != caller:
+        raise ValueError("handoff record does not name the caller as its successor")
+    if not predecessor or rec.get("predecessor") != predecessor:
+        raise ValueError("handoff record does not name the given predecessor")
+    return rec
+
+
+def rebind_successor(predecessor: str, *, caller: str, record_path: str | os.PathLike[str],
+                     self_session_state: Optional[Path] = None) -> list[str]:
+    """Self-handoff takeover: every ACTIVE (unexpired) claim owned by `predecessor` becomes `caller`'s, same
+    claim id, atomically under the registry lock, with a `history` line. Returns the rebound claim ids (may be
+    empty). Raises ValueError when the record does not verify (see _verified_handoff); a claim owned by anyone
+    else, released or expired is left alone."""
+    rec = _verified_handoff(record_path, predecessor, caller, self_session_state)
+    token = str(rec.get("token") or "")
+    done: list[str] = []
+    with _claims_lock():
+        for c in list_claims("active"):
+            owner = c["owner"]
+            keys = _owner_keys(c)
+            if not (owner.get("agent") == predecessor or (not owner.get("agent") and predecessor in keys)):
+                continue
+            new_owner = dict(owner)
+            new_owner["agent"] = caller
+            for k in ("record", "session"):
+                if new_owner.get(k) == predecessor:
+                    new_owner[k] = caller
+            hist = c.get("history") if isinstance(c.get("history"), list) else []
+            hist = [h for h in hist if isinstance(h, str)][-49:]
+            hist.append(f"{utc_now()} rebound from {predecessor} by self-handoff {token}")
+            _update_unlocked(str(c["id"]), owner=new_owner, history=hist)
+            done.append(str(c["id"]))
+    return done
 
 
 def set_state(claim_id: str, state: str) -> Optional[dict[str, Any]]:
@@ -2863,6 +2926,11 @@ def _cli(argv: Sequence[str]) -> int:
     bo.add_argument("--owner-agent", required=True)
     bo.add_argument("--owner-record")
     bo.add_argument("--owner-session")
+    so = sp.add_parser("successor-of", help="self-handoff takeover: rebind every active claim of PREDECESSOR to the "
+                       "caller (PASEO_AGENT_ID), verified against its acknowledged/archived handoff record")
+    so.add_argument("predecessor")
+    so.add_argument("--record", required=True)
+    so.add_argument("--self-session-state")
     rel = sp.add_parser("release", help="mark a claim released (W2 follow-up / ade-claim workspace.archive.after)")
     rel.add_argument("--id", required=True)
     ins = sp.add_parser("install", help="install the ref hooks into the repository of DIR (exit 2 not a repository, "
@@ -2891,6 +2959,10 @@ def _cli(argv: Sequence[str]) -> int:
             c = bind_owner(a.id, owner_agent=a.owner_agent, owner_record=a.owner_record,
                            owner_session=a.owner_session)
             print(c.get("id"))
+        elif a.cmd == "successor-of":
+            ids = rebind_successor(a.predecessor, caller=os.environ.get("PASEO_AGENT_ID", ""), record_path=a.record,
+                                   self_session_state=Path(a.self_session_state) if a.self_session_state else None)
+            print(json.dumps({"rebound": ids}))
         elif a.cmd == "release":
             c = set_state(a.id, "released")
             if c is None:

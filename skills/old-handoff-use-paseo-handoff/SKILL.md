@@ -294,7 +294,7 @@ Follow [the native transaction protocol](../../docs/self-session.md#c-self-hando
 Creation is pending, not completion: the exact successor reads and acknowledges
 the preserved checkpoint and next action with `accept`, then runs `finish` once: it waits (bounded,
 default 45 s of stable idle, 25 min overall) for the predecessor to be idle and verifies retirement without `--force`.
-Reconcile the exclusive workspace claim before further project writes. End this
+`finish` also rebinds every active claim the predecessor owned to the successor (same claim id, a `history` line `rebound from <pred> by self-handoff <token>`; ids in the record's `rebound_claims`, a failure in `claims_rebind_error`), so never `release` and `new --id` them again. Check `ade_claims.py list` before further project writes. End this
 turn after requesting the handoff; stop scheduling project writes.
 
 If the helper refuses before creation, start the successor yourself using

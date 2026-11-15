@@ -144,6 +144,8 @@ The successor runs this once after `accept`; it does the waiting itself (2026-11
 bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json [--stable S] [--wait-timeout S] [--poll S]
 ```
 
+Once the predecessor is archived, `finish` rebinds every active, unexpired `ade_claims` claim the predecessor owned to the successor (cl-succ, 2026-11-15): same claim id, a `history` line `rebound from <predecessor> by self-handoff <token>`, ids saved as `rebound_claims` in the record (a failure as `claims_rebind_error`; it never fails `finish`, and a re-run retries it). The rebind is `ade_claims.py successor-of` (docs/git-guard.md) and is refused unless the record is `acknowledged`/`archived` and names this agent as successor. Never `release` and re-`new` a claim after a self-handoff.
+
 `finish` samples `agent inspect` of the predecessor every `--poll` seconds (default 5) and archives only after
 it has been `idle` with `PendingPermissions == []` in every sample for `--stable` seconds (default 45; any busy
 sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). One idle sample
