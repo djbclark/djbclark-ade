@@ -1061,7 +1061,7 @@ def test_native_code_shaped_like_a_bare_token_is_not_recorded(code):
 
 
 @pytest.mark.parametrize('code', [
-    'password:hunter2', 'token:abc123XYZ', 'api_key:sk_live_abc123', 'GITHUB_TOKEN:ghx_abc', 'secret=x', 'Password:Hunter2',
+    'password:hunter2', 'token:abc123XYZ', 'api_key:sk_live_abc123', 'GITHUB_TOKEN:ghx_abc', 'secret=x', 'Password:Hunter2', 'cookie:sid123', 'set-cookie:abc', 'COOKIE:deadbeef',
 ])
 def test_native_code_shaped_like_a_keyword_secret_is_not_recorded(code):
     assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')

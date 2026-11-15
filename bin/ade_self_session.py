@@ -99,11 +99,11 @@ def valid_code(code):
 
     Native codes seen: UPPER_SNAKE, `host_offline`, `commander.excessArguments`. A full match of the character
     set, so no space, control character or newline (even a trailing one). The wider set must not let through
-    what the message scrub would redact: a bare token (`ghp_...`, `sk-...`, `AKIA...`), a `keyword:value` secret
-    (`password:hunter2`), or a prefix-less token, taken as any run of 16 or more letters and digits that holds a
+    what the message scrub would redact (a code that `bounded()` changes is not a code: a bare token such as `ghp_...`, a
+    `keyword:value` or `cookie:value` secret such as `password:hunter2`, every current and future scrub pattern), or a prefix-less token, taken as any run of 16 or more letters and digits that holds a
     digit (real codes are words and carry no such run).
     """
-    return bool(_CODE_CHARS.fullmatch(code) and not _BARE_TOKEN.search(code) and not _SECRETISH.search(code)
+    return bool(_CODE_CHARS.fullmatch(code) and bounded(code, 64) == code
                 and not any(re.search(r'\d', run) for run in _ALNUM_RUN.findall(code)))
 
 
