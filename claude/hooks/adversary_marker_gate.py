@@ -26,7 +26,7 @@ Denied: a command that runs a `gh` write and sends a LIVE APPROVE marker.
     (`$(grep M report.md)`, `grep M report.md | gh ...`, `<F tr`, also an unquoted `$( )`) is judged with fences ignored: the filter
     pulls the marker line out of its fence (so a filter over a report with a fenced real-head APPROVE is denied even if its
     output omits the line); a `$( )` anywhere in a command that holds a write is read (`BODY="$(cat raw.md)"; gh ... "$BODY"`). JSON payloads are also scanned as their decoded strings (`\\u003c!--`); a flag prefix
-    glued directly before a fence (`--body="```..."`) is not part of the body (the write's own words only); heredoc bodies are scanned as their own text.
+    glued directly before a fence (`--body="```..."`) is not part of the body (a flag word of the write, never a flag's value); heredoc bodies are scanned as their own text.
 
 "Live" is decided by the checker's own parser (`adversary_marker._strip_code`, `_marker_spans`, `MARKER_START_RE`), so what
 this gate lets through is what the Action reads as documentation:
@@ -164,14 +164,14 @@ def live_approve(text: str, am, raw: bool = False) -> str:
 
 
 def split_heredocs(command: str):
-    """(command without heredoc bodies, [(heredoc body, the command text before its `<<`)]); bodies are scanned as their own text, so a fence at the start
+    """(command without heredoc bodies, [(heredoc body, the command text before its `<<`, delimiter quoted)]); bodies are scanned as their own text, so a fence at the start
     of a body line is a fence (the raw command's `--body '```` is not at a line start and would read as live)."""
-    out, bodies, end, cur, head = [], [], None, [], ""
+    out, bodies, end, cur, head, quoted = [], [], None, [], "", False
     for line in command.split("\n"):
         if end is not None:
             if line.strip() == end:
                 end = None
-                bodies.append(("\n".join(cur), head))
+                bodies.append(("\n".join(cur), head, quoted))
                 cur = []
             else:
                 cur.append(line)
@@ -181,6 +181,7 @@ def split_heredocs(command: str):
         if m:
             end = m.group(2)
             head = line[:m.start()]
+            quoted = bool(m.group(1))
     if end is not None:  # no terminator: `<<` was not a heredoc (quoted, arithmetic): judge the whole command
         return command, []
     return "\n".join(out), bodies
@@ -335,7 +336,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env = [], {}
+        self.raw_texts, self.env, self.write_args = [], {}, set()
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -367,7 +368,14 @@ class Scan:
                         for v in node:
                             leaves(v, depth + 1)
                 leaves(json.loads(full))
-                self.texts.extend(t[:MAX_TEXT] for t in strings[:200])
+                chunk = ""
+                for t in strings:              # small strings are joined into texts of at most MAX_TEXT, so none is lost
+                    if len(chunk) + len(t) + 1 > MAX_TEXT and chunk:
+                        self.texts.append(chunk)
+                        chunk = ""
+                    chunk += t[:MAX_TEXT] + "\n"
+                if chunk:
+                    self.texts.append(chunk)
             except ValueError:
                 pass
 
@@ -476,7 +484,10 @@ def prefix_stripped(words):
     is not part of the body (a prefix before anything else is, and stays)."""
     out, prev = [], ""
     for w in words:
-        m = FLAG_PREFIX.match(w) if w.startswith("-") else (KEY_PREFIX.match(w) if prev in ("-f", "-F", "--field", "--raw-field") else None)
+        if prev in ("-f", "-F", "--field", "--raw-field"):
+            m = KEY_PREFIX.match(w)
+        else:                                  # a value of a flag (`--body "-b```..."`) is the body itself
+            m = FLAG_PREFIX.match(w) if w.startswith("-") and prev not in GH_VALUE_FLAGS else None
         out.append(w[m.end():] if m else w)
         prev = w
     return out
@@ -507,7 +518,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
     if not parsed and loose_write(command):
         scan.write = True                      # unparseable: fail closed, scan the raw command too
         scan.add(command)
-    for body, head in bodies:
+    for body, head, _quoted in bodies:
         if loose_write(body):                  # a script heredoc that names a gh write is one
             scan.write = True
             scan.add(body)
@@ -526,7 +537,6 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
 
     def feeder(w: str, seg, raw: bool = False) -> None:
         scan.add(w)
-        subs(w, seg["cwd"])
         if scan.incidental < MAX_FILES and len(w) < 4096 and "\n" not in w:
             content = scan.read(w.split("=", 1)[-1] if "=" in w else w, seg["cwd"])
             if content:
@@ -563,9 +573,9 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                                            for seg in feeders)
         for seg, g in gh:
             if g and is_write(g[0], g[1], g[2]):
-                for a, shown in zip(g[2], prefix_stripped(g[2])):
+                scan.write_args.update(g[2])
+                for shown in prefix_stripped(g[2]):
                     scan.add(shown, force=True)
-                    subs(a, seg["cwd"])
                 for f in operand_files(g[0], g[2]):
                     scan.add(scan.read(f, seg["cwd"]), operand=True)
                 for w in seg["words"][:g[3]]:  # `find . -name F -exec gh ...`, `xargs`: words before gh may name files
@@ -580,12 +590,21 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
     if not scan.token_write and loose_write(cleaned):
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
-        for w, shown in zip(words_all, prefix_stripped(words_all)):   # a body file or variable the same command writes first
-            scan.add(shown)
-            subs(w, cwd)                       # `BODY="$(cat raw.md)"; gh ... "$BODY"`
-        for body, _head in bodies:
+        for w in words_all:                    # a body file or variable the same command writes first
+            if w not in scan.write_args:       # a write's own words went in above (a fence prefix removed)
+                scan.add(w)
+        cwds = []                              # `cd DIR && BODY="$(cat raw.md)"; gh ... "$BODY"`: each segment's own cwd
+        for pipe in pipes:
+            for seg in pipe.segments:
+                for w in seg["words"]:
+                    subs(w, seg["cwd"])
+                if seg["cwd"] not in cwds:
+                    cwds.append(seg["cwd"])
+        for body, _head, quoted in bodies:
             scan.add(body)
-            subs(body, cwd)                    # an unquoted heredoc expands its `$( )` lines
+            if not quoted:                     # an unquoted heredoc expands its `$( )` lines; a quoted one does not
+                for at in cwds[:8] or [cwd]:
+                    subs(body, at)
 
 
 def judge(command: str, cwd: str, am_loader) -> str:

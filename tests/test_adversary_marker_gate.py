@@ -469,6 +469,37 @@ def test_each_path_resolves_files_under_the_tracked_cd(live, command):
     assert run(command, cwd=live), command
 
 
+@pytest.mark.parametrize("command", [
+    'cd sub && BODY="$(cat only.md)" && gh pr create --title t --body "$BODY"',
+    'cd sub && M=$(grep adversary-verdict only.md); gh pr comment 1 --body "$M"',
+    'cd sub && gh pr comment 1 --body-file - <<EOF\nverdict: $(cat only.md)\nEOF\n',
+    '(cd sub && BODY="$(cat only.md)"; gh pr create --title t --body "$BODY")',
+])
+def test_substitutions_anywhere_resolve_under_the_cd_that_precedes_them(live, command):
+    assert run(command, cwd=live), command
+
+
+def test_a_quoted_heredoc_is_not_expanded_by_the_shell(report):
+    body = "Notes about `report.md` and $(cat raw.md) stay literal prose here.\n"
+    assert run("gh pr comment 1 --body-file - <<'EOF'\n%sEOF\n" % body, cwd=report) is None
+    (report / "raw.md").write_text(APPROVE)
+    assert run("gh pr comment 1 --body-file - <<'EOF'\n%sEOF\n" % body, cwd=report) is None
+    assert run("gh pr comment 1 --body-file - <<EOF\n%sEOF\n" % body, cwd=report)       # an unquoted one runs `$( )`
+
+
+def test_a_body_word_that_is_itself_a_flag_spelling_before_a_fence_is_judged_as_written(live):
+    fence = "```\n%s\n```" % APPROVE
+    assert run("gh pr comment 1 --body " + q("-b" + fence), cwd=live)
+    assert run("gh pr comment 1 --body " + q("--body=" + fence), cwd=live)
+    assert run("printf %s " + q("-b" + fence) + " > nb.md && gh pr comment 1 --body-file nb.md", cwd=live)
+
+
+def test_many_short_json_strings_ahead_of_the_body_do_not_hide_it(live):
+    payload = json.dumps({"x": ["s%d" % i for i in range(300)], "body": APPROVE}).replace("<", "\\u003c").replace(">", "\\u003e")
+    (live / "u200.json").write_text(payload)
+    assert run("gh api repos/o/r/issues/1/comments --input u200.json", cwd=live)
+
+
 def test_a_prefix_before_something_other_than_a_fence_stays_part_of_the_body(live):
     fence = "```\n%s\n```" % APPROVE
     assert run("gh pr comment 1 --body " + q("x=" + fence), cwd=live)
@@ -485,8 +516,15 @@ def test_unclosed_substitutions_are_linear_not_quadratic(live):
     assert reason and time.time() - t0 < 10
 
 
+def test_json_strings_totalling_more_than_the_cap_are_chunked_not_cut(live):
+    leaves = ["z" * 1000 for _ in range(120)] + [APPROVE]            # 120 KB of leaves, then the body
+    payload = json.dumps({"x": leaves}).replace("<", "\\u003c")
+    (live / "many.json").write_text(payload)
+    assert run("gh api repos/o/r/issues/1/comments --input many.json", cwd=live)
+
+
 def test_a_json_payload_padded_past_the_cap_is_still_decoded(live):
-    (live / "pad.json").write_text(json.dumps({"x": "y" * 80000, "body": APPROVE}))
+    (live / "pad.json").write_text(json.dumps({"x": "y" * 80000, "body": APPROVE}).replace("<", "\\u003c"))
     assert run("gh api repos/o/r/issues/1/comments --input pad.json", cwd=live)
 
 
