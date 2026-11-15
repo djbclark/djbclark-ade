@@ -2043,3 +2043,18 @@ def test_a_rerun_after_a_timed_out_wait_keeps_the_redirect_on_while_it_waits(set
     native.status_at = lambda now: 'running' if now < 300 else 'idle'
     service.finish(path, stable=20, timeout=1000, poll=5)
     assert seen and set(seen) == {'redirect'}
+
+
+def test_the_redirect_stays_on_during_a_retry_archive_call(setup):
+    """sr-43 rv-753 B1: peers message while the retry `agent archive` runs; a stale AGENT_RUNNING is still a wait there."""
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_queue = [RUNNING]
+    real, seen = service.native, []
+
+    def native_call(*args, **kw):
+        if args[:2] == ('agent', 'archive'):
+            seen.append(guard_says(service))
+        return real(*args, **kw)
+    service.native = native_call
+    service.finish(path, stable=0, timeout=100, poll=5)
+    assert len(seen) == 2 and seen[1] == 'redirect'
