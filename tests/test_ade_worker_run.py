@@ -49,7 +49,7 @@ elif a[:2] == ["agent", "inspect"]:
         row = d["inspect_agents"][a[2]]
         if row is None:
             sys.exit(1)
-        print(json.dumps({"Id": a[2], **{k: v for k, v in row.items() if k != "_rc"}}))
+        print(json.dumps({"Id": a[2], **{k: v for k, v in row.items() if k != "_rc"}}))  # a row may carry its own Id (another agent's)
         sys.exit(row.get("_rc", 0))
     if "inspect_cwd" not in d or d.get("inspect_rc"):
         sys.exit(d.get("inspect_rc") or 1)
@@ -1134,7 +1134,7 @@ def test_archive_state_wait_error_record_still_adopts_when_predecessor_is_idle(e
 
 
 @pytest.mark.parametrize("pstate, why", [({"Archived": False, "Status": "running"}, "'running'"), (None, "cannot be read"),
-                                         ({"Archived": True, "_rc": 1}, "exited 1"), ({"Archived": False, "Status": "idle", "PendingPermissions": [{"id": "p1"}]}, "pending permission"),
+                                         ({"Archived": True, "_rc": 1}, "exited 1"), ({"Id": OTHER_LEAD, "Archived": True}, "unexpected"), ({"Archived": False, "Status": "idle", "PendingPermissions": [{"id": "p1"}]}, "pending permission"),
                                          ({"Archived": False, "Status": "idle"}, "pending permission"), ({"Archived": False}, "None"), ({"Status": "idle"}, "cannot be read")])
 def test_acknowledged_handoff_with_an_acting_or_unreadable_predecessor_is_refused(env, pstate, why):
     acked_window(env, pstate)
@@ -1175,6 +1175,16 @@ def test_an_acknowledged_predecessor_whose_chain_reaches_the_lead_again_is_refus
     handoff(LEAD, PRED1)  # the predecessor's completed chain comes back to LEAD
     r = launch(env)
     assert r.returncode == 1 and "cyclic" in r.stderr and not placed(env)
+
+
+def test_label_queries_stay_bounded_behind_an_acknowledged_predecessor(env):
+    ids = [f"{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa" for i in range(1, 41)]
+    chain(*ids, PRED1)  # a long completed chain ending at the predecessor
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    assert launch(env).returncode == 0
+    label_calls = [c for c in env.calls() if c["argv"][0] == "ls" and "--label" in c["argv"]]
+    assert 1 <= len(label_calls) <= 18  # the lead and the predecessor, each with its 8 nearest predecessors
 
 
 def test_one_launch_reads_the_acknowledged_predecessor_once(env):
