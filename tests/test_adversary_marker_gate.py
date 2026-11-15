@@ -1047,6 +1047,11 @@ G = "gh pr create --body-file b.md"
     "pushd decoy; pushd +1; cd sub; " + G,                                                 # r6 A6a: an entry of the directory stack
     "pushd decoy; pushd -0; cd sub; " + G,
     "cd decoy extra; cd sub; " + G,                                                        # r6 A6b: `cd a b` fails in bash, substitutes in zsh
+    "{ cd decoy; } && true & cd sub; " + G,                                                # r7 A3: the whole AND-OR list before `&` runs in the background
+    "{ cd decoy; } || true & cd sub; " + G,
+    "cd decoy && true & cd sub; " + G,
+    "cd decoy && true | cat & cd sub; " + G,
+    "false && cd decoy; X=$(cd sub && " + G + ")",                                          # r7 C1: `$( )` after an unsure cd
     "if false; then cd decoy; else :; fi; bash -c 'cd sub && " + G + "'",                  # r6 A3: a nested shell inherits the candidate set
     "false && cd decoy; bash -c \"cd sub; " + G + "\"",
     "false && cd decoy; eval 'cd sub && " + G + "'",
@@ -1077,6 +1082,50 @@ def test_one_long_dotdot_target_over_a_full_candidate_set_is_charged_by_its_leng
     assert took < 5 and result and "can follow in time" in result, (took, result)
     huge = "cd " + "/".join(["y"] * 3000) + "; " + G                    # a single target past MAX_PATH is a deny, before it is joined anywhere
     assert "can follow in time" in (run(huge, cwd=live) or "")
+
+
+def test_redirects_with_an_ampersand_are_not_command_separators(live):
+    """Adversary r7 A4: `2>&1`, `&>f`, `>&2`, `<&-` ended the gh segment, so `--body-file` after them was never read, and a `cd`'s target was lost."""
+    _top_tree(live)
+    for command in ("gh pr create 2>&1 --body-file sub/b.md", "gh pr create &>/dev/null --body-file sub/b.md",
+                    "gh pr create >&2 --body-file sub/b.md", "gh pr create 0<&- --body-file sub/b.md",
+                    "cd 2>&1 sub; " + G, "cd >&2 sub; " + G, "cd &>/dev/null sub; " + G):
+        assert run(command, cwd=live), command
+    _top_tree(live, live_is_sub=False)
+    assert run("gh pr create 2>&1 --body-file sub/b.md", cwd=live) is None
+    assert run("make 2>&1 | tee log; cd sub; " + G, cwd=live) is None            # still a pipeline, and `cd sub` is sure
+
+
+def test_a_directory_named_plus_one_is_entered_by_cd_in_bash_and_is_also_a_stack_entry(live):
+    """Adversary r7 A6: `cd +1` (bash: a directory named `+1`; zsh: a stack entry) is followed both ways."""
+    (live / "+1" / "sub").mkdir(parents=True)
+    (live / "+1" / "sub" / "b.md").write_text(APPROVE)
+    assert run("cd +1; cd sub; " + G, cwd=live)
+
+
+def test_a_long_assignment_pile_is_linear_in_the_number_of_words(live):
+    """Adversary r7 A1: `all(...)` over the segment's words at every token made 20,000 `A=1` words cost 26 s (past the hook's timeout)."""
+    (live / "F").mkdir()
+    (live / "F" / "b.md").write_text(APPROVE)
+    result, took = _seconds("cd F; " + "A=1 " * 20000 + G, live)
+    assert took < 5 and result, (took, result)
+    result, took = _seconds("cd F; " + "{ " * 12000 + G + "; }" * 12000, live)
+    assert took < 5, took
+
+
+def test_the_cd_tracking_has_a_wall_clock_budget_that_denies_when_it_runs_out(live, monkeypatch):
+    """Adversary r7 A1/A2: work counts cannot bound every path (symlink chains in `realpath`); a clock can. Budget 0: the first `cd` expires it."""
+    monkeypatch.setattr(gate, "MAX_SECONDS", 0.0)
+    result = gate.judge("cd sub; " + G, str(live), gate._checker)
+    assert result and "can follow in time" in result
+
+
+def test_a_cd_target_over_the_path_cap_is_a_deny_before_it_is_joined(live):
+    """Adversary r7 C3: a target of `./` x 2,100 is under no component count that MAX_WORK would stop, but over MAX_PATH."""
+    command = "cd /" + "./" * 2100 + "; " + G
+    assert len(command) > gate.MAX_PATH
+    result, took = _seconds(command, live)
+    assert took < 5 and result and "can follow in time" in result
 
 
 def test_a_script_heredoc_after_a_taken_branch_runs_under_that_branchs_directory(live):
