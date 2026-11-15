@@ -134,6 +134,24 @@ def successor_of(lead: str, state_dir: Path | None = None, home: Path | None = N
     return _link(_read_record(state / f"handoff-{lead}.json"), lead, home or default_home(), statuses)
 
 
+def acknowledged_predecessors(lead: str, state_dir: Path | None = None, home: Path | None = None) -> list[str]:
+    """Agents whose FRESH acknowledged self-handoff (`ACKNOWLEDGED`, `_ack_is_fresh`) names `lead` as the successor, sorted.
+    Only a link to `lead` itself: a record naming another agent, a stale or failed one, or a completed one (that is `predecessors`)
+    is not listed. The caller still decides whether the predecessor has stopped acting (bin/ade-worker-run window adoption, hf-38c)."""
+    state = state_dir or default_state_dir()
+    home = home or default_home()
+    try:
+        names = sorted(p.name for p in state.iterdir())
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        m = RECORD_RE.fullmatch(name)
+        if m and _link(_read_record(state / name), m.group(1), home, ACKNOWLEDGED) == lead:
+            out.append(m.group(1))
+    return out
+
+
 def chain(lead: str, state_dir: Path | None = None, home: Path | None = None) -> list[str]:
     """[lead, its successor, that one's successor, ...] up to the agent no completed handoff replaces."""
     out = [lead]
