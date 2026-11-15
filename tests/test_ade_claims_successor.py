@@ -42,23 +42,29 @@ def claim(tmp_path, cid="c1", owner=PRED, **kw):
 
 
 def rebind(ss, caller=SUCC, **kw):
-    return ade_claims.rebind_successor(PRED, caller=caller, record_path=kw.pop("path", None) or record(ss),
+    return ade_claims.rebind_successor(PRED, caller=caller, record_path=kw.pop("path", None) or record(ss, status="archived"),
                                        self_session_state=ss)
 
 
-@pytest.mark.parametrize("status", ["acknowledged", "archived"])
-def test_successor_takes_over_same_id_with_audit_line(tmp_path, state, status):
+def test_successor_takes_over_same_id_with_audit_line(tmp_path, state):
     claim(tmp_path)
-    assert ade_claims.rebind_successor(PRED, caller=SUCC, record_path=record(state, status=status),
+    assert ade_claims.rebind_successor(PRED, caller=SUCC, record_path=record(state, status="archived"),
                                        self_session_state=state) == ["c1"]
     c = ade_claims.read_claim("c1")
     assert c["id"] == "c1" and c["state"] == "active"
-    assert c["owner"]["agent"] == SUCC and c["owner"]["record"] == SUCC
+    assert c["owner"]["agent"] == SUCC and c["owner"]["record"] == SUCC and c["owner"]["session"] is None
     assert c["history"][-1].endswith(f"rebound from {PRED} by self-handoff {TOKEN}")
 
 
 def test_no_claims_is_a_no_op(state):
     assert rebind(state) == []
+
+
+def test_old_session_key_of_the_predecessor_stops_being_an_owner_key(tmp_path, state):
+    claim(tmp_path, owner_session="claude-sess-1")
+    rebind(state, path=record(state, status="archived"))
+    c = ade_claims.read_claim("c1")
+    assert "claude-sess-1" not in ade_claims.owner_ids(c)
 
 
 def test_other_owners_claim_is_untouched(tmp_path, state):
@@ -80,7 +86,7 @@ def test_empty_caller_is_refused(tmp_path, state):
         rebind(state, caller="")
 
 
-@pytest.mark.parametrize("status", ["awaiting-ack", "creation-unknown", "creation-refused", "archive-unknown"])
+@pytest.mark.parametrize("status", ["acknowledged", "awaiting-ack", "creation-unknown", "creation-refused", "archive-unknown"])
 def test_record_not_yet_acknowledged_is_refused(tmp_path, state, status):
     claim(tmp_path)
     with pytest.raises(ValueError, match="status"):
@@ -91,13 +97,13 @@ def test_record_not_yet_acknowledged_is_refused(tmp_path, state, status):
 def test_record_naming_another_successor_is_refused(tmp_path, state):
     claim(tmp_path)
     with pytest.raises(ValueError, match="successor"):
-        rebind(state, path=record(state, successor=THIRD))
+        rebind(state, path=record(state, successor=THIRD, status="archived"))
 
 
 def test_record_naming_another_predecessor_is_refused(tmp_path, state):
     claim(tmp_path)
     with pytest.raises(ValueError, match="predecessor"):
-        rebind(state, path=record(state, predecessor=THIRD))
+        rebind(state, path=record(state, predecessor=THIRD, status="archived"))
     assert ade_claims.read_claim("c1")["owner"]["agent"] == PRED
 
 
@@ -106,12 +112,12 @@ def test_record_outside_state_dir_is_refused(tmp_path, state):
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     with pytest.raises(ValueError, match="state dir"):
-        rebind(state, path=record(elsewhere))
+        rebind(state, path=record(elsewhere, status="archived"))
 
 
 def test_symlinked_record_and_bad_names_are_refused(tmp_path, state):
     claim(tmp_path)
-    real = record(tmp_path)  # outside; link it inside
+    real = record(tmp_path, status="archived")  # outside; link it inside
     link = state / f"handoff-{TOKEN}.json"
     link.symlink_to(real)
     with pytest.raises(ValueError):
@@ -135,7 +141,7 @@ def test_unreadable_or_wrong_kind_record_is_refused(tmp_path, state, body):
 def test_a_non_handoff_kind_is_refused_even_if_otherwise_valid(tmp_path, state):
     claim(tmp_path)
     with pytest.raises(ValueError, match="not a handoff"):
-        rebind(state, path=record(state, kind="compact"))
+        rebind(state, path=record(state, kind="compact", status="archived"))
 
 
 def test_missing_record_is_refused(state):
@@ -164,12 +170,12 @@ def test_history_is_bounded(tmp_path, state):
 def test_second_rebind_by_the_old_owner_cannot_take_it_back(tmp_path, state):
     claim(tmp_path)
     rebind(state)
-    assert ade_claims.rebind_successor(PRED, caller=SUCC, record_path=record(state), self_session_state=state) == []
+    assert ade_claims.rebind_successor(PRED, caller=SUCC, record_path=record(state, status="archived"), self_session_state=state) == []
 
 
 def test_cli_successor_of(tmp_path, state):
     claim(tmp_path)
-    p = record(state)
+    p = record(state, status="archived")
     env = {**os.environ, "ADE_STATE_DIR": str(tmp_path / "state"), "PASEO_AGENT_ID": SUCC}
     base = [sys.executable, "-I", str(ROOT / "bin/ade_claims.py"), "successor-of", PRED, "--record", str(p),
             "--self-session-state", str(state)]
@@ -177,3 +183,11 @@ def test_cli_successor_of(tmp_path, state):
     assert r.returncode == 0 and json.loads(r.stdout) == {"rebound": ["c1"]}
     r = subprocess.run(base, env={**env, "PASEO_AGENT_ID": THIRD}, capture_output=True, text=True)
     assert r.returncode == 2 and "successor" in r.stderr
+
+
+def test_oversized_record_is_refused(tmp_path, state):
+    claim(tmp_path)
+    p = record(state, status="archived")
+    p.write_text(p.read_text() + " " * 300000)  # valid JSON that a truncated read would still parse
+    with pytest.raises(ValueError, match="unreadable"):
+        rebind(state, path=p)

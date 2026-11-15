@@ -476,21 +476,27 @@ def default_self_session_state() -> Path:
 def _verified_handoff(record_path: str | os.PathLike[str], predecessor: str, caller: str,
                       self_session_state: Optional[Path]) -> dict[str, Any]:
     """The self-handoff record, or ValueError: it must sit directly in the self-session state dir, be a regular
-    JSON handoff record, be acknowledged or archived, and name `predecessor` and `caller` (the successor)."""
+    JSON handoff record, be archived, and name `predecessor` and `caller` (the successor)."""
     state = (self_session_state or default_self_session_state()).resolve()
     p = Path(record_path)
     if p.parent.resolve() != state or not HANDOFF_RECORD_RE.fullmatch(p.name):
         raise ValueError("handoff record must be a handoff-<uuid>.json inside the self-session state dir")
     try:
-        if not stat.S_ISREG(os.lstat(p).st_mode):
-            raise ValueError("handoff record must be a regular file")
-        rec = json.loads(p.read_text(encoding="utf-8"))
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise ValueError("not a regular file")
+            raw = fh.read(262145)
+        if len(raw) > 262144:
+            raise ValueError("too large")
+        rec = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, RecursionError) as e:
         raise ValueError(f"handoff record unreadable: {type(e).__name__}") from None
     if not isinstance(rec, dict) or rec.get("kind") != "handoff":
         raise ValueError("not a handoff record")
-    if rec.get("status") not in ("acknowledged", "archived"):
-        raise ValueError(f"handoff record status {rec.get('status')!r}: need acknowledged or archived")
+    if rec.get("status") != "archived":
+        # `acknowledged` is also what finish leaves when it refuses to retire a still-live predecessor
+        raise ValueError(f"handoff record status {rec.get('status')!r}: need archived (the predecessor retired)")
     if not caller or rec.get("successor") != caller:
         raise ValueError("handoff record does not name the caller as its successor")
     if not predecessor or rec.get("predecessor") != predecessor:
@@ -515,9 +521,8 @@ def rebind_successor(predecessor: str, *, caller: str, record_path: str | os.Pat
                 continue
             new_owner = dict(owner)
             new_owner["agent"] = caller
-            for k in ("record", "session"):
-                if new_owner.get(k) == predecessor:
-                    new_owner[k] = caller
+            new_owner["record"] = caller
+            new_owner["session"] = None  # a revived predecessor's old keys must not stay owner keys
             hist = c.get("history") if isinstance(c.get("history"), list) else []
             hist = [h for h in hist if isinstance(h, str)][-49:]
             hist.append(f"{utc_now()} rebound from {predecessor} by self-handoff {token}")
@@ -2927,7 +2932,7 @@ def _cli(argv: Sequence[str]) -> int:
     bo.add_argument("--owner-record")
     bo.add_argument("--owner-session")
     so = sp.add_parser("successor-of", help="self-handoff takeover: rebind every active claim of PREDECESSOR to the "
-                       "caller (PASEO_AGENT_ID), verified against its acknowledged/archived handoff record")
+                       "caller (PASEO_AGENT_ID), verified against its archived handoff record")
     so.add_argument("predecessor")
     so.add_argument("--record", required=True)
     so.add_argument("--self-session-state")
