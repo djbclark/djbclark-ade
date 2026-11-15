@@ -135,6 +135,19 @@ def mentions_approve(text: str) -> bool:
     return bool(U_ESCAPE.search(text) and APPROVE_WORD.search(U_ESCAPE.sub(lambda m: chr(int(m.group()[2:], 16)), text)))
 
 
+def mentions_approve_decoded(text: str) -> bool:
+    """`mentions_approve` after decoding `\\uXXXX` escapes to a fixed point (at most 8 rounds): a JSON payload's string is decoded by
+    GitHub and then the marker's own JSON is decoded by the checker, so `\\u005cu0041PPROVE` is APPROVE (cq-45c, adversary r2 M1)."""
+    for _ in range(8):
+        if mentions_approve(text):
+            return True
+        decoded = U_ESCAPE.sub(lambda m: chr(int(m.group()[2:], 16)), text)
+        if decoded == text:
+            return False
+        text = decoded
+    return False
+
+
 def live_approve(text: str, am, raw: bool = False) -> str:
     """A reason string when `text` carries a live APPROVE marker the Action could count (or cannot rule out), else "".
     `raw`: the text is a filter's output (`grep`/`sed`/`head` over a file), so a fence around the line in the file is gone."""
@@ -399,7 +412,7 @@ class Scan:
             except ValueError:
                 pass
             except RecursionError:             # nested past the parser's limit: no leaf can be read, so an APPROVE anywhere in the
-                self.deep = self.deep or mentions_approve(full)   # whole text is denied by `judge` (cq-45c, review D1)
+                self.deep = self.deep or mentions_approve_decoded(full)   # whole text is denied by `judge` (cq-45c, review D1)
 
     def expand(self, path: str) -> str:
         """`$NAME` / `${NAME}` in a path, from the assignments the same command makes."""

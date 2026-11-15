@@ -693,27 +693,33 @@ DEEP_CMD = "gh api repos/o/r/issues/1/comments --input "
 
 
 # Only file-fed payloads are tested directly on the command line: a command over MAX_SHLEX (100,000) characters is not parsed.
-def _deep(leaf_json, pad_first=False):
-    """`{"body": LEAF, "pad": [[[...]]]}` (or `pad` first): GitHub ignores `pad`, and it is nested past the parser's recursion
-    limit, so `json.loads` raises RecursionError for the whole payload."""
+def _deep(live, leaf_json, pad_first=False):
+    """Write `{"body": LEAF, "pad": [[[...]]]}` (or `pad` first) to live/deep.json: GitHub ignores `pad`, and it is nested past the
+    parser's recursion limit, so `json.loads` raises RecursionError for the whole payload. The check runs in a fresh
+    interpreter, as the hook does (pytest's own deeper stack would raise earlier); where it parses, the test is skipped."""
     pad = "[" * DEEP + "]" * DEEP
     payload = '{"pad": %s, "body": %s}' % (pad, leaf_json) if pad_first else '{"body": %s, "pad": %s}' % (leaf_json, pad)
     assert len(payload) < gate.MAX_FILE
-    try:
-        json.loads(payload)
-    except RecursionError:
-        return payload
-    pytest.skip("this interpreter parses a payload nested %d deep" % DEEP)
+    (live / "deep.json").write_text(payload)
+    probe = subprocess.run([sys.executable, "-c", "import json,sys; json.loads(open(sys.argv[1]).read())", str(live / "deep.json")],
+                           capture_output=True, text=True, check=False)
+    if probe.returncode == 0:
+        pytest.skip("this interpreter parses a payload nested %d deep" % DEEP)
+    assert "RecursionError" in probe.stderr, probe.stderr[-300:]
 
 
 @pytest.mark.parametrize("pad_first", [False, True])
-@pytest.mark.parametrize("leaf", ["escaped", "raw"])
+@pytest.mark.parametrize("leaf", ["escaped", "raw", "double-escaped"])
 def test_a_json_payload_nested_past_the_recursion_limit_is_denied_next_to_approve(live, leaf, pad_first):
     """cq-45c (review D1): no leaf is read once json.loads raises RecursionError, and an escaped marker is invisible to the raw
     scan, so the gate used to allow it. Past the limit, a payload that mentions APPROVE is denied (fail closed), wherever the
     marker sits in it (`pad` first puts it past the 70,000-character cut) and however the payload is fed (file, pipe, filter)."""
-    marker = _escaped(APPROVE) if leaf == "escaped" else json.dumps(APPROVE)     # `\u003c!-- ...`: only the leaf path sees it
-    (live / "deep.json").write_text(_deep(marker, pad_first))
+    markers = {"escaped": _escaped(APPROVE),                                            # `\u003c!-- ...`: only the leaf path sees it
+               "raw": json.dumps(APPROVE),
+               # the verdict is `\u005cu0041PPROVE` in the file: GitHub decodes it to `\u0041PPROVE`, the checker again to APPROVE
+               "double-escaped": _escaped(ESC_APPROVE).replace("\\\\u0041", "\\u005cu0041")}
+    marker = markers[leaf]
+    _deep(live, marker, pad_first)
     reason = run(DEEP_CMD + "deep.json", cwd=live)
     assert reason and (leaf == "raw" or "nested past" in reason)               # a raw marker may be caught earlier, by its own reason
     assert run("gh api repos/o/r/issues/1/comments --input - < deep.json", cwd=live)
@@ -726,7 +732,7 @@ def test_a_json_payload_nested_past_the_recursion_limit_is_denied_next_to_approv
 @pytest.mark.parametrize("leaf", ["block", "block-raw", "none"])
 def test_a_json_payload_nested_past_the_recursion_limit_without_a_live_marker_is_allowed(live, leaf, pad_first):
     leaves = {"block": _escaped(BLOCK), "block-raw": json.dumps(BLOCK), "none": json.dumps("prose only")}
-    (live / "deep.json").write_text(_deep(leaves[leaf], pad_first))
+    _deep(live, leaves[leaf], pad_first)
     assert run(DEEP_CMD + "deep.json", cwd=live) is None
     assert run("grep -h . deep.json | " + DEEP_CMD + "-", cwd=live) is None
 
