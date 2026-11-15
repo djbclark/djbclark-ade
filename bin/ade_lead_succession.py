@@ -13,7 +13,8 @@ A link `predecessor -> successor` counts only when the record is a completed han
 `successor` different from the predecessor, and `ack.agent_id` equal to that successor. Anything else (a handoff still
 awaiting its acknowledgement, an `archive-unknown` one, a record of another home, a corrupt or oversized file, a symlink)
 is no link, so the chain stops there and the callers keep their old refusals (`successor_of(..., statuses=ACKNOWLEDGED)` reads
-an `acknowledged` record the same strict way; only `ade_send_guard` uses it, rq-38). A cycle is a
+an `acknowledged` record, or an `archive-unknown` one whose `native_error` is a waiting code, the same strict way and only while
+fresh; only `ade_send_guard` uses it, rq-38). A cycle is a
 SuccessionError, never an endless loop (every consumer reports it; none silently falls back to the old id).
 """
 from __future__ import annotations

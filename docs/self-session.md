@@ -283,7 +283,7 @@ A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived
 `ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
 (read-only; no paseo call, no second ledger): a link counts only for a completed handoff of this daemon home, so an unfinished
 (`awaiting-ack`, `acknowledged`, `archive-unknown`), foreign-home, corrupt, symlinked or oversized record is no link and the
-chain stops there (only the send guard also reads an `acknowledged` record, to redirect peers: see "Peers keep writing to the predecessor" above). A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
+chain stops there (only the send guard also reads an `acknowledged` record, or an `archive-unknown` one refused for waiting, to redirect peers: see "Peers keep writing to the predecessor" above). A cycle is an error and resolves nothing: every consumer reports it (`ade-worker-run` refuses, `ade-net-resume` exits 2,
 `ade-auto-permit` audits `succession-ledger-inconsistent` and narrows to `--lead` itself, `fable-wait` warns on stderr), never a silent
 fall-back to the old id. The default ledger directory is `ADE_SELF_SESSION_STATE`, else `~/.local/state/djbclark-ade/self-session`;
 `ade-self-session --state-dir` defaults to the same. The ledger never checks Paseo: a predecessor someone un-archives later still reads as
