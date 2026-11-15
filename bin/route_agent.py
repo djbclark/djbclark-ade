@@ -1964,6 +1964,28 @@ def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: di
     return closed if block else cap
 
 
+# The placed launcher (rd-01, 2026-11-14): a bare `paseo run` has no workspace, and `paseo run --cwd` is ignored by Paseo
+# (getpaseo/paseo#9699), so a worker launched from a plan line landed in the caller's own workspace. `ade-worker-run` is not
+# on PATH; the checkout path is the one the fan-out skill and the load-watch lines use.
+WORKER_RUN = "~/src/djbclark-ade/bin/ade-worker-run"
+LEAD_PLACEHOLDER = "<lead>"        # emitted quoted ('<lead>'): an unquoted <...> is a shell redirection, not an inert token
+SLICE_PLACEHOLDER = "<slice>"
+# The shapes `ade-worker-run` accepts (LEAD_RE, SLICE_RE there); a value outside them is refused at launch, so say so at plan time.
+LEAD_SHAPE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SLICE_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where a planned worker goes: the inputs of `ade-worker-run` (docs/workspace-layout.md). None = not given."""
+    lead: str | None = None             # the launching lead's own agent id (plan defaults it to $PASEO_AGENT_ID)
+    slice: str | None = None            # this slice's name (the tab is `worker <slice> <lead id>`)
+    cwd: str | None = None              # the window's own directory (the repo checkout); the slice's worktree goes in the brief
+    window_middle: str | None = None    # the WORKERS window's `(<work>)` part; required on a lead's first launch
+    repo: str | None = None             # window repo name when the cwd's own is not the one wanted
+    caller: str | None = None           # $PASEO_AGENT_ID when plan ran: ade-worker-run refuses any other --lead
+
+
 @dataclass
 class Choice:
     service: Service
@@ -1973,11 +1995,64 @@ class Choice:
     alternatives: list[str] = field(default_factory=list)
     model: str = ""                 # "<model> [--effort L]" for paseo run --thinking
     kind: str = ""                  # recorded as --label ade.kind=… on paseo run
+    placement: Placement | None = None   # set by `plan` / `adjust`; None (the single-slice `route`) = a bare launch template
+
+    @property
+    def dispatch_warnings(self) -> list[str]:
+        """What the `dispatch` line still lacks before it places the worker correctly (stderr and `dispatch_warnings` in --json)."""
+        if self.service.acp_agent == "cursor-cloud":
+            return []                   # a cloud agent: no Paseo workspace to place it in
+        pl = self.placement
+        if pl is None:
+            return ["bare `paseo run` template with no placement: launch through "
+                    f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
+                    "or the worker lands in the caller's own workspace (`paseo run --cwd` is ignored, getpaseo/paseo#9699)"]
+        out = []
+        if not self.model.split():
+            out.append(f"no model profile for {self.kind or 'this kind'} on {self.service.acp_agent}: replace the quoted "
+                       f"--provider placeholder with an id from `paseo provider models {self.service.acp_agent}`")
+        if pl.lead and pl.caller and pl.lead != pl.caller:
+            out.append(f"lead {pl.lead} is not the caller's own id ({pl.caller}): ade-worker-run refuses it "
+                       "unless --on-behalf-of-lead is passed")
+        if not pl.lead:
+            out.append(f"no lead id: {LEAD_PLACEHOLDER} stays in the line (pass --lead; $PASEO_AGENT_ID was not set)")
+        elif not LEAD_SHAPE.fullmatch(pl.lead):
+            out.append(f"lead {pl.lead!r} is not an agent id: ade-worker-run refuses it (pass your own full id)")
+        if not pl.slice:
+            out.append(f"no slice name: {SLICE_PLACEHOLDER} stays in the line (pass --slice, once per kind)")
+        elif not SLICE_SHAPE.fullmatch(pl.slice):
+            out.append(f"slice {pl.slice!r} is not a valid slice name: ade-worker-run refuses it (letters, digits, . _ -)")
+        if not pl.cwd:
+            out.append("no --cwd: a lead's first launch opens its WORKERS window in ade-worker-run's current directory; "
+                       "pass --cwd <the window's directory, ~/src/<repo>> (a later launch uses the existing window's own)")
+        return out
 
     @property
     def dispatch(self) -> str:
-        """Launch template: native `paseo run` (Wave 6; the acp-dispatch shim was deleted 2026-11-14).
-        Cursor Cloud uses cursor-cloud launch. Callers add placement flags and the brief."""
+        """Launch line: with a placement (`plan`, `adjust`) an `ade-worker-run` invocation whose arguments after `--` are the
+        native `paseo run` flags; callers append only the positional brief (and any extra labels). Without one (`route`) the
+        bare `paseo run` flags, a template. Cursor Cloud uses cursor-cloud launch. `dispatch_warnings` names what is missing."""
+        run = self._run_args(quote_template=self.placement is not None)
+        if run is None:
+            return self._cursor_cloud_dispatch()
+        if self.placement is None:
+            return f"paseo run {run}"
+        pl = self.placement
+        # Absolute at emit time: a `~` path works only where a shell parses the line directly (not shlex.split + exec, not $VAR).
+        head = [shlex.quote(os.path.expanduser(WORKER_RUN)), "--lead", shlex.quote(pl.lead or LEAD_PLACEHOLDER),
+                "--slice", shlex.quote(pl.slice or SLICE_PLACEHOLDER)]
+        for flag, value in (("--window-middle", pl.window_middle), ("--repo", pl.repo), ("--cwd", pl.cwd)):
+            if value:
+                head += [flag, shlex.quote(value)]
+        return " ".join(head) + f" -- {run}"
+
+    def _cursor_cloud_dispatch(self) -> str:
+        parts = self.model.split(None, 1)
+        return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
+                + (f" --model {shlex.quote(parts[0])}" if parts else ""))
+
+    def _run_args(self, quote_template: bool = False) -> str | None:
+        """The `paseo run` arguments (no leading `paseo run`, no brief); None for Cursor Cloud, which has no `paseo run`."""
         agent = self.service.acp_agent
         mode = DISPATCH_MODES.get(agent)
         mode_args = ["--mode", mode] if mode else []
@@ -1987,8 +2062,7 @@ class Choice:
         # Whitespace split keeps literal backslashes in model ids (shlex.split would eat them).
         parts = self.model.split(None, 1)
         if agent == "cursor-cloud":
-            return ("cursor-cloud launch --repo <url> --ref <branch> --prompt-file <brief>"
-                    + (f" --model {shlex.quote(parts[0])}" if parts else ""))
+            return None
         if agent == "pi":
             # Keep provider and full physical namespace together, translating only explicit effort.
             spec = shlex.split(self.model)
@@ -2000,9 +2074,11 @@ class Choice:
             argv += mode_args
             if self.kind:
                 argv += ["--label", f"ade.kind={self.kind}"]
-            return shlex.join(argv + ["--no-wait"])
+            return shlex.join(argv[2:] + ["--no-wait"])
         if not parts:
-            return (f"paseo run --provider {agent}/<id from: paseo provider models {agent}> "
+            # a placed line is a complete shell command: an unquoted `<id ...>` would be a redirection
+            provider = f"{agent}/<id from: paseo provider models {agent}>"
+            return (f"--provider {shlex.quote(provider) if quote_template else provider} "
                     + (shlex.join(mode_args) + " " if mode_args else "")
                     + (f"--label ade.kind={self.kind} " if self.kind else "")
                     + "--no-wait")
@@ -2015,7 +2091,7 @@ class Choice:
         argv += mode_args
         if self.kind:
             argv += ["--label", f"ade.kind={self.kind}"]
-        return shlex.join(argv + ["--no-wait"])
+        return shlex.join(argv[2:] + ["--no-wait"])
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
@@ -3221,6 +3297,40 @@ def format_calibrate_table(report: dict[str, Any]) -> str:
 ADJUST_EXIT_REFUSED = 3
 
 
+def add_placement_args(sp: argparse.ArgumentParser) -> None:
+    """The `ade-worker-run` placement inputs `plan` and `adjust` put into every dispatch line (rd-01)."""
+    sp.add_argument("--lead", help="your own agent id, for ade-worker-run --lead (default: $PASEO_AGENT_ID)")
+    sp.add_argument("--slice", action="append", default=[], dest="slices",
+                    help="slice name per kind, in --kinds order (repeat), for ade-worker-run --slice")
+    sp.add_argument("--cwd", help="the WORKERS window's directory (the repo checkout, ~/src/<repo>), for ade-worker-run --cwd; "
+                    "the slice's worktree goes in the brief, not here")
+    sp.add_argument("--window-middle", help="the WORKERS window's (<work>) part, for ade-worker-run --window-middle "
+                    "(required on a lead's first launch)")
+    sp.add_argument("--worker-repo", help="window repo name for ade-worker-run --repo, when the cwd's own is not the one wanted")
+
+
+def apply_placement(rows: list[tuple[Any, ...]], args: argparse.Namespace, parser: argparse.ArgumentParser,
+                    kinds: list[str]) -> None:
+    """Give every routed Choice its Placement, so its `dispatch` is an `ade-worker-run` line (rd-01, 2026-11-14)."""
+    if args.slices and len(args.slices) != len(kinds):
+        parser.error("--slice must be given once per kind, in --kinds order")
+    lead = args.lead or os.environ.get("PASEO_AGENT_ID") or None
+    for i, row in enumerate(rows):
+        choice = row[1]
+        if choice is not None:
+            choice.placement = Placement(lead=lead, slice=args.slices[i] if args.slices else None, cwd=args.cwd,
+                                         window_middle=args.window_middle, repo=args.worker_repo,
+                                         caller=os.environ.get("PASEO_AGENT_ID") or None)
+
+
+def warn_dispatch(rows: list[tuple[Any, ...]]) -> None:
+    """Print each routed slice's `dispatch_warnings` on stderr (an unplaced line must not look finished)."""
+    for i, row in enumerate(rows, 1):
+        choice = row[1]
+        for w in (choice.dispatch_warnings if choice is not None else []):
+            print(f"WARNING: slice {i} ({row[0]}): {w}", file=sys.stderr)
+
+
 def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
                     quota: dict[str, Any], age: float | None) -> int:
     """`adjust`: `plan` with memory. Exit 0 (rows may be queued), 3 when a slice was refused
@@ -3241,6 +3351,8 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     bad = [k for k in kinds if k not in KINDS]
     if bad:
         parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
+    if args.slices and len(args.slices) != len(kinds):
+        parser.error("--slice must be given once per kind, in --kinds order")   # before the locked write below
     skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
     repo = args.repo or repo_of(os.getcwd())
     write = cfg["enabled"] and not args.dry_run
@@ -3261,6 +3373,8 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     for event in result["events"]:
         print("adjust: " + json.dumps(event, sort_keys=True), file=sys.stderr)
     refused = any(r is not None for _, _, r in result["rows"])
+    apply_placement(result["rows"], args, parser, kinds)
+    warn_dispatch(result["rows"])
     if args.json:
         print(json.dumps({
             "enabled": cfg["enabled"], "snapshot_age_s": age, "fresh": result["fresh"],
@@ -3271,6 +3385,7 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
                         "agent": c.service.acp_agent if c else None,
                         "model": c.model if c else None,
                         "dispatch": c.dispatch if c else None,
+                        "dispatch_warnings": c.dispatch_warnings if c else [],
                         "remaining": c.remaining if c else None,
                         "refused": refusal,
                         "why": refusal or (c.why if c else unrouted_why(k, quota, skip))}
@@ -3316,6 +3431,7 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
+    add_placement_args(pl)
     ad = sub.add_parser("adjust", help="plan a wave like `plan`, but move kinds off a pool that fell below its "
                         "floor and back once it recovers (hysteresis, state and change log; new launches only)")
     ad.add_argument("--kinds", help="comma list, hardest first, e.g. code,code,research,bulk")
@@ -3325,6 +3441,7 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--json", action="store_true")
     ad.add_argument("--dry-run", action="store_true", help="compute and print, but write no state and no log")
     ad.add_argument("--status", action="store_true", help="print the saved holds and exit")
+    add_placement_args(ad)
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
     sv = sub.add_parser("services", help="every service discovered right now, with its Paseo provider's status")
     sv.add_argument("--check-models", action="store_true",
@@ -3380,6 +3497,8 @@ def main(argv: list[str] | None = None) -> int:
                     repo=(args.repo or repo_of(os.getcwd())))
         if args.brief and len(args.brief) != len(kinds):
             parser.error("--brief must be given once per kind, in --kinds order")
+        apply_placement(rows, args, parser, kinds)
+        warn_dispatch(rows)
         stale = (not quota) or age is None or age > STALE_SOFT
         if args.json:
             print(json.dumps({
@@ -3392,6 +3511,7 @@ def main(argv: list[str] | None = None) -> int:
                             "agent": c.service.acp_agent if c else None,
                             "model": c.model if c else None,
                             "dispatch": c.dispatch if c else None,
+                            "dispatch_warnings": c.dispatch_warnings if c else [],
                             "remaining": c.remaining if c else None,
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
@@ -3562,6 +3682,7 @@ def main(argv: list[str] | None = None) -> int:
             "kind": args.kind, "service": choice.service.name, "cli": choice.service.cli,
             "agent": choice.service.acp_agent, "model": choice.model,
             "dispatch": choice.dispatch,
+            "dispatch_warnings": choice.dispatch_warnings,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "snapshot_age_seconds": None if age is None else round(age),

@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Bash
 ---
 <!-- 2026-10-23 (operator; Wave 6 wording 2026-11-09): adversary rounds go to the
      judgment pool first via `route_agent.py plan --kinds judgment` → Choice.dispatch
-     (`paseo run --provider … [--thinking high] --label ade.kind=judgment --no-wait`).
+     (`ade-worker-run … -- --provider … [--thinking high] --label ade.kind=judgment --no-wait`, rd-01 2026-11-14).
      The archived omp API route is not a launch target. This agent stays `model: opus`
      for when that out-of-process path is unavailable, and the caller passes the Agent
      tool's `model: "sonnet"` override whenever the Claude windows are short

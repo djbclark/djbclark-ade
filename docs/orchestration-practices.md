@@ -122,7 +122,7 @@ remain intact. Never fix placement by restarting a healthy paid slice. Missing o
 a placement warning on stderr while the already launched agent continues — treat placement as unverified until
 `cwd` / workspace id match.
 
-Minimal out-of-process launch shape (after `route_agent.py plan` / `route` and `load-watch admit`):
+Minimal out-of-process launch shape by hand (after `load-watch admit`; a `route_agent.py plan --lead … --slice … --cwd …` line is already `ade-worker-run … -- --provider …`, which adds the workspace, `--cwd` and the lead/slice labels itself, so append only extra labels and the brief to it and never `--workspace` or `--cwd`):
 
 ```bash
 paseo run --provider PROVIDER/MODEL --no-wait \

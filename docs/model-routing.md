@@ -31,7 +31,7 @@ reports base/local source provenance. Explicit `load_policy(path)` and
 use one validated effective model-tier snapshot, refreshed by default reload;
 `MODEL_TIERS_TOML` isolates that domain and preserves its legacy default fallback.
 See [config precedence](config-migration.md).
-A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `paseo run --provider … --no-wait` line per slice;
+A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and prints one `ade-worker-run --lead … --slice … --cwd … -- --provider … --no-wait` line per slice (rd-01, 2026-11-14; `--lead` defaults to `$PASEO_AGENT_ID`; a missing input leaves `<lead>` / `<slice>` and fills `dispatch_warnings`; `route` still prints the bare `paseo run` template);
 `route`, `show`, `services [--check-models]`, `calibrate`, `substrate` and `hermes-chain` are its other commands.
 A2a. **Unattended dispatch (2026-11-12):** `Choice.dispatch` adds the provider-native mode from `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex and Antigravity `full-access`. Pi reports no selectable modes in `paseo provider ls --json`, so no mode is passed. This prevents workers from inheriting Default permissions.
 A2b. **PR Radar adapter (2026-11-14):** `bin/pr-radar-route` is the routing script of the pr-radar Paseo plugin (a third-party
