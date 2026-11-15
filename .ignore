@@ -3,3 +3,11 @@
 !graft/
 graft/.cache/
 graft/.graph/
+
+# Per-agent copies of graft's own wiring (`graft init`): not part of the repo, kept out of search too.
+/.adal/
+/.gemini/
+/.grok/
+/.kiro/
+/.windsurf/
+/.github/copilot-instructions.md
