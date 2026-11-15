@@ -881,6 +881,11 @@ def test_a_refused_freeze_starts_no_menu_bar_item(tmp_path, monkeypatch):
     assert gf.cmd_freeze(_freeze_args(), tmp_path) != gf.OK and calls == []
 
 
+def test_the_dialog_drops_a_stale_frozen_label_once_the_app_runs_again():   # H4: a 30 min old manual window kept saying "frozen" after a thaw --all
+    ui, model = ((BIN.parent / "macos" / "gui-hog" / n).read_text() for n in ("UI.swift", "Model.swift"))
+    assert "func clearStaleFrozen(" in model and "clearStaleFrozen(" in ui
+
+
 def test_the_dialog_ticks_a_thaw_clock_of_its_own():   # Swift side, structural: the window re-runs `thaw --due` every 20 s while it is open
     ui, model = ((BIN.parent / "macos" / "gui-hog" / n).read_text() for n in ("UI.swift", "Model.swift"))
     assert "func thawDueTick(" in model and "thawDueTick(" in ui and 'runner.thawDue(by: "dialog")' in ui
@@ -1011,7 +1016,8 @@ def test_real_a_wrong_start_refuses_before_any_signal(real):
 
 # ---- the CLI ----------------------------------------------------------------------------------------------------------------------------------------
 def cli(state, *args):
-    env = dict(os.environ, LW_STATE_DIR=str(state))
+    # a freeze starts the menu-bar item: point the bundle at a path that does not exist so a test run never launches the real app on this desktop
+    env = dict(os.environ, LW_STATE_DIR=str(state), LW_GUI_HOG_BUNDLE=str(Path(state) / "no-such-bundle" / "ADE GUI Hog.app"))
     return subprocess.run([sys.executable, str(BIN / "gui-hog"), *args], capture_output=True, text=True, env=env, timeout=60)
 
 
@@ -1046,6 +1052,7 @@ def test_cli_full_cycle_on_a_real_tree(real):
     assert r.returncode == 0, r.stdout + r.stderr
     out = json.loads(r.stdout)
     assert out["ok"] and out["members"] == 3 and _state(real.ops, real.root).startswith("T")
+    assert out["status_item"] in ("bundle-missing", "no-gui"), out   # never the real app
     listed = json.loads(cli(real.state, "frozen", "--json").stdout)["entries"]
     assert [x["id"] for x in listed] == [out["entry"]] and listed[0]["alive"] and listed[0]["by"] == "dialog"
     assert cli(real.state, "freeze", "--pid", str(real.root), "--start", real.start, "--minutes", "5").returncode == 9   # already frozen

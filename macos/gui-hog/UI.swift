@@ -84,7 +84,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 self.frozenBusy = false
                 guard let r = res else { return }
-                if r.entries != self.frozenEntries || r.roots != self.frozenRoots { self.frozenEntries = r.entries; self.frozenRoots = r.roots; self.rows = markFrozen(self.rows, rootPids: r.roots); self.rebuild() }
+                if r.entries != self.frozenEntries || r.roots != self.frozenRoots { self.frozenEntries = r.entries; self.frozenRoots = r.roots; self.rows = markFrozen(self.rows, rootPids: r.roots); self.status = clearStaleFrozen(self.status, rows: self.rows); self.rebuild() }
             }
         }
     }

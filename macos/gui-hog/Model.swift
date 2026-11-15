@@ -208,6 +208,17 @@ func freezeArgv(_ r: Row, minutes: Int?) -> [String] {
 }
 func resumeArgv(_ id: String, by: String) -> [String] { ["resume", "--entry=\(id)", "--by", by] }   // `--entry=ID`: an id is never read as an option
 /// The belt and braces of F5a, b, f: the dialog and the menu-bar item resume what is due on their own clock too (the sampler is the first clock).
+/// A row label "frozen" (set by a successful Freeze click) is dropped once the app is no longer frozen (a thaw by the clock, the menu bar or `thaw --all`):
+/// a window that stays open for half an hour must not keep saying "frozen" about a running app. Other labels are kept.
+func clearStaleFrozen(_ status: [String: String], rows: [Row]) -> [String: String] {
+    var out = status
+    for (k, v) in status where v == "frozen" {
+        if let r = rows.first(where: { $0.appId == k }), r.frozen { continue }
+        out[k] = nil
+    }
+    return out
+}
+
 /// The window re-runs `thaw --due` on its own 2 s refresh every 10th tick (20 s): a second clock inside the dialog, besides the menu-bar item and the sampler (F5).
 func thawDueTick(_ n: Int) -> Bool { n > 0 && n % 10 == 0 }
 func thawDueArgv(by: String) -> [String] { ["thaw", "--due", "--stale", "--by", by] }
