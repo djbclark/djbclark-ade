@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -29,7 +30,8 @@ import json, os, sys
 a = sys.argv[1:]
 rec = {"argv": a, "real_env": os.environ.get("ADE_REAL_PASEO"), "depth": os.environ.get("ADE_PASEO_SHIM_DEPTH"),
        "hops": os.environ.get("ADE_PASEO_SHIM_HOPS"), "pid": os.environ.get("ADE_PASEO_SHIM_PID"),
-       "hops_pid": os.environ.get("ADE_PASEO_SHIM_HOPS_PID"), "me": os.getpid(), "total": os.environ.get("ADE_PASEO_SHIM_TOTAL")}
+       "hops_pid": os.environ.get("ADE_PASEO_SHIM_HOPS_PID"), "me": os.getpid(), "total": os.environ.get("ADE_PASEO_SHIM_TOTAL"),
+       "total_t": os.environ.get("ADE_PASEO_SHIM_TOTAL_T")}
 if "--stdin" in a:
     rec["stdin"] = sys.stdin.read()
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -583,7 +585,7 @@ def test_a_wrapper_that_starts_the_next_shim_in_the_background_ends_at_the_total
     wrapper.parent.mkdir()
     wrapper.write_text("#!/bin/sh\n" + body.format(shim=SHIM) + "\n")
     wrapper.chmod(0o755)
-    p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper), "ADE_PASEO_SHIM_TOTAL": "254"}, timeout=60)
+    p = sw.run("ls", env={"ADE_REAL_PASEO": str(wrapper), "ADE_PASEO_SHIM_TOTAL": "254", "ADE_PASEO_SHIM_TOTAL_T": now()}, timeout=60)
     # run() returns when the whole chain has closed the pipes: shim 1 (255) runs the wrapper, shim 2 (256) too, shim 3 (257) stops
     assert "257 times in total" in p.stderr and sw.calls() == []
 
@@ -591,16 +593,85 @@ def test_a_wrapper_that_starts_the_next_shim_in_the_background_ends_at_the_total
 @pytest.mark.parametrize("junk", ["08", "-5", "junk", ""])
 def test_a_junk_total_counts_from_zero_like_the_other_counters(sw, junk):
     """716b1 r5 B3: kills dropping `to_count` on TOTAL (`-5` would stretch the cap, `08` would abort the sh arithmetic)."""
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": junk}, timeout=30)
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": junk, "ADE_PASEO_SHIM_TOTAL_T": now()}, timeout=30)
     want = "9" if junk == "08" else "1"  # `08` is eight
     assert p.returncode == 0 and json.loads(sw.log.read_text().splitlines()[-1])["total"] == want
 
 
+def now(delta=0):
+    return str(int(time.time()) + delta)
+
+
 def test_the_total_cap_is_exactly_256(sw):
-    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "255"}, timeout=30)
-    assert p.returncode == 0 and json.loads(sw.log.read_text().splitlines()[-1])["total"] == "256"
+    t = now()
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "255", "ADE_PASEO_SHIM_TOTAL_T": t}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["total"] == "256" and last_rec(sw)["total_t"] == t  # the window opens once and is kept
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": t}, timeout=30)
+    assert p.returncode == 127 and "257 times in total" in p.stderr
+
+
+@pytest.mark.parametrize("age", [0, 5, 590])
+def test_a_count_inside_its_window_is_kept(sw, age):
+    """ls-08 716 F2b: kills `-le 600` -> `-le 60` and a window that is never kept."""
+    t = now(-age)
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": t}, timeout=30)
+    assert p.returncode == 127 and "257 times in total" in p.stderr and sw.calls() == []
+
+
+@pytest.mark.parametrize("age", [650, 100000, 1700000000])
+def test_a_count_older_than_its_window_counts_from_zero(sw, age):
+    """ls-08 716 F2b: a daemon that a shim started hands its count to agents hours later; 256 restarts must not end every call.
+    Kills `-le 600` -> `-le 6000` and a count that is never reset."""
+    before = int(time.time())
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": str(before - age)}, timeout=30)
+    r = last_rec(sw)
+    assert p.returncode == 0 and p.stderr == "" and r["total"] == "1" and before <= int(r["total_t"]) <= int(time.time())
+
+
+@pytest.mark.parametrize("t", ["", "junk", "0", "000", "-5", "1.5", "123456789012", "99999999999999999999"])
+def test_a_missing_or_junk_window_start_counts_from_zero(sw, t):
+    """ls-08 716 F2b (lead): empty, non-numeric or absurd start times are never `trusted forever`. Kills dropping `to_epoch`."""
+    before = int(time.time())
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": t}, timeout=30)
+    r = last_rec(sw)
+    assert p.returncode == 0 and p.stderr == "" and r["total"] == "1" and before <= int(r["total_t"]) <= int(time.time())  # and no sh error
+
+
+def test_a_window_start_with_leading_zeros_is_a_decimal_number(sw):
+    """Kills dropping the zero strip of `to_epoch`: `$((now - 01794...))` would abort the sh arithmetic."""
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": "0" + now()}, timeout=30)
+    assert p.returncode == 127 and "257 times in total" in p.stderr
+
+
+def test_a_count_with_no_window_start_counts_from_zero(sw):
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256"}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["total"] == "1"
+
+
+@pytest.mark.parametrize("ahead", [2, 1000, 10**9])
+def test_a_window_start_in_the_future_is_a_fresh_window(sw, ahead):
+    """ls-08 716 F2b (lead): clock skew. A start time ahead of the clock opens a new window at the real time, never one that
+    stays trusted. Kills dropping `-le "$now_s"`."""
+    before = int(time.time())
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256", "ADE_PASEO_SHIM_TOTAL_T": now(ahead)}, timeout=30)
+    r = last_rec(sw)
+    assert p.returncode == 0 and r["total"] == "1" and before <= int(r["total_t"]) <= int(time.time())
+
+
+def test_with_no_clock_the_count_is_trusted_as_it_is(sw):
+    """No working `date`: the loop cap wins, as it did before the window."""
+    (sw.bindir / "date").write_text("#!/bin/sh\nexit 1\n")
+    (sw.bindir / "date").chmod(0o755)
     p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "256"}, timeout=30)
     assert p.returncode == 127 and "257 times in total" in p.stderr
+    p = sw.run("ls", env={"ADE_PASEO_SHIM_TOTAL": "5", "ADE_PASEO_SHIM_TOTAL_T": "7"}, timeout=30)
+    assert p.returncode == 0 and last_rec(sw)["total"] == "6"
+
+
+def test_the_shim_reads_its_argv_literally_no_redirects(sw):
+    """ls-08 r1 A2: the shell removed the redirects before the shim ran, so `>` and `2` are message words, and `2` is the agent."""
+    p = sw.run("send", "--", "2", ">", "x", A, timeout=30)
+    assert p.returncode == 0 and sw.calls()[0][:3] == ["agent", "inspect", "2"]
 
 
 def test_the_shim_names_itself_as_the_setter_of_the_hop_count(sw):
