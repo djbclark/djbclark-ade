@@ -1069,3 +1069,51 @@ def test_no_operand_file_is_read_once_the_operand_cap_is_spent(live, monkeypatch
     monkeypatch.setattr(gate, "MAX_FORCED", 2)
     gate.judge("gh api repos/o/r/issues/1/comments " + " ".join("-F a%d=@f%d.md" % (i, i) for i in range(10)), str(live), gate._checker)
     assert len(calls) <= 4, calls
+
+
+# ---- mg-51 repair round 3 (adversary of f19f6a97: H1, H2, H3, M1): bounded work, fail closed past the caps -----------------------
+
+
+def _seconds(command, cwd):
+    import time
+    start = time.monotonic()
+    result = gate.judge(command, str(cwd), gate._checker)
+    return result, time.monotonic() - start
+
+
+def test_thousands_of_cds_do_not_make_the_hook_quadratic(live):
+    """H1: 9,000 `cd`s took 18.8 s (over the hook's 15 s timeout, which fails open); the directory list is capped at MAX_DIRS."""
+    (live / "b.md").write_text(APPROVE)
+    command = "".join("cd d%x; " % i for i in range(9000)) + "gh pr comment 1 --body-file b.md"
+    result, took = _seconds(command, live)
+    assert took < 5, took
+    assert result                                   # the event cwd is still read, so the live file is found
+
+
+def test_directories_times_missing_operands_are_bounded_by_the_read_budget(live, monkeypatch):
+    """H2: 1,000 `cd`s x 2,000 operands that do not exist made 70 s of `stat`; `read_file` calls are capped at MAX_READS."""
+    calls = []
+    real_read = gate.read_file
+    monkeypatch.setattr(gate, "read_file", lambda path, cwd: calls.append(1) or real_read(path, cwd))
+    command = ("".join("cd d%x; " % i for i in range(1000)) + "gh api repos/o/r/issues/1/comments "
+               + " ".join("-F n%x=@m%x" % (i, i) for i in range(2000)) + " -f body=" + q("I approve this"))
+    result, took = _seconds(command, live)
+    assert len(calls) <= gate.MAX_READS and took < 5, (len(calls), took)
+    assert result and "more operand text" in result    # past the budget: denied beside the word APPROVE
+
+
+def test_more_directories_than_the_cap_deny_beside_approve_and_allow_otherwise(live):
+    """M1 and the fail-closed rule: past MAX_DIRS visited directories the real one may be dropped, so a body that mentions APPROVE is denied."""
+    decoys = "".join("false && cd /nonexistent/d%d; " % i for i in range(gate.MAX_DIRS + 2))
+    assert run(decoys + "gh pr comment 1 --body " + q("I approve this"), cwd=live)
+    assert run(decoys + "gh pr comment 1 --body " + q("fine"), cwd=live) is None
+
+
+def test_nested_heredocs_are_collected_once_per_level(live):
+    """H3: eight cwds x three levels made 512 collects; the body is collected once, under the last cwd."""
+    nest = ("".join("cd x%d && echo; " % i for i in range(8)) + "bash <<'A'\n")
+    nest = nest + "".join("cd y%d && echo; " % i for i in range(8)) + "bash <<'B'\n"
+    nest = nest + "gh api repos/o/r/issues/1/comments " + " ".join("-F n%x=@m%x" % (i, i) for i in range(1500)) + " -f body=" + q(APPROVE)
+    nest = nest + "\nB\nA\n"
+    result, took = _seconds(nest, live)
+    assert took < 5, took

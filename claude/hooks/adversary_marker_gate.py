@@ -78,6 +78,8 @@ MAX_TOTAL = 600000
 MAX_FORCED = 400            # operand files / stdin texts read outside the byte budget
 MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
+MAX_DIRS = 64               # distinct directories tracked for one command, and the most (path, directory) reads of one command's operands
+MAX_READS = 5000            # past either, `truncated` is set: the command is denied when it mentions APPROVE
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -263,6 +265,16 @@ def read_file(path: str, cwd: str) -> str:
         return ""
 
 
+class History(dict):
+    """cwd -> every directory the command had `cd`'d into by then (at most MAX_DIRS); `overflow` when a `cd` past the cap was dropped."""
+    overflow = False
+
+    def note(self, cur: str, visited) -> None:
+        merged = list(dict.fromkeys([*self.get(cur, ()), *visited]))
+        self[cur] = merged[:MAX_DIRS]
+        self.overflow = self.overflow or len(merged) > MAX_DIRS
+
+
 class Pipeline:
     """The simple commands joined by `|` (and a `<(...)` process substitution with the command it feeds)."""
 
@@ -275,8 +287,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None):
     A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
     skipped. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`; the assignment in
     effect at that point, so a later `D=decoy` does not move it); a name it cannot resolve stays literal, so the tracked cwd is wrong
-    and the file read falls back to the event cwd (docs/code-review.md rule 14). `history` (a dict) gets, for each tracked cwd, every
-    directory the command had `cd`'d into by then (no cap: the command's own length bounds it): a `cd` that does not run (`false && cd d`, `if false; then cd d; fi`,
+    and the file read falls back to the event cwd (docs/code-review.md rule 14). `history` (a History) gets, for each tracked cwd, every
+    directory the command had `cd`'d into by then (at most MAX_DIRS, past which `overflow` is set): a `cd` that does not run (`false && cd d`, `if false; then cd d; fi`,
     `pushd -n d`, a `coproc`) or does not change the directory must not move the read away from the file the shell reads (mg-51 r2, B1)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     visited = [cwd]
@@ -287,7 +299,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None):
 
     def new_seg():
         if history is not None:
-            history[cur] = list(dict.fromkeys([*history.get(cur, ()), *visited]))
+            history.note(cur, visited)
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
     seg = new_seg()
 
@@ -331,9 +343,12 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None):
                 seg["cwd"] = cur
                 for d in (cur, str(Path(cwd) / nd)):     # also the target relative to the event cwd: a `cd` before it that did not run
                     if d not in visited:                 # (`false && cd x; cd real`) must not move `real` under `x`
-                        visited.append(d)
+                        if len(visited) < MAX_DIRS:
+                            visited.append(d)
+                        elif history is not None:
+                            history.overflow = True
                 if history is not None:
-                    history[cur] = list(dict.fromkeys([*history.get(cur, ()), *visited]))
+                    history.note(cur, visited)
             continue
         if tok in ("cd", "pushd") and all(w in RESERVED or w in ("builtin", "command") for w in seg["words"]):
             want_dir = True
@@ -403,8 +418,8 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env, self.deep, self.api_write, self.history = [], {}, False, False, {}
-        self.cache, self.payload_ids = {}, set()      # (path, dir) -> text; id() of each text parsed as a whole JSON payload
+        self.raw_texts, self.env, self.deep, self.api_write, self.history = [], {}, False, False, History()
+        self.cache, self.payload_ids, self.read_calls = {}, set(), 0      # (path, dir) -> text; id() of each text parsed as a whole JSON payload
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -480,6 +495,10 @@ class Scan:
         texts = []
         for d in dict.fromkeys(dirs):
             if (path, d) not in self.cache:
+                self.read_calls += 1
+                if self.read_calls > MAX_READS:        # a command with thousands of operands x directories must not outrun the hook's 15 s
+                    self.truncated = True
+                    break
                 self.cache[path, d] = read_file(path, d)   # each (path, dir) is read once: a repeated operand costs nothing more
             texts.append(self.cache[path, d])
         return [t for k, t in enumerate(texts) if t and t not in texts[:k]]
@@ -624,10 +643,13 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             scan.add(body)
     pipes = split_pipelines(tokens, cwd, scan.expand, scan.history)
     for body, head, _quoted in bodies:
-        if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files, under the directory of
-            # the command that runs it (`cd real && bash <<X`); which segment that is, is not tracked, so every cwd the command had
-            for at in list(dict.fromkeys([cwd, *(seg["cwd"] for pipe in pipes for seg in pipe.segments)]))[:8]:
-                collect(body, at, scan, depth + 1)
+        if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files, under the directory of the
+            # command that runs it (`cd real && bash <<X`); which segment that is, is not tracked, so it is collected once, under the
+            # last cwd, and every cwd the command had is tried for its relative operands (`history`)
+            segs = [seg["cwd"] for pipe in pipes for seg in pipe.segments]
+            at = segs[-1] if segs else cwd
+            scan.history.note(at, [cwd, *segs])
+            collect(body, at, scan, depth + 1)
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
@@ -724,6 +746,7 @@ def judge(command: str, cwd: str, am_loader) -> str:
     if not scan.write:
         return ""
     am = am_loader()
+    scan.truncated = scan.truncated or scan.history.overflow
     # a `gh api` write may carry a GraphQL `query` (`-f query=...`, `-F query=@file`, a `--input` JSON leaf) whose string literals GitHub
     # decodes, so every text with a backslash is also judged decoded (an extra look: a false deny at worst; mg-51, Carried 52). A
     # whole JSON payload that `Scan.add` parsed is not a query text (its leaves are, and are separate texts), so it is left alone.
