@@ -1152,7 +1152,7 @@ def bg_operator(plain: str) -> bool:
         return False
     # bounded fan-out: every `&` is followed later in the same command by a `wait` builtin
     tail = s[s.rindex("&") + 1:]
-    return not re.search(r"(?:^|[;&|(){\n]|\b(?:do|then)\b)\s*wait\b", tail)
+    return not re.search(r"(?:^|[;&|(){\n]|\b(?:do|then)\b)\s*wait(?=$|[\s;&|)}])", tail)
 
 
 def check(cmd: str) -> tuple[str | None, str | None]:

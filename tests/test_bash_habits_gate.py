@@ -988,6 +988,9 @@ def test_gs02_unclosed_test_blocks_are_linear():
     "curl http://h/x?a=1&b=2",
     "echo a && sleep 5 &",
     "sleep 1 & wait; sleep 5 &",
+    "job > log 2>&1 & wait-file --timeout 600 log",
+    "sleep 1 & wait.sh",
+    "sleep 1 & wait-for x",
     "sleep 1 &\nsleep 5 &\nwait\nsleep 9 &",
 ])
 def test_job_control_background_is_denied(command):
@@ -1020,6 +1023,9 @@ def test_job_control_background_is_denied(command):
     "sleep 1 & sleep 2 & wait",
     "for n in 1 2; do sleep $n & done\nwait",
     "sleep 1 &\nwait $!",
+    "sleep 1 & wait",
+    "sleep 1 & wait; echo done",
+    "(sleep 1 & wait)",
     "case $x in a) echo a;& b) echo b;; esac",
     "case $x in a) echo a;;& b) echo b;; esac",
 ])
