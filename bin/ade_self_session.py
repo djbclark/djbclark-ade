@@ -117,7 +117,10 @@ def parse_envelope(*streams):
             if isinstance(code, str) and code:
                 # Native codes seen: UPPER_SNAKE, `host_offline`, `commander.excessArguments`; fullmatch, so no
                 # space, control character or newline (even a trailing one) gets through.
-                code = code if re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', code) else 'INVALID_CODE'
+                # A code shaped like a bare token (ghp_..., sk-..., AKIA...) is not a code: the wider set would
+                # otherwise record it unscrubbed.
+                ok = re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', code) and not _BARE_TOKEN.search(code)
+                code = code if ok else 'INVALID_CODE'
             else:
                 code = None
             return code, bounded(message, MESSAGE_LIMIT) if isinstance(message, str) else None

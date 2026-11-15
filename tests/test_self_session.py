@@ -1055,7 +1055,17 @@ def test_native_code_pattern_keeps_lowercase_dotted_and_colon_codes(code):
     assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
 
 
-@pytest.mark.parametrize('code', ['bad code', 'a\nb', 'trailing\n', 'tab\tx', 'nul\x00x', 'X' * 65, 'é', 'a/b'])
+@pytest.mark.parametrize('code', ['ghp_' + 'a' * 36, 'sk-ant-abc123', 'github_pat_abc123', 'AKIA' + 'A' * 16, 'xoxb-1-abc'])
+def test_native_code_shaped_like_a_bare_token_is_not_recorded(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
+@pytest.mark.parametrize('code', ['TASK_SK_1', 'disk-sk-2', 'ghost_town'])
+def test_native_code_with_token_lookalike_inside_is_kept(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
+
+
+@pytest.mark.parametrize('code', ['bad code','a\nb', 'trailing\n', 'tab\tx', 'nul\x00x', 'X' * 65, 'é', 'a/b'])
 def test_native_code_pattern_still_rejects_unsafe_codes(code):
     assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
 
