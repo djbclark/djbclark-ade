@@ -397,7 +397,9 @@ def test_a_filter_over_a_fenced_report_delivers_the_marker_unfenced(report, comm
     'gh pr comment 1 --body $(cat report.md)',
     "cat report.md | gh pr comment 1 -F -",
     "gh pr comment 1 --body-file report.md",
-    "gh pr comment 1 --body \"$(grep -c APPROVE report.md | head -1)\" --title t" if False else "gh pr comment 1 --body done",
+    "gh pr comment 1 --body done",
+    'gh pr comment 1 --body "$(< report.md)"',
+    'gh pr comment 1 --body "$(cat -- report.md)"',
 ])
 def test_a_whole_fenced_report_stays_documentation(report, command):
     assert run(command, cwd=report) is None, command
@@ -432,6 +434,60 @@ def test_json_escaped_markers_in_an_input_payload_are_decoded(live):
     assert run("echo %s | gh api repos/o/r/issues/1/comments --input -" % q(escaped), cwd=live)
     (live / "ok.json").write_text(json.dumps({"body": "prose \u2713"}))
     assert run("gh api repos/o/r/issues/1/comments --input ok.json", cwd=live) is None
+
+
+@pytest.mark.parametrize("command", [
+    'BODY="$(cat raw.md)"; gh pr create --title t --body "$BODY"',
+    'export BODY="$(cat raw.md)"; gh pr create --title t --body "$BODY"',
+    'BODY="$(cat raw.md)"\ngh pr create --title t --body "$BODY"',
+    'M=$(grep adversary-verdict report.md); gh pr comment 1 --body "Adversary: $M"',
+    'M=`grep adversary-verdict report.md`; gh pr comment 1 --body "$M"',
+    'gh pr comment 1 --body-file - <<EOF\nverdict: $(cat raw.md)\nEOF\n',
+    'gh pr comment 1 --body-file - <<EOF\n$(grep adversary-verdict report.md)\nEOF\n',
+    'gh pr comment 1 --body "$(cat empty.txt raw.md)"',
+    'gh pr comment 1 --body "$(<report.md grep adversary-verdict)"',
+    'gh pr comment 1 --body "$(< report.md tr -d q)"',
+    "gh pr comment $((1+2)) --body-file raw.md",
+    "gh pr comment 1 --body `grep adversary-verdict report.md`",
+])
+def test_files_named_in_a_substitution_anywhere_in_a_write_command_are_read(report, command):
+    (report / "raw.md").write_text("prose\n\n%s\n" % APPROVE)
+    (report / "empty.txt").write_text("")
+    assert run(command, cwd=report), command
+
+
+@pytest.mark.parametrize("command", [
+    # sub/only.md is live; nothing named only.md sits in the event cwd, so only a tracked `cd` finds it
+    'echo "$(cd sub && gh pr edit 41 --body-file only.md)"',
+    'cd sub && gh pr new --title t --body-file only.md',
+    'cd sub && gh issue new --title t --body "$(cat only.md)"',
+    'cd sub && gh pr close 41 --comment "$(cat only.md)"',
+    'cd sub && gh issue reopen 41 --comment "$(cat only.md)"',
+    'cd sub && echo "$(cat only.md)" | gh pr comment 1 -F -',
+])
+def test_each_path_resolves_files_under_the_tracked_cd(live, command):
+    assert run(command, cwd=live), command
+
+
+def test_a_prefix_before_something_other_than_a_fence_stays_part_of_the_body(live):
+    fence = "```\n%s\n```" % APPROVE
+    assert run("gh pr comment 1 --body " + q("x=" + fence), cwd=live)
+    assert run("gh pr comment 1 --body=" + q("x=" + fence), cwd=live)
+    assert run("gh pr comment 1 --body " + q("-q" + fence), cwd=live)
+    (live / "prefix.md").write_text("x=" + fence)
+    assert run("gh pr comment 1 --body-file prefix.md", cwd=live)
+
+
+def test_unclosed_substitutions_are_linear_not_quadratic(live):
+    import time
+    t0 = time.time()
+    reason = run("gh pr comment 1 --body-file live.md " + "$(" * 8000, cwd=live)
+    assert reason and time.time() - t0 < 10
+
+
+def test_a_json_payload_padded_past_the_cap_is_still_decoded(live):
+    (live / "pad.json").write_text(json.dumps({"x": "y" * 80000, "body": APPROVE}))
+    assert run("gh api repos/o/r/issues/1/comments --input pad.json", cwd=live)
 
 
 def test_a_budget_spent_on_feeders_never_hides_the_write_operands(live):

@@ -23,9 +23,10 @@ Denied: a command that runs a `gh` write and sends a LIVE APPROVE marker.
     `-F body=@F`, `--input F`, `-T F`, `$(cat F)`, `$(< F)`, relative to the cwd after `cd`), its `< F` and `<<<` operands,
     and, from the commands piped into it (`echo M |`, `cat F |`, `jq --rawfile b F |`, `<(cat F)`, `xargs`), their words and
     the files those words name (40 incidental files at most, spent after the write's own operands). A file read by a FILTER
-    (`$(grep M report.md)`, `grep M report.md | gh ...`, also an unquoted `$( )`) is judged with fences ignored: the filter
-    pulls the marker line out of its fence. JSON payloads are also scanned as their decoded strings (`\\u003c!--`); a flag prefix
-    glued to a fenced body (`--body="```..."`) is not part of the body; heredoc bodies are scanned as their own text.
+    (`$(grep M report.md)`, `grep M report.md | gh ...`, `<F tr`, also an unquoted `$( )`) is judged with fences ignored: the filter
+    pulls the marker line out of its fence (so a filter over a report with a fenced real-head APPROVE is denied even if its
+    output omits the line); a `$( )` anywhere in a command that holds a write is read (`BODY="$(cat raw.md)"; gh ... "$BODY"`). JSON payloads are also scanned as their decoded strings (`\\u003c!--`); a flag prefix
+    glued directly before a fence (`--body="```..."`) is not part of the body (the write's own words only); heredoc bodies are scanned as their own text.
 
 "Live" is decided by the checker's own parser (`adversary_marker._strip_code`, `_marker_spans`, `MARKER_START_RE`), so what
 this gate lets through is what the Action reads as documentation:
@@ -80,11 +81,11 @@ PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
 APPROVE_WORD = re.compile(r"approve", re.IGNORECASE)
-CAT_SUB = re.compile(r"""(?:\$\(|`)\s*(?:cat\s+(?:--\s+)?|<\s*)['"]?([^\s()'"`]+)""")
 EXPANDED_MARKER = re.compile(r"<!--\s*adversary[-_ ]?verdict[^>\n]{0,400}[$`]", re.IGNORECASE)
 VERDICT_VALUE = re.compile(r"""verdict\\?["']?\s*:\s*\\?["']?([^,}"'\s\\]*)""", re.IGNORECASE)   # quotes optional: the shell may eat them
 MARKER_NAME = re.compile(r"adversary[-_ ]?verdict\s*:?\s*v?\d*", re.IGNORECASE)
-FENCE_PREFIX = re.compile(r"(?:--[A-Za-z][\w-]*=|-[A-Za-z]|[A-Za-z_][\w-]*=)+(?=```|~~~)")
+FLAG_PREFIX = re.compile(r"(?:--(?:body|comment)=|-[bF]|-[fF][A-Za-z_]*=)(?=```|~~~)")   # glued before a fence: not part of the body
+KEY_PREFIX = re.compile(r"[A-Za-z_][\w-]*=(?=```|~~~)")
 PLAIN_FEEDERS = {"cat", "echo", "printf"}
 ENV_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 U_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{4}")
@@ -135,13 +136,13 @@ def live_approve(text: str, am, raw: bool = False) -> str:
     stripped = text if raw else am._strip_code(text)
     spans = am._marker_spans(stripped)
     for _start, js, je in spans:
-        raw = text[js:je]
-        if am._is_docs_template_json(raw):
+        body = text[js:je]
+        if am._is_docs_template_json(body):
             continue
         try:
-            doc = json.loads(raw, object_pairs_hook=am._strict_object)
+            doc = json.loads(body, object_pairs_hook=am._strict_object)
         except ValueError:
-            if APPROVE_WORD.search(raw):
+            if APPROVE_WORD.search(body):
                 return "an `adversary-verdict:v1` marker that does not parse as JSON and mentions APPROVE"
             continue
         if not isinstance(doc, dict):
@@ -341,10 +342,7 @@ class Scan:
         outside the byte budget but capped in count and bytes (past the cap `truncated` is set and the text is not read)."""
         if not text:
             return
-        text = text[:MAX_TEXT]
-        m = FENCE_PREFIX.match(text)
-        if m:                                  # `--body="```...` / `body=```...`: the flag's prefix is not part of the body
-            text = text[m.end():]
+        full, text = text, text[:MAX_TEXT]
         if operand:
             if self.forced >= MAX_FORCED or self.forced_bytes + len(text) > MAX_FORCED_BYTES:
                 self.truncated = True
@@ -355,8 +353,8 @@ class Scan:
             return
         self.budget -= len(text)
         (self.raw_texts if raw else self.texts).append(text)
-        if text.lstrip()[:1] in ("{", "[") and U_ESCAPE.search(text):   # JSON: GitHub stores the decoded strings (`\u003c` is `<`)
-            try:
+        if full.lstrip()[:1] in ("{", "[") and (len(full) > MAX_TEXT or U_ESCAPE.search(full)):
+            try:                               # JSON: GitHub stores the decoded strings (`\\u003c` is `<`), each its own text
                 strings = []
 
                 def leaves(node, depth=0):
@@ -368,8 +366,8 @@ class Scan:
                     elif depth < 8 and isinstance(node, list):
                         for v in node:
                             leaves(v, depth + 1)
-                leaves(json.loads(text))
-                self.texts.append("\n".join(strings)[:MAX_TEXT])
+                leaves(json.loads(full))
+                self.texts.extend(t[:MAX_TEXT] for t in strings[:200])
             except ValueError:
                 pass
 
@@ -408,16 +406,18 @@ def substitutions(word: str):
 
 
 def merge_substitutions(tokens):
-    """Rejoin an UNQUOTED `$( ... )` (shlex splits it at the parentheses) into the one word the shell makes of it, so
-    `--body $(grep M report.md)` is the write's argument, not a separate command."""
+    """Rejoin an UNQUOTED `$( ... )`, `$(( ... ))` or backtick pair (shlex splits them at the punctuation) into the one word
+    the shell makes of it, so `--body $(grep M report.md)` is the write's argument, not a separate command. Linear: after
+    the first group that never closes the rest is left as it is."""
     out, i = [], 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok == "(" and out and out[-1] and not set(out[-1]) <= set(PUNCT) and out[-1].endswith("$"):
-            depth, j, inner, rest = 1, i + 1, [], ""
+        opener = tok and set(tok) == {"("} and out and out[-1] and not set(out[-1]) <= set(PUNCT) and out[-1].endswith("$")
+        if opener or tok == "`":
+            depth, j, inner, rest = (len(tok) if opener else 1), i + 1, [], ""
             while j < len(tokens) and depth:
                 t = tokens[j]
-                if t and set(t) <= set(PUNCT):
+                if opener and t and set(t) <= set(PUNCT):
                     piece = ""
                     for k, ch in enumerate(t):
                         depth += (ch == "(") - (ch == ")")
@@ -427,30 +427,58 @@ def merge_substitutions(tokens):
                         piece += ch
                     if piece:
                         inner.append(piece)
+                elif not opener and t and set(t) <= set(PUNCT) and "`" in t:
+                    piece, rest, depth = t[:t.index("`")], t[t.index("`") + 1:], 0
+                    if piece:
+                        inner.append(piece)
+                elif t and set(t) <= set(PUNCT):
+                    inner.append(t)
                 else:
                     inner.append(shlex.quote(t))
                 j += 1
-            if depth == 0:
-                out[-1] = out[-1] + "(" + " ".join(inner) + ")"
-                if rest:
-                    out.append(rest)
-                i = j
-                continue
+            if depth != 0:
+                out.extend(tokens[i:])         # never closed: nothing after it can close either
+                break
+            word = ("(" + " ".join(inner) + ")") if opener else ("`" + " ".join(inner) + "`")
+            if opener:
+                out[-1] = out[-1] + word
+            else:
+                out.append(word)
+            if rest:
+                out.append(rest)
+            i = j
+            continue
         out.append(tok)
         i += 1
     return out
 
 
-def filter_files(word: str):
-    """Words inside the `$( ... )`/backticks of `word` that a FILTER (anything but a lone `cat F` / `< F`) may read."""
-    out = []
+def sub_files(word: str):
+    """(files read verbatim, files read through a filter) named inside the `$( ... )`/backticks of `word`: a lone
+    `cat F ...` or `< F` keeps the file's fence; anything else (grep, sed, head, `<F tr`, a pipe) is a filter."""
+    plain, filt = [], []
     for inner in substitutions(word):
         toks = tokenize(inner)[0]
         words = [t for t in toks if t and not set(t) <= set(PUNCT)]
         piped = any(t and set(t) <= set(PUNCT) and "|" in t for t in toks)
-        if not piped and (inner.lstrip().startswith("<") or (words and os.path.basename(words[0]) == "cat")):
-            continue
-        out.extend(words[1:] if words else [])
+        m = re.fullmatch(r"\s*<\s*(\S+)\s*", inner)
+        if m:
+            plain.append(m.group(1).strip("'\""))
+        elif not piped and words and os.path.basename(words[0]) == "cat":
+            plain.extend(w for w in words[1:] if not w.startswith("-"))
+        else:
+            filt.extend(words)
+    return plain, filt
+
+
+def prefix_stripped(words):
+    """The texts a write's words send: a flag prefix glued before a fence (`--body="```...`, `-b"```...`, `-f body=```...`)
+    is not part of the body (a prefix before anything else is, and stays)."""
+    out, prev = [], ""
+    for w in words:
+        m = FLAG_PREFIX.match(w) if w.startswith("-") else (KEY_PREFIX.match(w) if prev in ("-f", "-F", "--field", "--raw-field") else None)
+        out.append(w[m.end():] if m else w)
+        prev = w
     return out
 
 
@@ -487,10 +515,18 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             collect(body, cwd, scan, depth + 1)
     pipes = split_pipelines(tokens, cwd)
 
+    def subs(w: str, at: str) -> None:
+        """Files a `$( ... )`/backtick inside `w` reads: a lone `cat F` keeps its fence, a filter's output does not."""
+        if "$(" in w or "`" in w:
+            plain, filt = sub_files(w)
+            for f in plain:
+                scan.add(scan.read(f, at), operand=True)
+            for f in filt:
+                scan.add(scan.read(f, at), operand=True, raw=True)
+
     def feeder(w: str, seg, raw: bool = False) -> None:
         scan.add(w)
-        for m in CAT_SUB.finditer(w):
-            scan.add(scan.read(m.group(1), seg["cwd"]))
+        subs(w, seg["cwd"])
         if scan.incidental < MAX_FILES and len(w) < 4096 and "\n" not in w:
             content = scan.read(w.split("=", 1)[-1] if "=" in w else w, seg["cwd"])
             if content:
@@ -527,12 +563,9 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                                            for seg in feeders)
         for seg, g in gh:
             if g and is_write(g[0], g[1], g[2]):
-                for a in g[2]:
-                    scan.add(a, force=True)
-                    for m in CAT_SUB.finditer(a):
-                        scan.add(scan.read(m.group(1), seg["cwd"]), operand=True)
-                    for f in filter_files(a):
-                        scan.add(scan.read(f, seg["cwd"]), operand=True, raw=True)
+                for a, shown in zip(g[2], prefix_stripped(g[2])):
+                    scan.add(shown, force=True)
+                    subs(a, seg["cwd"])
                 for f in operand_files(g[0], g[2]):
                     scan.add(scan.read(f, seg["cwd"]), operand=True)
                 for w in seg["words"][:g[3]]:  # `find . -name F -exec gh ...`, `xargs`: words before gh may name files
@@ -540,8 +573,6 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             else:                              # a feeder: echo/printf words, cat F, jq --rawfile b F
                 for w in seg["words"]:
                     feeder(w, seg, raw=filtered)
-                    for f in filter_files(w):
-                        scan.add(scan.read(f, seg["cwd"]), operand=True, raw=True)
             for f in seg["stdin"]:
                 scan.add(scan.read(f, seg["cwd"]), operand=True, raw=filtered and not (g and is_write(g[0], g[1], g[2])))
             for h in seg["here"]:
@@ -549,10 +580,12 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
     if not scan.token_write and loose_write(cleaned):
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
-        for w in words_all:                    # a body file or variable the same command writes first
-            scan.add(w)
+        for w, shown in zip(words_all, prefix_stripped(words_all)):   # a body file or variable the same command writes first
+            scan.add(shown)
+            subs(w, cwd)                       # `BODY="$(cat raw.md)"; gh ... "$BODY"`
         for body, _head in bodies:
             scan.add(body)
+            subs(body, cwd)                    # an unquoted heredoc expands its `$( )` lines
 
 
 def judge(command: str, cwd: str, am_loader) -> str:
