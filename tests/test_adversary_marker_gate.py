@@ -1039,6 +1039,18 @@ G = "gh pr create --body-file b.md"
     "f() { cd decoy; }; cd sub; " + G,                                                      # a `{` after `)` may be a function body
     "cd decoy ; popd; cd sub; " + G,
     "pushd decoy; pushd; cd sub; " + G,
+    "{ cd decoy; } | cat; cd sub; " + G,                                                   # r6 A2: a `{ }` group as a pipeline element / before `&`
+    "{ cd decoy && make; } 2>&1 | tee /dev/null; cd sub; " + G,
+    "{ cd decoy; } > /dev/null | cat; cd sub; " + G,
+    "{ { cd decoy; }; } | cat; cd sub; " + G,
+    "{ cd decoy; } & cd sub; " + G,
+    "pushd decoy; pushd +1; cd sub; " + G,                                                 # r6 A6a: an entry of the directory stack
+    "pushd decoy; pushd -0; cd sub; " + G,
+    "cd decoy extra; cd sub; " + G,                                                        # r6 A6b: `cd a b` fails in bash, substitutes in zsh
+    "if false; then cd decoy; else :; fi; bash -c 'cd sub && " + G + "'",                  # r6 A3: a nested shell inherits the candidate set
+    "false && cd decoy; bash -c \"cd sub; " + G + "\"",
+    "false && cd decoy; eval 'cd sub && " + G + "'",
+    "if false; then cd decoy; else cd .; fi; bash <<'EOS'\ncd sub\n" + G + "\nEOS\n",
 ])
 def test_a_cd_in_a_body_that_may_not_run_still_leaves_the_read_on_the_live_file(live, command):
     """Adversary r5 A2: compound bodies, multi-statement bodies, newline after `&&`, case arms, pipelines, `&` and `popd`."""
@@ -1047,6 +1059,31 @@ def test_a_cd_in_a_body_that_may_not_run_still_leaves_the_read_on_the_live_file(
     assert run(command, cwd=live), command
     _top_tree(live, live_is_sub=False)
     assert run(command, cwd=live) is None, command
+
+
+def test_one_long_dotdot_target_over_a_full_candidate_set_is_charged_by_its_length_not_timed_out(live):
+    """Adversary r6 A1: `realpath` of `x/../x/../...` applied to 127 candidates cost 36 s while MAX_WORK charged 127; now charged per component."""
+    for i in range(gate.MAX_DIRS - 1):
+        (live / ("e%d" % i)).mkdir(exist_ok=True)
+    long_target = "/".join(["x", ".."] * 40000)[:90000]
+    command = "".join("false && cd e%d; " % i for i in range(gate.MAX_DIRS - 1)) + "cd " + long_target + "; cd sub; " + G
+    result, took = _seconds(command, live)
+    assert took < 5, took
+    assert result and "can follow in time" in result
+    mid = "/".join(["x", ".."] * 900)[:3900]                          # under MAX_PATH: only the per-component charge catches it
+    assert 3000 < len(mid) < gate.MAX_PATH
+    command = "".join("false && cd e%d; " % i for i in range(gate.MAX_DIRS - 1)) + "cd " + mid + "; " + G
+    result, took = _seconds(command, live)
+    assert took < 5 and result and "can follow in time" in result, (took, result)
+    huge = "cd " + "/".join(["y"] * 3000) + "; " + G                    # a single target past MAX_PATH is a deny, before it is joined anywhere
+    assert "can follow in time" in (run(huge, cwd=live) or "")
+
+
+def test_a_script_heredoc_after_a_taken_branch_runs_under_that_branchs_directory(live):
+    """Adversary r6 A3c: the representative path ends on the branch that did not run; the heredoc's own `cd sub` needs the taken one too."""
+    _top_tree(live, live_is_sub=False)
+    (live / "decoy" / "sub" / "b.md").write_text(APPROVE)
+    assert run("if true; then cd decoy; else cd .; fi; bash <<'EOS'\ncd sub\n" + G + "\nEOS\n", cwd=live)
 
 
 def test_a_cd_in_a_taken_body_is_followed_into_the_candidate_that_is_not_the_representative_path(live):

@@ -277,11 +277,17 @@ class History(dict):
         self.work = 0                           # sum over the command's `cd`s of the candidates each one was applied to
         self.dirs = {}                          # path -> os.path.isdir, once per command
         self.known = {}                         # cwd -> set(self[cwd]), so `note` costs the new directories only
+        self.real = {}                          # path -> os.path.realpath, once per command
 
     def isdir(self, path: str) -> bool:
         if path not in self.dirs:
             self.dirs[path] = os.path.isdir(path)
         return self.dirs[path]
+
+    def realpath(self, path: str) -> str:
+        if path not in self.real:
+            self.real[path] = os.path.realpath(path)
+        return self.real[path]
 
     def note(self, cur: str, visited) -> None:
         have = self.setdefault(cur, [])
@@ -324,16 +330,20 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     that moved every candidate. A sure `cd` replaces the set by its targets; any other adds its targets to the old set. A target is applied to
     every candidate (normalised, lexical `..`; when it holds `..`, the physical `realpath` too, for `set -P`/`cd -P` through a symlink), and a
     candidate for which it is no directory stays where it was (the `cd` fails). `popd` and a bare `pushd` add every candidate seen so far.
-    Not modelled (so a documented limit): a `cd` in a shell function, `eval`, `trap`, a directory that an earlier command of the same line
-    creates. `history` (a History) gets, for each tracked cwd, the candidates by then; past MAX_DIRS candidates or MAX_WORK of `cd` work it sets
+    Not modelled (so a documented limit): a `cd` in a shell function, `trap`, a `#` comment, a quoted reserved word, `time -p if`, zsh `repeat`,
+    a directory named `2`, a directory that an earlier command of the same line creates. `history` (a History) gets, for each tracked cwd, the candidates by then; past MAX_DIRS candidates or MAX_WORK of `cd` work it sets
     `overflow` (the write is then denied) and stops tracking."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
-    cands = list(dict.fromkeys([cwd, *bases]))   # `bases`: the directories an enclosing script heredoc runs under
+    cands = list(dict.fromkeys([cwd, *bases]))   # `bases`: the directories an enclosing nested shell runs under
+    if len(cands) > MAX_DIRS:
+        cands = cands[:MAX_DIRS]
+        if history is not None:
+            history.overflow = True
     seen = list(cands)                          # every directory that was ever a candidate (for `popd`)
     want_dir = redirect = None
     no_more_options = pushd_n = False
     last_sep, last_cd, this_cd, snap = "", None, None, None   # last_cd: did the previous segment's `cd` move every candidate surely (True)
-    comp, braces, case_marks, stack = 0, [], [], []
+    comp, braces, case_marks, stack, group_snap = 0, [], [], [], None   # braces: [(conditional?, (cur, cands) at the `{`)]
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
     dirs = history.isdir if history is not None else os.path.isdir
 
@@ -353,7 +363,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             pipe = Pipeline()
 
     def placed_unsure():
-        return (comp > 0 or any(braces) or any(w in UNSURE_WORDS for w in seg["words"]) or "||" in last_sep
+        return (comp > 0 or any(b[0] for b in braces) or any(w in UNSURE_WORDS for w in seg["words"]) or "||" in last_sep
                 or "|" in last_sep.replace("||", "") or ("&&" in last_sep and last_cd is not True))
 
     def overflowed():
@@ -370,18 +380,21 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
                 history.overflow = True
             del cands[MAX_DIRS:]
 
-    def apply(target, kind):
-        """One `cd`/`pushd` to `target` (a word, or "" for HOME)."""
+    def apply(target, kind, extra=False):
+        """One `cd`/`pushd` to `target` (a word, or "" for HOME); `extra`: more operands follow (`cd a b` fails in bash, substitutes in zsh)."""
         nonlocal cur, cands, this_cd, snap
         if overflowed():                        # past an overflow the verdict is a deny: stop paying for tracking
             return
+        if len(target) > MAX_PATH and history is not None:
+            history.overflow = True
+            return
+        nd = Path(home_expanded((expand(target, assigned) if expand else target) if target else "~"))
         if history is not None:
-            history.work += len(cands)
+            history.work += len(cands) * max(1, len(nd.parts))      # the stat/realpath work scales with the target's components too
             if history.work > MAX_WORK:
                 history.overflow = True
                 return
-        nd = Path(home_expanded((expand(target, assigned) if expand else target) if target else "~"))
-        unsure = pushd_n or placed_unsure()
+        unsure = pushd_n or extra or placed_unsure()
         if snap is None:
             snap = (cur, list(cands))
         moved, clean = [], True
@@ -389,7 +402,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             joined = nd if nd.is_absolute() else Path(v) / nd
             options = [os.path.normpath(str(joined))]
             if ".." in nd.parts:                # a physical shell (`cd -P`, `set -P`) resolves `link/..` through the link
-                options.append(os.path.realpath(str(joined)))
+                options.append(history.realpath(str(joined)) if history is not None else os.path.realpath(str(joined)))
             found = [m for m in dict.fromkeys(options) if dirs(m)]
             clean = clean and bool(found)
             moved += found or [v]
@@ -417,9 +430,11 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             want_dir = None
             no_more_options = pushd_n = False
             flat = tok.replace("&&", "").replace("||", "")
-            if snap is not None and ("|" in flat or "&" in flat):   # `cd d | cat`, `cd d &`: the shell here did not move
-                widen(snap[1])
-                cur = snap[0]
+            for held in (snap, group_snap):     # `cd d | cat`, `cd d &`, `{ cd d; } | tee`: the shell here did not move
+                if held is not None and ("|" in flat or "&" in flat):
+                    widen(held[1])
+                    cur = held[0]
+            group_snap = None
             if tok.strip("\n") == "" and seg_empty(seg) and ("&&" in last_sep or "||" in last_sep or "|" in last_sep):
                 continue                        # `false &&` NEWLINE `cd d`: the line continues, the boundary before it still holds
             last_sep, last_cd, this_cd, snap = tok, this_cd, None, None
@@ -441,6 +456,11 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             if tok == "--" and not no_more_options:
                 no_more_options = True
                 continue
+            if re.fullmatch(r"[+-]\d+", tok) and not no_more_options:     # `pushd +1`, `pushd -0`, zsh `cd +1`: an entry of the directory stack
+                widen(seen)
+                this_cd = False
+                want_dir = None
+                continue
             if tok.startswith("-") and tok != "-" and not no_more_options:
                 pushd_n = pushd_n or (want_dir == "pushd" and "n" in tok[1:])
                 continue                       # `cd -P DIR`, `cd -L -e DIR`: an option, the directory comes later
@@ -450,7 +470,9 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             want_dir = None
             no_more_options = False
             if tok != "-":                     # `cd -` is OLDPWD, which this command cannot name: the same limit as an unresolved `$D`
-                apply(tok, kind)
+                nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+                more = bool(nxt) and not set(nxt) <= set(PUNCT) and not (nxt.isdigit() and i + 2 < len(tokens) and set(tokens[i + 2]) <= set("<>"))
+                apply(tok, kind, extra=more)
             pushd_n = False
             continue
         lead = all(w in RESERVED or w in ("builtin", "command") for w in seg["words"])
@@ -470,9 +492,9 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
                 if tok == "esac" and case_marks:
                     case_marks.pop()
             elif tok == "{":
-                braces.append(placed_unsure() or ")" in last_sep)
+                braces.append((placed_unsure() or ")" in last_sep, (cur, list(cands))))
             elif tok == "}" and braces:
-                braces.pop()
+                group_snap = braces.pop()[1]
         if ASSIGN.match(tok) and all(ASSIGN.match(w) or w in ASSIGNERS for w in seg["words"]):
             assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
         seg["words"].append(tok)
@@ -608,8 +630,8 @@ class Scan:
     def reads(self, path: str, cwd: str) -> list[str]:
         """The file under the tracked cwd, the event cwd AND every candidate directory the shell may be in by then (`history`, from the
         candidate set of `split_pipelines`: a `cd` that may not run, or is not on straight-line code, adds its moved directories to the set
-        instead of replacing it; later relative `cd`s and this path resolve against all of them). Not covered: a `cd` in a shell function,
-        `eval`, `trap`, a target the gate cannot name (`cd $D` set elsewhere, `cd -`, `cd $(...)`) and a directory an earlier command of the
+        instead of replacing it; later relative `cd`s and this path resolve against all of them; a nested shell starts from that set). Not covered: a `cd` in a shell function,
+        `trap`, a `#` comment, a target the gate cannot name (`cd $D` set elsewhere, `cd -`, `cd $(...)`) and a directory an earlier command of the
         same line creates. Every distinct text is returned and scanned (am-02 round 1 L1; mg-51 r2 B1, r5)."""
         path = self.expand(path)
         dirs = [cwd]
@@ -772,7 +794,8 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
             segs = [seg["cwd"] for pipe in pipes for seg in pipe.segments]
             at = segs[-1] if segs else cwd
             scan.history.note(at, [cwd, *segs])
-            collect(body, at, scan, depth + 1, bases=[cwd, *segs])
+            held = [d for sg in segs for d in scan.history.get(sg, ())]
+            collect(body, at, scan, depth + 1, bases=list(dict.fromkeys([cwd, *segs, *held])))
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
@@ -807,13 +830,13 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
                 elif w == "eval":
                     code = [" ".join(words[k + 1:])]
                 if code and depth < 3:
-                    collect(code[0], seg["cwd"], scan, depth + 1)
+                    collect(code[0], seg["cwd"], scan, depth + 1, bases=scan.history.get(seg["cwd"], ()))
                     break
             if depth < 3:
                 for w in words:
                     if "gh" in w and ("$(" in w or "`" in w):
                         for inner in substitutions(w):
-                            collect(inner, seg["cwd"], scan, depth + 1)
+                            collect(inner, seg["cwd"], scan, depth + 1, bases=scan.history.get(seg["cwd"], ()))
         if not writes:
             continue
         scan.write = scan.token_write = True
