@@ -1055,7 +1055,7 @@ def test_native_code_pattern_keeps_lowercase_dotted_and_colon_codes(code):
     assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
 
 
-@pytest.mark.parametrize('code', ['ghp_' + 'a' * 36, 'sk-ant-abc123', 'github_pat_abc123', 'AKIA' + 'A' * 16, 'xoxb-1-abc'])
+@pytest.mark.parametrize('code', ['ghp_' + 'a' * 36, 'sk-ant-abc123', 'github_pat_abc123', 'AKIA' + 'A' * 16, 'xoxb-1-abc', 'ns:ghp_abc', 'x.sk-abc'])
 def test_native_code_shaped_like_a_bare_token_is_not_recorded(code):
     assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
 
