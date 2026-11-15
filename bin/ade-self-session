@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """Explicit native self-session operations (local daemon only).
 
-ade-self-session handoff --checkpoint FILE --quiesced [--thinking LEVEL]
+ade-self-session handoff --checkpoint FILE --quiesced [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ade-self-session compact --checkpoint FILE --request-id TOKEN
 ade-self-session status|reconcile --record FILE
 ade-self-session finish --record FILE [--stable S] [--wait-timeout S] [--poll S]
@@ -34,6 +34,8 @@ def main():
         if command == 'handoff':
             q.add_argument('--mode', choices=('plan', 'read-only', 'dontAsk'), help='explicit operator-requested restrictive successor mode; must exist in native catalog')
             q.add_argument('--thinking', metavar='LEVEL', help='successor thinking option ID (for example high); default: the predecessor\'s own level when it has an explicit one')
+            q.add_argument('--title', help='successor title; default: the predecessor\'s own name (a lead keeps its name through every handoff)')
+            q.add_argument('--role', help='ade.role label for the successor; default: the one the predecessor\'s handoff record carried (Paseo\'s CLI cannot read labels back, so a chain\'s first handoff names it here)')
             q.add_argument('--quiesced', action='store_true', help='attest other jobs/writes finished; successor waits for retirement')
         else:
             q.add_argument('--request-id', required=True, help='reuse on retry; new ID only for a deliberately new request')
@@ -51,7 +53,8 @@ def main():
     try:
         if a.command == 'handoff':
             result = service.handoff(a.checkpoint, quiesced=a.quiesced, requested_mode=a.mode,
-                                     requested_thinking=a.thinking)
+                                     requested_thinking=a.thinking, requested_title=a.title,
+                                     requested_role=a.role)
         elif a.command == 'compact':
             result = service.compact(a.checkpoint, request_id=a.request_id)
         elif a.command == 'accept':
