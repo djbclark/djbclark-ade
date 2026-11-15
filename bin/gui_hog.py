@@ -1,13 +1,18 @@
-"""gui_hog: the data and the trigger of the GUI-hog dialog (docs/gui-hog-dialog.md, PR 3a: dry-run only, no window).
+"""gui_hog: the data, the trigger and the actions' checks of the GUI-hog dialog (docs/gui-hog-dialog.md; PR 3a was dry-run only, PR 3b adds the
+window: the sampler launches `ADE GUI Hog.app` live, writes its snapshot, and `vet` checks every Quit before the Swift view acts).
 
 Stdlib only; it never imports `load-watch` (a broken sampler must not be able to break it, and PR 3c's thaw path will
 live here). `load-watch` imports it lazily, inside a `try`, in two places: `admit --wait` writes the hold registry
-(C2) and the 20 s sampler calls `tick` (C3, C4, C5). Nothing here signals, quits or freezes anything.
+(C2) and the 20 s sampler calls `tick` (C3, C4, C5). Nothing here signals, quits or freezes anything: the Swift dialog does Quit and
+Force Quit itself (`NSRunningApplication`), after `vet` here said the app may be touched.
 
     hold_write / hold_remove / read_holds     ~/.local/state/load-watch/held/<pid>-<start>.json: who waits on `admit` now (C2)
     parse_lsappinfo / group_apps              GUI apps from `lsappinfo list`, with their process trees (C3, C4b)
     should_show(held, apps, now, snooze, last_shown, cfg)   the one pure decision function (C4)
-    tick                                      the sampler's whole step: window, decision, dry-run line (K1)
+    tick                                      the sampler's whole step: window, decision, snapshot, dry-run line, launch (K1, C5)
+    build_snapshot / write_snapshot           gui-hog/snapshot.json, the dialog's only input (D3)
+    vet                                       the live checks before a Quit or Force Quit (D4: exit 0 / 3 protected / 4 identity / 5 hosts a build / 6 gone)
+    launch_dialog / bundle_state              start the bundle detached, never build at trigger time (C5, D2)
     status_lines                              `bin/gui-hog status`
 
 Untrusted text (J3): an app sets its own name and bundle id, `admit_caller` is a program name: `clean` strips control,
@@ -24,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 import calendar
+import fcntl
+import hashlib
 import time
 import unicodedata
 from pathlib import Path
@@ -169,12 +176,16 @@ def kernel_exe(pid):
         return None
 
 
+def _has_proc():
+    return os.path.isdir("/proc/self")
+
+
 def proc_start(pid):
     """A start-time string for `pid` that is stable for the life of the process (`ps -o lstart=` under LC_ALL=C TZ=UTC on macOS;
     /proc/PID/stat starttime on Linux), or None when it is gone or unreadable."""
     try:
         pid = int(pid)
-        if os.path.isdir("/proc/self"):
+        if _has_proc():
             fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
             return "proc:" + fields[19]
         env = dict(os.environ, LC_ALL="C", TZ="UTC")
@@ -267,21 +278,63 @@ def hold_remove(path):
         pass
 
 
-def read_holds(state_dir, now, sweep=True, start_of=proc_start, cap=HOLD_AGE_CAP_S, check_start=True):
+def proc_starts(pids):
+    """{pid: start string} for the pids that exist, from ONE `ps -o pid=,lstart= -p a,b,c` call on macOS (LC_ALL=C TZ=UTC; a missing pid
+    is simply absent and makes ps exit 1, which is not an error here) or one /proc read each on Linux. {} when ps fails or times out: the
+    callers treat an unknown start as "cannot tell", never as a different process."""
+    pids = [int(p) for p in pids]
+    if not pids:
+        return {}
+    if _has_proc():
+        return {p: s for p in pids if (s := proc_start(p))}
+    try:
+        env = dict(os.environ, LC_ALL="C", TZ="UTC")
+        r = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in pids)], capture_output=True, text=True, timeout=5, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            out[int(parts[0])] = " ".join(parts[1:])
+    return out
+
+
+def _sweep_tmp(d, now, max_age=120):
+    """Remove `.hold-*.tmp` files (a writer killed between mkstemp and os.replace) older than `max_age` seconds. Regular files only, by lstat."""
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for name in names:
+        if name.startswith(".hold-") and name.endswith(".tmp"):
+            try:
+                info = os.lstat(d / name)
+                if stat.S_ISREG(info.st_mode) and now - info.st_mtime > max_age:
+                    os.unlink(d / name)
+            except OSError:
+                pass
+
+
+def read_holds(state_dir, now, sweep=True, start_of=None, cap=HOLD_AGE_CAP_S, check_start=True):
     """The live holds. A file is stale (and swept when `sweep`) when its `updated` is more than max(60 s, 2 polls + 15 s) old or in the future,
     or, when `check_start`, its pid is gone or now has another start time (pid reuse; a start time that cannot be read, such as a `ps` timeout
-    under load, counts as stale only when the pid is dead). Only files named `<digits>-<slug>.json` are looked at, and never deleted otherwise;
+    under load, counts as stale only when the pid is dead). The start times of every candidate come from ONE `ps -p a,b,c` call
+    (`proc_starts`), or from `start_of(pid)` one by one when a caller passes it. Only files named `<digits>-<slug>.json` are looked at, and never deleted otherwise;
     the directory must be a real directory of this user; each file is read as a small regular file (no symlink, no FIFO, 64 KB cap); a file that
-    does not parse or has wrong types is skipped (and swept when older than 2 min by mtime). `refused_since` is clamped to [now - cap, now]:
-    a future or non-integer value counts as `now`."""
+    does not parse or has wrong types is skipped (and swept when older than 2 min by mtime); with `sweep`, a leftover `.hold-*.tmp` older than 2 min goes too.
+    `refused_since` is clamped to [now - cap, now]: a future or non-integer value counts as `now`."""
     d = held_dir(state_dir)
     out = []
     if not safe_dir(d):
         return out
+    if sweep:
+        _sweep_tmp(d, now)
     try:
         names = sorted(os.listdir(d))
     except OSError:
         return out
+    cands = []   # (path, record, stale-by-age)
     for name in names:
         if not _HOLD_NAME.match(name):
             continue
@@ -289,7 +342,7 @@ def read_holds(state_dir, now, sweep=True, start_of=proc_start, cap=HOLD_AGE_CAP
         try:
             rec = json.loads(read_small(p))
             pid, upd, poll = rec["pid"], rec["updated"], rec.get("poll_s", 15)
-            ok = (rec.get("v") == 1 and type(pid) is int and 0 < pid < 2 ** 31 and _fin(upd) and _fin(poll)
+            ok = (rec.get("v") == 1 and type(pid) is int and 1 < pid < 2 ** 31 and _fin(upd) and _fin(poll)
                   and isinstance(rec.get("start", ""), str) and isinstance(rec.get("refused", []), list))
             if not ok:
                 raise ValueError("shape")
@@ -301,9 +354,19 @@ def read_holds(state_dir, now, sweep=True, start_of=proc_start, cap=HOLD_AGE_CAP
                 pass
             continue
         stale = now - upd > max(HOLD_STALE_S, 2 * min(600, max(1, poll)) + 15) or upd > now + HOLD_STALE_S
+        cands.append((p, rec, stale))
+    starts = {}
+    if check_start:
+        want = [r["pid"] for _p, r, st in cands if not st and r.get("start", "")]
+        if start_of is None:
+            starts = proc_starts(want)
+        else:
+            starts = {pid: s for pid in want if (s := start_of(pid)) is not None}
+    for p, rec, stale in cands:
+        pid, upd = rec["pid"], rec["updated"]
         if not stale and check_start:
             rec_start = rec.get("start", "")
-            cur = start_of(pid) if rec_start else None
+            cur = starts.get(pid) if rec_start else None
             stale = (cur != rec_start) if cur is not None else not _alive(pid)
         if stale:
             if sweep:
@@ -384,6 +447,21 @@ class _App:
         self.build_cores = 0.0
 
 
+def argv_head_words(cmd):
+    """The program word and the first non-option word after it, as base names: `node --max-old-space-size=4096 /opt/bin/pi` is {node, pi}
+    (3a looked at the first two words only, so a leading node option hid the CLI). At most 8 words are scanned. Known limit: an option whose value is a
+    separate word (`--max-old-space-size 4096 /opt/bin/pi`) still takes the value for the script word, as load-watch's own cli_heads does."""
+    words = str(cmd).split()[:8]
+    if not words:
+        return set()
+    heads = {os.path.basename(words[0]).lstrip("-")}
+    for w in words[1:]:
+        if not w.startswith("-"):
+            heads.add(os.path.basename(w).lstrip("-"))
+            break
+    return heads
+
+
 # ---- grouping (C3, C4b) --------------------------------------------------------------------------------------------
 def _app_prefix(path):
     """The outermost `X.app` prefix of `path`, or None."""
@@ -435,8 +513,8 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
         cmd = table[pid][3] if pid in table else ""
         return os.path.basename(cmd.split()[0]) if cmd.split() else ""
 
-    def argv_heads(pid):   # the program and its first argument (`node /x/claude`), as load-watch's cli_heads: a CLI's kernel exe is often `node` or a version number
-        return {os.path.basename(w).lstrip("-") for w in (table[pid][3].split()[:2] if pid in table else [])}
+    def argv_heads(pid):   # the program and its script word (`node /x/claude`), as load-watch's cli_heads: a CLI's kernel exe is often `node` or a version number
+        return argv_head_words(table[pid][3] if pid in table else "")
 
     def is_agent(pid):
         return bool(agent_clis & (argv_heads(pid) | {pname(pid)}))
@@ -584,7 +662,7 @@ def window_update(st, t, apps, total_cores, cfg):
     meta = st.get("app_meta") if isinstance(st.get("app_meta"), dict) else {}
     for a in apps:
         if a["id"] in row:
-            meta[a["id"]] = {"n": clean(a["name"]), "b": clean(a["bundle_id"] or "", 80), "p": clean(a["bundle_path"] or "", 120)}
+            meta[a["id"]] = {"n": clean(a["name"]), "b": clean(a["bundle_id"] or "", 80), "p": clean(a["bundle_path"] or "", 200)}
     live = {pid for x in keep for pid in x["a"]}
     st["app_meta"] = {k: v for k, v in meta.items() if k in live}
 
@@ -594,9 +672,10 @@ def _fin(x):
 
 
 def window_means(st, t, cfg):
-    """[{id, name, bundle_id, bundle_path, cores_5m, rss_mb, protected, hosts_build}] from st["apps"]: cores are the mean over the
-    samples in the window (an app missing from a sample counts 0); RSS is the latest reading, and 0 for an app absent from the latest
-    sample (it has exited: its last reading must not keep the trigger alive until it ages out)."""
+    """[{id, name, bundle_id, bundle_path, cores_5m, cpu_now, rss_mb, present, protected, hosts_build}] from st["apps"]: cores are the mean over the
+    samples in the window (an app missing from a sample counts 0); RSS (an int, MB) is the latest reading, and 0 for an app absent from the latest
+    sample (it has exited: its last reading must not keep the trigger alive until it ages out). `present` says whether the app is in the newest
+    sample: 3b's dialog offers Quit and Force Quit only on a present row (an app that uses nothing also reads 0 MB, so rss_mb is no sign of it)."""
     apps = st.get("apps") if isinstance(st.get("apps"), list) else []
     win = [x for x in apps if isinstance(x, dict) and _fin(x.get("t")) and t - cfg["trigger"]["window_s"] <= x["t"] <= t
            and isinstance(x.get("a"), dict)]
@@ -616,8 +695,10 @@ def window_means(st, t, cfg):
     for pid, s in sums.items():
         it, m = last[pid], meta.get(pid, {}) if isinstance(meta.get(pid, {}), dict) else {}
         flag = it[2] if len(it) > 2 and isinstance(it[2], int) else 0
-        out.append({"id": pid, "name": clean(m.get("n", pid)), "bundle_id": clean(m.get("b", ""), 80), "bundle_path": clean(m.get("p", ""), 120),
-                    "cores_5m": s / n, "rss_mb": it[1] if pid in latest else 0, "protected": bool(flag & 1), "hosts_build": bool(flag & 2), "excluded": None})
+        here = pid in latest and isinstance(latest[pid], list) and len(latest[pid]) >= 2 and _fin(latest[pid][0]) and _fin(latest[pid][1])
+        out.append({"id": pid, "name": clean(m.get("n", pid)), "bundle_id": clean(m.get("b", ""), 80), "bundle_path": clean(m.get("p", ""), 200),
+                    "cores_5m": s / n, "rss_mb": int(it[1]) if here else 0, "cpu_now": float(latest[pid][0]) if here else 0.0, "present": bool(here),
+                    "protected": bool(flag & 1), "hosts_build": bool(flag & 2), "excluded": None})
     out.sort(key=lambda a: -a["cores_5m"])
     return out
 
@@ -691,7 +772,21 @@ def dry_run_path(state_dir):
 
 def dry_run_append(state_dir, entry):
     """Append one JSON line to dry-run.jsonl (mode 0600; rotated at 1 MB to one `.1` file). Raises on an OS error: the caller wraps it."""
-    p = dry_run_path(state_dir)
+    _jsonl_append(dry_run_path(state_dir), entry)
+
+
+def events_path(state_dir):
+    return gui_dir(state_dir) / "events.jsonl"
+
+
+def events_append(state_dir, event, **fields):
+    """One line in gui-hog/events.jsonl: what the operator clicked or what the sampler did (`by` says who). Strings are cleaned (J3). Raises on an OS error."""
+    entry = {"t": _iso(time.time()), "event": clean(event, 40)}
+    entry.update({k: (clean(v, 120) if isinstance(v, str) else v) for k, v in fields.items()})
+    _jsonl_append(events_path(state_dir), entry)
+
+
+def _jsonl_append(p, entry):
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not safe_dir(p.parent):
         raise OSError(f"{p.parent} is not a real directory of this user")
@@ -766,11 +861,311 @@ def enabled():
     return os.environ.get("LW_GUI_HOG", "").strip() != "0"
 
 
+# ---- the snapshot the dialog reads (D3) and the small state files it writes through us (D5) ---------------------------------
+SNAPSHOT_MAX_ROWS = 12
+DEFAULT_AGENT_CLIS = frozenset({"claude", "codex", "opencode", "omp", "pi", "gemini", "copilot", "cursor-agent", "agy",
+                                "crush", "kimi", "qwen", "goose", "aider", "amp", "droid", "kiro-cli", "paseo"})   # = load-watch AGENT_CLIS (a test pins it)
+VET_OK, VET_PROTECTED, VET_CHANGED, VET_BUILD, VET_GONE = 0, 3, 4, 5, 6
+
+
+def _gui_dir_ready(state_dir):
+    d = gui_dir(state_dir)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not safe_dir(d):
+        raise OSError(f"{d} is not a real directory of this user")
+    return d
+
+
+def atomic_json(path, obj):
+    """Write `obj` as JSON to `path` (mode 0600) through a unique temp file in the same directory, then os.replace (D5: a fixed temp name would let
+    two writers clobber each other). Raises on an OS error."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".gh-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_snooze(state_dir, now, minutes):
+    """Ignore (D5): snooze_until = now + minutes, in gui-hog/snooze.json. The sampler only reads it and clamps it to snooze_s."""
+    until = int(now + 60 * max(1, min(int(minutes), 24 * 60)))
+    atomic_json(_gui_dir_ready(state_dir) / "snooze.json", {"snooze_until": until})
+    return until
+
+
+def record_exit(state_dir, code, now):
+    """The dialog's own outcome (D5): gui-hog/last-exit.json. The sampler reads it on its next tick."""
+    atomic_json(_gui_dir_ready(state_dir) / "last-exit.json", {"code": int(code), "at": int(now), "by": "dialog"})
+
+
+def read_last_exit(state_dir):
+    try:
+        if not safe_dir(gui_dir(state_dir)):
+            return None
+        r = json.loads(read_small(gui_dir(state_dir) / "last-exit.json"))
+        return r if isinstance(r, dict) and type(r.get("code")) is int and _fin(r.get("at")) else None
+    except Exception:  # noqa: BLE001 - a corrupt file is no exit record
+        return None
+
+
+def parse_lstart(text):
+    """Epoch seconds of a `ps -o lstart=` string (C locale, UTC), or None (also for the Linux `proc:` form)."""
+    try:
+        return calendar.timegm(time.strptime(" ".join(str(text).split()), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def window_total(st, t, cfg):
+    """The 5-minute mean of the machine's total cores (the header's sliding average, B2), or None without samples."""
+    win = [x["cpu"] for x in (st.get("apps") if isinstance(st.get("apps"), list) else [])
+           if isinstance(x, dict) and _fin(x.get("t")) and _fin(x.get("cpu")) and t - cfg["trigger"]["window_s"] <= x["t"] <= t]
+    return sum(win) / len(win) if win else None
+
+
+def build_snapshot(means, held, now, cfg, *, load=None, ncpu=None, cpu_5m=None, starts=None, manual=False):
+    """The dialog's whole input (D3, E1, E2): header numbers, one line per held build, the rows (busiest first, up to 12, then `more`) and the
+    protected-hidden count. No command lines, only cleaned text. A row carries `present` (the app is in the newest sample): the dialog offers
+    Quit and Force Quit on a present row that does not host a build, and nowhere else. `starts` maps a root pid to its live start string."""
+    tr = cfg["trigger"]
+    starts = starts or {}
+    rows = [a for a in means if not a["protected"] and (a["cores_5m"] >= tr["min_row_cores"] or a["rss_mb"] >= tr["min_row_rss_mb"])]
+    out = []
+    for a in rows[:SNAPSHOT_MAX_ROWS]:
+        pid = int(a["id"]) if str(a["id"]).isdigit() else 0
+        st_s = starts.get(pid) if a.get("present") else None
+        out.append({"app_id": str(a["id"]), "name": a["name"], "bundle_id": a["bundle_id"], "bundle_path": a["bundle_path"], "root_pid": pid,
+                    "root_start": st_s or "", "root_start_epoch": parse_lstart(st_s) if st_s else None,
+                    "cores_5m": round(a["cores_5m"], 2), "cpu_now": round(a.get("cpu_now", 0.0), 2), "rss_mb": int(a["rss_mb"]),
+                    "present": bool(a.get("present")), "hosts_build": bool(a.get("hosts_build")), "frozen": False})
+    return {"v": 1, "t": int(now), "manual": bool(manual),
+            "header": {"load": [round(x, 2) for x in load] if load else None, "ncpu": ncpu, "cpu_5m": None if cpu_5m is None else round(cpu_5m, 2)},
+            "holds": [{"caller": h["caller"], "held_s": int(max(0, now - h["refused_since"])), "refused": h["refused"]} for h in held],
+            "rows": out, "more": max(0, len(rows) - SNAPSHOT_MAX_ROWS), "protected_hidden": sum(1 for a in means if a["protected"]),
+            "rss_trigger": sum(a["rss_mb"] for a in means if not a["protected"]) >= tr["min_rss_mb"]}
+
+
+def write_snapshot(state_dir, snap):
+    atomic_json(_gui_dir_ready(state_dir) / "snapshot.json", snap)
+
+
+# ---- the bundle, the single-instance lock and the detached launch (C5, D2, D5) ----------------------------------------------------
+def bundle_dir():
+    return Path(os.environ.get("LW_GUI_HOG_BUNDLE") or HOME / ".local/libexec/djbclark-ade/ADE GUI Hog.app")
+
+
+def bundle_exe(bundle=None):
+    return Path(bundle or bundle_dir()) / "Contents" / "MacOS" / "ade-gui-hog"
+
+
+def swift_dir():
+    return ADE / "macos" / "gui-hog"
+
+
+BUILD_RECIPE = "1"   # bump when bin/ade-gui-build's flags change, so every bundle counts as stale once
+
+
+def source_hash(src=None):
+    """SHA-256 over the Swift sources and Info.plist (names and bytes, sorted) and the build recipe: what `ade-gui-build` stamps into the bundle."""
+    src = Path(src or swift_dir())
+    h = hashlib.sha256(BUILD_RECIPE.encode())
+    names = sorted([p.name for p in src.glob("*.swift")] + (["Info.plist"] if (src / "Info.plist").exists() else []))
+    if not names:
+        return None
+    for n in names:
+        h.update(n.encode() + b"\0" + (src / n).read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def bundle_state(bundle=None, src=None):
+    """("ok"|"missing"|"stale", detail). Never builds. A bundle whose stamp does not match the sources, or sources that cannot be read, is stale: no dialog."""
+    b = Path(bundle or bundle_dir())
+    exe = bundle_exe(b)
+    try:
+        if not (exe.is_file() and os.access(exe, os.X_OK)):
+            return "missing", f"no executable at {exe}"
+        want = source_hash(src)
+        have = (b / "Contents" / "Resources" / "source.sha256").read_text().strip()
+    except OSError as e:
+        return "stale", f"cannot read the stamp or the sources: {e}"
+    if want is None:
+        return "stale", "no Swift sources found"
+    return ("ok", "") if want == have else ("stale", "sources changed since the bundle was built (run bin/ade-gui-build)")
+
+
+def dialog_running(state_dir):
+    """True when a dialog holds gui-hog/dialog.lock (the dialog flocks it for its whole life: F8-13). A flock dies with its process, so a crash never
+    leaves a stale lock. False when the directory does not exist yet."""
+    d = gui_dir(state_dir)
+    if not safe_dir(d):
+        return False
+    try:
+        fd = os.open(d / "dialog.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def launch_dialog(state_dir, *, bundle=None, extra=(), popen=subprocess.Popen, python=None):
+    """Start the dialog detached and return (True, "") or (False, why). Argv list, no shell; `start_new_session`, `close_fds`, stdin and stdout
+    on /dev/null, stderr on gui-hog/dialog.log (mode 0600, cut at 256 KB); never waited on, so the build never waits on the dialog (C5). The
+    dialog gets the interpreter and `bin/gui-hog` to run its actions with (D4); it never builds anything here (D2)."""
+    state, detail = bundle_state(bundle)
+    if state != "ok":
+        return False, f"bundle-{state}"
+    if dialog_running(state_dir):
+        return False, "running"
+    d = _gui_dir_ready(state_dir)
+    logp = d / "dialog.log"
+    try:
+        if os.lstat(logp).st_size > 256 * 1024:
+            os.unlink(logp)
+    except OSError:
+        pass
+    try:   # O_NONBLOCK: a FIFO planted at dialog.log must fail the open, not block the sampler (adversary round 1, finding 4)
+        errfd = os.open(logp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        return False, "log-unsafe"
+    if not stat.S_ISREG(os.fstat(errfd).st_mode):
+        os.close(errfd)
+        return False, "log-unsafe"
+    try:
+        argv = [str(bundle_exe(bundle)), "--state-dir", str(state_dir), "--python", python or sys.executable,
+                "--gui-hog", str(Path(__file__).resolve().parent / "gui-hog"), *extra]
+        popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errfd, close_fds=True, start_new_session=True)
+    finally:
+        os.close(errfd)
+    return True, ""
+
+
+# ---- the live checks before a Quit or Force Quit (D4) --------------------------------------------------------------------------------
+def collect_table(timeout=15):
+    """(table, rss_kb, ttys) from one `ps` call, in the shape `group_apps` takes ({pid str: (ppid int, uid int, cores, command)}), or None when ps fails or times out."""
+    try:
+        r = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,rss=,tty=,command="], capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, LC_ALL="C"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    table, rss, ttys = {}, {}, set()
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 6 or not parts[0].isdigit():
+            continue
+        try:
+            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, parts[6] if len(parts) > 6 else "")
+            rss[parts[0]] = int(parts[4]) if parts[4].isdigit() else 0
+        except ValueError:
+            continue
+        if parts[5] not in ("??", "?", "-"):
+            ttys.add(parts[0])
+    return table, rss, ttys
+
+
+def verify_identity(pid, expect_start, *, start_of=proc_start, exe_of=kernel_exe):
+    """The pid-reuse check made right before an action (F3, carry-over e): the process exists, its executable path is readable and its start time
+    equals `expect_start` (a non-empty string from the snapshot's `root_start`). Returns (ok, reason)."""
+    if not expect_start:
+        return False, "no start time to compare (the app was not in the newest sample)"
+    live = start_of(pid)
+    if live is None:
+        return False, "the process is gone"
+    if live != expect_start:
+        return False, f"pid {pid} now has another start time (pid reuse)"
+    if not exe_of(pid):
+        return False, "no kernel executable path for the process"
+    return True, ""
+
+
+def vet(pid, expect_start, expect_bundle_id, expect_bundle_path="", *, state_dir, my_uid, cfg=None, agent_clis=DEFAULT_AGENT_CLIS,
+        start_of=proc_start, exe_of=kernel_exe, table_fn=collect_table, lsapps_fn=collect_lsappinfo, plist_of=_plist_id):
+    """May the dialog quit this app? (code, reason, info). Everything is read from the LIVE pid and the live process table, never from the snapshot
+    (a snapshot can be 20 s old or tampered with): 4 when the pid is not the process the snapshot saw (start time, bundle id or bundle path differ),
+    3 when the live bundle is protected or part of a build, 5 when the app hosts a build or terminal subtree (the walk of C4b, re-run now), 6 when the
+    process is gone or ps failed. 0 only when all of that is clean. The arguments are expected values: a mismatch is a refusal, never a lookup key."""
+    cfg = cfg or load_config()
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return VET_GONE, "bad pid", {}
+    if not 1 < pid < 2 ** 31:
+        return VET_GONE, "bad pid", {}
+    ok, why = verify_identity(pid, expect_start, start_of=start_of, exe_of=exe_of)
+    if not ok:
+        return (VET_GONE if "gone" in why else VET_CHANGED), why, {}
+    exe = exe_of(pid)
+    live_path = _app_prefix(_real(exe)) if exe else None
+    if not live_path:
+        return VET_CHANGED, "the live executable is not inside an .app bundle", {}
+    live_id = plist_of(live_path)
+    if (expect_bundle_id or "").casefold() != (live_id or "").casefold():
+        return VET_CHANGED, "the live bundle id differs from the one the dialog showed", {"bundle_id": clean(live_id or "", 80)}
+    if expect_bundle_path and _real(expect_bundle_path) != _real(live_path):
+        return VET_CHANGED, "the live bundle path differs from the one the dialog showed", {}
+    got = table_fn()
+    if got is None:
+        return VET_GONE, "ps failed or timed out: no signal is sent without a live look", {}
+    table, rss, ttys = got
+    holds = read_holds(state_dir, time.time(), sweep=False, check_start=False)
+    held_pids = [h["pid"] for h in holds] + [h["caller_pid"] for h in holds if h.get("caller_pid")]
+    apps = group_apps(table, rss, ttys, lsapps_fn(), exe_of=exe_of, my_uid=my_uid, held_pids=held_pids, agent_clis=agent_clis, cfg=cfg)
+    me = next((a for a in apps if a["root_pid"] == pid), None)
+    if me is None:
+        return VET_CHANGED, "the pid is not the root of a GUI app now", {}
+    info = {"bundle_id": clean(me["bundle_id"] or "", 80), "name": clean(me["name"])}
+    if me["protected"]:
+        return VET_PROTECTED, f"protected ({me['protected']})", info
+    if me["excluded"]:
+        return VET_PROTECTED, f"part of a build ({me['excluded']})", info
+    if me["hosts_build"]:
+        return VET_BUILD, "the app has a terminal or build inside: no actions", info
+    return VET_OK, "", info
+
+
+# ---- the sampler's step -------------------------------------------------------------------------------------------------------------
+def _manual_snapshot_live(state_dir, t):
+    """True while the operator's `gui-hog show` window is open on a snapshot it wrote (`manual`, under 30 min old): the sampler leaves that snapshot alone,
+    so a manual test on a small app (`show --all`) is not overwritten by the next tick's thresholds."""
+    try:
+        snap = json.loads(read_small(gui_dir(state_dir) / "snapshot.json"))
+        return bool(snap.get("manual")) and _fin(snap.get("t")) and 0 <= t - snap["t"] < 1800 and dialog_running(state_dir)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _note_exit(state_dir, gh, t):
+    """D5: log the dialog's own exit record once (`dialog-exit`); a no-GUI exit (69) keeps the trigger quiet for the rate limit."""
+    r = read_last_exit(state_dir)
+    if r and r["at"] > gh.get("exit_seen", 0):
+        gh["exit_seen"] = r["at"]
+        events_append(state_dir, "dialog-exit", code=r["code"], by="sampler", note={69: "no-gui", 70: "internal-error", 75: "already-running"}.get(r["code"], ""))
+        if r["code"] == 69:
+            gh["last_shown"] = t
+
+
 def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_cores=None, load1=None, dry=False,
-         cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=proc_start):
-    """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, and on a `show` write the dry-run
-    line (or, with `dry`, print it and change nothing but the window). Returns the decision dict, or None when LW_GUI_HOG=0.
-    The caller wraps it in a `try`: a failure here never stops load sampling."""
+         cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=None, launch=False, popen=subprocess.Popen,
+         load_avg=None, ncpu=None, gui_ok=None):
+    """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, keep the dialog's snapshot fresh while a hold
+    is active or the dialog runs (D3), and on a `show` write the dry-run line (kept in 3b: it is the count of how often the dialog fired) and,
+    with `launch`, start the dialog (C5, D6). With `dry` it prints the line and changes nothing but the window. Returns the decision dict, or None
+    when LW_GUI_HOG=0. The caller wraps it in a `try`: a failure here never stops load sampling."""
     if not enabled():
         for k in ("apps", "app_meta"):
             st.pop(k, None)
@@ -789,11 +1184,36 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
     gh = st["gui_hog"]
     means = window_means(st, t, cfg)
     d = should_show(held, means, t, effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"], record=True), gh.get("last_shown"), cfg)
+    if not dry:
+        try:
+            _note_exit(state_dir, gh, t)
+        except Exception as e:  # noqa: BLE001 - the dialog's bookkeeping never stops the decision
+            out(f"gui-hog: dialog exit record: {e!r}")
+        if (held or dialog_running(state_dir)) and not _manual_snapshot_live(state_dir, t):
+            try:
+                rows = [a for a in means if a.get("present") and not a["protected"]][:SNAPSHOT_MAX_ROWS * 2]
+                la = load_avg if load_avg is not None else (os.getloadavg() if hasattr(os, "getloadavg") else None)
+                write_snapshot(state_dir, build_snapshot(means, held, t, cfg, load=la, ncpu=ncpu or os.cpu_count(), cpu_5m=window_total(st, t, cfg),
+                                                         starts=proc_starts([int(a["id"]) for a in rows if str(a["id"]).isdigit()])))
+            except Exception as e:  # noqa: BLE001
+                out(f"gui-hog: snapshot: {e!r}")
     if d["show"]:
         line = would_show_line(d, means, t, load1, cfg, my_uid)
         if dry:
             out("gui-hog would show dialog: " + json.dumps(line, separators=(",", ":")))
         else:
+            ok = gui_session(my_uid) if gui_ok is None else gui_ok
+            line["launch"] = "off" if not launch else ("no-gui" if not ok else "pending")
+            gh["last_shown"] = t   # before the launch and the log line: a failure in either must not make the dialog return every 20 s
+            if launch and ok:
+                try:
+                    started, why = launch_dialog(state_dir, popen=popen)
+                except Exception as e:  # noqa: BLE001 - a failed launch is a log line, never a failed sample
+                    started, why = False, f"error: {e!r}"[:120]
+                line["launch"] = "started" if started else why
+                if why.startswith("bundle-") and t - gh.get("bundle_noted", 0) >= 86400:   # D2: one line a day for a missing or stale bundle
+                    gh["bundle_noted"] = t
+                    events_append(state_dir, "bundle-" + why[7:], by="sampler")
             dry_run_append(state_dir, line)
             gh["last_shown"] = t
     return d
@@ -807,7 +1227,9 @@ def status_lines(st, state_dir, now, cfg):
     ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
     snooze, last = effective_snooze(ghs, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"]), ghs.get("last_shown")
     d = should_show(held, means, now, snooze, last, cfg)
-    lines = [f"gui-hog (PR 3a, dry-run only: no window exists yet) {'ENABLED' if enabled() else 'OFF (LW_GUI_HOG=0)'}",
+    bstate, bdetail = bundle_state()
+    lines = [f"gui-hog (PR 3b: the window is live) {'ENABLED' if enabled() else 'OFF (LW_GUI_HOG=0)'}",
+             f"dialog bundle: {bstate}" + (f" ({bdetail})" if bdetail else "") + f" at {bundle_dir()}; dialog running: {'yes' if dialog_running(state_dir) else 'no'}",
              f"decision now: {'WOULD SHOW' if d['show'] else 'no'} ({d['reason']})",
              f"thresholds: hold {tr['hold_s']} s, sum of non-build apps >= {tr['min_cores']:g} cores (5-min mean) or >= {tr['min_rss_mb']} MB RSS; "
              f"rate {tr['rate_s']} s, Ignore snooze {tr['snooze_s']} s",
@@ -819,10 +1241,10 @@ def status_lines(st, state_dir, now, cfg):
     rows = [a for a in means if not a["protected"] and (a["cores_5m"] >= tr["min_row_cores"] or a["rss_mb"] >= tr["min_row_rss_mb"])]
     lines.append(f"apps (busiest first; cores = {tr['window_s']} s mean):")
     for a in rows[:12]:
-        lines.append(f"  {a['cores_5m']:5.2f} cores {a['rss_mb']:6d} MB  {a['name']}  [{a['bundle_id'] or 'no bundle id'}]"
+        lines.append(f"  {a['cores_5m']:5.2f} cores {int(a['rss_mb']):6d} MB  {a['name']}  [{a['bundle_id'] or 'no bundle id'}]"
                      + ("  has a build or terminal inside: no actions" if a["hosts_build"] else ""))
     if len(rows) > 12:
         lines.append(f"  +{len(rows) - 12} more")
     lines.append(f"{sum(1 for a in means if a['protected'])} protected apps hidden")
-    lines.append(f"dry-run log: {dry_run_path(state_dir)} ({count_dry_run(state_dir, 7, now)} would-show lines in the last 7 days)")
+    lines.append(f"dry-run log: {dry_run_path(state_dir)} ({count_dry_run(state_dir, 7, now)} would-show lines in the last 7 days); events: {events_path(state_dir)}")
     return lines
