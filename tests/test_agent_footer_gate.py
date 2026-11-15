@@ -578,3 +578,20 @@ def test_a_peers_pasted_report_label_does_not_hide_the_own_unfinished_report_beh
     prompt = f"Report path: {own}\n```\nthe peer's brief\nReport path: {peer}\n```\ntask\n## Delivery contract (shared footer)\n"
     out = run({"description": "Own", "prompt": prompt}, env=footer_env(tmp_path))
     assert out["permissionDecision"] == "deny" and str(own) in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("indent", ["    ", "\t", "        "])
+def test_a_peers_footer_pasted_indented_does_not_become_the_launchs_report_path(tmp_path, indent):
+    """Adversary r6 A1: a footer pasted as an indented block (4+ spaces or a tab, or a fence nested in a list item) is not
+    seen by the heading check, so the hook appends its own footer; its delivery line must not name the report either."""
+    peer = tmp_path / "peer-x-report.md"
+    block = "".join(f"{indent}{ln}\n" for ln in ("## Delivery contract (shared footer)", f"Write the full deliverable to `{peer}`."))
+    updated = _updated(tmp_path, f"review the worker's brief below\n\n{block}")
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated
+
+
+def test_a_fence_nested_in_a_list_item_with_a_peer_footer_is_not_the_launchs_report_path(tmp_path):
+    peer = tmp_path / "peer-x-report.md"
+    prompt = f"steps:\n\n1. paste:\n\n    ```\n    ## Delivery contract (shared footer)\n    Write the full deliverable to `{peer}`.\n    ```\n"
+    updated = _updated(tmp_path, prompt)
+    assert f"report: {tmp_path / 'reports' / 's1' / 'adv-report.md'}" in updated and f"report: {peer}" not in updated

@@ -152,7 +152,7 @@ def named_report(prompt):
             paths = _uniq(bare, REPORT_LABELLED.findall(outside))
         else:
             # a pasted peer footer's delivery line is the peer's report, not this prompt's (lead review B3)
-            theirs = set(FOOTER_DELIVERY.findall(prompt)) - set(FOOTER_DELIVERY.findall(outside))
+            theirs = set(FOOTER_DELIVERY.findall(prompt))      # no footer heading of its own outside pasted text: any delivery line is a peer's (fenced, quoted or indented)
             paths = (_uniq([x for x in REPORT_OWN.findall(prompt) if x not in theirs],
                            [x for x in REPORT_LABELLED.findall(prompt) if x not in theirs])
                      or _uniq([x for x in REPORT_IN_PROMPT.findall(prompt) if x not in theirs]))
