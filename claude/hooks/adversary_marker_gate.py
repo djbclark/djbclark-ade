@@ -25,7 +25,7 @@ Denied: a command that runs a `gh` write and sends a LIVE APPROVE marker.
     the files those words name (40 incidental files at most, spent after the write's own operands). A file read by a FILTER
     (`$(grep M report.md)`, `grep M report.md | gh ...`, `<F tr`, also an unquoted `$( )`) is judged with fences ignored: the filter
     pulls the marker line out of its fence (so a filter over a report with a fenced real-head APPROVE is denied even if its
-    output omits the line); a `$( )` anywhere in a command that holds a write is read (`BODY="$(cat raw.md)"; gh ... "$BODY"`). JSON payloads are also scanned as their decoded strings (`\\u003c!--`); a flag prefix
+    output omits the line); a `$( )` anywhere in a command that holds a write is read (`BODY="$(cat raw.md)"; gh ... "$BODY"`). JSON payloads (a leading UTF-8 BOM is dropped) are also scanned as their decoded strings (`\\u003c!--`), and a `gh api` write's texts again with GraphQL string escapes decoded (`-f query=`, `-F query=@file`); a flag prefix
     glued directly before a fence (`--body="```..."`) is not part of the body (a flag word of the write, never a flag's value); heredoc bodies are scanned as their own text.
 
 "Live" is decided by the checker's own parser (`adversary_marker._strip_code`, `_marker_spans`, `MARKER_START_RE`), so what
@@ -40,7 +40,7 @@ this gate lets through is what the Action reads as documentation:
 
 Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
 without naming `gh pr`/`gh api`); a body or body-file path held in a variable set in ANOTHER tool call (`F=raw.md; gh ... --body-file "$F"` in ONE command is seen);
-a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`; `D=sub; cd $D` in one command is expanded); `gh pr create --fill*`
+a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`, `cd -`; `D=sub; cd $D` in one command is expanded, in token order, and `cd -P`/`cd --`/`builtin cd`/`{ cd`/`if cd` are followed); a program's output or a decoder piped into `gh api --input -` (`base64 -d`, `gzip -dc`); `gh pr create --fill*`
 (the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
 (`$'\\x3c'`, a shell-built `verdict` key beside a decoy BLOCK); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
@@ -91,6 +91,9 @@ PLAIN_FEEDERS = {"cat", "echo", "printf"}
 ENV_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 U_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{4}")
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+ASSIGNERS = {"export", "local", "declare", "readonly", "typeset"}   # `export D=sub` assigns like `D=sub`
+GQL_ESCAPE = re.compile(r"\\(?:u\{([0-9a-fA-F]{1,8})\}|u([0-9a-fA-F]{4})|([\"\\/bfnrt]))")   # GraphQL string-literal escapes
+GQL_SIMPLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
 TEXT_VERBS = {"create", "new", "edit", "comment", "review", "close", "reopen"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 RESERVED = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "coproc", "time", "case", "in"}
@@ -148,13 +151,24 @@ def mentions_approve_decoded(text: str) -> bool:
     return False
 
 
+def graphql_unescape(text: str) -> str:
+    """`text` with its GraphQL string-literal escapes decoded once (`\\u003c` is `<`, `\\"` is `"`, `\\\\` is `\\`): GitHub's parser does
+    that to a `query` field before it stores a comment, so a marker spelled with them is live there (mg-51, queue Carried 52)."""
+    def one(m):
+        code = m.group(1) or m.group(2)
+        if code is None:
+            return GQL_SIMPLE.get(m.group(3), m.group(3))
+        return chr(int(code, 16)) if int(code, 16) <= 0x10FFFF else m.group()
+    return GQL_ESCAPE.sub(one, text)
+
+
 def live_approve(text: str, am, raw: bool = False) -> str:
     """A reason string when `text` carries a live APPROVE marker the Action could count (or cannot rule out), else "".
     `raw`: the text is a filter's output (`grep`/`sed`/`head` over a file), so a fence around the line in the file is gone."""
     if not VERDICT_WORD.search(text):
         return ""
     if len(VERDICT_WORD.findall(text)) > MAX_STARTS:
-        return "more than %d `adversary-verdict` marker starts" % MAX_STARTS if mentions_approve(text) else ""
+        return "more than %d `adversary-verdict` marker starts" % MAX_STARTS if mentions_approve_decoded(text) else ""
     stripped = text if raw else am._strip_code(text)
     spans = am._marker_spans(stripped)
     for _start, js, je in spans:
@@ -251,11 +265,15 @@ class Pipeline:
 
 def split_pipelines(tokens, cwd: str, expand=None):
     """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
-    `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`); a name it cannot
-    resolve stays literal, so the tracked cwd is wrong and the file read falls back to the event cwd (docs/code-review.md rule 14)."""
+    A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
+    skipped. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`; the assignment in
+    effect at that point, so a later `D=decoy` does not move it); a name it cannot resolve stays literal, so the tracked cwd is wrong
+    and the file read falls back to the event cwd (docs/code-review.md rule 14)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     want_dir = redirect = None
+    no_more_options = False
     stack = []
+    assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
 
     def new_seg():
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
@@ -275,6 +293,7 @@ def split_pipelines(tokens, cwd: str, expand=None):
                 redirect = "stdin" if tok == "<" else "here" if tok == "<<<" else "skip"
                 continue
             # a boundary: `|` (not `||`) and `<(`/`>(` keep the pipeline, everything else ends it
+            want_dir = no_more_options = False  # a bare `cd` (HOME) ends at the boundary; it must not take the next command for its directory
             for ch in tok:                     # a `cd` inside `( ... )` ends with it
                 if ch == "(":
                     stack.append(cur)
@@ -288,15 +307,22 @@ def split_pipelines(tokens, cwd: str, expand=None):
             redirect = None
             continue
         if want_dir:
-            want_dir = None
-            if not tok.startswith("-"):
-                nd = Path(os.path.expanduser(expand(tok) if expand else tok))
+            if tok == "--" and not no_more_options:
+                no_more_options = True
+                continue
+            if tok.startswith("-") and tok != "-" and not no_more_options:
+                continue                       # `cd -P DIR`, `cd -L -e DIR`: an option, the directory comes later
+            want_dir = no_more_options = False
+            if tok != "-":                     # `cd -` is OLDPWD, which this command cannot name: the same limit as an unresolved `$D`
+                nd = Path(os.path.expanduser(expand(tok, assigned) if expand else tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
                 seg["cwd"] = cur
             continue
-        if not seg["words"] and tok in ("cd", "pushd"):
+        if tok in ("cd", "pushd") and all(w in RESERVED or w in ("builtin", "command") for w in seg["words"]):
             want_dir = True
             continue
+        if ASSIGN.match(tok) and all(ASSIGN.match(w) or w in ASSIGNERS for w in seg["words"]):
+            assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
         seg["words"].append(tok)
     close(False)
     return pipes
@@ -360,7 +386,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env, self.deep = [], {}, False
+        self.raw_texts, self.env, self.deep, self.api_write = [], {}, False, False
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -378,6 +404,7 @@ class Scan:
             return
         self.budget -= len(text)
         (self.raw_texts if raw else self.texts).append(text)
+        full = full.lstrip("\ufeff")           # a UTF-8 BOM before the payload: json.loads refuses it, a JSON reader may not (mg-51)
         if full.lstrip()[:1] in ("{", "["):    # any JSON payload: a decoy code span or fence reaches across leaves of the raw text (am-02, M1)
             try:                               # JSON: GitHub stores the decoded strings (`\\u003c` is `<`), each its own text
                 strings = []
@@ -401,7 +428,7 @@ class Scan:
                         self.texts.append(t[:MAX_TEXT])
                     else:
                         rest.append(t)         # past the cap: joined as before, and denied beside APPROVE
-                        self.truncated = self.truncated or mentions_approve(t)
+                        self.truncated = self.truncated or mentions_approve_decoded(t)
                 for t in rest:                 # the other strings are joined into texts of at most MAX_TEXT, so none is lost
                     if len(chunk) + len(t) + 1 > MAX_TEXT and chunk:
                         self.texts.append(chunk)
@@ -414,9 +441,11 @@ class Scan:
             except RecursionError:             # nested past the parser's limit: no leaf can be read, so an APPROVE anywhere in the
                 self.deep = self.deep or mentions_approve_decoded(full)   # whole text is denied by `judge` (cq-45c, review D1)
 
-    def expand(self, path: str) -> str:
-        """`$NAME` / `${NAME}` in a path, from the assignments the same command makes."""
-        return ENV_REF.sub(lambda m: self.env.get(m.group(1) or m.group(2), m.group(0)), path) if "$" in path else path
+    def expand(self, path: str, first: dict | None = None) -> str:
+        """`$NAME` / `${NAME}` in a path, from the assignments the same command makes (`first`: those already in effect at this
+        point, which win over the command's last assignment of the name)."""
+        env = {**self.env, **(first or {})}
+        return ENV_REF.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), path) if "$" in path else path
 
     def reads(self, path: str, cwd: str) -> list[str]:
         """The file under the tracked cwd AND, when that differs from the event cwd, under the event cwd: a `cd` in a closed
@@ -616,6 +645,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                                            for seg in feeders)
         for seg, g in gh:
             if g and is_write(g[0], g[1], g[2]):
+                scan.api_write = scan.api_write or g[0] == "api"   # a GraphQL `query` is read decoded too (judge)
                 own.update(g[2])
                 for shown in prefix_stripped(g[2]):
                     scan.add(shown, force=True)
@@ -661,20 +691,26 @@ def judge(command: str, cwd: str, am_loader) -> str:
     if not scan.write:
         return ""
     am = am_loader()
-    for t in scan.texts:
+    # a `gh api` write may carry a GraphQL `query` (`-f query=...`, `-F query=@file`, a `--input` JSON leaf) whose string literals GitHub
+    # decodes, so every text with a backslash is also judged decoded (an extra look: a false deny at worst; mg-51, Carried 52). A
+    # whole JSON payload is not a query text (its leaves are, and are separate texts), so it is left alone.
+    def gql(texts):
+        return [graphql_unescape(t) for t in texts if "\\" in t and t.lstrip("\ufeff \t\r\n")[:1] not in ("{", "[")] if scan.api_write else []
+    decoded, decoded_raw = gql(scan.texts), gql(scan.raw_texts)
+    for t in scan.texts + decoded:
         found = live_approve(t, am)
         if found:
             return found
-    for t in scan.raw_texts:
+    for t in scan.raw_texts + decoded_raw:
         found = live_approve(t, am, raw=True)
         if found:
             return found
     if scan.deep:                              # judged on the whole payload, not on its MAX_TEXT cut or its channel (file, pipe, filter)
         return "a JSON payload nested past this gate's parser limit that mentions APPROVE (its leaves cannot be read)"
+    if scan.truncated and any(mentions_approve_decoded(t) for t in scan.texts):   # the unread rest may hold an escaped APPROVE (mg-51)
+        return "more operand text than this gate can scan in time (%d files or %d bytes) next to the word APPROVE" % (
+            MAX_FORCED, MAX_FORCED_BYTES)
     if any(mentions_approve(t) for t in scan.texts):
-        if scan.truncated:
-            return "more operand text than this gate can scan in time (%d files or %d bytes) next to the word APPROVE" % (
-                MAX_FORCED, MAX_FORCED_BYTES)
         for t in scan.texts:
             stripped = am._strip_code(t)
             for m in EXPANDED_MARKER.finditer(stripped):
