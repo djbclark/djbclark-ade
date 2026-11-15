@@ -856,6 +856,9 @@ def test_clock_text_is_new_york_12_hour_with_a_day_name_when_not_today():   # op
     assert gf.clock_text(due, same_day, zone="America/New_York") == gf.clock_text(due, same_day + 60, zone="America/New_York")   # no countdown
     assert gf.clock_text(1794744000, 1794744000, zone="UTC") == "12:00 PM" and gf.clock_text(1794700800, 1794700800, zone="UTC") == "12:00 AM"
     assert gf.clock_text(999999999999999, same_day) == "?" and gf.clock_text(1e13, same_day) == "?"   # far off: a hand-edited file, same as the Swift side
+    week = 7 * 24 * 3600   # the guard's edge, a time inside the zone's range (so no other check can hide a missing guard)
+    assert gf.clock_text(same_day + week, same_day, zone="UTC") not in ("?", "") and gf.clock_text(same_day + week + 1, same_day, zone="UTC") == "?"
+    assert gf.clock_text(same_day - week, same_day, zone="UTC") != "?" and gf.clock_text(same_day - week - 1, same_day, zone="UTC") == "?"
     assert gf.clock_text(float("nan"), same_day) == "?" and gf.clock_text(10**30, same_day) == "?"
     assert gf.clock_text(due, same_day, zone="Not/AZone").endswith("UTC")   # a zone that cannot load says so
 
