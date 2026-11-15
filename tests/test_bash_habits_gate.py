@@ -879,6 +879,18 @@ SEND_DENY = [
     'sudo -u me paseo send ab "`x`"',
     'deadline run --max 60 -- paseo send ab "`x`"',
     'A=1 B=2 paseo send ab "`x`"',
+    'case $a in x) paseo send ab "`y`";; esac',                    # gs-03: a case arm (first arm shares the `case` command)
+    'case $a in (x) paseo send ab "`y`";; esac',
+    'case $a in a) true;; x) paseo send ab "`y`";; esac',          # a later arm starts with the pattern word `x)`
+    'ssh host paseo send ab "`x`"',                                # the LOCAL shell runs the backtick before ssh starts
+    'gtimeout 600 paseo send ab "`x`"',
+    'noglob paseo send ab "`x`"',
+    'builtin command paseo send ab "`x`"',
+    'flock /tmp/f paseo send ab "`x`"',
+    'watch -n 60 paseo send ab "`x`"',
+    'direnv exec . paseo send ab "`x`"',
+    'op run -- paseo send ab "`x`"',
+    '{paseo send ab "`x`";}',                                      # no space: zsh reads `{paseo` as the command word
 ]
 
 
@@ -927,6 +939,10 @@ def test_gs02_backtick_or_dollar_paren_in_a_double_quoted_send_argument_is_denie
     'cmd paseo send "`x`"',
     'A=1 ls paseo send "`x`"',
     'echo {a,b} "`x`"; paseo send ab ok',           # a brace word is not a group
+    'echo x) paseo send "`y`"',                     # gs-03: `echo` is not a sender, whatever follows
+    'f) paseo send ab ok',                          # a case-arm pattern word, nothing to run
+    'ssh host ls paseo "`x`"',                      # no `send` verb
+    '{paseo} ls "`x`"',
 ])
 def test_gs02_send_lookalikes_pass(command):
     assert not denied(command), command
