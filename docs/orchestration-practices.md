@@ -98,7 +98,7 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
 8. **Names with ids (2026-10-23, from the load watcher):** wherever a brief, message or report names a Paseo
-   workspace, give the name the GUI shows (a workers window: `WORKERS <repo> (<work>)`; its tabs `worker <slice> <lead agent id>`) and its id (`wks_…`); for an agent, its agent id too. A GUI
+   workspace, give the name the GUI shows (a workers box: `WORKER <repo> (<work>)`; its tabs `worker <slice> <lead agent id>`, optionally ` [wt: <worktree>]`) and its id (`wks_…`); for an agent, its agent id too. A GUI
    rename makes a name alone unreliable, and an id alone is unreadable.
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
@@ -115,9 +115,9 @@ caller requires explicit `--workspace`. Only a run without `PASEO_AGENT_ID` may 
 Native Paseo 0.15.3 `inspect --json` omitted workspace identity when checked on 2026-11-08, so agent-origin
 launches on that CLI need `--workspace`. Mint a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace` (there is no dispatch shim since 2026-11-14). A lead's first launch of a run has no
-WORKERS window yet: `--new-workspace local --cwd DIR` (DIR the repo's primary checkout), check the returned `cwd`, then name
-the window `WORKERS <repo> (<work>)` and reuse it for every later launch; each tab is `worker <slice> <lead agent
-id>` (operator rulings 2026-11-13, `docs/workspace-layout.md`, `skills/fan-out` section 3; `bin/ade-worker-run` does it). Parent links
+WORKER box yet: `--new-workspace local --cwd DIR` (DIR the repo's primary checkout), check the returned `cwd`, then name
+the window `WORKER <repo> (<work>)` and reuse it for every later launch (one WORKER box per lead and repo, a successor reuses its chain's; at most the three boxes LEAD, WORKER, OTHER, operator ruling 2026-11-14); each tab is `worker <slice> <lead agent
+id>` (operator rulings 2026-11-13 and 2026-11-14, `docs/workspace-layout.md`, `skills/fan-out` section 3; `bin/ade-worker-run` does it). Parent links
 remain intact. Never fix placement by restarting a healthy paid slice. Missing or mismatched metadata produces
 a placement warning on stderr while the already launched agent continues — treat placement as unverified until
 `cwd` / workspace id match.
@@ -129,7 +129,7 @@ paseo run --provider PROVIDER/MODEL --no-wait \
   --workspace wks_… --cwd ~/src/<repo> \
   --label ade.kind=KIND --label ade.name=NAME --label ade.lead=LEAD \
   "$(cat brief-with-footer.md)"
-# the lead's first launch has no WORKERS window yet: --new-workspace local --cwd ~/src/<repo> instead of --workspace
+# the lead's first launch has no WORKER box yet: --new-workspace local --cwd ~/src/<repo> instead of --workspace
 ```
 
 **A worker whose job is judging untrusted GitHub artifacts for prompt injection** (an injection-triage agent, a PR, issue, comment or

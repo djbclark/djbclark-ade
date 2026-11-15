@@ -27,12 +27,12 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 2. **First agent only.** The agent must be the earliest-created (ties by id) non-archived, non-background agent in the window; an agent
    joining a window does not name it. A closed (not archived) first agent still counts as first. The agent list is read unpaged, so past
    the server's 200-agent default page an older agent could be missing (32 non-archived agents on 2026-11-14).
-3. **KIND.** `WORKERS` when the agent has a parent (`parentAgentId`) or an `ade.lead` label; otherwise `MAIN`. The `ade.placement` label
-   (`main`, `workers`, `user`) overrides; **`USER` is never guessed**: it is what a lead connects the operator's agents into (tidy skill).
+3. **KIND** (2026-11-14: LEAD, WORKER, OTHER; the 2026-11-13 MAIN, WORKERS, USER are the old spellings). `WORKER` when the agent has a parent (`parentAgentId`) or an `ade.lead` label; otherwise `LEAD`. The `ade.placement` label
+   (`lead`|`main`, `worker`|`workers`, `other`|`user`) overrides; **`OTHER` is never guessed**: it is what a lead connects the operator's agents into (tidy skill).
 4. **`<repo>`** is the main checkout's name via git (a linked worktree `my-repo-x-wt` reads `my-repo`), else the directory's basename.
    A name that is not a valid window-name part (a space in the directory) leaves the window alone.
 5. **`<work>`** is the agent's title, at most 50 characters at a word boundary, one line, no parentheses: a `worker <slice> <lead id>`
-   title reduces to the slice, `LEAD|MAIN <repo> <work>` (upper case, the tab names) to the work, a leading `<repo> ` is dropped. No title
+   title reduces to the slice, `LEAD|MAIN <repo> <work>` (upper case, the tab names; also `other <slice> <lead id>` tabs) to the work, a leading `<repo> ` is dropped. No title
    yet: wait for the retry.
 6. **`bin/ade-worker-run` launches are skipped** (labels `slice` and `ade.lead`): it names its own windows right after the launch, and a
    plugin write landing between its read and its rename could otherwise win.
@@ -42,16 +42,17 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 1. **Backfill.** The plugin has no "new window" gate: after an install or reload, the next turn of the first agent of any default-named
    window names it, but only a window with no title at all: a prompt-titled window is named within five minutes of its agent's creation, or not
    at all (a window deliberately reset to its default name in the app is renamed at the next reload).
-2. **The first guess sticks.** The name is a placeholder from the first prompt line. `ade-worker-run rename-main` is a no-op on a window
-   that already has a MAIN name, and `ade-tidy` keeps an existing name's KIND and work; to change one, use `paseo workspace rename`.
-   A lead started with a parent label (a sub-lead launched without `env -u PASEO_AGENT_ID`) gets WORKERS, not MAIN.
+2. **The first guess sticks.** The name is a placeholder from the first prompt line. `ade-worker-run rename-lead` (alias `rename-main`) is a no-op on a window
+   that already has a LEAD name (a MAIN name becomes LEAD), and `ade-tidy` keeps an existing name's box and work; to change one, use `paseo workspace rename`.
+   A lead started with a parent label (a sub-lead launched without `env -u PASEO_AGENT_ID`) gets WORKER, not LEAD.
 3. **Trust.** The daemon runs `bin/ade_ws_autoname.py` and `ade_ws_names.py` from the install path (the shared checkout, which order 9
    says may sit on another session's branch), as `python3 -I`; `ade-claim` has the same property. `ADE_PYTHON` and `ADE_WS_AUTONAME_PY`
    come from the daemon's environment. The plugin also checks the script's answer (a string in the scheme, at most 100 characters) before it
    writes a title.
-4. **Name collisions.** A plugin-made `WORKERS <repo> (<work>)` name is looked up by exact name by `ade-worker-run --window-middle`; if a
-   parent-labelled agent's first prompt line equals a lead's `--window-middle`, that lead is refused (ownership is checked, nothing is
-   misplaced). Pick distinctive `--window-middle` values.
+4. **Name collisions and boxes.** `ade-worker-run` finds a lead's WORKER box by ownership evidence (window record, labelled agent), never by name,
+   and `--window-middle` is only the `(<work>)` text of a box it opens (and a picker among several), so a plugin-made `WORKER <repo> (<work>)`
+   name cannot be taken for a lead's box by its text alone. At most three windows (LEAD, WORKER, OTHER) per lead and repo are intended (operator
+   ruling 2026-11-14); a window the plugin makes beyond them is listed by `ade-tidy` (section H).
 5. **One event per window, with a budget.** While a handler runs for a window, a second event for it is dropped (the next turn
    brings another), so nothing queues behind Paseo's 30 s hook timeout. Each run has a 25 s budget and an `AbortController`, aborted by the
    budget or by Paseo's hook cancel: the python child is killed and the run makes no further daemon call or title write (a call already in flight still completes).

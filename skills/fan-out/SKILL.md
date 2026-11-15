@@ -52,7 +52,7 @@ sub-agent's final message: the harness cuts that at 4,000 characters.
 
 A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 `git worktree add -b NAME ~/src/<repo>-NAME-wt origin/master`); the slice works in that worktree (its absolute path is in
-the brief) while its Paseo session sits in the lead's WORKERS window (below).
+the brief) while its Paseo session sits in the lead's WORKER box (below).
 Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
 (N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
 exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report; exit 2 is also what a `load-watch` from before 2026-11-14 answers to a flag it does not know, such as `--refused-since EPOCH` ("unrecognized arguments"): a launcher that hands its hold start over with that flag must drop it and retry without it, or report, never treat the exit as a refusal to wait out). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
@@ -60,7 +60,7 @@ and it records a reservation: once the agent has spawned, or the launch failed, 
 may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
 (one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
 and launch with `Choice.dispatch` unchanged: no extra `--model`, provider or credential flag. Pass the placement to the plan
-(`plan --kinds KIND --lead <your id> --slice <name> --cwd <the window's directory, ~/src/<repo>> [--window-middle <work>]`, `--slice` once per
+(`plan --kinds KIND --lead <your id> --slice <name> --cwd <the window's directory, ~/src/<repo>> [--window-middle <work>]` (`--window-middle` is optional: only the `(<work>)` text of a box the launch opens), `--slice` once per
 kind; `--lead` defaults to `$PASEO_AGENT_ID`), and its `dispatch` is already an `ade-worker-run` line (section 3): a bare `paseo run`
 puts the worker in the caller's own workspace, since Paseo ignores `--cwd` (getpaseo/paseo#9699, #4125). A plan that lacks a
 lead or slice keeps a quoted `'<lead>'` / `'<slice>'` placeholder in the line and names it in `dispatch_warnings` (JSON) and on stderr: fix it, never launch it; a missing `--cwd` is advisory (only a lead's first launch takes the current directory). The line is a complete shell command with an absolute launcher path: paste it into the command as it is, then add the labels and the brief (not `$VAR` expansion: a quoted window name would split). Since the dispatch shim left (2026-11-14) no code enforces the load gate, the cap,
@@ -75,7 +75,7 @@ ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
   --label ade.kind=KIND --label ade.name=NAME --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
 # Then (also if the launch failed): ~/src/djbclark-ade/bin/load-watch release <reservation>
-# ade-worker-run adds the placement (WORKERS window), --label ade.lead=LEAD and --label slice=NAME (below); by hand that is
+# ade-worker-run adds the placement (the WORKER box), --label ade.lead=LEAD and --label slice=NAME (below); by hand that is
 # `paseo run … --workspace wks_… --cwd ~/src/<repo> --label ade.lead=LEAD`, or --new-workspace local on the first launch
 ```
 
@@ -89,32 +89,36 @@ such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only 
 (2026-11-13: worker 2c54cedf, launched env-stripped without the label, stalled 1h40m on a Bash permission prompt
 that the watcher skipped as `outside-scope`).
 
-**Placement: one WORKERS window per lead; operator-requested workers go in the lead's MAIN window (operator rulings, 2026-11-13; naming and limits in `docs/workspace-layout.md`).** Window names are `<KIND> <repo> (<work>)`, KIND `MAIN` (the lead's own), `WORKERS` (workers you start yourself) or `USER` (operator-started agents you were connected to); the lead id is not in a window name.
-The env-stripped launch has no caller workspace, so each `--new-workspace` launch made its own "master" window (11 piled up;
-archiving an agent keeps its window). `bin/ade-worker-run` (2026-11-13) does the whole recipe, so use it for every worker:
+**Placement: at most three windows ("boxes") per lead and repo, LEAD, WORKER and OTHER; tabs go in the fitting box (operator ruling, 2026-11-14, to the tendcf lead ae1f6d65, verbatim: "Close any unneeded tabs and any unneeded workspaces you or your predecessors have made. In the future, have at most LEAD, WORKER, and OTHER workspaces and put tabs in the appropriate box. The tabs can mention the worktree they are in."; supersedes the 2026-11-13 one-WORKERS-window-per-lead, MAIN, USER names; naming and limits in `docs/workspace-layout.md`).** Window names are `<KIND> <repo> (<work>)`, KIND `LEAD` (the lead's own, was MAIN), `WORKER` (every worker and reviewer you start yourself, was WORKERS) or `OTHER` (probes, side tasks, operator-started agents you were connected to, was USER); the lead id is not in a window name.
+The env-stripped launch has no caller workspace, so each `--new-workspace` launch made its own "master" window (11 piled up; a window per `--window-middle` text then piled up one per slice, tendcf 9, djbclark-ade about 15; archiving an agent keeps its window). `bin/ade-worker-run` does the whole recipe, so use it for every worker:
 
 ```bash
-ade-worker-run --lead LEAD --slice NAME [--window-middle "Wave 7"] [--repo NAME] [--cwd ~/src/<repo>] [--no-footer] -- \
+ade-worker-run --lead LEAD --slice NAME [--window-middle "Wave 7"] [--repo NAME] [--cwd ~/src/<repo>] [--worktree <slice worktree>] [--no-footer] -- \
   <the paseo run arguments of the launch above: --provider … --mode … --no-wait "$(cat brief-with-footer.md)">
-# a worker the OPERATOR asked you for interactively ("open a new sonnet tab to …"): a tab in your own MAIN window
-ade-worker-run --lead LEAD --slice NAME --interactive -- <the same paseo run arguments>
-ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME]   # once: name your own window MAIN <repo> (<work>)
+# a worker the OPERATOR asked you for interactively ("open a new sonnet tab to …"): a tab in your own LEAD window
+ade-worker-run --lead LEAD --slice NAME --placement lead -- <the same paseo run arguments>      # alias --interactive
+# a probe or side task: the OTHER box
+ade-worker-run --lead LEAD --slice NAME --placement other -- <the same paseo run arguments>     # alias --other
+ade-worker-run rename-lead --lead LEAD [--window-middle "Wave 7"] [--repo NAME]   # once: name your own window LEAD <repo> (<work>); alias rename-main
 ```
 
-1. It strips `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID`, finds the lead's window by its exact name
-   `WORKERS <repo> (<work>)` in `paseo workspace ls --json` (`<repo>`: `--repo`, else the repo of `--cwd`, also from a linked
-   worktree; `<work>`: `--window-middle`; without `--window-middle`, the one WORKERS window holding a live agent labelled
-   `ade.lead=<LEAD>`). Two matches, or a match holding a live agent labelled for another lead, are refused. A legacy window
-   of this lead (`workers <middle> <LEAD>`, `WORKERS <middle> <LEAD>`) is renamed to the current form first (same window id).
-   It passes `--workspace` of the window plus `--cwd` (the window's own: a different `--cwd` is refused, because Paseo ignores it with `--workspace`, getpaseo/paseo#9699; the launched agent's `Cwd` is checked afterwards and a worker that landed elsewhere is stopped). With no window yet, the first launch mints one
+1. It strips `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID` and finds the lead's **one WORKER box of the repo by
+   ownership evidence** (window record, a live agent labelled `ade.lead=<LEAD>`, or a legacy name carrying the lead id), **whatever the
+   slice and whatever `--window-middle` says** (`<repo>`: `--repo`, else the repo of `--cwd`, also from a linked worktree). A successor
+   of a completed self-handoff reuses the box its predecessors made. Two matches, or a match holding a live agent labelled for another
+   lead, are refused. A 2026-11-13 or legacy window of this lead (`WORKERS <repo> (<work>)`, `workers <middle> <LEAD>`) is renamed to the
+   current form first (same window id). It passes `--workspace` of the window plus `--cwd` (the window's own: a different `--cwd` is refused, because Paseo ignores it with `--workspace`, getpaseo/paseo#9699; the launched agent's `Cwd` is checked afterwards and a worker that landed elsewhere is stopped). With no box yet, the first launch mints one
    (`--new-workspace local --cwd ~/src/<repo>`), reads its id from the launch (JSON `workspaceId` if paseo prints one, else the
    single `Created workspace wks_… - <name>` stderr line, cross-checked with the agent's state file; absent or ambiguous
-   fails closed and names the launched agent) and renames it `WORKERS <repo> (<work>)`. `--window-middle` is required on the first
-   launch (no default) and `--cwd ~/src/<repo>` should be passed (default: the current directory); a later `--window-middle`
-   that names no window while the lead itself placed another is refused, never a second window (windows inherited from a handed-off predecessor do not count: new work opens a new one; once it launches into one, that window is its own and different work is refused as a second window).
+   fails closed and names the launched agent) and renames it `WORKER <repo> (<work>)`. **`--window-middle` is optional** (default `workers`):
+   it is only the `(<work>)` text of a box this launch opens, and a picker when the lead owns several boxes of the repo; it never opens a
+   second box, and an old invocation that passes it keeps working. Pass `--cwd ~/src/<repo>` (default: the current directory). A box of
+   another repo is not this launch's: a launch for a repo the lead has no box for opens that repo's box.
 2. It adds `--label ade.lead=<LEAD>` and `--label slice=<NAME>` itself (so do not pass them, nor `--workspace`,
    `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
-   `worker <NAME> <LEAD>` with `paseo agent update`, and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
+   `worker <NAME> <LEAD>` with `paseo agent update` (**the tab may mention its worktree**: `--worktree <dir>`, or a `--cwd` that is itself a
+   linked worktree, appends ` [wt: <worktree dir basename>]`, shortened to fit 100 characters; a hint, the brief still names the absolute path;
+   the OTHER box's tabs start `other `), and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
    The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (the bare
    `paseo run` template that `route --kind K` prints starts with it; `plan`'s `dispatch` is already the whole `ade-worker-run` line
    (rd-01, 2026-11-14), so run it as it stands and append only the brief); no bundled short options
@@ -126,22 +130,23 @@ ade-worker-run rename-main --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    (skipped by `--no-footer`; refused when the last argument is not recognisably the brief). It does not replace writing
    the footer into the brief (2026-11-13: lead-written briefs omitted it and a worker pushed a changelog fragment with no
    `###` heading).
-   `--interactive` (= `--placement main`) is for a worker the operator asked you for in the chat: it launches a tab into your
+   `--placement lead` (aliases `main`, `--interactive`) is for a worker the operator asked you for in the chat: it launches a tab into your
    own window (resolved from your own agent record, not `PASEO_WORKSPACE_ID`; you must be the caller), which must be named
-   `MAIN <repo> (<work>)` (`rename-main` names it; a legacy `MAIN <middle>` is renamed on the first such launch), labels it
-   `ade.placement=main`, and never archives it.
-3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--window-middle …]
+   `LEAD <repo> (<work>)` (`rename-lead` names it; a `MAIN …` name is renamed on the first such launch), labels it
+   `ade.placement=main`, and never archives it. `--placement other` puts the worker in the OTHER box (label `ade.placement=other`).
+3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--placement worker|other] [--window-middle …]
    [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` is closed (or
    idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and the window is this
-   lead's WORKERS window (current or legacy name); otherwise it lists the blockers and archives nothing (`--dry-run` to only
-   check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; a MAIN-placed worker in another window does not block it.
+   lead's WORKER (or OTHER) box (current or legacy name); otherwise it lists the blockers and archives nothing (`--dry-run` to only
+   check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; a LEAD- or OTHER-placed worker in another window does not block it. A LEAD window is never archived. Extra windows a chain left behind
+   (a second WORKER window, a window named outside the scheme) are listed by `bin/ade-tidy` (section H) and archived by `--apply` when empty or finished.
 
 By hand (what the helper does; a hand-made window has no ownership record, so `archive-window` will not archive it until a helper launch adopted it while empty): the same strip, `--new-workspace` on the first launch only, the window id taken from the
 launch and never guessed by cwd or name, `paseo workspace rename`, `--workspace wks_…` on later launches, `paseo agent update
 <full agent id> --name "worker <NAME> <LEAD>"`.
 
 A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
-its own placement (its own MAIN window), and opens its own WORKERS window when it dispatches.
+its own placement (its own LEAD window), and reuses the chain's WORKER and OTHER boxes when it dispatches (it opens none beside them).
 
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.
 
@@ -150,7 +155,7 @@ rd-01, 2026-11-14; `route --kind K` still prints the bare `paseo run` template, 
 only extra labels and the positional brief (`paseo run` has no `--prompt-file`). Write the footer into
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
-lead's first launch of a run, which opens its WORKERS window (above).
+lead's first launch of a run, which opens its WORKER box (above).
 As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
 `paseo workspace ls --json` and `-C` / `--cwd`) and never emit `--new-workspace` on an ordinary launch.
@@ -167,7 +172,7 @@ launcher does not check the login, it only records it. Every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
 The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
-naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the WORKERS window's `cwd`, while every writer's
+naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the WORKER box's `cwd`, while every writer's
 brief names a separate claimed execution worktree and every repository tool call targets it explicitly. Never turn a
 report folder into a workspace.
 
@@ -212,7 +217,7 @@ Three independent fixes in one repository, one review:
 4. A BLOCKED report: answer with `paseo send --json --no-wait`, or re-brief under a new `--label ade.name=…`.
 5. Each DONE slice: review its diff, push its branch, open the PR; one read-only review per PR through
    `bin/review-launch` (Claude) or a judgment `paseo run` brief that says change nothing, in the same
-   WORKERS window, its brief naming the slice's worktree.
+   WORKER box, its brief naming the slice's worktree.
 
 ## 6. Avoid operator permission cards (2026-11-12)
 

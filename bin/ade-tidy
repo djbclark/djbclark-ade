@@ -796,7 +796,7 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
         kind = window_kind(agents)
         occupants = occupancy.get(wks, [])
         foreign = [a for a in occupants if a not in {r["id"] for r in by_win.get(wks, [])}]
-        entry = {"windowId": wks, "name": clean(w.get("name"), 120), "kind": kind, "isolation": w.get("isolation"), "agents": [r["id"] for r in agents],
+        entry = {"windowId": wks, "name": clean(w.get("name"), 120), "cwd": w.get("cwd"), "kind": kind, "isolation": w.get("isolation"), "agents": [r["id"] for r in agents],
                  "occupants": len(occupants), "outsideRepoAgents": len(foreign)}
         out["windows"].append(entry)
         for r in agents:

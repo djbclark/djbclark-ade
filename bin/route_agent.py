@@ -1981,7 +1981,7 @@ class Placement:
     lead: str | None = None             # the launching lead's own agent id (plan defaults it to $PASEO_AGENT_ID)
     slice: str | None = None            # this slice's name (the tab is `worker <slice> <lead id>`)
     cwd: str | None = None              # the window's own directory (the repo checkout); the slice's worktree goes in the brief
-    window_middle: str | None = None    # the WORKERS window's `(<work>)` part; required on a lead's first launch
+    window_middle: str | None = None    # the `(<work>)` text of the WORKER box a launch opens (default `workers`); never opens a second box
     repo: str | None = None             # window repo name when the cwd's own is not the one wanted
     caller: str | None = None           # $PASEO_AGENT_ID when plan ran: ade-worker-run refuses any other --lead
 
@@ -2023,7 +2023,7 @@ class Choice:
         elif not SLICE_SHAPE.fullmatch(pl.slice):
             out.append(f"slice {pl.slice!r} is not a valid slice name: ade-worker-run refuses it (letters, digits, . _ -)")
         if not pl.cwd:
-            out.append("no --cwd: a lead's first launch opens its WORKERS window in ade-worker-run's current directory; "
+            out.append("no --cwd: a lead's first launch opens its WORKER box in ade-worker-run's current directory; "
                        "pass --cwd <the window's directory, ~/src/<repo>> (a later launch uses the existing window's own)")
         return out
 
@@ -3302,10 +3302,10 @@ def add_placement_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--lead", help="your own agent id, for ade-worker-run --lead (default: $PASEO_AGENT_ID)")
     sp.add_argument("--slice", action="append", default=[], dest="slices",
                     help="slice name per kind, in --kinds order (repeat), for ade-worker-run --slice")
-    sp.add_argument("--cwd", help="the WORKERS window's directory (the repo checkout, ~/src/<repo>), for ade-worker-run --cwd; "
+    sp.add_argument("--cwd", help="the WORKER box's directory (the repo checkout, ~/src/<repo>), for ade-worker-run --cwd; "
                     "the slice's worktree goes in the brief, not here")
-    sp.add_argument("--window-middle", help="the WORKERS window's (<work>) part, for ade-worker-run --window-middle "
-                    "(required on a lead's first launch)")
+    sp.add_argument("--window-middle", help="the (<work>) text of the WORKER box (`WORKER <repo> (<work>)`), for ade-worker-run --window-middle: names a "
+                    "box a launch opens or picks among several the lead owns, never opens another (default: workers)")
     sp.add_argument("--worker-repo", help="window repo name for ade-worker-run --repo, when the cwd's own is not the one wanted")
 
 
