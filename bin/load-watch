@@ -644,9 +644,9 @@ def registry():
 
 
 def bad_registry_field(*vals):
-    """The first value with a control character (tab, newline, ...), else None: the registry is TSV, so such a value would write extra rows
+    """The first value with a control character (tab, newline, DEL, C1 such as U+0085, U+2028/2029: all that `str.splitlines` splits on), else None: the registry is TSV, so such a value would write extra rows
     (adversary, PR 744: `ci decide X pending $'n\\n/home/*\\tlocal\\tx'` planted a `local` glob row without any approval)."""
-    return next((v for v in vals if any(ord(c) < 32 or ord(c) == 127 for c in str(v))), None)
+    return next((v for v in vals if any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or c in "\u2028\u2029" for c in str(v))), None)
 
 
 def write_registry(rows):

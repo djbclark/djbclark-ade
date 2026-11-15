@@ -249,6 +249,8 @@ def test_control_characters_cannot_plant_a_local_row_past_the_gate(tmp_path):
         assert r.returncode == 2 and "control character" in r.stderr, mode
     assert run(tmp_path, "ci-only", "add", str(repo), evil).returncode == 2
     assert run(tmp_path, "ci", "decide", str(repo), "pending", "a\tb").returncode == 2
+    for sep in ("\x0b", "\x0c", "\x1c", "\x7f", "\x85", "\u2028", "\u2029"):  # what str.splitlines() splits on, and DEL/C1
+        assert run(tmp_path, "ci", "decide", str(repo), "pending", f"a{sep}b").returncode == 2, repr(sep)
     assert not (tmp_path / "ci-only.tsv").exists() and not calls.exists()
     # the same through a hostile directory name, and a hand-built row set reaching write_registry
     odd = tmp_path / "x\ny"
