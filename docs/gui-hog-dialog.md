@@ -1,6 +1,6 @@
 # GUI-hog dialog: design (2026-11-14, PR 3 of the load-gate retune)
 
-Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M). **PR 3b is built (2026-11-14): the native window, Quit / Force Quit / Quit All, the trigger live** (section N says what it does, where it departs from this text, and the operator's H4 run, which has NOT been done: 3b must not merge without it). PR 3c (Freeze) is not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design.
+Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M). **PR 3b is built (2026-11-14): the native window, Quit / Force Quit / Quit All, the trigger live** (section N says what it does, where it departs from this text, and the operator's H4 run, which has NOT been done: 3b must not merge without it). PR 3c (Freeze) is not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design. **PR 3c's Python side is built (2026-11-14, section O): Freeze, every thaw path and the escape hatch; its Swift row buttons and menu-bar item are added on top of PR 3b.**
 Rulings come from the operator's 2026-11-13 and 2026-11-14 `/steps` answers, recorded in the lead's memory note
 `project_load_gate_retune_proposal_2026-11-13.md`. Items marked **DECIDE** are open forks. Each one has a
 recommendation, and the build slices follow the recommendation unless the operator rules otherwise.
@@ -624,3 +624,65 @@ N9. **Adversary round 3 (head 1c97da60, BLOCK; repaired).** (a) *Medium: a new a
 previous merge, never in the same merge that marks its row absent (the new app waits one refresh, 20 s). (b) *Low, fixed:* the root width is a required constraint (1010 pt, rows about 951 pt), so the main window
 never changes width and a sheet never re-centres; each row clips to its 36 pt and has the lowest vertical clipping resistance, so an app name in a tall-fonted script cannot push or paint over a neighbour.
 (c) *Info:* an app that only dropped out of the busiest-12 list shows "no longer running", as for one that quit; 16 rows plus 8 hold lines can be tall, and the red close button acts as Wait.
+
+## O. PR 3c as built (2026-11-14)
+
+O1. **What shipped (Python).** `bin/gui_hog_freeze.py` (stdlib; it imports `gui_hog`, never `load-watch`) and the CLI `gui-hog freeze | resume | thaw | frozen`
+(`bin/gui-hog`). Freeze (F1-F4): `vet_app` re-reads the **live** pid (start time, uid, kernel executable, bundle id and path from the executable's `.app` and its
+`Info.plist`; the argv values are only expected values, a difference is exit 4), applies the protected list (F6) to the root **and every member**, refuses an app that hosts a
+build or terminal (exit 5), an app under a held caller or agent CLI (exit 3), and the tool's own process and ancestors (exit 3). `freeze` takes `frozen.lock`, writes the entry
+as `freezing` (root and every member) **before the first SIGSTOP**, stops the root first, then the members, rescans up to 3 times (a newcomer is written into the entry
+before it is stopped; a protected newcomer or a new build subtree rolls the whole freeze back), then writes `frozen`. A failed signal rolls back what was stopped.
+Thaw (F5, F7): `thaw_due` (timed due, orphaned `freezing`/`thawing`, and a prune of entries whose processes are gone or changed: a reboot, an exit), `resume --entry|--all`,
+`thaw --all`, `thaw --all --stopped-apps` (asks for `yes`; `--yes` skips it), the sampler's tick (it runs `thaw_due` **first**, before `ps_table`, in its own `try`, even
+with `LW_GUI_HOG=0`) and the removal of load-watch's job (`ade_sched.thaw_gui_hog_before_removal`, in `uninstall` and `remove_launchd_locked`; a failure refuses the removal).
+Resume order is children first, the root last (F4). `config/gui-hog.toml [freeze]`: `enabled`, `default_minutes` 10, `max_minutes` 1440, `passes` 3, `lock_timeout_s` 5.
+`enabled = false` refuses `freeze` (exit 6) and leaves every thaw path working. Exit codes: 0 ok, 2 usage, 3 protected, 4 identity, 5 hosts a build, 6 disabled, 7 lock
+timeout, 8 sampler job not loaded (F8-2), 9 refused (state unusable, already frozen or stopped, a signal failed).
+
+O2. **Where it departs from the text above (all conservative).**
+(a) An orphaned `freezing` or `thawing` entry is resumed **at once** under the lock, not after 60 s: a live operation holds the lock for its whole run, so an entry seen
+under the lock is the leftover of a crashed one. `thaw --stale` is accepted and always on.
+(b) A pid is only ever signalled when the entry's **four** fields match the live process (F3); SIGCONT also needs state `T` ("not-stopped" is logged, no signal), and SIGSTOP refuses a process
+already stopped by someone else. An entry's pid must be an int in 2..2**31-1 (0 and -1 are process groups to `kill`), its timed `thaw_at` is clamped to 24 h after `frozen_at`.
+(c) The state directory is opened through directory fds with `O_NOFOLLOW` and owner and mode checks: a symlinked `state_dir`, `gui-hog` or state file is refused (exit 9), never
+followed; writes use a unique temp name and `os.replace`, never a write through a link (a symlinked `frozen.json` with no usable `.prev` is unreadable, so `freeze` refuses before it writes). `gui-hog/` must be mode 0700-like (no group or world write);
+its parent only not world-writable. A corrupt `frozen.json` falls back to `frozen.json.prev`; with neither usable, `freeze` and `thaw --all` refuse and the message names
+`thaw --all --stopped-apps`.
+(d) Members are listed parents before children (sorted by depth, then pid), so the reverse order is always children first. A partly finished thaw keeps only the unfinished
+processes, the last of them taking the root's place.
+(e) `group_apps` gained the additive key `member_pids`. `vet`, as a separate subcommand for Quit and Force Quit, is PR 3b's: `freeze` runs the same checks itself (D4).
+(f) Every event (`freeze`, `thaw`, `drop`, `refuse`, `not-stopped`, `exe-changed`, `late-helpers`) goes to `gui-hog/events.jsonl` (0600, rotated at 1 MB) with `by`: `dialog`, `cli`, `sampler`,
+`uninstall`, `recovery` or `menubar`.
+(g) **After the first adversary round (2026-11-14):** SIGCONT needs pid, start time, uid and state T but **not** the executable path (a bundle replaced or moved while frozen, an update or the Trash, must never leave
+the app stopped; the event `exe-changed` is logged); SIGSTOP still needs all four. A root that is gone or changed does not delete the entry: the entry is resumed (each member that is still the recorded process gets SIGCONT)
+and counts as `dropped` only when nothing could be signalled. `thaw --all --stopped-apps` also lists stopped processes whose path is unreadable. A full or read-only disk never blocks a resume (the signals go out first; the CLI turns any
+`OSError` into exit 9). `gui-hog freeze` rolls back on SIGTERM (the dialog's timeout is 120 s; a timeout reads "no answer in time: check the Frozen list"). A second instance of the same bundle (a member with the root's own
+executable) and a launchd-started helper that hosts a shell (`group_apps` now walks the subtree under such a helper) both refuse the freeze with exit 5. A `frozen_at` in the future (a wrong clock, a hand edit) counts as due.
+Entry ids start with a letter or digit, and the Swift side passes `--entry=ID`. The dialog (at start) and the menu-bar item (at start and every 20 s) run `gui-hog thaw --due --stale` themselves: the second clock of F5a, b, f.
+(h) **Known limits, deferred on purpose:** a thaw runs one `ps -p` per process (a 80-helper browser under a multi-second `ps` stall can span several ticks; resume order stays children first); a freeze clicked in the
+milliseconds between `ade_sched uninstall`'s thaw and its bootout is resumed by `gui-hog thaw --all` (and by the menu-bar item's clock, but only when the sampler started the item before it went away: nothing else starts it).
+(i) **Round 2 (APPROVE at 4ce980ca, five lows):** fixed: a build-stop child already seen by the outer loop still sets `hosts_build` (ps order); the frozen list keeps a replaced bundle "alive"; a `ps` killed by a signal is an error (never an empty answer); the Swift timeout is carried in the result (no shared flag); code 5 shows the reason. Left open on purpose: a SIGTERM that lands inside `load_entries` (a broad `except` can swallow the handler's exception there; only an external SIGTERM in the first seconds, the dialog's 120 s timeout cannot reach it) — `gui-hog thaw --all --stopped-apps` still finds such an app (the Frozen list does not: its entry is gone).
+
+(j) **Round 4 (APPROVE at d1fa1a44 after the 3b merge; two lows, fixed).** After a successful Freeze the row is marked frozen at once (it no longer waits for the Frozen-list poll), so Quit, Force Quit and Freeze vanish immediately; the freeze command joins each value to its option (`--bundle-id=-y` works); Resume has the same click-grace guard as the other buttons. Not fixed on purpose: `gui_hog.vet` (the Quit path) does not read `frozen.json` (a Force Quit on a stopped app SIGKILLs only that root and the next tick resumes the helpers). The window is now 1190 pt wide with a 1158 pt row area (3b: 1010 and 951 in N9 (b)) to fit the Freeze buttons; the separators use the row-area width. Folded in from 3b's deferred round-4 LOW (operator, 2026-11-14): at the 16-row cap a free slot must be absent in `old` AND still absent after the merge, so an app that returns in the same refresh keeps its slot and a new app does not overwrite it (self-test case "an absent app that returns keeps its slot").
+
+O3. **Tests (H1 d, e, g, H1a, H4 f and g, Python side).** `tests/test_gui_hog_freeze.py`: the state machine on a fake clock and fake process table, the four identity fields, a reused pid,
+protected root and protected member, hard-floor names, a crash at each signal, a crash while thawing, a hand-edited `frozen.json`, symlinked directories and files, the lock, disabled,
+sampler-not-loaded, the rescan limit, the sampler and uninstall wiring, and **real** SIGSTOP/SIGCONT on disposable trees the test starts itself (a copy of `dash` with two `sleep` helpers
+inside a fake `.app`; macOS needs `codesign --force -s -` on the copies, the fixture does it). Mutation checks (2026-11-14, one mutant at a time): `mismatch` always None, exe not compared,
+start not compared, no protected check on members, the write-ahead saved after the first signal, SIGCONT without the stopped check, a pid guard that accepts 0, a followed symlink, and
+the resume order reversed: all nine killed.
+
+O3a. **Prior art checked (2026-11-14, shared `mcp__firecrawl__*`, section L is the starting point).** Searches: SIGSTOP/SIGCONT of a macOS app's process tree with Chrome/Electron helpers and App Nap, Chromium's hang and stall handling after a stopped process resumes, and a developer-index search for process suspend tools. The web search returned mostly generic pages. The developer index found Procopticon's `suspend` (it filters out its own process, which F6's own-ancestor refusal matches) and macOS-only SIGSTOP/SIGCONT wrappers in microsoft/ox-tools PR 332. Chromium's stability notes (`docs/stability.md`) describe hung or unresponsive renderers as the browser's to detect, which is why the resume order is children first, the root last (F4). No tool was found that combines a write-ahead record, a four-field identity check and a thaw on every path, so the design stands.
+
+O4. **The Swift side (built on PR 3b's `macos/gui-hog/`).** The view stays thin: it calls `bin/gui-hog` through `Process` and decides nothing about whether an app may be frozen.
+(a) Row buttons: **Freeze N min** (N is `[freeze] default_minutes`, carried in the snapshot's new `freeze` block) and **Freeze…** (indefinite; a confirm sheet whose default is Cancel). Both appear only
+on a row that offers Quit (present in the newest sample, no build or terminal inside, identity known, not frozen) and only when the snapshot says `freeze.enabled`; a snapshot without the block hides them.
+The press runs `gui-hog freeze … --by dialog` off the main thread; exit 3, 4, 5, 6, 8 and 9 each have a plain refusal text. (b) A row whose root pid is a frozen entry's root is marked frozen from
+`gui-hog frozen --json` (polled every 2 s, off the main thread): no Quit, Force Quit, Freeze or Quit All for it ("frozen: use Resume below"). (c) A **Frozen** section lists every entry with the time left
+and a **Resume** button (`gui-hog resume --entry ID --by dialog`); Resume is offered even when Freeze is off. (d) The **menu-bar item** (E5): the app started with `--status-only`, its own lock
+`gui-hog/status.lock`, no window; the title is `❄︎ N`, the menu has one Resume item per entry and Resume All. It only resumes, polls `gui-hog frozen --json` every 5 s, and exits by itself after two empty reads
+or a minute without an answer. The sampler starts it (`gui_hog_freeze.ensure_status_item`, after `thaw_due`, in a GUI session with a fresh bundle, never waited on and never built) while anything is frozen.
+(e) `by` gained `menubar`. Self-test (`bin/ade-gui-build --self-test`): the Freeze buttons' conditions (absent row, build host, frozen row, disabled), the argv lists, the frozen list and its sanitizing.
+
+O5. **Not done by the author.** The operator's H4 run (f), (g) with the real window and a real freeze is **not done**; the PR must not merge without it. The runbook is in the PR body.

@@ -1305,6 +1305,29 @@ def reload_launchd_locked(job: Job, text: str, *, state_dir: Path | None, env: M
     return "reloaded"
 
 
+LOAD_WATCH_LABEL = "com.djbclark.load-watch"
+
+
+def thaw_gui_hog_before_removal(label: str, env: Mapping[str, str] | None = None) -> None:
+    """GUI-hog Freeze (docs/gui-hog-dialog.md F5f, PR 3c): removing load-watch's job removes the sampler that resumes timed freezes, so every
+    frozen app is resumed FIRST (`gui_hog_freeze.thaw_all`, identity-checked). A failure refuses the removal (SchedError, nothing removed).
+    No frozen.json means there is nothing to do; the module is imported only when one exists."""
+    if label != LOAD_WATCH_LABEL:
+        return
+    e = env if env is not None else os.environ
+    state = Path(e.get("LW_STATE_DIR") or (Path.home() / ".local/state/load-watch"))
+    if not any((state / "gui-hog" / n).exists() or (state / "gui-hog" / n).is_symlink() for n in ("frozen.json", "frozen.json.prev")):
+        return
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import gui_hog_freeze
+        _done, left = gui_hog_freeze.thaw_all(state, by="uninstall")
+    except Exception as exc:  # noqa: BLE001 - fail closed: frozen apps must not outlive the thing that resumes them
+        raise SchedError(EX_ACTIVATE, f"cannot resume the frozen GUI apps first ({exc}); run `gui-hog thaw --all` (or `--all --stopped-apps`)") from exc
+    if left:
+        raise SchedError(EX_ACTIVATE, f"frozen GUI apps could not be resumed ({', '.join(left)}); run `gui-hog thaw --all`")
+
+
 def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_dir: Path | None,
                           env: Mapping[str, str] | None = None,
                           loaded_proof: Callable[[str, bytes], str | None] | None = None, **overrides: Any) -> bool:
@@ -1318,6 +1341,7 @@ def remove_launchd_locked(label: str, *, expect_hash: str, loaded: bool, state_d
     uninstall's proof is `loaded_definition_problem` plus `loaded_file_problem` (full argv, program, source path; not the
     environment, schedule or KeepAlive keys of the file).
     A disk error while writing the recovery record is a NativeDefer too: nothing is unloaded and no half record remains."""
+    thaw_gui_hog_before_removal(label, env)
     c = _ctx("launchd", env, overrides)
     plist = c.agents_dir / f"{label}.plist"
     try:
@@ -1503,6 +1527,8 @@ def uninstall(label: str, backend: str | Backend | None = None, *, dry_run: bool
     err = err or sys.stderr
     if not LABEL_RE.fullmatch(label):
         raise SchedError(EX_USAGE, f"bad label {label!r}")
+    if not dry_run:
+        thaw_gui_hog_before_removal(label, env)
     c = _ctx(backend, env, overrides)
     name = c.backend.name
     if name == "launchd":

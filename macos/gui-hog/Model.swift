@@ -57,6 +57,8 @@ struct Snapshot {
     var more: Int
     var protectedHidden: Int
     var rssTrigger: Bool
+    var freezeEnabled = false     // [freeze] enabled (PR 3c, I3): false (or missing) hides every Freeze button
+    var freezeMinutes = 10        // [freeze] default_minutes: the timed button's length
 }
 
 private func num(_ v: Any?) -> Double? {
@@ -87,9 +89,59 @@ func parseSnapshot(_ data: Data) -> Snapshot? {
                         cores5m: max(0, num(d["cores_5m"]) ?? 0), cpuNow: max(0, num(d["cpu_now"]) ?? 0), rssMb: max(0, int(d["rss_mb"]) ?? 0),
                         present: bool(d["present"]), hostsBuild: bool(d["hosts_build"]), frozen: bool(d["frozen"])))
     }
+    let fz = top["freeze"] as? [String: Any] ?? [:]
     return Snapshot(t: int(top["t"]) ?? 0, load: load, ncpu: int(header["ncpu"]), cpu5m: num(header["cpu_5m"]), holds: holds, rows: rows,
-                    more: max(0, int(top["more"]) ?? 0), protectedHidden: max(0, int(top["protected_hidden"]) ?? 0), rssTrigger: bool(top["rss_trigger"]))
+                    more: max(0, int(top["more"]) ?? 0), protectedHidden: max(0, int(top["protected_hidden"]) ?? 0), rssTrigger: bool(top["rss_trigger"]),
+                    freezeEnabled: bool(fz["enabled"]), freezeMinutes: min(1440, max(1, int(fz["default_minutes"]) ?? 10)))
 }
+
+// MARK: frozen apps (PR 3c: E2 Resume rows, E5 menu-bar item)
+
+/// One entry of `gui-hog frozen --json`. The Python core owns the truth (frozen.json); this is only what the window shows.
+struct FrozenEntry: Equatable {
+    var id: String
+    var name: String
+    var state: String
+    var thawAt: Int?        // nil: frozen until someone resumes it
+    var members: Int
+    var alive: Bool
+}
+
+/// The entries from `gui-hog frozen --json` output, or nil when it is not a version-1 object. Every text field is sanitized (J3).
+func parseFrozen(_ data: Data) -> [FrozenEntry]? {
+    guard let top = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], int(top["v"]) == 1 else { return nil }
+    var out: [FrozenEntry] = []
+    for e in (top["entries"] as? [Any] ?? []).prefix(24) {
+        guard let d = e as? [String: Any], let id = d["id"] as? String, !id.isEmpty else { continue }
+        let app = d["app"] as? [String: Any] ?? [:]
+        out.append(FrozenEntry(id: sanitize(id, limit: 40), name: sanitize(app["name"] as? String ?? "?"), state: sanitize(d["state"] as? String ?? "", limit: 20),
+                               thawAt: int(d["thaw_at"]), members: max(1, int(d["members"]) ?? 1), alive: bool(d["alive"])))
+    }
+    return out
+}
+
+/// A row whose root pid is a frozen entry's root is shown as frozen: no Quit, no Force Quit, no second Freeze. `rootPids` come from the frozen entries'
+/// `root_pid` (the same list); the flag is set and cleared with the list; a pid match alone never lets an action through, it only takes actions away.
+func markFrozen(_ rows: [Row], rootPids: Set<Int>) -> [Row] {
+    rows.map { r in var c = r; c.frozen = rootPids.contains(r.rootPid); return c }
+}
+
+func parseFrozenRoots(_ data: Data) -> Set<Int> {
+    guard let top = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], int(top["v"]) == 1 else { return [] }
+    return Set((top["entries"] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).flatMap { int($0["root_pid"]) } })
+}
+
+/// Freeze is offered on a row that offers Quit (present, not hosting a build, not frozen, identity known) when the config allows it. A row whose app
+/// is absent from the newest sample gets no button (carry-over from the 3a reviews).
+func rowFreezeAllowed(_ r: Row, _ s: Snapshot) -> Bool { s.freezeEnabled && rowActionsAllowed(r) }
+
+func thawText(_ e: FrozenEntry, now: Int) -> String {
+    guard let t = e.thawAt else { return "frozen until you resume it" }
+    let left = max(0, t - now)
+    return left >= 90 ? "resumes in \((left + 30) / 60) min" : "resumes in \(left) s"
+}
+
+func statusTitle(_ n: Int) -> String { n == 0 ? "" : "❄︎ \(n)" }
 
 // MARK: formatting (E1, E2)
 
@@ -122,6 +174,7 @@ func rowActionsAllowed(_ r: Row) -> Bool {
 func rowNote(_ r: Row) -> String? {
     if !r.present { return "no longer running" }
     if r.hostsBuild { return "has a terminal or build inside: no actions" }
+    if r.frozen { return "frozen: use Resume below" }
     if !rowActionsAllowed(r) { return "identity unknown: no actions" }
     return nil
 }
@@ -136,6 +189,17 @@ func vetArgv(_ r: Row) -> [String] {
     ["vet", "--pid=" + String(r.rootPid), "--start=" + r.rootStart, "--bundle-id=" + r.bundleId, "--bundle-path=" + r.bundlePath]
 }
 func snoozeArgv() -> [String] { ["snooze", "--minutes", "60"] }
+
+/// Freeze one app: `minutes` is the timed length, nil is indefinite. The Python core re-checks everything live (identity, protected list, build hosts).
+func freezeArgv(_ r: Row, minutes: Int?) -> [String] {
+    ["freeze", "--pid=" + String(r.rootPid), "--start=" + r.rootStart, "--bundle-id=" + r.bundleId, "--bundle-path=" + r.bundlePath,
+     minutes.map { "--minutes=\($0)" } ?? "--indefinite", "--by", "dialog"]
+}
+func resumeArgv(_ id: String, by: String) -> [String] { ["resume", "--entry=\(id)", "--by", by] }   // `--entry=ID`: an id is never read as an option
+/// The belt and braces of F5a, b, f: the dialog and the menu-bar item resume what is due on their own clock too (the sampler is the first clock).
+func thawDueArgv(by: String) -> [String] { ["thaw", "--due", "--stale", "--by", by] }
+func resumeAllArgv(by: String) -> [String] { ["resume", "--all", "--by", by] }
+func frozenArgv() -> [String] { ["frozen", "--json"] }
 func exitArgv(_ code: Int32) -> [String] { ["record-exit", "--code", String(code)] }
 func logArgv(_ event: String, _ r: Row?) -> [String] {
     ["log", "--event=" + event, "--by", "dialog"] + (r.map { ["--app=" + $0.name, "--bundle-id=" + $0.bundleId] } ?? [])
@@ -159,7 +223,7 @@ func mergeRows(old: [Row], new: [Row], cap: Int = maxWindowRows) -> [Row] {
     }
     let known = Set(old.map { $0.appId })
     // A slot is reused only if it was ALREADY absent in `old` (so it had no button for a click to be aimed at): never in the same merge that marks its row absent.
-    var free = old.prefix(cap).enumerated().filter { !$0.element.present }.map { $0.offset }
+    var free = old.prefix(cap).enumerated().filter { !$0.element.present && !out[$0.offset].present }.map { $0.offset }   // and still absent in `out`: a returning app keeps its slot
     for n in new where !known.contains(n.appId) {
         if out.count < cap { out.append(n) } else if !free.isEmpty { out[free.removeFirst()] = n }
     }
