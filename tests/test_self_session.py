@@ -1050,6 +1050,16 @@ def test_code_is_validated_not_scrubbed():
     assert ss.parse_envelope(envelope('', 'm'))[0] is None
 
 
+@pytest.mark.parametrize('code', ['host_offline', 'commander.excessArguments', 'ns:code-1', 'A' * 64])
+def test_native_code_pattern_keeps_lowercase_dotted_and_colon_codes(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == (code, 'm')
+
+
+@pytest.mark.parametrize('code', ['bad code', 'a\nb', 'trailing\n', 'tab\tx', 'nul\x00x', 'X' * 65, 'é', 'a/b'])
+def test_native_code_pattern_still_rejects_unsafe_codes(code):
+    assert ss.parse_envelope(envelope(code, 'm')) == ('INVALID_CODE', 'm')
+
+
 def test_envelope_stderr_tail_keeps_code_and_message_readable(setup):
     service, native, _ = setup
     native.archive_result = (1, '', envelope('TOKEN_EXPIRED', 'login again'))

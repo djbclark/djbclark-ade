@@ -115,7 +115,9 @@ def parse_envelope(*streams):
                 code, message = data.get('code'), error if isinstance(error, str) else data.get('message')
             # A code is validated, never scrubbed: scrubbing mangled TOKEN_EXPIRED.
             if isinstance(code, str) and code:
-                code = code if re.fullmatch(r'[A-Z0-9_]{1,64}', code) else 'INVALID_CODE'
+                # Native codes seen: UPPER_SNAKE, `host_offline`, `commander.excessArguments`; fullmatch, so no
+                # space, control character or newline (even a trailing one) gets through.
+                code = code if re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', code) else 'INVALID_CODE'
             else:
                 code = None
             return code, bounded(message, MESSAGE_LIMIT) if isinstance(message, str) else None
