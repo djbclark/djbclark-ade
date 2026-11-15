@@ -195,6 +195,7 @@ def test_local_decision_denied_cancelled_or_unaskable_writes_nothing(tmp_path):
     # no sudo-ask at all (missing helper, no GUI): refused
     r = run(tmp_path, "ci", "decide", str(repo), "local", "why")
     assert r.returncode == 1 and "djbclark" in r.stderr and "nothing was recorded" in r.stderr
+    assert "pending" not in r.stderr  # a denial must not steer the agent to a decision that also runs here
     assert (tmp_path / "ci-only.tsv").read_text() == before
     assert [x[1] for x in approvals_log(tmp_path)] == ["lw-local-unavailable"]
     # Deny (rc 1) and cancel/timeout (rc 124, 143): refused
@@ -202,6 +203,7 @@ def test_local_decision_denied_cancelled_or_unaskable_writes_nothing(tmp_path):
         stub_sudo_ask(tmp_path, rc)
         r = run(tmp_path, "ci", "decide", str(repo), "local", "why")
         assert r.returncode == 1 and "did not approve" in r.stderr, rc
+        assert "pending" not in r.stderr, rc
         assert (tmp_path / "ci-only.tsv").read_text() == before, rc
     assert [x[1] for x in approvals_log(tmp_path)][1:] == ["lw-local-denied"] * 3
     # a non-executable helper is as good as none
@@ -235,6 +237,53 @@ def test_existing_local_row_keeps_working_and_edits_its_reason_without_a_dialog(
     assert run(tmp_path, "ci", "decide", str(repo), "local", "macOS only, still").returncode == 0
     assert rows(tmp_path)[0][1:3] == ["local", "macOS only, still"]
     assert not calls.exists()
+
+
+def test_control_characters_cannot_plant_a_local_row_past_the_gate(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 1)  # every ask is denied
+    glob = os.path.realpath(tmp_path) + "/*"
+    evil = f"note\n{glob}\tlocal\tx"  # a second, `local` registry row smuggled into an ungated pending/ci decision
+    for mode in ("pending", "ci"):
+        r = run(tmp_path, "ci", "decide", str(repo), mode, evil)
+        assert r.returncode == 2 and "control character" in r.stderr, mode
+    assert run(tmp_path, "ci-only", "add", str(repo), evil).returncode == 2
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "a\tb").returncode == 2
+    assert not (tmp_path / "ci-only.tsv").exists() and not calls.exists()
+    # the same through a hostile directory name, and a hand-built row set reaching write_registry
+    odd = tmp_path / "x\ny"
+    odd.mkdir()
+    assert run(tmp_path, "ci", "decide", str(odd), "pending", "ok").returncode == 2
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_write_registry_refuses_control_characters(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "REGISTRY", tmp_path / "ci-only.tsv")
+    try:
+        lw.write_registry({"/r": ["pending", "n\n/x\tlocal\ty", "2026-11-15"]})
+    except SystemExit as e:
+        assert "control character" in str(e)
+    else:
+        raise AssertionError("write_registry accepted a control character")
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_glob_local_decision_is_gated(tmp_path):
+    stub_sudo_ask(tmp_path, 1)
+    glob = os.path.realpath(tmp_path) + "/*"
+    assert run(tmp_path, "ci", "decide", glob, "local", "all of it").returncode == 1
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_approval_log_escapes_the_directory_and_uses_bgs_timestamp(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    lw.local_approval_log("lw-local-approved", "/r\n2026-01-01T00:00:00-05:00\tlw-local-approved\tdeadbeef\t/etc\tbg", "why")
+    (line,) = (tmp_path / "home/.local/state/bg/approvals.log").read_text().splitlines()
+    cols = line.split("\t")
+    assert len(cols) == 5 and cols[1] == "lw-local-approved" and cols[4] == "load-watch" and "\\n" in cols[3]
+    assert cols[0][-6] in "+-" and cols[0][-3] == ":"  # 2026-11-15T19:35:00-05:00, as `gdate -Is`
 
 
 def test_local_decision_helper_timeout_or_crash_is_a_refusal(tmp_path, monkeypatch):
