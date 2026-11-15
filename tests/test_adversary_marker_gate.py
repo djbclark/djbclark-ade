@@ -942,6 +942,95 @@ def test_a_cd_that_does_not_run_does_not_move_the_read_away_from_the_file_the_sh
     assert run(command, cwd=live) is None, command
 
 
+def _two_step_tree(live, real_live=True):
+    """Lead r2 B1c: real/sub/b.md is the live one; real/decoy/sub/b.md, sub/b.md and b.md are benign."""
+    for d in ("real/sub", "real/decoy/sub", "sub"):
+        (live / d).mkdir(parents=True, exist_ok=True)
+        (live / d / "b.md").write_text("prose only")
+    (live / "b.md").write_text("prose only")
+    (live / "real" / "sub" / "b.md").write_text(APPROVE if real_live else "prose only")
+
+
+@pytest.mark.parametrize("command", [
+    "cd real && if false; then cd decoy; fi; cd sub; gh pr create --body-file b.md",                 # B1c 1
+    "cd real && if true; then :; else cd decoy; fi; cd sub; gh pr create --body-file b.md",          # B1c 2
+    "cd real && pushd -n decoy && cd sub && gh pr create --body-file b.md",                          # B1c 3
+    "cd real && coproc cd decoy; cd sub; gh pr create --body-file b.md",                             # B1c 4
+    "cd real && false && cd decoy; cd sub; gh pr create --body-file b.md",                           # the same, after `&&`
+    "cd real && true || cd decoy; cd sub; gh pr create --body-file b.md",                            # ... after `||`
+    "cd real && for x in 1; do cd decoy; done; cd sub; gh pr create --body-file b.md",               # ... behind `do`
+])
+def test_two_cds_after_one_that_does_not_run_still_read_the_file_the_shell_reads(live, command):
+    """Lead r2 B1: a `cd` the gate cannot place makes the cwd a set; the next relative `cd` and the body file resolve against every member."""
+    _two_step_tree(live)
+    assert run(command, cwd=live), command
+    _two_step_tree(live, real_live=False)
+    assert run(command, cwd=live) is None, command
+
+
+def test_a_cd_that_does_run_is_followed_into_its_candidate_directories(live):
+    """Lead r2: `if true; then cd decoy; fi; cd sub` runs both: the file is decoy/sub/b.md (the taken branch must be read too)."""
+    _two_step_tree(live, real_live=False)
+    (live / "real" / "decoy" / "sub" / "b.md").write_text(APPROVE)
+    for command in ("cd real && if true; then cd decoy; fi; cd sub; gh pr create --body-file b.md",
+                    "cd real && true && cd decoy; cd sub; gh pr create --body-file b.md",
+                    "cd real && cd decoy && cd sub && gh pr create --body-file b.md"):
+        assert run(command, cwd=live), command
+
+
+def test_a_certain_cd_replaces_the_candidates_instead_of_adding_to_them(live):
+    """A plain `cd real/decoy && cd sub` runs in one place only: a live file elsewhere (real/sub) is not read for it."""
+    _two_step_tree(live)
+    for sep in ("&&", ";", "\n"):
+        assert run("cd real/decoy %s cd sub %s gh pr create --body-file b.md" % (sep, sep), cwd=live) is None, sep
+        assert run("cd real %s cd sub %s gh pr create --body-file b.md" % (sep, sep), cwd=live), sep
+    # an `&&` that follows a `cd` that may not have run stays a set: `false && cd decoy && cd sub` runs both or neither
+    _two_step_tree(live)
+    assert run("cd real && false && cd decoy && cd sub && gh pr create --body-file b.md", cwd=live)
+
+
+def test_a_sure_cd_drops_the_directories_it_left_and_an_unsure_one_keeps_them(live):
+    """Kills the candidate-bookkeeping mutants: a live b.md sits in ONE directory, and only the right bookkeeping reads (or skips) it."""
+    (live / "real" / "decoy").mkdir(parents=True)
+    (live / "b.md").write_text("prose only")
+    (live / "real" / "b.md").write_text("prose only")
+    (live / "real" / "decoy" / "b.md").write_text(APPROVE)
+    gh = " gh pr create --body-file b.md"
+    for sep in ("&&", ";"):      # the shell left real/decoy for real (`cd ..` after a sure `cd`): the live file is out of reach
+        assert run("cd real/decoy %s cd ..%s" % (sep, ";" + gh if sep == ";" else " &&" + gh), cwd=live) is None, sep
+    assert run("cd real/decoy; cd ..; cd -P . ;" + gh, cwd=live) is None
+    # ... but a `cd` that may not have run leaves the old directory a candidate, and the `&&` after it runs only if it did
+    assert run("cd real/decoy && false && cd .. && cd .. &&" + gh, cwd=live)
+    assert run("cd real/decoy; false || cd ..;" + gh, cwd=live)
+    (live / "real" / "decoy" / "b.md").write_text("prose only")
+    (live / "real" / "b.md").write_text(APPROVE)
+    (live / "real" / "sub").mkdir()
+    # a `cd` into nothing fails and the `&&` chain stops: the shell is still in real/, where the next command runs
+    assert run("cd real && cd nonexistent && cd sub; " + gh, cwd=live)
+
+
+def test_a_cd_in_a_closed_subshell_leaves_the_candidates_as_they_were(live):
+    """S1: `(cd decoy)` must not move the outer set; the later `cd sub` is still real/sub (live), not real/decoy/sub."""
+    _two_step_tree(live)
+    for command in ("cd real && (cd decoy); cd sub; gh pr create --body-file b.md",
+                    "cd real && (cd decoy) && cd sub && gh pr create --body-file b.md",
+                    # the set, not only the representative path, is restored: real/sub is a candidate only through the outer `false && cd`
+                    "cd real && false && cd decoy; (cd decoy); cd sub; gh pr create --body-file b.md"):
+        assert run(command, cwd=live), command
+
+
+def test_cd_and_back_pairs_are_normalised_and_do_not_hit_the_directory_cap(live):
+    """Lead r2 B2: `cd dK && make && cd ..` x 22 built `d0/../d1/..` strings, each a new directory; past the cap a write was denied."""
+    for i in range(40):
+        (live / ("d%d" % i)).mkdir()
+    pairs = " && ".join("cd d%d && make && cd .." % i for i in range(40))
+    assert run(pairs + " && gh pr create --body 'ordinary'", cwd=live) is None
+    assert run(" && ".join("cd d0 && make && cd .." for _ in range(200)) + " && gh pr create --body 'ordinary'", cwd=live) is None
+    live_b = live / "d3" / "b.md"
+    live_b.write_text(APPROVE)
+    assert run(pairs + " && cd d3 && gh pr create --body-file b.md", cwd=live)
+
+
 def test_a_directory_visited_only_after_the_write_is_not_read_for_it(live):
     (live / "real").mkdir()
     (live / "real" / "b.md").write_text(APPROVE)
@@ -1091,20 +1180,27 @@ def test_thousands_of_cds_do_not_make_the_hook_quadratic(live):
 
 
 def test_directories_times_missing_operands_are_bounded_by_the_read_budget(live, monkeypatch):
-    """H2: 1,000 `cd`s x 2,000 operands that do not exist made 70 s of `stat`; `read_file` calls are capped at MAX_READS."""
+    """H2: 1,000 `cd`s x 2,000 operands that do not exist made 70 s of `stat` (r5: 200 candidate directories now); `read_file` calls are capped at MAX_READS."""
     calls = []
     real_read = gate.read_file
     monkeypatch.setattr(gate, "read_file", lambda path, cwd: calls.append(1) or real_read(path, cwd))
-    command = ("".join("cd d%x; " % i for i in range(1000)) + "gh api repos/o/r/issues/1/comments "
+    command = (_decoy_cds(live, 200) + "gh api repos/o/r/issues/1/comments "
                + " ".join("-F n%x=@m%x" % (i, i) for i in range(2000)) + " -f body=" + q("I approve this"))
     result, took = _seconds(command, live)
     assert len(calls) <= gate.MAX_READS and took < 5, (len(calls), took)
     assert result and "can follow in time" in result   # past the budget: denied
 
 
+def _decoy_cds(live, n):
+    """n `cd`s the gate cannot place (`false && cd eK`), each into a directory that exists: n distinct candidates."""
+    for i in range(n):
+        (live / ("e%d" % i)).mkdir(exist_ok=True)
+    return "".join("false && cd e%d; " % i for i in range(n))
+
+
 def test_more_directories_than_the_cap_deny_beside_approve_and_allow_otherwise(live):
     """M1 and the fail-closed rule: past MAX_DIRS visited directories the real one may be dropped, so a body that mentions APPROVE is denied."""
-    decoys = "".join("false && cd /nonexistent/d%d; " % i for i in range(gate.MAX_DIRS + 2))
+    decoys = _decoy_cds(live, gate.MAX_DIRS + 2)
     assert run(decoys + "gh pr comment 1 --body " + q("I approve this"), cwd=live)
     assert run(decoys + "gh pr comment 1 --body " + q("fine"), cwd=live)        # fail closed: the real directory may have been dropped
     assert run(decoys[:200] + "gh pr comment 1 --body " + q("fine"), cwd=live) is None
@@ -1124,7 +1220,7 @@ def test_past_the_caps_a_write_whose_live_file_was_out_of_reach_is_denied(live):
     """R1/R2 (r3): the fail-closed rule needs no APPROVE in a text that was read: the live file is exactly the one never reached."""
     (live / "real").mkdir()
     (live / "real" / "b.md").write_text(APPROVE)
-    decoys = "".join("false && cd /nonexistent/d%d; " % i for i in range(70))
+    decoys = _decoy_cds(live, 70)
     assert run(decoys + "cd real && gh pr comment 1 --body-file b.md", cwd=live)
     flood = " ".join("-F n%x=@m%x" % (i, i) for i in range(2600))
     assert run("cd real && gh api repos/o/r/issues/1/comments %s -F body=@b.md" % flood, cwd=live)
