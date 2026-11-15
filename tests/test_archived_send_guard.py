@@ -195,6 +195,7 @@ def test_a_stuck_acknowledged_handoff_hands_the_predecessor_its_mail_back(world)
     ("archive-unknown", "AGENT_RUNNING", True), ("archive-unknown", "PREDECESSOR_NOT_IDLE", True),
     ("archive-unknown", None, False),  # a crashed archive with no recorded reason: unknown outcome
     ("archive-unknown", "ARCHIVE_FAILED", False), ("archive-unknown", "ARCHIVED_OTHER_AGENT", False),
+    ("archive-unknown", "ARCHIVE_RESOLVED_OTHER_AGENT", False),  # sr-43 a: an AGENT_RUNNING naming another agent is no wait
     ("creation-unknown", None, False), ("creation-refused", "INVALID_THINKING_OPTION", False), ("creation-refused", None, False), ("awaiting-ack", None, False), ("archive-failed", "AGENT_RUNNING", False),
 ])
 def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, status, code, redirects):
@@ -762,3 +763,17 @@ def test_a_backstop_crash_does_not_unjudge_a_send_the_parser_found(monkeypatch, 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"tool_name": "Bash", "tool_input": {"command": f"paseo send {A} hi"}})))
     assert gate.main() == 0
     assert denied == [f"archived {A}"] and "boom" in capsys.readouterr().err
+
+
+def test_one_decision_inspects_each_agent_once(world):
+    """sr-43 e: target, successor and chain end are each read once per decision; a not-found answer is cached too."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    calls = []
+
+    def inspect(ident):
+        calls.append(ident)
+        if ident == C:
+            raise LookupError(ident)
+        return {"Id": ident, "Archived": False}
+    assert guard.decide(A, inspect, state_dir=world.state, home=world.home).action == guard.REDIRECT
+    assert sorted(calls) == sorted(set(calls)) and set(calls) == {A, B}

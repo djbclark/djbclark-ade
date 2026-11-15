@@ -71,6 +71,9 @@ MIN_POLL = 0.5          # a floor: each sample spawns `paseo agent inspect`
 MAX_POLL = 3600.0       # caps keep `time.sleep` far from OverflowError and the wait from being unbounded in practice
 MAX_TIMEOUT = 86400.0
 AGENT_RUNNING = 'AGENT_RUNNING'  # Paseo's structured archive refusal for an agent mid-turn; nothing archived
+# An AGENT_RUNNING refusal whose message names a different agent: not a wait. Recorded under this code so the send guard
+# (ade_lead_succession.ACK_WAIT_CODES does not list it) stops redirecting at once (sr-43 a, rv-736r B1).
+ARCHIVE_RESOLVED_OTHER_AGENT = 'ARCHIVE_RESOLVED_OTHER_AGENT'
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
@@ -848,6 +851,11 @@ class Service:
             # Recorded like every later re-check (rq-38 B2): a first check that fails (checkpoint, HEAD or mode drift) leaves a
             # native_error, which ends the send guard's acknowledged redirect at once instead of after its hour.
             guarded(self.check_retirement, record, target)
+            if record.get('native_error', {}).get('code') not in (AGENT_RUNNING, 'PREDECESSOR_NOT_IDLE'):
+                # A re-run whose first check passes (a waiting reason stays true here and ends before the archive call): the earlier failure (drift since fixed) no longer holds the send guard's
+                # acknowledged redirect off (sr-43 c, rv-736r R2); the reason stays as history. A failure now records afresh.
+                self.resolve_native_error(record)
+                self.save(target, record)
 
             def timed_out(seen):
                 message = (f'predecessor {record["predecessor"]} never stayed idle without permission waits for '
@@ -880,13 +888,20 @@ class Service:
                         'match, getpaseo/paseo#9668); nothing archived; archive by exact id via the Paseo MCP '
                         'archive_agent, verify with `paseo agent inspect`, then re-run finish')
                 record['status'] = 'archive-unknown'
+                # A refusal from an earlier loop pass (AGENT_RUNNING) must not outlive this call: if the process dies inside
+                # the archive call below the outcome is unknown, and a stale waiting code would keep the send guard
+                # redirecting (sr-43 b, rv-736r R1). The reason stays as history; this call's own refusal records afresh.
+                if 'native_error' in record:
+                    record['resolved_native_error'] = record.pop('native_error')
                 self.save(target, record)
                 try:
                     receipt = self.native('agent', 'archive', record['predecessor'])  # never --force/workspace archive
                 except SessionError as error:
-                    record['native_error'] = native_error_record('agent archive', error)
-                    self.save(target, record)
                     other = self.archive_other_agent(error, record['predecessor'])  # also for AGENT_RUNNING: its message names the agent
+                    record['native_error'] = native_error_record('agent archive', error)
+                    if other and record['native_error'].get('code') == AGENT_RUNNING:
+                        record['native_error']['code'] = ARCHIVE_RESOLVED_OTHER_AGENT  # not a wait: ends the guard's redirect
+                    self.save(target, record)  # one save: a kill between two would leave the waiting code
                     if (not other and isinstance(error, NativeError) and error.info.get('code') == AGENT_RUNNING):
                         # The predecessor started a turn after our last sample (peer messages wake it); Paseo
                         # archived nothing. Wait for stable idle again, inside the same overall bound; the

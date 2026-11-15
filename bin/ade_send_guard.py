@@ -68,6 +68,23 @@ def _record(inspect, ident: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _cached(inspect):
+    """`inspect` memoised for one decision (sr-43 e): the target, the successor and the chain end are each read once.
+    A not-found answer (LookupError) is cached too; any other failure is not, so it still fails open each time."""
+    seen: dict = {}
+
+    def cached(ident: str):
+        if ident not in seen:
+            try:
+                seen[ident] = inspect(ident)
+            except LookupError:
+                seen[ident] = LookupError(ident)
+        if isinstance(seen[ident], LookupError):
+            raise seen[ident]
+        return seen[ident]
+    return cached
+
+
 def _follow(ident: str, inspect, state_dir: Path | None, home: Path | None) -> str:
     """The current holder of `ident`'s role: the end of its completed chain, then across `acknowledged` hops (each only to a
     successor that is live, so a crashed successor never leaves the predecessor unreachable), then that agent's completed chain."""
@@ -100,6 +117,7 @@ def _follow(ident: str, inspect, state_dir: Path | None, home: Path | None) -> s
 def decide(target: str, inspect, allow_archived: bool | str | None = False, state_dir: Path | None = None,
            home: Path | None = None, allow_replaced: str | None = None) -> Decision:
     """What to do about a send to `target` (an id, an id prefix or a name Paseo resolves)."""
+    inspect = _cached(inspect)
     if target.startswith("-"):  # an option, not an agent: never hand it to the inspect CLI
         return Decision(PASS, target, "not an agent id: not guarded")
     try:
