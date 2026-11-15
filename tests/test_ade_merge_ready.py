@@ -2166,6 +2166,9 @@ def _approve_post_inproc(mod, capsys, monkeypatch, tmp_path: Path, gh: Path, prs
     return rc, cap.out, cap.err
 
 
+AUTH_KWARGS: list = []
+
+
 def _fake_auth_run(mod, monkeypatch, calls: list, rc: int = 0, exc: Exception | None = None) -> None:
     """Answer only the two authentication programs (never a real dialog or sudo); everything else runs for real."""
     real_run = subprocess.run
@@ -2173,6 +2176,7 @@ def _fake_auth_run(mod, monkeypatch, calls: list, rc: int = 0, exc: Exception | 
     def fake_run(argv, *a, **kw):
         if argv and argv[0] in (mod.SUDO_ASK, mod.SUDO):
             calls.append(list(argv))
+            AUTH_KWARGS.append(dict(kw))
             if exc is not None:
                 raise exc
             return subprocess.CompletedProcess(argv, rc)
@@ -2206,7 +2210,7 @@ def test_approve_post_refused_posts_nothing(tmp_path: Path, monkeypatch, capsys)
 
     monkeypatch.setattr(mod, "confirm_approve_post", refuse)
     rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
-    assert rc != 0
+    assert rc == 3
     assert not log.exists()
     assert "nothing was posted" in err
     assert "commented" not in out
@@ -2223,7 +2227,7 @@ def test_approve_post_sudo_ask_denied_posts_nothing(tmp_path: Path, monkeypatch,
     _fake_auth_run(mod, monkeypatch, calls, rc=auth_rc)
     gh, log = _approve_world(tmp_path, TWO_PRS)
     rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
-    assert rc != 0 and not log.exists()
+    assert rc == 3 and not log.exists()
     assert len(calls) == 1 and calls[0][0] == str(ask)  # a refusal is final: no second try through plain sudo
     assert "did not confirm" in err
 
@@ -2269,7 +2273,7 @@ def test_approve_post_sudo_fallback_failure_or_timeout_posts_nothing(tmp_path: P
         calls: list = []
         _fake_auth_run(mod, monkeypatch, calls, **kwargs)
         rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
-        assert rc != 0 and not log.exists(), kwargs
+        assert rc == 3 and not log.exists(), kwargs
         assert len(calls) == 1 and "nothing was posted" in err
 
 
@@ -2317,7 +2321,7 @@ def test_approve_post_refuses_a_dialog_that_would_be_cut_off(tmp_path: Path, mon
     many = {300 + i: f"{i:x}".rjust(40, "a") for i in range(14)}
     gh, log = _approve_world(tmp_path, many)
     rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, many)
-    assert rc != 0 and not log.exists() and not calls
+    assert rc == 3 and not log.exists() and not calls
     assert "do not fit in one confirmation dialog" in err
 
 
@@ -2328,3 +2332,53 @@ def test_confirm_approve_post_unit_rejects_a_row_without_a_full_head(monkeypatch
     with pytest.raises(RuntimeError, match="40-hex"):
         mod.confirm_approve_post(APPROVE_REPO, [{"number": 7, "head": "abc123"}])
     assert not calls
+
+
+@pytest.mark.parametrize("with_sudo_ask", [True, False])
+def test_approve_post_authentication_runs_with_a_scrubbed_environment(
+    tmp_path: Path, monkeypatch, capsys, with_sudo_ask: bool
+) -> None:
+    """sudo-ask is a bash script: BASH_ENV (or ENV, SHELLOPTS, an exported function) from the caller must not reach it."""
+    mod = _load_module()
+    if with_sudo_ask:
+        ask = tmp_path / "sudo-ask"
+        ask.write_text("#!/bin/sh\n")
+        ask.chmod(0o755)
+        monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
+    else:
+        monkeypatch.setattr(mod, "SUDO_ASK", str(tmp_path / "no-such-sudo-ask"))
+    harmless = tmp_path / "harmless.sh"  # the fake gh is a bash script too, so these must not break it
+    harmless.write_text("true\n")
+    for k, v in {
+        "BASH_ENV": str(harmless),
+        "ENV": str(harmless),
+        "SHELLOPTS": "noclobber",
+        "BASH_FUNC_zzz%%": "() { true; }",
+        "SUDO_ASK_MAX_WAIT": "1",
+        "HOME": str(tmp_path / "fake-home"),
+    }.items():
+        monkeypatch.setenv(k, v)
+    calls: list = []
+    AUTH_KWARGS.clear()
+    _fake_auth_run(mod, monkeypatch, calls, rc=0)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc == 0, err
+    assert len(AUTH_KWARGS) == 1
+    env = AUTH_KWARGS[0]["env"]
+    assert set(env) <= {"PATH", "HOME", "USER", "LOGNAME", "LANG"}
+    assert env["HOME"] != str(tmp_path / "fake-home")
+
+
+def test_sudo_ask_path_comes_from_the_account_not_home(monkeypatch) -> None:
+    import pwd
+
+    monkeypatch.setenv("HOME", "/nonexistent-fake-home")
+    mod = _load_module()
+    assert mod.SUDO_ASK == str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "bin" / "sudo-ask")
+
+
+def test_dialog_cost_counts_non_ascii_as_octal_escapes() -> None:
+    mod = _load_module()
+    assert mod._dialog_cost("abc") == 3 and mod._dialog_cost("a b") == 4
+    assert mod._dialog_cost("é") == 8  # two UTF-8 bytes, four characters each in the worst case
