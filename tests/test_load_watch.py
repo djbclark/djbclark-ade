@@ -7,14 +7,39 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LW = Path(__file__).resolve().parent.parent / "bin" / "load-watch"
 
 
-def run(tmp_path, *args):
-    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"))
-    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=env, timeout=30)
+def lw_env(tmp_path, **extra_env):
+    # HOME is a scratch directory: a `local` decision asks `$HOME/.local/bin/sudo-ask` (djbclark's Touch ID dialog), never the real one
+    return dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **extra_env)
+
+
+def run(tmp_path, *args, **extra_env):
+    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=lw_env(tmp_path, **extra_env), timeout=30)
+
+
+def stub_sudo_ask(tmp_path, rc):
+    """A fake `sudo-ask` that records its argv (one line per call) and exits `rc`: 0 = Allow + Touch ID, anything else = Deny/cancel."""
+    path = tmp_path / "home" / ".local" / "bin" / "sudo-ask"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    calls = tmp_path / "sudo-ask-calls"
+    path.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{calls}"\nexit {rc}\n')
+    path.chmod(0o755)
+    return calls
+
+
+def rows(tmp_path):
+    f = tmp_path / "ci-only.tsv"
+    return [ln.split("\t") for ln in f.read_text().splitlines() if not ln.startswith("#")] if f.exists() else []
+
+
+def approvals_log(tmp_path):
+    f = tmp_path / "home" / ".local" / "state" / "bg" / "approvals.log"
+    return [ln.split("\t") for ln in f.read_text().splitlines()] if f.exists() else []
 
 
 def load_module():
@@ -135,6 +160,7 @@ def test_ci_decide_check_modes_and_legacy_rows(tmp_path):
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     top = os.path.realpath(repo)
     (tmp_path / "ci-only.tsv").write_text(f"{top}\tscripts/ci-run\t2026-10-18\n")  # pre-decide 3-column row
+    stub_sudo_ask(tmp_path, 0)
     assert run(tmp_path, "ci", "check", str(repo)).stdout.split("\t")[:2] == ["ci", "scripts/ci-run"]
     assert run(tmp_path, "ci-only", "check", str(repo)).stdout.strip() == "scripts/ci-run"
     assert run(tmp_path, "ci", "decide", str(repo), "local", "needs Xcode").returncode == 0
@@ -144,6 +170,234 @@ def test_ci_decide_check_modes_and_legacy_rows(tmp_path):
     assert run(tmp_path, "ci", "check", str(tmp_path)).returncode == 1  # undecided
 
 
+def _repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    return repo
+
+
+def test_local_decision_approved_is_recorded_and_logged(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 0)
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "needs Xcode")
+    assert r.returncode == 0, r.stderr
+    assert [x[:3] for x in rows(tmp_path)] == [[os.path.realpath(repo), "local", "needs Xcode"]]
+    ask = calls.read_text().splitlines()
+    assert len(ask) == 1 and ask[0].startswith("-k /usr/bin/printf")  # fresh auth (-k), not a cached sudo ticket
+    assert os.path.realpath(repo) in ask[0] and "needs Xcode" in ask[0]  # djbclark sees the directory and the reason
+    (log,) = approvals_log(tmp_path)
+    assert log[1:2] == ["lw-local-approved"] and log[3] == os.path.realpath(repo) and log[4] == "load-watch"
+    assert "needs Xcode" not in "\t".join(log)  # the reason is not logged
+
+
+def test_local_decision_denied_cancelled_or_unaskable_writes_nothing(tmp_path):
+    repo = _repo(tmp_path)
+    run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run")
+    before = (tmp_path / "ci-only.tsv").read_text()
+    assert rows(tmp_path)[0][1] == "ci"
+    # no sudo-ask at all (missing helper, no GUI): refused
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "why")
+    assert r.returncode == 1 and "djbclark" in r.stderr and "nothing was recorded" in r.stderr
+    assert "pending" not in r.stderr  # a denial must not steer the agent to a decision that also runs here
+    assert (tmp_path / "ci-only.tsv").read_text() == before
+    assert [x[1] for x in approvals_log(tmp_path)] == ["lw-local-unavailable"]
+    # Deny (rc 1) and cancel/timeout (rc 124, 143): refused
+    for rc in (1, 124, 143):
+        stub_sudo_ask(tmp_path, rc)
+        r = run(tmp_path, "ci", "decide", str(repo), "local", "why")
+        assert r.returncode == 1 and "did not approve" in r.stderr, rc
+        assert "pending" not in r.stderr, rc
+        assert (tmp_path / "ci-only.tsv").read_text() == before, rc
+    assert [x[1] for x in approvals_log(tmp_path)][1:] == ["lw-local-denied"] * 3
+    # a non-executable helper is as good as none
+    (tmp_path / "home" / ".local" / "bin" / "sudo-ask").chmod(0o644)
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why").returncode == 1
+    assert (tmp_path / "ci-only.tsv").read_text() == before
+
+
+def test_local_decision_over_pending_is_gated_and_ci_pending_are_not(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 1)  # every ask is denied
+    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded").returncode == 0
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why").returncode == 1  # pending -> local is gated
+    assert rows(tmp_path)[0][1] == "pending"
+    assert not calls.exists() or len(calls.read_text().splitlines()) == 1  # only that one local attempt asked
+    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    assert rows(tmp_path)[0][1] == "ci"
+    assert run(tmp_path, "ci", "check", str(repo)).returncode == 0  # reads are ungated
+    assert run(tmp_path, "ci", "list").returncode == 0
+    assert run(tmp_path, "ci", "rm", str(repo)).returncode == 0
+    assert len(calls.read_text().splitlines()) == 1
+
+
+def test_existing_local_row_keeps_working_and_edits_its_reason_without_a_dialog(tmp_path):
+    repo = _repo(tmp_path)
+    top = os.path.realpath(repo)
+    (tmp_path / "ci-only.tsv").write_text(f"{top}\tlocal\tmacOS only\t2026-10-18\n")  # recorded before the gate
+    calls = stub_sudo_ask(tmp_path, 1)  # a denying helper: it must not even be asked
+    assert run(tmp_path, "ci", "check", str(repo)).stdout.split("\t")[:2] == ["local", "macOS only"]
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "macOS only, still").returncode == 0
+    assert rows(tmp_path)[0][1:3] == ["local", "macOS only, still"]
+    assert not calls.exists()
+
+
+def test_control_characters_cannot_plant_a_local_row_past_the_gate(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 1)  # every ask is denied
+    glob = os.path.realpath(tmp_path) + "/*"
+    evil = f"note\n{glob}\tlocal\tx"  # a second, `local` registry row smuggled into an ungated pending/ci decision
+    for mode in ("pending", "ci"):
+        r = run(tmp_path, "ci", "decide", str(repo), mode, evil)
+        assert r.returncode == 2 and "control character" in r.stderr, mode
+    assert run(tmp_path, "ci-only", "add", str(repo), evil).returncode == 2
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "a\tb").returncode == 2
+    for sep in ("\x0b", "\x0c", "\x1c", "\x7f", "\x85", "\u2028", "\u2029"):  # what str.splitlines() splits on, and DEL/C1
+        assert run(tmp_path, "ci", "decide", str(repo), "pending", f"a{sep}b").returncode == 2, repr(sep)
+    assert not (tmp_path / "ci-only.tsv").exists() and not calls.exists()
+    # the same through a hostile directory name, and a hand-built row set reaching write_registry
+    odd = tmp_path / "x\ny"
+    odd.mkdir()
+    assert run(tmp_path, "ci", "decide", str(odd), "pending", "ok").returncode == 2
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_write_registry_refuses_control_characters(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "REGISTRY", tmp_path / "ci-only.tsv")
+    try:
+        lw.write_registry({"/r": ["pending", "n\n/x\tlocal\ty", "2026-11-15"]})
+    except SystemExit as e:
+        assert "control character" in str(e)
+    else:
+        raise AssertionError("write_registry accepted a control character")
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_caller_environment_cannot_make_the_helper_approve(tmp_path):
+    repo = _repo(tmp_path)
+    path = tmp_path / "home" / ".local" / "bin" / "sudo-ask"
+    path.parent.mkdir(parents=True)
+    path.write_text("#!/bin/bash\nexit 1\n")  # a bash helper that denies, like the real sudo-ask
+    path.chmod(0o755)
+    hook = tmp_path / "hook.sh"
+    hook.write_text("exit 0\n")  # BASH_ENV runs this first in a non-interactive bash: it would approve before the helper's own code
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why", BASH_ENV=str(hook)).returncode == 1
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "why", ENV=str(hook), SHELLOPTS="xtrace").returncode == 1
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def _slow_approver(tmp_path):
+    """A sudo-ask that waits for a flag file, then approves: the dialog is 'open' until the test creates the flag."""
+    flag, started = tmp_path / "flag", tmp_path / "started"
+    path = tmp_path / "home" / ".local" / "bin" / "sudo-ask"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n: > {started}\nwhile [ ! -e {flag} ]; do sleep 0.05; done\nexit 0\n")
+    path.chmod(0o755)
+    return flag, started
+
+
+def _wait_for(path):
+    for _ in range(200):
+        if path.exists():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{path} never appeared")
+
+
+def test_changes_made_during_the_approval_wait_survive(tmp_path):
+    """PR 744 B1: the registry snapshot must not be held across the dialog (a stale write-back restored an unapproved `local` row)."""
+    repo, j, k = _repo(tmp_path), tmp_path / "j", tmp_path / "k"
+    for d in (j, k):
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+    jt, kt = os.path.realpath(j), os.path.realpath(k)
+    (tmp_path / "ci-only.tsv").write_text(f"{jt}\tlocal\tgrandfathered\t2026-10-18\n")
+    flag, started = _slow_approver(tmp_path)
+    p = subprocess.Popen([sys.executable, str(LW), "ci", "decide", str(repo), "local", "needs Xcode"], env=lw_env(tmp_path),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_for(started)  # the dialog is open and the first process has read the registry
+        assert run(tmp_path, "ci", "decide", str(j), "ci", "scripts/ci-run").returncode == 0  # the operator moves J to CI meanwhile
+        assert run(tmp_path, "ci", "decide", str(k), "pending", "seeded").returncode == 0
+        flag.write_text("")
+        assert p.wait(timeout=30) == 0
+    finally:
+        p.kill()
+    got = {r[0]: r[1] for r in rows(tmp_path)}
+    assert got == {os.path.realpath(repo): "local", jt: "ci", kt: "pending"}, got
+
+
+def test_concurrent_registry_writers_lose_no_update(tmp_path):
+    dirs = []
+    for i in range(10):
+        d = tmp_path / f"r{i}"
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        dirs.append(d)
+    procs = [subprocess.Popen([sys.executable, str(LW), "ci-only", "add", str(d), "scripts/ci-run"], env=lw_env(tmp_path),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for d in dirs]
+    assert [p.wait(timeout=60) for p in procs] == [0] * 10
+    assert sorted(r[0] for r in rows(tmp_path)) == sorted(os.path.realpath(d) for d in dirs)
+
+
+def test_helper_gets_no_tmpdir(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path)
+    monkeypatch.setenv("TMPDIR", "/somewhere/evil")
+    monkeypatch.setenv("BASH_ENV", "/x")
+    env = lw.helper_env()
+    assert "TMPDIR" not in env and "BASH_ENV" not in env and env["HOME"] == str(tmp_path)
+
+
+def test_damaged_row_is_named_in_the_refusal(tmp_path):
+    repo = _repo(tmp_path)
+    (tmp_path / "ci-only.tsv").write_text("/damaged\x01repo\tci\tcmd\t2026-10-18\n")
+    r = run(tmp_path, "ci-only", "add", str(repo), "scripts/ci-run")
+    assert r.returncode == 1 and "damaged" in r.stderr and "nothing was written" in r.stderr
+
+
+def test_glob_local_decision_is_gated(tmp_path):
+    stub_sudo_ask(tmp_path, 1)
+    glob = os.path.realpath(tmp_path) + "/*"
+    assert run(tmp_path, "ci", "decide", glob, "local", "all of it").returncode == 1
+    assert not (tmp_path / "ci-only.tsv").exists()
+
+
+def test_approval_log_escapes_the_directory_and_uses_bgs_timestamp(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    lw.local_approval_log("lw-local-approved", "/r\n2026-01-01T00:00:00-05:00\tlw-local-approved\tdeadbeef\t/etc\tbg", "why")
+    (line,) = (tmp_path / "home/.local/state/bg/approvals.log").read_text().splitlines()
+    cols = line.split("\t")
+    assert len(cols) == 5 and cols[1] == "lw-local-approved" and cols[4] == "load-watch" and "\\n" in cols[3]
+    assert cols[0][-6] in "+-" and cols[0][-3] == ":"  # 2026-11-15T19:35:00-05:00, as `gdate -Is`
+
+
+def test_local_decision_helper_timeout_or_crash_is_a_refusal(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    slow = tmp_path / "sudo-ask"
+    slow.write_text("#!/bin/sh\nsleep 30\nexit 0\n")  # would approve, but only after the outer bound
+    slow.chmod(0o755)
+    monkeypatch.setattr(lw, "SUDO_ASK", slow)
+    monkeypatch.setattr(lw, "SUDO_ASK_TIMEOUT_S", 0.5)
+    assert lw.approve_local_decision("/some/repo", "why") is False
+    bad = tmp_path / "bad-ask"
+    bad.write_text("not an executable script\n")  # exec format error: OSError
+    bad.chmod(0o755)
+    monkeypatch.setattr(lw, "SUDO_ASK", bad)
+    assert lw.approve_local_decision("/some/repo", "why") is False
+
+
+def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):
+    repo = _repo(tmp_path)
+    calls = stub_sudo_ask(tmp_path, 1)
+    assert run(tmp_path, "ci-only", "add", str(repo), "scripts/ci-run test").returncode == 0
+    assert rows(tmp_path)[0][1] == "ci" and not calls.exists()
+
+
 def test_ci_worktree_and_glob_take_a_decision(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -151,6 +405,7 @@ def test_ci_worktree_and_glob_take_a_decision(tmp_path):
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
     subprocess.run(git + ["worktree", "add", "-q", str(tmp_path / "wt")], check=True)
+    stub_sudo_ask(tmp_path, 0)
     assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded").returncode == 0
     out = run(tmp_path, "ci", "check", str(tmp_path / "wt")).stdout.strip().split("\t")
     assert out == ["pending", "seeded", os.path.realpath(repo)]
