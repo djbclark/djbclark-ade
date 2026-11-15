@@ -919,3 +919,74 @@ def test_an_unresolvable_cd_target_stays_the_documented_limit_in_every_form(live
     for cd in ("cd -P $D", "cd -- $D", "builtin cd $D", "cd -", "cd $(pwd)/sub"):
         assert run("%s && gh pr edit 41 --body-file only.md" % cd, cwd=live) is None, cd
         assert run("%s && gh pr edit 41 --body-file live.md" % cd, cwd=live), cd          # the event-cwd fallback still finds this one
+
+
+# ---- mg-51 repair (lead review of PR 749: B1, B2, B3, B6) ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "cd real && if false; then cd decoy; fi; gh pr create --body-file b.md",                  # B1a
+    "cd real && if true; then :; else cd decoy; fi; gh pr create --body-file b.md",           # B1b
+    "cd real && pushd -n decoy && gh pr create --body-file b.md",                             # B1c: `pushd -n` does not change directory
+    "cd real && coproc cd decoy; gh pr create --body-file b.md",                              # B1d: a coproc runs in a subshell
+    "cd real && false && cd decoy; gh pr create --body-file b.md",                            # the same class, before mg-51
+    "cd real && cd nonexistent; gh pr create --body-file b.md",
+])
+def test_a_cd_that_does_not_run_does_not_move_the_read_away_from_the_file_the_shell_reads(live, command):
+    """Lead review B1: the live b.md is under real/, a benign one under real/decoy/; every directory visited so far is tried."""
+    (live / "real" / "decoy").mkdir(parents=True)
+    (live / "real" / "b.md").write_text(APPROVE)
+    (live / "real" / "decoy" / "b.md").write_text("prose only")
+    assert run(command, cwd=live), command
+    (live / "real" / "b.md").write_text("prose only")
+    assert run(command, cwd=live) is None, command
+
+
+def test_a_directory_visited_only_after_the_write_is_not_read_for_it(live):
+    (live / "real").mkdir()
+    (live / "real" / "b.md").write_text(APPROVE)
+    assert run("gh pr create --body-file b.md && cd real", cwd=live) is None
+
+
+def test_a_gh_api_script_heredoc_is_read_with_graphql_escapes_decoded(live):
+    """Lead review B2: the loose path places the write but used to leave the query text undecoded."""
+    def script(marker):
+        return ("python3 - <<'EOF'\nimport subprocess\nsubprocess.run([\"gh\", \"api\", \"graphql\", \"-f\", r'''query=%s'''])\nEOF\n"
+                % _query(marker))
+    assert run(script(APPROVE), cwd=live)
+    assert run(script(BLOCK), cwd=live) is None
+    unparsed = "echo 'unbalanced; gh api graphql -f query=" + q(_query(APPROVE))
+    assert run(unparsed, cwd=live)
+
+
+def test_a_decoy_fence_leaf_does_not_hide_a_leaf_whose_verdict_word_is_graphql_escaped(live):
+    """Lead review B3: `adversary\\u002dverdict` is `adversary-verdict` once GitHub decodes the query; the leaf must be its own text."""
+    def payload(marker, decoy=True):
+        query = _query(marker).replace("adversary-verdict", "adversary\\u002dverdict")
+        return json.dumps({"variables": {"a": "```"} if decoy else {}, "query": query})
+    (live / "fence.json").write_text(payload(APPROVE))
+    (live / "nofence.json").write_text(payload(APPROVE, decoy=False))
+    (live / "fence-ok.json").write_text(payload(BLOCK))
+    assert run("gh api graphql --input nofence.json", cwd=live)
+    assert run("gh api graphql --input fence.json", cwd=live)
+    assert run("gh api graphql --input fence-ok.json", cwd=live) is None
+
+
+def test_a_query_read_through_a_filter_is_decoded_too(live):
+    """Lead review B6a: the raw-text (filter) channel is decoded like the others."""
+    (live / "q.graphql").write_text(_query(APPROVE) + "\n")
+    assert run('gh api graphql -f query="$(grep mutation q.graphql)"', cwd=live)
+    assert run("grep mutation q.graphql | gh api graphql -F query=@-", cwd=live)
+
+
+def test_cd_double_dash_ends_the_options_so_a_dash_named_directory_is_followed(live):
+    """Lead review B6b."""
+    (live / "x" / "-d").mkdir(parents=True)
+    (live / "x" / "-d" / "q.graphql").write_text(_query(APPROVE))
+    assert run("cd x; cd -- -d && gh api graphql -F query=@q.graphql", cwd=live)
+
+
+def test_a_decoded_marker_in_a_later_text_is_still_judged(live):
+    """Lead review B6c: an earlier text with an escape (and no marker) must not end the decoded scan."""
+    assert run("gh api graphql -f note=" + q("one\\ntwo") + " -f query=" + q(_query(APPROVE)), cwd=live)
+    assert run("gh api graphql -f note=" + q("one\\ntwo") + " -f query=" + q(_query(BLOCK)), cwd=live) is None

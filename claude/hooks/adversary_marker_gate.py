@@ -40,7 +40,7 @@ this gate lets through is what the Action reads as documentation:
 
 Not gated (known limits): a command with no `gh` word (`git commit`, `curl`, the GitHub MCP, a script that calls the API
 without naming `gh pr`/`gh api`); a body or body-file path held in a variable set in ANOTHER tool call (`F=raw.md; gh ... --body-file "$F"` in ONE command is seen);
-a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`, `cd -`; `D=sub; cd $D` in one command is expanded, in token order, and `cd -P`/`cd --`/`builtin cd`/`{ cd`/`if cd` are followed); a program's output or a decoder piped into `gh api --input -` (`base64 -d`, `gzip -dc`); `gh pr create --fill*`
+a body file made by a command the hook does not read (`cp live.md b.md && gh ... --body-file b.md`); a `cd` in a shell function; a `cd` target set in another tool call or built by a command substitution (`cd $D`, `cd $(pwd)/sub`, `cd -`; `D=sub; cd $D` in one command is expanded, in token order, and `cd -P`/`cd --`/`builtin cd`/`{ cd`/`if cd` are followed, and a relative operand is read under every directory entered before the write); a program's output or a decoder piped into `gh api --input -` (`base64 -d`, `gzip -dc`); `gh pr create --fill*`
 (the body comes from commit messages); a `gh alias`; `git -C DIR`; a heredoc script in another language (`python3 - <<EOF`: its text is scanned, its file operands are not); more than three levels of `bash -c`; obfuscated markers
 (`$'\\x3c'`, a shell-built `verdict` key beside a decoy BLOCK); a text over 70,000 characters is scanned only up to there (GitHub rejects a body over 65,536). `bin/ade-merge-ready
 approve-post` is the operator's path: this hook does not see it (it is not a `gh` command), and only the operator, or an agent
@@ -78,6 +78,7 @@ MAX_TOTAL = 600000
 MAX_FORCED = 400            # operand files / stdin texts read outside the byte budget
 MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
+MAX_DIRS = 8                # directories a relative operand is tried under (the event cwd and each `cd` target before the write)
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -263,19 +264,24 @@ class Pipeline:
         self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
-def split_pipelines(tokens, cwd: str, expand=None):
+def split_pipelines(tokens, cwd: str, expand=None, history=None):
     """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
     A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
     skipped. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`; the assignment in
     effect at that point, so a later `D=decoy` does not move it); a name it cannot resolve stays literal, so the tracked cwd is wrong
-    and the file read falls back to the event cwd (docs/code-review.md rule 14)."""
+    and the file read falls back to the event cwd (docs/code-review.md rule 14). `history` (a dict) gets, for each tracked cwd, every
+    directory the command had `cd`'d into by then (at most MAX_DIRS): a `cd` that does not run (`false && cd d`, `if false; then cd d; fi`,
+    `pushd -n d`, a `coproc`) or does not change the directory must not move the read away from the file the shell reads (mg-51 r2, B1)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
+    visited = [cwd]
     want_dir = redirect = None
     no_more_options = False
     stack = []
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
 
     def new_seg():
+        if history is not None:
+            history[cur] = list(dict.fromkeys([*history.get(cur, ()), *visited]))[:MAX_DIRS]
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
     seg = new_seg()
 
@@ -317,6 +323,10 @@ def split_pipelines(tokens, cwd: str, expand=None):
                 nd = Path(os.path.expanduser(expand(tok, assigned) if expand else tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
                 seg["cwd"] = cur
+                if cur not in visited and len(visited) < MAX_DIRS:
+                    visited.append(cur)
+                if history is not None:
+                    history[cur] = list(dict.fromkeys([*history.get(cur, ()), *visited]))[:MAX_DIRS]
             continue
         if tok in ("cd", "pushd") and all(w in RESERVED or w in ("builtin", "command") for w in seg["words"]):
             want_dir = True
@@ -386,7 +396,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env, self.deep, self.api_write = [], {}, False, False
+        self.raw_texts, self.env, self.deep, self.api_write, self.history = [], {}, False, False, {}
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -421,7 +431,8 @@ class Scan:
                 leaves(json.loads(full))
                 chunk, alone, rest = "", 0, []
                 for t in strings:              # a string that names a verdict is its own text: a decoy fence in a neighbour leaf
-                    if not VERDICT_WORD.search(t):   # (`{"title":"```","body":"\u003c!-- ..."}`) cannot swallow it (am-02, C1)
+                    if not (VERDICT_WORD.search(t) or ("\\" in t and VERDICT_WORD.search(graphql_unescape(t)))):   # (`{"title":"```","body":"\u003c!-- ..."}`)
+                        # cannot swallow it (am-02, C1); a verdict word spelled with GraphQL escapes (`adversary\u002dverdict`) names it too (mg-51 r2, B3)
                         rest.append(t)
                     elif alone < MAX_STARTS:
                         alone += 1
@@ -448,13 +459,15 @@ class Scan:
         return ENV_REF.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), path) if "$" in path else path
 
     def reads(self, path: str, cwd: str) -> list[str]:
-        """The file under the tracked cwd AND, when that differs from the event cwd, under the event cwd: a `cd` in a closed
-        subshell, a `cd` target we mis-tracked or expanded from an assignment that does not apply (`cd $D ...; D=decoy`) must not
-        move the read away from the file the shell reads. Every distinct text is returned and scanned (am-02, adversary round 1 L1)."""
+        """The file under the tracked cwd, the event cwd AND every directory the command had `cd`'d into by then (`history`): a `cd`
+        in a closed subshell, one that does not run (`false && cd d`, `if false; then cd d; fi`, `coproc cd d`), `pushd -n d`, a target
+        we mis-tracked or expanded from an assignment that does not apply (`cd $D ...; D=decoy`) must not move the read away from the
+        file the shell reads. Every distinct text is returned and scanned (am-02 round 1 L1; mg-51 r2 B1)."""
         path = self.expand(path)
-        texts = [read_file(path, cwd)]
-        if self.cwd0 and cwd != self.cwd0 and not os.path.isabs(os.path.expanduser(path)):
-            texts.append(read_file(path, self.cwd0))
+        dirs = [cwd]
+        if not os.path.isabs(os.path.expanduser(path)):
+            dirs += [d for d in (self.cwd0, *self.history.get(cwd, ())) if d]
+        texts = [read_file(path, d) for d in dict.fromkeys(dirs)]
         return [t for k, t in enumerate(texts) if t and t not in texts[:k]]
 
     def add_file(self, path: str, cwd: str, **kw) -> None:
@@ -594,7 +607,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             scan.add(body)
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files
             collect(body, cwd, scan, depth + 1)
-    pipes = split_pipelines(tokens, cwd, scan.expand)
+    pipes = split_pipelines(tokens, cwd, scan.expand, scan.history)
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
@@ -694,8 +707,10 @@ def judge(command: str, cwd: str, am_loader) -> str:
     # a `gh api` write may carry a GraphQL `query` (`-f query=...`, `-F query=@file`, a `--input` JSON leaf) whose string literals GitHub
     # decodes, so every text with a backslash is also judged decoded (an extra look: a false deny at worst; mg-51, Carried 52). A
     # whole JSON payload is not a query text (its leaves are, and are separate texts), so it is left alone.
+    api = scan.api_write or bool(GH_API_LOOSE.search(command))   # also a `gh api` the loose paths placed (heredoc script, unparseable command)
+
     def gql(texts):
-        return [graphql_unescape(t) for t in texts if "\\" in t and t.lstrip("\ufeff \t\r\n")[:1] not in ("{", "[")] if scan.api_write else []
+        return [graphql_unescape(t) for t in texts if "\\" in t and t.lstrip("\ufeff \t\r\n")[:1] not in ("{", "[")] if api else []
     decoded, decoded_raw = gql(scan.texts), gql(scan.raw_texts)
     for t in scan.texts + decoded:
         found = live_approve(t, am)
