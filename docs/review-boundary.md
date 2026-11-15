@@ -48,7 +48,7 @@ owner PR still counts when the last editor is the owner or a login in `BODY_TRUS
 COLLABORATOR PRs** still need a live APPROVE in an issue comment the owner posted (not through a GitHub App) that
 nobody but the owner has edited (GraphQL `editor`, `lastEditedAt` and `userContentEdits`; unknown history, or one
 longer than 100 edits, fails closed). A body APPROVE on those PRs never counts; editing their body approves nothing
-(2026-11-07, Argon review F-HIGH-1). Agents must not write a live APPROVE marker. A BLOCK in the body or in any
+(2026-11-07, Argon review F-HIGH-1). Agents must not write a live APPROVE marker (code-review.md rule 14: `claude/hooks/adversary_marker_gate.py` denies the `gh` write). A BLOCK in the body or in any
 comment fails the check, and a dispatch judges every open PR at the same head, with both lookups paginated to the end
 (F-CRIT-2; pagination from the Codex review of PR 300).
 
@@ -142,12 +142,12 @@ stopped by the tripwire (exit 77). The Mac's own check is an operator step (belo
 From a checkout of the repository, after the push: it reads the PR (`gh pr view --json headRefOid,baseRefOid,baseRefName,
 headRefName,isCrossRepository,author,state`), refuses an author who is neither the operator's login nor the authenticated gh user unless
 `--allow-untrusted`, adds a clean detached worktree at exactly the head (an owner-authored PR whose head the operator pushed directly (push, force-push, branch creation; a merged child PR is not enough) runs the `trusted` mode, anything else `review`: `--runtime auto|restricted|yolo`, 2026-11-12), writes `git diff BASE...HEAD` and the file list into
-its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints
+its `.review-launch/`, runs `review-launch --mode review --head HEAD` with `config/review-schema.json`, prints (inside a ``` fence)
 `<!-- adversary-verdict:v1 {"verdict":"…","head":"<the full head>"} -->` (checked against the gate's own parser), files
 `~/.local/state/review-launch/<owner>__<name>-pr<N>-<head>.json` and removes the worktree. Exit 0 APPROVE, 1 BLOCK, 2 refused,
 3 failed, 77 tripwire, 124 timeout. It never posts. On an **owner-authored** PR the gate already succeeds without pasting
 (owner-trust, 2026-11-10); keep the printed marker for the local record — do not paste it into the PR body just to
-satisfy the gate. On an **outside** PR, paste the marker into an owner issue comment (not the body; never through
+satisfy the gate. On an **outside** PR, the operator (never an agent: `claude/hooks/adversary_marker_gate.py`) pastes the marker line (without its fence) into an owner issue comment (not the body; never through
 herdr, which mangles `<!-- … -->`), then:
 
 ```sh

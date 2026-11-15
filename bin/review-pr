@@ -26,7 +26,7 @@ Run it from a checkout of the repository, after the push has landed. It
                    and the authenticated-user rule never enable it; a head someone else pushed is reviewed restricted
        auto        (default) yolo for such an operator-authored and operator-pushed PR, else restricted
      The mode used is filed as `runtime` in the result.
-  6. checks that the verdict names this head, prints the marker (retained for the local record):
+  6. checks that the verdict names this head, prints the marker inside a ``` fence (retained for the local record):
          <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<the 40-hex head>"} -->
      (verdict and head only: the model's free text never goes into the marker), confirms that
      bin/adversary_marker.py reads it back as the same verdict, and files
@@ -37,7 +37,7 @@ Run it from a checkout of the repository, after the push has landed. It
   7. removes the worktree. It never posts anything to GitHub. Under owner-trust policy (PR #484,
      docs/review-boundary.md), owner-authored PRs whose head the operator pushed succeed the adversary-marker check
      without needing an APPROVE marker pasted (anyone else's push makes it an outside PR: the operator's marker comment) (keep the printed marker for the local record; do not paste into the body
-     just to satisfy the gate). On an outside PR, paste the marker into an owner issue comment (not the body),
+     just to satisfy the gate). On an outside PR, the operator (never an agent) pastes the marker into an owner issue comment (not the body),
      then run `gh workflow run adversary-marker.yml -f pr=N` so the merge gate reads it.
 
 Exit: 0 APPROVE, 1 BLOCK, 2 usage / no such PR / not a checkout of that repository / an untrusted author /
@@ -525,7 +525,7 @@ def review_attempt(argv: list[str]) -> int:
         print(json.dumps({**result, "file": str(path)}, sort_keys=True))
     else:
         if result.get("marker"):
-            print(result["marker"])
+            print("```\n" + result["marker"] + "\n```")   # fenced: a raw line copied into a report would be a live marker
             for f in result.get("findings") or []:
                 if isinstance(f, dict):
                     print(f"  [{f.get('severity')}] {f.get('file')}:{f.get('line', '')} {f.get('summary')}", file=sys.stderr)

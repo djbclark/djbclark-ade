@@ -30,24 +30,33 @@ For each request:
    with findings ranked by severity, each with file:line, the concrete
    failure scenario, and the fix you expect. "No findings" is a valid
    verdict; say it explicitly.
-4. **Your verdict ends with a machine-readable marker** (AGENTS.md rule 1), on its
-   own raw line after the findings, naming the head you reviewed:
+4. **Your verdict ends with a machine-readable marker** (AGENTS.md rule 1), in a fenced block
+   after the findings, naming the head you reviewed:
 
+   ```
    <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex sha you reviewed>"} -->
+   ```
 
    Two things about that line: it is an HTML comment, so it renders invisibly
    in a Markdown viewer — read the file itself — and it is a TEMPLATE, so
    replace the placeholder head with the real sha (and `APPROVE` with a
-   `BLOCK` when you block); pasted literally it approves nothing: an APPROVE
+   `BLOCK` when you block); left as is it approves nothing: an APPROVE
    with the placeholder head is read as documentation (no verdict,
    `adversary-missing`), and a BLOCK with it is `malformed`.
-   You never edit, commit or push, so emit the marker as a **raw line in your
-   reply** — not inside backticks or a fence, where an APPROVE would read as
-   documentation and be ignored (a BLOCK naming this head is rescued from the
-   raw body anyway, but write it raw) — for the teammate to paste into the PR
-   body.
+   You never edit, commit or push, and **neither does the teammate who gets your reply write a live APPROVE
+   marker into a PR body or comment** (AGENTS.md "Code review" item 1; docs/code-review.md rules 1 and 14: the
+   merge gate counts a live APPROVE as the owner's, and `gh` here is the owner; `claude/hooks/adversary_marker_gate.py`
+   denies it). So put the marker in your reply **and in every report file you write inside a fenced block** (a ``` fence on its own
+   lines; never a raw marker line anywhere, since a report that holds one is a live marker to copy), with the real
+   40-hex head, so the verdict stays machine-readable in the report. **Only the operator applies a live marker** (an owner
+   comment, `bin/ade-merge-ready approve-post`), or an agent the operator explicitly tells to; no teammate does it on its
+   own, through `gh` or through that tool. The teammate's PR body states your verdict as prose (quote it as prose, never
+   the fenced marker, which the Action would read as live inside a blockquote or a list indent), never as a live APPROVE marker. (A
+   BLOCK marker is the exception the gate allows: it counts wherever it appears, fenced or not, so it may be
+   relayed raw.)
    The merge gate (the `adversary-marker` Action, `bin/adversary_marker.py`) reads that marker and **not** your prose, so a verdict written only
-   as sentences is invisible to the gate. Two mistakes hard-block the PR as
+   as sentences is invisible to the gate (an owner-authored PR the operator pushed needs no APPROVE marker at all,
+   docs/review-boundary.md; the marker is for the outside-PR path and the record). Two mistakes hard-block the PR as
    `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
    no findings" maps to `APPROVE`), and `head` must be the **full 40-character
    sha** — write it out in full, never a `…`/`...` abbreviation. The gate can
