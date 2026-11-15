@@ -66,6 +66,16 @@ def run(gh: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_confirmed(monkeypatch, capsys, gh: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """`run` in this process with the djbclark confirmation stubbed as approved (ap-01); never opens a real dialog."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "confirm_approve_post", lambda repo, rows: None)
+    monkeypatch.setenv("ADE_MERGE_READY_STATE", str(gh.parent / "marker-state.json"))
+    rc = mod.main(["--gh", str(gh), *args])
+    cap = capsys.readouterr()
+    return subprocess.CompletedProcess(args, rc, cap.out, cap.err)
+
+
 def test_needs_approve_when_tests_pass_without_live_marker(tmp_path: Path) -> None:
     head = "a" * 40
     listing = json.dumps(
@@ -658,7 +668,7 @@ def test_approve_post_refuses_non_owner(tmp_path: Path) -> None:
     assert "not the operator's login" in r.stderr
 
 
-def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path) -> None:
+def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path, monkeypatch, capsys) -> None:
     head = "c" * 40
     listing = json.dumps(
         [
@@ -694,7 +704,9 @@ def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path) -> None:
             """
         ),
     )
-    r = run(
+    r = _run_confirmed(
+        monkeypatch,
+        capsys,
         gh,
         "approve-post",
         "--i-reviewed",
@@ -714,7 +726,7 @@ def test_approve_post_yes_posts_comment_for_outside(tmp_path: Path) -> None:
     assert "adversary-verdict:v1" in posted
 
 
-def test_approve_post_yes_via_body_edits_owner_pr(tmp_path: Path) -> None:
+def test_approve_post_yes_via_body_edits_owner_pr(tmp_path: Path, monkeypatch, capsys) -> None:
     head = "d" * 40
     listing = json.dumps(
         [
@@ -753,7 +765,9 @@ def test_approve_post_yes_via_body_edits_owner_pr(tmp_path: Path) -> None:
             """
         ),
     )
-    r = run(
+    r = _run_confirmed(
+        monkeypatch,
+        capsys,
         gh,
         "approve-post",
         "--i-reviewed",
@@ -2079,3 +2093,238 @@ def test_a_bot_author_named_like_the_operator_is_not_an_owner_pr(tmp_path: Path)
     r = _dry_run_world(tmp_path, "frdminc", "djbclark", "djbclark", is_bot=True)
     assert r.returncode == 0, r.stderr
     assert "would body-edit" not in r.stdout and "would comment" in r.stdout, r.stdout
+
+
+# --- ap-01 (2026-11-15): approve-post asks djbclark for fresh Touch ID / password before it posts ----------------------------
+# These run `main()` in this process so the confirmation is stubbed at the Python level (a monkeypatched function or
+# `subprocess.run`); the script has no flag, env var or config that skips it, so a subprocess run could never be stubbed.
+
+APPROVE_REPO = "djbclark/djbclark-ade"
+
+
+def _load_module():
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("ade_merge_ready_ap01", str(SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _approve_world(tmp_path: Path, prs: dict[int, str]) -> tuple[Path, Path]:
+    """A fake gh listing the outside-authored tips in *prs* ({number: head}); returns (gh, post log)."""
+    listing = json.dumps(
+        [
+            {
+                "number": n,
+                "title": f"tip {n}",
+                "headRefOid": h,
+                "baseRefName": "master",
+                "mergeable": "MERGEABLE",
+                "headRefName": f"cursor/tip-{n}-f576",
+                "author": {"login": "stranger"},
+            }
+            for n, h in prs.items()
+        ]
+    )
+    checks = "pytest-linux\tpass\t0\tx\nadversary-marker\tfail\t0\tx\n"
+    log = tmp_path / "posts.log"
+    gh = write_fake_gh(
+        tmp_path,
+        textwrap.dedent(
+            f"""
+            set -e
+            case "$*" in
+              *"pr list"*) echo '{listing}' ;;
+              *"pr checks"*) printf '%s' '{checks}' ; exit 1 ;;
+              *"api user"*) echo djbclark ;;
+              *"repo view"*) echo djbclark ;;
+              *"pr comment"*)
+                echo "$*" >> '{log}'
+                exit 0
+                ;;
+              *) echo "unexpected: $*" >&2; exit 99 ;;
+            esac
+            """
+        ),
+    )
+    return gh, log
+
+
+def _approve_post_inproc(mod, capsys, monkeypatch, tmp_path: Path, gh: Path, prs: dict[int, str], *, yes: bool = True):
+    monkeypatch.setenv("ADE_MERGE_READY_STATE", str(tmp_path / "marker-state.json"))
+    args = ["--gh", str(gh), "approve-post", "--prs", ",".join(str(n) for n in prs), "--min", "1"]
+    if yes:
+        args += ["--i-reviewed", "--yes"]
+        for n, h in prs.items():
+            args += ["--expect-head", f"{n}={h}"]
+    rc = mod.main(args)
+    cap = capsys.readouterr()
+    return rc, cap.out, cap.err
+
+
+def _fake_auth_run(mod, monkeypatch, calls: list, rc: int = 0, exc: Exception | None = None) -> None:
+    """Answer only the two authentication programs (never a real dialog or sudo); everything else runs for real."""
+    real_run = subprocess.run
+
+    def fake_run(argv, *a, **kw):
+        if argv and argv[0] in (mod.SUDO_ASK, mod.SUDO):
+            calls.append(list(argv))
+            if exc is not None:
+                raise exc
+            return subprocess.CompletedProcess(argv, rc)
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+
+TWO_PRS = {334: "c" * 40, 335: "d" * 40}
+
+
+def test_approve_post_confirmed_posts_every_pr(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    asked: list = []
+    monkeypatch.setattr(mod, "confirm_approve_post", lambda repo, rows: asked.append((repo, [r["number"] for r in rows])))
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc == 0, err
+    assert asked == [(APPROVE_REPO, [334, 335])]  # asked once, for both PRs, before the posts
+    posted = log.read_text()
+    assert "pr comment 334" in posted and "pr comment 335" in posted
+    assert TWO_PRS[334] in posted and TWO_PRS[335] in posted
+
+
+def test_approve_post_refused_posts_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+
+    def refuse(repo, rows):
+        raise RuntimeError("approve-post: djbclark did not confirm (test); nothing was posted")
+
+    monkeypatch.setattr(mod, "confirm_approve_post", refuse)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc != 0
+    assert not log.exists()
+    assert "nothing was posted" in err
+    assert "commented" not in out
+
+
+@pytest.mark.parametrize("auth_rc", [1, 2, 126])
+def test_approve_post_sudo_ask_denied_posts_nothing(tmp_path: Path, monkeypatch, capsys, auth_rc: int) -> None:
+    mod = _load_module()
+    ask = tmp_path / "sudo-ask"
+    ask.write_text("#!/bin/sh\n")
+    ask.chmod(0o755)
+    monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls, rc=auth_rc)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc != 0 and not log.exists()
+    assert len(calls) == 1 and calls[0][0] == str(ask)  # a refusal is final: no second try through plain sudo
+    assert "did not confirm" in err
+
+
+def test_approve_post_dialog_names_repo_and_every_pr_head(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    ask = tmp_path / "sudo-ask"
+    ask.write_text("#!/bin/sh\n")
+    ask.chmod(0o755)
+    monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls, rc=0)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc == 0, err
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[:3] == [str(ask), "-k", "/usr/bin/printf"]
+    text = argv[-1]
+    assert APPROVE_REPO in text
+    for n, h in TWO_PRS.items():
+        assert f"PR {n} head {h}" in text
+    assert "pr comment 334" in log.read_text()  # posted only after the confirmation succeeded
+
+
+def test_approve_post_without_sudo_ask_falls_back_to_sudo(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    monkeypatch.setattr(mod, "SUDO_ASK", str(tmp_path / "no-such-sudo-ask"))
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls, rc=0)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc == 0, err
+    assert calls == [["/usr/bin/sudo", "-k", "/usr/bin/true"]]
+    assert "pr comment 335" in log.read_text()
+
+
+def test_approve_post_sudo_fallback_failure_or_timeout_posts_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    monkeypatch.setattr(mod, "SUDO_ASK", str(tmp_path / "no-such-sudo-ask"))
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    for kwargs in ({"rc": 1}, {"exc": subprocess.TimeoutExpired(["sudo"], 1)}, {"exc": OSError("no sudo")}):
+        calls: list = []
+        _fake_auth_run(mod, monkeypatch, calls, **kwargs)
+        rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+        assert rc != 0 and not log.exists(), kwargs
+        assert len(calls) == 1 and "nothing was posted" in err
+
+
+def test_approve_post_dry_run_never_asks(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls)
+
+    def boom(repo, rows):
+        raise AssertionError("dry-run must not ask for confirmation")
+
+    monkeypatch.setattr(mod, "confirm_approve_post", boom)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS, yes=False)
+    assert rc == 0, err
+    assert "dry-run" in out and not calls and not log.exists()
+
+
+def test_approve_post_rejected_before_posting_never_asks(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A refusal by an earlier check (no --i-reviewed, no --expect-head, moved head) costs djbclark no dialog."""
+    mod = _load_module()
+
+    def boom(repo, rows):
+        raise AssertionError("must not ask for confirmation")
+
+    monkeypatch.setattr(mod, "confirm_approve_post", boom)
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    monkeypatch.setenv("ADE_MERGE_READY_STATE", str(tmp_path / "marker-state.json"))
+    base = ["--gh", str(gh), "approve-post", "--prs", "334,335", "--min", "1", "--yes"]
+    assert mod.main(base) == 2  # no --i-reviewed
+    assert mod.main([*base, "--i-reviewed"]) == 2  # no --expect-head
+    assert mod.main([*base, "--i-reviewed", "--expect-head", f"334={'e' * 40}", "--expect-head", f"335={TWO_PRS[335]}"]) == 2
+    capsys.readouterr()
+    assert not log.exists()
+
+
+def test_approve_post_refuses_a_dialog_that_would_be_cut_off(tmp_path: Path, monkeypatch, capsys) -> None:
+    mod = _load_module()
+    ask = tmp_path / "sudo-ask"
+    ask.write_text("#!/bin/sh\n")
+    ask.chmod(0o755)
+    monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls)
+    many = {300 + i: f"{i:x}".rjust(40, "a") for i in range(14)}
+    gh, log = _approve_world(tmp_path, many)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, many)
+    assert rc != 0 and not log.exists() and not calls
+    assert "do not fit in one confirmation dialog" in err
+
+
+def test_confirm_approve_post_unit_rejects_a_row_without_a_full_head(monkeypatch) -> None:
+    mod = _load_module()
+    calls: list = []
+    _fake_auth_run(mod, monkeypatch, calls)
+    with pytest.raises(RuntimeError, match="40-hex"):
+        mod.confirm_approve_post(APPROVE_REPO, [{"number": 7, "head": "abc123"}])
+    assert not calls
