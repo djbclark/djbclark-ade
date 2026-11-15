@@ -1099,14 +1099,15 @@ def test_directories_times_missing_operands_are_bounded_by_the_read_budget(live,
                + " ".join("-F n%x=@m%x" % (i, i) for i in range(2000)) + " -f body=" + q("I approve this"))
     result, took = _seconds(command, live)
     assert len(calls) <= gate.MAX_READS and took < 5, (len(calls), took)
-    assert result and "more operand text" in result    # past the budget: denied beside the word APPROVE
+    assert result and "can follow in time" in result   # past the budget: denied
 
 
 def test_more_directories_than_the_cap_deny_beside_approve_and_allow_otherwise(live):
     """M1 and the fail-closed rule: past MAX_DIRS visited directories the real one may be dropped, so a body that mentions APPROVE is denied."""
     decoys = "".join("false && cd /nonexistent/d%d; " % i for i in range(gate.MAX_DIRS + 2))
     assert run(decoys + "gh pr comment 1 --body " + q("I approve this"), cwd=live)
-    assert run(decoys + "gh pr comment 1 --body " + q("fine"), cwd=live) is None
+    assert run(decoys + "gh pr comment 1 --body " + q("fine"), cwd=live)        # fail closed: the real directory may have been dropped
+    assert run(decoys[:200] + "gh pr comment 1 --body " + q("fine"), cwd=live) is None
 
 
 def test_nested_heredocs_are_collected_once_per_level(live):
@@ -1117,3 +1118,28 @@ def test_nested_heredocs_are_collected_once_per_level(live):
     nest = nest + "\nB\nA\n"
     result, took = _seconds(nest, live)
     assert took < 5, took
+
+
+def test_past_the_caps_a_write_whose_live_file_was_out_of_reach_is_denied(live):
+    """R1/R2 (r3): the fail-closed rule needs no APPROVE in a text that was read: the live file is exactly the one never reached."""
+    (live / "real").mkdir()
+    (live / "real" / "b.md").write_text(APPROVE)
+    decoys = "".join("false && cd /nonexistent/d%d; " % i for i in range(70))
+    assert run(decoys + "cd real && gh pr comment 1 --body-file b.md", cwd=live)
+    flood = " ".join("-F n%x=@m%x" % (i, i) for i in range(2600))
+    assert run("cd real && gh api repos/o/r/issues/1/comments %s -F body=@b.md" % flood, cwd=live)
+
+
+def test_a_cd_inside_a_script_heredoc_joins_every_outer_directory(live):
+    """R3 (r3): the script's own relative `cd sub` is tried under each directory the outer command had."""
+    (live / "real" / "sub").mkdir(parents=True)
+    (live / "real" / "sub" / "b.md").write_text(APPROVE)
+    assert run("cd real && bash <<'A'; cd /tmp; echo\ncd sub && gh pr comment 1 --body-file b.md\nA\n".replace("\\n", "\n"), cwd=live)
+
+
+def test_a_huge_tracked_path_is_cut_off_not_quadratic(live):
+    """M1 (r3): 27,000 nested relative `cd`s grew one path until pathlib took 19 s; past MAX_PATH it is an overflow (deny)."""
+    command = "".join("cd d%x; " % i for i in range(27000)) + "gh pr comment 1 --body-file b.md"
+    result, took = _seconds(command, live)
+    assert took < 8, took
+    assert result and "can follow in time" in result

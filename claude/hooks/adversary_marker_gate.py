@@ -79,7 +79,8 @@ MAX_FORCED = 400            # operand files / stdin texts read outside the byte 
 MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
 MAX_DIRS = 64               # distinct directories tracked for one command, and the most (path, directory) reads of one command's operands
-MAX_READS = 5000            # past either, `truncated` is set: the command is denied when it mentions APPROVE
+MAX_READS = 5000            # past either (or a tracked path over MAX_PATH), the gh write is denied: it may read a file this gate never reached
+MAX_PATH = 4096
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -282,7 +283,7 @@ class Pipeline:
         self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
-def split_pipelines(tokens, cwd: str, expand=None, history=None):
+def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
     A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
     skipped. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`; the assignment in
@@ -292,6 +293,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None):
     `pushd -n d`, a `coproc`) or does not change the directory must not move the read away from the file the shell reads (mg-51 r2, B1)."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     visited = [cwd]
+    bases = list(bases)[:MAX_DIRS]              # the directories an enclosing script heredoc runs under: a relative `cd` in it joins each
     want_dir = redirect = None
     no_more_options = False
     stack = []
@@ -341,7 +343,10 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None):
                 nd = Path(home_expanded(expand(tok, assigned) if expand else tok))
                 cur = str(nd if nd.is_absolute() else Path(cur) / nd)
                 seg["cwd"] = cur
-                for d in (cur, str(Path(cwd) / nd)):     # also the target relative to the event cwd: a `cd` before it that did not run
+                if len(cur) > MAX_PATH and history is not None:     # a path that long is a pile of `cd`s: stop extending it (quadratic)
+                    history.overflow = True
+                    cur = seg["cwd"] = cwd
+                for d in (cur, str(Path(cwd) / nd), *(str(Path(b) / nd) for b in bases)):     # also the target relative to the event cwd: a `cd` before it that did not run
                     if d not in visited:                 # (`false && cd x; cd real`) must not move `real` under `x`
                         if len(visited) < MAX_DIRS:
                             visited.append(d)
@@ -497,7 +502,7 @@ class Scan:
             if (path, d) not in self.cache:
                 self.read_calls += 1
                 if self.read_calls > MAX_READS:        # a command with thousands of operands x directories must not outrun the hook's 15 s
-                    self.truncated = True
+                    self.history.overflow = True
                     break
                 self.cache[path, d] = read_file(path, d)   # each (path, dir) is read once: a repeated operand costs nothing more
             texts.append(self.cache[path, d])
@@ -626,7 +631,7 @@ def shell_head(head: str) -> bool:
     return False
 
 
-def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
+def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> None:
     cleaned, bodies = split_heredocs(command)
     tokens, parsed = tokenize(cleaned)
     tokens = merge_substitutions(tokens)
@@ -641,7 +646,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
         if loose_write(body):                  # a script heredoc that names a gh write is one
             scan.write = True
             scan.add(body)
-    pipes = split_pipelines(tokens, cwd, scan.expand, scan.history)
+    pipes = split_pipelines(tokens, cwd, scan.expand, scan.history, bases)
     for body, head, _quoted in bodies:
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files, under the directory of the
             # command that runs it (`cd real && bash <<X`); which segment that is, is not tracked, so it is collected once, under the
@@ -649,7 +654,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
             segs = [seg["cwd"] for pipe in pipes for seg in pipe.segments]
             at = segs[-1] if segs else cwd
             scan.history.note(at, [cwd, *segs])
-            collect(body, at, scan, depth + 1)
+            collect(body, at, scan, depth + 1, bases=[cwd, *segs])
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
@@ -746,7 +751,6 @@ def judge(command: str, cwd: str, am_loader) -> str:
     if not scan.write:
         return ""
     am = am_loader()
-    scan.truncated = scan.truncated or scan.history.overflow
     # a `gh api` write may carry a GraphQL `query` (`-f query=...`, `-F query=@file`, a `--input` JSON leaf) whose string literals GitHub
     # decodes, so every text with a backslash is also judged decoded (an extra look: a false deny at worst; mg-51, Carried 52). A
     # whole JSON payload that `Scan.add` parsed is not a query text (its leaves are, and are separate texts), so it is left alone.
@@ -763,6 +767,8 @@ def judge(command: str, cwd: str, am_loader) -> str:
         found = live_approve(t, am, raw=True)
         if found:
             return found
+    if scan.history.overflow:                  # more directories, reads or path than this gate can follow: a live file may be out of reach
+        return "more `cd` directories or operand reads than this gate can follow in time (%d directories, %d reads)" % (MAX_DIRS, MAX_READS)
     if scan.deep:                              # judged on the whole payload, not on its MAX_TEXT cut or its channel (file, pipe, filter)
         return "a JSON payload nested past this gate's parser limit that mentions APPROVE (its leaves cannot be read)"
     if scan.truncated and any(mentions_approve_decoded(t) for t in scan.texts):   # the unread rest may hold an escaped APPROVE (mg-51)
