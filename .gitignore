@@ -3,7 +3,8 @@
 
 # Files graft 0.29.0 `graft init` writes into every fresh worktree (docs/queue.md Carried 47; operator ruling 2026-11-15).
 # Exactly the paths it creates that this repo does not track, anchored at the root. Not `.agents/` (it holds tracked skills);
-# graft's edits to tracked files (AGENTS.md, .claude/, .cursor/) cannot be ignored and are not listed.
+# graft's edits to tracked files (AGENTS.md, .claude/, .cursor/ and others) cannot be ignored and are not listed.
+# /.github/copilot-instructions.md is where Copilot code review reads instructions: drop that line if the repo ever adopts the file.
 /.adal/
 /.gemini/
 /.grok/
