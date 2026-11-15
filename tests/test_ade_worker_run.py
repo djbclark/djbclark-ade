@@ -1113,7 +1113,8 @@ def acked_window(env, pstate):
     own(PRED1, "wks_win1")
 
 
-@pytest.mark.parametrize("pstate", [{"Archived": False, "Status": "idle"}, {"Archived": False, "Status": "closed"},
+@pytest.mark.parametrize("pstate", [{"Archived": False, "Status": "idle", "PendingPermissions": []},
+                                    {"Archived": False, "Status": "closed", "PendingPermissions": []},
                                     {"Archived": True, "Status": "closed"}, {"Archived": True, "Status": "running"}])
 def test_fresh_acknowledged_handoff_with_a_stopped_predecessor_adopts_its_window(env, pstate):
     acked_window(env, pstate)
@@ -1126,14 +1127,15 @@ def test_fresh_acknowledged_handoff_with_a_stopped_predecessor_adopts_its_window
 
 
 def test_archive_state_wait_error_record_still_adopts_when_predecessor_is_idle(env):
-    acked_window(env, {"Archived": False, "Status": "idle"})
+    acked_window(env, {"Archived": False, "Status": "idle", "PendingPermissions": []})
     ack_handoff(PRED1, LEAD, status="archive-unknown", error="AGENT_RUNNING")  # finish is waiting on a stale running flag
     r = launch(env)
     assert r.returncode == 0 and "--new-workspace" not in placed(env)[0]
 
 
 @pytest.mark.parametrize("pstate, why", [({"Archived": False, "Status": "running"}, "'running'"), (None, "cannot be read"),
-                                         ({"Archived": True, "_rc": 1}, "exited 1"), ({"Archived": False}, "None"), ({"Status": "idle"}, "cannot be read")])
+                                         ({"Archived": True, "_rc": 1}, "exited 1"), ({"Archived": False, "Status": "idle", "PendingPermissions": [{"id": "p1"}]}, "pending permission"),
+                                         ({"Archived": False, "Status": "idle"}, "pending permission"), ({"Archived": False}, "None"), ({"Status": "idle"}, "cannot be read")])
 def test_acknowledged_handoff_with_an_acting_or_unreadable_predecessor_is_refused(env, pstate, why):
     acked_window(env, pstate)
     ack_handoff(PRED1, LEAD)
@@ -1145,7 +1147,7 @@ def test_acknowledged_handoff_with_an_acting_or_unreadable_predecessor_is_refuse
 
 
 def test_a_stale_acknowledged_record_adopts_nothing(env):
-    acked_window(env, {"Archived": False, "Status": "idle"})
+    acked_window(env, {"Archived": False, "Status": "idle", "PendingPermissions": []})
     ack_handoff(PRED1, LEAD, age=7200)
     r = archive(env)
     assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr
@@ -1165,6 +1167,22 @@ def test_a_completed_record_is_adopted_without_inspecting_the_predecessor(env):
     r = launch(env)
     assert r.returncode == 0 and "--new-workspace" not in placed(env)[0]
     assert not any(c["argv"][:2] == ["agent", "inspect"] and c["argv"][2] == PRED1 for c in env.calls())
+
+
+def test_an_acknowledged_predecessor_whose_chain_reaches_the_lead_again_is_refused_loudly(env):
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    handoff(LEAD, PRED1)  # the predecessor's completed chain comes back to LEAD
+    r = launch(env)
+    assert r.returncode == 1 and "cyclic" in r.stderr and not placed(env)
+
+
+def test_one_launch_reads_the_acknowledged_predecessor_once(env):
+    acked_window(env, {"Archived": True})
+    ack_handoff(PRED1, LEAD)
+    assert launch(env).returncode == 0
+    reads = [c for c in env.calls() if c["argv"][:3] == ["agent", "inspect", PRED1]]
+    assert len(reads) == 1
 
 
 def test_a_cyclic_ledger_adopts_nothing(env):

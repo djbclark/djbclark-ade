@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import json
 import os
 from pathlib import Path
@@ -163,11 +164,15 @@ def predecessor_acting(pred: str) -> str | None:
     if data["Archived"]:
         return None
     status = data.get("Status")
-    if status in ("idle", "closed"):
+    pending = data.get("PendingPermissions")  # `finish`'s own idle test needs [] too (ade_self_session.py): a card open means it may still act
+    if status in ("idle", "closed") and pending == []:
         return None
+    if status in ("idle", "closed"):
+        return f"it has pending permission requests or an unreadable permission list ({pending!r:.60})"
     return f"it is not archived and its status is {status!r}"
 
 
+@functools.lru_cache(maxsize=None)  # one reading per process: a launch decides and explains from the same inspect
 def ack_adoption(lead: str) -> tuple[set[str], dict[str, str]]:
     """(ids adopted, {predecessor: reason not adopted}) for the fresh acknowledged self-handoffs that name THIS lead as successor
     (ade_lead_succession.acknowledged_predecessors; a stale record or one naming another agent is no link). An adopted predecessor
@@ -208,7 +213,11 @@ def label_queries(lead: str) -> list[str]:
         ids = succ.recent_lineage(lead)
     except succ.SuccessionError as e:
         raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
-    return ids + sorted(ack_adoption(lead)[0] - set(ids))
+    adopted = ack_adoption(lead)[0]
+    for pred in succ.acknowledged_predecessors(lead):  # bounded like the base path: each adopted predecessor's nearest ones
+        if pred in adopted:
+            ids += [x for x in succ.recent_lineage(pred) if x not in ids]
+    return ids
 
 
 def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
