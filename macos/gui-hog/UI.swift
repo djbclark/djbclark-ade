@@ -5,6 +5,10 @@
 import AppKit
 import Foundation
 
+/// The window's frame (E6): closable (that is Wait), miniaturizable (it stays reachable from the Dock and acts on nothing), and it floats above other windows.
+let dialogStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+let dialogWindowLevel: NSWindow.Level = .floating
+
 final class GuardedWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown && swallowsKey(event.keyCode) { return true }
@@ -44,9 +48,9 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     init(_ cfg: Config) { self.cfg = cfg; self.runner = Runner(cfg) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        window = GuardedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window = GuardedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: dialogStyleMask, backing: .buffered, defer: false)
         window.title = cfg.demo ? "ADE GUI Hog (demo)" : "A build is waiting: desktop apps are busy"
-        window.level = .floating
+        window.level = dialogWindowLevel
         window.isReleasedWhenClosed = false
         window.delegate = self
         root.orientation = .vertical

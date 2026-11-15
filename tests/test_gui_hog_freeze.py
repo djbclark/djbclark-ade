@@ -886,6 +886,14 @@ def test_the_dialog_drops_a_stale_frozen_label_once_the_app_runs_again():   # H4
     assert "func clearStaleFrozen(" in model and "clearStaleFrozen(" in ui
 
 
+def test_the_dialog_window_is_closable_miniaturizable_and_floating():   # operator ruling 2026-11-14 (H4): a minimize button, level unchanged
+    ui = (BIN.parent / "macos" / "gui-hog" / "UI.swift").read_text()
+    assert "let dialogStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]" in ui and "let dialogWindowLevel: NSWindow.Level = .floating" in ui
+    assert "styleMask: dialogStyleMask" in ui and "window.level = dialogWindowLevel" in ui
+    assert "windowShouldClose(_ sender: NSWindow) -> Bool { finish(0); return false }" in ui   # closing keeps its meaning (Wait)
+    assert "windowWillMiniaturize" not in ui and "windowDidMiniaturize" not in ui   # minimizing is the window server's: no handler, so no action of ours
+
+
 def test_the_dialog_ticks_a_thaw_clock_of_its_own():   # Swift side, structural: the window re-runs `thaw --due` every 20 s while it is open
     ui, model = ((BIN.parent / "macos" / "gui-hog" / n).read_text() for n in ("UI.swift", "Model.swift"))
     assert "func thawDueTick(" in model and "thawDueTick(" in ui and 'runner.thawDue(by: "dialog")' in ui
