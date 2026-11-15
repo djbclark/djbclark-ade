@@ -804,6 +804,17 @@ def test_a_redirect_to_the_caller_itself_is_refused(sw):
     assert sw.run("send", B, "hi", env={"PASEO_AGENT_ID": B}).returncode == 0  # a send to a live target is no redirect
 
 
+def test_the_shim_redirects_an_acknowledged_predecessor_and_refuses_the_successor_messaging_it(sw):
+    from test_archived_send_guard import stamp
+    write_link(sw.state, sw.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    sw.live(**{A: False, B: False})
+    p = sw.run("send", A, "done: x", env={"PASEO_AGENT_ID": C})
+    assert p.returncode == 0 and sw.sends() == [["send", B, "done: x"]]
+    sw.log.unlink()
+    p = sw.run("send", A, "question", env={"PASEO_AGENT_ID": B})
+    assert p.returncode == 4 and sw.sends() == [] and "the caller itself" in p.stderr
+
+
 # L4/L5: the override log -------------------------------------------------------------------------------------------------
 
 def test_a_use_logged_at_the_shim_says_it_was_sent_and_several_uses_append(sw):

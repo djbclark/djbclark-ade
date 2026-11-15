@@ -10,7 +10,9 @@ target, what a sender should do instead:
             the old agent is already running again (`Archived=false`): the chain says it was replaced.
             An `acknowledged` handoff (the successor attested, `finish` has not archived the predecessor yet) redirects too
             (rq-38, 2026-11-15: five done notices to the acknowledged 6621fe2b stretched `finish`'s idle wait ~15 min), but only to
-            a successor Paseo knows and reports `Archived: false`; otherwise the hop is ignored and the target passes as before.
+            a successor (and the holder of its role) Paseo knows and reports `Archived: false`, and only while the record is fresh
+            (`ade_lead_succession.ACK_WINDOW_SECONDS` after `accept`, no `finish` failure but waiting); otherwise the hop is
+            ignored and the target passes as before.
   refuse    the target is archived and nothing replaced it, or its succession ledger is cyclic, or the successor itself is
             archived: nothing is sent. `allow_archived` (operator override, deliberate resume of an archived agent) turns
             a plain archived target into `pass` when it is True or equals that agent's full id; it never overrides a
@@ -81,7 +83,15 @@ def _follow(ident: str, inspect, state_dir: Path | None, home: Path | None) -> s
             return current
         if live is None or live.get("Archived") is not False:
             return current
-        current = succ.effective_lead(nxt, state_dir, home)
+        end = succ.effective_lead(nxt, state_dir, home)
+        if end != nxt:  # the successor itself was replaced since: its holder must be live too
+            try:
+                live = _record(inspect, end)
+            except Exception:  # noqa: BLE001
+                return current
+            if live is None or live.get("Archived") is not False:
+                return current
+        current = end
         if current in seen:
             raise succ.SuccessionError(f"lead succession from {ident} is cyclic")
         seen.update((nxt, current))

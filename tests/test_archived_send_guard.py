@@ -1,10 +1,12 @@
 """bin/ade_send_guard.py and claude/hooks/archived_send_gate.py: a send to an archived or replaced agent is redirected or
 denied, never delivered (ls-02). Offline: a fake `paseo` on PATH, a throwaway succession ledger."""
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -118,9 +120,14 @@ def test_an_unfinished_handoff_is_no_redirect(world):
     assert decide(world, A, {A: True}).action == guard.REFUSE
 
 
+def stamp(age=0.0):
+    """`acknowledged_at` as `ade-self-session accept` writes it, `age` seconds ago."""
+    return datetime.fromtimestamp(time.time() - age, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_an_acknowledged_handoff_redirects_while_the_predecessor_still_runs(world):
     """rq-38 (a): a peer's send to the acknowledged, not yet archived predecessor goes to the successor."""
-    write_link(world.state, world.home, A, B, status="acknowledged")
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
     d = decide(world, A, {A: False, B: False})
     assert (d.action, d.target) == (guard.REDIRECT, B) and "acknowledged" in d.reason
 
@@ -131,7 +138,7 @@ def test_an_awaiting_ack_handoff_is_not_redirected_yet(world):
 
 
 def test_an_acknowledged_handoff_with_a_dead_or_unknown_successor_leaves_the_predecessor_reachable(world):
-    write_link(world.state, world.home, A, B, status="acknowledged")
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
     assert decide(world, A, {A: False, B: True}).action == guard.PASS  # successor archived: not a place to send
     assert decide(world, A, {A: False}).action == guard.PASS  # successor unknown to paseo
 
@@ -144,28 +151,67 @@ def test_an_acknowledged_handoff_with_a_dead_or_unknown_successor_leaves_the_pre
 
 def test_acknowledged_hops_chain_with_completed_ones(world):
     write_link(world.state, world.home, A, B)  # completed
-    write_link(world.state, world.home, B, C, status="acknowledged")
+    write_link(world.state, world.home, B, C, status="acknowledged", acknowledged_at=stamp())
     write_link(world.state, world.home, C, D)  # completed
     d = decide(world, A, {A: True, B: False, C: False, D: False})
     assert (d.action, d.target) == (guard.REDIRECT, D)
 
 
 def test_an_acknowledged_cycle_is_refused(world):
-    write_link(world.state, world.home, A, B, status="acknowledged")
-    write_link(world.state, world.home, B, A, status="acknowledged")
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    write_link(world.state, world.home, B, A, status="acknowledged", acknowledged_at=stamp())
     assert decide(world, A, {A: False, B: False}).action == guard.REFUSE
 
 
 def test_the_replaced_override_still_sends_to_an_acknowledged_predecessor(world):
-    write_link(world.state, world.home, A, B, status="acknowledged")
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
     d = decide(world, A, {A: False, B: False}, allow_replaced=A)
     assert (d.action, d.target, d.replaced_by) == (guard.PASS, A, B)
 
 
 def test_other_consumers_still_see_an_acknowledged_handoff_as_no_link(world):
     import ade_lead_succession as succ
-    write_link(world.state, world.home, A, B, status="acknowledged")
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
     assert succ.effective_lead(A, world.state, world.home) == A
+
+
+def test_a_stuck_acknowledged_handoff_hands_the_predecessor_its_mail_back(world):
+    """adversary M1: `finish` refused for good and nothing ends the record: only its age (or a recorded failure) can."""
+    agents = {A: False, B: False}
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(7200))
+    assert decide(world, A, agents).action == guard.PASS  # older than the window
+    write_link(world.state, world.home, A, B, status="acknowledged")  # no stamp at all (written before rq-38)
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at="yesterday")
+    assert decide(world, A, agents).action == guard.PASS
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(-3600))  # from the future
+    assert decide(world, A, agents).action == guard.PASS
+
+
+@pytest.mark.parametrize("code,redirects", [("PREDECESSOR_NOT_IDLE", True), ("AGENT_RUNNING", True),
+                                            ("LISTING_GAP", False), ("ARCHIVE_FAILED", False)])
+def test_only_a_waiting_finish_keeps_the_acknowledged_redirect(world, code, redirects):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp(),
+               native_error={"op": "finish", "code": code})
+    assert (decide(world, A, {A: False, B: False}).action == guard.REDIRECT) is redirects
+
+
+def test_the_liveness_check_covers_the_end_of_the_successors_own_chain(world):
+    """adversary L2: A ack -> B (live), B completed -> C, C archived: A stays reachable, not refused."""
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    write_link(world.state, world.home, B, C)
+    assert decide(world, A, {A: False, B: False, C: True}).action == guard.PASS
+    d = decide(world, A, {A: False, B: False, C: False})
+    assert (d.action, d.target) == (guard.REDIRECT, C)
+
+
+def test_the_hook_denies_an_acknowledged_predecessor_send_but_not_to_oneself_twice(world):
+    write_link(world.state, world.home, A, B, status="acknowledged", acknowledged_at=stamp())
+    world.live(**{A: False, B: False})
+    reason = denial(run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}))
+    assert f"Re-send to {B}" in reason
+    reason = denial(run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}, env={**world.env, "PASEO_AGENT_ID": B}))
+    assert "is you" in reason and "Re-send" not in reason
 
 
 def test_an_unknown_target_and_an_unreadable_paseo_fail_open(world):

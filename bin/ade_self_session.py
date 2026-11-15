@@ -663,6 +663,9 @@ class Service:
                 raise SessionError('transaction is not awaiting acknowledgement')
             record['ack'] = safe_ack
             record['status'] = 'acknowledged'
+            # when the successor attested: ade_lead_succession redirects peers to it only while this is recent (rq-38); a
+            # repeated accept keeps the first stamp, so a stuck handoff cannot be kept "fresh" by re-running it
+            record.setdefault('acknowledged_at', datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
             self.reassert_identity(record, 'accept')
             self.save(target, record)
             return record

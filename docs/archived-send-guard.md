@@ -18,13 +18,20 @@ record's successor chain) or refused, and never resurrect it.
    **From `acknowledged` on (rq-38, 2026-11-15)** the same redirect applies while the handoff is still unfinished (the
    successor attested; `ade-self-session finish` has not archived the predecessor): peers kept sending done notices to the
    predecessor and each one stretched `finish`'s idle wait (five notices, about 15 minutes, in the 6621fe2b -> 54b15a51
-   handoff). Not before: an `awaiting-ack` record is no link. The acknowledged hop is followed only to a successor that
-   `paseo agent inspect` reports as known and `Archived: false`; an archived or unknown successor, or one Paseo cannot be asked
-   about, leaves the predecessor reachable (a crashed successor must not strand its messages). Hops chain with completed
-   ones, and a cycle among them is `refuse`. Only the send guard reads `acknowledged` records
-   (`ade_lead_succession.successor_of(..., statuses=ACKNOWLEDGED)`): `ade-worker-run`, `ade-net-resume`, `ade-auto-permit`,
-   `ade-tidy` and `fable-wait` still follow completed links only. `ADE_ALLOW_REPLACED_SEND=<predecessor's full id>` reaches the
-   still-live predecessor as before (for example the successor asking it a question).
+   handoff). Not before: an `awaiting-ack` record is no link. The acknowledged hop is followed only (1) to a successor, and the
+   holder of its role, that `paseo agent inspect` reports as known and `Archived: false` (an archived or unknown one, or one
+   Paseo cannot be asked about, leaves the predecessor reachable: a crashed successor must not strand its messages), and (2)
+   while the record is fresh: `accept` stamps `acknowledged_at`, the hop ends `ade_lead_succession.ACK_WINDOW_SECONDS` (1 hour;
+   `finish` waits at most 25 minutes) later, and ends at once when `finish` recorded a failure other than waiting for the
+   predecessor (`native_error` other than `PREDECESSOR_NOT_IDLE` / `AGENT_RUNNING`). No command ends an `acknowledged` record, so
+   a handoff that stays stuck (checkpoint or HEAD changed, mode drift) hands the predecessor its mail back after the hour; a
+   record without the stamp (written before rq-38) is no link. Hops chain with completed ones, and a cycle among them is
+   `refuse`. Only the send guard reads `acknowledged` records
+   (`ade_lead_succession.successor_of(..., statuses=ACKNOWLEDGED)`): `ade-worker-run`, `ade-net-resume`, `ade-auto-permit` and
+   `ade-tidy` still follow completed links only. Every sender that goes through `ade_send_guard.guard` follows the hop too:
+   the `paseo` shim, the `archived_send_gate` hook, `bin/fable-wait`, `bin/deadline` and `bin/completion-notice`. The caller
+   being the successor itself (it messaging its predecessor) is refused by the shim and by the hook as a message to oneself;
+   only the operator sends to the live predecessor, with `ADE_ALLOW_REPLACED_SEND=<predecessor's full id>`.
 3. `refuse`: the target is archived and nothing replaced it; or its replacement is archived too; or the ledger is cyclic. The
    reason names what to do.
 

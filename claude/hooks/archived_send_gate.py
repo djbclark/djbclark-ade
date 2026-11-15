@@ -5,7 +5,7 @@ Paseo un-archives and runs an archived agent that is sent a message (2026-11-14:
 could act as a stale lead). This hook checks the target of a Bash `paseo send` / `paseo agent send` and of the MCP tool
 `send_agent_prompt` with `bin/ade_send_guard.py` (which reads `ade-self-session`'s completed-handoff records, #669):
 
-  replaced by a completed handoff   deny, naming the successor (a hook cannot safely rewrite the target; re-send to it)
+  replaced by a completed handoff (or an acknowledged one still finishing, rq-38)   deny, naming the successor (a hook cannot safely rewrite the target; re-send to it)
   archived, nothing replaced it     deny; `ADE_ALLOW_ARCHIVED_SEND=<its full id> paseo send ...` resumes it on purpose
   replaced but still live           `ADE_ALLOW_REPLACED_SEND=<its full id> paseo send ...` sends to it anyway (logged)
   live, unknown to Paseo, anything this hook cannot parse or reach   allow silently (fails open)
@@ -17,6 +17,7 @@ Block form: stdout JSON permissionDecision "deny" and exit 0 (same as upstream_r
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -437,6 +438,9 @@ def judge(target: str, allow: str | None, backstop: bool = False, replaced: str 
                 f"writes the id {target}, which is not a live agent ({d.reason}). If no send to {target} is meant, leave its "
                 f"id out of the command or split the command; if one is, send to " +
                 (f"{d.target}." if d.action == guard.REDIRECT else "a live agent (it would un-archive and run it)."))
+    if d.action == guard.REDIRECT and d.target == (os.environ.get("PASEO_AGENT_ID") or "").strip():
+        return (f"Blocked by archived_send_gate: {d.reason}. {d.target} is you: nothing was sent (a message to oneself queues a "
+                f"spurious turn). Only the operator messages the replaced agent ({guard.ALLOW_REPLACED_ENV}=<its full id> while it is live).")
     if d.action == guard.REDIRECT:
         return (f"Blocked by archived_send_gate: {d.reason}. Re-send to {d.target} (a send to the replaced agent would "
                 f"un-archive and run it as a stale lead).")

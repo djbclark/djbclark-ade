@@ -1765,3 +1765,19 @@ def test_the_send_guard_redirects_to_the_successor_from_accept_on_not_before(set
     rows[PRED] = True
     d = decide()
     assert (d.action, d.target) == (guard.REDIRECT, SUCC)
+
+
+def test_accept_stamps_acknowledged_at_once_and_a_repeat_keeps_it(setup):
+    """rq-38 (adversary M1): the redirect window runs from the first accept; re-running accept cannot keep it fresh."""
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    assert 'acknowledged_at' not in json.loads(path.read_text())
+    accept(service, record, path)
+    first = json.loads(path.read_text())['acknowledged_at']
+    assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', first)
+    data = json.loads(path.read_text())
+    data['acknowledged_at'] = '2026-01-01T00:00:00Z'
+    path.write_text(json.dumps(data))
+    accept(service, record, path)
+    assert json.loads(path.read_text())['acknowledged_at'] == '2026-01-01T00:00:00Z'
