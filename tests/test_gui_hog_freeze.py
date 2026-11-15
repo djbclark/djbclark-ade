@@ -790,19 +790,24 @@ def _wait(cond, what, timeout=10.0):
 
 @pytest.fixture
 def real(tmp_path):
-    """Fake.app with a root (a copy of /bin/sh) and two helpers (copies of sleep) inside its bundle, started detached (setsid, parent exits:
+    """Fake.app with a root (a copy of /bin/sh) and two helpers (copies of the shell, blocked on a fifo) inside its bundle, started detached (setsid, parent exits:
     launchd-like), so the tree under it is only ours. Everything it starts is killed at teardown."""
     app = tmp_path / "Apps" / "Fake.app"
     macos = app / "Contents" / "MacOS"
     macos.mkdir(parents=True)
     (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.real"}))
-    for src, dst in ((os.path.realpath("/bin/dash" if os.path.exists("/bin/dash") else "/bin/sh"), "Fake"), (os.path.realpath(shutil.which("sleep") or "/bin/sleep"), "Helper")):
+    shell = os.path.realpath("/bin/dash" if os.path.exists("/bin/dash") else "/bin/sh")
+    # Both are copies of the shell: a copied `sleep` is a multi-call binary on some Linux runners (uutils coreutils) that refuses to run under another name (CI, 2026-11-15)
+    for src, dst in ((shell, "Fake"), (shell, "Helper")):
         shutil.copy(src, macos / dst)
         if sys.platform == "darwin":   # macOS kills a copied Apple binary (exit 137) until it is ad-hoc signed
             subprocess.run(["codesign", "--force", "-s", "-", str(macos / dst)], capture_output=True, timeout=60)
     if subprocess.run([str(macos / "Fake"), "-c", "exit 0"], capture_output=True, timeout=20).returncode != 0:
         pytest.skip("a copied shell does not run here")
-    script = f"{shlex.quote(str(macos / 'Helper'))} 300 & {shlex.quote(str(macos / 'Helper'))} 300 & wait"
+    fifo = tmp_path / "hold"
+    os.mkfifo(fifo)   # a helper opens it read-write (never blocks) and then waits on a read that never gets data
+    hold = f"{shlex.quote(str(macos / 'Helper'))} -c 'read x' <>{shlex.quote(str(fifo))}"
+    script = f"{hold} & {hold} & wait"
     spawner = ("import subprocess,sys;p=subprocess.Popen([sys.argv[1],'-c',sys.argv[2]],start_new_session=True,close_fds=True,"
                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print(p.pid)")
     try:
@@ -820,10 +825,10 @@ def real(tmp_path):
         try:
             _wait(lambda: len(kids()) == 2, "the two helpers")
         except AssertionError as e:   # say what the machine looked like: a CI-only failure must leave evidence in the log
-            probe = subprocess.run([str(macos / "Helper"), "0"], capture_output=True, text=True, timeout=20)
+            probe = subprocess.run([str(macos / "Helper"), "-c", "exit 0"], capture_output=True, text=True, timeout=20)
             ps = subprocess.run(["ps", "-axo", "pid,ppid,state,comm,args"], capture_output=True, text=True, timeout=20).stdout
             mine = [ln for ln in ps.splitlines() if str(macos) in ln or ln.split()[:1] == [str(root)]]
-            raise AssertionError(f"{e}: root {root}, table kids {kids()}, `Helper 0` rc {probe.returncode} {probe.stderr.strip()[:200]!r}, ps lines {mine}") from None
+            raise AssertionError(f"{e}: root {root}, table kids {kids()}, `Helper -c 'exit 0'` rc {probe.returncode} {probe.stderr.strip()[:200]!r}, ps lines {mine}") from None
         created |= set(kids())
         w = type("R", (), {})()
         w.ops, w.root, w.kids, w.state, w.app, w.macos, w.tmp = ops, root, kids(), tmp_path / "state", app, macos, tmp_path
@@ -902,7 +907,7 @@ def test_real_timed_freeze_resumes_when_due_and_not_before(real):
 
 def test_real_a_stranger_with_a_forged_or_reused_pid_is_never_continued(real, tmp_path):
     """The entry names a pid that now belongs to another process (stopped by this test): all four identity fields are compared first."""
-    stranger = subprocess.Popen([os.path.realpath(shutil.which("sleep") or "/bin/sleep"), "300"], start_new_session=True)
+    stranger = subprocess.Popen([shutil.which("sleep") or "/bin/sleep", "300"], start_new_session=True)   # run under its own name: a resolved multi-call binary would not
     try:
         os.kill(stranger.pid, signal.SIGSTOP)
         _wait(lambda: (_state(real.ops, stranger.pid) or "").startswith("T"), "the stranger to stop")
