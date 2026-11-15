@@ -1009,6 +1009,108 @@ def test_a_sure_cd_drops_the_directories_it_left_and_an_unsure_one_keeps_them(li
     assert run("cd real && cd nonexistent && cd sub; " + gh, cwd=live)
 
 
+def _top_tree(live, live_is_sub=True):
+    """Adversary r5 layout `top`: sub/b.md is the live one; decoy/sub/b.md and b.md are benign."""
+    for d in ("sub", "decoy/sub"):
+        (live / d).mkdir(parents=True, exist_ok=True)
+        (live / d / "b.md").write_text("prose only")
+    (live / "b.md").write_text("prose only")
+    (live / "sub" / "b.md").write_text(APPROVE if live_is_sub else "prose only")
+
+
+G = "gh pr create --body-file b.md"
+
+
+@pytest.mark.parametrize("command", [
+    "if false; then echo x; cd decoy; fi; cd sub; " + G,                                    # A2a: the second statement of a then-body
+    "if false; then\ncd decoy\nfi\ncd sub\n" + G,                                          # A2b: a multi-line if
+    "bash -c 'if false; then\ncd decoy\nfi\ncd sub\n" + G + "'",
+    "false && \ncd decoy; cd sub; " + G,                                                    # A2c: `&&` then a newline
+    "true || \ncd decoy; cd sub; " + G,
+    "true || { echo; cd decoy; }; cd sub; " + G,                                            # A2d
+    "while false; do echo; cd decoy; done; cd sub; " + G,                                   # A2e
+    "for x in; do echo; cd decoy; done; cd sub; " + G,
+    "case x in y) cd decoy;; esac; cd sub; " + G,                                           # A2f
+    "cd decoy | cat; cd sub; " + G,                                                         # A2g: a pipeline element runs in a subshell
+    "echo | cd decoy; cd sub; " + G,
+    "cd decoy & cd sub; " + G,                                                              # A2h: background
+    "pushd decoy && popd && cd sub && " + G,                                                # A2i
+    "false && { cd decoy; }; cd sub; " + G,
+    "f() { cd decoy; }; cd sub; " + G,                                                      # a `{` after `)` may be a function body
+    "cd decoy ; popd; cd sub; " + G,
+    "pushd decoy; pushd; cd sub; " + G,
+])
+def test_a_cd_in_a_body_that_may_not_run_still_leaves_the_read_on_the_live_file(live, command):
+    """Adversary r5 A2: compound bodies, multi-statement bodies, newline after `&&`, case arms, pipelines, `&` and `popd`."""
+    _top_tree(live)
+    command = command.replace("\\n", "\n")
+    assert run(command, cwd=live), command
+    _top_tree(live, live_is_sub=False)
+    assert run(command, cwd=live) is None, command
+
+
+def test_a_cd_in_a_taken_body_is_followed_into_the_candidate_that_is_not_the_representative_path(live):
+    """Adversary r5 C1: the live file is under decoy/sub, reached only through a taken `if`; `cur` ends up elsewhere."""
+    _top_tree(live, live_is_sub=False)
+    (live / "decoy" / "sub" / "b.md").write_text(APPROVE)
+    assert run("if true; then cd decoy; fi; cd sub; " + G, cwd=live)
+    assert run("true && { echo; cd decoy; }; cd sub; false && cd sub; " + G, cwd=live)
+    assert run("while true; do cd decoy; break; done; cd sub; false && cd /nonexistent; " + G, cwd=live)
+
+
+def test_a_sure_cd_after_a_compound_command_still_replaces_the_set(live):
+    """The conservative rules above must not make every later `cd` unsure: after `fi` a plain `cd` is exact again."""
+    _top_tree(live)
+    (live / "decoy" / "b.md").write_text(APPROVE)
+    for d in ("other", "decoy/other"):
+        (live / d).mkdir()
+        (live / d / "b.md").write_text("prose only")
+    # sure: `cd other` replaces the set, so decoy/b.md (live) is out of reach; unsure would keep decoy as a candidate
+    assert run("if false; then cd decoy; fi; cd other; " + G, cwd=live) is None
+    assert run("if false; then cd decoy; fi; cd other && cd ..; cd decoy; " + G, cwd=live)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_physical_dotdot_through_a_symlink_is_followed_as_the_shell_does_under_cd_P_and_set_P(live):
+    """Adversary r5 A3: `cd -P link/..` leaves a symlinked directory by its real parent; the lexical `link/..` is the other directory."""
+    (live / "X" / "y").mkdir(parents=True)
+    (live / "X" / "b.md").write_text(APPROVE)
+    (live / "b.md").write_text("prose only")
+    (live / "link").symlink_to(live / "X" / "y")
+    for command in ("cd -P link/.. && " + G, "cd -P link && cd .. && " + G, "set -P; cd link; cd ..; " + G, "cd link/..; " + G):
+        assert run(command, cwd=live), command
+    (live / "X" / "b.md").write_text("prose only")
+    assert run("cd -P link/.. && " + G, cwd=live) is None
+
+
+def test_a_case_pattern_paren_does_not_close_an_enclosing_subshell(live):
+    """Adversary r5 A4: `(cd real; case x in y) :;; esac; cd sub; G)` kept real/sub as a candidate only if `)` did not pop the subshell."""
+    _two_step_tree(live)
+    assert run("(cd real; case x in y) :;; esac; cd sub; " + G + ")", cwd=live)
+
+
+def test_a_fd_redirect_inside_a_cd_is_not_its_target_and_a_bare_cd_goes_home(live, monkeypatch, tmp_path):
+    """Adversary r5 A5/A6: `cd 2>/dev/null real` enters real; a bare `cd` enters HOME."""
+    _two_step_tree(live)
+    assert run("cd 2>/dev/null real; cd sub; " + G, cwd=live)
+    home = tmp_path / "home"
+    (home / "hsub").mkdir(parents=True)
+    (home / "hsub" / "b.md").write_text(APPROVE)
+    env = {**os.environ, "HOME": str(home)}
+    assert run("false && cd decoy; cd; cd hsub; " + G, cwd=live, env=env)
+    assert run("cd ~; cd hsub; " + G, cwd=live, env=env)
+
+
+def test_a_full_candidate_set_with_tens_of_thousands_of_cds_is_denied_in_time_not_failed_open(live):
+    """Adversary r5 A1: a full candidate set x 60,000 `cd .` made the hook outrun its 15 s timeout (fail open)."""
+    for i in range(gate.MAX_DIRS - 1):
+        (live / ("e%d" % i)).mkdir(exist_ok=True)
+    command = "".join("false && cd e%d; " % i for i in range(gate.MAX_DIRS - 1)) + "cd .; " * 60000 + "cd sub; " + G
+    result, took = _seconds(command, live)
+    assert took < 5, took
+    assert result and "can follow in time" in result
+
+
 def test_a_cd_in_a_closed_subshell_leaves_the_candidates_as_they_were(live):
     """S1: `(cd decoy)` must not move the outer set; the later `cd sub` is still real/sub (live), not real/decoy/sub."""
     _two_step_tree(live)
@@ -1220,7 +1322,7 @@ def test_past_the_caps_a_write_whose_live_file_was_out_of_reach_is_denied(live):
     """R1/R2 (r3): the fail-closed rule needs no APPROVE in a text that was read: the live file is exactly the one never reached."""
     (live / "real").mkdir()
     (live / "real" / "b.md").write_text(APPROVE)
-    decoys = _decoy_cds(live, 70)
+    decoys = _decoy_cds(live, gate.MAX_DIRS + 6)
     assert run(decoys + "cd real && gh pr comment 1 --body-file b.md", cwd=live)
     flood = " ".join("-F n%x=@m%x" % (i, i) for i in range(2600))
     assert run("cd real && gh api repos/o/r/issues/1/comments %s -F body=@b.md" % flood, cwd=live)

@@ -78,9 +78,10 @@ MAX_TOTAL = 600000
 MAX_FORCED = 400            # operand files / stdin texts read outside the byte budget
 MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
-MAX_DIRS = 64               # distinct directories tracked for one command, and the most (path, directory) reads of one command's operands
+MAX_DIRS = 128              # distinct directories tracked for one command, and the most (path, directory) reads of one command's operands
 MAX_READS = 5000            # past either (or a tracked path over MAX_PATH), the gh write is denied: it may read a file this gate never reached
 MAX_PATH = 4096
+MAX_WORK = 30000            # sum over a command's `cd`s of the candidate directories each was applied to; past it the write is denied
 PUNCT = ";&|()<>`\n"
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -267,13 +268,32 @@ def read_file(path: str, cwd: str) -> str:
 
 
 class History(dict):
-    """cwd -> the candidate directories the shell may be in by then (at most MAX_DIRS); `overflow` when the set grew past the cap."""
+    """cwd -> the candidate directories the shell may be in by then (at most MAX_DIRS). `overflow` is set when a set grew past the cap,
+    a command's `cd` work passed MAX_WORK, a path passed MAX_PATH or the reads passed MAX_READS: the gate then denies the write."""
     overflow = False
 
+    def __init__(self):
+        super().__init__()
+        self.work = 0                           # sum over the command's `cd`s of the candidates each one was applied to
+        self.dirs = {}                          # path -> os.path.isdir, once per command
+        self.known = {}                         # cwd -> set(self[cwd]), so `note` costs the new directories only
+
+    def isdir(self, path: str) -> bool:
+        if path not in self.dirs:
+            self.dirs[path] = os.path.isdir(path)
+        return self.dirs[path]
+
     def note(self, cur: str, visited) -> None:
-        merged = list(dict.fromkeys([*self.get(cur, ()), *visited]))
-        self[cur] = merged[:MAX_DIRS]
-        self.overflow = self.overflow or len(merged) > MAX_DIRS
+        have = self.setdefault(cur, [])
+        known = self.known.setdefault(cur, set(have))
+        extra = [d for d in visited if d not in known]
+        if extra:
+            for d in dict.fromkeys(extra):
+                known.add(d)
+                have.append(d)
+            if len(have) > MAX_DIRS:
+                del have[MAX_DIRS:]
+                self.overflow = True
 
 
 class Pipeline:
@@ -283,27 +303,42 @@ class Pipeline:
         self.segments = []   # each: {"words": [...], "stdin": [files], "here": [words], "cwd": str}
 
 
+OPENERS = {"if", "while", "until", "for", "select", "case"}        # a compound command: a `cd` inside may not run (nor run once)
+CLOSERS = {"fi", "done", "esac"}
+UNSURE_WORDS = ("then", "else", "elif", "do", "coproc")
+
+
+def seg_empty(seg):
+    return not (seg["words"] or seg["stdin"] or seg["here"])
+
+
 def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
     A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
-    skipped. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`; the assignment in
-    effect at that point, so a later `D=decoy` does not move it); a name it cannot resolve stays literal (a directory that does not exist,
-    so the `cd` fails and nothing moves), and the file read falls back to the event cwd (docs/code-review.md rule 14).
-    The shell's directory is a SET of candidates (`cands`), because a `cd` the gate cannot place with certainty may or may not have run:
-    behind `then`/`else`/`elif`/`do`/`coproc`, `pushd -n`, after `||`, or after `&&` that follows anything but a `cd`. Such a `cd` adds the
-    moved candidates to the old ones; a certain one replaces them. A target is applied to every candidate (paths normalised, lexical `..`),
-    and a candidate for which the target is no directory now stays where it was (the `cd` fails; a directory made by an earlier command of the same line is not seen). `history` (a History) gets, for each tracked cwd, the
-    candidates by then (at most MAX_DIRS, past which `overflow` is set), and `reads` tries the file under each (mg-51 r5, lead B1)."""
+    skipped, a bare `cd` goes to HOME. `expand` turns `$NAME` in a `cd` target into the value the same command assigned (`D=sub; cd $D`;
+    the assignment in effect at that point, so a later `D=decoy` does not move it); a name it cannot resolve stays literal (no such
+    directory, the `cd` fails, nothing moves) and the file read falls back to the event cwd (docs/code-review.md rule 14).
+    The shell's directory is a SET of candidates (`cands`). A `cd` is SURE only on plain straight-line code: outside every compound command
+    (`if`/`while`/`until`/`for`/`select`/`case`) and `{ }` group that is itself conditional, not behind `then`/`else`/`elif`/`do`/`coproc`,
+    not `pushd -n`, not an element of a pipeline or before `&`, and not after `||`, nor after `&&` unless the command before it was a sure `cd`
+    that moved every candidate. A sure `cd` replaces the set by its targets; any other adds its targets to the old set. A target is applied to
+    every candidate (normalised, lexical `..`; when it holds `..`, the physical `realpath` too, for `set -P`/`cd -P` through a symlink), and a
+    candidate for which it is no directory stays where it was (the `cd` fails). `popd` and a bare `pushd` add every candidate seen so far.
+    Not modelled (so a documented limit): a `cd` in a shell function, `eval`, `trap`, a directory that an earlier command of the same line
+    creates. `history` (a History) gets, for each tracked cwd, the candidates by then; past MAX_DIRS candidates or MAX_WORK of `cd` work it sets
+    `overflow` (the write is then denied) and stops tracking."""
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     cands = list(dict.fromkeys([cwd, *bases]))   # `bases`: the directories an enclosing script heredoc runs under
+    seen = list(cands)                          # every directory that was ever a candidate (for `popd`)
     want_dir = redirect = None
     no_more_options = pushd_n = False
-    last_sep, last_cd, this_cd = "", None, None   # the previous boundary; did the previous segment's `cd` move every candidate (True), only some (False), or was there none (None)
-    stack = []
+    last_sep, last_cd, this_cd, snap = "", None, None, None   # last_cd: did the previous segment's `cd` move every candidate surely (True)
+    comp, braces, case_marks, stack = 0, [], [], []
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
+    dirs = history.isdir if history is not None else os.path.isdir
 
     def new_seg():
-        if history is not None:
+        if history is not None and not history.overflow:    # past an overflow the verdict is a deny: stop paying
             history.note(cur, cands)
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
     seg = new_seg()
@@ -317,20 +352,82 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             pipes.append(pipe)
             pipe = Pipeline()
 
-    def move(v, nd):
-        return os.path.normpath(str(nd if nd.is_absolute() else Path(v) / nd))
-    for tok in tokens:
+    def placed_unsure():
+        return (comp > 0 or any(braces) or any(w in UNSURE_WORDS for w in seg["words"]) or "||" in last_sep
+                or "|" in last_sep.replace("||", "") or ("&&" in last_sep and last_cd is not True))
+
+    def overflowed():
+        return history is not None and history.overflow
+
+    def widen(more):
+        nonlocal cands
+        cands = list(dict.fromkeys([*cands, *more]))
+        for d in more:
+            if d not in seen and len(seen) < MAX_DIRS:
+                seen.append(d)
+        if len(cands) > MAX_DIRS:
+            if history is not None:
+                history.overflow = True
+            del cands[MAX_DIRS:]
+
+    def apply(target, kind):
+        """One `cd`/`pushd` to `target` (a word, or "" for HOME)."""
+        nonlocal cur, cands, this_cd, snap
+        if overflowed():                        # past an overflow the verdict is a deny: stop paying for tracking
+            return
+        if history is not None:
+            history.work += len(cands)
+            if history.work > MAX_WORK:
+                history.overflow = True
+                return
+        nd = Path(home_expanded((expand(target, assigned) if expand else target) if target else "~"))
+        unsure = pushd_n or placed_unsure()
+        if snap is None:
+            snap = (cur, list(cands))
+        moved, clean = [], True
+        for v in cands:
+            joined = nd if nd.is_absolute() else Path(v) / nd
+            options = [os.path.normpath(str(joined))]
+            if ".." in nd.parts:                # a physical shell (`cd -P`, `set -P`) resolves `link/..` through the link
+                options.append(os.path.realpath(str(joined)))
+            found = [m for m in dict.fromkeys(options) if dirs(m)]
+            clean = clean and bool(found)
+            moved += found or [v]
+        cur = os.path.normpath(str(nd if nd.is_absolute() else Path(cur) / nd))
+        cands = [] if not unsure else cands
+        widen(moved)
+        this_cd = bool(not unsure and clean)
+        if len(cur) > MAX_PATH and history is not None:     # a path that long is a pile of `cd`s: stop extending it (quadratic)
+            history.overflow = True
+            cur = cwd
+        seg["cwd"] = cur
+        if history is not None:
+            history.note(cur, cands)
+    for i, tok in enumerate(tokens):
         if tok and set(tok) <= set(PUNCT):
             if set(tok) <= set("<>") and not tok.startswith("<("):
                 redirect = "stdin" if tok == "<" else "here" if tok == "<<<" else "skip"
                 continue
-            # a boundary: `|` (not `||`) and `<(`/`>(` keep the pipeline, everything else ends it
-            want_dir = None                     # a bare `cd` (HOME) ends at the boundary; it must not take the next command for its directory
+            if want_dir:                        # a bare `cd` (HOME) or `pushd` ends at the boundary; it must not take the next command for its directory
+                if want_dir == "cd":
+                    apply("", "cd")
+                else:
+                    widen(seen)
+                    this_cd = False
+            want_dir = None
             no_more_options = pushd_n = False
-            last_sep, last_cd, this_cd = tok, this_cd, None
-            for ch in tok:                     # a `cd` inside `( ... )` ends with it
+            flat = tok.replace("&&", "").replace("||", "")
+            if snap is not None and ("|" in flat or "&" in flat):   # `cd d | cat`, `cd d &`: the shell here did not move
+                widen(snap[1])
+                cur = snap[0]
+            if tok.strip("\n") == "" and seg_empty(seg) and ("&&" in last_sep or "||" in last_sep or "|" in last_sep):
+                continue                        # `false &&` NEWLINE `cd d`: the line continues, the boundary before it still holds
+            last_sep, last_cd, this_cd, snap = tok, this_cd, None, None
+            for ch in tok:                      # a `cd` inside `( ... )` ends with it
                 if ch == "(":
                     stack.append((cur, list(cands)))
+                elif ch == ")" and case_marks and len(stack) == case_marks[-1]:
+                    pass                        # the `)` closing a `case` pattern
                 elif ch == ")" and stack:
                     cur, cands = stack.pop()
             close("|" in tok.replace("||", "") or "<(" in tok or ">(" in tok)
@@ -347,34 +444,40 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             if tok.startswith("-") and tok != "-" and not no_more_options:
                 pushd_n = pushd_n or (want_dir == "pushd" and "n" in tok[1:])
                 continue                       # `cd -P DIR`, `cd -L -e DIR`: an option, the directory comes later
+            if tok.isdigit() and i + 1 < len(tokens) and tokens[i + 1] and set(tokens[i + 1]) <= set("<>"):
+                continue                       # `cd 2>/dev/null DIR`: the `2` is a file descriptor
+            kind = want_dir
             want_dir = None
             no_more_options = False
-            if tok != "-" and not (history is not None and history.overflow):  # `cd -` is OLDPWD (past an overflow the verdict is a deny: stop paying), which this command cannot name: the same limit as an unresolved `$D`
-                nd = Path(home_expanded(expand(tok, assigned) if expand else tok))
-                unsure = (pushd_n or any(w in ("then", "else", "elif", "do", "coproc") for w in seg["words"])
-                          or "||" in last_sep or ("&&" in last_sep and last_cd is not True))
-                moved = [m if os.path.isdir(m) else v for v, m in ((v, move(v, nd)) for v in cands)]   # no directory now: the `cd` fails, the shell stays
-                this_cd = not unsure and all(os.path.isdir(move(v, nd)) for v in cands)   # a sure `cd` that moved every candidate: an `&&` after it runs that `cd` too
-                cur = move(cur, nd)                # the representative path keeps compounding, directory or not (MAX_PATH below)
-                cands = list(dict.fromkeys([*(cands if unsure else ()), *moved]))
-                if len(cands) > MAX_DIRS:
-                    if history is not None:
-                        history.overflow = True
-                    cands = cands[-MAX_DIRS:]
-                if len(cur) > MAX_PATH and history is not None:     # a path that long is a pile of `cd`s: stop extending it (quadratic)
-                    history.overflow = True
-                    cur = cwd
-                seg["cwd"] = cur
-                if history is not None:
-                    history.note(cur, cands)
+            if tok != "-":                     # `cd -` is OLDPWD, which this command cannot name: the same limit as an unresolved `$D`
+                apply(tok, kind)
             pushd_n = False
             continue
-        if tok in ("cd", "pushd") and all(w in RESERVED or w in ("builtin", "command") for w in seg["words"]):
+        lead = all(w in RESERVED or w in ("builtin", "command") for w in seg["words"])
+        if tok in ("cd", "pushd") and lead:
             want_dir = tok
             continue
+        if tok == "popd" and lead:             # back to an earlier directory: any candidate seen so far
+            widen(seen)
+            this_cd = False
+        elif all(w in RESERVED for w in seg["words"]):
+            if tok in OPENERS:
+                comp += 1
+                if tok == "case":
+                    case_marks.append(len(stack))
+            elif tok in CLOSERS:
+                comp = max(0, comp - 1)
+                if tok == "esac" and case_marks:
+                    case_marks.pop()
+            elif tok == "{":
+                braces.append(placed_unsure() or ")" in last_sep)
+            elif tok == "}" and braces:
+                braces.pop()
         if ASSIGN.match(tok) and all(ASSIGN.match(w) or w in ASSIGNERS for w in seg["words"]):
             assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
         seg["words"].append(tok)
+    if want_dir:
+        apply("", "cd") if want_dir == "cd" else widen(seen)
     close(False)
     return pipes
 
@@ -504,11 +607,10 @@ class Scan:
 
     def reads(self, path: str, cwd: str) -> list[str]:
         """The file under the tracked cwd, the event cwd AND every candidate directory the shell may be in by then (`history`, from the
-        candidate set of `split_pipelines`: a `cd` the gate cannot place with certainty adds its moved directories instead of replacing
-        the old ones, and later relative `cd`s and this path resolve against all of them). So one `cd` that may not run (`false && cd d`,
-        `if false; then cd d; fi`, `coproc cd d`, `pushd -n d`), and the `cd`s after it, cannot move the read away from the file the shell
-        reads. What it does NOT cover: a target the gate cannot name (`cd $D` set elsewhere, `cd -`, `cd $(...)`, a directory an earlier
-        command of the same line makes). Every distinct text is returned and scanned (am-02 round 1 L1; mg-51 r2 B1, r5)."""
+        candidate set of `split_pipelines`: a `cd` that may not run, or is not on straight-line code, adds its moved directories to the set
+        instead of replacing it; later relative `cd`s and this path resolve against all of them). Not covered: a `cd` in a shell function,
+        `eval`, `trap`, a target the gate cannot name (`cd $D` set elsewhere, `cd -`, `cd $(...)`) and a directory an earlier command of the
+        same line creates. Every distinct text is returned and scanned (am-02 round 1 L1; mg-51 r2 B1, r5)."""
         path = self.expand(path)
         dirs = [cwd]
         if not os.path.isabs(home_expanded(path)):
