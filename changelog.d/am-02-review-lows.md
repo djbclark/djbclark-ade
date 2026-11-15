@@ -1,0 +1,3 @@
+### Fixed
+
+- `adversary_marker_gate`: a JSON payload is read leaf by leaf (a decoy fence leaf can no longer hide an escaped APPROVE marker leaf), `D=sub; cd $D` is expanded (a `cd` target set in another tool call stays a documented limit), and a word equal to a flag word is scanned as written too; `ade-worker-run archive-window` blocks on a closed agent with no readable state file and shows window names escaped in refusals; `ade-tidy` lists a corrupt claim file as a warning in a dry run (`--apply` still refuses); the approve-post scrubbed-env test pins PATH, HOME, USER and LOGNAME, and docs/review-boundary.md gains a manual probe for the live sudo-ask path (#734).
