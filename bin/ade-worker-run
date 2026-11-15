@@ -214,9 +214,12 @@ def label_queries(lead: str) -> list[str]:
     except succ.SuccessionError as e:
         raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
     adopted = ack_adoption(lead)[0]
-    for pred in succ.acknowledged_predecessors(lead):  # bounded like the base path: each adopted predecessor's nearest ones
-        if pred in adopted:
-            ids += [x for x in succ.recent_lineage(pred) if x not in ids]
+    try:
+        for pred in succ.acknowledged_predecessors(lead):  # bounded like the base path: each adopted predecessor's nearest ones
+            if pred in adopted:
+                ids += [x for x in succ.recent_lineage(pred) if x not in ids]
+    except succ.SuccessionError as e:
+        raise Refused(f"{e}; fix or remove the handoff records in {succ.default_state_dir()} by hand")
     return ids
 
 
