@@ -224,6 +224,19 @@ operator comments a marker.
 is required with `--yes`. After #484, skip `approve-post` for owner-authored
 tips — the gate trusts them without a marker.
 
+**Fresh confirmation before any post (ap-01, operator ruling 2026-11-15).** `approve-post` posts an owner-authored APPROVE
+comment through djbclark's own `gh` login, which the `adversary-marker` gate counts, so `--i-reviewed --yes` alone let an
+agent approve its own PR. A real (non-dry-run) run now, after the PRs and tip heads are selected and the checks above have
+passed and before the first post, asks djbclark once for Touch ID/password: `~/.local/bin/sudo-ask -k /usr/bin/printf …`
+(an Allow dialog listing the repo and every `PR N head <40-hex>` about to receive an APPROVE, then sudo's prompt), else
+`/usr/bin/sudo -k /usr/bin/true` when sudo-ask is missing; the same design as site-public's `bg approve-local`. Refusal,
+failure, timeout (700 s), or a selection whose dialog sudo-ask would cut off at 700 characters (about nine PRs; select
+fewer with `--prs`) posts nothing and exits 3. Dry-run, `approve-paste`, classify and the other subcommands are unchanged.
+There is no flag, env var or config that skips it; tests stub the function or `subprocess.run` in their own process. The helper runs with a scrubbed environment (adversary round 1: `BASH_ENV=<file with exit 0>` made sudo-ask exit 0 before its dialog) and its path comes from the password database, not `$HOME`.
+**It guards** honest mistakes (a wrong PR or head, a stale selection) and an agent approving its own PR through this tool.
+**It does not guard** against a determined agent that holds djbclark's `gh` token (it can post the comment with `gh`
+directly; `claude/hooks/adversary_marker_gate.py` denies that for Claude sessions only, docs/code-review.md rule 14) or one that can write `~/.local/bin/sudo-ask`.
+
 `merge-now` is the only merge path in this tool: refuses unless classify is
 `merge_now` (pytest-linux pass + adversary-marker success). Dry-run unless
 `--yes`.

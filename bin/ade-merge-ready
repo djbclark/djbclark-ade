@@ -29,6 +29,17 @@ Default `--via auto`: always an issue **comment** (the gate counts an operator c
 APPROVE on any PR; a body APPROVE never counts once the head was pushed by someone else,
 so a body append would report success and leave the check red). `--via body` / `--via comment` force one path. Never invents a
 head — each marker names the tip `headRefOid` just collected.
+**Fresh operator confirmation (ap-01, 2026-11-15).** A real `approve-post` (`--yes`) posts nothing until djbclark
+authenticates afresh: after the PRs and tip heads are selected and every check above has passed (operator login,
+`--i-reviewed`, `--yes`, `--expect-head`), and before the first post, it runs `~/.local/bin/sudo-ask -k /usr/bin/printf …`
+(an Allow dialog naming the repo and every `PR N head <40-hex>` about to receive an APPROVE, then sudo's Touch ID/password),
+else `/usr/bin/sudo -k /usr/bin/true` when sudo-ask is absent (the design of site-public's `bg approve-local`). A refusal,
+a failure, a timeout, or a selection too long for one dialog posts nothing and exits 3. Dry-run, `approve-paste`, classify
+and the other subcommands never ask. There is deliberately **no flag, env var or config that skips it** (tests stub
+`confirm_approve_post` or `subprocess.run` inside their own process); the helper runs with a scrubbed environment (a
+caller's `BASH_ENV`, `ENV`, `SHELLOPTS` or exported bash function cannot make sudo-ask exit 0 early) and its path comes
+from the password database, not `$HOME`. It guards honest mistakes and an agent approving its
+own PR through this tool; it does not stop a determined agent that holds djbclark's `gh` token and posts the comment itself, or one that can replace `~/.local/bin/sudo-ask`.
 `retrigger-marker` only runs `gh workflow run adversary-marker.yml -f pr=N`
 for selected open tips (dry-run unless `--yes`); it never posts markers and
 never merges. Require at least one of `--prs`, `--bottoms-only`, or
@@ -1054,6 +1065,94 @@ def require_expect_heads(
             )
 
 
+# Fresh operator authentication before `approve-post` posts anything (ap-01, 2026-11-15). Same design as site-public's
+# `bg approve-local`: djbclark's Touch ID helper `sudo-ask -k` (an Allow dialog that shows the text, then sudo's Touch
+# ID/password, ignoring any cached sudo ticket), else `sudo -k /usr/bin/true`. There is deliberately no flag, env var or
+# config that skips it; tests stub `confirm_approve_post` or `subprocess.run` inside their own process.
+def _account_home() -> str:
+    """The account's home directory from the password database, never `$HOME` (an agent can repoint that)."""
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+SUDO_ASK = os.path.join(_account_home(), ".local", "bin", "sudo-ask")
+SUDO = "/usr/bin/sudo"
+PRINTF = "/usr/bin/printf"
+TRUE = "/usr/bin/true"
+AUTH_TIMEOUT = 700  # sudo-ask waits up to 600 s for a click; past this the tool gives up and posts nothing
+# sudo-ask shows its argv shell-quoted and cut at 700 characters; a dialog that would be cut hides PRs, so it is refused.
+DIALOG_COST_MAX = 620
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+
+
+def _dialog_cost(text: str) -> int:
+    """Worst-case characters sudo-ask shows for *text* (it prints `printf %q`: most punctuation gets a backslash,
+    a non-ASCII character can become `$'\\ooo'` octal escapes, up to 4 characters per UTF-8 byte)."""
+    return sum(
+        1 if (c.isalnum() and c.isascii()) or c in "._-/" else 2 if c.isascii() else 4 * len(c.encode())
+        for c in text
+    )
+
+
+def _auth_env() -> dict[str, str]:
+    """A scrubbed environment for the authentication program: sudo-ask is a bash script, and an inherited `BASH_ENV`,
+    `ENV`, `SHELLOPTS` or exported `BASH_FUNC_*` function can make it exit 0 before its dialog. Never copy the caller's env."""
+    import pwd
+
+    pw = pwd.getpwuid(os.getuid())
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": pw.pw_dir,
+        "USER": pw.pw_name,
+        "LOGNAME": pw.pw_name,
+    }
+    if os.environ.get("LANG"):
+        env["LANG"] = os.environ["LANG"]
+    return env
+
+
+def approve_dialog_text(repo: str, rows: list[dict]) -> str:
+    """One line naming the repo and every `PR N head <40-hex>` about to receive an APPROVE."""
+    items = "; ".join(f"PR {int(r['number'])} head {r.get('head') or ''}" for r in rows)
+    return f"APPROVE (ade-merge-ready approve-post) in {repo}: {items}"
+
+
+def confirm_approve_post(repo: str, rows: list[dict]) -> None:
+    """Ask djbclark for fresh Touch ID/password; raise RuntimeError (post nothing) unless it succeeds.
+
+    Guards honest mistakes and an agent approving its own PR through this tool. It does not stop a determined agent that
+    holds djbclark's `gh` token and posts the comment itself."""
+    for r in rows:
+        if not _HEX40.fullmatch(str(r.get("head") or "")):
+            raise RuntimeError(
+                f"approve-post: #{r.get('number')} has no 40-hex tip head to confirm; nothing was posted"
+            )
+    text = approve_dialog_text(repo, rows)
+    if _dialog_cost(text) > DIALOG_COST_MAX:
+        raise RuntimeError(
+            f"approve-post: {len(rows)} PRs do not fit in one confirmation dialog (it would be cut off); "
+            "select fewer with --prs; nothing was posted"
+        )
+    print(f"ade-merge-ready: asking djbclark to confirm: {text}", file=sys.stderr)
+    if os.path.isfile(SUDO_ASK) and os.access(SUDO_ASK, os.X_OK):
+        # The Allow dialog shows `text` (mouse click only); sudo then asks for Touch ID or the password.
+        argv = [SUDO_ASK, "-k", PRINTF, "%s\\n", text]
+    else:
+        # -k with a command: ask afresh, run /usr/bin/true, leave the machine's sudo ticket as it was.
+        argv = [SUDO, "-k", TRUE]
+    try:
+        p = subprocess.run(argv, stdout=subprocess.DEVNULL, timeout=AUTH_TIMEOUT, env=_auth_env())
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(
+            f"approve-post: confirmation failed ({type(e).__name__}); nothing was posted"
+        ) from e
+    if p.returncode != 0:
+        raise RuntimeError(
+            "approve-post: djbclark did not confirm (refused or authentication failed); nothing was posted"
+        )
+
+
 def post_approve_comment(
     gh: str,
     repo: str,
@@ -2053,6 +2152,11 @@ def main(argv: list[str] | None = None) -> int:
                 require_expect_heads(paste_rows, expect_heads)
             except RuntimeError as e:
                 return die(str(e))
+        if not dry_run:
+            try:
+                confirm_approve_post(a.repo, paste_rows)
+            except RuntimeError as e:
+                return die(str(e), 3)
         out = sys.stderr if a.json else sys.stdout
         if dry_run:
             print(
