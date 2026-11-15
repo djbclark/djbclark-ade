@@ -49,7 +49,7 @@ the operator tells to, runs it. An agent that wants the verdict recorded puts th
 Failure modes (stated): fails OPEN, with a one-line stderr diagnostic that a hook on exit 0 does not show, for bad stdin,
 a non-Bash tool, an unreadable, non-regular or over-256 KB file, the 600,000-character scan budget (the write's own operand files sit outside it: past 400 texts or 2 MB of them the command is denied if it mentions APPROVE), any internal error, a
 missing `bin/adversary_marker.py` (looked for beside this file's checkout, then `~/src/djbclark-ade/bin`) and a hook timeout
-(15 s). A text with more than 100 marker starts is denied if it mentions APPROVE, never parsed (bounded work). Fails CLOSED
+(15 s). A text with more than 100 marker starts is denied if it mentions APPROVE, never parsed (bounded work); a JSON payload nested past the parser's recursion limit is denied if it mentions APPROVE (its leaves cannot be read). Fails CLOSED
 where the command cannot be parsed: shlex failure (a stray apostrophe) splits on the shell operators instead and, when the raw
 text names a gh write anywhere, scans the raw command too. Same shape as archived_send_gate.
 
@@ -133,6 +133,19 @@ def mentions_approve(text: str) -> bool:
     if APPROVE_WORD.search(text):
         return True
     return bool(U_ESCAPE.search(text) and APPROVE_WORD.search(U_ESCAPE.sub(lambda m: chr(int(m.group()[2:], 16)), text)))
+
+
+def mentions_approve_decoded(text: str) -> bool:
+    """`mentions_approve` after decoding `\\uXXXX` escapes to a fixed point (at most 8 rounds): a JSON payload's string is decoded by
+    GitHub and then the marker's own JSON is decoded by the checker, so `\\u005cu0041PPROVE` is APPROVE (cq-45c, adversary r2 M1)."""
+    for _ in range(8):
+        if mentions_approve(text):
+            return True
+        decoded = U_ESCAPE.sub(lambda m: chr(int(m.group()[2:], 16)), text)
+        if decoded == text:
+            return False
+        text = decoded
+    return False
 
 
 def live_approve(text: str, am, raw: bool = False) -> str:
@@ -347,7 +360,7 @@ class Scan:
     def __init__(self, cwd: str = ""):
         self.texts, self.write, self.budget, self.cwd0 = [], False, MAX_TOTAL, cwd
         self.token_write, self.incidental, self.forced, self.forced_bytes, self.truncated = False, 0, 0, 0, False
-        self.raw_texts, self.env = [], {}
+        self.raw_texts, self.env, self.deep = [], {}, False
 
     def add(self, text: str, force: bool = False, operand: bool = False, raw: bool = False):
         """`force`: the write's own arguments (bounded by the command's length); `operand`: a file or stdin text it reads,
@@ -396,8 +409,10 @@ class Scan:
                     chunk += t[:MAX_TEXT] + "\n"
                 if chunk:
                     self.texts.append(chunk)
-            except (ValueError, RecursionError):
+            except ValueError:
                 pass
+            except RecursionError:             # nested past the parser's limit: no leaf can be read, so an APPROVE anywhere in the
+                self.deep = self.deep or mentions_approve_decoded(full)   # whole text is denied by `judge` (cq-45c, review D1)
 
     def expand(self, path: str) -> str:
         """`$NAME` / `${NAME}` in a path, from the assignments the same command makes."""
@@ -654,6 +669,8 @@ def judge(command: str, cwd: str, am_loader) -> str:
         found = live_approve(t, am, raw=True)
         if found:
             return found
+    if scan.deep:                              # judged on the whole payload, not on its MAX_TEXT cut or its channel (file, pipe, filter)
+        return "a JSON payload nested past this gate's parser limit that mentions APPROVE (its leaves cannot be read)"
     if any(mentions_approve(t) for t in scan.texts):
         if scan.truncated:
             return "more operand text than this gate can scan in time (%d files or %d bytes) next to the word APPROVE" % (
