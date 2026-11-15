@@ -396,8 +396,10 @@ class Scan:
                     chunk += t[:MAX_TEXT] + "\n"
                 if chunk:
                     self.texts.append(chunk)
-            except (ValueError, RecursionError):
+            except ValueError:
                 pass
+            except RecursionError:             # nested past the parser's limit: no leaf can be read, so an APPROVE anywhere is denied
+                self.truncated = self.truncated or mentions_approve(full)
 
     def expand(self, path: str) -> str:
         """`$NAME` / `${NAME}` in a path, from the assignments the same command makes."""
