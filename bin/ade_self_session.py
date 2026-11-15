@@ -44,7 +44,8 @@ class NativeError(SessionError):
 
 # Codes Paseo's `agent run` raises BEFORE it contacts the daemon or creates anything (adversary, ss-49: the catch-all
 # `AGENT_CREATE_FAILED`, `UNKNOWN_ERROR`, `DAEMON_*` and a failed initial prompt can follow a created agent, so a code
-# alone is no proof). Only these make a refusal definite; every other code stays `creation-unknown`.
+# alone is no proof). Checked against Paseo da7e3d94 (`runRunCommand`, packages/cli/src/commands/agent/run.ts): re-verify on a
+# Paseo upgrade. Only these make a refusal definite; every other code stays `creation-unknown`.
 PRE_CREATE_REFUSAL_CODES = frozenset((
     'INVALID_OPTIONS', 'INVALID_LABEL', 'INVALID_ENV', 'MISSING_PROMPT', 'INVALID_THINKING_OPTION', 'INVALID_TIMEOUT',
     'MISSING_PROVIDER', 'INVALID_PROVIDER', 'INVALID_MODEL', 'CONFLICTING_MODEL_OPTIONS', 'WORKSPACE_NOT_FOUND',
