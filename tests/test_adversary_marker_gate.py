@@ -1427,3 +1427,148 @@ def test_a_huge_tracked_path_is_cut_off_not_quadratic(live):
     result, took = _seconds(command, live)
     assert took < 8, took
     assert result and "can follow in time" in result
+
+
+@pytest.mark.parametrize("command", [
+    "cd real; cd decoy && true & cd sub; " + G,                                            # r8 C1: the list starts after the `;`
+    "{ cd real; cd decoy && true & }; cd sub; " + G,                                       # r8 A4a: ... inside a `{ }` group
+    "{ cd real; cd decoy && true & cd sub; " + G + "; }",                                  # A4b
+    "{\ncd real\ncd decoy && true &\n}\ncd sub; " + G,                                     # A4c: multi-line
+    "{ cd real; { cd decoy; } && true & }; cd sub; " + G,                                  # A4d
+    "{ { cd real; cd decoy && true & }; }; cd sub; " + G,
+    "cd real; cd decoy &&\ntrue &\ncd sub; " + G,                                          # r8 A5: `&&` NEWLINE is one shlex token
+    "cd real; cd decoy ||\ntrue &\ncd sub; " + G,
+])
+def test_a_background_and_or_list_started_after_a_semicolon_or_inside_a_group_ran_in_the_background(live, command):
+    """Adversary r8 A4/A5 (std layout): the list before `&` starts at the last `;`/newline at ITS brace level, and `&&` NEWLINE continues it."""
+    _two_step_tree(live)
+    assert run(command, cwd=live), command
+    _two_step_tree(live, real_live=False)
+    assert run(command, cwd=live) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    "cd decoy &</dev/null; cd sub; " + G,                                                  # r8 A6: `&<` is `&` then `<`
+    "cd decoy &<<<x; cd sub; " + G,
+    "true &&>/dev/null cd sub; " + G,                                                      # `&&>` is `&&` then `>`: the `cd` after the redirect is a command
+    "true &&</dev/null cd sub; " + G,
+    "gh pr create >|/dev/null --body-file sub/b.md",                                       # r8 A8: `>|` is a redirect, not a pipe
+    "bash <<'EOS'\ncd decoy &</dev/null\ncd sub\n" + G + "\nEOS\n",
+])
+def test_a_redirect_is_matched_exactly_not_by_the_characters_it_is_made_of(live, command):
+    """Adversary r8 A6/A8: `&<` and `&&>` start with a separator; `>|` is one redirect operator."""
+    _top_tree(live)
+    assert run(command, cwd=live), command
+    _top_tree(live, live_is_sub=False)
+    assert run(command, cwd=live) is None, command
+
+
+def test_the_lenient_split_keeps_an_ampersand_redirect_inside_its_command(live):
+    """Adversary r8 A7: a command shlex cannot parse (or past MAX_SHLEX) is split by a regex that cut `2>&1` at the `&`."""
+    (live / "F").mkdir()
+    (live / "F" / "b.md").write_text(APPROVE)
+    command = "cd F; gh pr create " + "2>&1 " * 30000 + "--body-file b.md # don't"
+    result, took = _seconds(command, live)
+    assert result and took < 8, (took, result)
+    words = gate.tokenize("gh pr create 2>&1 --body-file b.md # don't")[0]
+    assert "--body-file" in words and ";" not in words and not any(w == "&" for w in words)
+
+
+def test_a_symlink_chain_is_resolved_in_bounds_not_by_one_unbounded_realpath(live, monkeypatch):
+    """Adversary r8 A3: one `realpath` call through a chain of 45,000 symlinks took 17 s on a 47-character command."""
+    (live / "x").mkdir()
+    (live / "F").mkdir()
+    (live / "F" / "b.md").write_text(APPROVE)
+    n = 200
+    for k in range(1, n + 1):
+        (live / ("L%d" % k)).symlink_to("x/../L%d" % (k + 1) if k < n else "x")
+    walked = gate.History().walk(str(live / "L1"))
+    assert walked == "", walked                                         # past MAX_LINKS: unresolved, not followed to the end
+    assert gate.History().walk(str(live / ("L%d" % (n - 5)))) == str(live / "x")   # 6 links: resolved as the kernel would
+    # the lexical `cd L1/..` is still followed, so the live file under F is read
+    assert run("cd L1/..; cd F; gh pr create --body-file b.md", cwd=live)
+    (live / "F" / "b.md").write_text("prose only")
+    assert run("cd L1/..; cd F; gh pr create --body-file b.md", cwd=live) is None
+
+
+def test_stack_entries_are_followed_by_cd_plus_n_as_well_as_the_directory_named_plus_one(live):
+    """Adversary r8 C2: `pushd decoy; cd +1` (zsh) returns to the start; there is no `+1` directory, only the stack entry holds the live file."""
+    _top_tree(live)
+    assert run("pushd decoy; cd +1; cd sub; " + G, cwd=live)
+    _top_tree(live, live_is_sub=False)
+    assert run("pushd decoy; cd +1; cd sub; " + G, cwd=live) is None
+
+
+def test_more_distinct_directories_than_the_cap_reaching_a_script_heredoc_are_a_deny(live):
+    """Adversary r7 C4: the set a nested shell starts from is cut at MAX_DIRS and that is an overflow, not a silent drop."""
+    for i in range(gate.MAX_DIRS + 2):
+        (live / ("e%d" % i)).mkdir(exist_ok=True)
+    (live / "b.md").write_text("prose only")
+    command = "".join("cd ../e%d; true; " % i for i in range(gate.MAX_DIRS + 2))      # a command in each: a segment per directory
+    command = "cd e0; " + command + "bash <<'EOS'\n" + G + "\nEOS\n"
+    result = gate.judge(command, str(live), gate._checker)
+    assert result and "can follow in time" in result, result
+
+
+def _slow_after_the_last_cd(monkeypatch, live, tail, n):
+    """The clock is read in the token loop and in `collect`, not only in `apply`: all the slow work comes after the last `cd`."""
+    monkeypatch.setattr(gate, "MAX_SECONDS", 0.02)
+    (live / "b.md").write_text("prose only")
+    command = _decoy_cds(live, gate.MAX_DIRS - 1) + tail * n + G
+    return gate.judge(command, str(live), gate._checker)
+
+
+@pytest.mark.parametrize("tail,n", [("true & ", 40000), ("popd; ", 40000), ("cd +1; ", 20000), ("pushd; ", 40000)])
+def test_slow_work_after_the_last_cd_is_on_the_clock_too(live, monkeypatch, tail, n):
+    """Adversary r8 A2/C3: a pile of `&`, `popd`, bare `pushd` or `cd +1` over a full candidate set cost 14-18 s, with no `cd` left to check the clock."""
+    result = _slow_after_the_last_cd(monkeypatch, live, tail, n)
+    assert result and "can follow in time" in result, result
+
+
+def test_script_heredocs_over_many_segments_are_built_once_and_on_the_clock(live, monkeypatch):
+    """Adversary r8 A1: heredocs x segments x candidates (a 67 KB command) ran 31 s; the shared set is built once, and the loop is on the clock."""
+    monkeypatch.setattr(gate, "MAX_SECONDS", 0.05)
+    (live / "b.md").write_text("prose only")
+    command = (_decoy_cds(live, gate.MAX_DIRS - 1) + "true; " * 6000
+               + "".join("bash <<E%d\nE%d\n" % (j, j) for j in range(800)) + G)
+    result, took = _seconds(command, live)
+    assert result and "can follow in time" in result and took < 5, (took, result)
+
+
+def test_a_noclobber_redirect_does_not_make_the_cd_before_it_unsure(live):
+    """Adversary r8 A8: `>|f` is a redirect, so `cd real >|f` stays a sure `cd` and the next `cd sub` reads real/sub only (a pipe would keep the old directory, whose sub/b.md is live)."""
+    _two_step_tree(live, real_live=False)
+    (live / "sub" / "b.md").write_text(APPROVE)
+    for redirect in (">|/dev/null", ">/dev/null"):
+        assert run("cd real %s; cd sub; " % redirect + G, cwd=live) is None, redirect
+    assert run("cd real | cat; cd sub; " + G, cwd=live)            # the control: a pipe makes it unsure
+
+
+def test_the_physical_walk_stops_after_its_component_and_link_caps(live):
+    """Adversary r8 A3: bounded by components as well as by links (a link target such as `x/..` x 200 multiplies the work)."""
+    assert gate.History().walk("/" + "/".join(["."] * (gate.MAX_STEPS + 10))) == ""
+    assert gate.History().walk(str(live / "a" / ".." / "b")) == str(live / "b")
+
+
+def test_the_token_loop_reads_the_clock_every_256_tokens(live, monkeypatch):
+    """Adversary r8 A2: a pile of `&` has no `cd` after it, so `apply` never checks the clock again; the token loop must."""
+    calls = []
+    real = gate.History.expired
+    monkeypatch.setattr(gate.History, "expired", lambda self: calls.append(1) or real(self))
+    tokens = gate.tokenize("true & " * 3000)[0]
+    gate.split_pipelines(tokens, str(live), history=gate.History())
+    assert len(calls) >= len(tokens) // 256, (len(calls), len(tokens))
+
+
+def test_the_collector_stops_reading_when_the_clock_ran_out_after_the_split(live, monkeypatch):
+    """Adversary r8 A1/C3: the pipeline pass of `collect` is on the clock too: time spent in the split is not a licence to read on."""
+    (live / "b.md").write_text("prose only")
+    real = gate.split_pipelines
+
+    def slow_split(tokens, cwd, expand=None, history=None, bases=()):
+        out = real(tokens, cwd, expand, history, bases)
+        history.started -= 100                      # the split used up the clock
+        return out
+    monkeypatch.setattr(gate, "split_pipelines", slow_split)
+    result = gate.judge("cd . ; " + G, str(live), gate._checker)
+    assert result and "can follow in time" in result, result

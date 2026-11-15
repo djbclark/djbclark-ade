@@ -83,8 +83,14 @@ MAX_DIRS = 128              # distinct directories tracked for one command, and 
 MAX_READS = 5000            # past either (or a tracked path over MAX_PATH), the gh write is denied: it may read a file this gate never reached
 MAX_PATH = 4096
 MAX_WORK = 30000            # sum over a command's `cd`s of (candidate directories x components of the target); past it the write is denied
+MAX_LINKS = 40               # symlinks one physical `..` resolution follows (the kernel's own limit is of this order); past it the physical option is dropped
+MAX_STEPS = 4096            # path components one physical resolution walks
 MAX_SECONDS = 4.0           # wall-clock budget of the cd tracking (the hook's own timeout is 15 s and fails open); past it the write is denied
 PUNCT = ";&|()<>`\n"
+# the lenient split's separator runs: a `&` that is not part of `>&`, `<&`, `&>` (a redirect) is one; `&&` always is
+SEPARATORS = r"((?:&&|(?<![<>])&(?!>)|[;|()`\n])+)"
+# the redirect operators (a run of `<>&` that is none of them is a separator, then a redirect: `&<`, `&&>`)
+REDIRECTS = {"<", ">", ">>", "<<", "<<<", "<>", ">|", ">&", "<&", "&>", "&>>"}
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
 APPROVE_WORD = re.compile(r"approve", re.IGNORECASE)
@@ -242,7 +248,7 @@ def tokenize(text: str):
         except ValueError:
             pass
     out = []
-    for piece in re.split(r"([;&|()`\n]+)", text.replace("\\\n", " ")):
+    for piece in re.split(SEPARATORS, text.replace("\\\n", " ")):
         if piece and set(piece) <= set(PUNCT):
             out.append(piece)
         else:
@@ -294,9 +300,40 @@ class History(dict):
         return self.overflow
 
     def realpath(self, path: str) -> str:
+        """The physical path (what `cd -P` reaches), or "" when it cannot be had in bounds: more than MAX_LINKS symlinks (the kernel
+        gives up at 40 too), MAX_STEPS components, or past the clock. `os.path.realpath` has no such limit (one call through a chain of
+        45,000 links took 17 s), so the walk is this one, with a link counter and the clock checked per component."""
         if path not in self.real:
-            self.real[path] = os.path.realpath(path)
+            self.real[path] = self.walk(path)
         return self.real[path]
+
+    def walk(self, path: str) -> str:
+        todo, out, links, steps = path.split("/")[::-1], "/", 0, 0
+        while todo:
+            steps += 1
+            if steps > MAX_STEPS or (steps % 64 == 0 and self.expired()):
+                return ""
+            part = todo.pop()
+            if part in ("", "."):
+                continue
+            if part == "..":
+                out = os.path.dirname(out)
+                continue
+            nxt = os.path.join(out, part)
+            try:
+                if os.path.islink(nxt):
+                    links += 1
+                    if links > MAX_LINKS:
+                        return ""
+                    target = os.readlink(nxt)
+                    if os.path.isabs(target):
+                        out = "/"
+                    todo.extend(target.split("/")[::-1])
+                    continue
+            except OSError:
+                return ""
+            out = nxt
+        return out
 
     def note(self, cur: str, visited) -> None:
         have = self.setdefault(cur, [])
@@ -327,6 +364,19 @@ def seg_empty(seg):
     return not (seg["words"] or seg["stdin"] or seg["here"])
 
 
+def split_redirects(tokens):
+    """A run of `<>&` that is not one redirect operator is a separator followed by one (`&<` is `&` then `<`; `&&>` is `&&` then `>`)."""
+    out = []
+    for tok in tokens:
+        if tok and set(tok) <= set("<>&") and ("<" in tok or ">" in tok) and tok not in REDIRECTS and tok.startswith("&"):
+            head = "&&" if tok.startswith("&&") else "&"
+            if tok[len(head):] in REDIRECTS:
+                out += [head, tok[len(head):]]
+                continue
+        out.append(tok)
+    return out
+
+
 def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     """Pipelines of segments, with `cd`/`pushd` tracked into each segment's cwd and `<` / `<<<` operands set aside.
     A `cd` counts behind `builtin`/`command` and a shell keyword (`{ cd`, `if cd`, `then cd`); its options (`-P`, `-L`, `-e`, `--`) are
@@ -342,6 +392,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     Not modelled (so a documented limit): a `cd` in a shell function, `trap`, a `#` comment, a quoted reserved word, `time -p if`, zsh `repeat`,
     a directory named `2`, `cd ~1`, zsh `cd old new`, a heredoc inside a `bash -c` string, a directory that an earlier command of the same line creates. `history` (a History) gets, for each tracked cwd, the candidates by then; past MAX_DIRS candidates or MAX_WORK of `cd` work it sets
     `overflow` (the write is then denied) and stops tracking."""
+    tokens = split_redirects(tokens)
     pipes, pipe, seg, cur = [], Pipeline(), None, cwd
     cands = list(dict.fromkeys([cwd, *bases]))   # `bases`: the directories an enclosing nested shell runs under
     if len(cands) > MAX_DIRS:
@@ -349,11 +400,13 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
         if history is not None:
             history.overflow = True
     seen = list(cands)                          # every directory that was ever a candidate (for `popd`)
+    seen_set = set(seen)
     want_dir = redirect = None
     no_more_options = pushd_n = False
     last_sep, last_cd, this_cd, snap = "", None, None, None   # last_cd: did the previous segment's `cd` move every candidate surely (True)
     comp, braces, case_marks, stack, group_snap, list_snap = 0, [], [], [], None, (cwd, cands)
     nbraces = [0]                               # how many open `{` groups are conditional (O(1) per token)   # braces: [(conditional?, (cur, cands) at the `{`)]
+    groups = []                                 # one entry per open `{` / `(`: (comp at the opener, the AND-OR list start outside it): a list inside it starts afresh
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
     dirs = history.isdir if history is not None else os.path.isdir
 
@@ -391,10 +444,16 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
 
     def widen(more):
         nonlocal cands
-        cands = list(dict.fromkeys([*cands, *more]))
+        if more is cands or overflowed():       # nothing to add, or the verdict is a deny already: stop paying (O(|more|) a call, never O(|more| x |seen|))
+            return
+        have = set(cands)
+        extra = [d for d in dict.fromkeys(more) if d not in have]
+        if extra:
+            cands = [*cands, *extra]
         for d in more:
-            if d not in seen and len(seen) < MAX_DIRS:
+            if d not in seen_set and len(seen) < MAX_DIRS:
                 seen.append(d)
+                seen_set.add(d)
         if len(cands) > MAX_DIRS:
             if history is not None:
                 history.overflow = True
@@ -439,8 +498,10 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
         if history is not None:
             history.note(cur, cands)
     for i, tok in enumerate(tokens):
-        if tok and set(tok) <= set(PUNCT):
-            if set(tok) <= set("<>&") and ("<" in tok or ">" in tok) and not tok.startswith("<("):   # `>`, `2>&1` (`>&`), `&>`: a redirect, not a background `&`
+        if history is not None and not i & 255:     # the whole token loop is on the clock, not only `apply` (a pile of `&`, `popd`, `{` ...)
+            history.expired()
+        if tok and (tok in REDIRECTS or set(tok) <= set(PUNCT)):
+            if (tok in REDIRECTS or (set(tok) <= set("<>&") and ("<" in tok or ">" in tok))) and not tok.startswith("<("):   # `>`, `2>&1` (`>&`), `&>`, `>|`: a redirect, not a background `&` or a pipe
                 redirect = "stdin" if tok == "<" else "here" if tok == "<<<" else "skip"
                 continue
             if want_dir:                        # a bare `cd` (HOME) or `pushd` ends at the boundary; it must not take the next command for its directory
@@ -467,12 +528,17 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             for ch in tok:                      # a `cd` inside `( ... )` ends with it
                 if ch == "(":
                     stack.append((cur, cands))
+                    groups.append((comp, list_snap))
+                    list_snap = (cur, cands)
                 elif ch == ")" and case_marks and len(stack) == case_marks[-1]:
                     pass                        # the `)` closing a `case` pattern
                 elif ch == ")" and stack:
                     cur, cands = stack.pop()
-            if bg or ((";" in tok or "\n" in tok) and not braces and comp == 0):
-                list_snap = (cur, cands)         # a new AND-OR list starts here (a `;` inside `{ }` or a compound command does not end the outer list)
+                    if groups:
+                        list_snap = groups.pop()[1]
+            continued = tok.rstrip("\n").endswith(("&&", "||", "|", "|&"))     # `&&` NEWLINE is one shlex token: the list goes on
+            if bg or ((";" in tok or "\n" in tok) and not continued and comp == (groups[-1][0] if groups else 0)):
+                list_snap = (cur, cands)         # a new AND-OR list starts here, at the level of the innermost `{`/`(` (a `;` in a compound command inside it does not end it)
             close("|" in tok.replace("||", "") or "<(" in tok or ">(" in tok)
             continue
         if redirect:
@@ -526,9 +592,13 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
                 cond = placed_unsure() or ")" in last_sep
                 nbraces[0] += cond
                 braces.append((cond, (cur, cands)))
+                groups.append((comp, list_snap))
+                list_snap = (cur, cands)
             elif tok == "}" and braces:
                 cond, group_snap = braces.pop()
                 nbraces[0] -= cond
+                if groups:
+                    list_snap = groups.pop()[1]
         if flags["assign"] and ASSIGN.match(tok):
             assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
         push(tok)
@@ -821,15 +891,20 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
             scan.write = True
             scan.add(body)
     pipes = split_pipelines(tokens, cwd, scan.expand, scan.history, bases)
+    running = None                             # (at, bases) of a script fed to a shell: the same for every such heredoc, so built once
     for body, head, _quoted in bodies:
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files, under the directory of the
             # command that runs it (`cd real && bash <<X`); which segment that is, is not tracked, so it is collected once, under the
             # last cwd, and every cwd the command had is tried for its relative operands (`history`)
-            segs = [seg["cwd"] for pipe in pipes for seg in pipe.segments]
-            at = segs[-1] if segs else cwd
-            scan.history.note(at, [cwd, *segs])
-            held = [d for sg in segs for d in scan.history.get(sg, ())]
-            collect(body, at, scan, depth + 1, bases=list(dict.fromkeys([cwd, *segs, *held])))
+            if scan.history.expired():
+                break                          # out of time: the verdict is a deny (judge), whatever is left unread
+            if running is None:
+                segs = list(dict.fromkeys(seg["cwd"] for pipe in pipes for seg in pipe.segments))
+                at = [seg["cwd"] for pipe in pipes for seg in pipe.segments][-1:] or [cwd]
+                scan.history.note(at[0], [cwd, *segs])
+                held = dict.fromkeys(d for sg in segs for d in scan.history.get(sg, ()))
+                running = (at[0], list(dict.fromkeys([cwd, *segs, *held])))
+            collect(body, running[0], scan, depth + 1, bases=running[1])
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
 
     def subs(w: str, at: str) -> None:
@@ -850,6 +925,8 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
                 for content in found:
                     scan.add(content, raw=raw)
     for pipe in pipes:
+        if scan.history.expired():             # out of time (the cd tracking's clock covers the whole command): stop reading; judge denies a write
+            break
         gh = [(seg, gh_invocation(seg["words"])) for seg in pipe.segments]
         writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
         for seg in pipe.segments:              # code-bearing strings are collected again
