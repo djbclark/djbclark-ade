@@ -1,0 +1,60 @@
+ 1) "loginwindow" ASN:0x0-0x1e01e0:
+    bundleID="com.apple.loginwindow"
+    bundle path="/System/Library/CoreServices/loginwindow.app"
+    executable path="/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"
+    pid = 100 token=[sess=100500 pid=100 uid:0,0,4294967295 g:20,20 pV:82108] type="UIElement" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 100  { 100 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 2) "universalaccessd" ASN:0x0-0x1f01f0:
+    bundleID=[ NULL ] 
+    bundle path="/usr/sbin/universalaccessd"
+    executable path="/usr/sbin/universalaccessd"
+    pid = 101 token=[sess=100500 pid=101 uid:502,502,4294967295 g:20,20 pV:82108] type="BackgroundOnly" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 101  { 101 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 3) "Ghostty" ASN:0x0-0x1f21f2:
+    bundleID="com.mitchellh.ghostty"
+    bundle path="/Applications/Ghostty.app"
+    executable path="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+    pid = 200 token=[sess=100500 pid=200 uid:502,502,4294967295 g:20,20 pV:82108] type="Foreground" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 200  { 200 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 4) "Slack" ASN:0x0-0x2a02a0:
+    bundleID="com.tinyspeck.slackmacgap"
+    bundle path="/Applications/Slack.app"
+    executable path="/Applications/Slack.app/Contents/MacOS/Slack"
+    pid = 300 token=[sess=100500 pid=300 uid:502,502,4294967295 g:20,20 pV:82108] type="Foreground" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 300  { 300 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 5) "Slack Helper" ASN:0x0-0x2a12a1:
+    bundleID="com.tinyspeck.slackmacgap.helper"
+    bundle path="/Applications/Slack.app/Contents/Frameworks/Slack Helper.app"
+    executable path="/Applications/Slack.app/Contents/Frameworks/Slack Helper.app/Contents/MacOS/Slack Helper"
+    pid = 301 token=[sess=100500 pid=301 uid:502,502,4294967295 g:20,20 pV:82108] type="UIElement" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 301  { 301 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 6) "Code" ASN:0x0-0x3a03a0:
+    bundleID="com.microsoft.VSCode"
+    bundle path="/Applications/Visual Studio Code.app"
+    executable path="/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+    pid = 400 token=[sess=100500 pid=400 uid:502,502,4294967295 g:20,20 pV:82108] type="Foreground" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 400  { 400 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 7) "Evil "quoted" ‮app" ASN:0x0-0x4a04a0:
+    bundleID="com.example.evil"
+    bundle path="/Applications/Evil.app"
+    executable path="/Applications/Evil.app/Contents/MacOS/evil"
+    pid = 500 token=[sess=100500 pid=500 uid:502,502,4294967295 g:20,20 pV:82108] type="Foreground" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 500  { 500 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 8) "Impostor" ASN:0x0-0x5a05a0:
+    bundleID="com.mitchellh.ghostty"
+    bundle path="/Users/x/Downloads/Impostor.app"
+    executable path="/Users/x/Downloads/Impostor.app/Contents/MacOS/impostor"
+    pid = 600 token=[sess=100500 pid=600 uid:502,502,4294967295 g:20,20 pV:82108] type="Foreground" flavor=3 Version="1.0" fileType="APPL" creator="????" Arch=ARM64 
+    coalition: 600  { 600 }
+    checkin time = 2026/11/09 19:26:33 ( 4 days, 21 hours ago )
+ 9) "NoPid" ASN:0x0-0x6a06a0:
+    bundleID="com.example.nopid"
+    bundle path="/Applications/NoPid.app"
+    executable path="/Applications/NoPid.app/Contents/MacOS/nopid"

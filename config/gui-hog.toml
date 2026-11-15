@@ -1,0 +1,45 @@
+# GUI-hog dialog (docs/gui-hog-dialog.md; PR 3a = data and dry-run trigger, no window yet).
+# Read by bin/gui_hog.py. ~/.config/load-watch/gui-hog.toml may ADD to [protected], never remove from it or from the
+# hard floor in code (pid 1 and other users, WindowServer, Dock, loginwindow, Finder, SystemUIServer, Control Center,
+# WindowManager, anything under /System or /usr, the dialog itself; `bg` and agent CLIs are builds, matched by argv, not apps). LW_GUI_HOG=0 turns the
+# whole thing off (no app window, no trigger).
+
+[trigger]
+hold_s = 180            # a build must have been refused this long under `admit --wait` (B1, C4a)
+min_cores = 0.75        # sum over non-build, non-protected apps of their 5-min mean cores (K2: a sum)
+min_rss_mb = 2048       # or the sum of their RSS (shared pages double-count, so this fires early)
+rate_s = 1800           # at most one dialog per 30 min
+snooze_s = 3600         # what Ignore sets (read from gui-hog/snooze.json; the dialog writes it in PR 3b)
+window_s = 300          # the mean window for cores
+min_row_cores = 0.05    # a row is listed above this many cores ...
+min_row_rss_mb = 200    # ... or this much RAM
+# gates that quitting a desktop app can relieve; the agent cap and the reservation cap do not (C4b)
+relievable = ["load", "compressor", "free_mem", "pageins", "swapins"]
+
+# Protection is by bundle id, bundle-id prefix, bundle path or executable path, never by display name (J3).
+# A bundle id was checked against the installed Info.plist or `lsappinfo` on 2026-11-14 where the app is installed;
+# apps that are not installed are protected by path or by a documented id namespace instead of a guessed id.
+[protected]
+bundle_ids = [
+  "sh.paseo.desktop", "sh.paseo.desktop.helper",                       # Paseo (the agent harness)
+  "com.mitchellh.ghostty", "com.apple.Terminal", "com.googlecode.iterm2",   # terminals
+  "com.nousresearch.hermes.setup", "com.hermesdesktop.app",            # Hermes
+  "io.tailscale.ipn.macsys",                                           # VPN
+  "com.apple.CoreSimulator.CoreSimulatorService", "com.apple.CoreSimulator.SimulatorTrampoline",
+  "com.apple.iphonesimulator",                                         # Simulator (started by simctl / xcodebuild, ppid 1)
+  "com.apple.dt.Xcode",                                                # in-bundle toolchain (C4b)
+  "com.google.android.studio",                                         # bundles a JDK (C4b)
+  "com.apple.Virtualization.VirtualMachine", "com.github.cirruslabs.tart",   # VM hosts
+  "com.1password.1password",                                           # password manager
+  "us.zoom.xos",                                                       # conferencing
+]
+# JetBrains IDEs bundle a JDK (C4b); `com.jetbrains.` is JetBrains' own namespace.
+bundle_id_prefixes = ["com.jetbrains."]
+bundle_paths = [
+  "/Applications/Ghostty.app", "/Applications/iTerm.app", "/Applications/WezTerm.app", "/Applications/kitty.app",
+  "/Applications/Tailscale.app", "/Applications/WireGuard.app",
+  "/Applications/Docker.app", "/Applications/OrbStack.app",
+  "/Applications/Xcode.app", "/Applications/Android Studio.app", "/Applications/Simulator.app",
+  "/Applications/Paseo.app", "/Applications/Hermes.app", "/Applications/HermesDesktop.app",
+]
+exe_paths = []
