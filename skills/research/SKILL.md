@@ -171,8 +171,8 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
 
 1. **Workers, refuter, writer and reviewer are `fan-out` slices, not only
    Claude sub-agents.** Dispatch each brief with native Paseo: take
-   `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND --lead LEAD --slice N --cwd ~/src/<repo> --window-middle <work>`
-   (`--cwd` is the checkout whose WORKERS window holds the slices, not the run folder: name the run folder in each brief as an absolute path)
+   `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND --lead LEAD --slice N --cwd ~/src/<repo> [--window-middle <work>]`
+   (`--cwd` is the checkout whose WORKER box holds the slices, not the run folder (`--window-middle` is optional): name the run folder in each brief as an absolute path)
    and run each choice's `dispatch` field **as-is** (rd-01, 2026-11-14: an
    `ade-worker-run … -- --provider … [--thinking …] [--label ade.kind=…] --no-wait` line for
    every pool, including Claude and Codex, which places the worker; a bare `paseo run` — what `route --kind K` prints — would land it in
@@ -182,7 +182,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    `--kinds frontier`. Minimal shape (see `skills/fan-out`):
 
    ```bash
-   # after: route_agent.py plan --kinds research|frontier --lead LEAD --slice N --cwd ~/src/<repo> --window-middle <work>
+   # after: route_agent.py plan --kinds research|frontier --lead LEAD --slice N --cwd ~/src/<repo> [--window-middle <work>]
    # Paste Choice.dispatch itself as the start of the command (it is a complete shell command; ade-worker-run adds
    # ade.lead and slice). Not `$DISPATCH`: a variable would split the quoted window name. Then labels + positional brief:
    <Choice.dispatch> --label ade.name=N \

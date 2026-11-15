@@ -32,8 +32,8 @@ predecessor's id needs a hand step (2026-11-14): `ade-worker-run` adopts its win
 `ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0a). A manual
 handoff that never runs `finish` records no chain: re-point those jobs by hand.
 
-Placement differs: workers go in the lead's one `WORKERS <repo> (<work>)` window, and workers the operator asks for
-interactively in the lead's own `MAIN <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a
-**successor is a new lead, not a worker**: it starts top-level in its own placement (not in the predecessor's WORKERS window;
-it names its own window `MAIN …` with `ade-worker-run rename-main`), then opens its own WORKERS window when it dispatches
-(2026-11-13; window names carry no lead id).
+Placement differs: workers go in the lead's one `WORKER <repo> (<work>)` box, and workers the operator asks for
+interactively in the lead's own `LEAD <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a
+**successor is a new lead, not a worker**: it starts top-level in its own placement (not in the predecessor's WORKER box;
+it names its own window `LEAD …` with `ade-worker-run rename-lead`), then **reuses the predecessor chain's WORKER and OTHER boxes**
+when it dispatches (operator ruling 2026-11-14: at most three windows per lead and repo; window names carry no lead id).

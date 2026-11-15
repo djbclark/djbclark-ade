@@ -24,10 +24,11 @@ a later event, the agent had no title yet). Exit 0 either way; exit 2 on
 unreadable input (the plugin treats any non-zero exit as "leave the window alone").
 
 KIND rules (docs/workspace-layout.md):
-  WORKERS  the agent has a parent (`parentAgentId`) or an `ade.lead` label, or `ade.placement=workers`
-  USER     only by an explicit `ade.placement=user` label: USER is what a lead connects the operator's agents into (the tidy
-           skill moves them); a first agent the operator started is MAIN
-  MAIN     everything else (an operator-started first agent, a lead's own window); `ade.placement=main` says so explicitly
+  WORKER   the agent has a parent (`parentAgentId`) or an `ade.lead` label, or `ade.placement=worker` (`workers`)
+  OTHER    only by an explicit `ade.placement=other` (`user`) label: OTHER is what a lead puts probes, side tasks and the
+           operator's connected agents into; a first agent the operator started is LEAD
+  LEAD     everything else (an operator-started first agent, a lead's own window); `ade.placement=lead` (`main`) says so explicitly
+(The 2026-11-13 kinds MAIN, WORKERS and USER became LEAD, WORKER and OTHER on 2026-11-14; the old label values still work.)
 
 "Paseo default name" means the window's own title is null (Paseo's `title` field is the user-set override; null means the name
 is derived from the branch or directory, e.g. `master`). A title that already reads `MAIN repo (work)` is a title, so it is
@@ -45,9 +46,9 @@ import ade_ws_names as names  # noqa: E402
 
 WORK_LIMIT = 50  # characters of work text; the whole name stays under ade_ws_names.NAME_LIMIT
 _UUID = names.UUID_RE
-_WORKER_TAB_RE = re.compile(rf"^worker\s+(.+?)\s+{_UUID}$")
+_WORKER_TAB_RE = re.compile(rf"^(?:worker|other)\s+(.+?)\s+{_UUID}(?:\s+\[wt: [^\]]*\])?$")
 _LEAD_TAB_RE = re.compile(r"^(?:LEAD|MAIN)\s+(.+)$")  # the tab names `LEAD <repo> <work>`; an ordinary "Lead the migration" stays
-PLACEMENT_KINDS = {"main": "MAIN", "workers": "WORKERS", "user": "USER"}
+PLACEMENT_KINDS = {"lead": "LEAD", "main": "LEAD", "worker": "WORKER", "workers": "WORKER", "other": "OTHER", "user": "OTHER"}
 
 
 def skip(reason: str, retry: bool = False) -> dict:
@@ -56,14 +57,14 @@ def skip(reason: str, retry: bool = False) -> dict:
 
 
 def kind_for(agent: dict) -> str:
-    """WORKERS for an agent with a parent or lead; USER/MAIN/WORKERS only as the explicit `ade.placement` label says; else MAIN."""
+    """WORKER for an agent with a parent or lead; LEAD/WORKER/OTHER only as the explicit `ade.placement` label says; else LEAD."""
     labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
     placement = PLACEMENT_KINDS.get(str(labels.get("ade.placement") or "").strip().lower())
     if placement:
         return placement
     if agent.get("parentAgentId") or str(labels.get("ade.lead") or "").strip():
-        return "WORKERS"
-    return "MAIN"
+        return "WORKER"
+    return "LEAD"
 
 
 def work_from_title(title: object, repo: str) -> str | None:

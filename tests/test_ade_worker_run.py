@@ -12,8 +12,13 @@ SCRIPT = ROOT / "bin/ade-worker-run"
 LEAD = "8cd86203-d33b-49db-abde-9baba52bcf61"
 OTHER_LEAD = "11111111-2222-3333-4444-555555555555"
 AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-WIN = "WORKERS repo (Wave 7)"  # the stub runs with --cwd /repo (not a git repo): its repo name is the basename `repo`
+WIN = "WORKER repo (Wave 7)"  # the stub runs with --cwd /repo (not a git repo): its repo name is the basename `repo`
 LEGACY_WIN = f"workers repo Wave 7 {LEAD}"
+OTHER_WIN = "OTHER repo (other)"
+LEAD_NAME = "LEAD repo (Wave 7)"  # the lead's own window in `main_env`
+# bin/ade-worker-run bug (wb-01 report): a launch calls find_window with middle=None, which returns the lead's ONLY owned box
+# even when it belongs to ANOTHER repo, so a launch for a second repo reuses (or, by the cwd check, is refused by) the first
+# repo's window instead of opening its own, as the 2026-11-14 ruling says. These tests assert the ruling; remove the marker with the fix.
 LEAD_WKS = "wks_lead01"
 FOOTER_LINE = f"Also follow every item of {ROOT}/docs/dispatch-footer.md."
 STUB = '''#!/usr/bin/env python3
@@ -150,8 +155,9 @@ def test_second_launch_reuses_the_window(env):
 def test_two_matching_windows_refuse(env):
     env.data["workspaces"] = [{"workspaceId": "wks_a1", "name": WIN, "cwd": "/repo"},
                               {"workspaceId": "wks_b2", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_a1", "wks_b2")  # both are the lead's boxes: the pick (--window-middle Wave 7) cannot tell them apart
     r = launch(env)
-    assert r.returncode == 1 and "wks_a1" in r.stderr and "wks_b2" in r.stderr
+    assert r.returncode == 1 and "wks_a1" in r.stderr and "wks_b2" in r.stderr and "2 windows match the lead's WORKER box" in r.stderr
     assert ["run"] not in env.verbs()
 
 
@@ -307,7 +313,7 @@ def test_archive_unplaceable_live_agent_blocks(window):
 
 
 def test_archive_refuses_ambiguous_and_missing_window(env):
-    assert archive(env).returncode == 1 and "no workers window" in archive(env).stderr
+    assert archive(env).returncode == 1 and "no WORKER box for lead" in archive(env).stderr
     env.data["workspaces"] = [{"workspaceId": "wks_a1", "name": WIN}, {"workspaceId": "wks_b2", "name": WIN}]
     r = archive(env)
     assert r.returncode == 1 and "wks_a1" in r.stderr
@@ -341,38 +347,44 @@ def test_non_uuid_agent_id_refused(env):
 
 
 def test_other_leads_window_is_never_picked_without_a_middle(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": "WORKERS repo (Wave 7)", "cwd": "/repo"}]
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": WIN, "cwd": "/repo"}]
     env.data["agents"] = [{"id": "o9", "status": "running", "labels": {"ade.lead": OTHER_LEAD}}]
     env.state("o9", "wks_o1", {"ade.lead": OTHER_LEAD})
     r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
-    assert r.returncode == 1 and "--window-middle" in r.stderr and ["run"] not in env.verbs()
+    assert r.returncode == 0, r.stderr  # the stranger's window is not this lead's box: the lead opens its own
+    run = run_argv(env)
+    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
+    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", "WORKER repo (workers)"]]
 
 
 def test_no_middle_reuses_the_window_holding_the_leads_labelled_agent(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": "WORKERS repo (Other)", "cwd": "/repo"},
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": "WORKER repo (Other)", "cwd": "/repo"},
                               {"workspaceId": "wks_me", "name": WIN, "cwd": "/repo/lead"}]
     env.data["agents"] = [{"id": "w1", "status": "running", "labels": {"ade.lead": LEAD}}]
     env.state("w1", "wks_me", {"ade.lead": LEAD})
-    r = env.run("--lead", LEAD, "--slice", "alpha", "--", "--no-wait", "BRIEF")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--repo", "repo", "--", "--no-wait", "BRIEF")
     assert r.returncode == 0, r.stderr
     run = run_argv(env)
     assert run[run.index("--workspace") + 1] == "wks_me"
     assert run[run.index("--cwd") + 1] == "/repo/lead"  # the window's own cwd
 
 
-def test_changed_middle_refuses_a_second_window(env):
+def test_a_different_middle_reuses_the_owned_box_not_a_second_window(env):
+    """The old typo guard is gone (operator ruling 2026-11-14): --window-middle never opens a second box beside an owned one."""
     env.data["workspaces"] = [{"workspaceId": "wks_me", "name": WIN, "cwd": "/repo"}]
     env.data["agents"] = [{"id": "w1", "status": "running", "labels": {"ade.lead": LEAD}}]
     env.state("w1", "wks_me", {"ade.lead": LEAD})
     r = env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Typo", "--cwd", "/repo", "--", "--no-wait", "B")
-    assert r.returncode == 1 and "wks_me" in r.stderr and "second window" in r.stderr
-    assert ["run"] not in env.verbs()
+    assert r.returncode == 0, r.stderr
+    run = run_argv(env)
+    assert run[run.index("--workspace") + 1] == "wks_me" and "--new-workspace" not in run
+    assert rename_calls(env) == [] and json.loads(r.stdout)["windowName"] == WIN
 
 
 def test_archive_no_middle_ignores_another_leads_window(env):
     env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": f"WORKERS x {OTHER_LEAD}", "cwd": "/repo"}]
     r = archive(env)
-    assert r.returncode == 1 and "no workers window" in r.stderr
+    assert r.returncode == 1 and "no WORKER box for lead" in r.stderr
     assert ["workspace", "archive"] not in env.verbs()
 
 
@@ -484,13 +496,13 @@ def member(env, agent, wks, lead=LEAD, status="running"):
 
 def test_new_window_is_minted_in_the_kind_repo_work_form(env):
     assert launch(env).returncode == 0
-    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", "WORKERS repo (Wave 7)"]]
+    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", "WORKER repo (Wave 7)"]]
     assert LEAD not in rename_calls(env)[0][3]  # the lead id lives in the tab name and the label, not the window name
 
 
 def test_explicit_repo_wins_over_the_cwd(env):
     assert launch(env, "alpha", "--repo", "djbclark-ade").returncode == 0
-    assert rename_calls(env)[0][3] == "WORKERS djbclark-ade (Wave 7)"
+    assert rename_calls(env)[0][3] == "WORKER djbclark-ade (Wave 7)"
 
 
 def test_repo_comes_from_the_main_checkout_even_in_a_linked_worktree(env, tmp_path):
@@ -503,12 +515,16 @@ def test_repo_comes_from_the_main_checkout_even_in_a_linked_worktree(env, tmp_pa
     git("worktree", "add", "-q", "-b", "feature", str(wt))
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 0, r.stderr
-    assert rename_calls(env)[0][3] == "WORKERS my-repo (Wave 7)"
+    assert rename_calls(env)[0][3] == "WORKER my-repo (Wave 7)"
+    assert json.loads(r.stdout)["tabName"] == f"worker a {LEAD} [wt: my-repo-feature-wt]"  # a --cwd that is a linked worktree is named
 
 
-def test_first_launch_without_a_middle_refuses(env):
+def test_first_launch_without_a_middle_opens_the_default_work_box(env):
     r = env.run("--lead", LEAD, "--slice", "a", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
-    assert r.returncode == 1 and "--window-middle" in r.stderr and ["run"] not in env.verbs()
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["windowName"] == "WORKER repo (workers)"
+    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", "WORKER repo (workers)"]]
+    assert registry(LEAD) == {"wks_abc123"}
 
 
 @pytest.mark.parametrize("legacy", [f"workers repo Wave 7 {LEAD}", f"WORKERS repo Wave 7 {LEAD}",
@@ -561,18 +577,23 @@ def test_window_holding_another_leads_labelled_agent_is_refused(window):
 
 def test_window_holding_only_another_leads_closed_agent_is_refused(env):
     env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_b1")  # the lead's box (by its record) that once held another lead's worker
     member(env, "o9", "wks_b1", lead=OTHER_LEAD, status="closed")
     r = launch(env)
     assert r.returncode == 1 and "another lead's agents" in r.stderr and ["run"] not in env.verbs()  # F3
-    assert registry(LEAD) == set()
 
 
-def test_window_registered_to_another_lead_is_refused_for_launch_and_archive(env):
+def test_window_registered_to_another_lead_is_never_taken_by_launch_and_refused_by_archive(env):
     env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]
     own(OTHER_LEAD, "wks_b1")
-    for r in (launch(env), archive(env)):
-        assert r.returncode == 1 and "registered to lead" in r.stderr
-    assert ["run"] not in env.verbs() and ["workspace", "archive"] not in env.verbs()
+    r = launch(env)  # a launch looks for the lead's own boxes only: the other lead's window is not one, so it opens its own
+    assert r.returncode == 0, r.stderr
+    run = run_argv(env)
+    assert "--new-workspace" in run and all(a[2] != "wks_b1" for a in rename_calls(env)) and registry(OTHER_LEAD) == {"wks_b1"}
+    env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]  # only the stranger's window by that name
+    r = archive(env)
+    assert r.returncode == 1 and "registered to lead" in r.stderr
+    assert ["workspace", "archive"] not in env.verbs()
 
 
 def test_archive_refuses_a_same_named_window_nothing_shows_is_ours(env):  # F1
@@ -586,11 +607,15 @@ def test_archive_refuses_a_same_named_window_nothing_shows_is_ours(env):  # F1
     assert r.returncode == 1 and "another lead's agents" in r.stderr and ["workspace", "archive"] not in env.verbs()
 
 
-def test_launch_adopts_an_unclaimed_same_named_window_and_records_it(env):
+def test_launch_never_adopts_an_unclaimed_same_named_window(env):
+    """A launch finds boxes by ownership only (find_window middle=None): a window of the right name nothing shows is the lead's
+    is left alone and the lead opens (and records) its own, so a name alone still never confers ownership."""
     env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
     assert launch(env).returncode == 0
-    assert registry(LEAD) == {"wks_u1"}
-    assert archive(env).returncode == 0  # now provably ours
+    assert "--new-workspace" in run_argv(env) and registry(LEAD) == {"wks_abc123"}
+    env.data = json.loads(env.data_path.read_text())  # the stub's rename of the minted window
+    r = env.run("archive-window", "--lead", LEAD, "--dry-run", "--repo", "repo")  # the record finds its own window, not the namesake
+    assert r.returncode == 0 and json.loads(r.stdout)["workspaceId"] == "wks_abc123", r.stderr
 
 
 def test_minting_records_the_window_and_archive_unrecords_it(env):
@@ -641,8 +666,9 @@ def test_label_keys_with_whitespace_are_refused(env, key):  # F7
     assert r.returncode == 1 and not env.calls()
 
 
-@pytest.mark.parametrize("name", ["Workers repo (Wave 7)", "WORKERS repo Wave 7", "WORKERS repo (Wave 7) x",
-                                  "MAIN repo (Wave 7)", "USER repo (Wave 7)", "WORKERS  repo (Wave 7)"])
+@pytest.mark.parametrize("name", ["Workers repo (Wave 7)", "WORKERS repo Wave 7", "WORKER repo (Wave 7) x", "worker repo (Wave 7)",
+                                  "WORKER  repo (Wave 7)", "MAIN repo (Wave 7)", "LEAD repo (Wave 7)", "USER repo (Wave 7)",
+                                  "OTHER repo (Wave 7)", "WORKERS  repo (Wave 7)"])
 def test_near_miss_names_are_not_matched(env, name):
     env.data["workspaces"] = [{"workspaceId": "wks_nm1", "name": name, "cwd": "/repo"}]
     assert launch(env).returncode == 0
@@ -660,13 +686,18 @@ def test_archive_accepts_both_spellings_and_never_migrates(env):
         assert rename_calls(env) == []
 
 
-def test_archive_never_archives_main_or_user_windows(env):
-    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN repo (Wave 7)"},
-                              {"workspaceId": "wks_u1", "name": "USER repo (Wave 7)"}]
+def test_archive_never_archives_lead_windows_or_the_other_box_by_default(env):
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": LEAD_NAME},
+                              {"workspaceId": "wks_u1", "name": "OTHER repo (Wave 7)"},
+                              {"workspaceId": "wks_m1", "name": "MAIN repo (Wave 9)"}]  # a 2026-11-13 name is still a LEAD window
     member(env, "w1", LEAD_WKS, status="idle")  # even a window holding the lead's own labelled agent
-    r = archive(env, "--idle-handled")
-    assert r.returncode == 1 and "no workers window" in r.stderr
-    assert ["workspace", "archive"] not in env.verbs()
+    own(LEAD, "wks_u1")
+    for extra in ([], ["--placement", "worker"]):
+        r = archive(env, "--idle-handled", *extra)
+        assert r.returncode == 1 and "no WORKER box for lead" in r.stderr
+    r = archive(env, "--idle-handled", "--placement", "other")  # the OTHER box is archivable, but only when asked for
+    assert r.returncode == 0, r.stderr
+    assert [c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "archive"]] == [["workspace", "archive", "wks_u1"]]
 
 
 def test_archive_finds_the_window_by_membership_without_a_middle(window):
@@ -685,8 +716,8 @@ def test_archive_without_a_middle_finds_an_emptied_window_by_the_record_only(win
     assert r.returncode == 1 and "--window-middle" in r.stderr
 
 
-def test_archive_ignores_a_main_placed_worker_in_the_main_window(window):
-    window.data["workspaces"].append({"workspaceId": LEAD_WKS, "name": "MAIN repo (Wave 7)"})
+def test_archive_ignores_a_main_placed_worker_in_the_lead_window(window):
+    window.data["workspaces"].append({"workspaceId": LEAD_WKS, "name": LEAD_NAME})
     window.data["agents"] = [{"id": "m1", "status": "running", "labels": {"ade.lead": LEAD, "ade.placement": "main"}}]
     window.state("m1", LEAD_WKS, {"ade.lead": LEAD, "ade.placement": "main"})
     r = archive(window)
@@ -704,7 +735,7 @@ def test_archive_still_blocks_on_a_main_labelled_agent_inside_the_workers_window
 @pytest.fixture
 def main_env(env):
     env.state(LEAD, LEAD_WKS)
-    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN repo (Wave 7)", "cwd": "/repo/lead"}]
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": LEAD_NAME, "cwd": "/repo/lead"}]
     env.data["run_err"] = ""
     return env
 
@@ -713,18 +744,18 @@ def interactive(env, *extra, slice_name="op1", cwd=None):
     return env.run("--lead", LEAD, "--slice", slice_name, *extra, "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF", cwd=cwd)
 
 
-@pytest.mark.parametrize("flag", [["--placement", "main"], ["--interactive"]])
+@pytest.mark.parametrize("flag", [["--placement", "main"], ["--placement", "lead"], ["--interactive"]])
 def test_main_placement_launches_into_the_leads_window(main_env, flag):
     r = interactive(main_env, *flag)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": "MAIN repo (Wave 7)",
+    assert json.loads(r.stdout) == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": LEAD_NAME,
                                     "tabName": f"worker op1 {LEAD}"}
     run = run_argv(main_env)
     assert run[run.index("--workspace") + 1] == LEAD_WKS and "--new-workspace" not in run
     assert run[run.index("--cwd") + 1] == "/repo/lead"
     assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=op1", "ade.placement=main"]
-    assert rename_calls(main_env) == []  # an already-MAIN window is not renamed by a launch
-    assert LEAD_WKS not in registry(LEAD)  # the record means "WORKERS windows": a MAIN launch never writes it
+    assert rename_calls(main_env) == []  # an already-LEAD window is not renamed by a launch
+    assert LEAD_WKS not in registry(LEAD)  # the record means "WORKER windows": a LEAD launch never writes it
     assert all(c["env"]["PASEO_WORKSPACE_ID"] is None for c in main_env.calls())
     assert ["agent", "update", AGENT, "--name", f"worker op1 {LEAD}"] in [c["argv"] for c in main_env.calls()]
 
@@ -736,18 +767,19 @@ def test_main_placement_uses_the_agent_record_not_the_ambient_workspace_id(main_
     assert json.loads(r.stdout)["workspaceId"] == LEAD_WKS  # not the ambient wks_ambient
 
 
-def test_main_placement_migrates_a_legacy_main_name_first(main_env):
-    main_env.data["workspaces"][0]["name"] = "MAIN repo Wave 7"
+@pytest.mark.parametrize("old", ["MAIN repo Wave 7", "MAIN repo (Wave 7)"])
+def test_main_placement_migrates_a_2026_11_13_main_name_to_lead_first(main_env, old):
+    main_env.data["workspaces"][0]["name"] = old
     main_env.data["workspaces"][0]["cwd"] = "/repo"
     r = interactive(main_env, "--interactive", "--cwd", "/repo")
     assert r.returncode == 0, r.stderr
-    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN repo (Wave 7)"]]
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, LEAD_NAME]]
     assert main_env.verbs().index(["workspace", "rename"]) < main_env.verbs().index(["run"])
-    assert json.loads(r.stdout)["windowName"] == "MAIN repo (Wave 7)"
+    assert json.loads(r.stdout)["windowName"] == LEAD_NAME
 
 
-@pytest.mark.parametrize("name", ["djbclark-ade Wave 7", "master", "MAINTAIN x", "Main x", "WORKERS repo (Wave 7)",
-                                  "USER repo (Wave 7)", f"workers repo Wave 7 {LEAD}"])
+@pytest.mark.parametrize("name", ["djbclark-ade Wave 7", "master", "MAINTAIN x", "Main x", "WORKER repo (Wave 7)",
+                                  "OTHER repo (Wave 7)", "WORKERS repo (Wave 7)", "USER repo (Wave 7)", f"workers repo Wave 7 {LEAD}"])
 def test_main_placement_refuses_a_window_that_is_not_main(main_env, name):
     main_env.data["workspaces"][0]["name"] = name
     r = interactive(main_env, "--interactive")
@@ -765,7 +797,7 @@ def test_main_placement_needs_the_lead_to_be_the_caller(main_env, monkeypatch):
 
 
 def test_main_placement_without_a_state_file_workspace_refuses(env):
-    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN repo (x)", "cwd": "/repo"}]
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "LEAD repo (x)", "cwd": "/repo"}]
     r = interactive(env, "--interactive")
     assert r.returncode == 1 and "own window is unknown" in r.stderr and ["run"] not in env.verbs()
 
@@ -792,25 +824,28 @@ def test_ade_placement_label_is_owned(env):
     assert r.returncode == 1 and "set by ade-worker-run" in r.stderr and not env.calls()
 
 
-@pytest.mark.parametrize("old,new", [("djbclark-ade Wave 7", "MAIN repo (djbclark-ade Wave 7)"), ("repo Wave 7", "MAIN repo (Wave 7)"),
-                                     ("master", "MAIN repo (master)"), ("MAIN repo Wave 7", "MAIN repo (Wave 7)")])
-def test_rename_main_converts_the_name(main_env, old, new):
+@pytest.mark.parametrize("old,new", [("djbclark-ade Wave 7", "LEAD repo (djbclark-ade Wave 7)"), ("repo Wave 7", "LEAD repo (Wave 7)"),
+                                     ("master", "LEAD repo (master)"), ("MAIN repo Wave 7", "LEAD repo (Wave 7)"),
+                                     ("MAIN repo (Wave 7)", "LEAD repo (Wave 7)")])
+@pytest.mark.parametrize("verb", ["rename-main", "rename-lead"])
+def test_rename_main_converts_the_name(main_env, old, new, verb):
     main_env.data["workspaces"][0]["name"] = old
-    r = main_env.run("rename-main", "--lead", LEAD, "--repo", "repo")
+    r = main_env.run(verb, "--lead", LEAD, "--repo", "repo")
     assert r.returncode == 0, r.stderr
     assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, new]] and json.loads(r.stdout)["renamed"] is True
 
 
-def test_rename_main_is_a_noop_on_a_main_name_and_takes_an_explicit_work(main_env):
+def test_rename_main_is_a_noop_on_a_lead_name_and_takes_an_explicit_work(main_env):
     r = main_env.run("rename-main", "--lead", LEAD)
     assert r.returncode == 0 and json.loads(r.stdout)["renamed"] is False and rename_calls(main_env) == []
     main_env.data["workspaces"][0]["name"] = "master"
-    r = main_env.run("rename-main", "--lead", LEAD, "--window-middle", "Wave 8")  # repo from the window's cwd: lead
-    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN lead (Wave 8)"]]
+    r = main_env.run("rename-lead", "--lead", LEAD, "--window-middle", "Wave 8")  # repo from the window's cwd: lead
+    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD lead (Wave 8)"]]
 
 
-@pytest.mark.parametrize("name", ["WORKERS repo (Wave 7)", "USER repo (Wave 7)", f"workers repo Wave 7 {LEAD}"])
-def test_rename_main_refuses_a_workers_or_user_window(main_env, name):
+@pytest.mark.parametrize("name", ["WORKER repo (Wave 7)", "OTHER repo (Wave 7)", "WORKERS repo (Wave 7)", "USER repo (Wave 7)",
+                                  f"workers repo Wave 7 {LEAD}"])
+def test_rename_main_refuses_a_worker_or_other_window(main_env, name):
     main_env.data["workspaces"][0]["name"] = name
     r = main_env.run("rename-main", "--lead", LEAD)
     assert r.returncode == 1 and rename_calls(main_env) == []
@@ -855,7 +890,7 @@ def test_interactive_legacy_main_migration_uses_the_windows_own_repo(main_env): 
     main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
     r = interactive(main_env, "--interactive", "--cwd", "/somewhere/djbclark-ade")
     assert r.returncode == 0, r.stderr
-    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD djbclark-ade (Wave 7)"]]
 
 
 def test_interactive_legacy_main_migration_without_cwd_takes_the_windows_repo_not_the_callers(main_env, tmp_path):  # F4, kept
@@ -866,7 +901,7 @@ def test_interactive_legacy_main_migration_without_cwd_takes_the_windows_repo_no
     elsewhere.mkdir()
     r = interactive(main_env, "--interactive", cwd=elsewhere)
     assert r.returncode == 0, r.stderr
-    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "MAIN djbclark-ade (Wave 7)"]]
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD djbclark-ade (Wave 7)"]]
 
 
 def test_interactive_with_a_cwd_other_than_the_windows_is_refused_before_any_rename(main_env):  # ls-05 (was F4's other repo)
@@ -904,13 +939,14 @@ def test_failed_launch_does_not_record_an_adopted_window(env):  # B1
 
 
 @pytest.mark.parametrize("status", ["running", "idle", "closed"])
-def test_adoption_refuses_a_window_holding_an_unlabelled_agent(env, status):  # B2
+def test_a_window_holding_an_unlabelled_agent_is_left_alone_and_never_adopted(env, status):  # B2
     env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
     env.data["agents"] = [{"id": "op1", "status": status, "labels": {}}]
     env.state("op1", "wks_u1")
-    r = launch(env)
-    assert r.returncode == 1 and "not labelled for this lead" in r.stderr and "op1" in r.stderr
-    assert ["run"] not in env.verbs() and registry(LEAD) == set()
+    r = launch(env)  # not the lead's box (nothing shows it): the lead opens its own and never touches the operator's window
+    assert r.returncode == 0, r.stderr
+    assert "--new-workspace" in run_argv(env) and registry(LEAD) == {"wks_abc123"}
+    assert all(a[2] != "wks_u1" for a in rename_calls(env))
 
 
 def test_a_stray_or_foreign_named_record_file_does_not_block_other_leads(window):  # B3
@@ -937,11 +973,12 @@ def test_no_wait_taken_as_a_flag_value_is_not_a_brief_position(env):  # B6d
     assert r.returncode == 1 and not env.calls()
 
 
-def test_adoption_refuses_while_a_live_agent_cannot_be_placed(env):  # round 3 B1
+def test_a_window_beside_a_live_agent_that_cannot_be_placed_is_left_alone(env):  # round 3 B1
     env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": WIN, "cwd": "/repo"}]
     env.data["agents"] = [{"id": "ghost", "status": "running", "labels": {}}]  # no state file
     r = launch(env)
-    assert r.returncode == 1 and "ghost" in r.stderr and ["run"] not in env.verbs() and registry(LEAD) == set()
+    assert r.returncode == 0, r.stderr
+    assert "--new-workspace" in run_argv(env) and registry(LEAD) == {"wks_abc123"}
 
 
 def test_a_record_write_failure_after_launch_names_the_launched_agent(env, monkeypatch):  # round 3 B2
@@ -1006,18 +1043,22 @@ def test_without_a_completed_handoff_the_old_refusals_stand(env):
     for status in ("awaiting-ack", "acknowledged", "archive-unknown"):  # a broken chain: the last hop never finished
         chain(PRED1, PRED2, status=status)
         handoff(PRED2, LEAD)
-        r = launch(env)
+        r = archive(env)
         assert r.returncode == 1 and f"registered to lead {PRED1}" in r.stderr, status
-    assert not placed(env)
+    r = launch(env)  # a launch never takes it either: it is not a box of this lead, so the lead opens its own
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert "--new-workspace" in run and registry(PRED1) == {"wks_win1"}
+    assert ["workspace", "archive"] not in env.verbs()
 
 
 def test_a_different_live_lead_is_still_refused_even_beside_a_chain(env):
     env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"},
-                              {"workspaceId": "wks_win2", "name": "WORKERS repo (Wave 9)", "cwd": "/repo"}]
+                              {"workspaceId": "wks_win2", "name": "WORKER repo (Wave 9)", "cwd": "/repo"}]
     chain(PRED1, LEAD)
     own(OTHER_LEAD, "wks_win1")
     own(PRED1, "wks_win2")
-    r = launch(env)  # Wave 7 is the stranger's
+    r = archive(env)  # Wave 7 is the stranger's
     assert r.returncode == 1 and f"registered to lead {OTHER_LEAD}" in r.stderr
     env.data["agents"] = [{"id": WORKER, "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
     env.state(WORKER, "wks_win2", {"ade.lead": OTHER_LEAD})
@@ -1025,6 +1066,11 @@ def test_a_different_live_lead_is_still_refused_even_beside_a_chain(env):
                 "--provider", "claude/sonnet", "--no-wait", "BRIEF")
     assert r.returncode == 1 and "another lead's agents" in r.stderr
     assert not placed(env)
+    env.data["agents"] = []
+    r = launch(env)  # the stranger's window is never a box of this lead's; the one its predecessor placed is
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_win2"
 
 
 def test_a_successors_registry_never_makes_a_predecessor_foreign_to_itself(env):
@@ -1032,9 +1078,12 @@ def test_a_successors_registry_never_makes_a_predecessor_foreign_to_itself(env):
     env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": WIN, "cwd": "/repo"}]
     own(LEAD, "wks_win1")
     chain(PRED1, LEAD)
+    r = env.run("archive-window", "--lead", PRED1, "--on-behalf-of-lead", "--window-middle", "Wave 7")
+    assert r.returncode == 1 and f"registered to lead {LEAD}" in r.stderr
     r = env.run("--lead", PRED1, "--on-behalf-of-lead", "--slice", "alpha", "--window-middle", "Wave 7", "--cwd", "/repo",
                 "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
-    assert r.returncode == 1 and f"registered to lead {LEAD}" in r.stderr
+    assert r.returncode == 0, r.stderr  # not the predecessor's box: it opens its own and leaves the successor's alone
+    assert "--new-workspace" in placed(env)[0] and registry(LEAD) == {"wks_win1"}
 
 
 def test_a_cyclic_ledger_adopts_nothing(env):
@@ -1110,27 +1159,31 @@ def inherited_windows(env, *names):
     own(PRED1, *[f"wks_old{i}" for i in range(len(names))])
 
 
-def test_a_successor_opens_a_new_window_for_new_work_beside_inherited_ones(env):
-    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS repo (Old B)", "WORKERS other (Old C)")
-    r = launch(env)  # --window-middle "Wave 7": no inherited window carries that work
+def test_a_successor_reuses_the_inherited_box_of_its_repo_and_leaves_the_others(env):
+    inherited_windows(env, "WORKER repo (Old A)", "WORKERS other (Old C)")
+    r = launch(env)  # --window-middle "Wave 7" is not new work for a new window any more: one box per lead and repo
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
-    assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
-    assert json.loads(r.stdout)["windowName"] == WIN
-    assert registry(LEAD) == {json.loads(r.stdout)["workspaceId"]} and registry(PRED1) == {"wks_old0", "wks_old1", "wks_old2"}
+    assert run[run.index("--workspace") + 1] == "wks_old0" and "--new-workspace" not in run
+    assert json.loads(r.stdout)["windowName"] == "WORKER repo (Old A)" and rename_calls(env) == []
+    assert registry(LEAD) == {"wks_old0"} and registry(PRED1) == {"wks_old0", "wks_old1"}
 
 
-def test_a_lead_with_its_own_window_still_refuses_a_second_one_for_a_typo(env):
-    inherited_windows(env, "WORKERS repo (Old A)")
-    env.data["workspaces"].append({"workspaceId": "wks_mine", "name": "WORKERS repo (Mine)", "cwd": "/repo"})
-    own(LEAD, "wks_mine")  # the lead placed this one itself: the typo guard applies again
-    r = launch(env)
-    assert r.returncode == 1 and "wks_mine" in r.stderr and "second window" in r.stderr
-    assert "wks_old0" not in r.stderr  # only the lead's own windows are named, not the inherited ones
+def test_a_successor_with_an_own_and_an_inherited_box_of_the_repo_must_pick_one(env):
+    inherited_windows(env, "WORKER repo (Old A)")
+    env.data["workspaces"].append({"workspaceId": "wks_mine", "name": "WORKER repo (Mine)", "cwd": "/repo"})
+    own(LEAD, "wks_mine")  # the lead placed this one itself: two boxes of the repo, whoever placed them
+    r = launch(env)  # --window-middle "Wave 7" picks neither
+    assert r.returncode == 1 and "2 windows match the lead's WORKER box" in r.stderr
+    assert "wks_mine" in r.stderr and "wks_old0" in r.stderr and not placed(env)
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Mine", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_mine"
 
 
 def test_without_a_middle_the_window_of_this_repo_is_picked_when_exactly_one_matches(env):
-    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS other (Old B)", "WORKERS third (Old C)")
+    inherited_windows(env, "WORKER repo (Old A)", "WORKER other (Old B)", "WORKER third (Old C)")
     r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
@@ -1138,30 +1191,30 @@ def test_without_a_middle_the_window_of_this_repo_is_picked_when_exactly_one_mat
 
 
 def test_without_a_middle_two_windows_of_the_same_repo_are_still_ambiguous(env):
-    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS repo (Old B)", "WORKERS other (Old C)")
+    inherited_windows(env, "WORKER repo (Old A)", "WORKER repo (Old B)", "WORKERS other (Old C)")
     r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--provider", "claude/sonnet", "--no-wait", "BRIEF")
     assert r.returncode == 1 and "2 windows match" in r.stderr and "--window-middle" in r.stderr
     assert not placed(env)
 
 
 def test_a_wrong_repo_never_picks_an_inherited_legacy_window(env):
-    """The repo of a legacy window is its cwd's, never the --repo argument: a typo refuses instead of taking it."""
+    """The repo of a legacy window is its cwd's, never the --repo argument: archive-window refuses two matches; a launch takes the window whose gone directory names no repo."""
     chain(PRED1, LEAD)
     env.data["workspaces"] = [
-        {"workspaceId": "wks_mine", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_mine", "name": "WORKER bar (X)", "cwd": "/bar"},
         {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/elsewhere/foo"}]
     own(LEAD, "wks_mine")
-    for cmd in (("archive-window", "--lead", LEAD, "--repo", "baz", "--dry-run"),
-                ("--lead", LEAD, "--slice", "s", "--repo", "baz", "--", "--no-wait", "B")):
-        r = env.run(*cmd)
-        assert r.returncode == 1 and "2 windows match" in r.stderr, (cmd, r.stderr)
-    assert not placed(env)
+    r = env.run("archive-window", "--lead", LEAD, "--repo", "baz", "--dry-run")
+    assert r.returncode == 1 and "2 windows match" in r.stderr, r.stderr
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "baz", "--", "--no-wait", "B")  # `bar` is another repo's; the legacy window's
+    assert r.returncode == 0, r.stderr                                                    # directory is gone, so it names no repo: it is the box
+    assert placed(env)[0][placed(env)[0].index("--workspace") + 1] == "wks_leg"
 
 
 def test_a_legacy_window_is_picked_by_its_cwds_repo(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [
-        {"workspaceId": "wks_mine", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_mine", "name": "WORKER bar (X)", "cwd": "/bar"},
         {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/elsewhere/foo"}]
     own(LEAD, "wks_mine")
     r = env.run("archive-window", "--lead", LEAD, "--repo", "foo", "--dry-run")
@@ -1170,7 +1223,7 @@ def test_a_legacy_window_is_picked_by_its_cwds_repo(env):
 
 
 def test_archive_window_narrows_by_repo_and_refuses_when_ambiguous(env):
-    inherited_windows(env, "WORKERS repo (Old A)", "WORKERS other (Old B)")
+    inherited_windows(env, "WORKER repo (Old A)", "WORKER other (Old B)")
     r = env.run("archive-window", "--lead", LEAD, "--repo", "other", "--dry-run")
     assert r.returncode == 0 and "wks_old1" in r.stdout, r.stderr
     r = env.run("archive-window", "--lead", LEAD, "--repo", "nothere", "--dry-run")
@@ -1180,44 +1233,52 @@ def test_archive_window_narrows_by_repo_and_refuses_when_ambiguous(env):
 def test_with_a_middle_the_repo_narrowing_never_promotes_an_unowned_name_match(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [
-        {"workspaceId": "wks_u", "name": "WORKERS repo (M)", "cwd": "/repo"},  # no record, no label: owned=False
+        {"workspaceId": "wks_u", "name": "WORKER repo (M)", "cwd": "/repo"},  # no record, no label: not this lead's box
         {"workspaceId": "wks_l1", "name": f"workers M {PRED1}", "cwd": "/x/one"},
         {"workspaceId": "wks_l2", "name": f"workers M {PRED1}", "cwd": "/x/two"}]
     r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "M", "--cwd", "/repo", "--", "--no-wait", "B")
-    assert r.returncode == 1 and "3 windows match" in r.stderr and not placed(env)
+    assert r.returncode == 1 and "2 windows match" in r.stderr and not placed(env)
+    assert "wks_l1" in r.stderr and "wks_l2" in r.stderr and "wks_u" not in r.stderr  # the unowned name match is not even counted
 
 
-def test_a_lead_whose_own_window_has_a_legacy_name_still_refuses_a_typo(env):
+def test_a_lead_whose_own_window_has_a_legacy_name_reuses_it_for_any_middle(env):
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": "/repo"}]
-    r = launch(env)  # --window-middle "Wave 7": the lead's own (legacy) window is Wave 6
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+    r = launch(env)  # --window-middle "Wave 7": the lead's own (legacy) window is Wave 6, and it is the box
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_leg" and "--new-workspace" not in run
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER repo (Wave 6)"]] and registry(LEAD) == {"wks_leg"}
 
 
-def test_a_successor_with_only_an_inherited_legacy_window_opens_a_new_one_for_new_work(env):
+def test_a_successor_with_only_an_inherited_legacy_window_reuses_it_and_renames_it(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}", "cwd": "/repo"}]
-    r = launch(env)  # --window-middle "Wave 7": new work, the predecessor's legacy window is not this lead's own
+    r = launch(env)  # --window-middle "Wave 7": the predecessor's legacy window is the successor's box now
     assert r.returncode == 0, r.stderr
-    assert registry(LEAD) and "wks_leg" not in registry(LEAD)
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_leg" and "--new-workspace" not in run
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER repo (Wave 6)"]] and registry(LEAD) == {"wks_leg"}
 
 
 def test_a_launch_into_an_inherited_window_makes_it_the_successors_own(env):
-    """The typo guard must keep covering a window the successor used, after its worker is archived."""
-    inherited_windows(env, "WORKERS repo (Wave 7)")
-    r = launch(env)  # --window-middle "Wave 7": the inherited window carries that work
+    """The record keeps covering a window the successor used, after its worker is archived (archive-window finds it by it)."""
+    inherited_windows(env, "WORKER repo (Wave 7)")
+    r = launch(env)
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--workspace") + 1] == "wks_old0" and "--new-workspace" not in run
     assert registry(LEAD) == {"wks_old0"} and registry(PRED1) == {"wks_old0"}
     env.data["agents"] = []  # the worker is archived: only the registry says the window is the lead's
     r = env.run("--lead", LEAD, "--slice", "beta", "--window-middle", "Wave 7x", "--cwd", "/repo", "--", "--no-wait", "B")
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_old0" in r.stderr
+    assert r.returncode == 0, r.stderr  # a different middle is the same box, never a second window
+    run = placed(env)[1]
+    assert run[run.index("--workspace") + 1] == "wks_old0" and "--new-workspace" not in run
 
 
 def test_archive_window_without_a_repo_never_picks_a_cwd_less_legacy_window(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [
-        {"workspaceId": "wks_cur", "name": "WORKERS bar (X)", "cwd": "/bar"},
+        {"workspaceId": "wks_cur", "name": "WORKER bar (X)", "cwd": "/bar"},
         {"workspaceId": "wks_leg", "name": f"workers Wave 6 {PRED1}"}]  # no cwd: its repo is unknown
     own(LEAD, "wks_cur")
     own(PRED1, "wks_leg")
@@ -1243,11 +1304,12 @@ def test_an_unbuildable_predecessor_window_in_the_repo_work_form_still_refuses_a
     assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
 
 
-def test_a_buildable_predecessor_window_of_another_repo_is_not_taken_by_normalising_with_the_launch_repo(env):
-    """`workers repo Wave 7 <PRED1>` in cwd /other migrates to `repo Wave 7` in repo `other`; a launch from repo `repo` that asks
-    for "Wave 7" would only match it by normalising with its own repo. The window must stay the predecessor's."""
+def test_a_buildable_predecessor_window_of_another_repo_is_not_taken_by_normalising_with_the_launch_repo(env, tmp_path):
+    """`workers repo Wave 7 <PRED1>` in cwd /other migrates to `repo Wave 7` in repo `other`; a launch from repo `repo` is not
+    that repo's box (one box per lead and repo): it opens its own, the predecessor's window stays the predecessor's."""
     chain(PRED1, LEAD)
-    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers repo Wave 7 {PRED1}", "cwd": "/other"}]
+    (tmp_path / "other").mkdir()
+    env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers repo Wave 7 {PRED1}", "cwd": str(tmp_path / "other")}]
     own(PRED1, "wks_leg")
     r = launch(env)
     assert r.returncode == 0, r.stderr
@@ -1257,24 +1319,26 @@ def test_a_buildable_predecessor_window_of_another_repo_is_not_taken_by_normalis
     assert not [c for c in env.calls() if c["argv"][:2] == ["workspace", "rename"] and "wks_leg" in c["argv"]]
 
 
-def test_a_buildable_predecessor_window_for_other_work_never_takes_a_new_middle(env):
+def test_a_buildable_predecessor_window_for_other_work_is_reused_whatever_the_middle(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Big Wave 7 {PRED1}", "cwd": "/repo"}]
     own(PRED1, "wks_leg")
-    r = launch(env)  # --window-middle "Wave 7" is not the work "Big Wave 7" (a suffix is not a match)
+    r = launch(env)  # --window-middle "Wave 7" is not the work "Big Wave 7", and does not have to be
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
-    assert run[run.index("--new-workspace") + 1] == "local"
-    assert "wks_leg" not in registry(LEAD) and not [c for c in env.calls() if c["argv"][:2] == ["workspace", "rename"] and "wks_leg" in c["argv"]]
+    assert run[run.index("--workspace") + 1] == "wks_leg" and "--new-workspace" not in run
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER repo (Big Wave 7)"]] and "wks_leg" in registry(LEAD)
 
 
-def test_an_unbuildable_predecessor_window_for_other_work_does_not_block_new_work(env):
+def test_an_unbuildable_predecessor_window_is_the_box_and_needs_an_explicit_repo(env):
     chain(PRED1, LEAD)
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Big Wave 7 {PRED1}", "cwd": "/x/bad repo"}]
     own(PRED1, "wks_leg")
-    r = launch(env)
+    r = launch(env)  # the only box of the lead cannot be renamed (its repo `bad repo` is no valid name): refused, nothing placed
+    assert r.returncode == 1 and "cannot be renamed" in r.stderr and not placed(env)
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--repo", "repo", "--", "--no-wait", "BRIEF")  # --repo names the window's repo
     assert r.returncode == 0, r.stderr
-    assert placed(env)
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER repo (Big Wave 7)"]]
 
 
 def test_a_cwd_other_than_the_windows_is_refused_not_silently_dropped(env):
@@ -1346,75 +1410,91 @@ def test_an_unreadable_inspect_never_fails_a_good_launch(env):
     assert r.returncode == 0, r.stderr
 
 
-# --- wr-01: one WORKERS window per (lead, repo); a minted window sits in the repo's primary checkout (2026-11-14) -------------
+# --- wr-01: one WORKER window per (lead, repo); a minted window sits in the repo's primary checkout (2026-11-14) -------------
 
 def other_repo_launch(env, middle="tendcf PR41 fork fixes", repo_cwd="/libntech-wt", *extra):
     return env.run("--lead", LEAD, "--slice", "s", "--window-middle", middle, "--cwd", repo_cwd, *extra, "--", "--no-wait", "B")
 
 
 def test_a_launch_for_another_repo_mints_its_own_window_not_a_refusal(env):
-    """The reported case: the lead owns a WORKERS window for repo A; a new --window-middle for repo B is not a typo."""
-    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    """The reported case: the lead owns a WORKER box for repo A; a launch for repo B opens its own box beside it."""
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
     own(LEAD, "wks_a")
     r = other_repo_launch(env, "tendcf PR41 fork fixes", "/libntech-wt", "--repo", "libntech")
     assert r.returncode == 0, r.stderr
     run = placed(env)[0]
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
-    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
+    assert json.loads(r.stdout)["windowName"] == "WORKER libntech (tendcf PR41 fork fixes)"
     assert registry(LEAD) == {"wks_a", "wks_abc123"}  # the new window is the lead's own beside the first
 
 
-def test_the_typo_guard_still_refuses_a_mistyped_middle_for_the_same_repo(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
-                              {"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+def test_a_mistyped_middle_reuses_the_same_repos_box_never_the_other_repos(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
+                              {"workspaceId": "wks_l", "name": "WORKER libntech (strictjson)", "cwd": "/libntech"}]
     own(LEAD, "wks_a", "wks_l")
-    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "libntech")
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
-    assert "wks_a" not in r.stderr  # only the same repo's window is named
-    assert not placed(env)
+    r = other_repo_launch(env, "strictjsno", "/libntech", "--repo", "libntech")
+    assert r.returncode == 0, r.stderr  # no typo guard: the middle never opens a box and never picks the other repo's
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_l" and rename_calls(env) == []
+    assert json.loads(r.stdout)["windowName"] == "WORKER libntech (strictjson)"
 
 
 def test_the_repo_comes_from_the_cwd_when_no_repo_is_given(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
     own(LEAD, "wks_a")
-    r = other_repo_launch(env, repo_cwd="/libntech")  # repo_of(/libntech) = libntech
+    r = other_repo_launch(env, repo_cwd="/libntech")  # repo_of(/libntech) = libntech: not cfengine-core's box
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["windowName"] == "WORKERS libntech (tendcf PR41 fork fixes)"
-    # and a same-repo typo is still refused when the repo is derived the same way
-    env.data["workspaces"].append({"workspaceId": "wks_abc123", "name": "WORKERS libntech (tendcf PR41 fork fixes)", "cwd": "/libntech"})
+    assert json.loads(r.stdout)["windowName"] == "WORKER libntech (tendcf PR41 fork fixes)"
+
+
+def test_a_second_middle_of_the_derived_repo_reuses_its_box(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
+                              {"workspaceId": "wks_abc123", "name": "WORKER libntech (tendcf PR41 fork fixes)", "cwd": "/libntech"}]
+    own(LEAD, "wks_a", "wks_abc123")
     r = other_repo_launch(env, "tendcf PR41 fork fixs", "/libntech")
-    assert r.returncode == 1 and "second window" in r.stderr
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_abc123" and rename_calls(env) == []
 
 
-def test_a_legacy_window_counts_for_the_repo_of_its_cwd_only(env, tmp_path):
+def test_a_legacy_window_of_another_repo_is_not_taken(env, tmp_path):
     core, lib = tmp_path / "cfengine-core", tmp_path / "libntech"
     core.mkdir()
     lib.mkdir()
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(core)}]
-    r = other_repo_launch(env, repo_cwd=str(lib))  # the legacy window is cfengine-core's: a libntech launch mints
+    r = other_repo_launch(env, repo_cwd=str(lib))  # the legacy window is cfengine-core's: a libntech launch mints its own
     assert r.returncode == 0, r.stderr
     assert placed(env)[0][placed(env)[0].index("--new-workspace") + 1] == "local"
+
+
+def test_a_legacy_window_of_the_repo_of_its_cwd_is_reused_and_renamed(env, tmp_path):
+    lib = tmp_path / "libntech"
+    lib.mkdir()
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(lib)}]
-    env.data["created_id"] = "wks_def456"
-    r = other_repo_launch(env, "Typo", str(lib))  # the same repo: refused
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+    r = other_repo_launch(env, "Typo", str(lib))  # the same repo: its box, whatever the middle
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_leg" and "--new-workspace" not in run
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER libntech (Wave 6)"]]
 
 
-def test_a_window_whose_repo_is_unreadable_still_guards(env):
+def test_a_legacy_window_with_no_cwd_is_the_launch_repos_box(env):
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}"}]  # a legacy window with no cwd
     r = other_repo_launch(env, repo_cwd="/libntech")
-    assert r.returncode == 1 and "second window" in r.stderr  # cannot prove another repo: stay safe, keep the refusal
+    assert r.returncode == 0, r.stderr  # nothing says it is another repo's: it is taken and named for the launch's repo
+    assert rename_calls(env) == [["workspace", "rename", "wks_leg", "WORKER libntech (Wave 6)"]]
 
 
-def test_no_repo_keeps_every_owned_window_in_the_typo_guard(env, monkeypatch):
-    """find_window with repo None (a direct call, archive-window): the guard counts every window the lead placed."""
+def test_no_repo_keeps_every_owned_window_in_the_archive_typo_guard(env, monkeypatch):
+    """find_window with a `middle` (only archive-window passes one now; a launch passes none) still refuses a middle that
+    matches nothing while the lead owns a box: with repo None every owned window counts."""
     import importlib.machinery, importlib.util
     loader = importlib.machinery.SourceFileLoader("ade_worker_run_t", str(SCRIPT))
     spec = importlib.util.spec_from_loader("ade_worker_run_t", loader)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.syspath_prepend(str(ROOT / "bin"))
     loader.exec_module(mod)
-    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"}]
     own(LEAD, "wks_a")
     env.flush()
     with pytest.raises(mod.Refused, match="second window"):
@@ -1422,6 +1502,9 @@ def test_no_repo_keeps_every_owned_window_in_the_typo_guard(env, monkeypatch):
     with pytest.raises(mod.Refused, match="second window"):
         mod.find_window(LEAD, "cfengine-core", "Whatever")
     assert mod.find_window(LEAD, "libntech", "Whatever") is None
+    # a launch's call shape (middle None) finds the box whatever its work; `pick` only chooses among several
+    found = mod.find_window(LEAD, "cfengine-core", None, pick="Whatever")
+    assert found.row["workspaceId"] == "wks_a" and found.owned and found.rename_to is None
 
 
 def git(*args, cwd):
@@ -1451,7 +1534,8 @@ def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(e
     run = placed(env)[0]
     assert run[run.index("--cwd") + 1] == os.path.realpath(main)
     out = json.loads(r.stdout)
-    assert out["windowName"] == "WORKERS libntech (strictjson)"
+    assert out["windowName"] == "WORKER libntech (strictjson)"
+    assert out["tabName"] == f"worker s {LEAD} [wt: libntech-strictjson-wt]"  # the claimed worktree is named in the tab
     assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt)  # said, not silent
     assert "primary checkout" in r.stderr
     # the placement check compares with the primary checkout: a worker that started there passes, one elsewhere is stopped
@@ -1479,7 +1563,7 @@ def test_the_same_launch_again_goes_to_the_window_just_minted(env, tmp_path):
     r = mint(env, wt)
     assert r.returncode == 0, r.stderr
     wid = json.loads(r.stdout)["workspaceId"]
-    env.data["workspaces"] = [{"workspaceId": wid, "name": "WORKERS libntech (strictjson)", "cwd": os.path.realpath(main)}]
+    env.data["workspaces"] = [{"workspaceId": wid, "name": "WORKER libntech (strictjson)", "cwd": os.path.realpath(main)}]
     r = mint(env, wt, slice_name="s2")
     assert r.returncode == 0, r.stderr
     run = placed(env)[1]
@@ -1529,11 +1613,23 @@ def test_a_worktree_of_a_separate_git_dir_or_bare_repo_has_no_primary_checkout_a
     assert wsn.linked_worktree(str(tmp_path / "barewt"))
 
 
-def test_the_typo_guard_ignores_the_case_of_the_repo_name(env):
-    env.data["workspaces"] = [{"workspaceId": "wks_l", "name": "WORKERS libntech (strictjson)", "cwd": "/libntech"}]
+def test_a_repo_name_in_another_case_reuses_the_only_box(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_l", "name": "WORKER libntech (strictjson)", "cwd": "/libntech"}]
     own(LEAD, "wks_l")
-    r = other_repo_launch(env, "strictjsno", "/libntech-wt", "--repo", "LibNTech")
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_l" in r.stderr
+    r = other_repo_launch(env, "strictjsno", "/libntech", "--repo", "LibNTech")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_l" and rename_calls(env) == []
+
+
+def test_the_repo_narrowing_ignores_the_case_of_the_repo_name(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER cfengine-core (cmdbfc a1)", "cwd": "/cfengine-core"},
+                              {"workspaceId": "wks_l", "name": "WORKER libntech (strictjson)", "cwd": "/libntech"}]
+    own(LEAD, "wks_a", "wks_l")
+    r = other_repo_launch(env, "strictjsno", "/libntech", "--repo", "LibNTech")
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_l"
 
 
 def test_a_legacy_row_without_a_workspace_id_is_a_refusal_not_a_traceback(env):
@@ -1559,9 +1655,9 @@ def test_a_relative_cwd_or_a_longer_name_does_not_satisfy_the_brief_check(env, t
 
 def test_main_placement_keeps_refusing_a_cwd_other_than_its_windows(env, tmp_path):
     main, wt = make_repo(tmp_path)
-    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "MAIN libntech (lead)", "cwd": str(os.path.realpath(main))}]
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": "LEAD libntech (lead)", "cwd": str(os.path.realpath(main))}]
     env.state(LEAD, LEAD_WKS, {})
-    r = env.run("--lead", LEAD, "--slice", "s", "--placement", "main", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
+    r = env.run("--lead", LEAD, "--slice", "s", "--placement", "lead", "--cwd", str(wt), "--", "--no-wait", "no worktree named")
     assert r.returncode == 1 and "paseo ignores --cwd" in r.stderr and not placed(env)
 
 
@@ -1638,40 +1734,53 @@ def test_a_subdirectory_of_the_worktree_accepts_a_brief_naming_the_worktree(env,
 
 
 def test_a_directory_that_is_no_git_checkout_never_aliases_two_repos(env, tmp_path):
-    """Round 4, E2a: two --repo names minted from one scratch directory are two repos, not a typo."""
+    """Round 4, E2a: two --repo names minted from one scratch directory are two repos, each with its own box."""
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKERS alpha (Wave 1)", "cwd": str(scratch)}]
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER alpha (Wave 1)", "cwd": str(scratch)}]
     own(LEAD, "wks_a")
     r = env.run("--lead", LEAD, "--slice", "s", "--repo", "beta", "--window-middle", "Wave 1", "--cwd", str(scratch), "--", "--no-wait", "go")
     assert r.returncode == 0, r.stderr
+    assert "--new-workspace" in placed(env)[0] and json.loads(r.stdout)["windowName"] == "WORKER beta (Wave 1)"
 
 
-def test_a_checkout_match_under_another_name_says_to_pass_the_other_repos_cwd(env, tmp_path):
-    """Round 4, E2b: --repo libntech from inside the cfengine-core checkout is refused with the right remedy."""
+def test_a_launch_for_another_repo_name_from_the_checkout_of_a_box_opens_its_own_box(env, tmp_path):
+    """--repo libntech from inside the cfengine-core checkout: the box of cfengine-core is another repo's, so libntech gets its own."""
     core, _ = make_repo(tmp_path, "cfengine-core")
-    env.data["workspaces"] = [{"workspaceId": "wks_core", "name": "WORKERS cfengine-core (Wave 1)", "cwd": os.path.realpath(core)}]
+    env.data["workspaces"] = [{"workspaceId": "wks_core", "name": "WORKER cfengine-core (Wave 1)", "cwd": os.path.realpath(core)}]
     own(LEAD, "wks_core")
     r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "Wave 2", "--cwd", str(core), "--", "--no-wait", "go")
-    assert r.returncode == 1 and "second window" in r.stderr and "that repo's own checkout" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert "--new-workspace" in placed(env)[0] and json.loads(r.stdout)["windowName"] == "WORKER libntech (Wave 2)"
 
 
-def test_a_window_named_with_a_repo_alias_still_counts_for_the_same_checkout(env, tmp_path):
+def test_a_window_named_with_a_repo_alias_is_reused_for_the_same_checkout(env, tmp_path):
     main, wt = make_repo(tmp_path)
-    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": os.path.realpath(main)}]
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKER ade (Wave 7)", "cwd": os.path.realpath(main)}]
     own(LEAD, "wks_alias")
-    r = mint(env, wt, middle="Wave 8")  # repo derived: libntech, not `ade`; same checkout: a typo, not a new repo
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_alias" in r.stderr
-    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKERS ade (Wave 7)", "cwd": str(tmp_path / "elsewhere")}]
+    r = mint(env, wt, middle="Wave 8")  # repo derived: libntech, not `ade`; the same checkout: the same box, placed at its cwd
+    assert r.returncode == 0, r.stderr
+    run = placed(env)[0]
+    assert run[run.index("--workspace") + 1] == "wks_alias" and run[run.index("--cwd") + 1] == os.path.realpath(main)
+    assert rename_calls(env) == [] and "--new-workspace" not in run
+
+
+def test_a_window_of_another_checkout_is_another_repos_box(env, tmp_path):
+    main, wt = make_repo(tmp_path)
     (tmp_path / "elsewhere").mkdir()
-    assert mint(env, wt, middle="Wave 8").returncode == 0  # another checkout: another repo
+    env.data["workspaces"] = [{"workspaceId": "wks_alias", "name": "WORKER ade (Wave 7)", "cwd": str(tmp_path / "elsewhere")}]
+    own(LEAD, "wks_alias")
+    r = mint(env, wt, middle="Wave 8")
+    assert r.returncode == 0, r.stderr  # another checkout: another repo, so its own box
+    assert "--new-workspace" in placed(env)[0]
 
 
-def test_a_legacy_window_whose_directory_is_gone_still_counts(env, tmp_path):
+def test_a_legacy_window_whose_directory_is_gone_is_the_box_and_the_cwd_check_refuses(env, tmp_path):
     main, wt = make_repo(tmp_path)
     env.data["workspaces"] = [{"workspaceId": "wks_leg", "name": f"workers Wave 6 {LEAD}", "cwd": str(tmp_path / "libntech-old-wt")}]
     r = mint(env, wt, middle="Typo")
-    assert r.returncode == 1 and "second window" in r.stderr and "wks_leg" in r.stderr
+    assert r.returncode == 1 and "wks_leg" in r.stderr and "runs in" in r.stderr  # taken as the box, then refused for its cwd
+    assert not placed(env) and rename_calls(env) == []
 
 
 def test_a_prefix_or_a_dotted_sibling_does_not_name_the_worktree(env, tmp_path):
@@ -1695,3 +1804,340 @@ def test_the_footer_path_never_names_the_worktree(env, tmp_path):
     r = subprocess.run([sys.executable, str(wt / "bin/ade-worker-run"), "--lead", LEAD, "--slice", "s", "--window-middle", "strictjson",
                         "--cwd", str(wt), "--", "--no-wait", "do the work"], capture_output=True, text=True, cwd=env.tmp)
     assert r.returncode == 1 and "brief" in r.stderr and not placed(env), r.stderr
+
+
+# --- wb-01: three boxes per lead and repo, LEAD / WORKER / OTHER (operator ruling 2026-11-14) -------------------------------
+
+def mw(env, slice_name, *args, middle=None):
+    """A default (WORKER box) launch from /repo; `args` are extra ade-worker-run options before `--`."""
+    mid = ["--window-middle", middle] if middle else []
+    return env.run("--lead", LEAD, "--slice", slice_name, *mid, "--cwd", "/repo", *args, "--", "--no-wait", "BRIEF")
+
+
+def reload(env):
+    env.data = json.loads(env.data_path.read_text())  # keep what the stub renamed or created
+
+
+def run_places(env):
+    """(`--workspace` id or None, whether it asked for a new workspace) for every `paseo run` the stub saw."""
+    out = []
+    for a in placed(env):
+        out.append((a[a.index("--workspace") + 1] if "--workspace" in a else None, "--new-workspace" in a))
+    return out
+
+
+def test_one_box_is_reused_across_slices_and_window_middles(env):
+    r1 = mw(env, "a", middle="Wave 7")
+    assert r1.returncode == 0, r1.stderr
+    reload(env)
+    r2 = mw(env, "b", middle="Something else entirely")
+    r3 = mw(env, "c")
+    assert r2.returncode == 0 and r3.returncode == 0, (r2.stderr, r3.stderr)
+    outs = [json.loads(r.stdout) for r in (r1, r2, r3)]
+    assert {o["workspaceId"] for o in outs} == {"wks_abc123"} and {o["windowName"] for o in outs} == {WIN}
+    assert [o["tabName"] for o in outs] == [f"worker {x} {LEAD}" for x in "abc"]
+    assert run_places(env) == [(None, True), ("wks_abc123", False), ("wks_abc123", False)]  # one workspace create
+    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", WIN]]  # named once, when it was opened
+    assert registry(LEAD) == {"wks_abc123"}
+
+
+def test_a_successor_reuses_its_predecessors_box_whatever_the_slice_and_middle(env):
+    chain(PRED1, PRED2, LEAD)
+    env.data["workspaces"] = [{"workspaceId": "wks_win1", "name": "WORKER repo (Old work)", "cwd": "/repo"}]
+    own(PRED1, "wks_win1")
+    r = mw(env, "fresh-slice", middle="Brand new work")
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [("wks_win1", False)] and rename_calls(env) == []
+    assert json.loads(r.stdout)["windowName"] == "WORKER repo (Old work)"
+    assert registry(LEAD) == {"wks_win1"} and registry(PRED1) == {"wks_win1"}
+    assert mw(env, "again").returncode == 0 and run_places(env) == [("wks_win1", False)] * 2
+
+
+@pytest.mark.parametrize("old", ["WORKERS repo (Wave 7)", f"workers repo Wave 7 {LEAD}"])
+@pytest.mark.parametrize("middle", [None, "Wave 7", "Other work"])
+def test_an_owned_2026_11_13_window_is_reused_and_renamed_to_the_current_kind(env, old, middle):
+    env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": old, "cwd": "/repo"}]
+    own(LEAD, "wks_old1")
+    r = mw(env, "beta", middle=middle)
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [("wks_old1", False)]  # no second window
+    assert rename_calls(env) == [["workspace", "rename", "wks_old1", WIN]] and json.loads(r.stdout)["windowName"] == WIN
+    assert env.verbs().index(["workspace", "rename"]) < env.verbs().index(["run"])
+    reload(env)
+    env.calls_path.unlink()
+    assert mw(env, "gamma", middle=middle).returncode == 0 and rename_calls(env) == []  # renamed once, not again
+
+
+@pytest.mark.parametrize("old", ["WORKERS repo (Wave 7)", f"workers repo Wave 7 {OTHER_LEAD}", "USER repo (Wave 7)"])
+def test_a_2026_11_13_window_another_lead_owns_is_not_taken(env, old):
+    env.data["workspaces"] = [{"workspaceId": "wks_o1", "name": old, "cwd": "/repo"}]
+    own(OTHER_LEAD, "wks_o1")
+    r = mw(env, "beta", middle="Wave 7")
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [(None, True)]  # the lead opens its own box
+    assert all(a[2] != "wks_o1" for a in rename_calls(env)) and registry(OTHER_LEAD) == {"wks_o1"} and registry(LEAD) == {"wks_abc123"}
+
+
+def test_renaming_a_2026_11_13_box_onto_a_taken_current_name_is_refused(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": "WORKERS repo (Wave 7)", "cwd": "/repo"},
+                              {"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_old1")
+    own(OTHER_LEAD, "wks_b1")
+    r = mw(env, "beta", middle="Wave 7")
+    assert r.returncode == 1 and "already has that name" in r.stderr
+    assert not placed(env) and rename_calls(env) == []
+
+
+@pytest.mark.parametrize("flag", [["--placement", "workers"], ["--placement", "worker"], []])
+def test_worker_placement_spellings_all_land_in_the_worker_box(env, flag):
+    r = mw(env, "a", *flag, middle="Wave 7")
+    assert r.returncode == 0, r.stderr
+    run = run_argv(env)
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=a"]  # no placement label
+    assert json.loads(r.stdout)["windowName"] == WIN and json.loads(r.stdout)["tabName"] == f"worker a {LEAD}"
+
+
+@pytest.mark.parametrize("flag", [["--placement", "other"], ["--other"]])
+def test_other_placement_opens_the_other_box_and_reuses_it(env, flag):
+    r = mw(env, "p1", *flag)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["windowName"] == OTHER_WIN and out["tabName"] == f"other p1 {LEAD}" and out["workspaceId"] == "wks_abc123"
+    run = run_argv(env)
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=p1", "ade.placement=other"]
+    assert rename_calls(env) == [["workspace", "rename", "wks_abc123", OTHER_WIN]]
+    assert ["agent", "update", AGENT, "--name", f"other p1 {LEAD}"] in [c["argv"] for c in env.calls()]
+    assert registry(LEAD) == {"wks_abc123"}
+    reload(env)
+    r = mw(env, "p2", *flag, middle="probe")  # a second OTHER launch reuses it: --window-middle never opens another
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [(None, True), ("wks_abc123", False)] and json.loads(r.stdout)["tabName"] == f"other p2 {LEAD}"
+
+
+def test_worker_and_other_launches_never_land_in_each_others_box(env):
+    assert mw(env, "p1", "--other").returncode == 0  # OTHER repo (other) = wks_abc123
+    reload(env)
+    env.data["created_id"] = "wks_def456"
+    env.data["run_err"] = "Created workspace wks_def456 - master (master)\n"
+    r = mw(env, "w1", middle="Wave 7")  # a WORKER launch: the OTHER box is not its box
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["workspaceId"] == "wks_def456" and json.loads(r.stdout)["windowName"] == WIN
+    reload(env)
+    names = {w["workspaceId"]: w["name"] for w in env.data["workspaces"]}
+    assert names == {"wks_abc123": OTHER_WIN, "wks_def456": WIN}
+    r = mw(env, "p2", "--other")  # and an OTHER launch finds its own box again, not the WORKER one
+    assert json.loads(r.stdout)["workspaceId"] == "wks_abc123" and json.loads(r.stdout)["tabName"] == f"other p2 {LEAD}"
+    r = mw(env, "w2")
+    assert json.loads(r.stdout)["workspaceId"] == "wks_def456" and json.loads(r.stdout)["tabName"] == f"worker w2 {LEAD}"
+    assert run_places(env) == [(None, True), (None, True), ("wks_abc123", False), ("wks_def456", False)]
+
+
+def test_other_box_work_text_comes_from_window_middle_when_it_is_opened(env):
+    r = mw(env, "p1", "--other", middle="probe")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["windowName"] == "OTHER repo (probe)"
+
+
+@pytest.mark.parametrize("old,new", [("USER repo (probe)", "OTHER repo (probe)")])
+def test_an_owned_user_window_is_the_other_box_and_renamed(env, old, new):
+    env.data["workspaces"] = [{"workspaceId": "wks_u1", "name": old, "cwd": "/repo"}]
+    own(LEAD, "wks_u1")
+    r = mw(env, "p1", "--other")
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [("wks_u1", False)] and rename_calls(env) == [["workspace", "rename", "wks_u1", new]]
+    r = mw(env, "w1", middle="Wave 7")  # a WORKER launch never takes the USER/OTHER window
+    assert run_places(env)[-1] == (None, True)
+
+
+def test_a_lead_placement_launch_leaves_the_worker_and_other_boxes_alone(main_env):
+    main_env.data["workspaces"] += [{"workspaceId": "wks_w", "name": WIN, "cwd": "/repo"}, {"workspaceId": "wks_o", "name": OTHER_WIN, "cwd": "/repo"}]
+    own(LEAD, "wks_w", "wks_o")
+    r = interactive(main_env, "--interactive")
+    assert r.returncode == 0, r.stderr
+    assert run_places(main_env) == [(LEAD_WKS, False)] and rename_calls(main_env) == []
+
+
+def test_tab_name_names_the_worktree_given_with_dash_dash_worktree(env):
+    r = launch(env, "s", "--worktree", "/x/djbclark-ade-foo-wt")
+    assert r.returncode == 0, r.stderr
+    tab = f"worker s {LEAD} [wt: djbclark-ade-foo-wt]"
+    assert json.loads(r.stdout)["tabName"] == tab
+    assert ["agent", "update", AGENT, "--name", tab] in [c["argv"] for c in env.calls()]
+    assert "--worktree" not in run_argv(env) and "djbclark-ade-foo-wt" not in " ".join(run_argv(env)[:-1])  # a name only, not passed on
+
+
+def test_tab_name_has_no_worktree_part_without_one(env):
+    r = launch(env, "s")  # --cwd /repo is not a git checkout at all
+    assert json.loads(r.stdout)["tabName"] == f"worker s {LEAD}"
+
+
+def test_tab_name_names_a_linked_worktree_given_as_cwd_but_not_a_primary_checkout(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt, slice_name="s")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["tabName"] == f"worker s {LEAD} [wt: libntech-strictjson-wt]"
+    reload(env)
+    r = env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "strictjson", "--cwd", str(main), "--", "--no-wait", "go")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["tabName"] == f"worker s2 {LEAD}"  # the primary checkout is no worktree: unchanged name
+
+
+def test_an_explicit_worktree_wins_over_the_cwd_and_names_the_other_box_tab(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "p", "--other", "--worktree", "/x/mine-wt", "--cwd", str(wt), "--", "--no-wait", f"in {wt}")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["tabName"] == f"other p {LEAD} [wt: mine-wt]"
+
+
+def test_an_overlong_worktree_name_is_shortened_with_a_tilde_to_fit_the_tab_name(env):
+    long_dir = "w" * 200
+    r = launch(env, "s", "--worktree", f"/x/{long_dir}")
+    assert r.returncode == 0, r.stderr
+    tab = json.loads(r.stdout)["tabName"]
+    assert len(tab) == 100 and tab.startswith(f"worker s {LEAD} [wt: www") and tab.endswith("~]")
+    assert ["agent", "update", AGENT, "--name", tab] in [c["argv"] for c in env.calls()]
+
+
+def test_a_slice_too_long_for_the_tab_prefix_is_refused_before_anything_runs(env):
+    r = env.run("--lead", LEAD, "--slice", "s" * 60, "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "exceeds 100 characters" in r.stderr and not env.calls()
+
+
+def test_several_owned_boxes_need_a_pick_by_work_text(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER repo (Alpha)", "cwd": "/repo"},
+                              {"workspaceId": "wks_b", "name": "WORKER repo (Beta)", "cwd": "/repo"}]
+    own(LEAD, "wks_a", "wks_b")
+    r = mw(env, "s")  # no --window-middle
+    assert r.returncode == 1 and "2 windows match the lead's WORKER box" in r.stderr and "wks_a" in r.stderr and "wks_b" in r.stderr
+    r = mw(env, "s", middle="Gamma")  # a pick that names neither
+    assert r.returncode == 1 and "2 windows match the lead's WORKER box" in r.stderr
+    assert not placed(env)
+    r = mw(env, "s", middle="Beta")
+    assert r.returncode == 0, r.stderr
+    r = mw(env, "s2", middle="Alpha")
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [("wks_b", False), ("wks_a", False)] and rename_calls(env) == []
+
+
+def test_several_owned_boxes_are_picked_per_box_not_across_boxes(env):
+    env.data["workspaces"] = [{"workspaceId": "wks_a", "name": "WORKER repo (Alpha)", "cwd": "/repo"},
+                              {"workspaceId": "wks_b", "name": "WORKER repo (Beta)", "cwd": "/repo"},
+                              {"workspaceId": "wks_o", "name": "OTHER repo (Alpha)", "cwd": "/repo"}]
+    own(LEAD, "wks_a", "wks_b", "wks_o")
+    r = mw(env, "s", "--other")  # the OTHER box has one window: no pick needed, and the WORKER ones do not count
+    assert r.returncode == 0, r.stderr
+    assert run_places(env) == [("wks_o", False)]
+
+
+def test_archive_other_box_needs_the_placement_and_blocks_on_its_own_agents(window):
+    window.data["workspaces"].append({"workspaceId": "wks_o1", "name": OTHER_WIN, "cwd": "/repo"})
+    own(LEAD, "wks_win1", "wks_o1")
+    window.data["agents"] = [{"id": "p1", "status": "running", "labels": {"ade.lead": LEAD, "ade.placement": "other"}}]
+    window.state("p1", "wks_o1", {"ade.lead": LEAD, "ade.placement": "other"})
+    r = window.run("archive-window", "--lead", LEAD, "--repo", "repo", "--placement", "other")
+    assert r.returncode == 1 and "p1" in r.stderr and ["workspace", "archive"] not in window.verbs()
+    r = window.run("archive-window", "--lead", LEAD, "--repo", "repo")  # the WORKER box does not wait for an OTHER-box tab
+    assert r.returncode == 0, r.stderr
+    assert [c["argv"] for c in window.calls() if c["argv"][:2] == ["workspace", "archive"]] == [["workspace", "archive", "wks_win1"]]
+
+
+def test_archive_never_takes_the_lead_placement(window):
+    r = window.run("archive-window", "--lead", LEAD, "--placement", "lead")
+    assert r.returncode == 2 and not window.calls()  # not a choice: a LEAD window is never archived here
+
+
+def test_archive_placement_workers_alias_still_works(window):
+    r = window.run("archive-window", "--lead", LEAD, "--placement", "workers", "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["workspaceId"] == "wks_win1"
+
+
+def test_archive_refuses_a_lead_named_window_even_when_it_is_the_one_found(env):
+    env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": LEAD_NAME}]
+    own(LEAD, LEAD_WKS)
+    for extra in ([], ["--placement", "other"]):
+        r = archive(env, *extra)
+        assert r.returncode == 1 and "no " in r.stderr and ["workspace", "archive"] not in env.verbs()
+
+
+def test_archive_typo_guard_still_refuses_a_middle_naming_no_box(window):
+    r = window.run("archive-window", "--lead", LEAD, "--window-middle", "Typo")
+    assert r.returncode == 1 and "second window" in r.stderr and "wks_win1" in r.stderr
+    assert ["workspace", "archive"] not in window.verbs()
+
+
+def test_rename_lead_is_the_same_command_as_rename_main(main_env):
+    main_env.data["workspaces"][0]["name"] = "MAIN repo (Wave 7)"
+    r = main_env.run("rename-lead", "--lead", LEAD)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["renamed"] is True and out["windowName"] == LEAD_NAME and out["previousName"] == "MAIN repo (Wave 7)"
+
+
+# --- adversary round 1 of PR 732 (wb-01): closed strangers block an archive; unrenamable names are refused, not tracebacks ----
+
+@pytest.fixture
+def two_boxes(window):
+    window.data["workspaces"].append({"workspaceId": "wks_o1", "name": OTHER_WIN, "cwd": "/repo"})
+    own(LEAD, "wks_win1", "wks_o1")
+    return window
+
+
+def archive_calls(env):
+    return [c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "archive"]]
+
+
+@pytest.mark.parametrize("box, wks, extra", [("other", "wks_o1", ["--placement", "other", "--repo", "repo"]),
+                                             ("worker", "wks_win1", [])])
+def test_a_closed_agent_nobody_here_launched_blocks_the_archive(two_boxes, box, wks, extra):
+    """A1: a closed agent that is not labelled for the lead (the operator's interrupted session) would be archived with the window."""
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", wks)
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and "blocker: op1: closed, but not labelled for this lead" in r.stderr
+    assert json.loads(r.stdout)["archived"] is False and json.loads(r.stdout)["blockers"]
+    assert archive_calls(two_boxes) == []
+    two_boxes.data["agents"][0]["labels"] = {"ade.lead": OTHER_LEAD}                  # another lead's closed agent: still not ours
+    two_boxes.flush()
+    r = two_boxes.run("archive-window", "--lead", LEAD, *extra)
+    assert r.returncode == 1 and archive_calls(two_boxes) == []
+
+
+def test_a_closed_agent_labelled_for_the_lead_does_not_block_the_archive(two_boxes):
+    two_boxes.data["agents"] = [{"id": "c1", "status": "closed", "labels": {"ade.lead": LEAD}}]
+    two_boxes.state("c1", "wks_o1", {"ade.lead": LEAD})
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo")
+    assert r.returncode == 0, r.stderr
+    assert archive_calls(two_boxes) == [["workspace", "archive", "wks_o1"]]
+
+
+def test_a_closed_unlabelled_agent_in_another_window_does_not_block(two_boxes):
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", "wks_elsewhere")
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo")
+    assert r.returncode == 0, r.stderr
+
+
+def test_dry_run_with_a_closed_stranger_reports_the_blocker_and_archives_nothing(two_boxes):
+    two_boxes.data["agents"] = [{"id": "op1", "status": "closed", "labels": {}}]
+    two_boxes.state("op1", "wks_o1")
+    r = two_boxes.run("archive-window", "--lead", LEAD, "--placement", "other", "--repo", "repo", "--dry-run")
+    assert r.returncode == 1 and "op1" in r.stderr and "closed, but not labelled" in r.stderr
+    assert archive_calls(two_boxes) == []
+    assert registry(LEAD) == {"wks_win1", "wks_o1"}                                    # nothing was unregistered either
+
+
+def test_a_workers_window_with_an_untrimmed_work_text_is_refused_not_a_traceback(env):
+    """A5: `WORKERS repo ( x)` parses (the old kind) but its current-kind name cannot be built: refuse, launch nothing."""
+    env.data["workspaces"] = [{"workspaceId": "wks_bad", "name": "WORKERS repo ( x)", "cwd": "/repo"}]
+    own(LEAD, "wks_bad")
+    r = env.run("--lead", LEAD, "--slice", "alpha", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "rename it by hand" in r.stderr and "wks_bad" in r.stderr
+    assert ["run"] not in env.verbs() and rename_calls(env) == []
+
+
+def test_rename_main_of_a_window_with_an_untrimmed_work_text_is_refused_not_a_traceback(main_env):
+    main_env.data["workspaces"][0]["name"] = "MAIN repo ( x)"
+    r = main_env.run("rename-main", "--lead", LEAD)
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "rename it by hand" in r.stderr and LEAD_WKS in r.stderr
+    assert rename_calls(main_env) == [] and ["run"] not in main_env.verbs()

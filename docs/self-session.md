@@ -282,7 +282,7 @@ replaced. Consumers of an old lead id:
    its 8 nearest predecessors only, so a long chain stays cheap. The bound also applies to `archive-window`'s "every labelled worker is handled"
    guard (a live worker labelled for a lead nine or more handoffs back, outside the target window, no longer blocks the archive; one
    inside the window still does) and to window discovery by label alone (a window known only by such a worker, with no record, is not
-   found by label alone; a launch with `--window-middle` adopts and records it, and only then can `archive-window` find it as the lead's). A
+   found by label alone; a launch into that box adopts and records it (a `--window-middle` that names it picks it), and only then can `archive-window` find it as the lead's). A
    far-labelled worker inside the window blocks the archive as "other live agent in the window" even when idle: close it first. The blocker
    text names the label that matched.
 2. `bin/ade-net-resume --lead <pinned id>` (the installed launchd job): follows the chain to the current lead, counts

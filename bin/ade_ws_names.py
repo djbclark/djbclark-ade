@@ -1,12 +1,16 @@
 """Paseo window (workspace) names: `<KIND> <repo-name> (<current work>)`, and the legacy forms they replace.
 
-Operator ruling 2026-11-13 (docs/workspace-layout.md): a window is named exactly `<KIND> <repo> (<work>)`, KIND one of
-MAIN (a lead's own window, the tab row that includes the lead), WORKERS (the workers the lead starts on its own
-initiative), USER (agents the operator started that a lead has connected to). The lead's agent id is not part of a
-window name; it stays in the tab name (`worker <slice> <lead id>`) and the `ade.lead` label.
+Operator ruling 2026-11-14 (docs/workspace-layout.md): per lead and repo at most three windows ("boxes"), named exactly
+`<KIND> <repo> (<work>)`, KIND one of LEAD (the lead's own window, the tab row that includes the lead), WORKER (every
+worker and reviewer the lead starts), OTHER (anything else: probes, side tasks, agents the operator started that the lead
+connected). The lead's agent id is not part of a window name; it stays in the tab name (`worker <slice> <lead id>`) and
+the `ade.lead` label.
 
-Importable (no side effects): `build`, `parse`, `parse_legacy`, `migrated_name`, `repo_of`, `normalize_work`,
-`KINDS`, `NAME_LIMIT`. Used by bin/ade-worker-run; the window tidy skill reuses them.
+The 2026-11-13 kinds MAIN, WORKERS and USER are still recognised by `parse` (`Name.box` maps them onto LEAD, WORKER and
+OTHER) and are renamed to the current kind when a launch reuses the window; `build` only makes the current kinds.
+
+Importable (no side effects): `build`, `parse`, `parse_legacy`, `migrated_name`, `repo_of`, `normalize_work`, `tab_name`,
+`KINDS`, `LEGACY_KINDS`, `BOX_OF`, `NAME_LIMIT`. Used by bin/ade-worker-run; the window tidy skill reuses them.
 
 Legacy forms recognised (`parse_legacy`): `workers <middle> <lead id>` and `WORKERS <middle> <lead id>` (the 2026-11-13
 morning scheme) and `MAIN <middle>` (no repo, no parentheses). `migrated_name` turns one into the current form.
@@ -19,23 +23,35 @@ import re
 import subprocess
 from typing import NamedTuple
 
-KINDS = ("MAIN", "WORKERS", "USER")
+KINDS = ("LEAD", "WORKER", "OTHER")
+LEGACY_KINDS = ("MAIN", "WORKERS", "USER")  # the 2026-11-13 names of the same three boxes
+BOX_OF = {"LEAD": "LEAD", "WORKER": "WORKER", "OTHER": "OTHER", "MAIN": "LEAD", "WORKERS": "WORKER", "USER": "OTHER"}
 NAME_LIMIT = 100  # docs/workspace-layout.md: keep a window or tab name under ~100 characters
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_NEW_RE = re.compile(rf"^({'|'.join(KINDS)}) ({REPO_RE.pattern}) \((.+)\)$")
+_NEW_RE = re.compile(rf"^({'|'.join(KINDS + LEGACY_KINDS)}) ({REPO_RE.pattern}) \((.+)\)$")
 _LEGACY_WORKERS_RE = re.compile(rf"^(workers|WORKERS) (.+) ({UUID_RE})$")
 _LEGACY_MAIN_RE = re.compile(r"^MAIN (.+)$")
 
 
 class Name(NamedTuple):
-    kind: str
+    kind: str   # as written, a current kind or a 2026-11-13 one
     repo: str
     work: str
 
+    @property
+    def box(self) -> str:
+        """LEAD, WORKER or OTHER, whichever spelling of the kind the name uses."""
+        return BOX_OF[self.kind]
+
+    @property
+    def current(self) -> bool:
+        """True when the kind is one of the current ones (not MAIN, WORKERS or USER)."""
+        return self.kind in KINDS
+
 
 class Legacy(NamedTuple):
-    kind: str            # "WORKERS" or "MAIN"
+    kind: str            # "WORKERS" or "MAIN" (legacy spellings; `migrated_name` maps them onto WORKER and LEAD)
     middle: str
     lead: str | None  # the lead id of a workers window, None for MAIN
 
@@ -64,7 +80,8 @@ def build(kind: str, repo: str, work: str) -> str:
 
 
 def parse(name: str) -> Name | None:
-    """The current form only, or None (a legacy name, any other name, a wrong-case kind all return None)."""
+    """`<KIND> <repo> (<work>)` with a current or 2026-11-13 kind, or None (a pre-ruling name, any other name, a wrong-case
+    kind all return None)."""
     m = _NEW_RE.match(name) if isinstance(name, str) else None
     return Name(m.group(1), m.group(2), m.group(3)) if m else None
 
@@ -90,7 +107,29 @@ def normalize_work(middle: str, repo: str) -> str:
 
 
 def migrated_name(legacy: Legacy, repo: str) -> str:
-    return build(legacy.kind, repo, normalize_work(legacy.middle, repo))
+    return build(BOX_OF[legacy.kind], repo, normalize_work(legacy.middle, repo))
+
+
+def current_name(name: Name) -> str:
+    """The same window under its current kind (`WORKERS r (w)` -> `WORKER r (w)`)."""
+    return build(name.box, name.repo, name.work)
+
+
+TAB_PREFIX = {"LEAD": "worker", "WORKER": "worker", "OTHER": "other"}  # the first word of a tab name, by box
+
+
+def tab_name(box: str, slice_name: str, lead: str, worktree: str | None = None) -> str:
+    """`worker <slice> <lead id>`, with ` [wt: <worktree dir basename>]` when the launch names a worktree; `other ...` in the
+    OTHER box. The worktree part is a hint, so a name over NAME_LIMIT shortens it (with `~`) rather than failing."""
+    base = f"{TAB_PREFIX[box]} {slice_name} {lead}"
+    if not worktree:
+        return base
+    d = os.path.basename(os.path.realpath(worktree).rstrip("/")) or worktree
+    d = "".join(c for c in d if c.isprintable() and c not in "[]\n")
+    room = NAME_LIMIT - len(base) - len(" [wt: ]")
+    if not d or room < 1:
+        return base
+    return f"{base} [wt: {d if len(d) <= room else d[:room - 1] + '~'}]"
 
 
 def _git(path: str, *argv: str) -> str:
