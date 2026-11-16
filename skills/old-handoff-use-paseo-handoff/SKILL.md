@@ -23,17 +23,15 @@ commit flow:
   exception, pushed immediately (Step 6 below).
 - **Any other project**: output lives inside that project's own repo, at
   `<repo-root>/docs/handoffs/` — unless the project's always-loaded
-  `AGENTS.md` names another directory and a push exception, which wins
+  `AGENTS.md` names another directory, which wins
   (e.g. every CFEngine/libntech tree writes to
-  `~/src/cfengine-all/docs/handoffs/` and pushes there, 2026-10-20). Commit locally in that repo (Step 6 below)
-  — do **not** push automatically. Pushing to a project you don't have an
-  explicit standing exception for is a "visible to others" action per the
-  general action-care policy; site-private's push-immediately rule is a
-  specific, deliberate carve-out that repo's own AGENTS.md/CLAUDE.md
-  declared, not a default other repos inherit. If that project's own
-  AGENTS.md/CLAUDE.md declares an equivalent "memory is data, commit (and
-  push) in place" exception, follow it and push; otherwise leave the
-  commit local and tell the operator it's ready to push whenever they want.
+  `~/src/cfengine-all/docs/handoffs/`, 2026-10-20). Commit, then push to a
+  remote the operator owns (his fork or his repo, including `origin`)
+  without asking, at the commit (djbclark, 2026-11-15: "you can always
+  push to my forks and repos without asking, and do so at opportune
+  moments. Only upstream pushes are gated."). A push to an upstream remote
+  he does not own stays gated until he asks. If the only remote is an
+  upstream he does not own, leave the commit local and name that remote.
 
 ## Guards
 
@@ -249,9 +247,10 @@ target's release-gating precondition was failing for site-djbclark):**
    otherwise (2026-10-13, aiuse).
 1. `cd <repo-root> && git add docs/handoffs/ && git commit -m "docs: handoff <slug>"`
    — handoff-only commit; nothing else staged.
-2. Push only if that project's own AGENTS.md/CLAUDE.md declares an
-   equivalent memory-is-data exception (see Project scope above);
-   otherwise leave it committed locally and say so to the operator.
+2. Push that commit to a remote he owns (his fork or his repo) without
+   asking. `git-commit-own` from that repo is the publish path when the
+   branch publishes to his remote. Do not push an upstream remote he does
+   not own. If that is the only remote, leave the commit local and name it.
 
 ## Step 7 — Update Tier 1
 
@@ -259,8 +258,9 @@ Via the `session-handoff` skill's writer protocol: set `latest_handoff` to
 the new handoff file's path (site-private-relative for the ops-djbclark
 suite, repo-relative otherwise), refresh Current State, add a history
 entry. Then report to the operator: file path, chain + lineage,
-validation outcome, the next action, and (for a non-ops-djbclark target)
-whether the commit was pushed or is waiting locally.
+validation outcome, the next action, and which remote received the commit.
+A handoff on his fork or repo is already pushed. Name an upstream remote
+you left unpushed.
 
 ## Step 8 — Name the session
 
