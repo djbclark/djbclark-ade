@@ -150,8 +150,9 @@ unattended_modes = { claude = "bypassPermissions", codex = "full-access", antigr
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
-# 2026-10-19: the codex plan changed (Plus to the $100 plan, aiuse "prolite"); this
-# floor awaits re-calibration from `route_agent.py calibrate`. Value unchanged.
+# 2026-10-19: the codex plan changed (Plus to the $100 plan, aiuse "prolite");
+# 2026-11-16: upgraded to ChatGPT Pro ($200/mo). This floor awaits re-calibration
+# from `route_agent.py calibrate`. Value unchanged.
 # A key `SERVICE:frontier` floors only a slice on a [dispatch].frontier_models model;
 # `SERVICE:KIND` floors that kind and wins over plain `SERVICE`, which floors every other
 # slice (2026-10-25: codex's everyday models, luna and 6.1-sol, are not astra; 10.0 is a guess
@@ -305,7 +306,8 @@ access = "cli-only"
 # 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
 # dispatcher (acp-dispatch, deleted 2026-11-14) also reserved in-flight estimates per service; nothing does now,
 # so re-plan before each launch (skills/model-routing D5). max_parallel = 1 keeps one codex slice per `plan`.
-# 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
+# 2026-10-19: the plan changed to the $100 plan (aiuse "prolite");
+# 2026-11-16: upgraded to ChatGPT Pro ($200/mo). max_parallel = 1
 # and the lost in-flight rule await re-calibration from `route_agent.py calibrate`.
 plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
 models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
