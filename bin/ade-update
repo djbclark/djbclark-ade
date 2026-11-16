@@ -793,6 +793,32 @@ def update(rep, args, repo):
                 rep.say(f"GUI-hog dialog: build skipped ({e.__class__.__name__}); not a problem, rerun bin/ade-gui-build")
                 d["gui_bundle"] = {"rc": None, "note": e.__class__.__name__}
 
+    # 3c. the ADE-owned parts of the live Claude settings (bin/ade_settings_apply.py; docs/claude-settings-apply.md). Canonical checkout only, and only
+    # when the checkout carries the template and the live file exists. Dry-run under --check; --apply backs up and writes atomically. A refusal or a failure
+    # is a note, never an exit code (the live file is untouched).
+    sa = Path(__file__).resolve().parent / "ade-settings-apply"
+    live_settings = Path.home() / ".claude" / "settings.json"
+    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, timeout=30).returncode == 0:
+        # The template is read from the committed revision (`target`), never the working tree: an uncommitted edit in the shared checkout must not
+        # reach every Claude session (adversary A2).
+        try:
+            shown = subprocess.run(["git", "-C", str(repo), "show", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, text=True, timeout=30)
+            if shown.returncode != 0:
+                raise OSError("template not in " + short(target))
+            with tempfile.TemporaryDirectory(prefix="ade-settings-") as td:
+                tp = Path(td) / "settings.json.tmpl"
+                tp.write_text(shown.stdout)
+                argv = [sys.executable, str(sa), "--template", str(tp)] + ([] if check else ["--apply"])
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            lines = (r.stderr + r.stdout).strip().splitlines() or ["no output"]  # a REFUSED line (stderr) first
+            rep.say("Claude settings: " + lines[0][:300] + ("" if r.returncode == 0 else f" (rc={r.returncode}; live file untouched)"))
+            for ln in lines[1:80]:
+                rep.say("  " + ln[:300].strip())
+            d["claude_settings"] = {"rc": r.returncode}
+        except (OSError, subprocess.TimeoutExpired) as e:
+            rep.say(f"Claude settings: skipped ({e.__class__.__name__}); rerun bin/ade-settings-apply")
+            d["claude_settings"] = {"rc": None}
+
     # 4. changelog and state
     base, marked = read_state_record(state_path, repo)
     new_text = changelog_at(repo, target)

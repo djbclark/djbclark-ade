@@ -1411,3 +1411,48 @@ def test_a_run_that_could_not_list_fragments_records_no_marker(env):
     (env.bin / "changelog-fold").unlink()
     assert env.run().returncode == 0
     assert env.state.read_text().split() == [env.head(env.machine)]
+
+
+FAKE_SETTINGS_APPLY = """#!{python}
+import json, os, sys
+a = sys.argv[1:]
+t = a[a.index("--template") + 1]
+open(os.environ["FAKE_SA_LOG"], "a").write(json.dumps({{"argv": [x for x in a if x != t], "template": open(t).read()}}) + "\\n")
+print("settings: fake line")
+"""
+
+
+def _settings_env(env):
+    fake = env.bin / "ade-settings-apply"
+    fake.write_text(FAKE_SETTINGS_APPLY.format(python=sys.executable))
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    (env.home / ".claude").mkdir()
+    (env.home / ".claude" / "settings.json").write_text("{}")
+    log = env.tmp / "sa.log"
+    log.write_text("")
+    return log
+
+
+def test_settings_step_check_passes_no_apply_and_reads_the_target_commit(env):
+    log = _settings_env(env)
+    env.publish({"agents/claude/settings.json.tmpl": "COMMITTED\n"})
+    r = env.run("--check", extra_env={"FAKE_SA_LOG": str(log)})
+    got = [json.loads(x) for x in log.read_text().splitlines()]
+    assert r.returncode == 10 and "Claude settings: settings: fake line" in r.stdout, r.stdout + r.stderr
+    assert got == [{"argv": ["--template"], "template": "COMMITTED\n"}]  # dry-run, from the upstream commit not yet in the tree
+
+
+def test_settings_step_apply_uses_the_committed_template_not_the_dirty_working_tree(env):
+    log = _settings_env(env)
+    env.publish({"agents/claude/settings.json.tmpl": "COMMITTED\n"})
+    assert env.run(extra_env={"FAKE_SA_LOG": str(log)}).returncode == 0
+    (env.machine / "agents" / "claude" / "settings.json.tmpl").write_text("DIRTY\n")
+    env.run(extra_env={"FAKE_SA_LOG": str(log)})
+    got = [json.loads(x) for x in log.read_text().splitlines()]
+    assert all(g["argv"] == ["--template", "--apply"] and g["template"] == "COMMITTED\n" for g in got) and len(got) == 2
+
+
+def test_settings_step_skipped_without_the_template_or_live_file(env):
+    log = _settings_env(env)
+    env.run(extra_env={"FAKE_SA_LOG": str(log)})  # the fixture repo carries no agents/claude/settings.json.tmpl
+    assert log.read_text() == ""

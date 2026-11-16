@@ -2,7 +2,7 @@
 
 Carried #1 / issue #284: the hook and static `permissions.deny` are a speed bump; the OS wall is
 `sandbox.filesystem.denyRead` on Bash and its children (`docs/secret-deny.md` C3). This doc is the
-**operator trial plan only**. It does **not** mutate live `~/.claude/settings.json` (order 11). Agents
+**operator trial plan only**. It does **not** mutate live `~/.claude/settings.json` (order 11). **Update 2026-11-15 (operator ruling, st-apply):** `ade update` now adds the template's `sandbox` block to live when live has none (`bin/ade-settings-apply`, docs/claude-settings-apply.md); the C6 "operator-only apply" rule below is superseded for that path. Agents
 document and propose; the operator applies, measures, and rolls back.
 
 Related: PR #405 renders the same list into `agents/claude/settings.json.tmpl` (when merged) without

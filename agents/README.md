@@ -4,7 +4,7 @@ The config files that matter most were tracked nowhere
 ([docs/history/ade-everywhere-proposal.md](../docs/history/ade-everywhere-proposal.md) section 2 and 8 item 1). Phase 0
 item 4.4 (2026-10-20) tracks them here as **templates**: the live file's structure, key order and comments, with
 every secret, account id, host name and home path replaced by a placeholder. This is the section 4.2 layout
-(`agents/<tui>/<file>.tmpl`); nothing here is applied yet. The proposal's chezmoi apply (section 4.4) will render
+(`agents/<tui>/<file>.tmpl`); nothing here is applied yet, except `claude/settings.json.tmpl`, whose ADE-owned parts `bin/ade-update` merges into the live file (docs/claude-settings-apply.md); treat edits to that template as live config. The proposal's chezmoi apply (section 4.4) will render
 these with the companion's data, as a `modify_` merge and never a symlink, because each app also writes its own file.
 Phase 1 (2026-11-09) declares secret names and field homes; the owned-key `modify_` merge helpers for Claude and
 Codex landed 2026-11-10 under `agents/claude/modify_merge.py` and `agents/codex/modify_merge.py` (shared algorithm in
