@@ -1,0 +1,23 @@
+# Budgets for bin/context-budget-check: what a fresh Claude Code session may cost before the first
+# prompt, in tokens, as `claude -p "/context"` reports it (2026-10-18; Fable review of the
+# cache-cost report, section 4.8). Every number below is a ceiling on one /context row; "total" is
+# its "Tokens:" figure (deferred MCP tools, free space and the autocompact buffer are not in it).
+
+# Directories to measure, in order. Each is a place a session starts; the project CLAUDE.md,
+# auto-memory MEMORY.md and project skills differ per directory, so the numbers do too.
+dirs = ["~/src/djbclark-ade", "~"]
+
+[budget]
+total = 30000           # measured after the 2026-10-18 trims: 25k here, 27.3k in ~
+memory = 10000          # 9.1k here (global CLAUDE.md 5.7k + this repo's AGENTS.md ~3k)
+skills = 7500
+mcp_tools = 6500
+mcp_instructions = 5000
+grow_alert = 2000       # a rise of this many tokens in any row (or the total) since the last file pages
+
+# Overrides for one directory (any key above; the rest are inherited from [budget]).
+# "~" also loads its auto-memory index (site-private/memory/MEMORY.md): memory 9.8k measured
+# 2026-10-18 after that index was condensed (8.1k -> 4.1k) and claudeMdExcludes stopped ~/AGENTS.md
+# loading the global instructions a second time. A little headroom over the 10k default.
+[budget."~"]
+memory = 12000

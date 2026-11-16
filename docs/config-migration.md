@@ -305,10 +305,10 @@ from `config/ade.toml` when it carries one (`MODEL_TIERS_TOML` and explicit path
 read by that hook; a present but unreadable `ade.toml` is an error, never a quiet legacy read). **Writers follow:** `model_tiers.promote`/`set_role` (and `ade-model-tiers promote|set`) refuse
 while `ade.toml` carries tiers (also for `--root`), naming the file, rather than editing a dead legacy copy.
 
-**Not committed in this PR (2026-11-12 decision).** A tracked `config/ade.toml` duplicates `config/install.toml`,
-which other open slices (S3b key probes, installer work) still edit; a mirror committed now would go stale and the
-cut-over must be one mechanical commit. Cut-over checklist, after those slices merge: (1) `ade-config
-export-unified --write` in a claimed workspace; (2) `ade-config check` and the full suite; (3) delete the five legacy
-files in the same commit (they are no longer read once `ade.toml` exists), keeping `ROUTING_POLICY`, `GATES_TOML`,
-`MODEL_TIERS_TOML` and explicit-path readers for isolated tests; (4) repoint docs that name the legacy files as the
-edit surface; (5) land the `ade-model-tiers` writer on `ade.toml`. The old files remain readable until then.
+**Landed cutover (2026-11-16).** `config/ade.toml` is the single source of the five domains. The former
+`config/routing.toml`, `config/gates.toml`, `config/model-tiers.toml`, `config/install.toml` and
+`config/context-budget.toml` files are deleted as editable production inputs; complete isolated copies live under
+`tests/fixtures/config/legacy/` for explicit-path readers and parity tests. `ROUTING_POLICY`, `GATES_TOML`,
+`MODEL_TIERS_TOML` and explicit legacy paths remain isolated. `ade-model-tiers promote|set` refuses to edit a dead
+legacy copy while unified tiers exist. The pre-cutover `export-unified --write` / `--check` round trip proved
+equivalence with the legacy fixtures; after cutover `ade-config check` validates the effective tree.

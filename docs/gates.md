@@ -1,6 +1,6 @@
-# The frontier allowance: `config/gates.toml [frontier]` (2026-10-27; trimmed 2026-11-07)
+# The frontier allowance: `config/ade.toml [gates.frontier]` (2026-10-27; trimmed 2026-11-07)
 
-`config/gates.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance. Since
+`config/ade.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance. Since
 2026-11-09, `ade_gates.load_frontier` reads it through `ade_config.load_effective` (legacy projection when
 `config/ade.toml` is absent; `GATES_TOML` still isolates the gates domain for tests). Consumed by
 `bin/route_agent.py` (the planner's per-wave cap and the Fable floor) and `claude/hooks/frontier_agent_gate.py` (Agent-tool Fable calls;
@@ -73,7 +73,7 @@ significantly better than Opus 5.5, if it states why in one line. The checks, in
 
 C1. `route_agent.py plan` puts at most `frontier1_per_wave` frontier slices on claude and `frontier2_per_wave` on any other
 pool in a wave, and the cap above the closed 1 holds only while `judged_pool_block` passes (B2); otherwise the closed 1.
-C2. Unchanged by the allowance, as standing instructions (**not enforced by code since 2026-11-14**: those checks were `bin/acp-dispatch`'s `gate_policy`, which left with the shim): a frontier slice is advise-only (an exec role needed `ACP_OPERATOR_APPROVED=frontier-exec`), Fable at `xhigh`/`max` needs the operator's approval (it was `fable-xhigh`; `config/routing.toml [dispatch].fable_gated_efforts` still lists the efforts), and a frontier model is launched with `ade.kind=frontier` / through the Agent-tool hook; the stop signal (a short, stale or unknown Claude reading keeps the closed rules) is still enforced by `route_agent.py` and the hook.
+C2. Unchanged by the allowance, as standing instructions (**not enforced by code since 2026-11-14**: those checks were `bin/acp-dispatch`'s `gate_policy`, which left with the shim): a frontier slice is advise-only (an exec role needed `ACP_OPERATOR_APPROVED=frontier-exec`), Fable at `xhigh`/`max` needs the operator's approval (it was `fable-xhigh`; `config/ade.toml [dispatch].fable_gated_efforts` still lists the efforts), and a frontier model is launched with `ade.kind=frontier` / through the Agent-tool hook; the stop signal (a short, stale or unknown Claude reading keeps the closed rules) is still enforced by `route_agent.py` and the hook.
 Only the Agent-tool hook asks for a reason (the `acp-dispatch` grant path left with the shim, 2026-11-14).
 C3. **Gemini 4 Argon** (`antigravity-argon`, the frontier fallback behind codex and claude, restored 2026-11-07) has no
 allowance of its own: it is a `frontier` model (`--kind frontier` only), counts as family 2 in the planner's per-wave cap,

@@ -16,9 +16,9 @@ Current operator decision: Pi is the sole general-purpose third-party TUI; vendo
 
 ## A. Where the numbers live
 
-A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--model [--effort]`, the quality band, the
+A1. `config/ade.toml` (kinds, each pool's ranks per kind and suggested `--model [--effort]`, the quality band, the
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
-model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Print both with
+model) and `config/ade.toml [gates.frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
 Since **2026-11-10**, runtime routing reads these values through
 `ade_config.load_effective`: a valid `config/ade.toml` replaces the legacy base
@@ -53,7 +53,7 @@ defaults. Tests: `tests/test_pr_radar_route.py` (stubbed router, no live quota).
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and
-`config/install.toml [[install.jobs]]` (Carried #33 residual; launchd job retired in slim-down E5).
+`config/ade.toml [install.jobs]` (Carried #33 residual; launchd job retired in slim-down E5).
 
 A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, openai_api and zai, whose meters cannot establish exhaustion before a refusal. Each `plan` assigns at most one agent per named pool, including aliases, and prints per-pool max=1 (`canary_pool_max` in JSON). The lead must observe one successful canary turn, re-probe quota/refusals, and only then expand within the normal `max_parallel`. The planner does not attest live canary success; another plan is not permission to launch a second unproven canary. No elapsed-time release is used.
 
@@ -176,7 +176,7 @@ H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the 
 H2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
 adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
-`fable_lead = true` in `[lead]` of `config/routing.toml` (false or absent restores never-a-Fable-lead).
+`fable_lead = true` in `[lead]` of `config/ade.toml` (false or absent restores never-a-Fable-lead).
 H3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for
 bulk and mechanical work a stronger model reviews.
@@ -279,7 +279,7 @@ Rules, each tested offline with fixture quota:
 Every change is one JSON line in `changes.jsonl` and one `adjust: {…}` line on stderr: `route` (first pool for a
 kind), `switch` (from, to, why), `restore` (from, to), `hold` (a hold placed with no route line to carry it),
 `expire`, `refuse` (once per change, not per call), and `release` (a pool is eligible again without being chosen). `adjust --status` prints the saved holds; `--dry-run` writes nothing. `[routing.adjust].enabled =
-false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/routing.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
+false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/ade.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
 can make a hold yield early or log a `switch` that quota did not cause; a hold is never pruned except by expiry. Not built:
 effort or model-tier changes inside a pool (`docs/dynamic-model-effort.md` G4, still gated), automatic calls from other tools, and
 cross-kind promotion (a kind never moves to a different kind's pools).

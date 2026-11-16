@@ -26,7 +26,7 @@ def root(tmp_path, monkeypatch):
     r = tmp_path / "repo"
     (r / "config").mkdir(parents=True)
     for name in LEGACY:
-        shutil.copy2(REPO / "config" / name, r / "config" / name)
+        shutil.copy2(REPO / "tests/fixtures/config/legacy" / name, r / "config" / name)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in ("ROUTING_POLICY", "GATES_TOML", "MODEL_TIERS_TOML"):
         monkeypatch.delenv(name, raising=False)

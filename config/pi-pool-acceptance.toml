@@ -1,7 +1,7 @@
 # Pi pool acceptance for automatic routing (`ade/auto`, `bin/pi-default`).
 # Snapshot: 2026-11-09. Queue Carried #36 / docs/pi-defaults.md.
 #
-# Fail closed: a Pi [[service]] in config/routing.toml (`agent = "pi"`) with no
+# Fail closed: a Pi [[service]] in config/ade.toml (`agent = "pi"`) with no
 # row here, or with `accepted = false`, cannot win automatic routing. Manual
 # model pins are unchanged. The operator flips `accepted = true` per pool after
 # continuation, quota freshness, identity and failure-handling acceptance

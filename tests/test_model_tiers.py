@@ -1,4 +1,4 @@
-"""config/model-tiers.toml + bin/model_tiers.py + bin/ade-model-tiers (2026-11-09).
+"""config/ade.toml [model_tiers] + bin/model_tiers.py + bin/ade-model-tiers (2026-11-09).
 
 S2 loader + promote core from docs/history/model-tiers-design.md. No network, no secrets.
 """
@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
 BIN = REPO / "bin"
 sys.path.insert(0, str(BIN))
 import model_tiers as mt  # noqa: E402
@@ -41,12 +42,12 @@ def _clear_tiers_cache():
 
 
 def test_shipped_file_matches_defaults():
-    drift = mt.defaults_match_file(REPO / "config" / "model-tiers.toml")
+    drift = mt.defaults_match_file(LEGACY_ROOT / "model-tiers.toml")
     assert drift == [], drift
 
 
 def test_load_shipped_file_is_source_file():
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     assert tiers.source == "file" and tiers.error is None
     assert tiers.role_id("claude", "frontier") == "claude-fable-5-2"
     assert tiers.role_id("codex", "frontier") == "gpt-6-astra"
@@ -54,7 +55,7 @@ def test_load_shipped_file_is_source_file():
 
 def test_retired_fable_5_1_id_classifies_as_former_frontier():
     """Fable 5.1 was replaced by 5.2 (2026-11-13); old transcripts still classify."""
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     assert mt.classify("claude-fable-5-1[1m]", tiers) == ("claude", "frontier", "former")
     assert mt.classify("claude-fable-5-2[1m]", tiers) == ("claude", "frontier", "current")
 
@@ -69,7 +70,7 @@ def test_missing_file_falls_back_to_defaults(tmp_path, monkeypatch):
 
 
 def test_classify_aliases_prefixes_and_former():
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     assert mt.classify("fable", tiers) == ("claude", "frontier", "current")
     assert mt.classify("opus --effort high", tiers) == ("claude", "judgment", "current")
     assert mt.classify("anthropic/claude-opus-5-5", tiers) == ("claude", "judgment", "current")
@@ -81,7 +82,7 @@ def test_classify_aliases_prefixes_and_former():
 
 
 def test_resolve_spellings():
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     assert mt.resolve("claude", "judgment", "claude", tiers) == "opus"
     assert mt.resolve("claude", "judgment", "omp", tiers) == "anthropic/claude-opus-5-5"
     assert mt.resolve("claude", "everyday", "copilot", tiers) == "claude-sonnet-5.5"
@@ -95,7 +96,7 @@ def test_id_dotted_preserves_name_prefix():
     assert mt._id_dotted("claude-haiku-5-5") == "claude-haiku-5.5"
     assert mt._id_dotted("claude-fable-6") == "claude-fable-6"
     assert mt._id_dotted("gpt-6-astra") == "gpt-6-astra"
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     # No per-model override → generated spelling, not claude.opus.5-5.
     assert mt.resolve("claude", "judgment", "copilot", tiers) == "claude-opus-5.5"
     assert mt.resolve("claude", "frontier", "copilot", tiers) == "claude-fable-5.2"
@@ -103,14 +104,14 @@ def test_id_dotted_preserves_name_prefix():
 
 
 def test_frontier_tokens_and_sublimit_families():
-    tiers = mt.load(REPO / "config" / "model-tiers.toml", use_cache=False)
+    tiers = mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False)
     toks = {t.lower() for t in mt.frontier_tokens(tiers)}
     assert "fable" in toks and "claude-fable-5-2" in toks and "gpt-6-astra" in toks
     assert mt.sublimit_families(tiers) == ("fable",)
 
 
 def test_promote_cascade_2_claude(tmp_path):
-    src = (REPO / "config" / "model-tiers.toml").read_text()
+    src = (LEGACY_ROOT / "model-tiers.toml").read_text()
     path = tmp_path / "model-tiers.toml"
     path.write_text(src)
     result = mt.promote(
@@ -144,7 +145,7 @@ def test_promote_cascade_2_claude(tmp_path):
 
 
 def test_promote_dry_run_does_not_write(tmp_path):
-    src = (REPO / "config" / "model-tiers.toml").read_text()
+    src = (LEGACY_ROOT / "model-tiers.toml").read_text()
     path = tmp_path / "model-tiers.toml"
     path.write_text(src)
     before = path.read_text()
@@ -164,7 +165,7 @@ def test_promote_dry_run_does_not_write(tmp_path):
 
 def test_promote_rejects_family_mismatch(tmp_path):
     path = tmp_path / "model-tiers.toml"
-    path.write_text((REPO / "config" / "model-tiers.toml").read_text())
+    path.write_text((LEGACY_ROOT / "model-tiers.toml").read_text())
     with pytest.raises(mt.TiersError, match="family"):
         mt.promote(
             vendor="claude",
@@ -177,7 +178,7 @@ def test_promote_rejects_family_mismatch(tmp_path):
 
 def test_cli_show_validate_promote_dry_run(tmp_path):
     path = tmp_path / "model-tiers.toml"
-    path.write_text((REPO / "config" / "model-tiers.toml").read_text())
+    path.write_text((LEGACY_ROOT / "model-tiers.toml").read_text())
     env = {**os.environ, "MODEL_TIERS_TOML": str(path)}
 
     r = subprocess.run(
@@ -226,7 +227,7 @@ def test_route_agent_reads_tiers():
 def test_suggest_model_after_promote_shared_alias(tmp_path, monkeypatch):
     """After a promote that shares the alias, judgment resolves to the displaced canonical id, never the new frontier."""
     path = tmp_path / "model-tiers.toml"
-    path.write_text((REPO / "config" / "model-tiers.toml").read_text())
+    path.write_text((LEGACY_ROOT / "model-tiers.toml").read_text())
     mt.promote(
         vendor="claude",
         new_id="claude-fable-6",
@@ -269,7 +270,7 @@ def _unified_root(tmp_path, monkeypatch):
     import re
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
-    text = (REPO / "config/model-tiers.toml").read_text()
+    text = (LEGACY_ROOT / "model-tiers.toml").read_text()
     text = re.sub(r"^\[(meta|rank|vendor|model|former)", r"[model_tiers.\1", text, flags=re.M)
     (root / "config/ade.toml").write_text("schema_version = 1\n" + text)
     monkeypatch.delenv("MODEL_TIERS_TOML", raising=False)
@@ -282,7 +283,7 @@ def test_pathless_load_reads_unified_tiers(tmp_path, monkeypatch):
     root = _unified_root(tmp_path, monkeypatch)
     tiers = mt.load(use_cache=False)
     assert tiers.source == "file" and tiers.path == root / "config/ade.toml"
-    assert mt.public_dict(tiers)["rank"] == mt.public_dict(mt.load(REPO / "config/model-tiers.toml", use_cache=False))["rank"]
+    assert mt.public_dict(tiers)["rank"] == mt.public_dict(mt.load(LEGACY_ROOT / "model-tiers.toml", use_cache=False))["rank"]
 
 
 def test_legacy_writers_refuse_when_unified_carries_tiers(tmp_path, monkeypatch):

@@ -84,7 +84,7 @@ the recorded component choice but does not add the checklist. Scoped output stil
 ## Related
 
 - setup-plan S3a: `docs/setup-plan.md`
-- Install catalog Hermes row: `config/install.toml`, `docs/install-catalog.md`
+- Install catalog Hermes row: `config/ade.toml`, `docs/install-catalog.md`
 - MCP bridge facts: `docs/mcp-servers.md`
 - peer-link pointer: `skills/tell-chief-of-staff/SKILL.md`
 

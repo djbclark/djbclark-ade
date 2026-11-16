@@ -246,7 +246,8 @@ def test_transport_refuses_redirects(monkeypatch):
 
 
 def test_catalog_engine_uses_secret_boundary_and_persists_only_status(tmp_path, monkeypatch):
-    catalog = ai.load_catalog(root=REPO, install_path=REPO / "config/install.toml")
+    legacy_root = REPO / "tests/fixtures/config/legacy"
+    catalog = ai.load_catalog(root=legacy_root, install_path=legacy_root / "install.toml")
     rows = {row["name"]: row for row in catalog.keys}
     seen = []
     monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)
@@ -257,7 +258,7 @@ def test_catalog_engine_uses_secret_boundary_and_persists_only_status(tmp_path, 
             return subprocess.CompletedProcess(argv, 0, "", "")
         assert argv[:2] == ["sudo-secretspec", "run"]
         assert argv[argv.index("--") + 1:] in [
-            [str(REPO / "bin/ade-install"), "verify-key", provider] for provider in ENGINE_PROVIDERS
+            [str(legacy_root / "bin/ade-install"), "verify-key", provider] for provider in ENGINE_PROVIDERS
         ]
         return subprocess.CompletedProcess(argv, 0, SECRET, SECRET)
     state = tmp_path / "keys.json"

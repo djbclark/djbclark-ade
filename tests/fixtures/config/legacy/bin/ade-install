@@ -1,0 +1,797 @@
+#!/usr/bin/env -S python3 -I
+"""ade-install: transitional install catalog, plan, doctor, keys, and bounded apply.
+
+  ade-install                 print first-run guidance only (exit 0)
+  ade-install check [--root DIR] [--json]
+  ade-install catalog [--root DIR] [--json]
+  ade-install plan [--root DIR] [--json]
+  ade-install update-plan [--root DIR] [--json]
+  ade-install update [--root DIR] [--json] [--dry-run|--yes] [--id ID ...]
+                     [--state PATH] [--prefix DIR]
+  ade-install bootstrap [--root DIR] [--prefix DIR] [--dry-run|--yes] [--json]
+  ade-install python [--state-dir DIR] [--dry-run|--yes] [--recover] [--json]
+  ade-install recover [--state-dir DIR] [--dry-run|--yes] [--json]   # W18 crash/orphan repair
+  ade-install doctor [--root DIR] [--state-dir DIR] [--id ID ...] [--json]
+  ade-install hermes-choice {skip,self,ai} [--state-dir DIR] [--json]
+  ade-install keys [--root DIR] [--json] [--keys-state PATH]
+  ade-install keys-plan [--root DIR] [--json] [--state PATH]
+  ade-install keys-collect [--root DIR] [--json] [--keys-state PATH]  # batch `sudo-secretspec set`; terminal only
+  ade-install verify-key PROVIDER  # fixed metadata probe under sudo-secretspec run; see --help
+  ade-install apply [--root DIR] [--json] [--dry-run|--yes] [--id ID ...] [--force]
+                    [--system] [--print-system-argv] [--apply-system]
+
+Doctor runs recorded probe_argv when present (else PATH presence) and, when
+agents/claude/settings.json.tmpl is under --root, checks live
+~/.claude/settings.json for context_size_nudge.py registration; also probes
+credential-bak delete-after (WARN approaching / FAIL past; never deletes);
+never repairs or mutates settings. Keys runs sudo-secretspec check, then per-key
+verify_argv under sudo-secretspec run when recorded (no values printed).
+Apply defaults to --dry-run; --yes runs user install_argv for known missing
+components. Unknown/error observations block unless --force explicitly requests
+repair; --force retains component choices and system authority. --system --dry-run /
+--print-system-argv preview system_argv. Live system_argv needs --yes --system
+--apply-system (default refuse). Secrets are never read.
+update executes each candidate's own update_argv with evidence (S4): default
+--dry-run previews; --yes runs the argv (never shell strings; system_argv is
+never touched), observes before/after, runs a scoped doctor over the updated
+ids, retries each doctor-failing component ONCE and reports (never rolls back),
+and writes evidence to <state>/updates.json. See docs/install-catalog.md.
+Default catalog reads adopt effective install/keys metadata; explicit library
+install_path reads retain the legacy unified-presence refusal. No writer expansion.
+See docs/install-catalog.md.
+"""
+from __future__ import annotations
+
+import sys
+
+if sys.version_info < (3, 11):
+    print(
+        "ade-install requires Python 3.11+ (running "
+        f"{sys.version_info[0]}.{sys.version_info[1]}). "
+        "Make a supported python3 available on PATH, or run the cold-start "
+        "bridge `sh bin/ade-bootstrap` (preview first; uv-only, user-scoped), "
+        "then rerun. No installation was attempted.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def print_first_run_guidance() -> None:
+    print(
+        "ADE first-run checklist (guidance only; no changes made).\n"
+        "Prerequisite: Python 3.11+ available as python3 on PATH.\n"
+        "From the cloned repository, validate and preview:\n"
+        "  ./bin/ade-install check\n"
+        "  ./bin/ade-install plan\n"
+        "  ./bin/ade-install apply --dry-run\n"
+        "To install missing Just explicitly when ready:\n"
+        "  ./bin/ade-install apply --yes --id just\n"
+        "No Python 3.11+? Preview `sh bin/ade-bootstrap` (uv-only, user-scoped, "
+        "explicit --yes); with Python, `bin/ade-install python` and "
+        "`bin/ade-install bootstrap` are the explicit steps. These direct "
+        "commands do not require Just. Nothing runs automatically."
+    )
+
+
+# A cold no-argument run must not import repository modules or create bytecode.
+if __name__ == "__main__" and len(sys.argv) == 1:
+    print_first_run_guidance()
+    raise SystemExit(0)
+
+
+import argparse
+import json
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+if __name__ == "__main__" and any(command in sys.argv[1:] for command in ("update-plan", "update", "bootstrap", "keys-plan", "python")):
+    # Cover argparse's accepted option abbreviations without duplicating its
+    # grammar. Suppressing bytecode if an argument value matches is harmless.
+    sys.dont_write_bytecode = True
+
+import ade_install as ai  # noqa: E402
+
+
+def _print_json(obj: object) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install check: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({"ok": True, "summary": ai.catalog_summary(catalog)})
+    else:
+        s = ai.catalog_summary(catalog)
+        print("ade-install check: OK")
+        print(f"  path={s['path']}")
+        print(f"  components={s['components']} keys={s['keys']} logins={s['logins']} "
+              f"jobs={s.get('jobs', 0)} retired_jobs={s.get('retired_jobs', 0)}")
+        print(f"  by_class={s['by_class']}")
+        if s.get("jobs_by_owner"):
+            print(f"  jobs_by_owner={s['jobs_by_owner']}")
+    return 0
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+    except ai.InstallError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "summary": ai.catalog_summary(catalog),
+            "component": catalog.components,
+            "key": catalog.keys,
+            "login": catalog.logins,
+        })
+    else:
+        s = ai.catalog_summary(catalog)
+        print(f"ade-install catalog: {s['components']} components, {s['keys']} keys, {s['logins']} logins")
+        for row in catalog.components:
+            chosen = row.get("chosen")
+            ch = "" if chosen is None else f" chosen={chosen}"
+            argv = " argv" if row.get("install_argv") else ""
+            sys_flag = " needs_system" if row.get("needs_system") else ""
+            print(f"  [{row['class']}] {row['id']}{ch}{argv}{sys_flag}")
+        print("keys:")
+        for row in catalog.keys:
+            print(f"  {row['name']} (reference only)")
+        print("logins:")
+        for row in catalog.logins:
+            print(f"  {row['id']}")
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        steps = ai.plan(catalog)
+    except ai.InstallError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "steps": steps,
+            "note": "print-only; ade-install apply --dry-run|--yes executes install_argv",
+        })
+    else:
+        print(f"ade-install plan: {len(steps)} step(s) (print-only; does not install)")
+        for step in steps:
+            print(f"  {step['action']}: {step['id']} — {step['reason']}")
+    return 0
+
+
+def cmd_update_plan(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        steps = ai.update_plan(catalog)
+    except ai.ac.ConfigError as error:
+        if args.json:
+            _print_json({"mode": "plan-only", "errors": [str(error)]})
+        else:
+            print(str(error), file=sys.stderr)
+        return 1
+    note = (
+        "configured candidates only; installed/version/activity/ownership and root effects unknown; "
+        "no execution authorized, no probes or changes"
+    )
+    if args.json:
+        _print_json({"mode": "plan-only", "steps": steps, "note": note})
+    else:
+        print(f"ade-install update-plan: {len(steps)} component(s); {note}")
+        for step in steps:
+            managed = "unknown" if step["owner_managed"] is None else "true"
+            flags = f"needs_system={str(step['needs_system']).lower()} owner_managed={managed}"
+            print(f"  {step['action']}: {step['id']} ({flags}) — {step['reason']}")
+            if "argv" in step:
+                print("    argv=" + json.dumps(step["argv"]))
+    return 0
+
+
+def cmd_verify_key(args: argparse.Namespace) -> int:
+    return ai.verify_key_metadata(args.provider)
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    if args.yes and args.dry_run_flag:
+        print("ade-install update: refuse both --yes and --dry-run", file=sys.stderr)
+        return 2
+    dry_run = not args.yes  # default dry-run; --yes executes
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        report, rc = ai.apply_updates(
+            catalog,
+            dry_run=dry_run,
+            ids=set(args.id) if args.id else None,
+            prefix=Path(args.prefix) if args.prefix else None,
+            state_path=Path(args.state) if args.state else None,
+        )
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install update: FAIL", file=sys.stderr)
+        return 2
+    mode = "dry-run" if dry_run else "apply"
+    if args.json:
+        _print_json({"ok": rc == 0, "mode": mode, **report})
+    else:
+        label = "OK" if rc == 0 else "FAIL"
+        print(f"ade-install update ({mode}): {label}")
+        for entry in report["components"]:
+            extra = "" if entry.get("rc") is None else f" rc={entry['rc']}"
+            print(f"  {entry['action']:20} {entry['id']}{extra}")
+            if "argv" in entry:
+                print("    argv=" + json.dumps(entry["argv"]))
+            if entry.get("pre"):
+                print(f"    pre: {entry['pre']['status']} — {entry['pre']['detail'][:160]}")
+            if entry.get("retried"):
+                print(f"    retried once (retry_rc={entry.get('retry_rc')})")
+        doc = report["doctor"]
+        if doc["before_fail"] or doc["after_fail"]:
+            print(f"  doctor before_fail={doc['before_fail']} after_fail={doc['after_fail']}")
+        if not dry_run:
+            print(f"  evidence: {report.get('state_path')}")
+    return rc
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    try:
+        report, rc = ai.bootstrap_just(
+            root=Path(args.root) if args.root else BIN.parent,
+            prefix=Path(args.prefix) if args.prefix else None,
+            yes=args.yes,
+        )
+    except OSError as error:
+        report, rc = {"status": "unknown", "setup_complete": False, "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install bootstrap: {report['status']} (full setup not performed)")
+        print("  " + report.get("reason", report.get("note", "")))
+        for key in ("install_argv", "preview_argv"):
+            if key in report:
+                print(f"  {key}=" + json.dumps(report[key]))
+        if report.get("preview_stdout"):
+            print(report["preview_stdout"])
+        if report.get("preview_stderr"):
+            print(report["preview_stderr"], file=sys.stderr)
+    return rc
+
+
+def cmd_python(args: argparse.Namespace) -> int:
+    """Find or obtain Python 3.11+ via uv (user-scoped); explicit --yes to act."""
+    try:
+        report, rc = ai.acquire_python(
+            state_dir=Path(args.state_dir) if args.state_dir else None,
+            yes=args.yes, recover=args.recover,
+        )
+    except (OSError, ai.InstallError) as error:
+        report, rc = {"status": "unknown", "setup_complete": False, "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install python: {report['status']} (full setup not performed)")
+        print("  " + report.get("reason", report.get("note", "")))
+        for key in ("python", "python_version", "install_argv", "recover_command"):
+            if report.get(key):
+                print(f"  {key}=" + json.dumps(report[key]))
+        if report.get("python") and report["status"] == "ready":
+            print(f"  next: {report['python']} -I {BIN / 'ade-install'} bootstrap --yes")
+    return rc
+
+
+def cmd_hermes_choice(args: argparse.Namespace) -> int:
+    """Record the S3a choice. Never installs, probes, or edits tracked config."""
+    state = Path(args.state_dir) if args.state_dir else None
+    try:
+        path = ai.save_hermes_choice(args.choice, state_dir=state)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+        return 1
+    hint = ai.hermes_setup_hint(args.choice)
+    if args.json:
+        _print_json({"ok": True, "choice": args.choice, "path": str(path), "next": hint})
+    else:
+        print(f"ade-install hermes-choice: recorded {args.choice} at {path}")
+        print(hint)
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    ids = list(dict.fromkeys(args.ids)) if args.ids is not None else None
+    scope = (
+        {"kind": "components", "component_ids": ids}
+        if ids is not None else {"kind": "all"}
+    )
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        observations, rc = ai.doctor(catalog, component_ids=ids)
+        if ids is None:
+            # W18: installation-wide crash leftovers (orphaned pending entries, stale lock holder, temp files).
+            import ade_install_recovery as recovery
+
+            state_obs = recovery.observations(Path(args.state_dir) if args.state_dir else ai.default_state_dir())
+            observations = [*observations, *state_obs]
+            rc = 1 if rc or recovery.failing(state_obs) else 0
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "scope": scope, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install doctor: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "scope": scope,
+            "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in observations
+            ],
+        })
+    else:
+        note = "observe-only; no repair"
+        if ids is not None:
+            note += "; components: " + ", ".join(ids) + "; not whole-installation health"
+        print("ade-install doctor: " + ("OK" if rc == 0 else "FAIL") + " (" + note + ")")
+        for o in observations:
+            print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
+    return rc
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Explicit crash/orphan repair (W18); dry-run unless --yes; never runs from another command."""
+    import ade_install_recovery as recovery
+
+    state = Path(args.state_dir) if args.state_dir else ai.default_state_dir()
+    try:
+        report, rc = recovery.recover(state, yes=args.yes)
+    except (OSError, ai.InstallError) as error:
+        report, rc = {"status": "unknown", "reason": str(error)}, 1
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"ade-install recover: {report['status']}")
+        if report.get("reason"):
+            print("  " + report["reason"])
+        for f in report.get("findings", []):
+            print(f"  {f['status']:12} {f['kind']}/{recovery.safe(f['id'])}: {recovery.safe(f['detail'])}")
+        for name in report.get("repaired", []):
+            print(f"  repaired     {recovery.safe(name)}")
+        for f in report.get("deferred", []):
+            print(f"  deferred     {f['kind']}/{f['id']}: run `{f['repair']}`")
+        if report.get("would_repair"):
+            print("  rerun with --yes to repair: " + ", ".join(recovery.safe(x) for x in report["would_repair"]))
+    return rc
+
+
+def cmd_keys_plan(args: argparse.Namespace) -> int:
+    try:
+        if args.root == "":
+            raise ai.InstallError("empty --root")
+        catalog = ai.load_catalog(root=Path(args.root) if args.root is not None else None)
+    except ai.InstallError:
+        # Do not echo arbitrary config/error payloads through this reporting path.
+        if args.json:
+            _print_json({"mode": "cached-plan-only", "error": "invalid-catalog"})
+        else:
+            print("ade-install keys-plan: invalid catalog", file=sys.stderr)
+        return 1
+    if args.state == "":
+        cache, status = {}, "invalid"  # explicit empty path: never fall back to live user state
+    else:
+        cache, status = ai.load_keys_plan_cache(
+            Path(args.state) if args.state is not None else ai.default_keys_state_path())
+    result = ai.keys_plan(catalog, cache=cache, cache_status=status)
+    if args.json:
+        _print_json(result)
+    else:
+        print(f"ade-install keys-plan: {result['note']}")
+        print(f"cache={status}; cached_at={result['cached_at'] or 'unknown'}; freshness=unverified; setup_complete=false")
+        for row in result["keys"]:
+            print(f"  {row['action']}: {row['name']} (cached {row['cached_status']})")
+            print(f"    components={','.join(row['components']) or 'unlinked'}; selected={','.join(row['selected_components']) or 'none'}")
+            print(f"    purposes={'; '.join(row['purposes']) or 'UNKNOWN'}")
+            print(f"    create_url={row['create_url'] or 'UNKNOWN'}; gaps={','.join(row['coverage_gaps']) or 'none-recorded'}")
+    return 0
+
+
+def cmd_keys(args: argparse.Namespace) -> int:
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        state = Path(args.keys_state) if getattr(args, "keys_state", None) else None
+        observations, rc = ai.keys_observe(catalog, keys_state_path=state)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install keys: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "observations": [
+                {"kind": o.kind, "id": o.id, "status": o.status, "detail": o.detail}
+                for o in observations
+            ],
+            "note": (
+                "observe-only; sudo-secretspec check then verify_argv under "
+                "sudo-secretspec run; no get/export/set; no values printed"
+            ),
+        })
+    else:
+        print(
+            "ade-install keys: "
+            + ("OK" if rc == 0 else "FAIL")
+            + " (observe-only; no values; verify under sudo-secretspec run when recorded)"
+        )
+        for o in observations:
+            print(f"  {o.status:9} {o.kind}/{o.id}: {o.detail}")
+    return rc
+
+
+def cmd_keys_collect(args: argparse.Namespace) -> int:
+    """Batch-collect missing/failing/expiring selected keys; prompts only at a terminal."""
+    interactive = (not args.json) and sys.stdin.isatty() and sys.stdout.isatty()
+    lines: list[str] = []
+
+    def emit(line: str) -> None:
+        if args.json:
+            lines.append(line)
+        else:
+            print(line, flush=True)
+
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        ai.scrub_key_env(catalog)  # a stale exported NAME must not make a probe pass
+        state = Path(args.keys_state) if getattr(args, "keys_state", None) else None
+        result = ai.keys_collect(catalog, interactive=interactive, emit=emit, keys_state_path=state)
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install keys-collect: FAIL", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json({
+            "ok": result["rc"] == 0,
+            "interactive": result["interactive"],
+            "worklist": result["worklist"],
+            "results": result["results"],
+            "note": "names only; no values read; --json never prompts and never runs set",
+        })
+    return int(result["rc"])
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    if args.yes and args.dry_run_flag:
+        print("ade-install apply: refuse both --yes and --dry-run", file=sys.stderr)
+        return 2
+    if args.print_system_argv and (args.yes or args.apply_system):
+        print(
+            "ade-install apply: --print-system-argv is print-only "
+            "(refuse with --yes / --apply-system)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_system and not args.yes:
+        print(
+            "ade-install apply: --apply-system requires --yes "
+            "(use --system --dry-run or --print-system-argv to preview)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.apply_system and not args.system:
+        # Opt-in live path always implies --system consideration.
+        args.system = True
+    dry_run = not args.yes  # default dry-run; --yes executes
+    if args.reconcile_sched and args.no_reconcile_sched:
+        print("ade-install apply: refuse both --reconcile-sched and --no-reconcile-sched",
+              file=sys.stderr)
+        return 2
+    try:
+        catalog = ai.load_catalog(root=Path(args.root) if args.root else None)
+        ids = set(args.id) if args.id else None
+        prefix = Path(args.prefix) if args.prefix else None
+        if args.print_system_argv:
+            rows = ai.collect_system_argv(catalog, ids=ids, prefix=prefix)
+            if args.json:
+                _print_json({
+                    "ok": all(r.get("ok") for r in rows) if rows else True,
+                    "mode": "print-system-argv",
+                    "results": rows,
+                })
+            else:
+                print(f"ade-install apply (print-system-argv): {len(rows)} row(s)")
+                for row in rows:
+                    extra = ""
+                    if row.get("argv"):
+                        extra = " argv=" + " ".join(row["argv"])
+                    print(f"  {row['action']:18} {row['id']}: {row['reason']}{extra}")
+            # Missing platform argv is a soft miss (exit 1); print-only never installs.
+            return 0 if all(r.get("ok") for r in rows) or not rows else 1
+        reconcile_sched = None
+        if getattr(args, "reconcile_sched", False):
+            reconcile_sched = True
+        if getattr(args, "no_reconcile_sched", False):
+            reconcile_sched = False
+        results, rc = ai.apply(
+            catalog,
+            dry_run=dry_run,
+            ids=ids,
+            force=args.force,
+            allow_system=args.system,
+            apply_system=args.apply_system,
+            state_dir=Path(args.state_dir) if args.state_dir else None,
+            prefix=prefix,
+            reconcile_sched=reconcile_sched,
+        )
+    except ai.InstallError as e:
+        if args.json:
+            _print_json({"ok": False, "errors": [str(e)]})
+        else:
+            print(str(e), file=sys.stderr)
+            print("ade-install apply: FAIL", file=sys.stderr)
+        return 2
+    mode = "dry-run" if dry_run else ("yes+apply-system" if args.apply_system else "yes")
+    if args.json:
+        _print_json({
+            "ok": rc == 0,
+            "mode": mode,
+            "results": results,
+        })
+    else:
+        label = "OK" if rc == 0 else ("REFUSED" if rc == 2 else "FAIL")
+        print(f"ade-install apply ({mode}): {label}")
+        for row in results:
+            extra = ""
+            if row.get("argv"):
+                extra = " argv=" + " ".join(row["argv"])
+            print(f"  {row['action']:14} {row['id']}: {row['reason']}{extra}")
+    return rc
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        print_first_run_guidance()
+        return 0
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--root", default=argparse.SUPPRESS,
+                        help="repository root; before/after command, last explicit wins")
+    parser = argparse.ArgumentParser(
+        prog="ade-install",
+        description="Install catalog, plan, observe-only doctor, and bounded user-scoped apply.",
+        parents=[shared],
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    for name, func, help_text in (
+        ("check", cmd_check, "validate config/install.toml"),
+        ("catalog", cmd_catalog, "list components, key references, and login checks"),
+        ("plan", cmd_plan, "print-only install plan (no writes)"),
+        ("update-plan", cmd_update_plan, "configured dependency update candidates only; no probes or writes"),
+        ("keys-plan", cmd_keys_plan, "cached selected-key worklist; no probes, credential entry or writes"),
+        ("doctor", cmd_doctor,
+         "run probe_argv / PATH presence, Claude context_size_nudge, credential-bak delete-after, advisory UNACCEPTED Pi pools; never repairs"),
+        ("keys-collect", cmd_keys_collect,
+         "batch sudo-secretspec set for missing/failing/expiring selected keys (terminal only; --json lists, never prompts)"),
+        (
+            "keys",
+            cmd_keys,
+            "sudo-secretspec check + per-key verify_argv under run; never prints values",
+        ),
+    ):
+        p = sub.add_parser(name, parents=[shared], help=help_text)
+        p.add_argument("--json", action="store_true")
+        if name == "keys-plan":
+            p.add_argument("--state", help="existing nonsecret keys.json (default ADE_KEYS_STATE_PATH or user state); never refreshed")
+        if name == "doctor":
+            p.add_argument("--state-dir", help="install state/ledger directory to scan for crash leftovers (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
+            p.add_argument(
+                "--id", dest="ids", action="append",
+                help="check only this component (repeatable); skips installation-wide checks",
+            )
+        if name in ("keys", "keys-collect"):
+            p.add_argument(
+                "--keys-state",
+                default=None,
+                help="outcomes JSON path (default ~/.local/state/djbclark-ade/keys.json "
+                "or ADE_KEYS_STATE_PATH); never stores values",
+            )
+        p.set_defaults(func=func)
+
+    vp = sub.add_parser("verify-key", help="fixed metadata-authentication probe; reads injected environment only; no output except the allowlisted expiring marker")
+    vp.add_argument("provider", choices=("openai", "openrouter", "anthropic", "gemini", "deepseek", "cursor", "github", "telegram"))
+    vp.set_defaults(func=cmd_verify_key)
+
+    up = sub.add_parser(
+        "update",
+        parents=[shared],
+        help=(
+            "S4: execute each candidate's own update_argv with evidence; "
+            "--dry-run (default) or --yes; one doctor-driven retry per component"
+        ),
+    )
+    up.add_argument("--json", action="store_true")
+    mode = up.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print candidates with pre-observation and exact argv; run nothing, write nothing (default)",
+    )
+    mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="execute recorded update_argv (user scope only; never system_argv), scoped doctor + one retry, evidence to updates.json",
+    )
+    up.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        help="limit to this component id (repeatable)",
+    )
+    up.add_argument(
+        "--state",
+        default=None,
+        help="evidence JSON path (default: ~/.local/state/djbclark-ade/updates.json); written only with --yes",
+    )
+    up.add_argument(
+        "--prefix",
+        default=None,
+        help="user prefix for {prefix} token (default: ~/.local/bin)",
+    )
+    up.set_defaults(func=cmd_update, dry_run_flag=False)
+
+    bp = sub.add_parser("bootstrap", parents=[shared], help="explicit Just bootstrap followed only by installation preview")
+    bp.add_argument("--json", action="store_true")
+    bp.add_argument("--prefix", help="user Just destination (default: ADE_INSTALL_PREFIX or ~/.local/bin)")
+    mode = bp.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or downloads (default)")
+    mode.add_argument("--yes", action="store_true", help="install missing Just, verify it, then run only the installation preview")
+    bp.set_defaults(func=cmd_bootstrap)
+
+    pp = sub.add_parser("python", help="find or obtain Python 3.11+ with uv (user-scoped, explicit --yes; never pip/sudo)")
+    pp.add_argument("--json", action="store_true")
+    pp.add_argument("--state-dir", help="ledger/state directory (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
+    pp.add_argument("--recover", action="store_true", help="verify and clear a pending acquisition left by an interrupted run (never re-downloads)")
+    pmode = pp.add_mutually_exclusive_group()
+    pmode.add_argument("--dry-run", action="store_true", help="plan only; no subprocesses or writes (default)")
+    pmode.add_argument("--yes", action="store_true", help="acquire if missing, verify, and record in the install ledger")
+    pp.set_defaults(func=cmd_python)
+
+    rp = sub.add_parser("recover", help="W18: repair crash leftovers (orphaned pending ledger entries, stale lock holder, half-written temp files); dry-run unless --yes; never re-runs an install")
+    rp.add_argument("--json", action="store_true")
+    rp.add_argument("--state-dir", help="ledger/state directory (default: ADE_INSTALL_STATE_DIR or ~/.local/state/djbclark-ade/install)")
+    rmode = rp.add_mutually_exclusive_group()
+    rmode.add_argument("--dry-run", action="store_true", help="report only (default)")
+    rmode.add_argument("--yes", action="store_true", help="relabel orphaned pending entries `interrupted`, quarantine temp files, keep all evidence")
+    rp.set_defaults(func=cmd_recover)
+
+    hc = sub.add_parser(
+        "hermes-choice",
+        help="record the S3a Hermes choice (skip, self, ai); installs nothing",
+    )
+    hc.add_argument("choice", choices=ai.HERMES_CHOICES)
+    hc.add_argument("--json", action="store_true")
+    hc.add_argument(
+        "--state-dir",
+        default=None,
+        help="choice directory (default: the install ledger dir or ADE_INSTALL_STATE_DIR)",
+    )
+    hc.set_defaults(func=cmd_hermes_choice)
+
+    ap = sub.add_parser(
+        "apply",
+        parents=[shared],
+        help=(
+            "bounded apply: --dry-run (default) or --yes; "
+            "--system previews system_argv; --apply-system opts into live system_argv"
+        ),
+    )
+    ap.add_argument("--json", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="print planned install_argv; change nothing (default when --yes is absent)",
+    )
+    mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="execute recorded install_argv for missing expected components",
+    )
+    ap.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        help="limit to this component id (repeatable)",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="explicit repair/reinstall when present or probe is unknown/error; retains system authority checks",
+    )
+    ap.add_argument(
+        "--system",
+        action="store_true",
+        help=(
+            "consider system_argv: with --dry-run preview as would-system-install; "
+            "with --yes alone still refuse; with --yes --apply-system execute"
+        ),
+    )
+    ap.add_argument(
+        "--print-system-argv",
+        action="store_true",
+        help="print-only: dump platform system_argv for needs_system rows; never execute",
+    )
+    ap.add_argument(
+        "--apply-system",
+        action="store_true",
+        help=(
+            "operator opt-in: with --yes (and --system), execute system_argv via argv "
+            "list (never shell); default without this flag is refuse-system-exec"
+        ),
+    )
+    ap.add_argument(
+        "--state-dir",
+        default=None,
+        help="ledger directory (default: ~/.local/state/djbclark-ade/install or ADE_INSTALL_STATE_DIR)",
+    )
+    ap.add_argument(
+        "--prefix",
+        default=None,
+        help="user install prefix for {prefix} token (default: ~/.local/bin)",
+    )
+    ap.add_argument(
+        "--reconcile-sched",
+        action="store_true",
+        help=(
+            "after component steps, run ade-sched reconcile for ADE-owned labeled "
+            "jobs (default on for a full apply with no --id)"
+        ),
+    )
+    ap.add_argument(
+        "--no-reconcile-sched",
+        action="store_true",
+        help="skip the post-apply ade-sched reconcile step",
+    )
+    ap.set_defaults(
+        func=cmd_apply,
+        dry_run_flag=False,
+        yes=False,
+        print_system_argv=False,
+        apply_system=False,
+        reconcile_sched=False,
+        no_reconcile_sched=False,
+    )
+
+    args = parser.parse_args(argv)
+    args.root = getattr(args, "root", None)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

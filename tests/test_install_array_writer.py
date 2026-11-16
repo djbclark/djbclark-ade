@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
 BIN = REPO / "bin"
 sys.path.insert(0, str(BIN))
 import ade_config as ac  # noqa: E402
@@ -28,7 +29,7 @@ def tree(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     for name in ("ade.schema.json", "install.schema.json", "context-budget.toml"):
-        shutil.copy2(REPO / "config" / name, root / "config" / name)
+        shutil.copy2(LEGACY_ROOT / name, root / "config" / name)
     shutil.copy2(REPO / "tests/fixtures/install_catalog/minimal.toml", root / "config/install.toml")
     home = tmp_path / "home"
     home.mkdir()
@@ -192,7 +193,7 @@ def test_unified_component_and_job_rows(tree):
 
 def test_real_catalog_job_choice_roundtrip(tree):
     root, home = tree
-    shutil.copy2(REPO / "config/install.toml", root / "config/install.toml")
+    shutil.copy2(LEGACY_ROOT / "install.toml", root / "config/install.toml")
     text = (root / "config/install.toml").read_text()
     job = next(j for j in tomllib.loads(text)["install"]["jobs"] if "chosen" in j)
     flipped = not job["chosen"]
