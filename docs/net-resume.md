@@ -97,6 +97,19 @@ archived predecessors, so the job needs no reinstall. If the chain ends at an ar
 `load-watch` stopped the job. A Paseo outage (the lead is unreadable and `ls -a` fails too), an unreadable-but-listed lead and a cyclic ledger are still exit 2. Exit 0 hides a retired lead from `load-watch`: watch the `skip-lead-retired` row. Details:
 [self-session.md](self-session.md) C0a.
 
+## Transitions before exhaustion (`--transition-below`, 2026-11-16)
+
+The operator's rule: no agent should run out of tokens; every agent should transition in time. So the job also runs a
+**preventive** pass. `--transition-below PERCENT` reads each live agent's aiuse account (a Pi agent's account or pool is
+the first segment of its model, so a named account such as `opencode-go-djbclark` matches its own row) and asks every
+agent whose lowest window is at or below that percent to hand off or switch account **now**, with its checkpoint and the
+same report path.
+
+**No agent is special.** The message, the threshold and the 600 s per-agent gap are identical for a lead and a worker,
+and the pass covers the current lead exactly like a descendant (`in_chain`): during the 2026-11-16 incident the lead
+itself hit a 5-hour window and only a manual switch kept the project moving. A dry run records `would-transition`
+instead of sending. The template fills `__TRANSITION__`; a low percentage transitions late, a high one often.
+
 ## Quota resume (`--quota`, 2026-11-12)
 
 Session-guard resumes a quota-failed agent only when Paseo's `provider.usage.list` has a usage entry for the

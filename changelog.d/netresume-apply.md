@@ -1,3 +1,3 @@
 ### Changed
 
-- `ade-net-resume`'s launchd template now runs the quota pass with `--apply`, so a provider-window stop is actually resumed instead of only logged as `would-resume-quota` (operator decision 2026-11-16: quota depletion must not stop the project). The per-pool gap, reservation, re-reads and lineage scoping are unchanged. (#766)
+- `ade-net-resume` resumes a quota-stopped agent instead of only logging `would-resume-quota` (its launchd template now passes `--apply`), and gains a preventive `--transition-below PERCENT` pass that asks every agent whose pool headroom is nearly spent to hand off or switch account before it stops. Eligibility is uniform: the current lead counts exactly like a descendant, so a lead stopped by a provider window is no longer unrecoverable. (#769)

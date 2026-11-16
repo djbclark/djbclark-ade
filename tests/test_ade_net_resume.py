@@ -178,6 +178,46 @@ def test_ineligible_agents(fake, change):
     assert not sent.exists()
 
 
+def test_the_lead_is_eligible_like_any_agent(fake):
+    """No agent is special: a lead stopped by a provider window resumes the same way."""
+    data, scan, sent, _ = fake
+    data["agents"][LEAD]["Status"] = "error"
+    data["logs"] = ERROR
+    assert scan() == 0
+    assert sent.exists()
+
+
+def test_transition_ahead_warns_every_agent_uniformly(quota):
+    """Preventive, and the lead is not special: low headroom asks the lead and a worker alike."""
+    q = quota
+    q["data"]["agents"][LEAD].update(Provider="pi", Model="zai/glm-5.3-flash", Status="idle")
+    q["data"]["agents"][CHILD]["Status"] = "idle"
+    q["data"]["logs"] = ""
+    q["put"](exhausted_account())
+    assert q["scan"](transition_below=90.0) == 0
+    body = q["sent"].read_text()
+    assert LEAD in body and CHILD in body
+
+
+def test_transition_ahead_is_quiet_above_the_threshold(quota):
+    q = quota
+    q["data"]["agents"][LEAD].update(Provider="pi", Model="zai/glm-5.3-flash", Status="idle")
+    q["data"]["agents"][CHILD]["Status"] = "idle"
+    q["data"]["logs"] = ""
+    q["put"](reset_account())
+    assert q["scan"](transition_below=50.0) == 0
+    assert not q["sent"].exists()
+
+
+def test_transition_ahead_is_off_by_default(quota):
+    q = quota
+    q["data"]["agents"][CHILD]["Status"] = "idle"
+    q["data"]["logs"] = ""
+    q["put"](exhausted_account())
+    assert q["scan"]() == 0
+    assert not q["sent"].exists()
+
+
 def test_grandchild(fake):
     data, scan, sent, _ = fake
     data["agents"][MIDDLE] = {"Id": MIDDLE, "ParentAgentId": LEAD, "Archived": False, "Status": "idle"}

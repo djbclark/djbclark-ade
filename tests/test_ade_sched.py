@@ -22,9 +22,12 @@ import ade_sched as S
 
 CLI = REPO / "bin" / "ade-sched"
 PLISTS = sorted([*(REPO / "launchd").glob("*.plist"), *(REPO / "config/launchd").glob("*.plist")])
+TRANSITION = "40"
 SUBST = {"@TARGET@": "claude", "@STATE@": "/st/cpu", "__STATE__": "/st/state", "__REPO__": "/r/ade",
-         "__INDEX_DIR__": "/i/index", "__LEAD__": "11111111-1111-4111-8111-111111111111"}
+         "__INDEX_DIR__": "/i/index", "__LEAD__": "11111111-1111-4111-8111-111111111111",
+         "__TRANSITION__": TRANSITION}
 NASTY = "a&b <c> 'd' %x $y \"z\""
+TRANSITION = "40"
 # (plist stem, backend) pairs that must refuse with 69 rather than render
 REFUSE = {("dev.herdr.server", "cron"),                     # KeepAlive: cron cannot supervise
           ("com.djbclark.load-watch", "cron")}              # StartInterval 20 s: below cron's minute
@@ -228,7 +231,8 @@ def test_net_resume_template_enables_quota_sends(lead, fake, tmp_path):
     argv = doc["ProgramArguments"]
     assert argv == [f"{tmp_path.resolve()}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],   # W21c: every launch is wrapped
                     "com.djbclark.ade-net-resume", "--",
-                    f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota", "--apply"]
+                    f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota", "--apply",
+                    "--transition-below", TRANSITION]
 
 
 def test_unfilled_placeholder_is_exit_2():

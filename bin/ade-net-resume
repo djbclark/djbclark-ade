@@ -47,6 +47,9 @@ HOSTS = {
     "claude": "https://api.anthropic.com/",
     # Pi can route many services; a host cannot be inferred safely from 'pi'.
 }
+TRANSITION_PROMPT = ("provider pool headroom is low; transition now rather than running out: write your "
+                     "checkpoint, hand off to a fresh session or account, and keep the same report path")
+# --transition-below only. Preventive, not remedial: the same message to every agent, lead included.
 QUOTA_PROMPT = ("provider quota window reset; continue from where you stopped, check any interrupted "
                 "operation before retrying, same report path")
 # --quota only. The rendered last line of a real z.ai 5-hour stop (2026-11-12, agent f2802e7c); the
@@ -149,7 +152,8 @@ def transient(provider, logs):
 
 class Scanner:
     def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30, quota=False,
-                 only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None):
+                 only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None,
+                 transition_below=None):
         self.pinned = self.lead = agent_id(lead)  # --lead as installed; scan() follows it to the current lead
         self.leads = frozenset({self.lead})  # the current lead and the archived leads it replaced
         self.state = state
@@ -161,6 +165,7 @@ class Scanner:
         self.quota_per_pool = quota_per_pool
         self.quota_grace = quota_grace_seconds
         self.guard_state = guard_state or Path.home() / ".paseo/plugin-data/session-guard/state.json"
+        self.transition_below = transition_below
         self._aiuse = None
 
     def remaining(self):
@@ -210,6 +215,15 @@ class Scanner:
             raise ScanError("lead state unknown")
         return record
 
+    def in_chain(self, aid):
+        """Every live agent of this chain: the current lead and its descendants.
+
+        No agent is special: the lead is eligible for the same guarded resume as
+        a worker, because a lead stopped by a provider window otherwise had no
+        recovery at all (2026-11-16).
+        """
+        return aid in self.leads or self.descendant(aid)
+
     def descendant(self, aid):
         seen = set(self.leads)
         while aid and aid not in seen:
@@ -223,6 +237,7 @@ class Scanner:
                 return True
             aid = parent
         return False
+
 
     def healthy(self, url):
         # A subprocess deadline also bounds DNS lookup, unlike a socket timeout.
@@ -314,6 +329,74 @@ class Scanner:
             raise ScanError("invalid session-guard state")
         return any(isinstance(p, dict) and p.get("agentId") == aid and p.get("phase") not in GUARD_TERMINAL
                    for p in pauses)
+
+    def account_for(self, record):
+        """The aiuse account behind one agent, whatever its provider shape.
+
+        Pi agents carry their account or pool as the model's first segment
+        (`zai/...`, `opencode-go-djbclark/...`), so a named account is matched by
+        prefix as well as exactly; nothing here distinguishes a lead from a worker.
+        """
+        ident = record.get("Provider") or ""
+        model = record.get("Model") or ""
+        if ident == "pi" and isinstance(model, str) and "/" in model:
+            ident = model.split("/", 1)[0]
+        if not ident:
+            return None
+        self.aiuse_account(ident)  # populate the cached snapshot
+        found = self._aiuse
+        if not isinstance(found, list):
+            return None
+        exact = [a for a in found if isinstance(a, dict) and a.get("provider") == ident]
+        if len(exact) == 1:
+            return exact[0]
+        prefixed = [a for a in found if isinstance(a, dict)
+                    and isinstance(a.get("provider"), str) and a["provider"]
+                    and ident.startswith(a["provider"])]
+        # Longest provider name wins, so opencode-go-djbclark beats a bare opencode-go row.
+        prefixed.sort(key=lambda a: len(a["provider"]), reverse=True)
+        return prefixed[0] if prefixed else None
+
+    def headroom(self, account):
+        """Lowest remaining percentage across the account's windows, or None when unknown."""
+        used = [w.get("used_percent") for w in self.windows(account)]
+        used = [u for u in used if isinstance(u, (int, float)) and not isinstance(u, bool) and math.isfinite(u)]
+        return None if not used else 100.0 - max(used)
+
+    def transition_ahead(self, agents, history, events):
+        """Ask every agent whose pool is nearly spent to transition before it stops.
+
+        Preventive and uniform: the message, the threshold and the gap are the same
+        for a lead and a worker, and a dry run only records the decision.
+        """
+        if self.transition_below is None:
+            return
+        for row in agents:
+            try:
+                if not isinstance(row, dict) or row.get("status") == "closed":
+                    continue
+                aid = agent_id(row.get("id"))
+                if self.only and aid not in self.only:
+                    continue
+                record = self.inspect(aid)
+                if record.get("Archived") is not False or not self.in_chain(aid):
+                    continue
+                left = self.headroom(self.account_for(record))
+                if left is None or left > self.transition_below:
+                    continue
+                last = next((e for e in reversed(events)
+                             if e.get("action") == "transition-requested" and e.get("agent") == aid), None)
+                if last is not None and time.time() - last["time"] < QUOTA_POOL_GAP_SECONDS:
+                    continue
+                if not self.apply:
+                    self.event(history, aid, "would-transition", headroom=round(left, 1))
+                    continue
+                self.event(history, aid, "transition-requested", headroom=round(left, 1))
+                events.append({"agent": aid, "action": "transition-requested", "time": time.time()})
+                self.cli("send", "--json", "--no-wait", "--", aid, TRANSITION_PROMPT, accepted=True)
+                self.event(history, aid, "transition-sent", headroom=round(left, 1))
+            except (ScanError, ValueError, TypeError, AttributeError):
+                self.event(history, row.get("id") if isinstance(row, dict) else None, "unavailable")
 
     def aiuse_account(self, pool):
         """The pool's aiuse account, or None when aiuse is missing, unparseable or ambiguous."""
@@ -472,7 +555,7 @@ class Scanner:
                     continue  # Only an agent we saw fail, not yet resumed and not stale, can be a closed candidate.
                 record = self.inspect(aid)
                 pool = pool_of(record)
-                if record.get("Archived") is not False or pool is None or not self.descendant(aid):
+                if record.get("Archived") is not False or pool is None or not self.in_chain(aid):
                     continue
                 if self.guard_pending(aid):
                     self.note(history, events, aid, "guard-owned", key=str(record.get("UpdatedAt")))
@@ -549,7 +632,7 @@ class Scanner:
                 fresh_logs = self.cli("logs", aid) if status == "error" else None
                 same = (fresh.get("Status") == status and fresh.get("Archived") is False
                         and fresh.get("Provider") == record.get("Provider") and pool_of(fresh) == pool
-                        and fresh.get("UpdatedAt") == updated and self.descendant(aid)
+                        and fresh.get("UpdatedAt") == updated and self.in_chain(aid)
                         and not self.guard_pending(aid))
                 if same and status == "error":
                     same = (quota_line(pool, fresh_logs) and self.signature(fresh, fresh_logs) == signature
@@ -639,7 +722,7 @@ class Scanner:
                         aid = agent_id(row.get("id"))
                         if self.only and aid not in self.only:
                             continue
-                        if not self.descendant(aid):
+                        if not self.in_chain(aid):
                             continue
                         record = self.inspect(aid)
                         provider = record.get("Provider", "")
@@ -671,7 +754,7 @@ class Scanner:
                         # Probe may take seconds: re-read mutable state and ancestry before sending.
                         fresh = self.inspect(aid)
                         if (fresh.get("Status") != "error" or fresh.get("Archived") is not False
-                                or fresh.get("Provider") != provider or not self.descendant(aid)
+                                or fresh.get("Provider") != provider or not self.in_chain(aid)
                                 or not self.recent_error(fresh) or self.delivered(aid, provider)
                                 or self.signature(fresh, self.cli("logs", aid), provider) != signature):
                             self.event(history, aid, "changed")
@@ -689,13 +772,16 @@ class Scanner:
                         self.event(history, row.get("id") if isinstance(row, dict) else None, "unavailable")
                 if self.quota:
                     self.quota_scan(agents, history, events)
+                # Preventive pass: every agent, lead included, is asked to transition
+                # while it still has budget rather than after the window stops it.
+                self.transition_ahead(agents, history, events)
 
         return 0
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lead", required=True, help="full UUID; only descendants are eligible")
+    parser.add_argument("--lead", required=True, help="full UUID; every live agent in this chain is eligible")
     parser.add_argument("--apply", action="store_true", help="send the fixed continuation prompt")
     parser.add_argument("--state-dir", type=Path, default=Path.home()/".local/state/ade/net-resume",
                         help="shared cap ledger and lock; use the same directory for every invocation")
@@ -708,6 +794,8 @@ def main(argv=None):
     parser.add_argument("--quota-per-pool", type=int, default=1, metavar="N",
                         help="at most N quota resumes per pool per scan (default 1); dry-run counting only, "
                              "the 600 s pool gap limits --apply")
+    parser.add_argument("--transition-below", type=float, metavar="PERCENT",
+                        help="ask every agent whose pool headroom is at or below this percent to hand off or switch now")
     parser.add_argument("--quota-grace-seconds", type=float, default=60, metavar="SECONDS",
                         help="wait this long past a window's reset before resuming (default 60)")
     parser.add_argument("--only-agent", action="append", default=[], metavar="UUID",
@@ -725,7 +813,8 @@ def main(argv=None):
         parser.error("watch must be 1..3600 seconds")
     try:
         scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120, args.max_error_age_minutes,
-                          args.quota, args.only_agent, args.quota_per_pool, args.quota_grace_seconds)
+                          args.quota, args.only_agent, args.quota_per_pool, args.quota_grace_seconds,
+                          transition_below=args.transition_below)
         while True:
             rc = scanner.scan()
             if not args.watch:
