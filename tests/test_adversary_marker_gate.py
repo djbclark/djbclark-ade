@@ -1438,6 +1438,9 @@ def test_a_huge_tracked_path_is_cut_off_not_quadratic(live):
     "{ { cd real; cd decoy && true & }; }; cd sub; " + G,
     "cd real; cd decoy &&\ntrue &\ncd sub; " + G,                                          # r8 A5: `&&` NEWLINE is one shlex token
     "cd real; cd decoy ||\ntrue &\ncd sub; " + G,
+    "cd real; cd decoy && (true) & cd sub; " + G,                                          # r9 C1: `)` restores the outer list start
+    "cd real && ( cd decoy && true & cd sub; " + G + " )",                                  # r9 C2: `(` starts a fresh list
+    "cd real && { cd decoy && true & cd sub; " + G + "; }",                                 # r9 C3: `{` starts a fresh list
 ])
 def test_a_background_and_or_list_started_after_a_semicolon_or_inside_a_group_ran_in_the_background(live, command):
     """Adversary r8 A4/A5 (std layout): the list before `&` starts at the last `;`/newline at ITS brace level, and `&&` NEWLINE continues it."""
@@ -1546,7 +1549,8 @@ def test_a_noclobber_redirect_does_not_make_the_cd_before_it_unsure(live):
 
 def test_the_physical_walk_stops_after_its_component_and_link_caps(live):
     """Adversary r8 A3: bounded by components as well as by links (a link target such as `x/..` x 200 multiplies the work)."""
-    assert gate.History().walk("/" + "/".join(["."] * (gate.MAX_STEPS + 10))) == ""
+    h = gate.History()
+    assert h.walk("/" + "/".join(["."] * (gate.MAX_STEPS + 10))) == "" and h.overflow      # past the cap: a deny, not a dropped option (r9 A3)
     assert gate.History().walk(str(live / "a" / ".." / "b")) == str(live / "b")
 
 
@@ -1572,3 +1576,90 @@ def test_the_collector_stops_reading_when_the_clock_ran_out_after_the_split(live
     monkeypatch.setattr(gate, "split_pipelines", slow_split)
     result = gate.judge("cd . ; " + G, str(live), gate._checker)
     assert result and "can follow in time" in result, result
+
+
+@pytest.mark.parametrize("command", [
+    "2>/dev/null gh pr create --body-file sub/b.md",                                       # r9 A4: a redirect at the start hides the command word
+    "2>&1 gh pr create --body-file sub/b.md",
+    "0</dev/null gh pr create --body-file sub/b.md",
+    "{fd}</dev/null gh pr create --body-file sub/b.md",
+    "2>/dev/null gh api repos/o/r/issues/1/comments -F body=@sub/b.md",
+    "true;</dev/null gh pr create --body-file sub/b.md",                                   # a separator glued to the redirect
+    "true\n</dev/null gh pr create --body-file sub/b.md",
+    "(</dev/null gh pr create --body-file sub/b.md)",
+    "false ||</dev/null gh pr create --body-file sub/b.md",
+    "true |</dev/null gh pr create --body-file sub/b.md",
+    "true;>/dev/null cd sub; " + G,
+    "true;</dev/null cd sub; " + G,
+    "(>/dev/null cd sub; " + G + ")",
+    "{ true;>/dev/null cd sub; " + G + "; }",
+    "false ||>/dev/null cd sub; " + G,
+    "true;<<<x cd sub; " + G,
+    "2>/dev/null cd sub; " + G,
+    "true; 2>&1 cd sub; " + G,
+])
+def test_a_redirect_at_the_start_of_a_command_does_not_hide_the_command(live, command):
+    """Adversary r9 A4: `2>/dev/null gh ...` took the `2` for the command; `;</dev/null gh ...` was one punctuation token."""
+    _top_tree(live)
+    assert run(command, cwd=live), command
+    _top_tree(live, live_is_sub=False)
+    assert run(command, cwd=live) is None, command
+
+
+def test_the_split_of_a_punctuation_run_follows_the_shells_own_lexing():
+    s = gate.split_redirects
+    assert s([";</dev/null"]) == [";</dev/null"]                    # not one token (a word is glued): untouched
+    assert s([";<"]) == [";", "<"] and s(["&&>"]) == ["&&", ">"] and s(["&<"]) == ["&", "<"] and s([";&>"]) == [";", "&>"]
+    assert s(["\n<"]) == ["\n", "<"] and s(["(<"]) == ["(", "<"] and s(["||<"]) == ["||", "<"]
+    assert s(["&&\n"]) == ["&&\n"] and s(["<("]) == ["<("] and s(["|&"]) == ["|&"] and s([">|"]) == [">|"] and s([";;"]) == [";;"]
+
+
+@pytest.mark.parametrize("cause", ["longcd", "decoys", "clock"])
+@pytest.mark.parametrize("tail", [
+    "gh \\\npr create --body-file b.md",                                                    # a backslash-newline: the loose regex does not cross it
+    "gh pr -R o/r create --body-file b.md",
+    "bash <<'S'\ngh \\\npr create --body-file b.md\nS\n",
+    "gh \\\napi repos/o/r/issues/1/comments -F body=@b.md",
+])
+def test_any_overflow_denies_a_write_the_loose_backstop_cannot_see(live, monkeypatch, cause, tail):
+    """Adversary r9 A1: the collector stops reading on an overflow; the verdict must still be a deny for a write spelled so only the token path places."""
+    (live / "b.md").write_text(APPROVE)
+    if cause == "longcd":
+        command = "cd " + "x" * (gate.MAX_PATH + 100) + "; " + tail
+    elif cause == "decoys":
+        command = _decoy_cds(live, gate.MAX_DIRS + 1) + tail
+    else:
+        monkeypatch.setattr(gate, "MAX_SECONDS", 0.0)
+        command = "cd .; " + tail
+    result = gate.judge(command, str(live), gate._checker)
+    assert result, (cause, tail)
+
+
+def test_an_overflow_on_a_command_that_only_contains_gh_inside_a_word_is_no_deny(live):
+    """The overflow deny is for a command that names `gh` as a word (`high` is not one)."""
+    command = "".join("false && cd e%d; " % i for i in range(gate.MAX_DIRS + 1)) + "echo high through"
+    for i in range(gate.MAX_DIRS + 1):
+        (live / ("e%d" % i)).mkdir(exist_ok=True)
+    assert gate.judge(command, str(live), gate._checker) == ""
+
+
+def test_a_padded_command_does_not_make_the_loose_gh_regexes_quadratic(live):
+    """Adversary r9 A2: `(?:-\\S+\\s+)*` at every `gh` made 150 KB of `-/gh ` cost 35 s (past the hook's timeout, which fails open)."""
+    (live / "F").mkdir()
+    (live / "F" / "b.md").write_text(APPROVE)
+    for n in (19900, 30000):
+        result, took = _seconds("cd F; gh pr create --body-file b.md; echo " + "-/gh " * n, live)
+        assert result and took < 5, (n, took)
+
+
+def test_apply_resolves_a_physical_dotdot_with_the_bounded_walk_not_realpath(live, monkeypatch):
+    """Adversary r9 C4: nothing pinned that `apply` goes through `History.walk`; `os.path.realpath` here would raise."""
+    (live / "real" / "inner").mkdir(parents=True)
+    (live / "real" / "b.md").write_text(APPROVE)
+    (live / "b.md").write_text("prose only")
+    os.symlink("real/inner", live / "L1")
+
+    def boom(path, *a, **k):
+        raise AssertionError("os.path.realpath used")
+    monkeypatch.setattr(os.path, "realpath", boom)
+    assert gate.judge("cd -P L1/..; " + G, str(live), gate._checker)

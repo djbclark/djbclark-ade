@@ -84,12 +84,13 @@ MAX_READS = 5000            # past either (or a tracked path over MAX_PATH), the
 MAX_PATH = 4096
 MAX_WORK = 30000            # sum over a command's `cd`s of (candidate directories x components of the target); past it the write is denied
 MAX_LINKS = 40               # symlinks one physical `..` resolution follows (the kernel's own limit is of this order); past it the physical option is dropped
-MAX_STEPS = 4096            # path components one physical resolution walks
+MAX_STEPS = 65536           # path components one physical resolution walks (40 links x a 1,024-byte target is under it); past it: a deny
 MAX_SECONDS = 4.0           # wall-clock budget of the cd tracking (the hook's own timeout is 15 s and fails open); past it the write is denied
 PUNCT = ";&|()<>`\n"
 # the lenient split's separator runs: a `&` that is not part of `>&`, `<&`, `&>` (a redirect) is one; `&&` always is
 SEPARATORS = r"((?:&&|(?<![<>])&(?!>)|[;|()`\n])+)"
 # the redirect operators (a run of `<>&` that is none of them is a separator, then a redirect: `&<`, `&&>`)
+FD_WORD = re.compile(r"\d+|\{[A-Za-z_]\w*\}")
 REDIRECTS = {"<", ">", ">>", "<<", "<<<", "<>", ">|", ">&", "<&", "&>", "&>>"}
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -118,10 +119,12 @@ GH_VALUE_FLAGS = {"-R", "--repo", "--hostname", "-H", "--header", "-X", "--metho
                   "--title", "--base", "-B", "--head", "--assignee", "-a", "--label", "-l", "--milestone", "-m",
                   "--project", "-p", "--reviewer", "--comment", "-c", "--reason", "-r"}
 API_BODY_FLAG = re.compile(r"-[fF]|--field|--raw-field|--input")
+# (the flag run between the words is bounded: an unbounded `(?:-\S+\s+)*` at every `gh` made a padded command quadratic, 35 s for 150 KB)
 # the loose forms (a script's argv list, an unparseable command): `gh` then a group and a verb, quotes and commas between
-GH_TEXT_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+)*(?:pr|issue)['",\s]+(?:-\S+\s+)*"""
+GH_TEXT_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+){0,8}(?:pr|issue)['",\s]+(?:-\S+\s+){0,8}"""
                            r"""(?:create|new|edit|comment|review|close|reopen)(?![\w-])""")
-GH_API_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+)*api(?![\w-])""")
+GH_API_LOOSE = re.compile(r"""(?<![\w.-])gh['",\s]+(?:-\S+\s+){0,8}api(?![\w-])""")
+GH_WORD = re.compile(r"(?<![\w.-])gh(?![\w-])")      # linear: `gh` as a word anywhere in the command
 API_FLAG_LOOSE = re.compile(r"""(?<![\w-])(?:-[fF]|--field|--raw-field|--input)""")
 
 
@@ -301,7 +304,7 @@ class History(dict):
 
     def realpath(self, path: str) -> str:
         """The physical path (what `cd -P` reaches), or "" when it cannot be had in bounds: more than MAX_LINKS symlinks (the kernel
-        gives up at 40 too), MAX_STEPS components, or past the clock. `os.path.realpath` has no such limit (one call through a chain of
+        gives up at 32-40 too); more than MAX_STEPS components or the clock running out set `overflow` (a deny) instead. `os.path.realpath` has no such limit (one call through a chain of
         45,000 links took 17 s), so the walk is this one, with a link counter and the clock checked per component."""
         if path not in self.real:
             self.real[path] = self.walk(path)
@@ -311,7 +314,10 @@ class History(dict):
         todo, out, links, steps = path.split("/")[::-1], "/", 0, 0
         while todo:
             steps += 1
-            if steps > MAX_STEPS or (steps % 64 == 0 and self.expired()):
+            if steps > MAX_STEPS:               # a directory the shell may reach is out of reach of this walk: a deny, not a dropped option
+                self.overflow = True
+                return ""
+            if steps % 64 == 0 and self.expired():
                 return ""
             part = todo.pop()
             if part in ("", "."):
@@ -364,16 +370,38 @@ def seg_empty(seg):
     return not (seg["words"] or seg["stdin"] or seg["here"])
 
 
+OPERATORS = ("<<<", "&>>", "&&", "||", "|&", ">>", "<<", ">&", "<&", "&>", ">|", "<>", ";;", "<(", ">(",
+             ";", "&", "|", "(", ")", "<", ">", "`", "\n")         # the shell's own greedy lexing of a punctuation run, longest first
+
+
 def split_redirects(tokens):
-    """A run of `<>&` that is not one redirect operator is a separator followed by one (`&<` is `&` then `<`; `&&>` is `&&` then `>`)."""
+    """shlex makes ONE token of a run of punctuation (`;</dev/null`, `&&>`, `&<`, `(<`): split it the way the shell lexes it, a separator
+    token and each redirect operator its own token (`;` + `<`, `&&` + `>`, `&` + `<`), so a redirect never hides the separator before it
+    nor the command after it. A run without a redirect (`&&\n`, `;;`, `<(`) stays whole."""
     out = []
     for tok in tokens:
-        if tok and set(tok) <= set("<>&") and ("<" in tok or ">" in tok) and tok not in REDIRECTS and tok.startswith("&"):
-            head = "&&" if tok.startswith("&&") else "&"
-            if tok[len(head):] in REDIRECTS:
-                out += [head, tok[len(head):]]
-                continue
-        out.append(tok)
+        if not tok or tok in REDIRECTS or not set(tok) <= set(PUNCT) or not ("<" in tok or ">" in tok):
+            out.append(tok)
+            continue
+        ops, k = [], 0
+        while k < len(tok):
+            op = next((o for o in OPERATORS if tok.startswith(o, k)), tok[k])
+            ops.append(op)
+            k += len(op)
+        if not any(o in REDIRECTS for o in ops):
+            out.append(tok)
+            continue
+        run = ""
+        for op in ops:
+            if op in REDIRECTS:
+                if run:
+                    out.append(run)
+                    run = ""
+                out.append(op)
+            else:
+                run += op
+        if run:
+            out.append(run)
     return out
 
 
@@ -573,6 +601,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             pushd_n = False
             continue
         lead = flags["lead"]
+        if lead and FD_WORD.fullmatch(tok) and i + 1 < len(tokens) and tokens[i + 1] in REDIRECTS:
+            continue                           # `2>/dev/null gh ...`, `{fd}</dev/null cd d`: a file descriptor before a redirect is no command word
         if tok in ("cd", "pushd") and lead:
             want_dir = tok
             continue
@@ -896,8 +926,10 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files, under the directory of the
             # command that runs it (`cd real && bash <<X`); which segment that is, is not tracked, so it is collected once, under the
             # last cwd, and every cwd the command had is tried for its relative operands (`history`)
-            if scan.history.expired():
-                break                          # out of time: the verdict is a deny (judge), whatever is left unread
+            if scan.history.expired():         # out of time or over a cap: stop reading; the verdict is a deny (judge), but only for a gh write,
+                if "gh" in body:               # so a script that names gh counts as one (a linear test: no regex over the body)
+                    scan.write = True
+                break
             if running is None:
                 segs = list(dict.fromkeys(seg["cwd"] for pipe in pipes for seg in pipe.segments))
                 at = [seg["cwd"] for pipe in pipes for seg in pipe.segments][-1:] or [cwd]
@@ -925,7 +957,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
                 for content in found:
                     scan.add(content, raw=raw)
     for pipe in pipes:
-        if scan.history.expired():             # out of time (the cd tracking's clock covers the whole command): stop reading; judge denies a write
+        if scan.history.expired():             # out of time or over a cap: stop reading; judge denies any command that names `gh` as a word (GH_WORD), a write placed or not
             break
         gh = [(seg, gh_invocation(seg["words"])) for seg in pipe.segments]
         writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
@@ -1000,7 +1032,7 @@ def judge(command: str, cwd: str, am_loader) -> str:
         return ""
     scan = Scan(cwd)
     collect(command, cwd, scan)
-    if not scan.write:
+    if not scan.write and not (scan.history.overflow and GH_WORD.search(command)):   # an overflow stops the collector early: the write may be unplaced
         return ""
     am = am_loader()
     # a `gh api` write may carry a GraphQL `query` (`-f query=...`, `-F query=@file`, a `--input` JSON leaf) whose string literals GitHub
