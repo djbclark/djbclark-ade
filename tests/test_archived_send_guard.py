@@ -588,11 +588,23 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f"git commit -m 'about {B}'", []),  # no paseo send in the text: nothing judged
     (f"paseo send --no-wait -- {B} 'moved on: `paseo send {A} hi` is the old way'", []),  # quoted text is no send
     (f'paseo send --no-wait -- {B} --prompt "answer by paseo send: ack {A}"', []),
+    (f'paseo send --json --no-wait "$p" hi; cp agent-reports/{A}/x /tmp/y', []),  # an id in a path component is no send target
+    (f'paseo send "$p" hi; ls /tmp/{A}', []),  # likewise after any `/`
+    (f'paseo send "$p" hi; echo {A}', [A]),  # a bare id beside a built target is still judged
     (f'echo "result: $(paseo send {A} hi)"', []),  # parsed now (the quote closes around the substitution): nothing extra
 ])
 def test_backstop_judges_ids_in_a_command_the_parser_could_not_follow(command, expected):
     found = gate.targets_in_command(command)
     assert [t for t, _ in gate.backstop_targets(command, found)] == expected
+
+
+def test_a_report_path_naming_a_replaced_id_beside_a_built_target_send_is_allowed(world):
+    write_link(world.state, world.home, A, B)
+    world.live(**{A: False, B: False})
+    ok = f'p={B}; paseo send --json --no-wait "$p" --prompt done; cp agent-reports/{A}/x /tmp/y'
+    assert run_hook(world, "Bash", {"command": ok}) is None
+    bad = f'p={B}; paseo send --json --no-wait "$p" --prompt done; echo took over from {A}'
+    assert denial(run_hook(world, "Bash", {"command": bad}))  # not in a path: still judged
 
 
 def test_the_hook_denies_a_send_hidden_in_a_quoted_substitution(world):

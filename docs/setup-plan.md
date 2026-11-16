@@ -133,7 +133,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
         options, not hard dependencies. The subscriptions remain the user's own; logging in is the
         user's step (S3.5), and installing a client establishes no entitlement.
       - **The skill roots:** this repo, a site repository (site-djbclark for this operator, `[install.site_repo]` for
-        another user), and `skills-lock.json`'s external skills (today `fastino-glide`), all linked by
+        another user), and `skills-lock.json`'s external skills (none today: `fastino-glide` was removed 2026-11-15), all linked by
         `bin/skill-everywhere --all`.
       - **Repo-local state:** the scheduled jobs `bin/ade-sched` renders (launchd, systemd user timers or cron), the
         hook and secret-deny templates (`bin/ade-template-check`), and the `.claude/settings.json` mirror of the Paseo
