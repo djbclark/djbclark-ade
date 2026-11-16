@@ -103,9 +103,54 @@ response. Google free-tier multi-step runs need pacing. OpenAI API spending
 and Anthropic API balance were independently blocked; their vendor monthly
 pools are separate. Zen free rejected its free quota. OpenRouter's tested
 shared free models did not establish a reliable task loop. Venice spending
-is deliberately disabled; ClinePass remains reserved for Hermes/Hindsight.
+is deliberately disabled; ClinePass automatic spending remains reserved for
+Hermes/Hindsight (manual Pi exception below).
 These observations are dated acceptance results, not universal entitlement
 or billing guarantees. Runtime profiles require their own smoke checks.
+
+## ClinePass emergency manual access (2026-11-15)
+
+The operator authorized manual Pi selection of the primary ClinePass account.
+`pi-extensions/clinepass/index.mjs` registers provider `clinepass`, using Pi's
+built-in OpenAI Chat Completions streamer against `https://api.cline.bot/api/v1`.
+It resolves `CLINE_API_KEY` through `sudo-secretspec` at request time. No key is
+stored in settings or source. The operator subsequently authorized the second
+account: provider `clinepass-t-e` resolves only `CLINE_PASS_KEY_2_TE`. Select
+`clinepass-t-e/cline-pass/deepseek-v4.1-flash` for that account. Both provider
+identities persist in session history; neither switches accounts automatically.
+The t-e account also passed native read/write tools and a saved-session
+continuation using DeepSeek V4.1 Flash.
+Missing credentials, authentication failures and exhausted balance are visible
+Pi errors, without switching to another provider.
+
+The 15 text/tool model definitions in `pi-extensions/clinepass/models.json` are
+from [Cline's generated subscription catalog](https://github.com/cline/cline/blob/main/sdk/packages/llms/src/catalog/catalog.generated.ts),
+checked 2026-11-15 against its [ClinePass guide](https://docs.cline.bot/getting-started/clinepass).
+They retain the literal `cline-pass/` wire namespace and published context/output
+limits. Input is conservatively text-only; image support is not qualified here.
+Zero cost metadata denotes subscription billing, not unlimited quota or measured
+debit. General `/models` discovery includes pay-as-you-go models and is not used
+as subscription entitlement evidence. Catalog membership does not establish
+account-level availability of every model; the live check used DeepSeek only.
+
+Add this extension's absolute `index.mjs` path to Pi's user extension list using
+its public `SettingsManager` (`getExtensionPaths`, `setExtensionPaths`, `flush`),
+preserving all other settings. Explicit CLI selection is
+`pi --provider clinepass --model cline-pass/deepseek-v4.1-flash`;
+Paseo's provider/model identifier is `pi/clinepass/cline-pass/deepseek-v4.1-flash`.
+Existing interactive Pi sessions need `/reload` to discover the new extension.
+No running agents are restarted. This does not change the new-session default.
+
+ClinePass stays in `never_route` and out of ADE Auto. The previous reservation
+for Hermes/Hindsight continues to apply to automatic spending; this manual
+exception spends the same subscription allowance. Rollback removes only this
+extension path from the current extension list, retaining all later settings,
+credentials and session history.
+
+Live evidence: the primary key completed a streamed DeepSeek V4.1 Flash request;
+a native Pi session executed `read` and `write` tools. The first response omitted
+the source's trailing newline; a follow-up after reopening the saved session
+corrected it byte-for-byte and recalled the earlier nonce. No other model is live-qualified.
 
 ## Optional SIPB request-shape diagnostics
 
