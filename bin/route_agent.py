@@ -998,7 +998,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         stale = ((row_age is None or row_age > STALE_SOFT)
                  or row.get("reading_expired") is True)
         head = _pct(row.get("headroom_percent"))
-        if ("usable_now" in row and row["usable_now"] is not True) or head == 0:
+        if ("usable_now" in row and row["usable_now"] is not True) or row.get("state") == "blocked" or head == 0:
             top: float | None = 0.0
         elif stale:
             top = None
@@ -1007,6 +1007,8 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         entry: dict[str, Any] = {
             "remaining": top, "windows": {}, "sublimits": {}, "age_s": row_age,
             "billing_kind": row.get("billing_kind"),
+            "vendor": row.get("vendor"), "pool_id": row.get("pool_id"),
+            "transports": row.get("transports"),
             "pace_ratio": None, "resets_at": row.get("available_at"), "window_minutes": None,
             "binding_window": row.get("binding_window"),
             "available_at": row.get("available_at"),

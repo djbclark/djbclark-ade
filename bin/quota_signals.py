@@ -111,8 +111,8 @@ def signal(pool, rows, paseo, now, wave_start, cfg):
             or row.get('fresh') is not True or collected <= wave_start):
         result['reason'] = 'stale_or_pre_wave_reading'
         return result
-    if row.get('usable_now') is not True or row.get('requires_operator_approval') is True:
-        result['reason'] = 'not_usable_or_operator_gated'
+    if row.get('state') == 'blocked' or row.get('usable_now') is not True or row.get('requires_operator_approval') is True:
+        result['reason'] = 'blocked_or_spend_limit' if row.get('state') == 'blocked' else 'not_usable_or_operator_gated'
         return result
     windows = row.get('windows')
     if not isinstance(windows, list) or not windows:
