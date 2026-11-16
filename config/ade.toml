@@ -448,7 +448,7 @@ billing = "subscription"
 note = "Hermes-usable API pool; watch the burn alert"
 access = "api"
 agent = "pi"
-models = { bulk = "cline-pass/deepseek-v4.1-flash", mechanical = "cline-pass/deepseek-v4.1-flash", code = "cline-pass/glm-5.3" }
+models = { bulk = "clinepass/cline-pass/deepseek-v4.1-flash", mechanical = "clinepass/cline-pass/deepseek-v4.1-flash", code = "clinepass/cline-pass/glm-5.3" }
 
 # The paid half of the same provider. Retired with the prepaid tier, not
 # because the provider is unusable — restoring it is a top-up decision.

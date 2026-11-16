@@ -4,4 +4,4 @@
 
 ### Fixed
 
-- Routed manual ClinePass dispatches through configured Pi rather than the unconfigured native provider, kept the pool manual-only, made unified tier span scanning linear and TOML-string-aware, and made projection drift compare canonical tier data instead of regenerated formatting. (#766)
+- Routed manual ClinePass dispatches through configured Pi with fully namespaced model IDs, kept the pool manual-only, made unified tier span scanning linear and TOML-string-aware, preserved writer reason metadata and exact suffix bytes, and made projection drift check parsed tier equality as well as outside-subtree bytes. (#766)

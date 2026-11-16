@@ -255,6 +255,9 @@ def dump_toml(data: dict[str, Any]) -> str:
     lines.append("[meta]")
     lines.append(f"schema = {int(meta.get('schema', SCHEMA))}")
     lines.append(f"updated = {_quote_toml_str(str(meta.get('updated', '')))}")
+    for key, value in meta.items():
+        if key not in {"schema", "updated"}:
+            lines.append(f"{_quote_toml_key(str(key))} = {_format_value(value)}")
     lines.append("")
 
     rank = data.get("rank") or {}
@@ -325,10 +328,8 @@ def atomic_write(path: Path, text: str) -> None:
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
-            if not text.endswith("\n"):
-                fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
         try:
@@ -528,10 +529,22 @@ def _toml_string_mask(text: str) -> str:
             continue
         if state is not None:
             delimiter = {"basic": '"', "literal": "'", "basic3": '"""', "literal3": "'''"}[state]
-            if text.startswith(delimiter, i):
-                for j in range(i, i + len(delimiter)):
-                    out[j] = " "
-                i += len(delimiter)
+            if state in {"basic3", "literal3"} and text[i] == delimiter[0]:
+                end = i + 1
+                while end < n and text[end] == delimiter[0]:
+                    end += 1
+                if end - i >= 3:
+                    # TOML permits one/two quotes immediately before the
+                    # closing delimiter: consume a legal 4/5-quote run whole,
+                    # never reopen an ordinary string on the leftover quote.
+                    for j in range(i, end):
+                        out[j] = " "
+                    state = None
+                    i = end
+                    continue
+            if state in {"basic", "literal"} and text.startswith(delimiter, i):
+                out[i] = " "
+                i += 1
                 state = None
                 continue
             if state in {"basic", "basic3"} and text[i] == "\\" and i + 1 < n:
@@ -582,10 +595,11 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     tail = masked[start:]
     marker = re.search(r"(?m)^# --- from config/", tail[1:])
     table = re.search(r"(?m)^\[(?!model_tiers(?:\.|\]))", tail[1:])
-    if marker is not None:
-        end = start + marker.start() + 1
-    elif table is not None:
-        table_start = start + table.start() + 1
+    marker_start = start + marker.start() + 1 if marker is not None else None
+    table_start = start + table.start() + 1 if table is not None else None
+    if marker_start is not None and (table_start is None or marker_start < table_start):
+        end = marker_start
+    elif table_start is not None:
         before_table = original[start:table_start]
         # Without a generated marker, preserve the next table's contiguous
         # comment/blank preface too. Only table bodies are ours to regenerate.

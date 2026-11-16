@@ -314,6 +314,8 @@ def test_unified_writers_replace_only_the_tier_subtree(tmp_path, monkeypatch):
     )
     after = path.read_bytes()
     assert result.path == path and result.changed
+    assert result.after["meta"]["last_set_reason"] == "unified writer"
+    assert mt._read_toml(path)[0]["model_tiers"]["meta"]["last_set_reason"] == "unified writer"
     assert after.startswith(prefix) and after.endswith(suffix)
     assert b'roles = { frontier = "claude-fable-5-2", judgment = "claude-opus-5-5", everyday = "claude-sonnet-6-5"' in after
     assert mt.load(path, use_cache=False).role_id("claude", "everyday") == "claude-sonnet-6-5"
@@ -349,6 +351,45 @@ def test_unified_span_ignores_multiline_strings_and_finishes_large_preface_probe
     path.write_text(noisy)
     rewritten = mt.rewrite_unified(path, data)
     assert rewritten.endswith("# next-domain-sentinel\n[other]\na = 1\n")
+
+
+def test_rewrite_stops_at_a_foreign_table_before_a_later_marker(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    path = root / "config/ade.toml"
+    text = (
+        "schema_version = 1\n[model_tiers.meta]\nschema = 1\nupdated = \"old\"\n\n"
+        "[gates.frontier]\nfrontier1_judged = 1\n\n"
+        "# --- from config/install.toml ---\n[[install.component]]\nid = \"keep\"\n"
+    )
+    path.write_text(text)
+    data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
+    rewritten = mt.rewrite_unified(path, data)
+    assert "[gates.frontier]\nfrontier1_judged = 1" in rewritten
+    assert rewritten.endswith("# --- from config/install.toml ---\n[[install.component]]\nid = \"keep\"\n")
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("closing_quotes", [4, 5])
+def test_toml_multiline_closing_quote_runs_do_not_hide_following_domain(tmp_path, quote, closing_quotes):
+    marker = "# --- from config/install.toml ---"
+    suffix = marker + "\n[[install.component]]\nid = \"keep\"\n"
+    text = (
+        "schema_version = 1\n[model_tiers.meta]\nschema = 1\n"
+        f"note = {quote * 3}x{quote * closing_quotes}\n\n{suffix}"
+    )
+    import tomllib
+    assert tomllib.loads(text)["model_tiers"]["meta"]["note"] == "x" + quote * (closing_quotes - 3)
+    path = tmp_path / "ade.toml"
+    path.write_text(text)
+    data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
+    rewritten = mt.rewrite_unified(path, data)
+    assert rewritten.endswith(suffix)
+
+
+def test_atomic_write_does_not_append_a_newline(tmp_path):
+    path = tmp_path / "atomic.txt"
+    mt.atomic_write(path, "no-terminal-newline")
+    assert path.read_bytes() == b"no-terminal-newline"
 
 
 def test_env_override_and_explicit_path_ignore_unified(tmp_path, monkeypatch):

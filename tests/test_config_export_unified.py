@@ -45,6 +45,9 @@ def test_shipped_legacy_files_round_trip_and_keep_comments(root, tmp_path):
     # Canonicalize regenerated tier formatting/comments on both sides while
     # retaining exact comparison of tier data and every other domain's bytes.
     production = (REPO / "config/ade.toml").read_text()
+    assert tomllib.loads(production)["model_tiers"] == tomllib.loads(text)["model_tiers"], (
+        "production/frozen-fixture model_tiers data drifted (including writer reason metadata)"
+    )
     production_path = tmp_path / "production-ade.toml"
     production_path.write_text(production)
     production_canonical = mt.rewrite_unified(

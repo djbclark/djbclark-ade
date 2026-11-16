@@ -1080,8 +1080,13 @@ class TestRoutingPolicyToml(unittest.TestCase):
         r.reload_policy(LEGACY_ROUTING)
 
     def test_clinepass_dispatches_through_configured_pi_provider(self):
-        # Native clinepass is not a Paseo provider; Pi registers the same id.
-        self.assertEqual(r.BY_NAME["clinepass"].agent, "pi")
+        # Native clinepass is not a Paseo provider; Pi registers provider
+        # clinepass, whose model ids themselves start cline-pass/.
+        svc = r.BY_NAME["clinepass"]
+        self.assertEqual(svc.agent, "pi")
+        for model in svc.models.values():
+            self.assertTrue(model.startswith("clinepass/cline-pass/"), model)
+            self.assertTrue(f"{svc.agent}/{model}".startswith("pi/clinepass/cline-pass/"))
 
     def test_loaded_services_match_frozen_expectation(self):
         for name, expect in self.EXPECTED.items():
