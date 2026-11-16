@@ -13,4 +13,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.2
-      - run: uv run --with pytest --with pyyaml python -m pytest tests/test_pi_extension_paths.py tests/test_ade_install.py -q
+      - run: uv run --with pytest --with pyyaml python -m pytest tests/test_pi_extension_paths.py tests/test_ade_install.py tests/test_changelog_fold.py -q
