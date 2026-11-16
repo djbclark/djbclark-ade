@@ -196,24 +196,51 @@ def test_a_wrapper_named_gh_that_runs_the_shim_again_ends_after_eight_entries(wo
     wrapper_dir = tmp_path / "wrap"
     wrapper_dir.mkdir()
     wrapper = wrapper_dir / "gh"
-    wrapper.write_text('#!/bin/sh\nexec "%s" "$@"\n' % SHIM)   # the "real gh" calls the shim again
+    wrapper.write_text('#!/bin/sh\necho x >> "%s"\nexec "%s" "$@"\n' % (tmp_path / "entries", SHIM))   # the "real gh" calls the shim again
     wrapper.chmod(0o755)
     r = run(world, "auth", "status", env_extra={"PATH": "%s:/usr/bin:/bin" % wrapper_dir})
     assert r.returncode == 127 and "re-entered" in r.stderr
+    assert (tmp_path / "entries").read_text().count("x") == 8        # the ninth entry is the one refused
     assert calls(world) == []
 
 
-def test_a_binary_real_gh_gets_the_callers_environment_unchanged(world, tmp_path):
-    """No shim variable reaches a real gh that is no script (`env` stands in for the binary)."""
-    bin_dir = tmp_path / "binary"
+def test_a_real_gh_that_is_no_script_gets_the_callers_environment_unchanged(world, tmp_path):
+    """No shim variable reaches a real gh without a `#!` line (a copied system binary is killed by its signature, so a shebang-less file stands in)."""
+    bin_dir = tmp_path / "plain"
     bin_dir.mkdir()
-    shutil.copy("/usr/bin/env", bin_dir / "gh")
-    for args in (["-0"], ["-0", "pr"]):
-        r = subprocess.run([str(SHIM), *args], cwd=world["work"], env={"PATH": "%s:/usr/bin:/bin" % bin_dir, "HOME": str(tmp_path), "KEEP": "1"},
-                           capture_output=True, text=True, timeout=60)
-        names = {line.split("=", 1)[0] for line in r.stdout.split("\0") if "=" in line}
-        assert "KEEP" in names or r.returncode != 0
-        assert not any(n.startswith("ADE_") for n in names), names
+    (bin_dir / "gh").write_text("/usr/bin/env\n")
+    (bin_dir / "gh").chmod(0o755)
+    r = run(world, env_extra={"PATH": "%s:/usr/bin:/bin" % bin_dir, "KEEP": "1"})   # no judged word: the shim execs it directly
+    names = {line.split("=", 1)[0] for line in r.stdout.splitlines() if "=" in line}
+    assert "KEEP" in names, (r.stdout, r.stderr)
+    assert not any(n.startswith("ADE_") for n in names), names
+
+
+def test_a_real_gh_that_is_a_script_gets_only_the_reentry_counter(world, tmp_path):
+    bin_dir = tmp_path / "scripted"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text("#!/bin/sh\n/usr/bin/env\n")
+    (bin_dir / "gh").chmod(0o755)
+    r = run(world, "auth", "status", env_extra={"PATH": "%s:/usr/bin:/bin" % bin_dir})
+    assert sorted(n for n in (l.split("=", 1)[0] for l in r.stdout.splitlines() if "=" in l) if n.startswith("ADE_")) == ["ADE_GH_SHIM_DEPTH"]
+
+
+def test_a_shim_copy_is_never_taken_for_the_real_gh_without_a_judged_word(world, tmp_path):
+    copy_dir = tmp_path / "copy2"
+    copy_dir.mkdir()
+    shutil.copy(SHIM, copy_dir / "gh")
+    r = run(world, "auth", "status", env_extra={"PATH": "%s:%s:/usr/bin:/bin" % (copy_dir, world["bin"])})
+    assert r.returncode == 0, r.stderr
+    assert [c["argv"] for c in calls(world)] == [["auth", "status"]]
+
+
+def test_the_helper_never_takes_a_shim_copy_for_the_real_gh(guard, world, tmp_path):
+    copy_dir = tmp_path / "copy3"
+    copy_dir.mkdir()
+    shutil.copy(SHIM, copy_dir / "gh")
+    assert guard.is_shim(SHIM) and guard.is_shim(copy_dir / "gh") and not guard.is_shim(world["bin"] / "gh")
+    assert guard.real_gh({"PATH": "%s:%s" % (copy_dir, world["bin"])}) == str(world["bin"] / "gh")
+    assert guard.real_gh({"PATH": str(copy_dir), "ADE_REAL_GH": str(copy_dir / "gh")}) is None
 
 
 def test_the_helper_is_found_beside_the_shim_through_a_symlink(world, tmp_path):
