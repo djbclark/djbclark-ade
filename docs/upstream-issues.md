@@ -1056,7 +1056,7 @@ offer to send the PR: https://github.com/microsoft/SkillOpt/issues/314.
 
 **Status: blocked** (2026-11-09). Still not filed: no public issues repo found;
 channel unknown (support or Discord). Operator decides whether/where to file.
-Local skill: `.claude/skills/fastino-glide` (still in-tree).
+Local skill `.claude/skills/fastino-glide`: removed 2026-11-15 (operator ruling; queue Carried 47 (c)).
 
 **Seen:** 2026-10-11/12 on `POST https://api.fastino.ai/v1/systemone` with `"model": "fastino/glide"`.
 
