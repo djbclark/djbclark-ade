@@ -406,7 +406,7 @@ def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[
     run by `eval` or `watch`). When the command text (heredoc bodies and quoted message text aside) names more `paseo ... send`
     than the parser found judgeable targets for, every full agent id written in the command (not one right after a `/`, a path component such as `agent-reports/<id>/`) is judged too (at most 5): a false
     denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form
-    nobody listed."""
+    nobody listed (or a target derived from a path, `"${p##*/}"`: the `/` skip, accepted)."""
     if "paseo" not in command:
         return []
     text = strip_heredocs(command)

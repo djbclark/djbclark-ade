@@ -590,6 +590,7 @@ def test_the_hook_judges_an_mcp_agent_even_with_a_server_id(world):
     (f'paseo send --no-wait -- {B} --prompt "answer by paseo send: ack {A}"', []),
     (f'paseo send --json --no-wait "$p" hi; cp agent-reports/{A}/x /tmp/y', []),  # an id in a path component is no send target
     (f'paseo send "$p" hi; ls /tmp/{A}', []),  # likewise after any `/`
+    (f'p=agent-reports/{A}; paseo send "${{p##*/}}" hi', []),  # accepted miss (bookkeeping): a target derived from a path; pinned so a change is loud
     (f'paseo send "$p" hi; echo {A}', [A]),  # a bare id beside a built target is still judged
     (f'echo "result: $(paseo send {A} hi)"', []),  # parsed now (the quote closes around the substitution): nothing extra
 ])

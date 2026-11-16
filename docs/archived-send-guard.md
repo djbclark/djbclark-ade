@@ -144,13 +144,13 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    **Backstop:** when the command text, quoted message text aside, names more `paseo ... send` than the parser found judgeable
    targets for (a lone trailing backslash, an ANSI-C quote, a target the shell builds, `"$LEAD"`, `{}`, `$id`, or a string run
    by `eval`, `watch`, `su -c`, `-c`/`-e`/`--run=`/`--command=`, or a shell left outside quotes: `| sh`, `<<< ` to `bash`, `$SHELL`,
-   `source <(...)`, so `echo '...' | sh` is seen), every full agent id written in the command is judged too (at most 5). Quoted
+   `source <(...)`, so `echo '...' | sh` is seen), every full agent id written in the command (not one right after a `/`, a path component such as `agent-reports/<id>/`) is judged too (at most 5). Quoted
    text is blanked, so a `paseo send` or an id inside a message is text, unless it is a quoted id or list of ids, a
    `"${VAR:-id}"` expansion, a `$(...)` or backtick body, the argument of such a runner (not after `echo`, `printf`, `grep`,
    `rg`; `awk` and `sed -e` do run their strings), or the command has a shell word outside quotes (then nothing is blanked; a shell word inside message text does not count).
    A false denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, or one shell word
    (`bash x.sh`) anywhere outside quotes, which un-blanks every string in the command (accepted: the denial says how to get out). The denial then says the hook could not parse the form (and names the successor when there is one), not `Re-send to`.
-   Known limits of the backstop (adversary r5, ls-04 r1, accepted): only **full** ids are judged, so a prefix or a name inside
+   Known limits of the backstop (adversary r5, ls-04 r1, accepted): an id right after a `/` is skipped, so a target derived from a path (`p=agent-reports/<id>; paseo send "${p##*/}" hi`, `$(basename .../<id>)`) is not judged (bookkeeping, accepted: the report-path false denial is the commoner case); only **full** ids are judged, so a prefix or a name inside
    such a form is not (write the full id); the cap of 5 follows text order, so five other ids written before a hidden send can
    push it out; `ADE_ALLOW_ARCHIVED_SEND=<id>` anywhere in the text is honoured for that id; a command that merely *talks
    about* `paseo send` unquoted (`rg paseo send`) with an archived agent's id in it is denied; a runner not on the list
