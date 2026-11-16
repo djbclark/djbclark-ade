@@ -398,15 +398,15 @@ def _target(args: list[str]) -> str | None:
 
 
 SEND_WORD = re.compile(r"\bpaseo\b(?:\s+[^\s;&|]+){0,4}?\s+send\b")
-UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+UUID = re.compile(r"(?<!/)\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 
 
 def backstop_targets(command: str, found: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
     """The parser cannot follow every shell form (a lone trailing backslash, an ANSI-C quote, a target the shell builds, a string
     run by `eval` or `watch`). When the command text (heredoc bodies and quoted message text aside) names more `paseo ... send`
-    than the parser found judgeable targets for, every full agent id written in the command is judged too (at most 5): a false
+    than the parser found judgeable targets for, every full agent id written in the command (not one right after a `/`, a path component such as `agent-reports/<id>/`) is judged too (at most 5): a false
     denial needs an archived agent's id in a command that mentions `paseo send` outside quotes, a missed send needs a form
-    nobody listed."""
+    nobody listed (or a target derived from a path, `"${p##*/}"`: the `/` skip, accepted)."""
     if "paseo" not in command:
         return []
     text = strip_heredocs(command)

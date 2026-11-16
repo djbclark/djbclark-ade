@@ -1927,7 +1927,7 @@ def approve_local_decision(top, text, mode="local"):
     user-owned file can be edited. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no."""
     msg = f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
     if not (SUDO_ASK.is_file() and os.access(SUDO_ASK, os.X_OK)):
-        local_approval_log("lw-local-unavailable", top, text, mode)
+        local_approval_log(f"lw-{mode}-unavailable", top, text, mode)
         print(f"load-watch: recording a `{mode}` decision needs djbclark's approval (Allow dialog and Touch ID), and {SUDO_ASK} is missing or "
               "not executable, so nothing was recorded. Ask djbclark.", file=sys.stderr)
         return False
@@ -1938,7 +1938,7 @@ def approve_local_decision(top, text, mode="local"):
         ok = r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False
-    local_approval_log("lw-local-approved" if ok else "lw-local-denied", top, text, mode)
+    local_approval_log(f"lw-{mode}-approved" if ok else f"lw-{mode}-denied", top, text, mode)
     if not ok:
         print(f"load-watch: djbclark did not approve a `{mode}` decision (denied, cancelled or no dialog could be shown); nothing was recorded. "
               "Record `ci` (a CI command), or ask djbclark.", file=sys.stderr)

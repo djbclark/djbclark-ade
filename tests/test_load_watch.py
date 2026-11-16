@@ -251,7 +251,15 @@ def test_pending_decision_approved_is_recorded_and_logged_as_pending(tmp_path):
     (ask,) = calls.read_text().splitlines()
     assert "PENDING" in ask and os.path.realpath(repo) in ask
     (log,) = approvals_log(tmp_path)
-    assert log[1] == "lw-local-approved" and log[3] == os.path.realpath(repo)
+    assert log[1] == "lw-pending-approved" and log[3] == os.path.realpath(repo)  # the event names the mode (rv-758 B1), not `local`
+
+
+def test_pending_decision_denied_or_unaskable_is_logged_as_pending(tmp_path):
+    repo = _repo(tmp_path)
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "why").returncode == 1  # no sudo-ask at all
+    stub_sudo_ask(tmp_path, 1)
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "why").returncode == 1  # Deny
+    assert [x[1] for x in approvals_log(tmp_path)] == ["lw-pending-unavailable", "lw-pending-denied"]
 
 
 def test_pending_glob_key_is_gated(tmp_path):
