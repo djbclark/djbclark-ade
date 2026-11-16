@@ -1714,3 +1714,92 @@ def test_dropping_a_digit_word_must_not_move_a_value_flag_onto_the_verb(live):
     assert run(command, cwd=live)
     (live / "b.md").write_text("prose only")
     assert run(command, cwd=live) is None
+
+
+@pytest.mark.parametrize("command, where", [
+    ("gh pr create --body-file 2>/dev/null b.md", "b.md"),                                  # r12 A1: an fd word between a body flag and its value
+    ("gh pr create -F 2>/dev/null b.md", "b.md"),
+    ("gh api repos/o/r/issues/1/comments --input 2>/dev/null b.md", "b.md"),
+    ("gh pr create --body-file 2>/dev/null 3>/dev/null b.md", "b.md"),
+    ("gh pr create --body-file {x}>/dev/null b.md", "b.md"),
+    ("gh pr comment 1 --body-file 2>/dev/null b.md", "b.md"),
+    ("gh issue comment 1 -F 2>&1 b.md", "b.md"),
+    ("bash -c 'gh pr create --body-file 2>/dev/null b.md'", "b.md"),
+    ("bash <<'EOS'\ngh pr create --body-file 2>/dev/null b.md\nEOS\n", "b.md"),
+    ("bash -c 2>/dev/null '" + G + "'", "b.md"),                                            # r12 A2: an fd word right behind `-c` or `eval`
+    ("sh -c 2>&1 '" + G + "'", "b.md"),
+    ("zsh -f -c 2>/dev/null '" + G + "'", "b.md"),
+    ("eval 2>/dev/null '" + G + "'", "b.md"),
+    ("eval 2>/dev/null " + G, "b.md"),
+    ("gh pr create --body-file - <<<\"$(cat b.md)\"", "b.md"),                              # r12 A5: a here-string expands `$( )`
+    ("gh pr create --body-file - 0<<<\"$(cat b.md)\"", "b.md"),
+    ("gh pr create --body-file - <<< $(cat b.md)", "b.md"),
+    ("gh api repos/o/r/issues/1/comments --input - <<<\"$(cat b.md)\"", "b.md"),
+    ("F=b; F+=.md; gh pr create --body-file \"$F\"", "b.md"),                               # r12 A7: an append or an element 0 changes `$NAME`
+    ("F=x.md; F[0]=b.md; gh pr create --body-file \"$F\"", "b.md"),
+    ("D=decoy; D+=2; cd $D; " + G, "decoy2/b.md"),
+    ("D=decoy; D[0]=sub; cd $D; " + G, "sub/b.md"),
+])
+def test_an_fd_word_or_an_assignment_does_not_hide_what_the_write_reads(live, command, where):
+    """Adversary r12 A1, A2, A5, A7: every reading of an fd word is read, a here-string's `$( )` is read, `+=` and `[0]=` change the value."""
+    for d in ("decoy2", "decoy", "sub"):
+        (live / d).mkdir(exist_ok=True)
+        (live / d / "b.md").write_text("prose only")
+    (live / "b.md").write_text("prose only")
+    (live / "b").write_text("prose only")
+    assert run(command, cwd=live) is None, command
+    (live / where).write_text(APPROVE)
+    assert run(command, cwd=live), command
+
+
+@pytest.mark.parametrize("command", [
+    ">/dev/null time cd decoy; cd sub; " + G,                                              # r12 A4: a word after a redirect is no keyword in bash
+    ">/dev/null ! cd decoy; cd sub; " + G,
+    "if false; then >/dev/null fi; cd decoy; fi; cd sub; " + G,
+    "if false; then 2>/dev/null fi; cd decoy; fi; cd sub; " + G,
+    "if false; then 2 >/dev/null fi; cd decoy; fi; cd sub; " + G,
+])
+def test_a_reserved_word_after_a_redirect_is_no_keyword(live, command):
+    _top_tree(live)
+    assert run(command, cwd=live), command
+    _top_tree(live, live_is_sub=False)
+    assert run(command, cwd=live) is None, command
+
+
+def test_an_fd_word_in_one_command_leaves_the_next_cd_sure(live):
+    """Adversary r12 C2: `flags["fd"]` is per command. `make 2>/dev/null; cd decoy; cd sub; G` tracks both `cd`s as sure, so only decoy/sub is read
+    (an unsure `cd decoy` would keep the top directory, and top/sub/b.md, as a candidate)."""
+    _top_tree(live, live_is_sub=False)
+    (live / "sub" / "b.md").write_text(APPROVE)
+    assert run("make 2>/dev/null; cd decoy; cd sub; " + G, cwd=live) is None
+    assert run("make 2>/dev/null; cd sub; " + G, cwd=live)
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --body 2>/dev/null '-b```\n%s\n```'",                                     # r12 A3: an fd word is not the flag before the body value
+    "gh pr create --body 2>&1 '-b```\n%s\n```'",
+    "gh pr comment 1 -b 2>&1 '-b```\n%s\n```'",
+])
+def test_a_flag_prefix_glued_to_a_body_value_behind_an_fd_word_is_judged_as_written(command):
+    assert run(command % APPROVE), command
+
+
+def test_a_fenced_api_field_behind_an_fd_word_is_denied_by_design():
+    """Adversary r12 A3 (the Low): `-f 2>/dev/null 'body=```...```'` is a fenced body when `2>` is a descriptor and a bare word when `2 >` is an
+    argument; shlex cannot tell them apart, so the word is judged unstripped as well (a false deny, documented in rule 14)."""
+    assert run("gh api repos/o/r/issues/1/comments -f 2>/dev/null 'body=```\n%s\n```'" % APPROVE)
+
+
+def test_a_pile_of_shell_names_is_judged_in_linear_time(live):
+    """Adversary r12 A6: every `sh` word scanned every later word for `-c` (60 KB of `sh ` ran past the hook's 15 s, which fails open)."""
+    (live / "b.md").write_text(APPROVE)
+    result, took = _seconds("echo " + "sh " * 33000 + "; " + G, live)
+    assert result and took < 4, took
+
+
+def test_a_gh_write_inside_a_here_string_substitution_is_collected(live):
+    """Adversary r12 A5: `cat <<< "$(gh pr create ...)"` runs the write; the here-string's `$( )` is collected like a word's."""
+    (live / "b.md").write_text("prose only")
+    assert run('cat <<< "$(' + G + ')"', cwd=live) is None
+    (live / "b.md").write_text(APPROVE)
+    assert run('cat <<< "$(' + G + ')"', cwd=live)

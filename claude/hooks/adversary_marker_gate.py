@@ -109,6 +109,20 @@ PLAIN_FEEDERS = {"cat", "echo", "printf"}
 ENV_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 U_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{4}")
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")      # NAME=, NAME+=, NAME[i]=
+ASSIGN_PARTS = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[([^\]]*)\])?(\+?)=(.*)$", re.S)
+
+
+def assign_to(env: dict, tok: str) -> None:
+    """Record the assignment word `tok` in `env`: `NAME=v` sets, `NAME+=v` appends to the value in effect, and `NAME[0]=v` (the element `$NAME`
+    names in bash) sets or appends like the scalar. Any other subscript changes an element `$NAME` does not name, so the value stays (zsh
+    numbers elements from 1 and reads `$NAME` as all of them: a documented limit)."""
+    m = ASSIGN_PARTS.match(tok)
+    if m:
+        name, sub, plus, value = m.groups()
+        if sub is None or sub.strip() == "0":
+            env[name] = (env.get(name, "") if plus else "") + value
+
+
 ASSIGNERS = {"export", "local", "declare", "readonly", "typeset"}   # `export D=sub` assigns like `D=sub`
 GQL_ESCAPE = re.compile(r"\\(?:u\{([0-9a-fA-F]{1,8})\}|u([0-9a-fA-F]{4})|([\"\\/bfnrt]))")   # GraphQL string-literal escapes
 GQL_SIMPLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -444,12 +458,12 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
     dirs = history.isdir if history is not None else os.path.isdir
 
-    flags = {"lead": True, "reserved": True, "assign": True, "unsure": False, "assigned": False, "fd": False}   # about seg["words"], updated per word: O(1) per token
+    flags = {"lead": True, "reserved": True, "assign": True, "unsure": False, "assigned": False, "fd": False, "redir": False}   # about seg["words"], updated per word: O(1) per token
 
     def new_seg():
         if history is not None and not history.overflow:    # past an overflow the verdict is a deny: stop paying
             history.note(cur, cands)
-        flags.update(lead=True, reserved=True, assign=True, unsure=False, assigned=False, fd=False)
+        flags.update(lead=True, reserved=True, assign=True, unsure=False, assigned=False, fd=False, redir=False)
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
     seg = new_seg()
 
@@ -461,7 +475,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
         flags["assigned"] = flags["assigned"] or is_assign
         flags["reserved"] = flags["reserved"] and tok in RESERVED
         flags["assign"] = flags["assign"] and bool(ASSIGN.match(tok) or tok in ASSIGNERS)
-        flags["unsure"] = flags["unsure"] or tok in UNSURE_WORDS
+        flags["unsure"] = flags["unsure"] or tok in UNSURE_WORDS or (flags["redir"] and tok in RESERVED)   # bash runs `>f time cd d` as an external `time`, zsh as the keyword
 
     def close(same_pipe):
         nonlocal seg, pipe
@@ -540,6 +554,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
         if tok and (tok in REDIRECTS or set(tok) <= set(PUNCT)):
             if (tok in REDIRECTS or (set(tok) <= set("<>&") and ("<" in tok or ">" in tok))) and not tok.startswith("<("):   # `>`, `2>&1` (`>&`), `&>`, `>|`: a redirect, not a background `&` or a pipe
                 redirect = "stdin" if tok == "<" else "here" if tok == "<<<" else "skip"
+                flags["reserved"], flags["redir"] = False, True     # a word after a redirect is no keyword in bash (`>f fi`, `>f time cd d`)
                 continue
             if want_dir:                        # a bare `cd` (HOME) or `pushd` ends at the boundary; it must not take the next command for its directory
                 if want_dir == "cd":
@@ -612,7 +627,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
         lead = flags["lead"]
         if FD_WORD.fullmatch(tok) and i + 1 < len(tokens) and tokens[i + 1] in REDIRECTS:
             seg["words"].append(FdWord(tok))   # `2>/dev/null gh ...`, `gh 2>/dev/null pr create`, `A=1 2>&1 gh`: an fd or an argument (`gh pr create --body-file 2 >f`):
-            flags["fd"] = True                 # kept, flags untouched (the fd reading); `gh_invocation` reads both; a `cd` behind it is unsure
+            flags["fd"] = flags["redir"] = True    # kept, `lead` untouched (the fd reading); `gh_invocation` reads both; a `cd` behind it is unsure
+            flags["reserved"] = False          # ... and what follows is no keyword (`2>f fi`)
             continue
         if tok in ("cd", "pushd") and lead:
             want_dir = tok
@@ -640,8 +656,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
                 nbraces[0] -= cond
                 if groups:
                     list_snap = groups.pop()[1]
-        if flags["assign"] and ASSIGN.match(tok) and "+" not in tok.split("=", 1)[0] and "[" not in tok.split("=", 1)[0]:
-            assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
+        if flags["assign"] and ASSIGN.match(tok):
+            assign_to(assigned, tok)
         push(tok)
     if want_dir:
         apply("", "cd") if want_dir == "cd" else widen(seen)
@@ -910,13 +926,23 @@ def sub_files(word: str):
 def prefix_stripped(words):
     """The texts a write's words send: a flag prefix glued before a fence (`--body="```...`, `-b"```...`, `-f body=```...`)
     is not part of the body (a prefix before anything else is, and stays)."""
-    out, prev = [], ""
-    for w in words:
+    def strip(w, prev):
         if prev in ("-f", "-F", "--field", "--raw-field"):
             m = KEY_PREFIX.match(w)
         else:                                  # a value of a flag (`--body "-b```..."`) is the body itself
             m = FLAG_PREFIX.match(w) if w.startswith("-") and prev not in GH_VALUE_FLAGS else None
-        out.append(w[m.end():] if m else w)
+        return w[m.end():] if m else w
+
+    out, prev, after_fd = [], "", False
+    for w in words:
+        if isinstance(w, FdWord):              # `2>f` (a descriptor: the flag before it still owns the next word) or `2 >f` (an argument):
+            out.append(w)                      # a word behind it is stripped as the flag before the `2` and as the `2`, and judged unstripped too
+            after_fd = True
+            continue
+        out.append(strip(w, prev))
+        if after_fd:
+            out.extend((strip(w, ""), w))
+        after_fd = False
         prev = w
     return out
 
@@ -935,6 +961,23 @@ def shell_head(head: str) -> bool:
     return False
 
 
+def code_string(words):
+    """The code a shell wrapper in `words` runs: the word after the first `-c` behind a shell name, or what follows `eval`, else None. Linear:
+    the next `-c` of every word comes from one right-to-left pass (a pile of shell names must not cost n^2 `SHELL_C` matches)."""
+    after, nearest = [None] * len(words), None
+    for x in range(len(words) - 1, -1, -1):
+        after[x] = nearest
+        if SHELL_C.match(words[x]):
+            nearest = x
+    for k, w in enumerate(words):
+        if os.path.basename(w) in SHELLS:
+            if after[k] is not None and after[k] + 1 < len(words):
+                return words[after[k] + 1]
+        elif w == "eval":
+            return " ".join(words[k + 1:])
+    return None
+
+
 def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> None:
     cleaned, bodies = split_heredocs(command)
     tokens, parsed = tokenize(cleaned)
@@ -942,7 +985,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
     words_all = [t for t in tokens if t and not set(t) <= set(PUNCT)]
     for w in words_all:
         if ASSIGN.match(w):
-            scan.env[w.split("=", 1)[0]] = w.split("=", 1)[1]
+            assign_to(scan.env, w)
     if not parsed and loose_write(command):
         scan.write = True                      # unparseable: fail closed, scan the raw command too
         scan.add(command)
@@ -993,20 +1036,15 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
         writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
         for seg in pipe.segments:              # code-bearing strings are collected again
             words = seg["words"]
-            for k, w in enumerate(words):
-                code = None
-                if os.path.basename(w) in SHELLS:
-                    for x in range(k + 1, len(words)):
-                        if SHELL_C.match(words[x]):
-                            code = words[x + 1:x + 2]
-                            break
-                elif w == "eval":
-                    code = [" ".join(words[k + 1:])]
-                if code and depth < 3:
-                    collect(code[0], seg["cwd"], scan, depth + 1, bases=scan.history.get(seg["cwd"], ()))
-                    break
             if depth < 3:
-                for w in words:
+                plain = [w for w in words if not isinstance(w, FdWord)]    # `bash -c 2>/dev/null 'CODE'`: the `2` is a descriptor, or the code
+                done = set()
+                for reading in ([words] if len(plain) == len(words) else [plain, words]):
+                    code = code_string(reading)
+                    if code is not None and code not in done:
+                        done.add(code)
+                        collect(code, seg["cwd"], scan, depth + 1, bases=scan.history.get(seg["cwd"], ()))
+                for w in (*words, *seg["here"]):
                     if "gh" in w and ("$(" in w or "`" in w):
                         for inner in substitutions(w):
                             collect(inner, seg["cwd"], scan, depth + 1, bases=scan.history.get(seg["cwd"], ()))
@@ -1023,7 +1061,8 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
                 own.update(g[2])
                 for shown in prefix_stripped(g[2]):
                     scan.add(shown, force=True)
-                for f in operand_files(g[0], g[2]):
+                plain = [w for w in g[2] if not isinstance(w, FdWord)]     # an fd word is also no operand (`--body-file 2>/dev/null b.md` reads b.md)
+                for f in dict.fromkeys([*operand_files(g[0], g[2]), *(operand_files(g[0], plain) if len(plain) < len(g[2]) else ())]):
                     scan.add_file(f, seg["cwd"], operand=True)
                 for w in seg["words"][:g[3]]:  # `find . -name F -exec gh ...`, `xargs`: words before gh may name files
                     feeder(w, seg)
@@ -1034,6 +1073,7 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0, bases=()) -> Non
                 scan.add_file(f, seg["cwd"], operand=True, raw=filtered and not (g and is_write(g[0], g[1], g[2])))
             for h in seg["here"]:
                 scan.add(h, operand=True)
+                subs(h, seg["cwd"])            # a here-string expands `$( )` (`<<< "$(cat b.md)"`)
     if not scan.token_write and loose_write(cleaned):
         scan.write = True                      # backstop: a gh write the token path could not place; words only, no files
     if scan.write:
