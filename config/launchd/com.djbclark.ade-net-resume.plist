@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Unloaded dry-run template. Explicit lead substitution required; see docs/net-resume.md. -->
+<!-- Operator-enabled sends (2026-11-16): the quota pass runs with --apply. Explicit lead substitution required; see docs/net-resume.md. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>com.djbclark.ade-net-resume</string>
   <key>ProgramArguments</key><array>
@@ -8,6 +8,7 @@
     <string>__ADE__/bin/ade-net-resume</string>
     <string>--lead</string><string>__LEAD__</string>
     <string>--quota</string>
+    <string>--apply</string>
   </array>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><false/>

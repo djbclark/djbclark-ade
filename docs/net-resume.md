@@ -81,10 +81,11 @@ race after the final check; the CLI has no conditional-send transaction.
 
 Exit codes: 0 completed scan/watch, 2 invalid usage or unreadable CLI/state,
 3 lock held for a one-shot (watch retries at the next interval). The unloaded template
-`config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot **dry-run with `--quota`**
-every minute (template update, 2026-11-12). Render it with `ade-sched render ... --set __LEAD__=UUID
---set __STATE__=/absolute/log/dir`; installing requires a deliberate operator
-action, and enabling sends also requires adding `--apply` to the template.
+`config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot `--quota --apply` scan
+every minute (sends enabled by operator decision, 2026-11-16). Render it with
+`ade-sched render ... --set __LEAD__=UUID --set __STATE__=/absolute/log/dir`; installing still requires a
+deliberate operator action. `--apply` is bounded by the reservation, the per-pool gap and the
+re-reads below, so a scan resumes at most one session per pool per gap and never repeats a delivery.
 The scheduler render fixtures supply `__LEAD__` using the same substitution
 contract as the merged auto-permit template (2026-11-12); unfilled placeholders
 are still refused. This PR installs or loads nothing.
@@ -103,9 +104,9 @@ agent's provider; Pi pools (z.ai, OpenCode Go, ClinePass) have none, and a daemo
 agent into `closed` with its `lastError` gone (design `design-quota-resume.md`, W10 evidence, 2026-11-12). `--quota`
 (off by default) adds a second pass after the network pass. The network path, its `DENIED` regex and its 30-minute
 rule are unchanged, and it still rejects every quota message. The launchd template includes `--quota`
-but stays **dry-run**, with no `--apply` (template update, 2026-11-12). Enabling sends remains a separate
-operator decision (order 11); reinstalling the template after merge runs the quota pass in dry-run mode and logs
-`would-resume-quota` decisions without sending resume prompts.
+and now **sends** (`--apply`, operator decision 2026-11-16): a quota stop is resumed after the aiuse reset
+anchor plus the grace period, at most `--quota-per-pool` sessions per pool per 600 s gap. A dry run is still available
+by running `bin/ade-net-resume --lead UUID --quota` by hand, and logs `would-resume-quota` without sending.
 
 ```
 bin/ade-net-resume --lead LEAD_UUID --quota --only-agent CANARY_UUID --watch 3600 --interval 60

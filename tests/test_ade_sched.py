@@ -219,7 +219,8 @@ def test_non_path_source_is_left_alone():
 
 @pytest.mark.parametrize("lead", ["11111111-1111-4111-8111-111111111111",
                                   "22222222-2222-4222-8222-222222222222"])
-def test_net_resume_template_quota_stays_dry_run(lead, fake, tmp_path):
+def test_net_resume_template_enables_quota_sends(lead, fake, tmp_path):
+    """Operator decision 2026-11-16: recovery must act, not only log decisions."""
     plist = REPO / "config/launchd/com.djbclark.ade-net-resume.plist"
     j = S.Job.from_plist(plist, {**SUBST, "__LEAD__": lead}, ade=tmp_path)
     rendered = S.render(j, "launchd", env=fake.env)
@@ -227,8 +228,7 @@ def test_net_resume_template_quota_stays_dry_run(lead, fake, tmp_path):
     argv = doc["ProgramArguments"]
     assert argv == [f"{tmp_path.resolve()}/bin/ade-job-run", "--lock-dir", S.default_subst()["__ADMISSION__"],   # W21c: every launch is wrapped
                     "com.djbclark.ade-net-resume", "--",
-                    f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota"]
-    assert "--apply" not in argv
+                    f"{tmp_path.resolve()}/bin/ade-net-resume", "--lead", lead, "--quota", "--apply"]
 
 
 def test_unfilled_placeholder_is_exit_2():
