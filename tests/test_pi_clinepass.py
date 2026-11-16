@@ -36,8 +36,9 @@ console.log(JSON.stringify(registration));
     assert all(m["compat"]["maxTokensField"] == "max_tokens" for m in config["models"])
 
 
+@pytest.mark.parametrize("provider", ["clinepass", "clinepass-t-e"])
 @pytest.mark.parametrize("failure", ["missing", 401, 402])
-def test_pi_reports_credential_and_provider_failures(tmp_path, failure):
+def test_pi_reports_credential_and_provider_failures(tmp_path, failure, provider):
     pi = shutil.which("pi")
     if not pi:
         pytest.skip("real Pi CLI installed by pi-clinepass CI")
@@ -76,7 +77,7 @@ def test_pi_reports_credential_and_provider_failures(tmp_path, failure):
     env.pop("CLINE_API_KEY", None)
     try:
         result = subprocess.run([pi, "--no-extensions", "-e", str(wrapper), "--no-skills", "--no-context-files",
-                                 "--no-mcp", "--no-tools", "--no-session", "--provider", "clinepass",
+                                 "--no-mcp", "--no-tools", "--no-session", "--provider", provider,
                                  "--model", "cline-pass/deepseek-v4.1-flash", "--mode", "json", "-p", "Reply OK"],
                                 cwd=tmp_path, env=env, capture_output=True, text=True, timeout=45)
     finally:

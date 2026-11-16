@@ -118,6 +118,8 @@ stored in settings or source. The operator subsequently authorized the second
 account: provider `clinepass-t-e` resolves only `CLINE_PASS_KEY_2_TE`. Select
 `clinepass-t-e/cline-pass/deepseek-v4.1-flash` for that account. Both provider
 identities persist in session history; neither switches accounts automatically.
+The t-e account also passed native read/write tools and a saved-session
+continuation using DeepSeek V4.1 Flash.
 Missing credentials, authentication failures and exhausted balance are visible
 Pi errors, without switching to another provider.
 
