@@ -144,8 +144,8 @@ credentials and session history.
 
 Live evidence: the primary key completed a streamed DeepSeek V4.1 Flash request;
 a native Pi session executed `read` and `write` tools. The first response omitted
-the source's trailing newline; the follow-up check and persisted-session result
-are recorded with the final validation report. No other model is live-qualified.
+the source's trailing newline; a follow-up after reopening the saved session
+corrected it byte-for-byte and recalled the earlier nonce. No other model is live-qualified.
 
 ## Optional SIPB request-shape diagnostics
 
