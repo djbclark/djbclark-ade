@@ -255,3 +255,27 @@ def test_write_atomic_keeps_a_non_default_mode(tmp_path):
     lp.chmod(0o640)
     sa.write_atomic(lp, {"a": 1})
     assert stat.S_IMODE(os.stat(lp).st_mode) == 0o640
+
+
+def test_dangling_link_into_the_ade_tree_is_never_added_but_an_existing_one_is(tmp_path):
+    root = tmp_path / "ade"
+    (root / "claude" / "hooks").mkdir(parents=True)
+    (root / "claude" / "hooks" / "real.sh").write_text("x")
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    os.symlink(root / "claude" / "hooks" / "gone.sh", home / ".claude" / "hooks" / "gone.sh")  # target inside the tree, absent
+    os.symlink(root / "claude" / "hooks" / "real.sh", home / ".claude" / "hooks" / "real.sh")
+    (home / ".claude" / "hooks" / "outside.sh").write_text("x")
+    t = {"hooks": {"SessionStart": [h("$HOME/.claude/hooks/gone.sh"), h("$HOME/.claude/hooks/real.sh"),
+                                    h("$HOME/.claude/hooks/outside.sh"), h("$HOME/src/djbclark-ade/bin/nope")]}}
+    m, added, skipped = _merge({}, t, str(home), [root])
+    cmds = [x["command"] for g in m["hooks"]["SessionStart"] for x in g["hooks"]]
+    assert cmds == ["$HOME/.claude/hooks/real.sh"]
+    assert sum("not added" in x for x in skipped) == 3
+
+
+def test_a_secret_inside_a_list_or_a_newer_token_shape_is_refused():
+    assert sa.secret_paths({"a": ["x", "ghp_" + "a" * 30]}) == ["/a[1]"]
+    assert sa.secret_paths({"url": "https://h/mcp?api_key=abc123"}) == ["/url"]
+    assert sa.secret_paths({"c": "FOO_SECRET=abc run"}) == ["/c"]
+    assert sa.secret_paths({"ok": "post-edit-check --hook"}) == []

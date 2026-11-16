@@ -798,7 +798,7 @@ def update(rep, args, repo):
     # is a note, never an exit code (the live file is untouched).
     sa = Path(__file__).resolve().parent / "ade-settings-apply"
     live_settings = Path.home() / ".claude" / "settings.json"
-    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True).returncode == 0:
+    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, timeout=30).returncode == 0:
         # The template is read from the committed revision (`target`), never the working tree: an uncommitted edit in the shared checkout must not
         # reach every Claude session (adversary A2).
         try:

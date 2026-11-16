@@ -114,7 +114,7 @@ def key_paths(d, prefix="") -> set:
 
 
 _SECRET_KEY = re.compile(r"(?i)(token|secret|passw|api[_-]?key|credential|private[_-]?key|authorization|apikeyhelper|awsauthrefresh|otelheadershelper)")
-_SECRET_VAL = re.compile(r"(?i)(sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,}|xox[abp]-[a-z0-9-]{10,}|AKIA[0-9A-Z]{16}|bearer\s+\S{12,}|[a-f0-9]{40,}|-----BEGIN)")
+_SECRET_VAL = re.compile(r"(?i)(sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,}|xox[abp]-[a-z0-9-]{10,}|AKIA[0-9A-Z]{16}|bearer\s+\S{12,}|[a-f0-9]{40,}|-----BEGIN|github_pat_[a-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}|eyJ[\w-]+\.[\w-]+\.|[?&](api_?key|token|key)=\S|\b[A-Z_]*(KEY|TOKEN|SECRET)=\S)")
 
 
 def secret_paths(d, p="") -> list:
