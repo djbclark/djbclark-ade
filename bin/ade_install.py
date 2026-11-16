@@ -2034,6 +2034,43 @@ def observe_client_wiring(
     return [Observation(kind, rid, status, detail) for kind, rid, status, detail in rows]
 
 
+def observe_pi_extension_paths(*, home: Path | None = None) -> Observation | None:
+    """Check explicit absolute user extension paths without loading code or keys.
+
+    Pi silently skips missing paths. Package sources, relative paths, globs and
+    enable/disable patterns belong to Pi's resolver and are not checked here.
+    """
+    home = home if home is not None else Path.home()
+    path = home / ".pi" / "agent" / "settings.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        return Observation("settings", "pi-extension-paths", "error", "Pi settings unreadable")
+    try:
+        settings = json.loads(raw)
+        extensions = settings.get("extensions", [])
+        if not isinstance(extensions, list) or any(not isinstance(p, str) for p in extensions):
+            raise ValueError("extensions must be a list of strings")
+    except (ValueError, AttributeError):
+        return Observation("settings", "pi-extension-paths", "error", "Invalid Pi settings or extensions list")
+    missing = []
+    for entry in extensions:
+        if any(c in entry for c in "*?[]{}"):
+            continue
+        target = home / entry[2:] if entry.startswith("~/") else Path(entry)
+        if target.is_absolute() and not target.exists():
+            missing.append(entry)
+    if missing:
+        return Observation(
+            "settings", "pi-extension-paths", "missing",
+            "Missing Pi extension path(s): " + ", ".join(missing)
+            + "; reinstall from a durable checkout, never a disposable worktree (docs/pi-services.md)",
+        )
+    return Observation("settings", "pi-extension-paths", "ok", "Explicit absolute Pi extension paths exist")
+
+
 def doctor(
     catalog: Catalog,
     *,
@@ -2186,6 +2223,11 @@ def doctor(
         obs.append(pools_obs)
         # Advisory warn stays exit 0; only a broken acceptance file fails doctor.
         if pools_obs.status == "error":
+            hard_missing += 1
+    pi_paths = observe_pi_extension_paths(home=wiring_home)
+    if pi_paths is not None:
+        obs.append(pi_paths)
+        if pi_paths.status in ("missing", "error"):
             hard_missing += 1
     # TUI wiring (MCP registrations + skill links): gaps are advisory warn (exit 0);
     # only a broken roster or unreadable client config fails doctor.

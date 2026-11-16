@@ -224,3 +224,35 @@ sessions and recalled the earlier nonce. dclark authenticated but returned a fiv
 no Extra Usage setting was changed. The old and current usage GET paths returned
 HTTP 403 from this machine, so no fresh numeric balance is claimed. Model
 listing is not proof every listed model is entitled or currently usable.
+
+## Durable extension installation paths (2026-11-16)
+
+Install ADE extensions from the durable `~/src/djbclark-ade/pi-extensions/`
+checkout, never from a task worktree. Pi settings retain absolute paths after
+worktree removal, and Pi can silently omit those extensions. This removes their
+providers from fresh Pi processes even while Paseo still shows cached models.
+Use the public SettingsManager to replace only the stale entries; preserve
+other settings, account identities and saved conversations. Reload existing Pi
+sessions and refresh Paseo's provider snapshot after repairing paths.
+
+Full `bin/ade-install doctor` checks explicit absolute and `~/` extension paths
+in `~/.pi/agent/settings.json`. Missing targets or invalid settings fail doctor;
+it never edits settings, loads extensions or reads credentials. Relative paths,
+package sources, globs and enable/disable patterns remain Pi's responsibility.
+This check detects missing targets, not provider health or quota exhaustion.
+
+Settings, Paseo's model catalog and an already-running Pi registry are separate.
+A catalog refresh does not reload extensions inside an existing Pi process.
+For a stuck Paseo tab, first verify that it has no active turn or pending
+permissions, then use the SDK's `refreshAgent(agentId)` to reopen that saved
+session. This retains its agent/native-session identity and transcript; do not
+send a probe prompt into the unfinished task or create a replacement tab.
+Reapply the intended model and effort and verify the resulting snapshot.
+`/reload` applies to interactive Pi; built-in TUI commands are not executed by
+Pi's RPC `prompt` command.
+
+`paseo provider diagnostic pi --json` refreshes the global model catalog.
+Workspace catalogs are separate: refresh only the affected workspace with
+`refreshProvidersSnapshot({cwd, providers: ['pi']})`, then compare its entries
+with a fresh Pi catalog. Recurring catalog staleness is tracked upstream in
+[getpaseo/paseo PR 7733](https://github.com/getpaseo/paseo/pull/7733).
