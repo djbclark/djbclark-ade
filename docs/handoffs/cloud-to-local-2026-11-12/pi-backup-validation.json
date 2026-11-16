@@ -1,0 +1,31 @@
+{
+  "worktree": "/workspace/ade-pi-backup-coverage-wt",
+  "base": "dc3463b16c400a3c7af00a4aef3a8cbb4a0e1276",
+  "test_head": "2104aaf825dfa13186949d814aacfc4121075988",
+  "command": [
+    "bin/pytest",
+    "-q",
+    "tests/test_pi_backup_recovery.py",
+    "tests/test_ade_backup_stores.py",
+    "tests/test_archive_session_history.py"
+  ],
+  "environment": "temporary HOME; synthetic session data; no native Pi or provider calls",
+  "output_log": "/tmp/pi-backup-final-tests.log",
+  "baseline": "186 passed",
+  "focused": "193 passed",
+  "status": "completed",
+  "pull_request": "https://github.com/djbclark/djbclark-ade/pull/566",
+  "exit_code": 0,
+  "final_head": "2104aaf825dfa13186949d814aacfc4121075988",
+  "remote_head_verified": true,
+  "review": "Independent available fresh reviewer: exact-head read-only review clean; no tests or live operations by reviewer",
+  "checks": "py_compile, Ruff F821/F822/F823, whitespace, roster, changelog230 pass; instruction-lint0errors/1existinggraftwarning",
+  "limitations": [
+    "default ~/.pi/agent/sessions only; custom env/settings/CLI roots not automatically discovered",
+    "offline fixture recovery and fresh history index only; no live Pi resume or Mac deploy",
+    "existing file-copy engine; no new active-writer atomic snapshot guarantee"
+  ],
+  "ci": "https://github.com/djbclark/djbclark-ade/actions/runs/43251846299",
+  "ci_status_at_report": "in_progress",
+  "pr_body_updated": true
+}
