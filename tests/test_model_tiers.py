@@ -346,7 +346,9 @@ def test_unified_span_ignores_multiline_strings_and_finishes_large_preface_probe
     assert rewritten.endswith("# outside-suffix-sentinel\n[gates.frontier]\nfrontier1_judged = 1\n")
 
     # The old nested preface regex was pathological on this non-matching tail.
-    noisy = "[model_tiers.meta]\nschema = 1\n" + ("x = 1\n" + " " * 40 + "\n") * 2000
+    noisy = "[model_tiers.meta]\nschema = 1\n" + "".join(
+        f"value{index} = 1\n" + " " * 40 + "\n" for index in range(2000)
+    )
     noisy += "# next-domain-sentinel\n[other]\na = 1\n"
     path.write_text(noisy)
     rewritten = mt.rewrite_unified(path, data)
@@ -369,12 +371,27 @@ def test_rewrite_stops_at_a_foreign_table_before_a_later_marker(tmp_path, monkey
     assert rewritten.endswith("# --- from config/install.toml ---\n[[install.component]]\nid = \"keep\"\n")
 
 
-def test_indented_tier_start_is_recognized(tmp_path):
+@pytest.mark.parametrize("tier_header", ["[ model_tiers . meta ]", "[ \"model_tiers\" . meta ]", "[ 'model_tiers' . meta ]"])
+def test_indented_tier_start_is_recognized(tmp_path, tier_header):
     suffix = "\t[ install . component ]\nid = \"keep\"\n"
     path = tmp_path / "ade.toml"
-    path.write_text("schema_version = 1\n  [ model_tiers . meta ]\nschema = 1\n" + suffix)
+    path.write_text(f"schema_version = 1\n  {tier_header}\nschema = 1\n" + suffix)
     data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
     assert mt.rewrite_unified(path, data).endswith(suffix)
+
+
+def test_quoted_final_tier_table_does_not_duplicate_or_invalidate_output(tmp_path, monkeypatch):
+    import tomllib
+    root = _unified_root(tmp_path, monkeypatch)
+    path = root / "config/ade.toml"
+    original = path.read_text().replace("[model_tiers.former]", "[\"model_tiers\".former]")
+    path.write_text(original)
+    before = tomllib.loads(original)
+    rewritten = mt._target_text(path, before["model_tiers"], "unused legacy text")
+    after = tomllib.loads(rewritten)
+    assert rewritten.count("[model_tiers.former]") == 1
+    assert "[\"model_tiers\".former]" not in rewritten
+    assert after == before
 
 
 @pytest.mark.parametrize("quote", ['"', "'"])

@@ -574,12 +574,19 @@ def _toml_string_mask(text: str) -> str:
     return "".join(out)
 
 
-def _table_headers(masked: str):
-    """Yield (byte offset, is_model_tiers) for table headers outside strings."""
+def _table_headers(original: str, masked: str):
+    """Yield (byte offset, is_model_tiers) for table headers outside strings.
+
+    The mask finds syntax boundaries; the real TOML parser decodes the original
+    header's quoted/dotted key path so no key spelling is erased before classifying.
+    """
     for match in re.finditer(r"(?m)^[ \t]*\[\[?([^\n]*)$", masked):
-        # Whitespace inside brackets and around dotted segments is legal too.
-        normalized = re.sub(r"[ \t]", "", match.group(1))
-        is_tiers = normalized.startswith("model_tiers.") or normalized.startswith("model_tiers]")
+        header = original[match.start():match.end()]
+        try:
+            parsed = tomllib.loads(header)
+            is_tiers = bool(parsed) and next(iter(parsed)) == "model_tiers"
+        except tomllib.TOMLDecodeError:
+            is_tiers = False  # safe direction: preserve, not a tier-table match
         yield match.start(), is_tiers
 
 
@@ -597,7 +604,7 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     except UnicodeDecodeError as e:
         raise TiersError(f"{path}: unified config is not UTF-8: {e}") from e
     masked = _toml_string_mask(original)
-    headers = list(_table_headers(masked))
+    headers = list(_table_headers(original, masked))
     start = next((offset for offset, is_tiers in headers if is_tiers), None)
     if start is None:
         raise TiersError(f"{path}: no [model_tiers...] subtree to write")
@@ -627,7 +634,22 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     replacement = _unified_table_text(data)
     if end < len(original) and not replacement.endswith("\n"):
         replacement += "\n"
-    return original[:start] + replacement + original[end:]
+    result = original[:start] + replacement + original[end:]
+
+    # A fresh full TOML parse and non-tier equivalence check is the final guard:
+    # no future span/parser edge case may persist malformed or lossy output.
+    try:
+        before = tomllib.loads(original)
+        after = tomllib.loads(result)
+    except tomllib.TOMLDecodeError as e:
+        raise TiersError(f"{path}: rendered unified config is invalid TOML: {e}") from e
+    if after.get("model_tiers") != data:
+        raise TiersError(f"{path}: rendered model_tiers differs from validated writer data")
+    if {key: value for key, value in before.items() if key != "model_tiers"} != {
+        key: value for key, value in after.items() if key != "model_tiers"
+    }:
+        raise TiersError(f"{path}: unified write would change a non-model_tiers domain")
+    return result
 
 
 def _target_text(path: Path, data: dict[str, Any], legacy_text: str) -> str:
