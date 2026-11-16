@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""ade-gh-guard: the decision half of the `gh` PATH shim (libexec/agent-bin/gh), mg-52, 2026-11-16.
+
+An agent never writes a live adversary APPROVE marker to a PR body or comment (docs/code-review.md rules 1 and 14). The Claude hook
+(claude/hooks/adversary_marker_gate.py) reads the TEXT of a Bash command, so every token variant of shell syntax was a possible bypass.
+This helper judges the REAL argv, cwd, operand files and stdin of the `gh` process itself, with the hook's own rules: one module, no copy.
+
+  ade-gh-guard gh-ARGS...     the shim's call: judge, then exec the real gh
+
+  pass    (a read, a non-body write, a body with no live marker): exec the real gh with the same argv, stdin and environment
+  refuse  (a write that carries a live marker, or one this gate cannot read): reason on stderr, exit 4, no exec
+
+How: `gh_invocation` finds the write (`pr`/`issue` create|edit|comment|review|close|reopen, `api` with a body flag), then the hook's `judge` runs on
+`shlex.join(["gh", *argv])`, a command this helper builds from the real argv (so it has no lexing to get wrong). A stdin the argv reads
+(`--body-file -`, `--input -`, `-F body=@-`) is read once into a private temp file, judged as `< FILE`, then handed to the real gh as its fd 0.
+Fails closed ONLY for a write that takes a body and that this gate cannot read (an error in `judge`); everything else that goes wrong runs the real gh.
+The real gh is ADE_REAL_GH (the shim passes it to this helper alone, which pops it) or the first non-shim `gh` on PATH; it is run with os.execv.
+Limits: docs/adversary-gh-shim.md.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import shlex
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent  # the checkout this script lives in (through any symlink), never the cwd
+sys.path.insert(0, str(ROOT / "claude" / "hooks"))
+EXIT_REFUSED = 4
+SHIM_MARKER = b"# ade-gh-shim:"  # in the first lines of every copy of libexec/agent-bin/gh
+MAX_STDIN = 16 * 1024 * 1024  # a stdin body larger than this is judged on its first 16 MB (the gate reads no more than MAX_TEXT of it anyway)
+
+
+def is_shim(path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1024).split(b"\n")[:6]
+    except OSError:
+        return False
+    return any(line.startswith(SHIM_MARKER) for line in head)
+
+
+def real_gh(env=None) -> str | None:
+    """ADE_REAL_GH, else the first `gh` on PATH that is an executable regular file and no copy of the shim."""
+    env = os.environ if env is None else env
+    named = env.get("ADE_REAL_GH")
+    if named and os.path.isfile(named) and os.access(named, os.X_OK) and not is_shim(named):
+        return named
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        cand = os.path.join(d, "gh") if d else ""
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK) and not is_shim(cand):
+            return cand
+    return None
+
+
+def reads_stdin(argv: list[str]) -> bool:
+    """True when an argument tells gh to read a body or payload from stdin (`-`, `--body-file=-`, `-F body=@-`, `--input -`)."""
+    return any(a == "-" or a.endswith("=-") or a.endswith("@-") for a in argv)
+
+
+def refuse(found: str) -> int:
+    import adversary_marker_gate as gate  # noqa: PLC0415
+    print(gate.reason_for(found).split(" To lift the gate")[0] + " (the gh shim: this process saw the real arguments and stdin; "
+          "only the operator's own shell, which does not go through the shim, writes a live marker).", file=sys.stderr)
+    return EXIT_REFUSED
+
+
+def judge_argv(argv: list[str], stdin_path: str | None, gate) -> str:
+    """The deny reason for this `gh` call, "" to pass. Raises only from inside the gate (the caller decides what a failure means)."""
+    words = ["gh", *argv]
+    g = gate.gh_invocation(words)
+    if not (g and gate.is_write(g[0], g[1], g[2])):
+        return ""                              # no body-taking write: nothing to judge
+    command = shlex.join(words) + (" < " + shlex.quote(stdin_path) if stdin_path else "")
+    return gate.judge(command, os.getcwd(), gate._checker)
+
+
+def run(argv: list[str], env=None) -> int:
+    """Decide for `argv` (gh's arguments) and exec the real gh, or return the exit code of a refusal."""
+    env = os.environ if env is None else env
+    real = real_gh(env)
+    if real is None:
+        print("ade-gh-guard: no real gh found on PATH", file=sys.stderr)
+        return 127
+    if env is os.environ:  # the shim names the real gh to this helper alone: not on to gh or its children
+        os.environ.pop("ADE_REAL_GH", None)
+    args = list(argv)
+    stdin_file = None
+    try:
+        import adversary_marker_gate as gate  # noqa: PLC0415 - the hook's rules, one copy
+        stdin_path = None
+        if reads_stdin(args) and not os.isatty(0):
+            fd, stdin_path = tempfile.mkstemp(prefix="ade-gh-stdin-")
+            with os.fdopen(fd, "wb") as out:
+                remaining = MAX_STDIN
+                while remaining > 0:
+                    chunk = os.read(0, min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    remaining -= len(chunk)
+            stdin_file = open(stdin_path, "rb")        # kept open: it becomes the real gh's stdin
+        try:
+            found = judge_argv(args, stdin_path, gate)
+        except Exception as exc:  # noqa: BLE001 - a write this gate cannot read is refused; a read is not
+            if gate.loose_write("gh " + " ".join(args)):
+                print(f"ade-gh-guard: {type(exc).__name__}: {exc}; refusing a write it cannot read", file=sys.stderr)
+                return EXIT_REFUSED
+            found = ""
+        finally:
+            if stdin_path:
+                os.unlink(stdin_path)
+        if found:
+            return refuse(found)
+    except Exception as exc:  # noqa: BLE001 - an accident guard: its own bug runs the real gh, never blocks it
+        print(f"ade-gh-guard: {type(exc).__name__}: {exc}; running gh unguarded", file=sys.stderr)
+        args = list(argv)
+    if stdin_file is not None:
+        stdin_file.seek(0)
+        os.dup2(stdin_file.fileno(), 0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(real, [real, *args])
+    except OSError as exc:
+        print(f"ade-gh-guard: cannot run {real}: {exc}", file=sys.stderr)
+        return 126
+    return 127  # not reached
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(list(sys.argv[1:] if argv is None else argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,108 @@
+#!/bin/sh
+# ade-gh-shim: v1 (every copy of this file carries this marker in its first lines; a shim never takes another shim for the real gh)
+# gh shim (mg-52, 2026-11-16): a `gh` front door that stops a `gh` write carrying a live adversary APPROVE marker in the send path itself,
+# where it sees the real argv, the real cwd, the real operand files and the real stdin (no shell text to lex). The Claude hook
+# (claude/hooks/adversary_marker_gate.py) stays as the backstop for a command typed in a Bash tool call. Design, limits and install:
+# docs/adversary-gh-shim.md and docs/code-review.md rule 14.
+#
+# Written for /bin/sh on purpose, like libexec/agent-bin/paseo: a bash script would source the operator's BASH_ENV (~/.bashrc), rewrite
+# PATH and pick the wrong gh.
+#
+# WHAT IT SEES: only a `gh` that the caller's PATH resolves to this directory (a Python subprocess.run(["gh", ...]), a script that keeps
+# its PATH, an agent whose PATH starts with libexec/agent-bin). Not an absolute path to the real gh, curl or python with a token, an MCP
+# tool, the web UI, or the owner's own shell. Nothing installs this shim: see docs/adversary-gh-shim.md (the ade-claim plugin's W4 hook
+# already prepends this directory to an agent's PATH in `enforce` mode).
+#
+# Order of work, cheapest first:
+#   1. No argument is `pr`, `issue` or `api`: exec the real gh untouched (every other gh command cannot send a body).
+#   2. Otherwise `python3 -I bin/ade-gh-guard ARGS...`, which decides and execs the real gh with the same argv, stdin and environment,
+#      or refuses (exit 4, nothing sent).
+# The real gh is ADE_REAL_GH, else the first `gh` on PATH that is an executable regular file and not a copy of this shim.
+# A real gh that is itself a script (`#!`) could run `gh` again and loop: only then the shim counts re-entries in ADE_GH_SHIM_DEPTH
+# (cap 8, exit 127); a binary real gh gets the caller's environment unchanged.
+# FAILS OPEN on its own failure (no python3, a missing helper, an error in the helper: the real gh runs, one line on stderr), except
+# that the helper refuses a write it cannot read (rule 14). An accident guard, like the hook, not a sandbox.
+#
+# Exit codes: 4 refused; 127 no real gh found or re-entered more than 8 times; every other code is the real gh's.
+# Environment: ADE_REAL_GH (the real gh; skips the PATH search; passed to the helper alone), ADE_PYTHON (default python3).
+set -u
+
+self="$0"
+case "$self" in */*) ;; *) self="./$self" ;; esac
+
+# is_shim FILE: a copy of this shim (marker line in its first lines), through symlinks
+is_shim() {
+  [ -f "$1" ] || return 1
+  shim_n=0
+  while [ "$shim_n" -lt 6 ] && IFS= read -r shim_line; do
+    case "$shim_line" in "# ade-gh-shim:"*) return 0 ;; esac
+    shim_n=$((shim_n + 1))
+  done < "$1" 2> /dev/null
+  return 1
+}
+
+real=""
+if [ -n "${ADE_REAL_GH:-}" ] && [ -f "$ADE_REAL_GH" ] && [ -x "$ADE_REAL_GH" ] && ! [ "$ADE_REAL_GH" -ef "$self" ] \
+  && ! is_shim "$ADE_REAL_GH"; then
+  real="$ADE_REAL_GH"
+else
+  set -f
+  IFS=:
+  for d in $PATH; do
+    if [ -n "$d" ] && [ -f "$d/gh" ] && [ -x "$d/gh" ] && ! [ "$d/gh" -ef "$self" ] && ! is_shim "$d/gh"; then
+      real="$d/gh"
+      break
+    fi
+  done
+  unset IFS
+  set +f
+fi
+if [ -z "$real" ]; then
+  echo "gh shim: no real gh found on PATH" >&2
+  exit 127
+fi
+
+# a script as the real gh may call `gh` again (this shim): count the re-entries, only then
+is_script=0
+if IFS= read -r first < "$real" 2> /dev/null; then
+  case "$first" in "#!"*) is_script=1 ;; esac
+fi
+if [ "$is_script" = 1 ]; then
+  depth="${ADE_GH_SHIM_DEPTH:-0}"
+  case "$depth" in "" | *[!0-9]* | ?????*) depth=0 ;; esac
+  depth=$((depth + 1))
+  if [ "$depth" -gt 8 ]; then
+    echo "gh shim: re-entered $depth times (a wrapper named gh that runs a shim again?): no real gh reachable" >&2
+    exit 127
+  fi
+  export ADE_GH_SHIM_DEPTH="$depth"
+fi
+
+# 1: no pr, issue or api word: nothing to judge
+judged=0
+for a in "$@"; do
+  case "$a" in pr | issue | api) judged=1; break ;; esac
+done
+if [ "$judged" = 0 ]; then
+  exec "$real" "$@"
+fi
+
+# the helper beside this script, through the shim's symlinks: <checkout>/libexec/agent-bin/gh -> <checkout>/bin/ade-gh-guard
+helper_path() {
+  hp_src="$self"
+  while [ -L "$hp_src" ]; do
+    hp_t=$(readlink "$hp_src")
+    case "$hp_t" in /*) hp_src="$hp_t" ;; *) hp_src="${hp_src%/*}/$hp_t" ;; esac
+  done
+  printf '%s/../../bin/ade-gh-guard' "${hp_src%/*}"
+}
+
+py="${ADE_PYTHON:-python3}"
+helper=$(helper_path)
+if ! command -v "$py" > /dev/null 2>&1 || ! [ -f "$helper" ]; then
+  echo "gh shim: guard unavailable (needs python3 and bin/ade-gh-guard); running gh unguarded" >&2
+  exec "$real" "$@"
+fi
+
+# -I: isolated (no PYTHON* variables, no user site, no cwd or script dir on sys.path)
+ADE_REAL_GH="$real" exec "$py" -I "$helper" "$@"  # named for the helper alone, never for a gh that may run a child

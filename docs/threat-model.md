@@ -425,6 +425,7 @@ tampered state file can do is still a finding (section 6 item 6).
    inside tool output (GitHub, logs, files, web) get no framing, and GitHub artifacts stay untrusted (AGENTS.md Trust). A reviewer
    does not block on the accepted weakness; a PR that widens it (framing non-Paseo-delivered text, or dropping the injection-triage exception) is
    still a finding.
+   **Same trust model, the adversary-marker gate (mg-52, 2026-11-16):** the gate (`libexec/agent-bin/gh` + the Claude hook, rule 14) stops an agent's careless marker text, not a steered agent that obfuscates on purpose; what it never catches (an absolute path to the real `gh`, curl or python with a token, the MCP, the web UI, the owner's own account) is listed in docs/adversary-gh-shim.md.
 
 ## 6. What a reviewer should check on a PR
 
