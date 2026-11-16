@@ -1597,6 +1597,12 @@ def test_the_collector_stops_reading_when_the_clock_ran_out_after_the_split(live
     "true;<<<x cd sub; " + G,
     "2>/dev/null cd sub; " + G,
     "true; 2>&1 cd sub; " + G,
+    "gh 2>/dev/null pr create --body-file sub/b.md",                                       # r10 A1: at every position, not only the first
+    "gh pr 2>/dev/null create --body-file sub/b.md",
+    "gh 2>/dev/null api repos/o/r/issues/1/comments -F body=@sub/b.md",
+    "FOO=1 2>/dev/null gh pr create --body-file sub/b.md",
+    "FOO=1 2>&1 gh pr create --body-file sub/b.md",
+    "FOO=1 2>/dev/null cd sub; " + G,
 ])
 def test_a_redirect_at_the_start_of_a_command_does_not_hide_the_command(live, command):
     """Adversary r9 A4: `2>/dev/null gh ...` took the `2` for the command; `;</dev/null gh ...` was one punctuation token."""
@@ -1663,3 +1669,9 @@ def test_apply_resolves_a_physical_dotdot_with_the_bounded_walk_not_realpath(liv
         raise AssertionError("os.path.realpath used")
     monkeypatch.setattr(os.path, "realpath", boom)
     assert gate.judge("cd -P L1/..; " + G, str(live), gate._checker)
+
+
+def test_a_digit_word_that_no_redirect_follows_is_still_the_command_word(live):
+    """Adversary r10 C1: `2 cd decoy` runs a command named `2`; its `cd` is an argument, so `cd sub` after it is the one that moves the shell."""
+    _top_tree(live)
+    assert run("2 cd decoy; cd sub; " + G, cwd=live)

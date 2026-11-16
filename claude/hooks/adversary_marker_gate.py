@@ -280,7 +280,8 @@ def read_file(path: str, cwd: str) -> str:
 
 class History(dict):
     """cwd -> the candidate directories the shell may be in by then (at most MAX_DIRS). `overflow` is set when a set grew past the cap,
-    a command's `cd` work passed MAX_WORK, a path passed MAX_PATH or the reads passed MAX_READS: the gate then denies the write."""
+    a command's `cd` work passed MAX_WORK, a path passed MAX_PATH, the reads passed MAX_READS, a physical walk passed MAX_STEPS or the
+    clock passed MAX_SECONDS: the gate then denies any command that names `gh` as a word."""
     overflow = False
 
     def __init__(self):
@@ -305,7 +306,7 @@ class History(dict):
     def realpath(self, path: str) -> str:
         """The physical path (what `cd -P` reaches), or "" when it cannot be had in bounds: more than MAX_LINKS symlinks (the kernel
         gives up at 32-40 too); more than MAX_STEPS components or the clock running out set `overflow` (a deny) instead. `os.path.realpath` has no such limit (one call through a chain of
-        45,000 links took 17 s), so the walk is this one, with a link counter and the clock checked per component."""
+        45,000 links took 17 s), so the walk is this one, with a link counter and the clock read every 64 components."""
         if path not in self.real:
             self.real[path] = self.walk(path)
         return self.real[path]
@@ -449,7 +450,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
 
     def push(tok):
         seg["words"].append(tok)
-        flags["lead"] = flags["lead"] and (tok in RESERVED or tok in ("builtin", "command"))
+        flags["lead"] = flags["lead"] and (tok in RESERVED or tok in ("builtin", "command") or bool(ASSIGN.match(tok)))   # `FOO=1 cd d` still moves the shell
         flags["reserved"] = flags["reserved"] and tok in RESERVED
         flags["assign"] = flags["assign"] and bool(ASSIGN.match(tok) or tok in ASSIGNERS)
         flags["unsure"] = flags["unsure"] or tok in UNSURE_WORDS
@@ -601,8 +602,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             pushd_n = False
             continue
         lead = flags["lead"]
-        if lead and FD_WORD.fullmatch(tok) and i + 1 < len(tokens) and tokens[i + 1] in REDIRECTS:
-            continue                           # `2>/dev/null gh ...`, `{fd}</dev/null cd d`: a file descriptor before a redirect is no command word
+        if FD_WORD.fullmatch(tok) and i + 1 < len(tokens) and tokens[i + 1] in REDIRECTS:
+            continue                           # `2>/dev/null gh ...`, `gh 2>/dev/null pr create`, `A=1 2>&1 gh`, `{fd}</dev/null cd d`: an fd before a redirect is no word (shlex splits `2>` and `2 >` alike; a literal argument `2` before a redirect is dropped: the deny side)
         if tok in ("cd", "pushd") and lead:
             want_dir = tok
             continue
