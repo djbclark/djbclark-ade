@@ -201,11 +201,12 @@ def test_hand_added_sandbox_deny_read_is_replaced_other_sandbox_keys_kept(fx):
         '      ]\n'
         '    },\n'
         '    "network": {"allowedDomains": ["github.com"]}\n'
-        '  },\n'
+        '  }'
     )
+    # keep the original trailing comma, or none when the sandbox block is the template's last key
     text2, n = _re.subn(
-        r'  "sandbox": \{.*?\n  \},?\n',
-        rich,
+        r'  "sandbox": \{.*?\n  \}(,?)\n',
+        lambda m: rich + m.group(1) + "\n",
         text,
         count=1,
         flags=_re.S,
@@ -417,3 +418,9 @@ def test_missing_codex_static_section_is_refused(fx):
 def test_executable_with_env_shebang():
     assert RENDER.read_text().startswith("#!/usr/bin/env python3\n")
     assert RENDER.stat().st_mode & 0o100
+
+
+def test_committed_template_parses_with_its_tags_masked_whatever_key_order():
+    """st-apply (2026-11-16): ade-settings-apply appends template keys (sandbox ends up last); the render script must still parse it."""
+    data = masked(TMPL)
+    assert isinstance(data["sandbox"]["filesystem"]["denyRead"], list)
