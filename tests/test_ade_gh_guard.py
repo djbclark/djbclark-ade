@@ -209,7 +209,8 @@ def test_the_shim_skips_every_copy_of_itself_when_it_looks_for_the_real_gh(world
 def test_no_real_gh_is_an_error_not_a_loop(world, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    r = run(world, "pr", "view", "1", env_extra={"PATH": "%s:/usr/bin:/bin" % empty})
+    # hermetic: PATH is the empty dir alone. Linux CI has /usr/bin/gh, so a PATH with /usr/bin or /bin would find a real gh there
+    r = run(world, "pr", "view", "1", env_extra={"PATH": str(empty)})
     assert r.returncode == 127 and "no real gh" in r.stderr
 
 
