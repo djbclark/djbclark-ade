@@ -330,7 +330,16 @@ class Scanner:
             self._aiuse = accounts
         if self._aiuse is False:
             return None
-        matches = [a for a in self._aiuse if isinstance(a, dict) and a.get("provider") == pool]
+        pool_ids = {pool}
+        if pool == "omp":
+            pool_ids.add("anthropic:claude_api")
+        elif pool == "pi":
+            pool_ids.add("openai:openai_api")
+        matches = [
+            a
+            for a in self._aiuse
+            if isinstance(a, dict) and (a.get("provider") in pool_ids or a.get("pool_id") in pool_ids)
+        ]
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
