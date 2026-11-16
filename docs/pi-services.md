@@ -240,3 +240,19 @@ in `~/.pi/agent/settings.json`. Missing targets or invalid settings fail doctor;
 it never edits settings, loads extensions or reads credentials. Relative paths,
 package sources, globs and enable/disable patterns remain Pi's responsibility.
 This check detects missing targets, not provider health or quota exhaustion.
+
+Settings, Paseo's model catalog and an already-running Pi registry are separate.
+A catalog refresh does not reload extensions inside an existing Pi process.
+For a stuck Paseo tab, first verify that it has no active turn or pending
+permissions, then use the SDK's `refreshAgent(agentId)` to reopen that saved
+session. This retains its agent/native-session identity and transcript; do not
+send a probe prompt into the unfinished task or create a replacement tab.
+Reapply the intended model and effort and verify the resulting snapshot.
+`/reload` applies to interactive Pi; built-in TUI commands are not executed by
+Pi's RPC `prompt` command.
+
+`paseo provider diagnostic pi --json` refreshes the global model catalog.
+Workspace catalogs are separate: refresh only the affected workspace with
+`refreshProvidersSnapshot({cwd, providers: ['pi']})`, then compare its entries
+with a fresh Pi catalog. Recurring catalog staleness is tracked upstream in
+[getpaseo/paseo PR 7733](https://github.com/getpaseo/paseo/pull/7733).
