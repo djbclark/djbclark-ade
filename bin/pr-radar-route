@@ -23,7 +23,7 @@ shows the reason. A router that exits non-zero has its exit code returned; the r
 stderr as is, else "route_agent.py exited with N".
 
 Router choice (first match): $PR_RADAR_ROUTE_AGENT (tests); `route_agent.py` beside this script when the script's
-parent directory has config/routing.toml (a djbclark-ade checkout or worktree); ~/src/djbclark-ade/bin/route_agent.py
+parent directory has config/ade.toml (a djbclark-ade checkout or worktree); ~/src/djbclark-ade/bin/route_agent.py
 (the live ADE router); else `route_agent.py` beside this script (a vendored copy).
 
 Exit 0: routed; non-zero: failed (bad stdin, router timeout, router error or unusable router answer).
@@ -138,7 +138,7 @@ def choose_router() -> Path:
         return Path(override)
     here = Path(__file__).resolve().parent
     sibling = here / "route_agent.py"
-    if (here.parent / "config" / "routing.toml").is_file():
+    if (here.parent / "config" / "ade.toml").is_file():
         return sibling
     ade_router = Path.home() / "src" / "djbclark-ade" / "bin" / "route_agent.py"
     return ade_router if ade_router.exists() else sibling

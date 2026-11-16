@@ -16,6 +16,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
+LEGACY_CONFIG = LEGACY_ROOT / "config"
 sys.path.insert(0, str(REPO / "bin"))
 import ade_config as ac
 import ade_config_edit as edit
@@ -34,7 +35,7 @@ def tree(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     shutil.copy2(REPO / "config/ade.schema.json", root / "config/ade.schema.json")
-    shutil.copy2(LEGACY_ROOT / "context-budget.toml", root / "config/context-budget.toml")
+    shutil.copy2(LEGACY_CONFIG / "context-budget.toml", root / "config/context-budget.toml")
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -178,7 +179,7 @@ def test_overlaid_budget_changes_real_saved_output_alerts(tree, capsys):
 def test_raw_context_validated_even_when_scoped_away(tree, domains):
     root, home, cli = tree
     for name in ("routing.toml", "gates.toml", "model-tiers.toml"):
-        shutil.copy2(LEGACY_ROOT / name, root / "config" / name)
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
     local(home, '[context_budget.budget]\nmemory=false\n')
     with pytest.raises(ac.ConfigError, match="finite number"):
         ac.load_effective(root=root, home=home, domains=domains)
@@ -187,7 +188,7 @@ def test_raw_context_validated_even_when_scoped_away(tree, domains):
 def test_router_scope_ignores_unselected_legacy_context(tree):
     root, home, cli = tree
     for name in ("routing.toml", "gates.toml", "model-tiers.toml"):
-        shutil.copy2(LEGACY_ROOT / name, root / "config" / name)
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
     (root / "config/context-budget.toml").write_text("invalid legacy [")
     assert "context_budget" not in ac.load_effective(root=root, home=home,
                                                     domains=ac.ROUTER_DOMAINS).data
@@ -306,7 +307,7 @@ def test_empty_cli_directory_uses_same_validated_fallback_label(tree, monkeypatc
 def test_generic_config_cli_exposes_context_and_diff_without_effects(tree):
     root, home, cli = tree
     for name in ("routing.toml", "gates.toml", "model-tiers.toml"):
-        shutil.copy2(LEGACY_ROOT / name, root / "config" / name)
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
     local(home, '[context_budget.budget]\ntotal=50000\n')
     before = snapshot(root.parent)
     for args in (["check"], ["get", "context_budget.budget.total"], ["diff"]):

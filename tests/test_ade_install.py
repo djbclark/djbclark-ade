@@ -12,7 +12,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 BIN = REPO / "bin"
 FIX = REPO / "tests" / "fixtures" / "install_catalog"
-LEGACY_INSTALL = REPO / "tests" / "fixtures" / "config" / "legacy" / "install.toml"
+LEGACY_INSTALL = REPO / "tests" / "fixtures" / "config" / "legacy" / "config" / "install.toml"
 sys.path.insert(0, str(BIN))
 import ade_install as ai  # noqa: E402
 import ade_user_install as aui  # noqa: E402

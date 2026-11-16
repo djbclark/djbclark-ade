@@ -247,7 +247,7 @@ def test_transport_refuses_redirects(monkeypatch):
 
 def test_catalog_engine_uses_secret_boundary_and_persists_only_status(tmp_path, monkeypatch):
     legacy_root = REPO / "tests/fixtures/config/legacy"
-    catalog = ai.load_catalog(root=legacy_root, install_path=legacy_root / "install.toml")
+    catalog = ai.load_catalog(root=legacy_root, install_path=legacy_root / "config/install.toml")
     rows = {row["name"]: row for row in catalog.keys}
     seen = []
     monkeypatch.setattr(ai, "_probe_executable_missing", lambda _: False)

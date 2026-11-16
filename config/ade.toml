@@ -465,7 +465,7 @@ agent = "opencode"
 # for bin/route_agent.py (the planner's per-wave cap; Choice.dispatch → paseo run)
 # and claude/hooks/frontier_agent_gate.py (Agent-tool frontier calls). The acp-dispatch grant path was deleted 2026-11-14.
 #
-# Since 2026-11-07 (slim-down E7) this file holds the frontier half only: the Claude quota gates ([governor],
+# Since 2026-11-07 (slim-down E7) the gates domain holds the frontier half only: the Claude quota gates ([governor],
 # [quota_guard], the gate profiles and their floors) were deleted with the fleet governor, the quota guard and the
 # gate profile tool. Pausing at a quota limit and resuming after the reset is the session-guard and usage-auto-resume
 # Paseo plugins' job; the Claude reading the allowance judges comes from route_agent's merged quota snapshot
@@ -500,9 +500,9 @@ frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }
 
 # --- from config/model-tiers.toml ---
 # Model tiers: roles → concrete models per vendor (docs/history/model-tiers-design.md).
-# Snapshot 2026-11-09: projects today's routing.toml / route_agent policy tables.
-# Edit via `bin/ade-model-tiers promote|set` in a claimed workspace; merge by PR.
-# Untiered pools (minimax, glm, gemini-4-argon, …) stay as literal ids in routing.toml.
+# Snapshot 2026-11-09: projects today's config/ade.toml / route_agent policy tables.
+# Edit production via `bin/ade-model-tiers promote|set` in a claimed workspace; merge by PR.
+# Untiered pools (minimax, glm, gemini-4-argon, …) stay as literal ids in config/ade.toml [dispatch].
 
 [model_tiers.meta]
 schema = 1
@@ -568,8 +568,8 @@ display = "GPT-6 Luna"
 "claude-fable-5-1" = { vendor = "claude", last_role = "frontier", until = "2026-11-13" }
 
 # --- from config/install.toml ---
-# Transitional install catalog (schema_version=1), 2026-11-09.
-# Used when config/ade.toml is absent. Values are references and recipes, never secret values.
+# Install catalog values (legacy schema_version=1), captured 2026-11-09.
+# Production authority is config/ade.toml [install] and [keys]. Values are references and recipes, never secret values.
 # install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename fallback for doctor.
 # install_argv / probe_argv = argv lists (tokens: {bin} {root} {home} {prefix}); doctor prefers probe_argv.
 # probe_warn_exit = nonzero probe exits that mean "advisory issues" -> warn (doctor exit 0) when probe_summary_re matches a stdout line; else error.

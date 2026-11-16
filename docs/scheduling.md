@@ -174,8 +174,8 @@ Remove: `bin/ade-sched uninstall com.djbclark.ade-helper-prune`.
 
 ## Inventory and drift (S4b, 2026-11-10)
 
-`config/ade.toml` carries `[install.jobs]` and `[install.retired_jobs]` (the setup-plan's
-`config/ade.toml [install.jobs]` home while that file is absent). Each job records `name`, `kind`
+`config/ade.toml` carries `[install.jobs]` and `[install.retired_jobs]`; the frozen legacy
+`config/install.toml` fixture preserves the old projection only for equivalence tests. Each job records `name`, `kind`
 (`ade-sched` / `paseo` / `service`), `owner`, `class`, and for probeable rows a `label` (plus `plist` /
 `mode` as needed). Paseo rows require an explicit `mode` (`auto` / `auto-review`).
 

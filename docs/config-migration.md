@@ -1,4 +1,10 @@
-# Config migration: schema_version=1 effective tree (2026-11-07; set 2026-11-08)
+# Config migration: schema_version=1 effective tree (2026-11-07; unified production 2026-11-16)
+
+`config/ade.toml` is now the checked-in production source. The five legacy files survive only as the repo-shaped
+frozen fixture under `tests/fixtures/config/legacy/config/`; the export test proves that production still matches
+their projection. `bin/ade-model-tiers promote|set` regenerates only the unified `[model_tiers…]` subtree, preserving
+all other bytes atomically (comments between tier tables are regenerated). Sections describing pre-cutover adoption
+are retained as history.
 
 First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
 CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
@@ -9,8 +15,8 @@ initialization and default reload in `bin/route_agent.py` also adopt `load_effec
 The final overlaid routing domain passes the legacy reader's shape/default checks
 before becoming routing constants. No new routes or policy values ship with this
 adoption. Install/keys metadata also has a bounded reader adoption below. Do not
-ship tracked `config/ade.toml` yet: other transitional readers still require
-separate adoption.
+ship tracked `config/ade.toml` at that stage: other transitional readers still required
+separate adoption (superseded by the 2026-11-16 cutover above).
 
 ## A. Mapping table (one explicit projection)
 

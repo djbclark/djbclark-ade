@@ -15,6 +15,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
+LEGACY_CONFIG = LEGACY_ROOT / "config"
 BIN = REPO / "bin"
 FIX = REPO / "tests" / "fixtures" / "ade_config"
 sys.path.insert(0, str(BIN))
@@ -59,7 +60,7 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
     import tomllib
 
     eff = ac.load_effective(root=LEGACY_ROOT, home=home)
-    shipped = tomllib.loads((LEGACY_ROOT / "routing.toml").read_text())
+    shipped = tomllib.loads((LEGACY_CONFIG / "routing.toml").read_text())
     for key in ("routing", "lead", "dispatch", "substrate", "hermes", "calibrate", "service"):
         assert eff.data.get(key) == shipped.get(key)
     assert eff.data["schema_version"] == 1
@@ -74,7 +75,7 @@ def test_legacy_effective_matches_routing_toml_and_clamped_gates(home):
 def test_local_override_preserves_sibling_lead_leaves(home):
     import tomllib
 
-    shipped_lead = tomllib.loads((LEGACY_ROOT / "routing.toml").read_text())["lead"]
+    shipped_lead = tomllib.loads((LEGACY_CONFIG / "routing.toml").read_text())["lead"]
     _local_write(home, (FIX / "local_sibling.toml").read_text())
     eff = ac.load_effective(root=REPO, home=home)
     assert eff.data["lead"]["fable_lead"] is False
@@ -125,13 +126,13 @@ def test_routing_policy_isolates_domain_from_local(home, monkeypatch):
     import tomllib
 
     # Point routing at shipped file via env; local tries to flip fable_lead.
-    monkeypatch.setenv("ROUTING_POLICY", str(LEGACY_ROOT / "routing.toml"))
+    monkeypatch.setenv("ROUTING_POLICY", str(LEGACY_CONFIG / "routing.toml"))
     _local_write(home, (FIX / "local_sibling.toml").read_text())
     eff = ac.load_effective(root=REPO, home=home, environ=dict(os.environ))
-    shipped = tomllib.loads((LEGACY_ROOT / "routing.toml").read_text())
+    shipped = tomllib.loads((LEGACY_CONFIG / "routing.toml").read_text())
     assert eff.data["lead"] == shipped["lead"]
     assert eff.data["lead"]["fable_lead"] is True
-    assert eff.provenance["routing_env"] == str(LEGACY_ROOT / "routing.toml")
+    assert eff.provenance["routing_env"] == str(LEGACY_CONFIG / "routing.toml")
 
 
 def test_gates_toml_isolates_and_bad_frontier_is_closed(home, monkeypatch):
@@ -170,8 +171,8 @@ def test_check_ok_and_cli_makes_no_writes(home, tmp_path):
     sentinel.write_text("x")
     before = {
         "sentinel": sentinel.stat().st_mtime_ns,
-        "routing": (LEGACY_ROOT / "routing.toml").stat().st_mtime_ns,
-        "gates": (LEGACY_ROOT / "gates.toml").stat().st_mtime_ns,
+        "routing": (LEGACY_CONFIG / "routing.toml").stat().st_mtime_ns,
+        "gates": (LEGACY_CONFIG / "gates.toml").stat().st_mtime_ns,
     }
     errors, eff = ac.check(root=REPO, home=home)
     assert errors == []
@@ -180,8 +181,8 @@ def test_check_ok_and_cli_makes_no_writes(home, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout
     assert sentinel.stat().st_mtime_ns == before["sentinel"]
-    assert (LEGACY_ROOT / "routing.toml").stat().st_mtime_ns == before["routing"]
-    assert (LEGACY_ROOT / "gates.toml").stat().st_mtime_ns == before["gates"]
+    assert (LEGACY_CONFIG / "routing.toml").stat().st_mtime_ns == before["routing"]
+    assert (LEGACY_CONFIG / "gates.toml").stat().st_mtime_ns == before["gates"]
     assert not (home / ".config" / "djbclark-ade" / "local.toml").exists()
 
 
@@ -239,7 +240,7 @@ def synthetic_root(tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     for name in ("ade.schema.json", "routing.toml", "gates.toml", "model-tiers.toml"):
-        (root / "config" / name).write_bytes((LEGACY_ROOT / name).read_bytes())
+        (root / "config" / name).write_bytes((LEGACY_CONFIG / name).read_bytes())
     return root
 
 

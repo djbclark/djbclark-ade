@@ -36,7 +36,7 @@ def catalog_root(tmp_path, monkeypatch):
 
 def full_root(root):
     for name in ("ade.schema.json", "routing.toml", "gates.toml", "model-tiers.toml"):
-        shutil.copy2(REPO / "tests/fixtures/config/legacy" / name, root / "config" / name)
+        shutil.copy2(REPO / "tests/fixtures/config/legacy/config" / name, root / "config" / name)
 
 
 def local(home, text):

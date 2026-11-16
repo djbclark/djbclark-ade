@@ -26,7 +26,7 @@ def root(tmp_path, monkeypatch):
     r = tmp_path / "repo"
     (r / "config").mkdir(parents=True)
     for name in LEGACY:
-        shutil.copy2(REPO / "tests/fixtures/config/legacy" / name, r / "config" / name)
+        shutil.copy2(REPO / "tests/fixtures/config/legacy/config" / name, r / "config" / name)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in ("ROUTING_POLICY", "GATES_TOML", "MODEL_TIERS_TOML"):
         monkeypatch.delenv(name, raising=False)
@@ -41,6 +41,10 @@ def effective(root: Path, tmp_path: Path):
 
 def test_shipped_legacy_files_round_trip_and_keep_comments(root, tmp_path):
     text = acx.generate_unified(root)
+    assert (REPO / "config/ade.toml").read_text() == text, (
+        "production unified config drifted from the frozen legacy fixture projection; "
+        "regenerate with bin/ade-config export-unified"
+    )
     parsed = tomllib.loads(text)
     assert parsed["schema_version"] == 1
     assert {"routing", "lead", "service", "gates", "model_tiers", "install", "keys", "context_budget"} <= set(parsed)

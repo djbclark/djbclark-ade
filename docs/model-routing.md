@@ -153,8 +153,8 @@ G1. Design: `docs/history/model-tiers-design.md`. This slice ships the file, the
 `@role` placeholders, render, literal scan) stays later.
 Runtime adoption **2026-11-10**: router tier reporting, frontier tokens, sublimit
 families and judgment fallback consume the final effective `[model_tiers]` tree.
-Malformed overlays fail before publishing runtime state. Legacy file readers and
-the tier writer remain unchanged; no model promotion ships with this adoption.
+Malformed overlays fail before publishing runtime state. Explicit legacy-file readers remain isolated;
+`ade-model-tiers promote|set` now writes the unified production subtree.
 G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 | role | claude (rank 1) | codex (rank 2) |
@@ -166,7 +166,10 @@ G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 G3. Succession: `ade-model-tiers promote --vendor V --new ID --reason TEXT [--cascade N] [--dry-run]` shifts the ladder
 (default cascade 2: new → frontier, old frontier → judgment; the displaced judgment goes to `[former]`). `set` changes
-one role without shifting. No secrets, no network. Edit in a claimed worktree; the merge is the atomic apply.
+one role without shifting. On the default unified source, the writer regenerates only `[model_tiers…]`, preserves every
+byte outside that subtree, and atomically replaces the file; comments between the tier tables are regenerated, not
+preserved. Explicit `MODEL_TIERS_TOML` paths retain the legacy whole-file format. No secrets, no network. Edit in a
+claimed worktree; the merge is the atomic apply.
 G4. Untiered models (e.g. `gemini-4-argon`) stay as literals in `[dispatch].frontier_models`; frontier matching is the
 union of that list and every spelling/alias of each tiered vendor's frontier role.
 

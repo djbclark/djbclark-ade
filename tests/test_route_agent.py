@@ -27,6 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import route_agent as r
 from test_gates import close_frontier_baseline
 
+LEGACY_ROUTING = (Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+                  / "config" / "legacy" / "config" / "routing.toml")
+LEGACY_GATES = (Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+                / "config" / "legacy" / "config" / "gates.toml")
+
 IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
     "claude": {"remaining": 47.0}, "codex": {"remaining": 100.0},
@@ -885,7 +890,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         """Env pointing the frontier gate at a temp gates.toml copy (`closed` closes its [frontier] baseline, the pre-2026-10-27 rule)
         and the Claude reading at a canned Paseo usage report (`claude_usage`); aiuse and its snapshot file are pinned away."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
-        toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
+        toml = LEGACY_GATES.read_text()
         if closed:
             toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
@@ -1072,7 +1077,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def tearDown(self):
         # Restore the repo policy after any test that reloads a temp file.
-        r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+        r.reload_policy(LEGACY_ROUTING)
 
     def test_loaded_services_match_frozen_expectation(self):
         for name, expect in self.EXPECTED.items():
@@ -1090,7 +1095,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
     def test_routing_policy_env_changes_route_output(self):
         import tempfile
         import textwrap
-        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        base = (LEGACY_ROUTING).read_text()
         # Make claude lose judgment (rank 99) and invent a fake judgment winner.
         patched = base.replace(
             'good_at = { judgment = 1, frontier = 2 }',
@@ -1285,7 +1290,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
             Path(tmp).unlink(missing_ok=True)
 
         # Present sections but a missing routing key → apply_policy ValueError.
-        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml"
+        base = (LEGACY_ROUTING
                 ).read_text()
         patched = base.replace(
             "pace_penalty_judgment_factor = 0.5\n", "", 1)
@@ -1304,7 +1309,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         finally:
             Path(tmp).unlink(missing_ok=True)
             r.reload_policy(
-                Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+                LEGACY_ROUTING)
 
     def test_policy_md_contains_codex_frontier_row(self):
         import io
@@ -1366,7 +1371,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
                     self.assertIn("| lead.fable_lead | false |", md.getvalue())
                     self.assertIn("not on Fable", md.getvalue())
                 finally:
-                    r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+                    r.reload_policy(LEGACY_ROUTING)
         for value in ('"yes"', "1"):
             path = self._lead_policy_variant('pipeline_effort = "medium"\n', f"fable_lead = {value}\n")
             with self.assertRaises(ValueError) as ctx:
@@ -1377,7 +1382,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         """Write routing.toml with the pipeline_effort line replaced (and, given `fable_line`, the fable_lead line too);
         return the temp path."""
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('pipeline_effort = "medium"\n', replacement)
         if fable_line is not None:
             self.assertIn("fable_lead = true\n", bad)
@@ -1406,7 +1411,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def test_a_judgment_lead_effort_outside_the_claude_levels_is_rejected(self):
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('effort = "high"\npipeline_model', 'effort = "minimal"\npipeline_model')
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
@@ -1420,7 +1425,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
     def test_a_lead_effort_xhigh_and_max_load(self):
         """Paseo's top Claude levels are valid [lead] effort and pipeline_effort (PR 33 round 2)."""
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         for value in ("xhigh", "max"):
             for key, needle in (("effort", 'effort = "high"\n'), ("pipeline_effort", 'pipeline_effort = "medium"\n')):
                 with self.subTest(key=key, value=value):
@@ -1441,7 +1446,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def test_a_lead_table_missing_a_key_is_rejected_naming_the_file(self):
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('pipeline_model = "sonnet"\n', "")
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:

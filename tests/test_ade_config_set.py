@@ -437,7 +437,7 @@ def test_real_repo_routing_copy_preserves_complex_bytes(home, tmp_path):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     shutil.copy(REPO / "config" / "ade.schema.json", root / "config" / "ade.schema.json")
-    shutil.copy(REPO / "tests" / "fixtures" / "config" / "legacy" / "routing.toml", root / "config" / "routing.toml")
+    shutil.copy(REPO / "tests" / "fixtures" / "config" / "legacy" / "config" / "routing.toml", root / "config" / "routing.toml")
     routing = root / "config" / "routing.toml"
     before = routing.read_bytes()
     ace.set_scalar("lead.fable_lead", False, target="repo", root=root, home=home)
