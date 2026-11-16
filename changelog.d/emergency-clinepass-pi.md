@@ -1,3 +1,3 @@
 ### Added
 
-- Manual ClinePass models in Pi using the managed primary key; automatic routing remains reserved. (#762)
+- Manual ClinePass models in Pi using the managed primary and t-e keys; automatic routing remains reserved. (#762)

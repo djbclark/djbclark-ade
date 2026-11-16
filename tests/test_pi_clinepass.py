@@ -16,13 +16,15 @@ EXTENSION = ROOT / "pi-extensions/clinepass/index.mjs"
 def test_subscription_catalog_and_registration():
     script = """
 import provider from './pi-extensions/clinepass/index.mjs';
-let registration;
-provider({registerProvider:(name,config)=>registration={name,config}});
+const registration=[];
+provider({registerProvider:(name,config)=>registration.push({name,config})});
 console.log(JSON.stringify(registration));
 """
     data = json.loads(subprocess.check_output(["node", "--input-type=module", "-e", script], cwd=ROOT))
-    config = data["config"]
-    assert data["name"] == "clinepass"
+    assert [r["name"] for r in data] == ["clinepass", "clinepass-t-e"]
+    assert data[1]["config"]["apiKey"] == "!sudo-secretspec get CLINE_PASS_KEY_2_TE --reason pi-clinepass-request"
+    config = data[0]["config"]
+    assert data[0]["name"] == "clinepass"
     assert config["baseUrl"] == "https://api.cline.bot/api/v1"
     assert config["api"] == "openai-completions"
     assert config["apiKey"] == "!sudo-secretspec get CLINE_API_KEY --reason pi-clinepass-request"

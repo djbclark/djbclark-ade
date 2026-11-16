@@ -114,7 +114,10 @@ The operator authorized manual Pi selection of the primary ClinePass account.
 `pi-extensions/clinepass/index.mjs` registers provider `clinepass`, using Pi's
 built-in OpenAI Chat Completions streamer against `https://api.cline.bot/api/v1`.
 It resolves `CLINE_API_KEY` through `sudo-secretspec` at request time. No key is
-stored in settings or source; the separate `CLINE_PASS_KEY_2_TE` account is unused.
+stored in settings or source. The operator subsequently authorized the second
+account: provider `clinepass-t-e` resolves only `CLINE_PASS_KEY_2_TE`. Select
+`clinepass-t-e/cline-pass/deepseek-v4.1-flash` for that account. Both provider
+identities persist in session history; neither switches accounts automatically.
 Missing credentials, authentication failures and exhausted balance are visible
 Pi errors, without switching to another provider.
 
