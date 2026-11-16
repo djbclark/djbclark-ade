@@ -12,7 +12,7 @@ This helper judges the REAL argv, cwd, operand files and stdin of the `gh` proce
 
 How: `gh_invocation` finds the write (`pr`/`issue` create|edit|comment|review|close|reopen, `api` with a body flag), then the hook's `judge` runs on
 `shlex.join(["gh", *argv])`, a command this helper builds from the real argv (so it has no lexing to get wrong). A stdin the argv reads
-(`--body-file -`, `--input -`, `-F body=@-`) is read once into a private temp file, judged as `< FILE`, then handed to the real gh as its fd 0.
+(`--body-file -`, `-F-`, `--input -`, `-F body=@-`) is spooled whole (never cut: gh submits every byte) into a private temp file, judged as `< FILE`, then handed to the real gh as its fd 0.
 Fails closed ONLY for a write that takes a body and that this gate cannot read (an error in `judge`); everything else that goes wrong runs the real gh.
 The real gh is ADE_REAL_GH (the shim passes it to this helper alone, which pops it) or the first non-shim `gh` on PATH; it is run with os.execv.
 Limits: docs/adversary-gh-shim.md.
@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent  # the checkout this script lives 
 sys.path.insert(0, str(ROOT / "claude" / "hooks"))
 EXIT_REFUSED = 4
 SHIM_MARKER = b"# ade-gh-shim:"  # in the first lines of every copy of libexec/agent-bin/gh
-MAX_STDIN = 16 * 1024 * 1024  # a stdin body larger than this is judged on its first 16 MB (the gate reads no more than MAX_TEXT of it anyway)
+CHUNK = 1 << 20  # the stdin spool is copied whole, a chunk at a time: the real gh gets every byte (the gate bounds its own reads, MAX_TEXT)
 
 
 def is_shim(path) -> bool:
@@ -55,8 +55,9 @@ def real_gh(env=None) -> str | None:
 
 
 def reads_stdin(argv: list[str]) -> bool:
-    """True when an argument tells gh to read a body or payload from stdin (`-`, `--body-file=-`, `-F body=@-`, `--input -`)."""
-    return any(a == "-" or a.endswith("=-") or a.endswith("@-") for a in argv)
+    """True when an argument tells gh to read a body or payload from stdin (`-`, `--body-file=-`, `-F-`, `-F body=@-`, `--input -`)."""
+    return any(a == "-" or a.endswith("=-") or a.endswith("@-") or (len(a) == 3 and a[0] == "-" and a[1] != "-" and a[2] == "-")
+               for a in argv)
 
 
 def refuse(found: str) -> int:
@@ -90,27 +91,36 @@ def run(argv: list[str], env=None) -> int:
     try:
         import adversary_marker_gate as gate  # noqa: PLC0415 - the hook's rules, one copy
         stdin_path = None
+        inspect_path = None
         if reads_stdin(args) and not os.isatty(0):
             fd, stdin_path = tempfile.mkstemp(prefix="ade-gh-stdin-")
+            head = b""
+            total = 0
             with os.fdopen(fd, "wb") as out:
-                remaining = MAX_STDIN
-                while remaining > 0:
-                    chunk = os.read(0, min(1 << 20, remaining))
+                while True:                            # the whole stream: the real gh must submit exactly what the caller sent
+                    chunk = os.read(0, CHUNK)
                     if not chunk:
                         break
                     out.write(chunk)
-                    remaining -= len(chunk)
+                    if len(head) < gate.MAX_FILE:
+                        head += chunk[:gate.MAX_FILE - len(head)]
+                    total += len(chunk)
             stdin_file = open(stdin_path, "rb")        # kept open: it becomes the real gh's stdin
+            inspect_path = stdin_path
+            if total > gate.MAX_FILE:                  # the gate reads no file over MAX_FILE: it judges the first MAX_FILE bytes (docs/adversary-gh-shim.md)
+                fd, inspect_path = tempfile.mkstemp(prefix="ade-gh-head-")
+                with os.fdopen(fd, "wb") as out:
+                    out.write(head)
         try:
-            found = judge_argv(args, stdin_path, gate)
+            found = judge_argv(args, inspect_path, gate)
         except Exception as exc:  # noqa: BLE001 - a write this gate cannot read is refused; a read is not
             if gate.loose_write("gh " + " ".join(args)):
                 print(f"ade-gh-guard: {type(exc).__name__}: {exc}; refusing a write it cannot read", file=sys.stderr)
                 return EXIT_REFUSED
             found = ""
         finally:
-            if stdin_path:
-                os.unlink(stdin_path)
+            for leftover in {stdin_path, inspect_path} - {None}:
+                os.unlink(leftover)
         if found:
             return refuse(found)
     except Exception as exc:  # noqa: BLE001 - an accident guard: its own bug runs the real gh, never blocks it

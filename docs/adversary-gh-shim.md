@@ -14,8 +14,9 @@ A. `libexec/agent-bin/gh` (POSIX `sh`, marker `# ade-gh-shim:`) and its helper `
 B. The helper sees the real argv, the real cwd, the real operand files and the real stdin. It finds the write with the hook's own
 `gh_invocation`/`is_write` (`pr`/`issue` `create`, `new`, `edit`, `comment`, `review`, `close`, `reopen`; `api` with a body flag) and judges it with
 the hook's own `judge`, on `shlex.join(["gh", *argv])`: a command text the helper builds from the real argv, so no shell syntax is left to lex.
-One module, no copy: a change to the marker rules in the hook is a change to the shim. A stdin the argv reads (`--body-file -`, `--input -`,
-`-F body=@-`) is read once into a private temp file, judged as `< FILE`, and handed to the real `gh` as its fd 0.
+One module, no copy: a change to the marker rules in the hook is a change to the shim. A stdin the argv reads (`--body-file -`, `-F-`, `--input -`,
+`-F body=@-`) is spooled whole (no size cap: the real `gh` submits exactly the bytes the caller sent) into a private temp file, judged as `< FILE`
+(the gate reads no file over `MAX_FILE`, 256 KiB: a stdin larger than that is judged on its first 256 KiB, and still reaches `gh` whole), and handed to the real `gh` as its fd 0.
 
 C. A refusal is exit 4 and one line on stderr; nothing runs. Everything else is `os.execv(real_gh, [real_gh, *argv])`: same argv, stdin,
 exit status and environment (the helper pops `ADE_REAL_GH`; only when the real `gh` is itself a script does the shim set `ADE_GH_SHIM_DEPTH`,
@@ -39,7 +40,7 @@ A. The promise is narrow on purpose (rule 14): the gate stops an agent's careles
 an absolute path to the real `gh`; `curl`, `python` or `node` with a token; the GitHub MCP or the web UI; the owner's own shell and
 `bin/ade-merge-ready approve-post` (the operator's route); a `gh alias` that expands to a write (the shim sees the alias name, not its
 expansion); a bash process whose startup file rewrites `PATH` (the `paseo` shim has the same limit: `env -u BASH_ENV`, or a PATH kept by the caller);
-a marker that a program the shim does not run assembles after `gh` has read its input (a `gh` extension, a pager).
+a marker that sits past the first 256 KiB of a stdin stream (GitHub rejects a body over 65,536 characters, so only a payload padded with other fields can hide one); a marker that a program the shim does not run assembles after `gh` has read its input (a `gh` extension, a pager).
 
 B. The hook still covers a command typed in a Bash tool call that names a `gh` write, through an absolute path or a PATH without the shim, with the
 limits listed in rule 14 (PR 749's record holds the lexing rounds; no new lexer work).
