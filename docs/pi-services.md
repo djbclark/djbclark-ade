@@ -174,7 +174,8 @@ is not needed for transport. The [official Go guide](https://opencode.ai/docs/co
 documents the current inference endpoints and subscription/Extra Usage distinction.
 
 Live DeepSeek V4.1 Flash checks: djbclark and t-e authenticated and executed native
-read/write tools. dclark authenticated but returned a five-hour Go usage limit;
+read/write tools, then retained their named identity after reopening saved
+sessions and recalled the earlier nonce. dclark authenticated but returned a five-hour Go usage limit;
 no Extra Usage setting was changed. The old and current usage GET paths returned
 HTTP 403 from this machine, so no fresh numeric balance is claimed. Model
 listing is not proof every listed model is entitled or currently usable.

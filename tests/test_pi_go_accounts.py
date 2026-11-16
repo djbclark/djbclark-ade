@@ -16,7 +16,7 @@ ACCOUNTS = {"djbclark": "OPENCODE_GO_API_KEY_DJBCLARK", "dclark": "OPENCODE_GO_A
 
 
 def test_account_identity_auth_isolation_and_native_transport():
-    script = """
+    script = r"""
 import assert from 'node:assert/strict';
 import {accountProviders} from './pi-extensions/go-accounts/providers.mjs';
 const calls=[];
