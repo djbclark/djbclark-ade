@@ -1,0 +1,16 @@
+name: Pi extension paths
+on:
+  push:
+    paths: ['bin/ade_install.py', 'tests/test_pi_extension_paths.py', 'tests/test_ade_install.py', '.github/workflows/pi-extension-paths.yml']
+  pull_request:
+    paths: ['bin/ade_install.py', 'tests/test_pi_extension_paths.py', 'tests/test_ade_install.py', '.github/workflows/pi-extension-paths.yml']
+permissions:
+  contents: read
+jobs:
+  paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest --with pyyaml python -m pytest tests/test_pi_extension_paths.py tests/test_ade_install.py -q

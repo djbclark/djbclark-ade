@@ -1,0 +1,1 @@
+Fix: installation doctor detects missing explicit Pi extension paths left behind by removed task worktrees; document durable installation paths.

@@ -2235,3 +2235,21 @@ def test_probe_timeout_s_valid_loads(tmp_path):
     )
     rows = {r["id"]: r for r in ai.load_catalog(root=root).data["component"]}
     assert rows["p"]["probe_timeout_s"] == 45.5
+
+
+def test_doctor_missing_pi_extension_fails_and_scoped_doctor_skips_it(tmp_path):
+    root = _fixture_root(tmp_path)
+    home = tmp_path / "pi-home"
+    settings = home / ".pi/agent/settings.json"
+    settings.parent.mkdir(parents=True)
+    missing = home / "removed-task-wt/index.mjs"
+    settings.write_text(json.dumps({"extensions": [str(missing)]}))
+    catalog = ai.load_catalog(root=root)
+    obs, rc = ai.doctor(catalog, runner=lambda argv, cwd: subprocess.CompletedProcess(argv, 0, "", ""),
+                        skip_jobs=True, skip_credential_bak=True, wiring_home=home)
+    assert rc == 1
+    assert any(o.id == "pi-extension-paths" and o.status == "missing" for o in obs)
+    obs, _ = ai.doctor(catalog, component_ids=[catalog.components[0]["id"]],
+                       runner=lambda argv, cwd: subprocess.CompletedProcess(argv, 0, "", ""),
+                       wiring_home=home)
+    assert not any(o.id == "pi-extension-paths" for o in obs)
