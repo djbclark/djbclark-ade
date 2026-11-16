@@ -798,7 +798,7 @@ def update(rep, args, repo):
     # is a note, never an exit code (the live file is untouched).
     sa = Path(__file__).resolve().parent / "ade-settings-apply"
     live_settings = Path.home() / ".claude" / "settings.json"
-    if can_link and sa.exists() and (Path(repo) / "agents" / "claude" / "settings.json.tmpl").is_file() and live_settings.is_file():
+    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True).returncode == 0:
         # The template is read from the committed revision (`target`), never the working tree: an uncommitted edit in the shared checkout must not
         # reach every Claude session (adversary A2).
         try:
@@ -810,9 +810,9 @@ def update(rep, args, repo):
                 tp.write_text(shown.stdout)
                 argv = [sys.executable, str(sa), "--template", str(tp)] + ([] if check else ["--apply"])
                 r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
-            lines = (r.stdout + r.stderr).strip().splitlines() or ["no output"]
+            lines = (r.stderr + r.stdout).strip().splitlines() or ["no output"]  # a REFUSED line (stderr) first
             rep.say("Claude settings: " + lines[0][:300] + ("" if r.returncode == 0 else f" (rc={r.returncode}; live file untouched)"))
-            for ln in lines[1:40]:
+            for ln in lines[1:80]:
                 rep.say("  " + ln[:300].strip())
             d["claude_settings"] = {"rc": r.returncode}
         except (OSError, subprocess.TimeoutExpired) as e:

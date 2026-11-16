@@ -18,7 +18,8 @@ Only ADE-owned parts are applied (operator ruling 2026-11-15, queue "st-apply"):
       ``settings.json.bak-<UTC stamp>`` (mode kept), then writes a temp file beside and ``os.replace``s it onto the
       realpath. It refuses (exit 1, nothing written) if any live key path would disappear.
 
-Exit 0 ok (including "nothing to do"), 1 refused, 2 usage or unreadable input. Secrets are never read or printed.
+Exit 0 ok (including "nothing to do"), 1 refused, 2 usage or unreadable input. The whole live file is read, but no value is printed
+except the `/sandbox` block a dry-run would add; `--render-template` refuses a secret-shaped key or value (key paths only in the message).
 """
 from __future__ import annotations
 
@@ -35,7 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HOME_TAG = "{{ .home }}"
-# A script is ADE-owned when it lives under the checkout or the linked ~/.claude hooks/helpers directories.
+# A command's script is found under the checkout or ~/.claude hooks/helpers (the dedupe key); it is ADE-OWNED, and only then added, when it
+# also resolves (symlinks followed) into the djbclark-ade tree and exists (adversary A1: never add an entry whose script is missing).
 _SCRIPT = re.compile(r"~/(?:\.claude/(?:hooks|helpers)/|src/djbclark-ade/)\S+")
 # R2 adds an absent key only under these paths (adversary A1: `env`, helpers, plugins, marketplaces and the like are never auto-added).
 ADD_ABSENT = ("/sandbox", "/modelSettings", "/skillOverrides")
@@ -46,6 +48,29 @@ def render(text: str, home: str) -> str:
     return text.replace(HOME_TAG, json.dumps(home)[1:-1])
 
 
+def unrender(text: str, home: str) -> str:
+    """Home path back to the tag, only where it is a whole path prefix (not /Users/djbclarkX)."""
+    h = re.escape(json.dumps(home)[1:-1])
+    return re.sub(r"(?<![\w.-])" + h + r"(?=[/\\\"\s']|$)", HOME_TAG.replace("\\", "\\\\"), text)
+
+
+def default_roots(home: str) -> list:
+    return [Path(__file__).resolve().parent.parent, Path(home) / "src" / "djbclark-ade"]
+
+
+def is_ade_owned(script: str, home: str, roots) -> bool:
+    real = Path(os.path.realpath(script.replace("~", home, 1)))
+    if not real.exists():
+        return False
+    for r in roots:
+        try:
+            real.relative_to(Path(os.path.realpath(r)))
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _norm(cmd: str, home: str) -> str:
     c = cmd.replace('"', "").replace("'", "")
     for h, to in (("${HOME}", "~"), ("$HOME", "~"), (home.rstrip("/") + "/", "~/")):
@@ -54,14 +79,17 @@ def _norm(cmd: str, home: str) -> str:
 
 
 def hook_key(cmd: str, home: str):
-    """(script, first non-flag argument) for an ADE-owned command, else None."""
+    """(script path, graft-hooks subcommand or "") for a command that runs a checkout or ~/.claude hooks/helpers script, else None.
+
+    The key is the script path alone (adversary A2: redirections, `[ ... ]` guards and flags must not change it); only graft-hooks.cjs
+    registers several hooks per event, told apart by their subcommand."""
     c = _norm(cmd, home)
     m = _SCRIPT.search(c)
     if not m:
         return None
     script = m.group(0).rstrip(";")
     rest = c[m.end():].split()
-    arg = rest[0] if rest and rest[0] not in _OPS and not rest[0].startswith("-") else ""
+    arg = rest[0] if script.endswith("graft-hooks.cjs") and rest and rest[0] not in _OPS and not rest[0].startswith("-") else ""
     return (script, arg)
 
 
@@ -85,8 +113,31 @@ def key_paths(d, prefix="") -> set:
     return out
 
 
-def merge(live: dict, tmpl: dict, home: str):
+_SECRET_KEY = re.compile(r"(?i)(token|secret|passw|api[_-]?key|credential|private[_-]?key|authorization|apikeyhelper|awsauthrefresh|otelheadershelper)")
+_SECRET_VAL = re.compile(r"(?i)(sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,}|xox[abp]-[a-z0-9-]{10,}|AKIA[0-9A-Z]{16}|bearer\s+\S{12,}|[a-f0-9]{40,}|-----BEGIN)")
+
+
+def secret_paths(d, p="") -> list:
+    """Key paths holding a secret-shaped key (non-empty string value) or value. Never returns a value."""
+    out = []
+    if isinstance(d, dict):
+        for k, v in d.items():
+            q = f"{p}/{k}"
+            if isinstance(v, str) and v and _SECRET_KEY.search(k):
+                out.append(q)
+            else:
+                out += secret_paths(v, q)
+    elif isinstance(d, list):
+        for i, v in enumerate(d):
+            out += secret_paths(v, f"{p}[{i}]")
+    elif isinstance(d, str) and _SECRET_VAL.search(d):
+        out.append(p)
+    return out
+
+
+def merge(live: dict, tmpl: dict, home: str, roots=None):
     """Return (merged, added, not_applied): added/not_applied are lists of key-path strings."""
+    roots = default_roots(home) if roots is None else roots
     merged = copy.deepcopy(live)
     added, skipped = [], []
     # R1 hooks
@@ -104,6 +155,9 @@ def merge(live: dict, tmpl: dict, home: str):
             tw = live_twin.get((ev, k))
             if tw and (tw[0].get("matcher") != g.get("matcher") or tw[1].get("timeout") != h.get("timeout")):
                 skipped.append(f"/hooks/{ev}: ADE hook {k[0]} differs in matcher/timeout (live kept)")
+            continue
+        if not is_ade_owned(k[0], home, roots):
+            skipped.append(f"/hooks/{ev}: {k[0]} not added (script missing or not in the djbclark-ade tree)")
             continue
         live_keys.add((ev, k))
         grp = {kk: copy.deepcopy(vv) for kk, vv in g.items() if kk != "hooks"}
@@ -233,7 +287,11 @@ def main(argv=None) -> int:
         return 2
     merged, added, skipped = merge(live, tmpl, home)
     if a.render_template:
-        print(json.dumps(merged, indent=2, ensure_ascii=False).replace(json.dumps(home)[1:-1], HOME_TAG))
+        bad = secret_paths(merged)
+        if bad:
+            print("ade-settings-apply: --render-template REFUSED, secret-shaped entries at: " + ", ".join(bad), file=sys.stderr)
+            return 1
+        print(unrender(json.dumps(merged, indent=2, ensure_ascii=False), home))
         return 0
     dropped = refuse_if_dropped(live, merged)
     rep = {"live": str(live_p), "added": added, "not_applied": skipped, "dropped": dropped, "applied": False, "backup": None,
