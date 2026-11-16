@@ -1,0 +1,23 @@
+name: Pi Go accounts
+on:
+  push:
+    branches: [pi-go-accounts]
+  pull_request:
+    paths: ['pi-extensions/go-accounts/**', 'tests/test_pi_go_accounts.py', '.github/workflows/pi-go-accounts.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  accounts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install current Pi
+        run: npm install -g @earendil-works/pi-coding-agent@latest
+      - name: Account isolation, native Pi auth errors and routing reservation
+        run: uv run --with pytest python -m pytest tests/test_pi_go_accounts.py tests/test_pi_defaults.py -q

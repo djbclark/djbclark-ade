@@ -125,3 +125,56 @@ tested Qwen and Gemma profiles. Requesting a 32k backend context did not
 establish a task-level repair. Keep this route out of automatic work routing.
 An experimental post-tool task reminder was rejected after it repeated
 completed work and review found stale-request behavior; it is not shipped.
+
+## Three named OpenCode Go accounts (2026-11-15)
+
+`pi-extensions/go-accounts/index.mjs` exposes three manual provider identities:
+
+| Pi provider | Managed credential name |
+| --- | --- |
+| `opencode-go-djbclark` | `OPENCODE_GO_API_KEY_DJBCLARK` |
+| `opencode-go-dclark` | `OPENCODE_GO_API_KEY_DCLARKUS` |
+| `opencode-go-t-e` | `OPENCODE_GO_API_KEY_TECHNOEUPHORA` |
+
+Select an account with Pi's model selector, for example
+`pi --provider opencode-go-djbclark --model deepseek-v4.1-flash`.
+Paseo uses `pi/opencode-go-djbclark/deepseek-v4.1-flash` (substitute the
+other named account). Account identity is part of the saved model selection;
+concurrent sessions can use different accounts without changing global auth.
+No account is an automatic fallback and none is added to ADE Auto. Existing
+unqualified `opencode-go` credentials/defaults and the retired OpenCode service
+remain unchanged.
+
+The extension reuses the installed Pi native Go provider: model metadata,
+Go-specific session headers and all native streaming APIs are retained.
+It resolves the host's public provider export through its package manifest
+because Pi's source-extension loader aliases SDK roots but not subpath imports.
+No second SDK copy, hard-coded version path or copied model catalog is used.
+Each account resolves only its named key through `sudo-secretspec` at request
+time; catalog enumeration does not read keys. Broker failures produce a fixed
+account-labelled error rather than forwarding stderr or choosing ambient auth.
+
+Add the extension's absolute path using Pi's public SettingsManager, preserving
+the rest of the extension list and defaults. Existing sessions can `/reload`;
+refresh Paseo's native provider snapshot for its selector. Rollback removes only
+this extension path; retain credentials and session history.
+
+`~/.local/bin/oc-go-key` resolves to the one-offs tool that changes the retired
+OpenCode service's active Console credential. It is not a Pi account switcher.
+[PR 481](https://github.com/djbclark/djbclark-ade/pull/481) archived that teaching.
+
+Alternatives checked: [pi-account-switcher](https://pi.dev/packages/pi-account-switcher)
+changes active runtime/global credential state;
+[pi-multiprovider](https://github.com/monotykamary/pi-multiprovider) offers
+session pinning and automatic cross-account failover. Neither is installed here:
+this operator request enables explicit account access, preserving account boundaries
+and existing managed-key ownership. Pi's own provider supports Go already, so
+[pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+is not needed for transport. The [official Go guide](https://opencode.ai/docs/console/go/)
+documents the current inference endpoints and subscription/Extra Usage distinction.
+
+Live DeepSeek V4.1 Flash checks: djbclark and t-e authenticated and executed native
+read/write tools. dclark authenticated but returned a five-hour Go usage limit;
+no Extra Usage setting was changed. The old and current usage GET paths returned
+HTTP 403 from this machine, so no fresh numeric balance is claimed. Model
+listing is not proof every listed model is entitled or currently usable.
