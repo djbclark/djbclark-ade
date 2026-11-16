@@ -1,1 +1,3 @@
-- Fix: installation doctor detects missing explicit Pi extension paths left behind by removed task worktrees; document durable installation paths.
+### Fixed
+
+- Installation doctor detected missing explicit Pi extension paths left behind by removed task worktrees; documented durable installation paths. (#767)
