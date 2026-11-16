@@ -1603,6 +1603,16 @@ def test_the_collector_stops_reading_when_the_clock_ran_out_after_the_split(live
     "FOO=1 2>/dev/null gh pr create --body-file sub/b.md",
     "FOO=1 2>&1 gh pr create --body-file sub/b.md",
     "FOO=1 2>/dev/null cd sub; " + G,
+    "FOO+=1 gh pr create --body-file sub/b.md",                                            # r11 A2: an append or array assignment is an assignment
+    "a[0]=1 gh pr create --body-file sub/b.md",
+    "FOO+=1 cd sub; " + G,
+    "a[0]=1 cd sub; " + G,
+    "FOO+=x pushd sub >/dev/null; " + G,
+    "A=1 time cd decoy; cd sub; " + G,                                                     # r11 A3: a reserved word after an assignment is no keyword
+    "FOO=1 ! cd decoy; cd sub; " + G,
+    "2 >/dev/null cd decoy; cd sub; " + G,                                                 # r11 A4: a command named `2`: the `cd` behind it is unsure
+    "'2'>/dev/null cd decoy; cd sub; " + G,
+    "FOO=1 2 >/dev/null cd decoy; cd sub; " + G,
 ])
 def test_a_redirect_at_the_start_of_a_command_does_not_hide_the_command(live, command):
     """Adversary r9 A4: `2>/dev/null gh ...` took the `2` for the command; `;</dev/null gh ...` was one punctuation token."""
@@ -1675,3 +1685,32 @@ def test_a_digit_word_that_no_redirect_follows_is_still_the_command_word(live):
     """Adversary r10 C1: `2 cd decoy` runs a command named `2`; its `cd` is an argument, so `cd sub` after it is the one that moves the shell."""
     _top_tree(live)
     assert run("2 cd decoy; cd sub; " + G, cwd=live)
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --body-file 2 >/dev/null",                                               # r11 A1: `2` before a redirect is also an argument
+    "gh pr create -F 2 >/dev/null",
+    "gh pr create --body-file '2'>/dev/null",
+    "gh pr create --body-file \"2\" > /dev/null",
+    "gh pr comment 749 --body-file 2 > /dev/null",
+    "gh api repos/o/r/issues/1/comments --input 2 >/dev/null",
+    "bash -c 'gh pr create --body-file 2 >/dev/null'",
+    "bash <<'EOS'\ngh pr create --body-file 2 >/dev/null\nEOS\n",
+])
+def test_a_digit_word_before_a_redirect_is_also_an_argument_of_gh(live, command):
+    """Adversary r11 A1: shlex gives `2`, `>` for `2>f` (a descriptor) and for `2 >f` or `'2'>f` (an argument); both readings are judged."""
+    (live / "b.md").write_text("prose only")
+    (live / "2").write_text(APPROVE)
+    assert run(command, cwd=live), command
+    (live / "2").write_text("prose only")
+    (live / "b.md").write_text("prose only")
+    assert run(command, cwd=live) is None, command
+
+
+def test_dropping_a_digit_word_must_not_move_a_value_flag_onto_the_verb(live):
+    """Adversary r11 A1 (group-shift): without the `2`, `--title` takes `create` for its value and the write is never placed."""
+    command = "gh pr --title 2 >/dev/null create --body-file b.md"
+    (live / "b.md").write_text(APPROVE)
+    assert run(command, cwd=live)
+    (live / "b.md").write_text("prose only")
+    assert run(command, cwd=live) is None

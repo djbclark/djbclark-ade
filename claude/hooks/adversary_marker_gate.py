@@ -91,6 +91,11 @@ PUNCT = ";&|()<>`\n"
 SEPARATORS = r"((?:&&|(?<![<>])&(?!>)|[;|()`\n])+)"
 # the redirect operators (a run of `<>&` that is none of them is a separator, then a redirect: `&<`, `&&>`)
 FD_WORD = re.compile(r"\d+|\{[A-Za-z_]\w*\}")
+
+
+class FdWord(str):
+    """A word that is a file descriptor before a redirect (`2>f`) OR an argument (`2 >f`, `'2'>f`): shlex cannot tell. It stays in `words`
+    (so a body file named `2` is still an operand) and `gh_invocation` reads the line both ways."""
 REDIRECTS = {"<", ">", ">>", "<<", "<<<", "<>", ">|", ">&", "<&", "&>", "&>>"}
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
@@ -103,7 +108,7 @@ KEY_PREFIX = re.compile(r"[A-Za-z_][\w-]*=(?=```|~~~)")
 PLAIN_FEEDERS = {"cat", "echo", "printf"}
 ENV_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 U_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{4}")
-ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")      # NAME=, NAME+=, NAME[i]=
 ASSIGNERS = {"export", "local", "declare", "readonly", "typeset"}   # `export D=sub` assigns like `D=sub`
 GQL_ESCAPE = re.compile(r"\\(?:u\{([0-9a-fA-F]{1,8})\}|u([0-9a-fA-F]{4})|([\"\\/bfnrt]))")   # GraphQL string-literal escapes
 GQL_SIMPLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -439,18 +444,21 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     assigned = {}                               # name -> value, in token order (a later reassignment does not reach an earlier cd)
     dirs = history.isdir if history is not None else os.path.isdir
 
-    flags = {"lead": True, "reserved": True, "assign": True, "unsure": False}   # about seg["words"], updated per word: O(1) per token
+    flags = {"lead": True, "reserved": True, "assign": True, "unsure": False, "assigned": False, "fd": False}   # about seg["words"], updated per word: O(1) per token
 
     def new_seg():
         if history is not None and not history.overflow:    # past an overflow the verdict is a deny: stop paying
             history.note(cur, cands)
-        flags.update(lead=True, reserved=True, assign=True, unsure=False)
+        flags.update(lead=True, reserved=True, assign=True, unsure=False, assigned=False, fd=False)
         return {"words": [], "stdin": [], "here": [], "cwd": cur}
     seg = new_seg()
 
     def push(tok):
         seg["words"].append(tok)
-        flags["lead"] = flags["lead"] and (tok in RESERVED or tok in ("builtin", "command") or bool(ASSIGN.match(tok)))   # `FOO=1 cd d` still moves the shell
+        is_assign = bool(ASSIGN.match(tok))
+        # `FOO=1 cd d` still moves the shell; a reserved word after an assignment is no keyword (`A=1 time cd d` runs an external `time`)
+        flags["lead"] = flags["lead"] and (tok in ("builtin", "command") or is_assign or (tok in RESERVED and not flags["assigned"]))
+        flags["assigned"] = flags["assigned"] or is_assign
         flags["reserved"] = flags["reserved"] and tok in RESERVED
         flags["assign"] = flags["assign"] and bool(ASSIGN.match(tok) or tok in ASSIGNERS)
         flags["unsure"] = flags["unsure"] or tok in UNSURE_WORDS
@@ -502,7 +510,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             if history.work > MAX_WORK:
                 history.overflow = True
                 return
-        unsure = pushd_n or extra or placed_unsure()
+        unsure = pushd_n or extra or placed_unsure() or flags["fd"]
         if snap is None:
             snap = (cur, list(cands))
         moved, clean = [], True
@@ -603,7 +611,9 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
             continue
         lead = flags["lead"]
         if FD_WORD.fullmatch(tok) and i + 1 < len(tokens) and tokens[i + 1] in REDIRECTS:
-            continue                           # `2>/dev/null gh ...`, `gh 2>/dev/null pr create`, `A=1 2>&1 gh`, `{fd}</dev/null cd d`: an fd before a redirect is no word (shlex splits `2>` and `2 >` alike; a literal argument `2` before a redirect is dropped: the deny side)
+            seg["words"].append(FdWord(tok))   # `2>/dev/null gh ...`, `gh 2>/dev/null pr create`, `A=1 2>&1 gh`: an fd or an argument (`gh pr create --body-file 2 >f`):
+            flags["fd"] = True                 # kept, flags untouched (the fd reading); `gh_invocation` reads both; a `cd` behind it is unsure
+            continue
         if tok in ("cd", "pushd") and lead:
             want_dir = tok
             continue
@@ -630,7 +640,7 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
                 nbraces[0] -= cond
                 if groups:
                     list_snap = groups.pop()[1]
-        if flags["assign"] and ASSIGN.match(tok):
+        if flags["assign"] and ASSIGN.match(tok) and "+" not in tok.split("=", 1)[0] and "[" not in tok.split("=", 1)[0]:
             assigned[tok.split("=", 1)[0]] = tok.split("=", 1)[1]
         push(tok)
     if want_dir:
@@ -639,8 +649,8 @@ def split_pipelines(tokens, cwd: str, expand=None, history=None, bases=()):
     return pipes
 
 
-def gh_invocation(words):
-    """(group, verb, args after gh, index of gh) when the segment runs gh (behind wrappers and assignments), else None."""
+def _gh_at(words):
+    """(group, verb, args after gh, index of gh) for one reading of the words, or None."""
     i = 0
     while i < len(words) and (ASSIGN.match(words[i]) or words[i] in RESERVED):
         i += 1
@@ -665,6 +675,25 @@ def gh_invocation(words):
         else:
             pos.append(a)
     return (pos[0] if pos else "", pos[1] if len(pos) > 1 else "", args, i)
+
+
+def gh_invocation(words):
+    """(group, verb, args after gh, index of gh) when the segment runs gh (behind wrappers and assignments), else None. A word that is an
+    `FdWord` (`2` before a redirect) is read as a file descriptor (dropped for the group, the verb and the command) AND as an argument (kept):
+    the write is placed if either reading places it, and its `args` keep every word, so an operand file named `2` is read."""
+    if not any(isinstance(w, FdWord) for w in words):
+        return _gh_at(words)
+    keep = [k for k, w in enumerate(words) if not isinstance(w, FdWord)]
+    fd_reading = _gh_at([words[k] for k in keep])
+    if fd_reading:
+        k = keep[fd_reading[3]]
+        fd_reading = (fd_reading[0], fd_reading[1], words[k + 1:], k)
+    if fd_reading and is_write(fd_reading[0], fd_reading[1], fd_reading[2]):
+        return fd_reading
+    arg_reading = _gh_at(list(words))
+    if arg_reading and is_write(arg_reading[0], arg_reading[1], arg_reading[2]):
+        return arg_reading
+    return fd_reading or arg_reading
 
 
 def is_write(group: str, verb: str, args) -> bool:
