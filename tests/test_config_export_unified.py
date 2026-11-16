@@ -16,6 +16,7 @@ sys.path.insert(0, str(BIN))
 import ade_config as ac  # noqa: E402
 import ade_config_edit as edit  # noqa: E402
 import ade_config_export as acx  # noqa: E402
+import model_tiers as mt  # noqa: E402
 
 LEGACY = ("routing.toml", "gates.toml", "model-tiers.toml", "install.toml", "context-budget.toml",
           "ade.schema.json", "install.schema.json")
@@ -41,9 +42,23 @@ def effective(root: Path, tmp_path: Path):
 
 def test_shipped_legacy_files_round_trip_and_keep_comments(root, tmp_path):
     text = acx.generate_unified(root)
-    assert (REPO / "config/ade.toml").read_text() == text, (
+    # Canonicalize regenerated tier formatting/comments on both sides while
+    # retaining exact comparison of tier data and every other domain's bytes.
+    production = (REPO / "config/ade.toml").read_text()
+    production_path = tmp_path / "production-ade.toml"
+    production_path.write_text(production)
+    production_canonical = mt.rewrite_unified(
+        production_path, tomllib.loads(production)["model_tiers"]
+    )
+    expected_path = tmp_path / "expected-ade.toml"
+    expected_path.write_text(text)
+    expected_canonical = mt.rewrite_unified(
+        expected_path, tomllib.loads(text)["model_tiers"]
+    )
+    assert production_canonical == expected_canonical, (
         "production unified config drifted from the frozen legacy fixture projection; "
-        "regenerate with bin/ade-config export-unified"
+        "regenerate with bin/ade-config export-unified and, after an intentional "
+        "tier change, update the frozen model-tiers fixture data"
     )
     parsed = tomllib.loads(text)
     assert parsed["schema_version"] == 1

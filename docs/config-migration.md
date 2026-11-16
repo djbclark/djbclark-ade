@@ -1,8 +1,9 @@
 # Config migration: schema_version=1 effective tree (2026-11-07; unified production 2026-11-16)
 
 `config/ade.toml` is now the checked-in production source. The five legacy files survive only as the repo-shaped
-frozen fixture under `tests/fixtures/config/legacy/config/`; the export test proves that production still matches
-their projection. `bin/ade-model-tiers promote|set` regenerates only the unified `[model_tiers…]` subtree, preserving
+frozen fixture under `tests/fixtures/config/legacy/config/`; the export test canonicalizes regenerated tier formatting
+on both sides, then proves that tier data and every other domain still match their projection. Intentional tier
+changes update the frozen tier fixture data too. `bin/ade-model-tiers promote|set` regenerates only the unified `[model_tiers…]` subtree, preserving
 all other bytes atomically (comments between tier tables are regenerated). Sections describing pre-cutover adoption
 are retained as history.
 

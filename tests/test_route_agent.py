@@ -1079,6 +1079,10 @@ class TestRoutingPolicyToml(unittest.TestCase):
         # Restore the repo policy after any test that reloads a temp file.
         r.reload_policy(LEGACY_ROUTING)
 
+    def test_clinepass_dispatches_through_configured_pi_provider(self):
+        # Native clinepass is not a Paseo provider; Pi registers the same id.
+        self.assertEqual(r.BY_NAME["clinepass"].agent, "pi")
+
     def test_loaded_services_match_frozen_expectation(self):
         for name, expect in self.EXPECTED.items():
             svc = r.BY_NAME[name]

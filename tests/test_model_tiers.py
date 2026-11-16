@@ -328,6 +328,29 @@ def test_unified_writers_replace_only_the_tier_subtree(tmp_path, monkeypatch):
     assert mt.load(path, use_cache=False).role_id("claude", "frontier") == "claude-fable-6"
 
 
+def test_unified_span_ignores_multiline_strings_and_finishes_large_preface_probe(tmp_path, monkeypatch):
+    root = _unified_root(tmp_path, monkeypatch)
+    path = root / "config/ade.toml"
+    original = path.read_text()
+    original = original.replace(
+        "[model_tiers.rank]",
+        '[model_tiers.rank]\nnote = """\n[not_a_table]\n# --- from config/not-a-domain ---\n"""',
+        1,
+    )
+    path.write_text(original)
+    data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
+    rewritten = mt.rewrite_unified(path, data)
+    assert "[not_a_table]" not in rewritten  # the whole old tier body is replaced
+    assert rewritten.endswith("# outside-suffix-sentinel\n[gates.frontier]\nfrontier1_judged = 1\n")
+
+    # The old nested preface regex was pathological on this non-matching tail.
+    noisy = "[model_tiers.meta]\nschema = 1\n" + ("x = 1\n" + " " * 40 + "\n") * 2000
+    noisy += "# next-domain-sentinel\n[other]\na = 1\n"
+    path.write_text(noisy)
+    rewritten = mt.rewrite_unified(path, data)
+    assert rewritten.endswith("# next-domain-sentinel\n[other]\na = 1\n")
+
+
 def test_env_override_and_explicit_path_ignore_unified(tmp_path, monkeypatch):
     root = _unified_root(tmp_path, monkeypatch)
     monkeypatch.setenv("MODEL_TIERS_TOML", str(tmp_path / "missing.toml"))

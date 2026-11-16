@@ -508,6 +508,59 @@ def _unified_table_text(data: dict[str, Any]) -> str:
     return "".join(rendered)
 
 
+def _toml_string_mask(text: str) -> str:
+    """Blank TOML string contents while preserving every byte offset/newline.
+
+    Comments stay readable for generated-domain markers. Table-shaped lines in
+    basic/literal strings, including multiline strings, therefore cannot be
+    mistaken for structural boundaries.
+    """
+    out = list(text)
+    i = 0
+    state: str | None = None
+    comment = False
+    n = len(text)
+    while i < n:
+        if comment:
+            if text[i] == "\n":
+                comment = False
+            i += 1
+            continue
+        if state is not None:
+            delimiter = {"basic": '"', "literal": "'", "basic3": '"""', "literal3": "'''"}[state]
+            if text.startswith(delimiter, i):
+                for j in range(i, i + len(delimiter)):
+                    out[j] = " "
+                i += len(delimiter)
+                state = None
+                continue
+            if state in {"basic", "basic3"} and text[i] == "\\" and i + 1 < n:
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            if text[i] != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        if text[i] == "#":
+            comment = True
+            i += 1
+            continue
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            delimiter = text[i:i + 3]
+            state = "basic3" if delimiter == '"""' else "literal3"
+            out[i:i + 3] = [" ", " ", " "]
+            i += 3
+            continue
+        if text[i] in {'"', "'"}:
+            state = "basic" if text[i] == '"' else "literal"
+            out[i] = " "
+            i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     """Return ``path`` with only its ``[model_tiers...]`` subtree replaced.
 
@@ -521,11 +574,12 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
         original = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as e:
         raise TiersError(f"{path}: unified config is not UTF-8: {e}") from e
-    start_match = re.search(r"(?m)^\[model_tiers(?:\.|\])", original)
+    masked = _toml_string_mask(original)
+    start_match = re.search(r"(?m)^\[model_tiers(?:\.|\])", masked)
     if start_match is None:
         raise TiersError(f"{path}: no [model_tiers...] subtree to write")
     start = start_match.start()
-    tail = original[start:]
+    tail = masked[start:]
     marker = re.search(r"(?m)^# --- from config/", tail[1:])
     table = re.search(r"(?m)^\[(?!model_tiers(?:\.|\]))", tail[1:])
     if marker is not None:
@@ -535,11 +589,18 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
         before_table = original[start:table_start]
         # Without a generated marker, preserve the next table's contiguous
         # comment/blank preface too. Only table bodies are ours to regenerate.
-        preface = re.search(r"(?:(?:[ \t]*#.*|[ \t]*)\n?)+\Z", before_table)
-        end = start + preface.start() if preface is not None else table_start
+        # Scan lines backwards: the former nested regex could backtrack for
+        # minutes on a few thousand non-matching lines.
+        preface_start = len(before_table)
+        for line in reversed(before_table.splitlines(keepends=True)):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                break
+            preface_start -= len(line)
+        end = start + preface_start
     else:
         end = len(original)
-    if re.search(r"(?m)^\[model_tiers(?:\.|\])", original[end:]):
+    if re.search(r"(?m)^\[model_tiers(?:\.|\])", masked[end:]):
         raise TiersError(f"{path}: [model_tiers...] tables must be contiguous")
     replacement = _unified_table_text(data)
     if end < len(original) and not replacement.endswith("\n"):

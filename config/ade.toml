@@ -447,6 +447,7 @@ billing = "subscription"
 # [disabled_services] keeps it out of `plan` since 2026-10-08.
 note = "Hermes-usable API pool; watch the burn alert"
 access = "api"
+agent = "pi"
 models = { bulk = "cline-pass/deepseek-v4.1-flash", mechanical = "cline-pass/deepseek-v4.1-flash", code = "cline-pass/glm-5.3" }
 
 # The paid half of the same provider. Retired with the prepaid tier, not

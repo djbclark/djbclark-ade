@@ -41,3 +41,8 @@ note = "SIPB shared GPU"
 accepted = false
 # awaits account scoping (docs/pi-defaults.md B3)
 note = "Pi Go path; not automatic"
+
+[pools.clinepass]
+accepted = false
+# Pi-mediated ClinePass is an emergency/manual pool, not automatic routing.
+note = "manual emergency access through Pi; native clinepass dispatch is not configured"

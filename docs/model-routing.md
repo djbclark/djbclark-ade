@@ -169,7 +169,10 @@ G3. Succession: `ade-model-tiers promote --vendor V --new ID --reason TEXT [--ca
 one role without shifting. On the default unified source, the writer regenerates only `[model_tiers…]`, preserves every
 byte outside that subtree, and atomically replaces the file; comments between the tier tables are regenerated, not
 preserved. Explicit `MODEL_TIERS_TOML` paths retain the legacy whole-file format. No secrets, no network. Edit in a
-claimed worktree; the merge is the atomic apply.
+claimed worktree; the merge is the atomic apply. The projection-drift test canonicalizes regenerated tier formatting on
+both sides and compares all other bytes exactly. After an intentional tier change, carry the new tier data into the
+frozen `tests/fixtures/config/legacy/config/model-tiers.toml` fixture as well; otherwise that test correctly reports
+the production/fixture drift.
 G4. Untiered models (e.g. `gemini-4-argon`) stay as literals in `[dispatch].frontier_models`; frontier matching is the
 union of that list and every spelling/alias of each tiered vendor's frontier role.
 

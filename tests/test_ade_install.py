@@ -1317,6 +1317,7 @@ def test_observe_pi_pools_ok_when_all_accepted(tmp_path):
     path.write_text(
         "[pools.cursor]\naccepted = true\n"
         "[pools.zai]\naccepted = true\n"
+        "[pools.clinepass]\naccepted = true\n"
     )
     o = ai.observe_pi_pools(root=root, acceptance_path=path)
     assert o is not None and o.status == "ok"
