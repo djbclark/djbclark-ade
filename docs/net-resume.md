@@ -110,6 +110,10 @@ and the pass covers the current lead exactly like a descendant (`in_chain`): dur
 itself hit a 5-hour window and only a manual switch kept the project moving. A dry run records `would-transition`
 instead of sending. The template fills `__TRANSITION__`; a low percentage transitions late, a high one often.
 
+**Install order.** The job runs whichever checkout `__ADE__` names (the shared one), so install a template only after the
+release that adds the flags it passes: on 2026-11-16 a template carrying `--transition-below` was installed while the
+deployed script predated the flag, and every run exited 2 until the argv was rolled back. Merge first, then install.
+
 ## Quota resume (`--quota`, 2026-11-12)
 
 Session-guard resumes a quota-failed agent only when Paseo's `provider.usage.list` has a usage entry for the
