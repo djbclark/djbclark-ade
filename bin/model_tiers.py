@@ -574,6 +574,15 @@ def _toml_string_mask(text: str) -> str:
     return "".join(out)
 
 
+def _table_headers(masked: str):
+    """Yield (byte offset, is_model_tiers) for table headers outside strings."""
+    for match in re.finditer(r"(?m)^[ \t]*\[\[?([^\n]*)$", masked):
+        # Whitespace inside brackets and around dotted segments is legal too.
+        normalized = re.sub(r"[ \t]", "", match.group(1))
+        is_tiers = normalized.startswith("model_tiers.") or normalized.startswith("model_tiers]")
+        yield match.start(), is_tiers
+
+
 def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     """Return ``path`` with only its ``[model_tiers...]`` subtree replaced.
 
@@ -588,15 +597,14 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
     except UnicodeDecodeError as e:
         raise TiersError(f"{path}: unified config is not UTF-8: {e}") from e
     masked = _toml_string_mask(original)
-    start_match = re.search(r"(?m)^\[model_tiers(?:\.|\])", masked)
-    if start_match is None:
+    headers = list(_table_headers(masked))
+    start = next((offset for offset, is_tiers in headers if is_tiers), None)
+    if start is None:
         raise TiersError(f"{path}: no [model_tiers...] subtree to write")
-    start = start_match.start()
     tail = masked[start:]
-    marker = re.search(r"(?m)^# --- from config/", tail[1:])
-    table = re.search(r"(?m)^\[(?!model_tiers(?:\.|\]))", tail[1:])
+    marker = re.search(r"(?m)^[ \t]*# --- from config/", tail[1:])
     marker_start = start + marker.start() + 1 if marker is not None else None
-    table_start = start + table.start() + 1 if table is not None else None
+    table_start = next((offset for offset, is_tiers in headers if offset > start and not is_tiers), None)
     if marker_start is not None and (table_start is None or marker_start < table_start):
         end = marker_start
     elif table_start is not None:
@@ -614,7 +622,7 @@ def rewrite_unified(path: Path, data: dict[str, Any]) -> str:
         end = start + preface_start
     else:
         end = len(original)
-    if re.search(r"(?m)^\[model_tiers(?:\.|\])", masked[end:]):
+    if any(offset >= end and is_tiers for offset, is_tiers in headers):
         raise TiersError(f"{path}: [model_tiers...] tables must be contiguous")
     replacement = _unified_table_text(data)
     if end < len(original) and not replacement.endswith("\n"):

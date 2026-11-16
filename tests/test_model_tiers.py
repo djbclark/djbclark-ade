@@ -353,19 +353,28 @@ def test_unified_span_ignores_multiline_strings_and_finishes_large_preface_probe
     assert rewritten.endswith("# next-domain-sentinel\n[other]\na = 1\n")
 
 
-def test_rewrite_stops_at_a_foreign_table_before_a_later_marker(tmp_path, monkeypatch):
+@pytest.mark.parametrize("foreign_header", ["[gates.frontier]", "  [ gates . frontier ]", "\t[[gates.frontier]]"])
+def test_rewrite_stops_at_a_foreign_table_before_a_later_marker(tmp_path, monkeypatch, foreign_header):
     root = _unified_root(tmp_path, monkeypatch)
     path = root / "config/ade.toml"
     text = (
         "schema_version = 1\n[model_tiers.meta]\nschema = 1\nupdated = \"old\"\n\n"
-        "[gates.frontier]\nfrontier1_judged = 1\n\n"
+        f"{foreign_header}\nfrontier1_judged = 1\n\n"
         "# --- from config/install.toml ---\n[[install.component]]\nid = \"keep\"\n"
     )
     path.write_text(text)
     data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
     rewritten = mt.rewrite_unified(path, data)
-    assert "[gates.frontier]\nfrontier1_judged = 1" in rewritten
+    assert f"{foreign_header}\nfrontier1_judged = 1" in rewritten
     assert rewritten.endswith("# --- from config/install.toml ---\n[[install.component]]\nid = \"keep\"\n")
+
+
+def test_indented_tier_start_is_recognized(tmp_path):
+    suffix = "\t[ install . component ]\nid = \"keep\"\n"
+    path = tmp_path / "ade.toml"
+    path.write_text("schema_version = 1\n  [ model_tiers . meta ]\nschema = 1\n" + suffix)
+    data = mt.load(LEGACY_CONFIG / "model-tiers.toml", use_cache=False).data
+    assert mt.rewrite_unified(path, data).endswith(suffix)
 
 
 @pytest.mark.parametrize("quote", ['"', "'"])
