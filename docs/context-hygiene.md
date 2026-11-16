@@ -174,11 +174,11 @@ requests, uncertain writes, compaction completion, out-of-order usage,
 fixed-baseline loops and parent lifecycle protection. Do not make paid inference
 requests just to test a guard. Live Claude nudge tests remain the current path.
 
-Local focused tests use the full `bg` path. Record the explicit decision first. Recording `local` needs djbclark's approval
-(operator ruling 2026-11-15): `load-watch ci decide DIR local "why"` opens the `sudo-ask` Allow dialog and Touch ID, the same
+Local focused tests use the full `bg` path. Record the explicit decision first. Recording `local` or `pending` needs djbclark's
+approval (operator ruling 2026-11-15; `bg` runs both here, so `pending` is gated exactly like `local`): `load-watch ci decide DIR local "why"` opens the `sudo-ask` Allow dialog and Touch ID, the same
 fresh authentication as `bg approve-local`, and records nothing when it is denied, cancelled or cannot be shown (no GUI session,
-`~/.local/bin/sudo-ask` missing). Each answer is logged in `~/.local/state/bg/approvals.log`. `ci` and `pending` decisions, reads and
-an existing `local` row stay ungated. Try `ci` first; ask djbclark for `local`:
+`~/.local/bin/sudo-ask` missing). Each answer is logged in `~/.local/state/bg/approvals.log`. `ci` decisions, reads and
+an existing row of the same mode (a new reason or note) stay ungated; `ci` over `local` or `pending` is ungated too. Try `ci` first; ask djbclark for `local`:
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci decide /absolute/worktree local "Small offline focused checks; full matrix on GitHub"
