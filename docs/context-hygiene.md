@@ -294,7 +294,7 @@ Titles and cwd go through `context-watch`'s `clean_text` (copied from the remove
 
 ## 7. Fresh-session cost: `bin/context-budget-check` (2026-10-18; a Paseo schedule since 2026-11-06)
 
-Runs `claude -p "/context"` (no model request) in each directory of `config/context-budget.toml` (default this repo
+Runs `claude -p "/context"` (no model request) in each directory of `config/ade.toml [context_budget]` (default this repo
 and `~`), compares the totals and the memory, skills and MCP rows with their budgets and with the previous night's
 `~/.local/state/context-budget/<date>.json`, and sends one `hermes-ping` line on a breach or a rise. `--instruction-lint`
 adds `bin/instruction-lint`'s counts, report-only (over each measured directory, so `~` covers `~/AGENTS.md` and

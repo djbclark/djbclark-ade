@@ -505,10 +505,17 @@ def test_observe_uncovered_non_fork_inventory(tmp_path):
     assert "djbclark/paseo" in forks.found
 
 
-def test_ade_toml_dual_source_refused(tmp_path):
+def test_ade_toml_dual_source_refused_only_when_it_carries_hardening(tmp_path):
     root = _fixture_root(tmp_path)
+    # A unified file without [hardening] is not a conflict: hardening.toml stays
+    # the single authority (2026-11-16 cutover).
     (root / "config" / "ade.toml").write_text("schema_version = 1\n")
-    with pytest.raises(ah.HardenError, match="ade.toml"):
+    cfg = ah.load_config(root=root)
+    assert cfg.path.name == "hardening.toml"
+    (root / "config" / "ade.toml").write_text(
+        "schema_version = 1\n[hardening]\n"
+    )
+    with pytest.raises(ah.HardenError, match="carries \\[hardening\\]"):
         ah.load_config(root=root)
 
 

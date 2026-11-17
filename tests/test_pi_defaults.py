@@ -71,7 +71,8 @@ def test_quality_and_judgment_gates_are_not_bypassed_for_pi():
     quota = {"cursor": reading(100), "zai": reading(100), "claude": reading(100)}
     assert defaults.choose("judgment", MODELS, quota=quota)["service"] is None
     assert router.route("judgment", quota=quota).service.name == "claude"
-    assert all(s.name not in {"omp", "opencode-go", "opencode-zen-free", "clinepass"}
+    # clinepass is a Pi routing service for manual use; the retired transports are not.
+    assert all(s.name not in {"omp", "opencode-go", "opencode-zen-free"}
                for s in router.SERVICES if s.acp_agent == "pi")
 
 

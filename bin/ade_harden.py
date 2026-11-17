@@ -300,10 +300,19 @@ def load_config(root: Path | None = None) -> HardenConfig:
     root = (root or repo_root_from_here()).resolve()
     ade = root / "config" / "ade.toml"
     if ade.is_file():
-        raise HardenError(
-            f"{ade}: present; fold [hardening] into ade.toml before using "
-            "config/hardening.toml (setup-plan S1)"
-        )
+        # The documented contract: this file is the source only while the unified
+        # file has no [hardening] table. Mere presence of ade.toml is not a
+        # conflict (the 2026-11-16 cutover shipped it without that domain), but
+        # two editable authorities must never coexist.
+        try:
+            unified = ac.read_toml(ade)
+        except ac.ConfigError as e:
+            raise HardenError(str(e)) from e
+        if isinstance(unified.get("hardening"), dict):
+            raise HardenError(
+                f"{ade}: carries [hardening]; refusing to edit the duplicate "
+                "config/hardening.toml (setup-plan S1)"
+            )
     path = default_config_path(root)
     try:
         data = ac.read_toml(path)

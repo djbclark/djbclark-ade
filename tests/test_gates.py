@@ -1,4 +1,4 @@
-"""bin/ade_gates.py and config/gates.toml: the frontier allowance (2026-10-27; trimmed to the frontier half 2026-11-07, slim-down E7).
+"""bin/ade_gates.py and config/ade.toml [gates.frontier]: the frontier allowance (2026-10-27; trimmed to the frontier half 2026-11-07, slim-down E7).
 
 The loader is driven with a copy of the shipped gates.toml (GATES_TOML); the Claude reading `read_guard_state` builds comes from
 route_agent's merged quota snapshot, fed here with canned `aiuse --available --json` and `paseo usage ls --json` output. Nothing
@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
+LEGACY_CONFIG = LEGACY_ROOT / "config"
 BIN = REPO / "bin"
 sys.path.insert(0, str(BIN))
 import ade_gates as g  # noqa: E402
@@ -42,7 +44,7 @@ def close_frontier_baseline(text: str) -> str:
 def fenv(tmp_path, monkeypatch):
     """A copy of the SHIPPED gates.toml; returns its path."""
     toml = tmp_path / "gates.toml"
-    toml.write_text((REPO / "config" / "gates.toml").read_text())
+    toml.write_text((LEGACY_CONFIG / "gates.toml").read_text())
     monkeypatch.setenv("GATES_TOML", str(toml))
     g._LOGGED.clear()
     return toml
@@ -60,7 +62,8 @@ def front(now=NOW):
 
 def test_the_shipped_frontier_baseline_is_the_ruled_standing_allowance_and_its_floors_equal_it():
     import tomllib
-    cfg = tomllib.loads((REPO / "config" / "gates.toml").read_text())
+    # Production baseline, not only the frozen legacy-equivalence fixture (B4).
+    cfg = tomllib.loads((REPO / "config" / "ade.toml").read_text())["gates"]
     assert cfg["frontier"] == pytest.approx(STANDING)
     assert set(cfg) == {"frontier", "floors"} and set(cfg["floors"]) == {"frontier"}      # the quota-gate tables are gone
     for k, v in STANDING.items():

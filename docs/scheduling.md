@@ -45,7 +45,7 @@ bin/ade-sched [options] render PLIST          print what install would write (on
 bin/ade-sched [options] install PLIST         write and activate the job
 bin/ade-sched [options] uninstall LABEL       remove it (not installed: exit 0)
 bin/ade-sched [options] status [LABEL...]     installed / active / next run; no LABEL: every job ade-sched generated
-bin/ade-sched [options] list                  print config/install.toml [install.jobs] / [install.retired_jobs]
+bin/ade-sched [options] list                  print config/ade.toml [install.jobs] / [install.retired_jobs]
 bin/ade-sched [options] diff                  compare the inventory to live launchd/systemd/cron/paseo (report only)
 bin/ade-sched [options] reconcile             ADE-owned launchd/systemd/cron/paseo reconcile + ownership ledger (default dry-run; --yes writes)
 
@@ -174,8 +174,8 @@ Remove: `bin/ade-sched uninstall com.djbclark.ade-helper-prune`.
 
 ## Inventory and drift (S4b, 2026-11-10)
 
-`config/install.toml` carries transitional `[install.jobs]` and `[install.retired_jobs]` (the setup-plan's
-`config/ade.toml [install.jobs]` home while that file is absent). Each job records `name`, `kind`
+`config/ade.toml` carries `[install.jobs]` and `[install.retired_jobs]`; the frozen legacy
+`config/install.toml` fixture preserves the old projection only for equivalence tests. Each job records `name`, `kind`
 (`ade-sched` / `paseo` / `service`), `owner`, `class`, and for probeable rows a `label` (plus `plist` /
 `mode` as needed). Paseo rows require an explicit `mode` (`auto` / `auto-review`).
 
@@ -282,7 +282,7 @@ yet; it never restarts a closed or errored session.
 Slice 1 (2026-11-12) ships [`bin/ade-progress`](../bin/ade-progress) (`declare`, `retire`, `scan`, `inbox`, `ack`;
 state-changing commands default to `--dry-run`) and the template
 `config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). Slice 1b (2026-11-12) added the
-`config/install.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`); the operator chose it on 2026-11-13, so
+`config/ade.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`); the operator chose it on 2026-11-13, so
 the row has `chosen = true` and `just doctor` fails with `missing` until the job is installed. Merging loads nothing. To install it, from the
 canonical checkout (a job installed from a linked worktree is refused):
 
@@ -321,15 +321,15 @@ paseo schedule create --cron "50 3 * * *" --timezone <IANA> --name context-budge
   "Run ~/src/djbclark-ade/bin/context-budget-check --instruction-lint. Report its exit code and output in one paragraph; change nothing. Exit 1 is a budget breach or a rise, 3 a directory it could not measure."
 ```
 
-**routing-recalibrate** (Carried #33 / E5; optional until `chosen = true` in `config/install.toml`):
+**routing-recalibrate** (Carried #33 / E5; optional until `chosen = true` in `config/ade.toml`):
 monthly Day 1 at 09:00, the judgment agent that used to be `bin/routing-recalibrate` + launchd
 (`com.djbclark.routing-recalibrate`, retired). It runs `route_agent.py calibrate` and, only when
-there are suggestions, edits `good_at` ranks in `config/routing.toml`.
+there are suggestions, edits `good_at` ranks in `config/ade.toml`.
 
 ```
 paseo schedule create --cron "0 9 1 * *" --timezone <IANA> --name routing-recalibrate \
   --mode auto --provider claude/<model> --cwd ~/src/djbclark-ade \
-  "Run ~/src/djbclark-ade/bin/route_agent.py calibrate --json --since 30. If suggestions is empty, say so and end (change nothing). Otherwise re-rank only the suggested service × kind good_at ranks in config/routing.toml by each listed delta (+N means worse / higher rank number; negative means better). One commit listing each before/after and the done_rate vs peer median that justified it; never change kinds eligibility, gates, reserve floors, frontier rows, burn_first, pace thresholds, or [calibrate]/[discovery]/[dispatch]/[hermes]/[lead]. Never touch a group under min_n. Run bin/pytest -q tests/test_route_agent.py (and calibrate siblings if present); open a PR from a worktree (master is PR-only). Do not push master."
+  "Run ~/src/djbclark-ade/bin/route_agent.py calibrate --json --since 30. If suggestions is empty, say so and end (change nothing). Otherwise re-rank only the suggested service × kind good_at ranks in config/ade.toml by each listed delta (+N means worse / higher rank number; negative means better). One commit listing each before/after and the done_rate vs peer median that justified it; never change kinds eligibility, gates, reserve floors, frontier rows, burn_first, pace thresholds, or [calibrate]/[discovery]/[dispatch]/[hermes]/[lead]. Never touch a group under min_n. Run bin/pytest -q tests/test_route_agent.py (and calibrate siblings if present); open a PR from a worktree (master is PR-only). Do not push master."
 ```
 
 After create: `paseo schedule ls --json`, then set `chosen = true` on the inventory row when you want

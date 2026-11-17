@@ -12,6 +12,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 BIN = REPO / "bin"
 FIX = REPO / "tests" / "fixtures" / "install_catalog"
+LEGACY_INSTALL = REPO / "tests" / "fixtures" / "config" / "legacy" / "config" / "install.toml"
 sys.path.insert(0, str(BIN))
 import ade_install as ai  # noqa: E402
 import ade_user_install as aui  # noqa: E402
@@ -1316,6 +1317,7 @@ def test_observe_pi_pools_ok_when_all_accepted(tmp_path):
     path.write_text(
         "[pools.cursor]\naccepted = true\n"
         "[pools.zai]\naccepted = true\n"
+        "[pools.clinepass]\naccepted = true\n"
     )
     o = ai.observe_pi_pools(root=root, acceptance_path=path)
     assert o is not None and o.status == "ok"
@@ -1643,7 +1645,7 @@ def test_apply_sched_reconcile_skips_non_write_backend(monkeypatch, tmp_path):
     root = _fixture_root(tmp_path)
     # Point catalog jobs at a labeled ADE row.
     (root / "config" / "install.toml").write_text(
-        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        (LEGACY_INSTALL).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     catalog = ai.load_catalog(root=root)
@@ -1673,7 +1675,7 @@ def test_apply_sched_reconcile_refuses_linked_worktree_root(monkeypatch, tmp_pat
     monkeypatch.setattr(sched, "reconcile", fake_reconcile)
     root = _fixture_root(tmp_path)
     (root / "config" / "install.toml").write_text(
-        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        (LEGACY_INSTALL).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     catalog = ai.load_catalog(root=root)
@@ -1709,7 +1711,7 @@ def test_apply_sched_reconcile_passes_implicit_ade(monkeypatch, tmp_path):
     monkeypatch.setattr(sched, "reconcile", fake_reconcile)
     root = _fixture_root(tmp_path)
     (root / "config" / "install.toml").write_text(
-        (REPO / "config" / "install.toml").read_text(encoding="utf-8"),
+        (LEGACY_INSTALL).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     catalog = ai.load_catalog(root=root)

@@ -1,4 +1,4 @@
-# Install catalog (transitional, 2026-11-09)
+# Install catalog (unified in `config/ade.toml`; legacy projection frozen 2026-11-16)
 
 Typed component / key-reference catalog with print-only `plan`, observe-only
 `doctor` (runs `probe_argv` when recorded), observe-only `keys` (bulk
@@ -12,7 +12,8 @@ remains later work (`docs/setup-plan.md` S3).
 
 | File | Role |
 | --- | --- |
-| `config/install.toml` | Transitional editable catalog (`schema_version = 1`) |
+| `config/ade.toml` | Editable unified catalog under `[install]` and `[keys]` (top-level `schema_version = 1`) |
+| `tests/fixtures/config/legacy/config/install.toml` | Frozen legacy-format fixture for equivalence tests only |
 | `config/install.schema.json` | Structural schema (checked by `ade-install check`) |
 | `bin/ade_install.py` / `bin/ade-install` | Loader, plan, doctor, apply |
 | `bin/ade_install_recovery.py` | W18 crash/orphan scan (doctor) and explicit `recover` repair |
