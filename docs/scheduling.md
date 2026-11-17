@@ -551,6 +551,25 @@ running service defer without stopping work. A fleet idle snapshot is insufficie
 Before 2026-11-12 no native adapter existed and production deferred every install and removal; the launchd adapter below
 is the first.
 
+### Native Paseo admission (2026-11-17)
+
+With `native_admission=True`, `install` and `adopt-ledger` for `kind=paseo`
+are admitted independently of the host backend and launchd activity. Creation
+uses the existing argv without `--run-now`; each future cron trigger starts a
+fresh agent. Adoption writes only the ownership ledger. Neither action stops
+or changes an existing run, so the shared quiescence obligations are vacuous
+for these actions, rather than measurements of running agents.
+
+Native `remove` remains deferred (exit 6) with a Paseo-specific active-run safety
+reason. The adapter does not prove whether deletion kills, preserves or drains
+an active run and issues no delete. Renames remain gated behind old-identity
+removal. An explicitly supplied admission callback still takes precedence.
+Host adapters and dry-run planning retain their existing behavior.
+
+Sources: [official schedules](https://github.com/getpaseo/paseo/blob/main/public-docs/schedules.md)
+and [CLI cadence](https://github.com/getpaseo/paseo/blob/main/public-docs/schedules-cli.md),
+fetched 2026-11-17. No live schedule was created or deleted for validation.
+
 ### Native launchd admission (2026-11-12, narrowed in rounds 2 and 3)
 
 `ade-sched reconcile --yes` and `ade-install apply` pass `native_admission=True`. On the **launchd** backend (activation

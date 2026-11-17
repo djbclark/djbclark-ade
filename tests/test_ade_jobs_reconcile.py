@@ -1844,3 +1844,165 @@ def test_unchosen_row_of_another_kind_gets_no_unchosen_report_even_when_ade_owne
                              env=fake.env, platform_name="linux")
     assert not any("is not chosen" in s.detail for s in steps)
     assert [(s.name, s.action) for s in steps if s.name == "ade-svc"] == [("ade-svc", "skip")]
+
+
+@pytest.mark.parametrize("host", ["launchd", "systemd", "cron"])
+def test_native_paseo_creates_and_ledgers(fake, tmp_path, host):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text("[]", encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        native_admission=True,
+        dry_run=False,
+        backend=host,
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(host, ()),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "installed" and r["name"] == "context-budget" for r in results)
+    assert "context-budget" in json.loads(store.read_text(encoding="utf-8"))
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["backend"] == "paseo"
+    assert entry["status"] == "committed"
+    assert entry["label"] == "context-budget"
+
+    # Idempotent: live + ledger → skip (no second create).
+    live = S.LiveScan(
+        host,
+        (S.LiveJob("context-budget", "paseo", "paseo", True),),
+    )
+    results2, rc2 = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        native_admission=True,
+        dry_run=False,
+        backend=host,
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=live,
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc2 == 0, results2
+    assert any(r["action"] == "skip" and r["name"] == "context-budget" for r in results2)
+
+
+@pytest.mark.parametrize("host", ["launchd", "systemd", "cron"])
+def test_native_paseo_adopts_without_create(fake, tmp_path, host):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+    run = _fake_paseo_run(store)
+    results, rc = S.reconcile(
+        catalog.jobs,
+        catalog.retired_jobs,
+        native_admission=True,
+        dry_run=False,
+        backend=host,
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            host,
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 0, results
+    assert any(r["action"] == "adopted" and r["name"] == "context-budget" for r in results)
+    assert json.loads(store.read_text(encoding="utf-8")) == ["context-budget"]
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["backend"] == "paseo" and entry["status"] == "committed"
+
+
+
+
+def test_native_paseo_remove_defers_without_active_run_evidence(fake, tmp_path):
+    """Codex P2: failed paseo delete must keep removal authority for the next reconcile."""
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "paseo-schedules.json"
+    store.write_text(json.dumps(["context-budget"]), encoding="utf-8")
+
+    def run(argv, **_k):
+        # delete always fails; ls still sees the schedule
+        if argv[:3] == ["paseo", "schedule", "delete"]:
+            return subprocess.CompletedProcess(argv, 1, "", "boom")
+        return _fake_paseo_run(store)(argv)
+
+    jobs = [j for j in catalog.jobs if j["name"] != "context-budget"]
+    ledger = S.empty_jobs_ledger(env=fake.env)
+    ledger["generation"] = 1
+    ledger["entries"]["context-budget"] = {
+        "logical_id": "context-budget",
+        "label": "context-budget",
+        "owner": "djbclark-ade",
+        "backend": "paseo",
+        "scope": "user",
+        "paths": ["paseo-schedule:context-budget"],
+        "artifact_hash": "deadbeef",
+        "generation": 1,
+        "status": "committed",
+    }
+    S.save_jobs_ledger(ledger, fake.state, env=fake.env)
+    results, rc = S.reconcile(
+        jobs,
+        catalog.retired_jobs,
+        native_admission=True,
+        dry_run=False,
+        backend="systemd",
+        root=root,
+        ade=root,
+        env=fake.env,
+        state_dir=fake.state,
+        names={"context-budget"},
+        live=S.LiveScan(
+            "systemd",
+            (S.LiveJob("context-budget", "paseo", "paseo", True),),
+        ),
+        platform_name="linux",
+        paseo_run=run,
+    )
+    assert rc == 6, results
+    assert any(r["action"] == "deferred" and r["name"] == "context-budget" for r in results)
+    entry = S.load_jobs_ledger(fake.state, env=fake.env)["entries"]["context-budget"]
+    assert entry["status"] == "committed"
+    assert "active-run safety is unproven" in str(results)
+    assert json.loads(store.read_text()) == ["context-budget"]
+    assert S._ledger_owns(entry, label="context-budget")
+
+
+def test_native_paseo_dry_run_preserves_store_and_ledger(fake, tmp_path):
+    root = _mini_catalog(tmp_path)
+    catalog = ai.load_catalog(root=root)
+    store = tmp_path / "schedules.json"
+    store.write_text("[]")
+    def no_commands(argv):
+        raise AssertionError(f"dry-run issued command: {argv}")
+    rows, rc = S.reconcile(
+        catalog.jobs, catalog.retired_jobs, native_admission=True,
+        dry_run=True, backend="systemd", root=root, ade=root, env=fake.env,
+        state_dir=fake.state, names={"context-budget"},
+        live=S.LiveScan("systemd", ()), platform_name="linux", paseo_run=no_commands,
+    )
+    assert rc == 0, rows
+    assert any(row["action"] == "would-install" for row in rows)
+    assert store.read_text() == "[]"
+    assert not S.load_jobs_ledger(fake.state, env=fake.env)["entries"]
