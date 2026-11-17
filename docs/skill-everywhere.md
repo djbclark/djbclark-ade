@@ -27,6 +27,10 @@ churn can no longer break skill loading):
   `SKILL_EVERYWHERE_SITE` overrides it) — link target
   `~/ops/site-public-djbclark/skills/<name>`. A name in more than one root resolves
   public, then private, then site.
+- chrome-use skills (since 2026-11-17): `~/src/chrome-use/skill-data/<name>/`,
+  the third-party `leeguooooo/chrome-use` repo's skills (e.g. `real-chrome`, `core`),
+  `SKILL_EVERYWHERE_CHROME` overrides it — resolves after public, private and site, so a
+  same-named ADE skill wins over a chrome-use one.
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/handoff` is a symlink to the git
