@@ -16,3 +16,11 @@ clients = ["claude", "codex"]
 id = "basic-memory"
 url = "http://127.0.0.1:18796/mcp"
 clients = ["claude", "codex", "cursor-agent", "hermes"]
+
+# A stdio server: `command` + `args` instead of `url`; only the claude client is checked (the doctor
+# reads ~/.claude.json). Args are plain words; the entry must match them exactly.
+[[server]]
+id = "chrome-devtools"
+command = "npx"
+args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics", "--no-performance-crux", "--redact-network-headers"]
+clients = ["claude"]
