@@ -98,7 +98,7 @@ def load_roster(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any
             raise ValueError(f"bad or duplicate server id {sid!r}")
         seen.add(sid)
         if "command" in row:
-            # A stdio server: `command` + `args`, no url. Only the Claude Code check reads stdio entries.
+            # A stdio server: `command` + `args`, no url.
             cmd, args = row.get("command"), row.get("args", [])
             if "url" in row:
                 raise ValueError(f"server {sid}: give url or command, not both")
@@ -106,13 +106,13 @@ def load_roster(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any
                 raise ValueError(f"server {sid}: command must be one plain word")
             if not isinstance(args, list) or any(not isinstance(a, str) or not SAFE_ARG.match(a) for a in args):
                 raise ValueError(f"server {sid}: args must be a list of plain words (letters, digits, @ . _ = : / -)")
-            if clients != ["claude"]:
-                raise ValueError(f"server {sid}: a stdio server may list only the claude client")
         elif not isinstance(url, str) or not SAFE_URL.match(url):
             raise ValueError(f"server {sid}: url must be plain http(s) (letters, digits, . : / _ -)")
         if not isinstance(clients, list) or not clients or any(
                 not isinstance(c, str) or not SAFE_ID.match(c) for c in clients):
             raise ValueError(f"server {sid}: clients must be a non-empty list of TUI ids")
+        if "command" in row and any(c not in ("claude", "codex") for c in clients):
+            raise ValueError(f"server {sid}: stdio checks support only claude and codex clients")
         if tuis is not None and (bad := [c for c in clients if c not in tuis]):
             raise ValueError(f"server {sid}: client(s) {bad} not in the skill-everywhere roster {tuis}")
     return rows
@@ -203,12 +203,14 @@ _LOADERS: dict[str, Callable[[Path], tuple[Path, dict[str, Any] | None]]] = {
 }
 
 
-def _judge_stdio(sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, str]:
-    """Claude Code stdio entry: (state, detail); ``_judge``'s states plus ``wrong-command``."""
+def _judge_stdio(tui: str, sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, str]:
+    """Claude Code/Codex stdio entry; ``_judge``'s states plus ``wrong-command``."""
     q = shlex.quote
     want = " ".join([q(cmd), *(q(a) for a in args)])
-    add = f"claude mcp add --scope user {q(sid)} -- {want}"
-    swap = f"claude mcp remove --scope user {q(sid)} && {add}"
+    client = "claude mcp" if tui == "claude" else "codex mcp"
+    scope = " --scope user" if tui == "claude" else ""
+    add = f"{client} add{scope} {q(sid)} -- {want}"
+    swap = f"{client} remove{scope} {q(sid)} && {add}"
     if entry is None:
         return "missing", f"not registered; run: {add}"
     if not isinstance(entry, dict):
@@ -217,6 +219,8 @@ def _judge_stdio(sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, 
         t = entry.get("type")
         shown = repr(t) if isinstance(t, str) and len(t) <= 32 else "<odd>"
         return "wrong-type", f"entry type is {shown}, want 'stdio'; run: {swap}"
+    if tui == "codex" and "url" in entry:
+        return "wrong-type", f"entry has url, want a stdio command; run: {swap}"
     if entry.get("enabled") is False:
         return "disabled", f"present but enabled = false; set enabled = true for {sid}"
     if entry.get("command") != cmd or entry.get("args", []) != args:
@@ -275,13 +279,10 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
         for r in wanted:
             sid = r["id"]
             if "command" in r:
+                state, detail = _judge_stdio(tui, sid, r["command"], r.get("args", []),
+                                             servers.get(sid) if servers is not None else None)
                 if servers is None:
-                    add = "claude mcp add --scope user " + shlex.quote(sid) + " -- " + " ".join(
-                        shlex.quote(a) for a in [r["command"], *r.get("args", [])])
-                    out[tui].append(("mcp", f"{tui}/{sid}", "warn",
-                                     f"missing: {path} absent (TUI not set up?); {add}"))
-                    continue
-                state, detail = _judge_stdio(sid, r["command"], r.get("args", []), servers.get(sid))
+                    detail = f"{path} absent (TUI not set up?); {detail}"
                 out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
                                  detail if state == "ok" else f"{state}: {detail}"))
                 continue
