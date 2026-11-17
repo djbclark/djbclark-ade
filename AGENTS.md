@@ -40,7 +40,7 @@ Each doc carries its own summary.
 | [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
 | [docs/workspace-layout.md](docs/workspace-layout.md) | naming: project / window / tab; windows are `<KIND> <repo> (<work>)`, KIND LEAD / WORKER / OTHER (operator ruling 2026-11-14: at most those three windows, "boxes", per lead and repo, tabs in the fitting box; supersedes MAIN / WORKERS / USER of 2026-11-13), no lead id in the name; `worker <slice> <lead id> [wt: <worktree>]` tabs; renames with `paseo workspace rename`, `paseo agent update --name` |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
-| [docs/gates.md](docs/gates.md) | the frontier allowance, `config/gates.toml [frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
+| [docs/gates.md](docs/gates.md) | the frontier allowance, `config/ade.toml [gates.frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/upstream-review-gate.md](docs/upstream-review-gate.md) | `claude/hooks/upstream_review_gate.py` (2026-11-12): denies `gh`/`git push`/Jira writes to CFEngine upstream (`cfengine`, `NorthernTechHQ`) only; target resolution, limits, registration |
 | [docs/pi-defaults.md](docs/pi-defaults.md) | Pi `ade/auto` task routing; `config/pi-pool-acceptance.toml` + `bin/ade-pi-pools check` (operator flips `accepted=true` per pool) |
 | [docs/deadline.md](docs/deadline.md) | `bin/deadline`: a maximum run time registered before a long command or wait, enforced from outside |
@@ -124,7 +124,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    `paseo usage ls --json`); `skills/model-routing/SKILL.md` section D is the procedure, and a model chain is
    `paseo run`'s job, never a hand-rolled fallback. The prepaid tier stays retired until an operator top-up; the
    `agent_stats.py burn` alert (every 6h, 48h ahead) governs pool exhaustion: the blanket clinepass rule was
-   **retired 2026-08-24**. Fable leads are allowed while `config/routing.toml [lead].fable_lead = true` (operator,
+   **retired 2026-08-24**. Fable leads are allowed while `config/ade.toml [lead].fable_lead = true` (operator,
    2026-11-07: "make it easy to turn off later"; that one line is the switch).
 8. **Upstream every local change to someone else's source** (operator,
    2026-10-24). A fork, vendored copy or local patch: in the same session,

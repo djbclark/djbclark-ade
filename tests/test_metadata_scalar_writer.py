@@ -14,6 +14,8 @@ from unittest.mock import Mock
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
+LEGACY_CONFIG = LEGACY_ROOT / "config"
 sys.path.insert(0, str(REPO / "bin"))
 import ade_config as ac
 import ade_config_edit as edit
@@ -25,7 +27,7 @@ def tree(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
     for name in ("ade.schema.json", "install.schema.json", "context-budget.toml"):
-        shutil.copy2(REPO / "config" / name, root / "config" / name)
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
     shutil.copy2(REPO / "tests/fixtures/install_catalog/minimal.toml", root / "config/install.toml")
     home = tmp_path / "home"
     home.mkdir()
@@ -95,7 +97,7 @@ def test_four_existing_key_metadata_fields_affect_catalog(tree, field, target, b
 def test_full_legacy_catalog_one_named_slot_preserves_every_other_byte(tree):
     root, home = tree
     path = root / "config/install.toml"
-    text = (REPO / "config/install.toml").read_text()
+    text = (LEGACY_CONFIG / "install.toml").read_text()
     text += '\n# trailing bytes retained\n'
     path.write_text(text)
     parsed = tomllib.loads(text)
@@ -274,7 +276,7 @@ def test_cli_quoted_set_get_round_trip_for_real_dotted_directory(tree):
     assert json.loads(result.stdout)["after"] == 21000
     # Generic get loads all legacy domains, so provide the unrelated fixture inputs.
     for name in ("routing.toml", "gates.toml", "model-tiers.toml"):
-        shutil.copy2(REPO / "config" / name, root / "config" / name)
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
     result = subprocess.run([sys.executable, "-I", "-B", str(REPO / "bin/ade-config"), "get",
                              path, "--root", str(root), "--home", str(home), "--json"],
                             capture_output=True, text=True,

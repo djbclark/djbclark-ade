@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- bin/ade-tidy, subcommand prune with the apply flag, every 30 minutes: a deterministic host script (no model prompt) that archives idle,
      finished Baton "[Handoff writer]" helpers machine-wide (docs/scheduling.md, 2026-11-14). Each archive is one JSON line in
-     ~/.local/state/ade/helper-prune.log; the run summary goes to helper-prune.out.log. Inventoried in config/install.toml as
+     ~/.local/state/ade/helper-prune.log; the run summary goes to helper-prune.out.log. Inventoried in config/ade.toml [install.jobs] as
      `ade-helper-prune` (class optional). Not loaded by merging this file. `bin/ade-sched` fills __ADE__ and __HOME__. -->
 <plist version="1.0">
 <dict>

@@ -1,8 +1,9 @@
-# The frontier allowance: `config/gates.toml [frontier]` (2026-10-27; trimmed 2026-11-07)
+# The frontier allowance: `config/ade.toml [gates.frontier]` (2026-10-27; trimmed 2026-11-07)
 
-`config/gates.toml` holds one gate since 2026-11-07 (slim-down E7): the frontier-model allowance. Since
-2026-11-09, `ade_gates.load_frontier` reads it through `ade_config.load_effective` (legacy projection when
-`config/ade.toml` is absent; `GATES_TOML` still isolates the gates domain for tests). Consumed by
+`config/ade.toml [gates.frontier]` holds the frontier-model allowance; the other gate families were retired on
+2026-11-07 (slim-down E7). Since 2026-11-09, `ade_gates.load_frontier` reads through `ade_config.load_effective`
+(the unified file became the production source on 2026-11-16; frozen legacy fixtures retain the projection-format
+acceptance tests, and `GATES_TOML` still isolates the gates domain for tests). Consumed by
 `bin/route_agent.py` (the planner's per-wave cap and the Fable floor) and `claude/hooks/frontier_agent_gate.py` (Agent-tool Fable calls;
 the `bin/acp-dispatch --frontier-reason` grant left with that shim, 2026-11-14). The Claude quota gates that shared the file
 (the fleet governor's `[governor]` and the quota guard's `[quota_guard]` thresholds, the temporary gate profiles with
@@ -14,10 +15,10 @@ text of this page is in git history.
 
 A1. `ade_gates.load_frontier()` returns `(thresholds, info)`. The code default, `ade_gates.FRONTIER_DEFAULTS`, is the
 fail-safe and is **all closed**: no judged use, one frontier slice per pool per wave, no Agent-tool frontier call without
-asking. It applies when `gates.toml` is missing, unreadable, not a regular file, or its `[frontier]` table is missing or
-holds a non-number (`info["toml_error"]` says why), so the hook asks.
-A2. The standing allowance is the file's `[frontier]` baseline. A "higher is looser" key (every key but `*_min_left`) may
-rise to its `[floors.frontier]` numeric `bound` and takes the code default above it; a `*_min_left` key is never looser
+asking. It applies when the selected gates source is missing, unreadable, not a regular file, or its frontier table is
+missing or holds a non-number (`info["toml_error"]` says why), so the hook asks.
+A2. The standing allowance is the `[gates.frontier]` baseline. A "higher is looser" key (every key but `*_min_left`) may
+rise to its `[gates.floors.frontier]` numeric `bound` and takes the code default above it; a `*_min_left` key is never looser
 (lower) than its code default, whatever the floors say. A replaced value is listed in `info["baseline_guarded"]`. The
 direction comes from the code, never from a floor entry's `loosen`.
 A3. **No env override of the numbers** (an agent can set an environment variable; the allowance must not widen that way).
@@ -73,7 +74,7 @@ significantly better than Opus 5.5, if it states why in one line. The checks, in
 
 C1. `route_agent.py plan` puts at most `frontier1_per_wave` frontier slices on claude and `frontier2_per_wave` on any other
 pool in a wave, and the cap above the closed 1 holds only while `judged_pool_block` passes (B2); otherwise the closed 1.
-C2. Unchanged by the allowance, as standing instructions (**not enforced by code since 2026-11-14**: those checks were `bin/acp-dispatch`'s `gate_policy`, which left with the shim): a frontier slice is advise-only (an exec role needed `ACP_OPERATOR_APPROVED=frontier-exec`), Fable at `xhigh`/`max` needs the operator's approval (it was `fable-xhigh`; `config/routing.toml [dispatch].fable_gated_efforts` still lists the efforts), and a frontier model is launched with `ade.kind=frontier` / through the Agent-tool hook; the stop signal (a short, stale or unknown Claude reading keeps the closed rules) is still enforced by `route_agent.py` and the hook.
+C2. Unchanged by the allowance, as standing instructions (**not enforced by code since 2026-11-14**: those checks were `bin/acp-dispatch`'s `gate_policy`, which left with the shim): a frontier slice is advise-only (an exec role needed `ACP_OPERATOR_APPROVED=frontier-exec`), Fable at `xhigh`/`max` needs the operator's approval (it was `fable-xhigh`; `config/ade.toml [dispatch].fable_gated_efforts` still lists the efforts), and a frontier model is launched with `ade.kind=frontier` / through the Agent-tool hook; the stop signal (a short, stale or unknown Claude reading keeps the closed rules) is still enforced by `route_agent.py` and the hook.
 Only the Agent-tool hook asks for a reason (the `acp-dispatch` grant path left with the shim, 2026-11-14).
 C3. **Gemini 4 Argon** (`antigravity-argon`, the frontier fallback behind codex and claude, restored 2026-11-07) has no
 allowance of its own: it is a `frontier` model (`--kind frontier` only), counts as family 2 in the planner's per-wave cap,

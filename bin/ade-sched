@@ -42,7 +42,7 @@ __NAME__ or @NAME@ left unfilled is exit 2, and so is an EnvironmentVariables na
 launchd; plist key KillMode overrides), TimeoutStartSec=max(3 x StartInterval, 300s) and AccuracySec=1s. On systemd and
 cron, ~/.local/bin:/usr/local/bin:/usr/bin:/bin go first in PATH (plist PATHs are Mac paths).
 
-list/diff/reconcile read config/install.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
+list/diff/reconcile read config/ade.toml [install.jobs] / [install.retired_jobs] (S4b) and load the install catalog
 only then (so backend/install/status stay usable on Python 3.10 without tomllib). diff never unloads any job,
 including foreign owners (Orca/BB/herdr and unknown labels are reported only). reconcile writes ADE-owned
 ade-sched jobs on launchd, systemd user units, and user crontab (RECONCILE_WRITE_BACKENDS), creates/deletes

@@ -1,7 +1,7 @@
 # Model tiers: roles → concrete models per vendor (docs/history/model-tiers-design.md).
-# Snapshot 2026-11-09: projects today's routing.toml / route_agent policy tables.
-# Edit via `bin/ade-model-tiers promote|set` in a claimed workspace; merge by PR.
-# Untiered pools (minimax, glm, gemini-4-argon, …) stay as literal ids in routing.toml.
+# Snapshot 2026-11-09: projects today's config/ade.toml / route_agent policy tables.
+# Edit production via `bin/ade-model-tiers promote|set` in a claimed workspace; merge by PR.
+# Untiered pools (minimax, glm, gemini-4-argon, …) stay as literal ids in config/ade.toml [dispatch].
 
 [meta]
 schema = 1

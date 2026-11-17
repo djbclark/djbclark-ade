@@ -375,10 +375,10 @@ def test_script_imports_stdlib_only():
 
 
 def test_router_choice_ade_checkout_uses_sibling(tmp_path):
-    """config/routing.toml in the script's parent: the sibling router wins over the live ~/src/djbclark-ade one."""
+    """config/ade.toml in the script's parent: the sibling router wins over the live ~/src/djbclark-ade one."""
     r = Rig(tmp_path)
     (r.dir.parent / "config").mkdir()
-    (r.dir.parent / "config" / "routing.toml").write_text("")
+    (r.dir.parent / "config" / "ade.toml").write_text("")
     decoy = r.home / "src" / "djbclark-ade" / "bin"
     decoy.mkdir(parents=True)
     (decoy / "route_agent.py").write_text(STUB)
@@ -400,7 +400,7 @@ def test_router_choice_live_ade_router_beats_vendored_sibling(tmp_path):
 def test_router_choice_env_override_wins(tmp_path):
     r = Rig(tmp_path)
     (r.dir.parent / "config").mkdir()
-    (r.dir.parent / "config" / "routing.toml").write_text("")
+    (r.dir.parent / "config" / "ade.toml").write_text("")
     other = tmp_path / "other_router.py"
     other.write_text(STUB)
     proc, argvs = r.run({"pr": {}}, PR_RADAR_ROUTE_AGENT=str(other))

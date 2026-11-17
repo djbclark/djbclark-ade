@@ -16,7 +16,7 @@ skill-everywhere link to it. Rewritten 2026-11-07 (slim-down E7); the effort ski
 fallback-chain skill are folded in below (sections B and F; git history has both). The dated matrix and the
 reasons behind the rules are in `docs/model-routing.md`; this skill is the method.
 
-**The policy numbers live in one place: `config/routing.toml` and `config/gates.toml [frontier]`, printed by
+**The policy numbers live in one place: `config/ade.toml`, printed by
 `bin/route_agent.py policy --md`** (services × kinds with each rank and suggested `--model [--effort]`, the pools
 with their Paseo provider and billing, the gates and caps, the lead's model). Run it; copy no rank, model id or
 threshold from this file or any other.
@@ -36,7 +36,7 @@ instructions, **not enforced by code since 2026-11-14**: the `--kind frontier` /
 `ACP_OPERATOR_APPROVED=fable-xhigh|frontier-exec` checks lived in the dispatch shim's `gate_policy` (deleted 2026-11-14); native `paseo run` never checked them. Fable is a **sublimit** (at most 50%) of the shared Claude
 weekly window, not a separate allowance: every Fable run bills the 5-hour and weekly windows too.
 A6. **Fable leads are allowed for now (operator 2026-11-07).** The one switch is `fable_lead = true` in the `[lead]` table
-of `config/routing.toml`; set it to `false` (or delete the line) to restore the 2026-10-23 rule, never a Fable lead (Fable
+of `config/ade.toml`; set it to `false` (or delete the line) to restore the 2026-10-23 rule, never a Fable lead (Fable
 only through the `fable-deep` sub-agent or a `frontier` slice). `policy --md` prints it, and `context_size_nudge.py` stops
 telling a Fable session to relaunch on Opus while it is true. `[lead]`'s `model`/`pipeline_model` (Opus 5.5 high, Sonnet 5.5
 medium for a pipeline-only lead) stay the defaults.
@@ -138,7 +138,7 @@ D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf 
 in-flight reservations across a parallel wave (that was the retired Wave 6 dispatch shim's write-and-recheck path).
 Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
 slices from one plan snapshot than the floor estimate fits in remaining.
-D5a. **A repo's frontier reviewer order (rt-01, 2026-11-14):** `[dispatch.repo_overrides.REPO] frontier_order` in `config/routing.toml`
+D5a. **A repo's frontier reviewer order (rt-01, 2026-11-14):** `[dispatch.repo_overrides.REPO] frontier_order` in `config/ade.toml`
 (tendcf: `codex`, `claude`, `antigravity-argon`, its standing rule 3) makes `route_agent.py plan --kinds frontier --repo REPO`
 sort the pools that already passed every gate by that order (unlisted ones after), the score only inside a position. It never
 admits a closed pool and Argon stays behind the pools it sits behind. A name that is no service fails the policy load, in the
@@ -146,7 +146,7 @@ router and in `ade-config check` alike. **The order does not apply model-family 
 `--exclude codex` to `plan` (tendcf rule 3 counts only Fable or Argon then), or the plan puts same-family Astra first.
 D6. **Calibrate and monthly re-rank (2026-11-10):** `bin/route_agent.py calibrate [--json] [--since 30]` proposes
 `good_at` rank deltas from recent outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
-`--mode auto`; create line in `docs/scheduling.md`, inventory in `config/install.toml`) applies them; leave
+`--mode auto`; create line in `docs/scheduling.md`, inventory in `config/ade.toml [install.jobs]`) applies them; leave
 `chosen = false` until the operator creates the schedule. Do not revive the deleted launchd script.
 
 D7. **Hold and restore for new launches (W8, 2026-11-12):** `bin/route_agent.py adjust --kinds …` is `plan` with memory: a kind's
