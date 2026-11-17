@@ -67,23 +67,26 @@ A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, o
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
 | B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; the deleted acp-dispatch shim stopped launching it with Paseo |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
-| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
+| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK, behind codex and claude (operator 2026-10-31), and since 2026-11-16 a `research` pool at rank 16 behind every main pool (both roles share that one window); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
 | B9. `opencode-zen` (paid) | opencode | prepaid | retired until an operator top-up |
 
 B10. Retired from the router: agy (the agy TUI; Google's plan is the antigravity provider), copilot (the CLI; Paseo's
 Copilot provider replaces it, no router row), zai/zcode, alibaba/qwen, devin, crush, kiro, cline, goose, muse, aider,
 venicecode, pi (2026-11-06), grok (the SuperGrok CLI, 2026-11-07). They are `never_route`, so an aiuse account or a Paseo
-provider row with their name never becomes an unprofiled service. `github` and `realtime-web` remain kinds with no pool.
+provider row with their name never becomes an unprofiled service. `github` and `realtime-web` remain kinds with no pool,
+and `api-only` survives only on the archived `omp` row, so the unprofiled-kind diagnostic ignores retired pools.
 
-**Frontier order is a cost ordering.** `codex` carries `frontier = 1` and `claude = 2`, so a frontier slice
-goes to the astra family first even though `model-tiers` ranks Fable 5.2 above it: astra is the cheaper frontier
+**Frontier order is a cost ordering.** `codex` carries `frontier = 1` and `claude = 2`, so a frontier slice usually
+goes to the astra family even though `model-tiers` ranks Fable 5.2 above it: astra is the cheaper frontier
 family, and the Fable gate plus `[dispatch.repo_overrides.REPO].frontier_order` still decide when Fable takes one
-(2026-11-16, operator decision). The config says so in both entries, because an unexplained inversion reads as a bug.
+(2026-11-16, operator decision). It is a preference **inside the score**, not a hard precedence: a Codex window at 20%
+scores worse than a fresh Claude one, so Fable can win. The config says both, because an unexplained inversion reads
+as a bug.
 
 **An unprofiled kind says so.** `bin/route_agent.py route --kind github` answers `no pool profiles github: declared
 kind, no live pool ranks it`, not "no pool has room": those kinds lost their only pools with copilot and the Grok CLI
-(2026-11-06/07), and `api-only` survives only on the archived omp pool.
+(2026-11-06/07). The diagnostic names the reason rather than claiming a pool was busy.
 
 ## C. The registry: `paseo provider ls --json` (2026-11-07)
 

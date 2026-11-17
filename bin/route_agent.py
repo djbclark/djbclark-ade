@@ -245,6 +245,12 @@ class Service:
     # the kind, whatever its score. route() applies this predicate (`fallback_block`); acp-dispatch, deleted 2026-11-14, once applied it too, so no launcher re-checks it now. A per-wave
     # cap or an `exclude` does not make a named service short. A fallback with no fresh reading fails closed.
     fallback_after: tuple[str, ...] = ()
+    # Kinds this service may take ONLY when no other eligible candidate can: a
+    # structural last resort, like fallback_after but scoped to kinds rather than
+    # to named pools. A rank alone cannot express this: the winner is chosen by
+    # rank + headroom pressure + pace penalty, so a "weak" rank still wins against
+    # a usable pool that is merely penalised (2026-11-16, r5 A6).
+    fallback_kinds: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
     window: str = ""
 
@@ -467,6 +473,7 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
     kwargs["good_at"] = {str(k): int(v) for k, v in kwargs["good_at"].items()}
     kwargs["plenty_kinds"] = tuple(str(k) for k in kwargs.get("plenty_kinds") or ())
     kwargs["fallback_after"] = tuple(str(k) for k in kwargs.get("fallback_after") or ())
+    kwargs["fallback_kinds"] = tuple(str(k) for k in kwargs.get("fallback_kinds") or ())
     if "models" in kwargs and kwargs["models"] is not None:
         kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
     return Service(**kwargs)
@@ -623,6 +630,7 @@ def policy_public() -> dict[str, Any]:
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
             "shares_pool": s.shares_pool, "plenty_kinds": list(s.plenty_kinds),
             "fallback_after": list(s.fallback_after), "window": s.window,
+            "fallback_kinds": list(s.fallback_kinds),
         }
     return {
         "path": str(POLICY_PATH),
@@ -2207,7 +2215,8 @@ def _unrouted_why(kind: str, quota: dict[str, Any] | None = None,
         # "no room" would be a lie when no pool profiles the kind at all: `github` and
         # `realtime-web` lost their only pools with copilot and the Grok CLI (2026-11-06/07),
         # and `api-only` survives only on the archived omp pool. Say which it is.
-        profiled = [s.name for s in discover(quota or {}) if kind in s.good_at]
+        profiled = [s.name for s in discover(quota or {})
+                    if kind in s.good_at and not s.retired and not s.hermes_only]
         if not profiled:
             return (f"no pool profiles {kind}: declared kind, no live pool ranks it "
                     "(see [routing].kinds and docs/model-routing.md); nothing will be queued")
@@ -2685,6 +2694,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     order = repo_frontier_order(repo) if kind == "frontier" else ()
     position = {n: i for i, n in enumerate(order)}
     scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after),
+                               kind in t[1].fallback_kinds,   # last-resort kinds sort last, whatever the score
                                position.get(t[1].name, len(position)), t[0], t[1].name))
     best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]

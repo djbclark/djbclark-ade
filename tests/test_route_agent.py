@@ -1537,6 +1537,40 @@ class TestQualityBand(unittest.TestCase):
         self.assertNotEqual(nxt.name, best.name)
 
 
+class TestLastResortKinds(unittest.TestCase):
+    """`fallback_kinds`: a pool that may take a kind only when nothing else can (r5 A6).
+
+    A weak rank cannot express this, because the winner is rank + headroom pressure + pace
+    penalty: claude bulk 32 lost nothing to cursor-cloud bulk 26 at 20% headroom (26 + 8 = 34).
+    """
+
+    def drained(self, **over):
+        return {**{s.name: {"remaining": 0.0} for s in r.SERVICES}, **over}
+
+    def test_claude_is_declared_a_last_resort_for_bulk_and_mechanical(self):
+        claude = next(s for s in r.SERVICES if s.name == "claude")
+        self.assertEqual(set(claude.fallback_kinds), {"bulk", "mechanical"})
+        # It is not a last resort for the kinds the weekly pool is kept for.
+        for kind in ("judgment", "code", "research", "frontier"):
+            self.assertNotIn(kind, claude.fallback_kinds)
+
+    def test_a_penalised_but_usable_pool_still_beats_the_last_resort(self):
+        # cursor-cloud bulk 26 at 20% headroom scores 26 + 8 = 34; claude bulk 32 scores 32.
+        # Rank alone hands it to claude; the structural rule must not.
+        q = self.drained(**{"claude": {"remaining": 100.0}, "cursor-cloud": {"remaining": 20.0}})
+        self.assertNotEqual(r.route("bulk", quota=q).service.name, "claude")
+        self.assertNotEqual(r.route("mechanical", quota=q).service.name, "claude")
+
+    def test_the_last_resort_still_takes_the_slice_when_nothing_else_can(self):
+        q = self.drained(claude={"remaining": 90.0})
+        self.assertEqual(r.route("bulk", quota=q).service.name, "claude")
+        self.assertEqual(r.route("mechanical", quota=q).service.name, "claude")
+
+    def test_the_last_resort_does_not_leak_into_judgment_or_code(self):
+        q = self.drained(claude={"remaining": 90.0})
+        self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
+
+
 class TestCodexEverydayKinds(unittest.TestCase):
     """Operator 2026-10-25: "if we have lots of codex quota and it is the best of available
     options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of

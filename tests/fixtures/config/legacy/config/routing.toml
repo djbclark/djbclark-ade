@@ -230,20 +230,24 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 name = "claude"
 pool_family = "default"
 cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
-# bulk/mechanical are a deliberate LAST RESORT (ranks 32/30, behind every other pool): the
-# weekly pool is the scarce one, kept for judgment and code. Haiku is the bulk-tier model.
-# frontier 2: Fable is the best frontier model but the scarce, expensive family, so astra takes
-# a frontier slice first by cost; the gates still admit Fable when a reason is judged
-# (docs/gates.md), and frontier_order overrides this per repo.
+# bulk/mechanical are a structural LAST RESORT (`fallback_kinds`, 2026-11-16): they are taken
+# only when no other eligible pool can, because the weekly pool is the scarce one, kept for
+# judgment and code. The ranks are what a last-resort pool would score; Haiku is the bulk model.
+# frontier 2: Fable is the best frontier model but the scarce, expensive family, so astra usually
+# takes a frontier slice first by cost -- a preference inside the score, not a hard order; the
+# gates still admit Fable when a reason is judged (docs/gates.md), and frontier_order overrides
+# this per repo.
 good_at = { judgment = 1, frontier = 2, code = 12, research = 10, bulk = 32, mechanical = 30 }
+fallback_kinds = ["bulk", "mechanical"]
+# research 10: Opus at high; the old "no research row" rule is gone (2026-11-16).
 billing = "subscription"
 note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
 judgment_tier = true
 access = "cli-only"
 # Code on Sonnet 5.5 (operator 2026-10-18: "claude should be in a code pool, it's just fable
 # that shouldn't be"); rank 12 keeps the use-it-or-lose-it pools first.
-# This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
-# Haiku lookups go through the Agent tool, not a dispatched slice. Fable at xhigh is never
+# This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. Research has a row
+# since 2026-11-16 (Opus at high). Fable at xhigh is never
 # suggested: it remains an operator-approved run (2026-10-18).
 models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high", research = "opus --effort high", bulk = "haiku --effort low", mechanical = "haiku --effort low" }
 
@@ -414,7 +418,9 @@ shares_pool = "cursor"
 max_parallel = 2
 models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5", research = "claude-sonnet-5-5" }
 
-# The Google AI Pro plan's Gemini 4 Argon window: frontier FALLBACK only (operator 2026-10-31, PR 224). Retired with the
+# The Google AI Pro plan's Gemini 4 Argon window: the frontier FALLBACK, and since 2026-11-16 a research
+# pool too (research 16, behind every main pool). Both roles share one Google plan window, so Argon
+# research competes with Argon frontier. Retired with the
 # agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
 # review route 3 (written as `acp-dispatch antigravity --model gemini-4-argon --kind frontier` in their AGENTS.md; the
 # shim is gone, 2026-11-14, and those files still need updating) needs a frontier row: without one `route_agent.py plan` refuses it as ineligible. aiuse reports the window as pool family `gemini_argon`
