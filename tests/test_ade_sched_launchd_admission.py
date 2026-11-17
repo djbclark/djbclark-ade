@@ -24,7 +24,7 @@ sys.path.insert(0, str(BIN))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_install as ai  # noqa: E402
 import ade_sched as S  # noqa: E402
-from test_ade_jobs_reconcile import _mini_catalog  # noqa: E402
+from test_ade_jobs_reconcile import _fake_paseo_run, _mini_catalog  # noqa: E402
 
 LABEL = "com.djbclark.deadline-sweep"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "launchd"
@@ -497,7 +497,9 @@ def test_unexpected_oserror_from_the_native_install_is_a_failed_row_not_a_traceb
 
 
 def test_paseo_install_step_on_a_launchd_host_never_reaches_the_launchd_adapter(ld, monkeypatch):
-    # An unrelated missing LaunchAgent file must not admit a paid-run paseo mutation.
+    # Explicit denial remains authoritative even when the host label is absent.
+    # Native Paseo creation is now independently admissible; launchd absence is
+    # neither its admission evidence nor a reason to bypass this denial.
     step = S.ReconcileStep("p", "install", S.OWNER_ADE, "paseo schedule create x", "x-schedule", touch=True)
     monkeypatch.setattr(S, "plan_reconcile", lambda *a, **kw: [step])
 
@@ -506,8 +508,44 @@ def test_paseo_install_step_on_a_launchd_host_never_reaches_the_launchd_adapter(
 
     rows, rc = S.reconcile([{"name": "p", "kind": "paseo", "owner": S.OWNER_ADE}], [], dry_run=False, backend="launchd",
                            root=ld.tmp, env=ld.env, state_dir=ld.state, live=S.LiveScan("launchd", ()),
-                           paseo_run=no_paseo, native_admission=True)
+                           paseo_run=no_paseo, native_admission=True,
+                           admission=lambda step: contextlib.nullcontext(S.JobAdmission(hold="explicit denial")))
     assert rc == 6 and rows[0]["action"] == "deferred", rows
+    assert rows[0]["detail"] == "explicit denial"
+    assert ld.verbs() == []
+    assert _entries(ld) == {}
+
+
+def test_native_paseo_install_bypasses_launchd_admission_with_valid_inventory(ld, monkeypatch):
+    # Exercise the native adapter selection, rather than a forced plan containing
+    # an invalid inventory row that fails before the fake Paseo runner is reached.
+    root = _mini_catalog(ld.tmp)
+    catalog = ai.load_catalog(root=root)
+    store = ld.tmp / "paseo-schedules.json"
+    store.write_text("[]")
+    fake_paseo = _fake_paseo_run(store)
+    calls = []
+
+    def launchd_factory(**kwargs):
+        def forbidden(step):
+            pytest.fail("native Paseo step reached launchd admission")
+        return forbidden
+
+    def run(argv):
+        calls.append(argv)
+        return fake_paseo(argv)
+
+    monkeypatch.setattr(S, "launchd_admission", launchd_factory)
+    rows, rc = S.reconcile(
+        catalog.jobs, catalog.retired_jobs, dry_run=False, backend="launchd",
+        root=root, ade=root, env=ld.env, state_dir=ld.state,
+        names={"context-budget"}, live=S.LiveScan("launchd", ()),
+        platform_name="linux", paseo_run=run, native_admission=True,
+    )
+    assert rc == 0 and any(row["action"] == "installed" for row in rows), rows
+    assert [argv[2] for argv in calls] == ["create", "ls"]
+    assert json.loads(store.read_text()) == ["context-budget"]
+    assert _entries(ld)["context-budget"]["backend"] == "paseo"
     assert ld.verbs() == []
 
 
