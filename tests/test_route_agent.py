@@ -526,6 +526,12 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
         self.assertEqual(r.map_agent_to_provider("cursor", "composer-2.5"), ("cursor", "third_party"))
         self.assertEqual(r.map_agent_to_provider("pi", "cursor/composer-2.5"), ("cursor", "third_party"))
         self.assertEqual(r.dispatch_service_name("claude", "sonnet"), "claude")
+        # codex is split by billing identity: luna is the subscription, sol/astra the prepaid credits
+        self.assertEqual(r.map_agent_to_provider("codex", "gpt-6-luna"), ("codex", "default"))
+        self.assertEqual(r.map_agent_to_provider("codex", "gpt-6.1-sol"), ("codex", "openai_api"))
+        self.assertEqual(r.map_agent_to_provider("codex", "gpt-6-astra"), ("codex", "openai_api"))
+        self.assertEqual(r.dispatch_service_name("codex", "gpt-6-luna"), "codex-subscription")
+        self.assertEqual(r.dispatch_service_name("codex", "gpt-6.1-sol"), "codex")
 
     def test_cursor_grok_bot_cannot_fund_composer_or_auto(self):
         bot = self.row("cursor", "grok_bot", 82)

@@ -3098,6 +3098,13 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
         return "cursor", "third_party"
+    if agent == "codex":
+        # codex is split by billing identity: gpt-6-luna bills the ChatGPT
+        # subscription (default family), gpt-6.1-sol / gpt-6-astra bill the
+        # OpenAI API prepaid credits (openai_api family).
+        if model and "luna" in model.lower():
+            return "codex", "default"
+        return "codex", "openai_api"
     if agent == "antigravity":
         # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
         return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None

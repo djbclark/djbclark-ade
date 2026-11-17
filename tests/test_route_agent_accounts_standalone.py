@@ -49,7 +49,7 @@ def test_several_accounts_keep_every_window_sublimit_and_reset(order):
 
 def test_codex_prepaid_credits_are_a_separate_pool_from_subscription():
     # The codex provider's subscription window (pool_family default) and its
-    # OpenAI API prepaid credits (pool_family codex_api) are separate routing
+    # OpenAI API prepaid credits (pool_family openai_api) are separate routing
     # pools: the subscription must not be presented as authority for the
     # prepaid API-only models gpt-6.1-sol / gpt-6-astra (2026-11-17).
     accounts = [
