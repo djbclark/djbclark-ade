@@ -43,10 +43,43 @@ class MergeOwnedTest(unittest.TestCase):
         self.assertIs(got["tuiPluginWrote"], True)
         self.assertEqual(got["env"], {"A": "2", "KEEP": "x", "B": "3"})
 
-    def test_lists_replace_not_append(self):
-        live = {"allow": ["a", "b"]}
-        desired = {"allow": ["c"]}
-        self.assertEqual(lib.merge_owned(live, desired)["allow"], ["c"])
+    def test_lists_desired_first_preserve_live_and_deduplicate(self):
+        live = {"allow": ["b", "a", "b", "local"], "deniedMcpServers": ["siyuan"]}
+        desired = {"allow": ["c", "a", "c"], "deniedMcpServers": ["remote"]}
+        self.assertEqual(lib.merge_owned(live, desired), {
+            "allow": ["c", "a", "b", "local"],
+            "deniedMcpServers": ["remote", "siyuan"],
+        })
+        self.assertEqual(lib.merge_owned(["local", "local"], []), ["local"])
+        self.assertEqual(lib.merge_owned([], ["new", "new"]), ["new"])
+        self.assertEqual(lib.merge_owned({}, {"new": ["x", "x"]}), {"new": ["x", "x"]})
+
+    def test_lists_hook_dicts_preserve_live_groups_and_copy_inputs(self):
+        def group(command):
+            return {"matcher": "*", "hooks": [{"type": "command", "command": command}]}
+        owned = group("ade-check")
+        local = [group("paseo hooks claude PreToolUse"), group("graft pre-bash || exit 0"),
+                 group("collie beacon")]
+        live = {"hooks": {"PreToolUse": [local[0], owned, *local[1:], local[0]],
+                          "Stop": [group("local-stop")]}, "other": [{"nested": [1, 2]}]}
+        desired = {"hooks": {"PreToolUse": [owned, owned, group("graft pre-bash")]},
+                   "other": [{"nested": [2, 1]}, {"nested": [2, 1]}]}
+        got = lib.merge_owned(live, desired)
+        self.assertEqual(got["hooks"]["PreToolUse"], [owned, group("graft pre-bash"), *local])
+        self.assertEqual(got["hooks"]["Stop"], [group("local-stop")])
+        self.assertEqual(got["other"], [{"nested": [2, 1]}, {"nested": [1, 2]}])
+        self.assertEqual(lib.merge_owned(got, desired), got)
+        got["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = "changed"
+        got["other"][1]["nested"].append(3)
+        self.assertEqual(owned, group("ade-check"))
+        self.assertEqual(live["other"], [{"nested": [1, 2]}])
+
+    def test_lists_type_mismatch_and_scalars_use_desired(self):
+        for live, desired in [(["live"], "desired"), ("live", ["desired"]),
+                              ({"key": "live"}, []), (["live"], {"key": "desired"}),
+                              ("live", "desired")]:
+            with self.subTest(live=live, desired=desired):
+                self.assertEqual(lib.merge_owned(live, desired), desired)
 
     def test_empty_live_is_desired(self):
         desired = {"model": "sonnet", "env": {"X": "1"}}
