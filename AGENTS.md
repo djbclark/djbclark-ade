@@ -111,12 +111,14 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    the thing itself: exit codes and structured output over string matching,
    config files over filenames, `gh pr view` over memory. When wrong, say so
    plainly and correct the record in the same breath.
-5. **Label every heading and item uniquely, so it can be referred to by a
-   short typed designation.** Each top-level heading in a reply gets a
-   letter (`A.`, `B.`, …); its items are `A1`, `A2`, …, sub-items `A1a`.
-   A reply with no headings uses `1.`, `2.`; question-card options are
-   numbered too. Each item is labelled once; keep labels stable within a
-   conversation (operator, 2026-10-24).
+5. **Use [ref labels](docs/ref-labels.md), Parts A and B, for operator-facing posts.**
+   Multiple sections use bold uppercase Roman numerals; major items use
+   bold-italic numbers, restarting per section; quoted sub-items use bold-italic
+   lowercase letters (skip i), then nested lowercase Roman numerals. Separate
+   labels with blank lines; no plain bullets. Question-card options stay `1.`,
+   `2.`, … . End each post with a fresh script-issued `Ref: <BOT>-<id>` from
+   `ref <BOT>` or `ref-append <BOT> FILE`; never invent or reuse an id. Follow
+   the document's short-progress/emoji exceptions (operator, 2026-11-17).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `bin/route_agent.py policy --md`, the one copy of the numbers (2026-11-07: built
