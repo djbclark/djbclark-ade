@@ -1047,11 +1047,13 @@ class TestRoutingPolicyToml(unittest.TestCase):
     EXPECTED: ClassVar[dict[str, dict[str, Any]]] = {
         "claude": {
             "cli": "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)",
-            "good_at": {"judgment": 1, "frontier": 2, "code": 12, "research": 10},
+            "good_at": {"judgment": 1, "frontier": 2, "code": 12, "research": 10,
+                        "bulk": 32, "mechanical": 30},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"judgment": "opus --effort high", "frontier": "fable --effort high",
-                       "code": "sonnet --effort high", "research": "opus --effort high"},
+                       "code": "sonnet --effort high", "research": "opus --effort high",
+                       "bulk": "haiku --effort low", "mechanical": "haiku --effort low"},
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {

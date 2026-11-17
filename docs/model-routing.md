@@ -76,6 +76,15 @@ Copilot provider replaces it, no router row), zai/zcode, alibaba/qwen, devin, cr
 venicecode, pi (2026-11-06), grok (the SuperGrok CLI, 2026-11-07). They are `never_route`, so an aiuse account or a Paseo
 provider row with their name never becomes an unprofiled service. `github` and `realtime-web` remain kinds with no pool.
 
+**Frontier order is a cost ordering.** `codex` carries `frontier = 1` and `claude = 2`, so a frontier slice
+goes to the astra family first even though `model-tiers` ranks Fable 5.2 above it: astra is the cheaper frontier
+family, and the Fable gate plus `[dispatch.repo_overrides.REPO].frontier_order` still decide when Fable takes one
+(2026-11-16, operator decision). The config says so in both entries, because an unexplained inversion reads as a bug.
+
+**An unprofiled kind says so.** `bin/route_agent.py route --kind github` answers `no pool profiles github: declared
+kind, no live pool ranks it`, not "no pool has room": those kinds lost their only pools with copilot and the Grok CLI
+(2026-11-06/07), and `api-only` survives only on the archived omp pool.
+
 ## C. The registry: `paseo provider ls --json` (2026-11-07)
 
 C1. `route_agent.py` builds the service list from the curated rows plus `paseo provider ls --json` rows whose `enabled`

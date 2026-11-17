@@ -230,7 +230,12 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 name = "claude"
 pool_family = "default"
 cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
-good_at = { judgment = 1, frontier = 2, code = 12, research = 10 }
+# bulk/mechanical are a deliberate LAST RESORT (ranks 32/30, behind every other pool): the
+# weekly pool is the scarce one, kept for judgment and code. Haiku is the bulk-tier model.
+# frontier 2: Fable is the best frontier model but the scarce, expensive family, so astra takes
+# a frontier slice first by cost; the gates still admit Fable when a reason is judged
+# (docs/gates.md), and frontier_order overrides this per repo.
+good_at = { judgment = 1, frontier = 2, code = 12, research = 10, bulk = 32, mechanical = 30 }
 billing = "subscription"
 note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
 judgment_tier = true
@@ -240,7 +245,7 @@ access = "cli-only"
 # This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
 # Haiku lookups go through the Agent tool, not a dispatched slice. Fable at xhigh is never
 # suggested: it remains an operator-approved run (2026-10-18).
-models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high", research = "opus --effort high" }
+models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high", research = "opus --effort high", bulk = "haiku --effort low", mechanical = "haiku --effort low" }
 
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
 # "omp credits", provider `omp`). The omp executable is retired (2026-11-08); the intended
@@ -276,6 +281,10 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 [[service]]
 name = "codex"
 cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
+# frontier rank 1 is a COST ordering, not a model-quality claim: astra takes a frontier slice
+# before Fable because the astra family is the cheaper one. model-tiers still ranks Fable 5.2
+# above astra, so this inverts the tier order on purpose (2026-11-16). Per-repo exceptions:
+# [dispatch.repo_overrides.REPO].frontier_order.
 good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20, research = 13 }
 billing = "subscription"
 note = "frontier: only a slice that really needs astra to look it over; judgment/code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"

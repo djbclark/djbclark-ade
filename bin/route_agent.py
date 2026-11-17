@@ -2204,6 +2204,13 @@ def _unrouted_why(kind: str, quota: dict[str, Any] | None = None,
         return fable
     best = quality_best(kind, list(discover(quota or {})), exclude, quota, need_profile=True)
     if gap is None or best is None:
+        # "no room" would be a lie when no pool profiles the kind at all: `github` and
+        # `realtime-web` lost their only pools with copilot and the Grok CLI (2026-11-06/07),
+        # and `api-only` survives only on the archived omp pool. Say which it is.
+        profiled = [s.name for s in discover(quota or {}) if kind in s.good_at]
+        if not profiled:
+            return (f"no pool profiles {kind}: declared kind, no live pool ranks it "
+                    "(see [routing].kinds and docs/model-routing.md); nothing will be queued")
         return "no pool has room: keep queued"
     return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
             f"r{best.rank_for(kind)}) has room; weaker pools are not used for {kind} "
