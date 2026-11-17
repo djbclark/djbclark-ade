@@ -174,7 +174,10 @@ agents/codex/modify_merge.py  --desired RENDERED.toml --live LIVE.toml [--write 
 `--live` defaults to stdin and omit `--write` to print the merge (chezmoi `modify_` shape). Dicts merge
 recursively; when both values are lists, keep template entries first, then live-only entries, deduplicated by
 deep equality (dict entries are compared whole). Empty template lists preserve live entries;
-matching lists do not support deletion. Scalars and differing types use the template value.
+matching lists do not support deletion. New or type-changing collection subtrees normalize
+recursively on the first merge. Codex `notify` alone is an atomic positional argv vector:
+when owned it uses the exact template vector, including repeated arguments; when unowned
+it keeps the exact live vector. Scalars and differing types use the template value.
 Live-only keys stay (Claude plugins/tui extras; Codex
 `[hooks.trust.*]`, `/private/tmp` `[projects.*]`, marketplace `last_revision`). `--write` refuses the real
 `~/.claude/settings.json` and `~/.codex/config.toml`. Shared algorithm: [`modify_merge_lib.py`](modify_merge_lib.py);

@@ -62,7 +62,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"modify_merge: {type(e).__name__}: parse failed (text withheld)", file=sys.stderr)
         return 1
 
-    merged = lib.merge_owned(live, desired)
+    # notify is executable + positional arguments, not hook registrations.
+    # Exclude it from collection normalization, including duplicate argv tokens.
+    merged = lib.merge_owned(
+        {k: v for k, v in live.items() if k != "notify"},
+        {k: v for k, v in desired.items() if k != "notify"},
+    )
+    if "notify" in desired or "notify" in live:
+        merged["notify"] = desired["notify"] if "notify" in desired else live["notify"]
     try:
         out = lib.dump_toml(merged)
     except TypeError as e:

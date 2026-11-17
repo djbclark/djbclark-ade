@@ -29,24 +29,26 @@ _LIVE_REFUSE = (
 def merge_owned(live: Any, desired: Any) -> Any:
     """Keep unowned live keys; apply owned desired keys.
 
-    When both sides are dicts, recurse and keep live-only keys. When both are lists,
+    Desired dicts recurse and keep live-only keys when live is a dict. Lists
     retain the first occurrence of each deeply equal entry in desired then live
     order (including dict entries, compared whole rather than merged by identity).
     An empty desired list preserves live entries; deletion requires removing entries
-    explicitly outside this helper. Otherwise desired replaces live. Results are
+    explicitly outside this helper. New/type-changing collection subtrees normalize
+    recursively on the first merge, too. Otherwise desired replaces live. Results are
     deep copies, so changing them never changes either input.
     """
-    if isinstance(live, dict) and isinstance(desired, dict):
-        out = copy.deepcopy(live)
+    if isinstance(desired, dict):
+        out = copy.deepcopy(live) if isinstance(live, dict) else {}
         for key, value in desired.items():
             if key in out:
                 out[key] = merge_owned(out[key], value)
             else:
-                out[key] = copy.deepcopy(value)
+                out[key] = merge_owned(None, value)
         return out
-    if isinstance(live, list) and isinstance(desired, list):
+    if isinstance(desired, list):
         out = []
-        for entry in desired + live:
+        for entry in desired + (live if isinstance(live, list) else []):
+            entry = merge_owned(None, entry)
             if entry not in out:
                 out.append(copy.deepcopy(entry))
         return out

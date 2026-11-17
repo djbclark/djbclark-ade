@@ -52,7 +52,7 @@ class MergeOwnedTest(unittest.TestCase):
         })
         self.assertEqual(lib.merge_owned(["local", "local"], []), ["local"])
         self.assertEqual(lib.merge_owned([], ["new", "new"]), ["new"])
-        self.assertEqual(lib.merge_owned({}, {"new": ["x", "x"]}), {"new": ["x", "x"]})
+        self.assertEqual(lib.merge_owned({}, {"new": ["x", "x"]}), {"new": ["x"]})
 
     def test_lists_hook_dicts_preserve_live_groups_and_copy_inputs(self):
         def group(command):
@@ -80,6 +80,24 @@ class MergeOwnedTest(unittest.TestCase):
                               ("live", "desired")]:
             with self.subTest(live=live, desired=desired):
                 self.assertEqual(lib.merge_owned(live, desired), desired)
+
+    def test_lists_first_merge_normalizes_new_and_type_changing_subtrees(self):
+        import copy
+        for live in [{}, {"new": "old"}, {"new": {}}, {"new": {"event": "old"}}]:
+            for desired in [{"new": ["x", "x"]},
+                            {"new": [{"hooks": ["x", "x"]}] * 2},
+                            {"new": {"event": [{"hooks": ["x", "x"]}] * 2}}]:
+                with self.subTest(live=live, desired=desired):
+                    before = copy.deepcopy((live, desired))
+                    first = lib.merge_owned(live, desired)
+                    self.assertEqual(first, lib.merge_owned(first, desired))
+                    expected = (["x"] if desired["new"] == ["x", "x"] else
+                                [{"hooks": ["x"]}] if isinstance(desired["new"], list) else
+                                {"event": [{"hooks": ["x"]}]})
+                    self.assertEqual(first["new"], expected)
+                    self.assertEqual((live, desired), before)
+                    first["new"].clear()
+                    self.assertEqual((live, desired), before)
 
     def test_empty_live_is_desired(self):
         desired = {"model": "sonnet", "env": {"X": "1"}}
@@ -123,6 +141,50 @@ class MergeOwnedTest(unittest.TestCase):
             "https://github.com/ComposioHQ/composio-plugin-openai.git",
         )
         self.assertEqual(got["marketplaces"]["composio"]["last_revision"], "deadbeef")
+
+
+class WrapperCollectionsTest(unittest.TestCase):
+    def test_wrappers_collection_preservation_and_atomic_notify(self):
+        for wrapper, suffix in [(CLAUDE, "json"), (CODEX, "toml")]:
+            for old_notify in [["/old", "x"], ["/old", "different"], None]:
+                for live_collection in [None, "old", ["local", "local"]]:
+                    with self.subTest(wrapper=wrapper, notify=old_notify, collection=live_collection):
+                        live = {}
+                        if live_collection is not None:
+                            live["deniedMcpServers"] = live_collection
+                        if old_notify is not None:
+                            live["notify"] = old_notify
+                        desired = {"deniedMcpServers": ["remote", "remote"]}
+                        if suffix == "json":
+                            desired["hooks"] = {"PreToolUse": [{"hooks": [{"command": "ade"}]}] * 2}
+                            live["hooks"] = {"PreToolUse": [{"hooks": [{"command": "collie"}]}]}
+                        else:
+                            desired["notify"] = ["/new", "x", "x"]
+                        encode = json.dumps if suffix == "json" else lib.dump_toml
+                        decode = json.loads if suffix == "json" else tomllib.loads
+                        with tempfile.TemporaryDirectory() as tmp:
+                            target = Path(tmp) / ("desired." + suffix)
+                            target.write_text(encode(desired))
+                            def run(value):
+                                proc = subprocess.run([sys.executable, str(wrapper), "--desired", str(target)],
+                                                      input=encode(value), text=True, capture_output=True)
+                                self.assertEqual(proc.returncode, 0, proc.stderr)
+                                return decode(proc.stdout)
+                            first = run(live)
+                            self.assertEqual(first, run(first))
+                            self.assertEqual(first["deniedMcpServers"],
+                                             ["remote", "local"] if isinstance(live_collection, list) else ["remote"])
+                            if suffix == "toml":
+                                self.assertEqual(first["notify"], ["/new", "x", "x"])
+                                del desired["notify"]
+                                target.write_text(encode(desired))
+                                unowned = {"notify": ["/local", "x", "x"]}
+                                kept = run(unowned)
+                                self.assertEqual(kept["notify"], unowned["notify"])
+                                self.assertEqual(kept, run(kept))
+                            else:
+                                self.assertEqual(first["hooks"]["PreToolUse"],
+                                                 [desired["hooks"]["PreToolUse"][0], live["hooks"]["PreToolUse"][0]])
 
 
 class RefuseLiveHomeTest(unittest.TestCase):
