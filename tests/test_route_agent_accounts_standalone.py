@@ -47,6 +47,33 @@ def test_several_accounts_keep_every_window_sublimit_and_reset(order):
     assert pool["sublimit_resets"]["fable"] == "2026-11-19T00:00:00+00:00"   # the later reset, for the wait message
 
 
+def test_codex_prepaid_credits_are_a_separate_pool_from_subscription():
+    # The codex provider's subscription window (pool_family default) and its
+    # OpenAI API prepaid credits (pool_family codex_api) are separate routing
+    # pools: the subscription must not be presented as authority for the
+    # prepaid API-only models gpt-6.1-sol / gpt-6-astra (2026-11-17).
+    accounts = [
+        {
+            "provider": "codex",
+            "age_seconds": 60,
+            "windows": [
+                {"label": "Codex weekly quota (2)", "pool_family": "default", "window_id": "secondary",
+                 "remaining_percent": 96.0, "headroom_percent": 96.0, "state": "ok"},
+                {"label": "OpenAI API credits", "pool_family": "openai_api", "window_id": "codex-api-credits",
+                 "remaining_percent": 0.0, "headroom_percent": 0.0, "state": "exhausted"},
+            ],
+        }
+    ]
+    pools = r._providers_from_accounts(accounts, 60)
+    assert pools["codex-subscription"]["remaining"] == 96.0   # subscription window keeps its headroom
+    assert pools["codex"]["remaining"] == 0.0                  # prepaid credits exhausted -> fail closed
+
+
+def test_codex_prepaid_pool_is_the_openai_api_canary():
+    assert r.canary_pool(r.BY_NAME["codex"]) == "openai_api"
+    assert r.canary_pool(r.BY_NAME["codex-subscription"]) is None
+
+
 def test_one_account_is_unchanged_by_the_merge():
     pool = r._providers_from_accounts([ACCOUNT_B], 60)["claude"]
     assert pool["remaining"] == 60 and pool["windows"]["weekly"] == 70 and pool["windows"]["session"] == 60

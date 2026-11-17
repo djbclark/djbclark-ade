@@ -1612,22 +1612,36 @@ class TestLastResortKinds(unittest.TestCase):
 
 
 class TestCodexEverydayKinds(unittest.TestCase):
-    """Operator 2026-10-25: "if we have lots of codex quota and it is the best of available
-    options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of
-    the binding headroom; astra stays frontier-only; ranking is the normal one."""
+    """Operator 2026-10-25 (split 2026-11-17): everyday kinds are gated on [routing].plenty_min
+    of the binding headroom. The codex provider now splits: gpt-6.1-sol (judgment/code/research)
+    and gpt-6-astra (frontier) bill the OpenAI API prepaid credits (the `codex` service, pool
+    family openai_api); gpt-6-luna (bulk/mechanical) bills the ChatGPT subscription (the
+    `codex-subscription` service, pool family default). astra stays frontier-only."""
 
-    EVERYDAY = ("judgment", "code", "bulk", "mechanical", "research")
+    EVERYDAY = ("judgment", "code", "research")
+    SUBSCRIPTION = ("bulk", "mechanical")
+
+    def setUp(self):
+        # The codex split lives in the repo's effective config (ade.toml);
+        # TestRoutingPolicyToml reloads a legacy fixture and leaves it in place.
+        r.reload_policy()
 
     def codex(self):
         return r.BY_NAME["codex"]
+
+    def codex_subscription(self):
+        return r.BY_NAME["codex-subscription"]
 
     def drained(self, **over):
         return {**{s.name: {"remaining": 0.0} for s in r.SERVICES}, **over}
 
     def test_eligible_at_high_headroom_only_for_the_everyday_kinds_profiled(self):
-        q = {"codex": {"remaining": 100.0}}
+        q = {"codex": {"remaining": 100.0}, "codex-subscription": {"remaining": 100.0}}
         for kind in self.EVERYDAY:
             self.assertTrue(self.codex().eligible(kind, q), kind)
+        for kind in self.SUBSCRIPTION:
+            self.assertTrue(self.codex_subscription().eligible(kind, q), kind)
+            self.assertFalse(self.codex().eligible(kind, q), kind)      # luna is not on the prepaid pool
         for kind in ("github", "api-only", "realtime-web"):
             self.assertFalse(self.codex().eligible(kind, q), kind)
         self.assertTrue(self.codex().eligible("frontier", q))
@@ -1639,26 +1653,32 @@ class TestCodexEverydayKinds(unittest.TestCase):
             self.assertFalse(self.codex().eligible(kind, {"codex": {"remaining": edge - 0.1}}), kind)
             self.assertFalse(self.codex().eligible(kind, {"codex": {"remaining": None}}), kind)
             self.assertFalse(self.codex().eligible(kind), kind)
+        for kind in self.SUBSCRIPTION:
+            self.assertTrue(self.codex_subscription().eligible(kind, {"codex-subscription": {"remaining": edge}}), kind)
+            self.assertFalse(self.codex_subscription().eligible(kind, {"codex-subscription": {"remaining": edge - 0.1}}), kind)
+            self.assertFalse(self.codex_subscription().eligible(kind, {"codex-subscription": {"remaining": None}}), kind)
+            self.assertFalse(self.codex_subscription().eligible(kind), kind)
         self.assertTrue(self.codex().eligible("frontier", {"codex": {"remaining": 1.0}}))
-        self.assertTrue(self.codex().eligible("frontier"))
+        self.assertFalse(self.codex().eligible("frontier"))      # a prepaid pool needs a measured reading even for frontier
 
     def test_a_window_with_no_reading_fails_closed_for_the_gated_kinds(self):
-        """One known 95% window must not stand for every window (adversary 7802361, A2): the
-        reader keeps `remaining` = the tightest KNOWN window, and lists the null one."""
-        known = [{"label": "5h", "remaining_percent": 95.0}, {"label": "weekly", "remaining_percent": 80.0}]
-        partial = [known[0], {"label": "weekly", "remaining_percent": None}]
+        """A null window must not stand for headroom (adversary 7802361, A2): the reader keeps
+        `remaining` = the tightest KNOWN window, and a null one keeps the plenty gate closed."""
+        known = [{"label": "credits", "pool_family": "openai_api", "remaining_percent": 95.0}]
+        unknown = [{"label": "credits", "pool_family": "openai_api", "remaining_percent": None}]
         whole = r._providers_from_accounts([{"provider": "codex", "windows": known}], 0.0)
-        half = r._providers_from_accounts([{"provider": "codex", "windows": partial}], 0.0)
-        self.assertEqual(half["codex"]["remaining"], 95.0)
+        none = r._providers_from_accounts([{"provider": "codex", "windows": unknown}], 0.0)
+        self.assertEqual(whole["codex"]["remaining"], 95.0)
+        self.assertIsNone(none["codex"]["remaining"])
         for kind in self.EVERYDAY:
             self.assertTrue(self.codex().eligible(kind, whole), kind)
-            self.assertFalse(self.codex().eligible(kind, half), kind)
-        self.assertTrue(self.codex().eligible("frontier", half))      # frontier needs no plenty
+            self.assertFalse(self.codex().eligible(kind, none), kind)
+        self.assertFalse(self.codex().eligible("frontier", none))      # unknown prepaid balance fails closed, even frontier
         self.assertTrue(self.codex().eligible("code", {"codex": {"remaining": 95.0}}))   # no windows listed
 
-    def test_only_codex_has_a_plenty_gate(self):
-        """The partial-reading rule lives in the plenty gate: no other pool carries one."""
-        self.assertEqual([s.name for s in r.SERVICES if s.plenty_kinds], ["codex"])
+    def test_only_codex_pools_have_a_plenty_gate(self):
+        """The partial-reading rule lives in the plenty gate: only the codex pools carry one."""
+        self.assertEqual([s.name for s in r.SERVICES if s.plenty_kinds], ["codex", "codex-subscription"])
 
     def test_the_default_constant_is_a_fifth_of_the_window(self):
         self.assertEqual(r.PLENTY_MIN, 20.0)
@@ -1697,14 +1717,14 @@ class TestCodexEverydayKinds(unittest.TestCase):
             self.assertFalse(any(tok in models[kind].lower() for tok in frontier), (kind, models[kind]))
         c = r.route("code", quota=self.drained(codex={"remaining": 100.0}))
         self.assertEqual((c.service.name, c.model), ("codex", "gpt-6.1-sol --effort medium"))
-        c = r.route("mechanical", quota=self.drained(codex={"remaining": 100.0}))
-        self.assertEqual((c.service.name, c.model), ("codex", "gpt-6-luna --effort low"))
+        c = r.route("mechanical", quota=self.drained(**{"codex-subscription": {"remaining": 100.0}}))
+        self.assertEqual((c.service.name, c.model), ("codex-subscription", "gpt-6-luna --effort low"))
 
     def test_codex_competes_on_rank_it_is_not_forced_first(self):
-        q = {**IDLE, "codex": {"remaining": 100.0}}
-        for kind in ("bulk", "mechanical"):          # free and idle pools stay first
+        q = {**IDLE, "codex": {"remaining": 100.0}, "codex-subscription": {"remaining": 100.0}}
+        for kind in self.SUBSCRIPTION:          # free and idle pools stay first, not the paid luna pool
             c = r.route(kind, quota=q)
-            self.assertNotEqual(c.service.name, "codex", kind)
+            self.assertNotEqual(c.service.name, "codex-subscription", kind)
         better = self.drained(codex={"remaining": 100.0}, **{"cursor-auto": {"remaining": 90.0}})
         self.assertEqual(r.route("code", quota=better).service.name, "cursor-auto")
         only = self.drained(codex={"remaining": 100.0}, cursor={"remaining": 90.0})
@@ -1719,7 +1739,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         pub = r.policy_public()
         self.assertEqual(pub["routing"]["plenty_min"], 20.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
-        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical", "research"])
+        self.assertEqual(sorted(row["plenty_kinds"]), ["code", "judgment", "research"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)
@@ -1905,7 +1925,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         now = datetime.now(UTC)
         self.accounts = [
             {"provider": "codex", "age_seconds": 30,
-             "windows": [{"label": "weekly", "remaining_percent": 60.0,
+             "windows": [{"label": "weekly", "remaining_percent": 60.0, "pool_family": "openai_api",
                           "headroom_percent": 60.0, "state": "ok"}]},
             {"provider": "omp", "age_seconds": 30, "windows": [
                 {"label": "omp credits", "remaining_percent": 2.0, "headroom_percent": 2.0,
@@ -2037,8 +2057,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
     def test_unparseable_shapes_fall_back_to_the_file(self):
         good_w = {"label": "w", "headroom_percent": 50.0}
         shapes = {
-            "windows non-dict": [{"provider": "codex", "windows": [5]}],
-            "windows object": [{"provider": "codex", "windows": {"a": 1}}],
+            "windows non-dict": [{"provider": "codex", "pool_family": "openai_api", "windows": [5]}],
+            "windows object": [{"provider": "codex", "pool_family": "openai_api", "windows": {"a": 1}}],
             "provider list": [{"provider": ["codex"], "windows": [good_w]}],
         }
         for name, rows in shapes.items():
@@ -2050,7 +2070,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 self.assertEqual(quota["codex"]["remaining"], 60.0)
 
     def test_non_numeric_percentage_reads_unknown_not_a_crash(self):
-        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": "lots",
+        row = {"provider": "codex", "pool_family": "openai_api", "windows": [{"label": "w", "headroom_percent": "lots",
                                                  "remaining_percent": "plenty"}]}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertIsNone(quota["codex"]["remaining"])
@@ -2081,7 +2101,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                         self.assertIsNone(choice.remaining, kind)   # unmeasured, never NaN read as headroom
 
     def test_percentages_are_clamped(self):
-        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
+        row = {"provider": "codex", "pool_family": "openai_api", "windows": [{"label": "w", "pool_family": "openai_api", "headroom_percent": 250}]}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertEqual(quota["codex"]["remaining"], 100.0)
 
@@ -2266,11 +2286,11 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 self.assertFalse(choice and choice.service.name == refused, (kind, refused))
 
     def test_row_with_windows_keeps_detail_and_the_tighter_remaining(self):
-        row = {"provider": "codex", "usable_now": True, "headroom_percent": 40.0,
+        row = {"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 40.0,
                "binding_window": "weekly",
-               "windows": [{"label": "5-hour", "headroom_percent": 55.0, "pace_ratio": 0.5,
+               "windows": [{"label": "5-hour", "pool_family": "openai_api", "headroom_percent": 55.0, "pace_ratio": 0.5,
                             "resets_at": "2026-10-25T00:00:00+00:00", "window_minutes": 300},
-                           {"label": "weekly", "headroom_percent": 40.0}]}
+                           {"label": "weekly", "pool_family": "openai_api", "headroom_percent": 40.0}]}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertEqual(quota["codex"]["remaining"], 40.0)
         self.assertEqual(quota["codex"]["windows"], {"weekly": 40.0, "5-hour": 55.0})
@@ -2280,7 +2300,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertEqual(quota2["codex"]["remaining"], 40.0)
 
     def test_usable_now_false_reads_zero_whatever_the_headroom(self):
-        row = {"provider": "codex", "usable_now": False, "headroom_percent": 60.0}
+        row = {"provider": "codex", "pool_family": "openai_api", "usable_now": False, "headroom_percent": 60.0}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertEqual(quota["codex"]["remaining"], 0.0)
 
@@ -2338,15 +2358,15 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             self.assertEqual(quota["claude"]["remaining"], 30.0)
 
     def test_stale_row_with_an_exhausted_window_reads_zero(self):
-        row = {"provider": "codex", "age_seconds": r.STALE_SOFT + 100, "windows": [
-            {"label": "w", "state": "exhausted", "headroom_percent": 0.0}]}
+        row = {"provider": "codex", "pool_family": "openai_api", "age_seconds": r.STALE_SOFT + 100, "windows": [
+            {"label": "w", "pool_family": "openai_api", "state": "exhausted", "headroom_percent": 0.0}]}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertEqual(quota["codex"]["remaining"], 0.0)
 
     def test_non_true_usable_now_reads_zero(self):
         for val in ("false", 0, None, "no"):
             with self.subTest(val):
-                row = {"provider": "codex", "usable_now": val, "headroom_percent": 60.0}
+                row = {"provider": "codex", "pool_family": "openai_api", "usable_now": val, "headroom_percent": 60.0}
                 quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON":
                                          str(self.rows_payload([row]))})
                 self.assertEqual(quota["codex"]["remaining"], 0.0)
@@ -2364,9 +2384,9 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             self.assertFalse(choice and choice.service.name == "grok", kind)
 
     def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
-        path = self.rows_payload([{"provider": "codex", "usable_now": True,
+        path = self.rows_payload([{"provider": "codex", "pool_family": "openai_api", "usable_now": True,
                                    "headroom_percent": 60.0}],
-                                 excluded=[{"provider": "codex"}])
+                                 excluded=[{"provider": "codex", "pool_family": "openai_api"}])
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(quota["codex"]["remaining"], 0.0)
 
@@ -2399,7 +2419,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertNotIn("grok", quota)
 
     def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
-        row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}
+        row = {"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 5.345454545}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
         self.assertEqual(quota["codex"]["remaining"], 5.3)
 
@@ -2428,7 +2448,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     @staticmethod
     def codex_row():
-        return {"provider": "codex", "usable_now": True, "headroom_percent": 55.0}
+        return {"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 55.0}
 
     @staticmethod
     def argon_row():
@@ -2571,8 +2591,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 self.assertEqual(quota["codex"]["remaining"], 60.0)
 
     def test_huge_integer_percentage_reads_unknown_not_a_crash(self):
-        body = ('{"age_seconds": 5, "available": [{"provider": "codex", "age_seconds": 1' + "0" * 400
-                + ', "windows": [{"label": "w", "headroom_percent": 1' + "0" * 400 + "}]}]}")
+        body = ('{"age_seconds": 5, "available": [{"provider": "codex", "pool_family": "openai_api", "age_seconds": 1' + "0" * 400
+                + ', "windows": [{"label": "w", "pool_family": "openai_api", "headroom_percent": 1' + "0" * 400 + "}]}]}")
         path = self.write("huge.json", body)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertIsNone(quota["codex"]["remaining"])
@@ -2916,7 +2936,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
             rep["windows"] = list(windows)
             rep["balances"] = list(balances)
         return {"id": f"{source}:default", "sourceId": source,
-                "pool_family": {"claude": "default", "cursor": "third_party"}.get(source), "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
+                "pool_family": {"claude": "default", "cursor": "third_party", "codex": "openai_api"}.get(source), "sourceLabel": source, "icon": "<svg>x</svg>", "account": "a",
                 "fetchedAt": (self.NOW - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ"), "report": rep,
                 "loginErrors": [{"message": "x"}]}
 
@@ -2966,7 +2986,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
                 pools = r.usage_from_paseo([row], now=self.NOW)
                 self.assertIsNone(pools["codex"]["remaining"])
                 self.assertIn("not read", pools["codex"]["unknown"])
-        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
+        aiuse = [{"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
         row = self.row("codex", windows=[])
         row["report"]["windows"] = 5
         quota, _, _info = self.load(aiuse, [row])
@@ -2997,7 +3017,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         return quota, age, info
 
     def test_the_tighter_source_wins_per_pool_and_each_pool_names_its_source(self):
-        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 80.0, "age_seconds": 20},
+        aiuse = [{"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 80.0, "age_seconds": 20},
                  {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 40.0, "age_seconds": 20}]
         usage = [self.row("codex", windows=[self.win("5-hour", left=35.0)]), self.row("claude", windows=[self.win("Weekly", left=90.0)]),
                  self.row("cursor", windows=[self.win("Monthly", left=66.0)])]
@@ -3008,7 +3028,7 @@ class TestQuotaFromPaseoUsage(unittest.TestCase):
         self.assertTrue(info["paseo"].startswith("ROUTE_AGENT_PASEO_USAGE_JSON="))
 
     def test_an_unknown_paseo_report_never_loosens_an_aiuse_reading_or_stands_in_for_one(self):
-        aiuse = [{"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 12.0, "age_seconds": 20}]
+        aiuse = [{"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 12.0, "age_seconds": 20}]
         usage = [self.row("codex", status="unavailable"), self.row("claude", status="error")]
         quota, _, _ = self.load(aiuse, usage)
         self.assertEqual(quota["codex"]["remaining"], 12.0)

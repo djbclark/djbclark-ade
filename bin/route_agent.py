@@ -2717,11 +2717,23 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
 
 def canary_pool(svc: Service) -> str | None:
-    """Quota identity for pools whose meter cannot warn before a first refusal."""
+    """Quota identity for pools whose meter cannot warn before a first refusal.
+
+    A canary name may be a provider (``antigravity``, ``zai``) or a pool
+    family (``openai_api``): match the service's provider, its ``pool`` family
+    and its declared ``pool_family`` so a family-named canary actually gates
+    (2026-11-17, D3: ``openai_api`` never matched while only ``svc.pool[0]``
+    was checked).
+    """
     provider = svc.pool[0] if svc.pool else (svc.shares_pool or svc.name)
     if svc.acp_agent == "antigravity":
-        provider = "antigravity"
-    return provider if provider in CANARY_POOLS else None
+        return "antigravity"
+    candidates = [provider]
+    if svc.pool and len(svc.pool) > 1 and svc.pool[1]:
+        candidates.append(svc.pool[1])
+    if svc.pool_family:
+        candidates.append(svc.pool_family)
+    return next((c for c in candidates if c in CANARY_POOLS), None)
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
