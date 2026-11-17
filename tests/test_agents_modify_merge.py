@@ -5,6 +5,7 @@ Fixture-only: never touches ~/.claude or ~/.codex.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -32,6 +33,38 @@ def _load(path: Path, name: str):
 lib = _load(LIB, "agents_modify_merge_lib")
 claude_cli = _load(CLAUDE, "claude_modify_merge")
 codex_cli = _load(CODEX, "codex_modify_merge")
+
+
+def opaque_collection_cases():
+    """Independent expected values for whole-entry preservation, not a merge oracle."""
+    c = {"type": "command", "command": "local-check"}
+    other = {"type": "command", "command": "other-check"}
+    single = {"matcher": "*", "hooks": [c]}
+    double = {"matcher": "*", "hooks": [c, c]}
+    forward = {"matcher": "*", "hooks": [c, other]}
+    reverse = {"matcher": "*", "hooks": [other, c]}
+    events = [
+        ("empty-keeps-inner-duplicates", [double], [], [double]),
+        ("multiplicity-distinguishes-groups", [double], [single], [single, double]),
+        ("outer-equality-only", [double, single, double], [double, double], [double, single]),
+        ("nested-order-distinguishes-groups", [reverse], [forward], [forward, reverse]),
+        ("opaque-nested-list-entries", [["a", "a"], ["a"]],
+         [["a"], ["a"]], [["a"], ["a", "a"]]),
+    ]
+    cases = []
+    for name, live_event, desired_event, expected_event in events:
+        cases.append((name, {"hooks": {"PreToolUse": live_event}},
+                      {"hooks": {"PreToolUse": desired_event}},
+                      {"hooks": {"PreToolUse": expected_event}}))
+    for name, live in [("missing-dict", {}), ("scalar-to-dict", {"hooks": "old"}),
+                       ("missing-event", {"hooks": {}}),
+                       ("scalar-to-list", {"hooks": {"PreToolUse": "old"}}),
+                       ("dict-to-list", {"hooks": {"PreToolUse": {"old": True}}})]:
+        cases.append((name, live, {"hooks": {"PreToolUse": [double, double]}},
+                      {"hooks": {"PreToolUse": [double]}}))
+    cases.append(("live-only-dict-key", {"local": {"event": [double, double]}}, {},
+                  {"local": {"event": [double, double]}}))
+    return copy.deepcopy(cases)
 
 
 class MergeOwnedTest(unittest.TestCase):
@@ -82,7 +115,8 @@ class MergeOwnedTest(unittest.TestCase):
                 self.assertEqual(lib.merge_owned(live, desired), desired)
 
     def test_lists_first_merge_normalizes_new_and_type_changing_subtrees(self):
-        import copy
+        # Recurse dictionary fields, but dedup only outer entries at a list boundary.
+        # Repeated inner hooks belong to an opaque entry and must remain repeated.
         for live in [{}, {"new": "old"}, {"new": {}}, {"new": {"event": "old"}}]:
             for desired in [{"new": ["x", "x"]},
                             {"new": [{"hooks": ["x", "x"]}] * 2},
@@ -92,12 +126,32 @@ class MergeOwnedTest(unittest.TestCase):
                     first = lib.merge_owned(live, desired)
                     self.assertEqual(first, lib.merge_owned(first, desired))
                     expected = (["x"] if desired["new"] == ["x", "x"] else
-                                [{"hooks": ["x"]}] if isinstance(desired["new"], list) else
-                                {"event": [{"hooks": ["x"]}]})
+                                [{"hooks": ["x", "x"]}] if isinstance(desired["new"], list) else
+                                {"event": [{"hooks": ["x", "x"]}]})
                     self.assertEqual(first["new"], expected)
                     self.assertEqual((live, desired), before)
                     first["new"].clear()
                     self.assertEqual((live, desired), before)
+
+    def test_opaque_entries_preserve_original_whole_values(self):
+        for name, live, desired, expected in opaque_collection_cases():
+            with self.subTest(case=name):
+                originals = copy.deepcopy((live, desired, expected))
+                first = lib.merge_owned(live, desired)
+                self.assertEqual(first, expected)
+                self.assertEqual(lib.merge_owned(first, desired), first)
+                # Mutate every mutable level of the output to detect nested aliases.
+                def mutate(value):
+                    if isinstance(value, dict):
+                        for child in list(value.values()):
+                            mutate(child)
+                        value["mutated"] = True
+                    elif isinstance(value, list):
+                        for child in value:
+                            mutate(child)
+                        value.append("mutated")
+                mutate(first)
+                self.assertEqual((live, desired, expected), originals)
 
     def test_empty_live_is_desired(self):
         desired = {"model": "sonnet", "env": {"X": "1"}}
@@ -144,6 +198,23 @@ class MergeOwnedTest(unittest.TestCase):
 
 
 class WrapperCollectionsTest(unittest.TestCase):
+    def test_claude_wrapper_opaque_entries(self):
+        for name, live, desired, expected in opaque_collection_cases():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                originals = copy.deepcopy((live, desired))
+                target = Path(tmp) / "desired.json"
+                target.write_text(json.dumps(desired))
+                def run(value):
+                    proc = subprocess.run([sys.executable, str(CLAUDE), "--desired", str(target)],
+                                          input=json.dumps(value), text=True, capture_output=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    return json.loads(proc.stdout)
+                first = run(live)
+                self.assertEqual(first, expected)
+                self.assertEqual(run(first), first)
+                first.clear()
+                self.assertEqual((live, desired), originals)
+
     def test_wrappers_collection_preservation_and_atomic_notify(self):
         for wrapper, suffix in [(CLAUDE, "json"), (CODEX, "toml")]:
             for old_notify in [["/old", "x"], ["/old", "different"], None]:

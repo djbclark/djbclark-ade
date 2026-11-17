@@ -31,10 +31,12 @@ def merge_owned(live: Any, desired: Any) -> Any:
 
     Desired dicts recurse and keep live-only keys when live is a dict. Lists
     retain the first occurrence of each deeply equal entry in desired then live
-    order (including dict entries, compared whole rather than merged by identity).
+    order. Entries are opaque whole values: compare and deep-copy their original
+    content without normalizing nested dicts/lists or merging by identity.
     An empty desired list preserves live entries; deletion requires removing entries
-    explicitly outside this helper. New/type-changing collection subtrees normalize
-    recursively on the first merge, too. Otherwise desired replaces live. Results are
+    explicitly outside this helper. New/type-changing desired dictionaries recurse by
+    key until each list boundary; new/type-changing lists deduplicate outer entries
+    on the first merge, too. Otherwise desired replaces live. Results are
     deep copies, so changing them never changes either input.
     """
     if isinstance(desired, dict):
@@ -48,7 +50,6 @@ def merge_owned(live: Any, desired: Any) -> Any:
     if isinstance(desired, list):
         out = []
         for entry in desired + (live if isinstance(live, list) else []):
-            entry = merge_owned(None, entry)
             if entry not in out:
                 out.append(copy.deepcopy(entry))
         return out
