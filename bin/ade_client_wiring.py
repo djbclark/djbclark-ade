@@ -49,7 +49,9 @@ MAX_DETAIL_LINES = 12
 
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 SAFE_URL = re.compile(r"https?://[A-Za-z0-9.:/_-]+\Z")
+SAFE_ARG = re.compile(r"[-A-Za-z0-9@][A-Za-z0-9@._=:/-]*\Z")  # one stdio argv word; no shell metacharacters
 CLAUDE_HTTP_TYPES = ("http", "streamable-http")  # alias accepted by Claude Code
+CLAUDE_STDIO_TYPES = (None, "stdio")  # an entry without type is read as stdio
 
 # (kind, id, status, detail)
 Row = tuple[str, str, str, str]
@@ -95,7 +97,18 @@ def load_roster(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any
         if not isinstance(sid, str) or not SAFE_ID.match(sid) or sid in seen:
             raise ValueError(f"bad or duplicate server id {sid!r}")
         seen.add(sid)
-        if not isinstance(url, str) or not SAFE_URL.match(url):
+        if "command" in row:
+            # A stdio server: `command` + `args`, no url. Only the Claude Code check reads stdio entries.
+            cmd, args = row.get("command"), row.get("args", [])
+            if "url" in row:
+                raise ValueError(f"server {sid}: give url or command, not both")
+            if not isinstance(cmd, str) or not SAFE_ID.match(cmd):
+                raise ValueError(f"server {sid}: command must be one plain word")
+            if not isinstance(args, list) or any(not isinstance(a, str) or not SAFE_ARG.match(a) for a in args):
+                raise ValueError(f"server {sid}: args must be a list of plain words (letters, digits, @ . _ = : / -)")
+            if clients != ["claude"]:
+                raise ValueError(f"server {sid}: a stdio server may list only the claude client")
+        elif not isinstance(url, str) or not SAFE_URL.match(url):
             raise ValueError(f"server {sid}: url must be plain http(s) (letters, digits, . : / _ -)")
         if not isinstance(clients, list) or not clients or any(
                 not isinstance(c, str) or not SAFE_ID.match(c) for c in clients):
@@ -190,6 +203,29 @@ _LOADERS: dict[str, Callable[[Path], tuple[Path, dict[str, Any] | None]]] = {
 }
 
 
+def _judge_stdio(sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, str]:
+    """Claude Code stdio entry: (state, detail); ``_judge``'s states plus ``wrong-command``."""
+    q = shlex.quote
+    want = " ".join([q(cmd), *(q(a) for a in args)])
+    add = f"claude mcp add --scope user {q(sid)} -- {want}"
+    swap = f"claude mcp remove --scope user {q(sid)} && {add}"
+    if entry is None:
+        return "missing", f"not registered; run: {add}"
+    if not isinstance(entry, dict):
+        return "wrong-type", f"entry is not a table/object; run: {swap}"
+    if entry.get("type") not in CLAUDE_STDIO_TYPES:
+        t = entry.get("type")
+        shown = repr(t) if isinstance(t, str) and len(t) <= 32 else "<odd>"
+        return "wrong-type", f"entry type is {shown}, want 'stdio'; run: {swap}"
+    if entry.get("enabled") is False:
+        return "disabled", f"present but enabled = false; set enabled = true for {sid}"
+    if entry.get("command") != cmd or entry.get("args", []) != args:
+        # Command and args only: never print env or other keys (they can hold secrets).
+        note = "; the entry has env, re-add it" if "env" in entry and entry["env"] else ""
+        return "wrong-command", f"command or args differ from the roster{note}; run: {swap}"
+    return "ok", f"registered: {want}"
+
+
 def _judge(tui: str, sid: str, want: str, entry: Any) -> tuple[str, str]:
     """(state, detail): state is ok | missing | wrong-url | wrong-type | disabled."""
     add = fix_add(tui, sid, want)
@@ -237,7 +273,19 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
                 continue
             raise
         for r in wanted:
-            sid, want = r["id"], r["url"]
+            sid = r["id"]
+            if "command" in r:
+                if servers is None:
+                    add = "claude mcp add --scope user " + shlex.quote(sid) + " -- " + " ".join(
+                        shlex.quote(a) for a in [r["command"], *r.get("args", [])])
+                    out[tui].append(("mcp", f"{tui}/{sid}", "warn",
+                                     f"missing: {path} absent (TUI not set up?); {add}"))
+                    continue
+                state, detail = _judge_stdio(sid, r["command"], r.get("args", []), servers.get(sid))
+                out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
+                                 detail if state == "ok" else f"{state}: {detail}"))
+                continue
+            want = r["url"]
             if servers is None:
                 out[tui].append(("mcp", f"{tui}/{sid}", "warn",
                                  f"missing: {path} absent (TUI not set up?); {fix_add(tui, sid, want)}"))

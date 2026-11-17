@@ -17,6 +17,9 @@ import ade_install as ai
 FC = "http://127.0.0.1:18804/mcp"
 BM = "http://127.0.0.1:18796/mcp"
 TUIS = cw.tui_roster(REPO)
+CDT_ARGS = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics",
+            "--no-performance-crux", "--redact-network-headers"]
+CDT = {"type": "stdio", "command": "npx", "args": CDT_ARGS, "env": {}}
 
 
 def write_claude(home, servers):
@@ -44,7 +47,8 @@ GOOD_HERMES = f"mcp_servers:\n  basic-memory:\n    url: {BM}\n    enabled: true\
 
 def good_home(home):
     write_claude(home, {"firecrawl": {"type": "http", "url": FC},
-                        "basic-memory": {"type": "http", "url": BM + "/"}})
+                        "basic-memory": {"type": "http", "url": BM + "/"},
+                        "chrome-devtools": CDT})
     write_codex(home, GOOD_CODEX)
     write_cursor(home, {"basic-memory": {"url": BM}})
     write_hermes(home, GOOD_HERMES)
@@ -73,7 +77,8 @@ def test_roster_matches_docs_scope_column_exactly():
     for row in cw.load_roster(REPO / "config" / "mcp-clients.toml", TUIS):
         line = next(l for l in docs.splitlines() if l.startswith(f"| `{row['id']}`"))
         cells = [c.strip() for c in line.strip("|").split("|")]
-        assert row["url"] in cells[1], row["id"]
+        shown = row["url"] if "url" in row else " ".join([row["command"], *row.get("args", [])])
+        assert shown in cells[1], row["id"]
         scope = cells[2].split("(")[0]
         assert {c for c, n in names.items() if n in scope} == set(row["clients"]), row["id"]
 
@@ -96,7 +101,8 @@ def test_mcp_all_ok(tmp_path, roster):
     good_home(tmp_path)
     got = mcp(tmp_path, roster)
     assert {k: v[0] for k, v in got.items()} == {
-        "claude/firecrawl": "ok", "claude/basic-memory": "ok", "codex/firecrawl": "ok",
+        "claude/firecrawl": "ok", "claude/basic-memory": "ok", "claude/chrome-devtools": "ok",
+        "codex/firecrawl": "ok",
         "codex/basic-memory": "ok", "cursor-agent/basic-memory": "ok", "hermes/basic-memory": "ok"}
 
 
@@ -306,7 +312,7 @@ def test_observe_one_summary_line_per_tui_then_details(tmp_path):
     summaries = [r for r in rows if r[0] == "tui"]
     assert [r[1] for r in summaries] == TUIS
     by = {r[1]: r for r in summaries}
-    assert by["claude"][2] == "warn" and "2 gap(s)" in by["claude"][3]
+    assert by["claude"][2] == "warn" and "3 gap(s)" in by["claude"][3]
     assert by["codex"][2] == "ok" and by["pi"][2] == "ok" and by["grokbot"][2] == "unknown"
     assert by["hermes"][2] == "ok" and by["cursor-agent"][2] == "ok"
 
@@ -479,3 +485,47 @@ def test_roster_missing_beside_skill_everywhere_is_error(tmp_path):
     (root / "config" / "mcp-clients.toml").unlink()
     rows = cw.observe(root, home=tmp_path, runner=runner_for(check_text({"a": ALL_OK})))
     assert rows[0][2] == "error" and "roster missing" in rows[0][3]
+
+
+# ---- stdio servers (chrome-devtools) ---------------------------------------------
+
+def test_stdio_missing_wrong_args_wrong_type_disabled(tmp_path, roster):
+    good_home(tmp_path)
+    write_claude(tmp_path, {"chrome-devtools": {"type": "stdio", "command": "npx", "args": ["-y", "x"],
+                                                "env": {"TOKEN": "s3cret"}}})
+    st, detail = mcp(tmp_path, roster)["claude/chrome-devtools"]
+    assert st == "warn" and "wrong-command" in detail and "s3cret" not in detail
+    assert "claude mcp add --scope user chrome-devtools -- npx -y chrome-devtools-mcp@latest" in detail
+    assert "re-add it" in detail
+    write_claude(tmp_path, {"chrome-devtools": {"type": "stdio", "command": "node", "args": CDT_ARGS}})
+    assert "wrong-command" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]  # wrong command, right args
+    write_claude(tmp_path, {"chrome-devtools": {"type": "stdio", "command": "npx", "args": ["--token=s3cret"]}})
+    assert "s3cret" not in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {"chrome-devtools": "nope"})
+    assert "wrong-type" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {})
+    assert "missing" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {"chrome-devtools": {"type": "http", "url": "http://x/mcp"}})
+    assert "wrong-type" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {"chrome-devtools": {**CDT, "enabled": False}})
+    assert "disabled" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {"chrome-devtools": {"command": "npx", "args": CDT_ARGS}})  # no type = stdio
+    assert mcp(tmp_path, roster)["claude/chrome-devtools"][0] == "ok"
+
+
+@pytest.mark.parametrize("body", [
+    'command="npx; rm"\nargs=[]\nclients=["claude"]\n',
+    'command="npx"\nargs=["$(id)"]\nclients=["claude"]\n',
+    'command="npx"\nargs=[1]\nclients=["claude"]\n',
+    'command="npx"\nargs=[]\nclients=["codex"]\n',
+    'command="npx"\nargs="x"\nclients=["claude"]\n',
+    'command="npx"\nargs={a=1}\nclients=["claude"]\n',
+    'command=1\nargs=[]\nclients=["claude"]\n',
+    'command="npx"\nargs=["x\\n"]\nclients=["claude"]\n',
+    'command="npx"\nurl="http://x/mcp"\nclients=["claude"]\n',
+])
+def test_stdio_roster_validation(tmp_path, body):
+    p = tmp_path / "r.toml"
+    p.write_text('[[server]]\nid="a"\n' + body)
+    with pytest.raises(ValueError):
+        cw.load_roster(p, TUIS)
