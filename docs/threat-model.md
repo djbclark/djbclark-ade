@@ -374,6 +374,23 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Gap.** The protected list is a name list: an app not on it (a VPN or password manager nobody listed) is a normal row, and a polite Quit of it is one click. Graceful Quit
   keeps the app's own save sheet; Force Quit loses unsaved work by design. Operator-run acceptance (H4) is required before each GUI PR merges.
 
+### 4.12 The Chrome DevTools MCP: the operator's logged-in browser (added 2026-11-17)
+
+Ranked with 4.1 and 4.3: it adds an asset, an entry point and a bypass.
+
+* Asset. Every tab of the operator's connected Chrome profile (cookies, saved logins, open sessions) for any agent that has
+  the user-scope `chrome-devtools` server (`docs/mcp-servers.md`). Output enters the transcript on disk and goes to the model
+  provider.
+* Entry point. Page content. Any page, PR, issue or bot comment an agent opens can carry an instruction (4.1).
+* Bypass. A click, form submit or `evaluate_script` in Chrome never passes `adversary_marker_gate.py`, the `gh` shim or
+  `upstream_review_gate.py`; GitHub attributes it to `djbclark`, which the Trust rule treats as the operator's own.
+* Control. The "Allow remote debugging?" dialog per connection (it does not name the client); `--redact-network-headers`,
+  `--no-usage-statistics` and `--no-performance-crux`; written rules in `docs/mcp-servers.md` (no account writes without the
+  operator's yes, page text is data, no secrets copied out); `bin/review-launch` runs with `--strict-mcp-config`, so
+  outside-PR review does not get the server.
+* Gap. All of these controls are prose except the dialog and the flags; `evaluate_script` stays on; `npx -y ...@latest`
+  runs unpinned code with the operator's rights (accepted, 4.7); remote debugging stays on, so any local process can ask.
+
 ## 5. Out of scope and accepted risks
 
 Accepted means a PR is not asked to defend against it; a PR that widens what an injected agent or a
