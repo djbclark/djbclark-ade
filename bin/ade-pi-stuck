@@ -42,6 +42,15 @@ POOL_TO_ACCOUNT = {
     "clinepass:default": "clinepass",
 }
 
+# Accounts the operator has confirmed empty.  Only a fresh reading that shows
+# positive headroom can clear one: a stale reading is not evidence of balance
+# (2026-11-17: openai prepaid reported 28.8% from a 21 h old reading while the
+# real Credit Grants balance was 217/217 inactive, i.e. $0).
+KNOWN_EMPTY = {"openai"}
+
+# Below this, an account is thin enough to flag before it hits zero.
+LOW_HEADROOM_PERCENT = 10.0
+
 
 def quota_by_account(avail):
     """Return {account: {"headroom": %, "usable": bool, "stale": bool, "pool": id}}.
@@ -99,10 +108,23 @@ def main():
             bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
             if bad and (fresh or not rec["stale"]):
                 exhausted.add(acct)
-        if "openai" not in accounts:
-            exhausted.add("openai")  # baseline until quota is readable
+            # Fail closed on a known-empty account: stale/suspect readings never
+            # clear it, only a fresh positive balance does.
+            if acct in KNOWN_EMPTY and not (
+                fresh and not rec["stale"] and (rec["headroom"] or 0) > 0
+            ):
+                exhausted.add(acct)
+        for acct in KNOWN_EMPTY:
+            if acct not in accounts:
+                exhausted.add(acct)
+        low = sorted(
+            a for a, r in accounts.items()
+            if a not in exhausted and r["headroom"] is not None
+            and r["headroom"] <= LOW_HEADROOM_PERCENT
+        )
     except Exception:
-        exhausted = {"openai"}
+        exhausted = set(KNOWN_EMPTY)
+        low = []
     out = []
     for a in rows:
         prov = a.get("provider") or ""
@@ -123,7 +145,7 @@ def main():
     stuck = [o for o in out if o["stuck"]]
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
-                          "exhausted": sorted(exhausted)}, indent=1))
+                          "exhausted": sorted(exhausted), "low": low}, indent=1))
     else:
         for o in out:
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
