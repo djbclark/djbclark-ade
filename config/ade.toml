@@ -432,20 +432,24 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 # agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
 # review route 3 (written as `acp-dispatch antigravity --model gemini-4-argon --kind frontier` in their AGENTS.md; the
 # shim is gone, 2026-11-14, and those files still need updating) needs a frontier row: without one `route_agent.py plan` refuses it as ineligible. aiuse reports the window as pool family `gemini_argon`
-# (antigravity/gemini_argon). `fallback_after` gates EVERY requested kind, not only `frontier`: while codex or claude is
-# usable for the requested kind, route() skips Argon. Past that gate its ranks decide, so `research = 24` keeps it behind
-# cursor/zai (18) and cursor-cloud (22) too, and both roles spend the same weekly window. A fallback with no fresh
-# reading is never used. No launcher applies the fallback predicate
+# (antigravity/gemini_argon). `fallback_after` gates EVERY requested kind, not only `frontier`, and it blocks Argon only
+# while BOTH codex and claude can take the requested kind; if either cannot, Argon enters the candidates. Once admitted,
+# structural sorting places it behind any named predecessor still in the candidate list, and `fallback_kinds` makes
+# it a last resort behind every other research pool as well. Both roles spend the same weekly window; a fallback with
+# no fresh reading is never used. No launcher applies the fallback predicate
 # itself (the acp-dispatch shim that once could is gone): the lead dispatches Argon only when `route_agent.py plan` names it.
 [[service]]
 name = "antigravity-argon"
 cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable; research behind every other research pool)"
 good_at = { frontier = 5, research = 24 }
 billing = "subscription"
-note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback (codex/claude first, operator 2026-10-31) and a research pool since 2026-11-16, both out of that one window"
+note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback (blocked while both codex and claude can, operator 2026-10-31) and a last-resort research pool since 2026-11-16, both out of that one window"
 judgment_tier = true
 pool = ["antigravity", "gemini_argon"]
 fallback_after = ["codex", "claude"]
+# research is a structural last resort too: rank 24 orders equal-pressure candidates but
+# cannot beat a usable pool that is merely headroom-penalised (r8 A7).
+fallback_kinds = ["research"]
 window = "Gemini 4 Argon weekly"
 max_parallel = 1
 access = "cli-only"

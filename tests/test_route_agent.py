@@ -1537,6 +1537,46 @@ class TestQualityBand(unittest.TestCase):
         self.assertNotEqual(nxt.name, best.name)
 
 
+class TestArgonResearchRank(unittest.TestCase):
+    """Argon research is a structural last resort (r7 Low, r8 A7, 2026-11-16).
+
+    Rank 24 only orders equal-pressure candidates; a usable pool that is merely
+    headroom-penalised could still lose to it (22 + 8 = 30 > 24), so the intent is
+    expressed with `fallback_kinds`, the same structural rule as Claude's
+    bulk/mechanical. The winner assertions here stay on pools that need no provider
+    probe, because a Pi-agent pool's readiness depends on the live `paseo` CLI.
+    """
+
+    @staticmethod
+    def reading(left):
+        # A pooled service needs a complete per-window reading, or it is ineligible.
+        return {"remaining": left, "age_s": 0, "windows": {"weekly": left}}
+
+    def quota(self, **left):
+        q = {s.name: self.reading(0.0) for s in r.SERVICES}
+        q.update({name: self.reading(value) for name, value in left.items()})
+        return q
+
+    def test_research_is_a_declared_last_resort(self):
+        argon = r.BY_NAME["antigravity-argon"]
+        self.assertIn("research", argon.fallback_kinds)
+        self.assertNotIn("frontier", argon.fallback_kinds)   # frontier keeps its named gate
+
+    def test_the_rank_sits_behind_the_pools_it_names(self):
+        argon = r.BY_NAME["antigravity-argon"].rank_for("research")
+        for name in ("cursor", "zai", "cursor-cloud"):
+            self.assertGreater(argon, r.BY_NAME[name].rank_for("research"), name)
+
+    def test_argon_takes_research_only_when_nothing_else_can(self):
+        q = self.quota(**{"antigravity-argon": 100.0})
+        self.assertEqual(r.route("research", quota=q).service.name, "antigravity-argon")
+
+    def test_fallback_after_still_gates_research_behind_claude(self):
+        # Blocked only while BOTH named peers can take the kind; claude here can.
+        q = self.quota(**{"antigravity-argon": 100.0, "claude": 100.0})
+        self.assertEqual(r.route("research", quota=q).service.name, "claude")
+
+
 class TestLastResortKinds(unittest.TestCase):
     """`fallback_kinds`: a pool that may take a kind only when nothing else can (r5 A6).
 
