@@ -2,7 +2,8 @@
 
 `bin/ade-net-resume` (2026-11-12) scans `paseo ls -g --background --json` for error-status
 descendants of an explicit full `--lead` UUID. Background workspaces are included. Unresolvable unrelated agents are skipped. Ancestry uses inspect's
-`ParentAgentId`; missing records, cycles, archived agents and unknown providers
+`ParentAgentId` and verified completed self-session links from eligible workers (whose successors
+are top-level too); missing records, cycles, archived agents and unknown providers
 cannot authorize a resume. PR 585's auto-permit helper was not on master when
 this tool was built, so this command has its own small ancestry walk.
 
@@ -81,10 +82,11 @@ race after the final check; the CLI has no conditional-send transaction.
 
 Exit codes: 0 completed scan/watch, 2 invalid usage or unreadable CLI/state,
 3 lock held for a one-shot (watch retries at the next interval). The unloaded template
-`config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot **dry-run with `--quota`**
-every minute (template update, 2026-11-12). Render it with `ade-sched render ... --set __LEAD__=UUID
---set __STATE__=/absolute/log/dir`; installing requires a deliberate operator
-action, and enabling sends also requires adding `--apply` to the template.
+`config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot `--quota --apply` scan
+every minute (sends enabled by operator decision, 2026-11-16). Render it with
+`ade-sched --set __LEAD__=UUID --set __STATE__=/absolute/log/dir --set __TRANSITION__=40 render config/launchd/com.djbclark.ade-net-resume.plist` (40 is a render-only illustration, not an approved deployment margin); installing still requires a
+deliberate operator action. `--apply` is bounded by the reservation, the per-pool gap and the
+re-reads below, so a scan resumes at most one session per pool per gap and never repeats a delivery.
 The scheduler render fixtures supply `__LEAD__` using the same substitution
 contract as the merged auto-permit template (2026-11-12); unfilled placeholders
 are still refused. This PR installs or loads nothing.
@@ -96,6 +98,49 @@ archived predecessors, so the job needs no reinstall. If the chain ends at an ar
 `load-watch` stopped the job. A Paseo outage (the lead is unreadable and `ls -a` fails too), an unreadable-but-listed lead and a cyclic ledger are still exit 2. Exit 0 hides a retired lead from `load-watch`: watch the `skip-lead-retired` row. Details:
 [self-session.md](self-session.md) C0a.
 
+## Transitions before exhaustion (`--transition-below`, 2026-11-16)
+
+The operator requires every eligible lead and worker to transition with reserve. This source implements
+best-effort preventive requests, not measured prevention of exhaustion. `--transition-below PERCENT`
+uses inclusive remaining-percent semantics: request at remaining <= PERCENT. Values must be finite in
+(0,100]; missing, stale, erroneous, ambiguous or unmeasured quota stays observable `transition-unknown`.
+Full aiuse snapshots, including exhausted accounts, are refreshed once each scan tick. Explicit exhausted state on a selected own, shared or ceiling window contributes zero
+headroom even when an active note-exhausted overlay leaves its numbers high. A foreign independent
+family does not bind. This applies equally to requests, destination evidence and source recovery. Measurements
+must be explicitly fresh with valid source timestamps and age no more than 600 seconds. Family-specific
+windows, declared shared parents and referenced umbrella ceiling windows bind; effective and ceiling
+headroom can tighten own headroom. Malformed raw windows or missing required relationships are unknown; ceiling-aware headroom takes precedence. Native billing
+aliases and the three exact named Go account labels are supported; duplicate identities refuse selection.
+
+A dry run records `would-transition`. Apply reserves a durable account/family/window/reset episode
+before sending, with a full CLI timeout plus reservation margin. `transition-submitted` means only CLI
+acceptance (including queued exit 5); failures are `transition-uncertain`. Elapsed time never permits a
+second request for that same unresolved episode. A fresh positively healthy source reading after a request can close its semantic depletion episode;
+only a newer depleted reading can rearm it. Earliest ledger reservations missing source identity or
+request token are held as observable `transition-unbound`: no new request, healthy destination
+observation or source recovery for that agent can be inferred until explicit provenance reconciliation.
+The scanner never invents the old identity, erases history or automatically reconciles it. Reset estimates, carried metadata, elapsed time and
+A-to-B-to-A account churn cannot rearm unresolved requests. An observed healthy account change is recorded separately;
+it is not proof of checkpoint preservation. A changed reset string alone cannot re-arm. No lead exemption applies.
+Acknowledgements require an exact unfenced/unquoted current assistant reply after the unique
+request in that agent's timeline; acknowledgement alone never closes an episode. Completed delivery records suppress requests; eligibility and lineage are re-inspected immediately before
+reservation. A conditional-send race remains because Paseo has no atomic inspect-and-send operation.
+
+Render-only example (finite 40 is illustrative, not a deployment recommendation):
+
+```sh
+bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=/absolute/log/dir --set __TRANSITION__=40 render config/launchd/com.djbclark.ade-net-resume.plist
+```
+
+For installation, follow the validated explicit `TRANSITION_REMAINING_PERCENT` recipe in
+[scheduling.md](scheduling.md). No deployment margin is approved here. Deployment still requires
+measurement of collection age, queue delay, checkpoint/handoff latency and token consumption, including
+concurrent shared-pool consumers. A successor on the same depleted pool does not meet transition acceptance.
+
+**Install order.** The job runs whichever checkout `__ADE__` names (the shared one), so install a template only after the
+release that adds the flags it passes: on 2026-11-16 a template carrying `--transition-below` was installed while the
+deployed script predated the flag, and every run exited 2 until the argv was rolled back. Merge first, then install.
+
 ## Quota resume (`--quota`, 2026-11-12)
 
 Session-guard resumes a quota-failed agent only when Paseo's `provider.usage.list` has a usage entry for the
@@ -103,9 +148,9 @@ agent's provider; Pi pools (z.ai, OpenCode Go, ClinePass) have none, and a daemo
 agent into `closed` with its `lastError` gone (design `design-quota-resume.md`, W10 evidence, 2026-11-12). `--quota`
 (off by default) adds a second pass after the network pass. The network path, its `DENIED` regex and its 30-minute
 rule are unchanged, and it still rejects every quota message. The launchd template includes `--quota`
-but stays **dry-run**, with no `--apply` (template update, 2026-11-12). Enabling sends remains a separate
-operator decision (order 11); reinstalling the template after merge runs the quota pass in dry-run mode and logs
-`would-resume-quota` decisions without sending resume prompts.
+and now **sends** (`--apply`, operator decision 2026-11-16): a quota stop is resumed after the aiuse reset
+anchor plus the grace period, at most `--quota-per-pool` sessions per pool per 600 s gap. A dry run is still available
+by running `bin/ade-net-resume --lead UUID --quota` by hand, and logs `would-resume-quota` without sending.
 
 ```
 bin/ade-net-resume --lead LEAD_UUID --quota --only-agent CANARY_UUID --watch 3600 --interval 60
@@ -186,7 +231,7 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 beside it.
 
 The quota implementation slice (2026-11-12) did not change the launchd plist or run a canary or live `--apply`.
-The template update (2026-11-12) adds only dry-run quota scanning; it installs or loads nothing.
+The current template enables `--apply` and preventive requests; this source repair installs or loads nothing.
 
 Offline tests use a fake Paseo executable, a fake `aiuse` and mocked endpoint health. CI runs
 them on Linux; no real agent is resumed by the tests.

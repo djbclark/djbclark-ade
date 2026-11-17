@@ -57,20 +57,30 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 ```
 
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan
-every minute with `--quota`, **dry-run only** (no `--apply`; template update,
-2026-11-12). After merge, the lead must reinstall the updated template from the
+every minute with `--quota --apply` and preventive requests enabled. Installation enables sends. After merge, the lead must reinstall the updated template from the
 canonical checkout, replacing `LEAD_UUID` with the intended lead UUID. A source
 change alone does not update the installed job:
 
 ```sh
-bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=$HOME/.local/state/ade/net-resume install config/launchd/com.djbclark.ade-net-resume.plist
+python3 - <<'PYTHON'
+import math, os, subprocess
+value = os.environ["TRANSITION_REMAINING_PERCENT"]
+threshold = float(value)
+if not math.isfinite(threshold) or not 0 < threshold <= 100:
+    raise SystemExit("TRANSITION_REMAINING_PERCENT must be finite and in (0,100]")
+subprocess.run(["bin/ade-sched", "--set", "__LEAD__=LEAD_UUID", "--set",
+                "__STATE__=" + os.path.expanduser("~/.local/state/ade/net-resume"),
+                "--set", "__TRANSITION__=" + value, "install",
+                "config/launchd/com.djbclark.ade-net-resume.plist"], check=True)
+PYTHON
 ```
 
 A `--lead` that is later replaced by an acknowledged self-handoff needs no reinstall (the job follows the completed
 `ade-self-session` chain, [self-session.md](self-session.md) C0a); one retired without a completed handoff logs one
 `skip-lead-retired` row and exits 0 on every run until the job is reinstalled with a live lead.
 
-This command activates the dry-run job; it does not enable resumes. See
+Set `TRANSITION_REMAINING_PERCENT` explicitly to an approved measured margin before this command.
+There is no default; missing or invalid input refuses installation. This command activates sends. See
 [net-resume.md](net-resume.md) for quota eligibility and ledger behavior.
 
 | option | meaning |
