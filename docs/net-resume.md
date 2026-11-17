@@ -2,7 +2,8 @@
 
 `bin/ade-net-resume` (2026-11-12) scans `paseo ls -g --background --json` for error-status
 descendants of an explicit full `--lead` UUID. Background workspaces are included. Unresolvable unrelated agents are skipped. Ancestry uses inspect's
-`ParentAgentId`; missing records, cycles, archived agents and unknown providers
+`ParentAgentId` and verified completed self-session links from eligible workers (whose successors
+are top-level too); missing records, cycles, archived agents and unknown providers
 cannot authorize a resume. PR 585's auto-permit helper was not on master when
 this tool was built, so this command has its own small ancestry walk.
 
@@ -105,15 +106,19 @@ uses inclusive remaining-percent semantics: request at remaining <= PERCENT. Val
 (0,100]; missing, stale, erroneous, ambiguous or unmeasured quota stays observable `transition-unknown`.
 Full aiuse snapshots, including exhausted accounts, are refreshed once each scan tick. Measurements
 must be explicitly fresh with valid source timestamps and age no more than 600 seconds. Family-specific
-windows and declared shared parents bind; ceiling-aware headroom takes precedence. Native billing
+windows, declared shared parents and referenced umbrella ceiling windows bind; effective and ceiling
+headroom can tighten own headroom. Malformed raw windows or missing required relationships are unknown; ceiling-aware headroom takes precedence. Native billing
 aliases and the three exact named Go account labels are supported; duplicate identities refuse selection.
 
 A dry run records `would-transition`. Apply reserves a durable account/family/window/reset episode
 before sending, with a full CLI timeout plus reservation margin. `transition-submitted` means only CLI
 acceptance (including queued exit 5); failures are `transition-uncertain`. Elapsed time never permits a
-second request for that same unresolved episode. An observed healthy account change is recorded separately;
-it is not proof of checkpoint preservation. A new reset episode can re-arm. No lead exemption applies.
-Completed delivery records suppress requests; eligibility and lineage are re-inspected immediately before
+second request for that same unresolved episode. A fresh positively healthy source reading after a request can close its semantic depletion episode;
+only a newer depleted reading can rearm it. Reset estimates, carried metadata, elapsed time and
+A-to-B-to-A account churn cannot rearm unresolved requests. An observed healthy account change is recorded separately;
+it is not proof of checkpoint preservation. A changed reset string alone cannot re-arm. No lead exemption applies.
+Acknowledgements require an exact unfenced/unquoted current assistant reply after the unique
+request in that agent's timeline; acknowledgement alone never closes an episode. Completed delivery records suppress requests; eligibility and lineage are re-inspected immediately before
 reservation. A conditional-send race remains because Paseo has no atomic inspect-and-send operation.
 
 Render-only example (finite 40 is illustrative, not a deployment recommendation):
