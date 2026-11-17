@@ -41,7 +41,8 @@ def write_hermes(home, body):
     (home / ".hermes" / "config.yaml").write_text(body)
 
 
-GOOD_CODEX = f'[mcp_servers.firecrawl]\nurl = "{FC}"\n[mcp_servers.basic-memory]\nurl = "{BM}"\n'
+GOOD_CODEX = (f'[mcp_servers.firecrawl]\nurl = "{FC}"\n[mcp_servers.basic-memory]\nurl = "{BM}"\n'
+              f'[mcp_servers.chrome-devtools]\ncommand = "npx"\nargs = {json.dumps(CDT_ARGS)}\n')
 GOOD_HERMES = f"mcp_servers:\n  basic-memory:\n    url: {BM}\n    enabled: true\n"
 
 
@@ -102,7 +103,7 @@ def test_mcp_all_ok(tmp_path, roster):
     got = mcp(tmp_path, roster)
     assert {k: v[0] for k, v in got.items()} == {
         "claude/firecrawl": "ok", "claude/basic-memory": "ok", "claude/chrome-devtools": "ok",
-        "codex/firecrawl": "ok",
+        "codex/firecrawl": "ok", "codex/chrome-devtools": "ok",
         "codex/basic-memory": "ok", "cursor-agent/basic-memory": "ok", "hermes/basic-memory": "ok"}
 
 
@@ -129,7 +130,7 @@ def test_mcp_wrong_url_wrong_type_disabled(tmp_path, roster):
     assert "disabled" in got["codex/basic-memory"][1]
     assert "wrong-url" in got["cursor-agent/basic-memory"][1]
     assert "disabled" in got["hermes/basic-memory"][1]
-    assert all(v[0] == "warn" for k, v in got.items() if k != "codex/firecrawl")
+    assert all(v[0] == "warn" for k, v in got.items() if k not in ("codex/firecrawl", "codex/chrome-devtools"))
 
 
 def test_mcp_never_prints_values(tmp_path, roster):
@@ -513,11 +514,47 @@ def test_stdio_missing_wrong_args_wrong_type_disabled(tmp_path, roster):
     assert mcp(tmp_path, roster)["claude/chrome-devtools"][0] == "ok"
 
 
+@pytest.mark.parametrize("entry,reason", [
+    (None, "missing"),
+    ({"command": "node", "args": CDT_ARGS}, "wrong-command"),
+    ({"command": "npx", "args": ["--secret=DO-NOT-PRINT"], "env": {"TOKEN": "DO-NOT-PRINT"}}, "wrong-command"),
+    ({"url": "https://example.com/DO-NOT-PRINT", "command": "npx", "args": CDT_ARGS}, "wrong-type"),
+    ({"command": "npx", "args": CDT_ARGS, "enabled": False}, "disabled"),
+])
+def test_codex_stdio_detects_drift_without_printing_values(tmp_path, roster, entry, reason):
+    # Real TOML loader + observer, including Codex's URL-based transport and no type field.
+    body = '[mcp_servers.chrome-devtools]\n' if entry is not None else ''
+    for key, value in (entry or {}).items():
+        if key == "env":
+            body += 'env = { TOKEN = "DO-NOT-PRINT" }\n'
+        else:
+            body += f'{key} = {json.dumps(value)}\n'
+    write_codex(tmp_path, body)
+    st, detail = mcp(tmp_path, roster)["codex/chrome-devtools"]
+    assert st == "warn" and reason in detail and "DO-NOT-PRINT" not in detail
+    if reason != "disabled":
+        assert "codex mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest" in detail
+        assert "claude" not in detail and "--scope" not in detail
+
+
+def test_codex_stdio_absent_config_has_codex_fix(tmp_path, roster):
+    st, detail = mcp(tmp_path, roster)["codex/chrome-devtools"]
+    assert st == "warn" and "absent" in detail
+    assert "codex mcp add chrome-devtools -- npx" in detail and "claude" not in detail
+
+
+@pytest.mark.parametrize("clients", [["codex"], ["claude", "codex"]])
+def test_stdio_roster_accepts_codex(tmp_path, clients):
+    p = tmp_path / "r.toml"
+    p.write_text('[[server]]\nid="a"\ncommand="npx"\nargs=[]\nclients=' + json.dumps(clients))
+    assert cw.load_roster(p, TUIS)[0]["clients"] == clients
+
+
 @pytest.mark.parametrize("body", [
     'command="npx; rm"\nargs=[]\nclients=["claude"]\n',
     'command="npx"\nargs=["$(id)"]\nclients=["claude"]\n',
     'command="npx"\nargs=[1]\nclients=["claude"]\n',
-    'command="npx"\nargs=[]\nclients=["codex"]\n',
+    'command="npx"\nargs=[]\nclients=["cursor-agent"]\n',
     'command="npx"\nargs="x"\nclients=["claude"]\n',
     'command="npx"\nargs={a=1}\nclients=["claude"]\n',
     'command=1\nargs=[]\nclients=["claude"]\n',
