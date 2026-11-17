@@ -665,7 +665,7 @@ def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
     assert "relaunch" not in out
     monkeypatch.delenv("ROUTING_POLICY")
-    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "routing.toml"
+    shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "ade.toml"
     assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
 
 

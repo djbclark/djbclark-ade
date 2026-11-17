@@ -216,7 +216,7 @@ def test_the_shipped_tendcf_order_is_astra_fable_argon():
 
 
 def _policy_with(tmp_path, order_line):
-    text = (ROOT / "config" / "routing.toml").read_text()
+    text = (ROOT / "config" / "ade.toml").read_text()
     new = re.sub(r"^frontier_order = .*$", order_line, text, count=1, flags=re.MULTILINE)
     assert new != text or order_line in text
     path = tmp_path / "routing.toml"
@@ -241,7 +241,7 @@ def test_a_bad_frontier_order_fails_the_policy_load_loudly(tmp_path, line, messa
 
 
 def test_an_upper_case_repo_key_fails_the_load_because_the_lookup_lower_cases(tmp_path):
-    text = (ROOT / "config" / "routing.toml").read_text().replace("[dispatch.repo_overrides.tendcf]\nfrontier_order",
+    text = (ROOT / "config" / "ade.toml").read_text().replace("[dispatch.repo_overrides.tendcf]\nfrontier_order",
                                                                    "[dispatch.repo_overrides.TendCF]\nfrontier_order")
     path = tmp_path / "routing.toml"
     path.write_text(text)

@@ -12,7 +12,7 @@ exactly those files after `~` expansion (a missing or unreadable one is exit 2).
 instruction files outside this repo are in scope: `instruction-lint --root ~` (or
 `instruction-lint ~/AGENTS.md ~/.cursor/rules/home-agents.mdc`) covers `~/AGENTS.md` and
 `home-agents.mdc`; `context-budget-check --instruction-lint` already runs the same lint over
-each `dirs` entry in `config/context-budget.toml` (this repo and `~`). Files are deduplicated
+each `dirs` entry in `config/ade.toml [context_budget]` (this repo and `~`). Files are deduplicated
 by realpath, so the `CLAUDE.md -> AGENTS.md` symlink is read once (the second name is listed
 under `skipped`). --skills-dir DIR (repeatable; default `<root>/skills`) names the folders
 whose subfolders holding a SKILL.md are the skill names for the heading-skill check.

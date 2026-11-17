@@ -32,7 +32,7 @@ Local contrast: `tests/test_ade_install.py` alone is ~1 s. The full tree is ~87 
 
 ## D. Practice while CI is slow
 
-Draft the next path-disjoint unit while `pytest-linux` runs (CI-overlap). Do not dual-write shared `config/install.toml` / `bin/ade_install.py` across parallel PRs. Prefer focused local pytest for the touched module; full CI remains the merge gate.
+Draft the next path-disjoint unit while `pytest-linux` runs (CI-overlap). Do not dual-write shared `config/ade.toml` / `bin/ade_install.py` across parallel PRs. Prefer focused local pytest for the touched module; full CI remains the merge gate.
 
 ## Published roster (2026-11-12)
 

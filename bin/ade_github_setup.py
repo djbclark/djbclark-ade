@@ -262,11 +262,18 @@ def load_config(root: Path | None = None) -> GithubConfig:
     root = (root or repo_root_from_here()).resolve()
     ade = root / "config" / "ade.toml"
     if ade.is_file():
-        # Future: read [github] from ade.toml. Refuse dual sources for now.
-        raise GithubSetupError(
-            f"{ade}: present; fold [github] into ade.toml before using "
-            "config/github.toml (setup-plan S1)"
-        )
+        # Future: read [github] from ade.toml. Refuse dual sources for now, but
+        # only when both really exist: a unified file without [github] leaves
+        # config/github.toml the single authority (2026-11-16 cutover).
+        try:
+            unified = ac.read_toml(ade)
+        except ac.ConfigError as e:
+            raise GithubSetupError(str(e)) from e
+        if isinstance(unified.get("github"), dict):
+            raise GithubSetupError(
+                f"{ade}: carries [github]; refusing to edit the duplicate "
+                "config/github.toml (setup-plan S1)"
+            )
     path = default_config_path(root)
     schema = default_schema_path(root)
     try:

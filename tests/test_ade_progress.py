@@ -476,7 +476,7 @@ def test_plist_template_and_inventory_row():
     assert d["ProgramArguments"] == ["__ADE__/bin/ade-job-run", "--lock-dir", "__ADMISSION__", "com.djbclark.ade-progress", "--",
                                      "__ADE__/bin/ade-progress", "scan", "--yes"] and d["StartInterval"] == 300
     # slice 1b: inventoried as an optional row; chosen = true since 2026-11-13, so doctor expects the label
-    rows = [r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
+    rows = [r for r in tomllib.loads((ROOT / "config" / "ade.toml").read_text())["install"]["jobs"]
             if r["name"] == "ade-progress"]
     assert len(rows) == 1
     r = rows[0]
@@ -488,7 +488,7 @@ def test_inventory_row_doctor_expectations():
     """Unchosen: quiet whether or not the label is live. Chosen: ok when live, a failing `missing` row when absent."""
     sys.path.insert(0, str(ROOT / "bin"))
     import ade_sched as S
-    row = next(r for r in tomllib.loads((ROOT / "config" / "install.toml").read_text())["install"]["jobs"]
+    row = next(r for r in tomllib.loads((ROOT / "config" / "ade.toml").read_text())["install"]["jobs"]
                if r["name"] == "ade-progress")
     live = S.LiveScan("launchd", (S.LiveJob("com.djbclark.ade-progress", "launchd", "generated"),), ())
     none = S.LiveScan("launchd", (), ())

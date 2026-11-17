@@ -1,5 +1,9 @@
 # Setup implementation progress — 2026-11-11
 
+**Cutover update (2026-11-16):** the five configuration domains now live in `config/ade.toml`. The former five
+production files are removed as editable inputs, with complete isolated legacy fixtures under
+`tests/fixtures/config/legacy/`. All 654 focused configuration tests pass; full Linux CI remains the merge gate.
+
 ## A. Verified merged work
 
 This continues the [November 10 matrix](setup-plan-progress-2026-11-10.md).

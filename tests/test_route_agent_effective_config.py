@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+LEGACY_ROOT = REPO / "tests" / "fixtures" / "config" / "legacy"
+LEGACY_CONFIG = LEGACY_ROOT / "config"
 sys.path.insert(0, str(REPO / "bin"))
 import ade_config as ac
 import route_agent as router
@@ -23,7 +25,11 @@ def tree(tmp_path, monkeypatch):
     (root / "bin").mkdir(parents=True)
     for name in ("route_agent.py", "ade_config.py", "ade_gates.py", "model_tiers.py", "ade_install_catalog.py"):
         shutil.copy2(REPO / "bin" / name, root / "bin" / name)
-    shutil.copytree(REPO / "config", root / "config")
+    (root / "config").mkdir(parents=True)
+    for name in ("ade.schema.json", "install.schema.json", "routing.toml", "gates.toml", "model-tiers.toml", "context-budget.toml"):
+        shutil.copy2(LEGACY_CONFIG / name, root / "config" / name)
+    for name in ("go-model-policy.json", "pi-pool-acceptance.toml"):
+        shutil.copy2(REPO / "config" / name, root / "config" / name)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -213,7 +219,7 @@ def test_explicit_pure_reader_and_reload_ignore_unified_and_local(tree, monkeypa
         assert router.POLICY_PATH == selected
         assert router.POLICY_PROVENANCE["local_config"] is None
     finally:
-        router.reload_policy(REPO / "config/routing.toml")
+        router.reload_policy(LEGACY_CONFIG / "routing.toml")
 
 
 def test_missing_selected_routing_path_refuses_runtime(tree):
@@ -235,7 +241,7 @@ def test_default_reload_adopts_local_config(tree, monkeypatch):
         assert router.LEAD_FABLE_ALLOWED is False
         assert router.POLICY_PATH == root / "config/routing.toml"
     finally:
-        router.reload_policy(REPO / "config/routing.toml")
+        router.reload_policy(LEGACY_CONFIG / "routing.toml")
 
 
 def test_local_service_array_replaces_whole_and_default_effort_is_retained(tree):

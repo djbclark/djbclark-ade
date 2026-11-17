@@ -16,9 +16,9 @@ Current operator decision: Pi is the sole general-purpose third-party TUI; vendo
 
 ## A. Where the numbers live
 
-A1. `config/routing.toml` (kinds, each pool's ranks per kind and suggested `--model [--effort]`, the quality band, the
+A1. `config/ade.toml` (kinds, each pool's ranks per kind and suggested `--model [--effort]`, the quality band, the
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
-model) and `config/gates.toml [frontier]` (the frontier allowance, `docs/gates.md`). Print both with
+model) and `config/ade.toml [gates.frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
 Since **2026-11-10**, runtime routing reads these values through
 `ade_config.load_effective`: a valid `config/ade.toml` replaces the legacy base
@@ -53,7 +53,7 @@ defaults. Tests: `tests/test_pr_radar_route.py` (stubbed router, no live quota).
 A3. **Monthly `good_at` re-rank (2026-11-10):** `route_agent.py calibrate --json --since 30` proposes rank
 deltas from recent dispatch outcomes. The optional Paseo schedule `routing-recalibrate` (Day 1 09:00,
 `--mode auto`) applies those suggestions; inventory + create line in `docs/scheduling.md` and
-`config/install.toml [[install.jobs]]` (Carried #33 residual; launchd job retired in slim-down E5).
+`config/ade.toml [install.jobs]` (Carried #33 residual; launchd job retired in slim-down E5).
 
 A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, openai_api and zai, whose meters cannot establish exhaustion before a refusal. Each `plan` assigns at most one agent per named pool, including aliases, and prints per-pool max=1 (`canary_pool_max` in JSON). The lead must observe one successful canary turn, re-probe quota/refusals, and only then expand within the normal `max_parallel`. The planner does not attest live canary success; another plan is not permission to launch a second unproven canary. No elapsed-time release is used.
 
@@ -67,14 +67,26 @@ A4. **Canary waves (2026-11-12):** `[routing].canary_pools` names antigravity, o
 | B4. `cursor-auto`, `cursor` | cursor | subscription (Auto and third-party sublimits) | Auto is burn-first; GrokBot's separate Cursor pool (`grok-bot`) is never a target |
 | B5. `cursor-cloud` | none (`bin/cursor-cloud launch`) | API price on the Cursor pool | leaves the Mac, pushes a branch; the deleted acp-dispatch shim stopped launching it with Paseo |
 | B6. `opencode-go`, `opencode-zen-free` (retired transport) | opencode, disabled | Go Plus subscription (one shared monthly allowance); the free zen models | bulk and mechanical, never code (djbclark 2026-10-30); section F |
-| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK only, behind codex and claude (operator 2026-10-31); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
+| B7. `antigravity-argon` | antigravity | Google AI Pro subscription (Gemini 4 Argon weekly window) | frontier FALLBACK, behind codex and claude (operator 2026-10-31), and since 2026-11-16 a last-resort `research` pool since 2026-11-16 (`fallback_kinds`, rank 24), with `fallback_after` gating every requested kind (both roles share that one window); restored 2026-11-07 for tendcf/nix2cf's review route 3; needs the `agy` CLI on PATH (`ade-install` component `antigravity-cli`) and dispatches `gemini-4-argon-high` (the provider folds effort into the id) |
 | B8. `clinepass`, `hermes` | none; hermes | Cline-pass API; the operator's assistant | never a delegation target; ClinePass is the Hermes/Dann lifeline (`substrate`, `hermes-chain`) |
 | B9. `opencode-zen` (paid) | opencode | prepaid | retired until an operator top-up |
 
 B10. Retired from the router: agy (the agy TUI; Google's plan is the antigravity provider), copilot (the CLI; Paseo's
 Copilot provider replaces it, no router row), zai/zcode, alibaba/qwen, devin, crush, kiro, cline, goose, muse, aider,
 venicecode, pi (2026-11-06), grok (the SuperGrok CLI, 2026-11-07). They are `never_route`, so an aiuse account or a Paseo
-provider row with their name never becomes an unprofiled service. `github` and `realtime-web` remain kinds with no pool.
+provider row with their name never becomes an unprofiled service. `github` and `realtime-web` remain kinds with no pool,
+and `api-only` survives only on the archived `omp` row, so the unprofiled-kind diagnostic ignores retired pools.
+
+**Frontier order is a cost ordering.** `codex` carries `frontier = 1` and `claude = 2`, so a frontier slice usually
+goes to the astra family even though `model-tiers` ranks Fable 5.2 above it: astra is the cheaper frontier
+family, and the Fable gate plus `[dispatch.repo_overrides.REPO].frontier_order` still decide when Fable takes one
+(2026-11-16, operator decision). It is a preference **inside the score**, not a hard precedence: a Codex window at 20%
+scores worse than a fresh Claude one, so Fable can win. The config says both, because an unexplained inversion reads
+as a bug.
+
+**An unprofiled kind says so.** `bin/route_agent.py route --kind github` answers `no pool profiles github: declared
+kind, no live pool ranks it`, not "no pool has room": those kinds lost their only pools with copilot and the Grok CLI
+(2026-11-06/07). The diagnostic names the reason rather than claiming a pool was busy.
 
 ## C. The registry: `paseo provider ls --json` (2026-11-07)
 
@@ -153,8 +165,8 @@ G1. Design: `docs/history/model-tiers-design.md`. This slice ships the file, the
 `@role` placeholders, render, literal scan) stays later.
 Runtime adoption **2026-11-10**: router tier reporting, frontier tokens, sublimit
 families and judgment fallback consume the final effective `[model_tiers]` tree.
-Malformed overlays fail before publishing runtime state. Legacy file readers and
-the tier writer remain unchanged; no model promotion ships with this adoption.
+Malformed overlays fail before publishing runtime state. Explicit legacy-file readers remain isolated;
+`ade-model-tiers promote|set` now writes the unified production subtree.
 G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 | role | claude (rank 1) | codex (rank 2) |
@@ -166,7 +178,13 @@ G2. Today's table (re-check with `bin/ade-model-tiers show`):
 
 G3. Succession: `ade-model-tiers promote --vendor V --new ID --reason TEXT [--cascade N] [--dry-run]` shifts the ladder
 (default cascade 2: new → frontier, old frontier → judgment; the displaced judgment goes to `[former]`). `set` changes
-one role without shifting. No secrets, no network. Edit in a claimed worktree; the merge is the atomic apply.
+one role without shifting. On the default unified source, the writer regenerates only `[model_tiers…]`, preserves every
+byte outside that subtree, and atomically replaces the file; comments between the tier tables are regenerated, not
+preserved. Explicit `MODEL_TIERS_TOML` paths retain the legacy whole-file format. No secrets, no network. Edit in a
+claimed worktree; the merge is the atomic apply. The projection-drift test canonicalizes regenerated tier formatting on
+both sides and compares all other bytes exactly. After an intentional tier change, carry the new tier data into the
+frozen `tests/fixtures/config/legacy/config/model-tiers.toml` fixture as well; otherwise that test correctly reports
+the production/fixture drift.
 G4. Untiered models (e.g. `gemini-4-argon`) stay as literals in `[dispatch].frontier_models`; frontier matching is the
 union of that list and every spelling/alias of each tiered vendor's frontier role.
 
@@ -176,7 +194,7 @@ H1. 2026-10-18: four astra slices at once emptied codex's 5-hour window, so the 
 H2. 2026-10-20: the Claude weekly window ran out 2.6 days before its reset; Opus sub-agents (~53%) and a Fable lead
 (~30%) were the burn. Hence `[lead]` (Opus judgment lead, Sonnet pipeline lead, never Fable: operator 2026-10-23) and
 adversary rounds on omp first at that time (that client was archived 2026-11-08 and is no longer a fallback). Since 2026-11-07 (operator) Fable leads are allowed for now: the one line to flip back is
-`fable_lead = true` in `[lead]` of `config/routing.toml` (false or absent restores never-a-Fable-lead).
+`fable_lead = true` in `[lead]` of `config/ade.toml` (false or absent restores never-a-Fable-lead).
 H3. 2026-11-01: a cheap model as the daily coding driver was checked against Terminal-Bench 4.0 and this repo's own
 review of Flash-written code (four BLOCKs): code stays on tier-1 models (Sonnet 5.5, GPT-6.1 Sol); cheap models only for
 bulk and mechanical work a stronger model reviews.
@@ -279,7 +297,7 @@ Rules, each tested offline with fixture quota:
 Every change is one JSON line in `changes.jsonl` and one `adjust: {…}` line on stderr: `route` (first pool for a
 kind), `switch` (from, to, why), `restore` (from, to), `hold` (a hold placed with no route line to carry it),
 `expire`, `refuse` (once per change, not per call), and `release` (a pool is eligible again without being chosen). `adjust --status` prints the saved holds; `--dry-run` writes nothing. `[routing.adjust].enabled =
-false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/routing.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
+false` makes `adjust` plain `plan` plus rules 2 and 3 (no state, no log). Config keys and defaults: `config/ade.toml [routing.adjust]`. Known limits (adversary round 2): the tracked pool follows the wave as planned, so a wave-cap on another kind
 can make a hold yield early or log a `switch` that quota did not cause; a hold is never pruned except by expiry. Not built:
 effort or model-tier changes inside a pool (`docs/dynamic-model-effort.md` G4, still gated), automatic calls from other tools, and
 cross-kind promotion (a kind never moves to a different kind's pools).

@@ -13,7 +13,7 @@ install. This is setup-plan **S3a path 3** (`just hermes-setup`).
 ## Hard rules
 
 1. **Opt-in only.** Do not install Hermes. Do not mark Hermes `chosen` or change
-   `config/install.toml`. If `hermes` is missing from PATH, say so and stop; the
+   `config/ade.toml`. If `hermes` is missing from PATH, say so and stop; the
    user installs with the catalog path (`ade-user-install hermes` / `just
    install-…`) or skips Hermes entirely.
 2. **No live peer-link.** Do not clone, install, start, or configure

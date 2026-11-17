@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/djbclark/djbclark-ade/config/ade.schema.json",
+  "title": "djbclark-ade effective config",
+  "description": "schema_version=1 effective ADE config (config/ade.toml shape). Checked by bin/ade-config check. Secrets are reference names only.",
+  "type": "object",
+  "required": [
+    "schema_version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Supported version is exactly 1; unknown versions fail closed."
+    },
+    "routing": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [routing] (identity)."
+    },
+    "lead": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [lead]."
+    },
+    "dispatch": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [dispatch]."
+    },
+    "substrate": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [substrate]."
+    },
+    "hermes": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [hermes]."
+    },
+    "calibrate": {
+      "type": "object",
+      "description": "Projected from legacy config/routing.toml [calibrate]."
+    },
+    "service": {
+      "type": "array",
+      "description": "Projected from legacy [[service]]; arrays replace whole on merge; duplicate name identities are rejected.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "model_tiers": {
+      "type": "object",
+      "description": "Projected from config/model-tiers.toml (roles \u2192 concrete model ids per vendor). Written by bin/ade-model-tiers promote|set.",
+      "additionalProperties": true
+    },
+    "gates": {
+      "type": "object",
+      "description": "Legacy gates.toml [frontier] and [floors.frontier] project under gates.frontier and gates.floors.frontier.",
+      "additionalProperties": false,
+      "properties": {
+        "frontier": {
+          "type": "object",
+          "description": "Effective frontier thresholds after the same floor/default clamping as bin/ade_gates.py.",
+          "additionalProperties": false,
+          "properties": {
+            "frontier1_judged": {
+              "type": "number"
+            },
+            "frontier2_judged": {
+              "type": "number"
+            },
+            "frontier1_per_wave": {
+              "type": "number"
+            },
+            "frontier2_per_wave": {
+              "type": "number"
+            },
+            "frontier1_agent_calls_per_day": {
+              "type": "number"
+            },
+            "frontier1_min_left": {
+              "type": "number"
+            },
+            "frontier1_window_min_left": {
+              "type": "number"
+            },
+            "frontier2_min_left": {
+              "type": "number"
+            }
+          }
+        },
+        "floors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "frontier": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "frontier1_judged": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier2_judged": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_per_wave": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier2_per_wave": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_agent_calls_per_day": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier1_window_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "frontier2_min_left": {
+                  "type": "object",
+                  "properties": {
+                    "loosen": {
+                      "type": "string"
+                    },
+                    "bound": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner",
+              "class"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              },
+              "chosen": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "plist": {
+                "type": "string"
+              },
+              "schedule": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1,
+                "description": "IANA timezone for paseo schedule create; ADE_TIMEZONE used when omitted"
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --provider for schedule create (e.g. claude/sonnet)"
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo --cwd; __ADE__/__HOME__ placeholders filled"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "description": "paseo schedule create prompt (positional)"
+              },
+              "set": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "platforms": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "retired_jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "owner"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "component": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "class"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "type": "string"
+              },
+              "chosen": {
+                "type": "boolean"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "install": {
+                "type": "string"
+              },
+              "install_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "update": {
+                "type": "string"
+              },
+              "update_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "probe": {
+                "type": "string"
+              },
+              "probe_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "probe_warn_exit": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "probe_summary_re": {
+                "type": "string",
+                "minLength": 1
+              },
+              "probe_timeout_s": {
+                "type": "number"
+              },
+              "presence": {
+                "type": "string"
+              },
+              "needs_system": {
+                "type": "boolean"
+              },
+              "system_argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "system_argv_darwin": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "platforms": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              },
+              "paseo_plugin": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Observe-only Paseo plugin id. Doctor runs `paseo plugin ls --json` and reports ok/disabled/missing; ade-install never installs or enables."
+              }
+            }
+          }
+        },
+        "login": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "keys": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "create_url": {
+            "type": "string"
+          },
+          "verify": {
+            "type": "string",
+            "description": "Human/status note; UNKNOWN until a probe is recorded. Outcomes come from verify_argv."
+          },
+          "verify_argv": {
+            "type": "array",
+            "description": "Argv for the cheapest read-only authenticated probe, run under sudo-secretspec run. Must read the key from the environment; never print values. Exit contract: 0 ok, 10 invalid, 11 no-quota, 12 unreachable, 13 expiring, 14 missing. Non-empty enforced by ade-install validation.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expiry": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "context_budget": {
+      "type": "object",
+      "description": "Legacy context-budget.toml dirs/budget; numeric leaves and directory overrides are additionally validated by ade_config.",
+      "properties": {
+        "dirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

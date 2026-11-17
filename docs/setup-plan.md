@@ -365,9 +365,7 @@ execution or scheduled apply. The numbered S4 behaviors below remain the goal.
 Operator, 2026-11-07: install and update manage every scheduled job and service that is reasonable to manage. On the
 card the operator chose "ours, plus checks": djbclark-ade manages its own jobs and checks the rest.
 
-**Status (2026-11-10, residual inventory + launchd/systemd/cron/paseo reconcile):** transitional
-`config/install.toml [[install.jobs]]` / `[[install.retired_jobs]]` (folds into `config/ade.toml [install.jobs]`
-later), `ade-sched list`/`diff`, and `just doctor` / `just sched-diff` observe launchd/systemd/cron/paseo
+**Status (2026-11-16, unified cutover landed):** `config/ade.toml [install.jobs]` / `[[install.retired_jobs]]`, with isolated legacy fixtures under `tests/fixtures/config/legacy`. `ade-sched list`/`diff` and `just doctor` / `just sched-diff` observe launchd/systemd/cron/paseo
 without unloading anyone. `ade-sched reconcile` (default dry-run; `--yes` writes) installs/reloads
 ADE-owned `ade-sched` jobs on **launchd**, **systemd user** units, **and** the user **crontab**, creates/deletes
 ADE-owned **paseo schedules** (ledger `backend="paseo"`; not a host write backend), and records ownership in
@@ -381,7 +379,7 @@ by default; `--apply-checkout` / `ADE_UPDATE_AUTO_APPLY=1` applies this checkout
 (option 1, 2026-11-10). Scheduled apply plist / mid-turn skip / failure ping
 (options 2–3) still wait on operator policy (PR 359 check-only gate stands).
 
-1. **One inventory**, `config/ade.toml [install.jobs]` (transitional: `config/install.toml [[install.jobs]]`). Each entry has:
+1. **One inventory**, `config/ade.toml [install.jobs]` (the unified cutover is landed; isolated legacy fixtures are under `tests/fixtures/config/legacy`). Each entry has:
    - name;
    - kind: launchd agent, systemd user timer, cron (only where neither of those exists), Paseo schedule, or service;
    - owner: `djbclark-ade`, the site repo, or a dependency;
@@ -733,7 +731,7 @@ safety properties, and keep existing readers unchanged until their adoption is r
    Bootstrap Python 3.11+ before relying on `tomllib`. The typed install catalog, observe-only doctor
    (`probe_argv` when recorded), bounded `ade-install apply` (user `install_argv`; opt-in
    `--apply-system` for `system_argv`), and `--system --dry-run` / `--print-system-argv`
-   preview (`config/install.toml`, `bin/ade-install`, `bin/ade-user-install`,
+   preview (`config/ade.toml`, `bin/ade-install`, `bin/ade-user-install`,
    2026-11-09) follow; see `docs/install-catalog.md`. Ownership-aware reconcile remains later.
 
 2. **One desired job specification.** The TOML inventory feeds `Job.from_dict` and the existing `ade-sched`

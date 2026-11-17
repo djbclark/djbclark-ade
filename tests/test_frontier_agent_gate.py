@@ -97,7 +97,7 @@ class TestAwayAllowance(unittest.TestCase):
     def closed_toml(self) -> str:
         """A gates.toml copy whose [frontier] BASELINE is the all-closed code default (the pre-2026-10-27 rule), floors as shipped."""
         path = self.state / "closed-gates.toml"
-        path.write_text(close_frontier_baseline((HOOK.parents[2] / "config/gates.toml").read_text()))
+        path.write_text(close_frontier_baseline((HOOK.parents[2] / "tests/fixtures/config/legacy/config/gates.toml").read_text()))
         return str(path)
 
     def call(self, prompt: str | None = REASON, guard=True, tool_input=None, env=None, closed=False):
