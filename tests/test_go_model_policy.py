@@ -48,7 +48,7 @@ def test_advice_requires_read_only_and_small_requested_context():
 
 def test_curated_go_default_routes_use_only_routine_models():
     import tomllib
-    data = tomllib.loads((ROOT / "config/routing.toml").read_text())
+    data = tomllib.loads((ROOT / "config/ade.toml").read_text())
     go = next(s for s in data["service"] if s["name"] == "opencode-go")
     assert go["billing"] == "subscription"
     assert all(policy.classification(m.split()[0]) == "routine" for m in go["models"].values())

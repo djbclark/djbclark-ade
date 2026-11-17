@@ -1748,7 +1748,7 @@ _PROGRESS_LABEL = "com.djbclark.ade-progress"
 
 def _progress_plan(fake, *, chosen: bool, live_labels=(), entry=None):
     import tomllib
-    row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
+    row = next(r for r in tomllib.loads((REPO / "config" / "ade.toml").read_text())["install"]["jobs"]
                if r["name"] == "ade-progress")
     row = dict(row, chosen=chosen)
     live = S.LiveScan("systemd", tuple(S.LiveJob(lab, "systemd", "generated", True) for lab in live_labels))
@@ -1807,7 +1807,7 @@ def test_unchosen_reason_needs_the_ledger_entry_id_to_equal_the_row_name(fake):
     # D1: the label belongs to the unchosen row 'ade-progress', but the ledger records it under another logical id, so the
     # remove must keep the generic reason and must not claim that this id's inventory row is unchosen.
     import tomllib
-    row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
+    row = next(r for r in tomllib.loads((REPO / "config" / "ade.toml").read_text())["install"]["jobs"]
                if r["name"] == "ade-progress")
     row = dict(row, chosen=False)
     live = S.LiveScan("systemd", (S.LiveJob(_PROGRESS_LABEL, "systemd", "generated", True),))
@@ -1822,7 +1822,7 @@ def test_unchosen_reason_needs_the_ledger_entry_id_to_equal_the_row_name(fake):
 def test_retired_reason_wins_over_unchosen_reason(fake):
     # D2a: a label that matches a retired pattern is 'retired' even when an unchosen row of the same name also claims it.
     import tomllib
-    row = next(r for r in tomllib.loads((REPO / "config" / "install.toml").read_text())["install"]["jobs"]
+    row = next(r for r in tomllib.loads((REPO / "config" / "ade.toml").read_text())["install"]["jobs"]
                if r["name"] == "ade-progress")
     row = dict(row, chosen=False)
     retired = [{"name": "ade-progress", "owner": "djbclark-ade", "label": _PROGRESS_LABEL}]

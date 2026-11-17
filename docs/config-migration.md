@@ -1,4 +1,11 @@
-# Config migration: schema_version=1 effective tree (2026-11-07; set 2026-11-08)
+# Config migration: schema_version=1 effective tree (2026-11-07; unified production 2026-11-16)
+
+`config/ade.toml` is now the checked-in production source. The five legacy files survive only as the repo-shaped
+frozen fixture under `tests/fixtures/config/legacy/config/`; the export test canonicalizes regenerated tier formatting
+on both sides, then proves that tier data and every other domain still match their projection. Intentional tier
+changes update the frozen tier fixture data too. `bin/ade-model-tiers promote|set` regenerates only the unified `[model_tiers…]` subtree, preserving
+all other bytes atomically (comments between tier tables are regenerated). Sections describing pre-cutover adoption
+are retained as history.
 
 First bounded S1/S2 unit: effective config loader (`bin/ade_config.py`),
 CLI (`bin/ade-config check|get|diff|set`), checked-in JSON Schema (`config/ade.schema.json`),
@@ -9,8 +16,8 @@ initialization and default reload in `bin/route_agent.py` also adopt `load_effec
 The final overlaid routing domain passes the legacy reader's shape/default checks
 before becoming routing constants. No new routes or policy values ship with this
 adoption. Install/keys metadata also has a bounded reader adoption below. Do not
-ship tracked `config/ade.toml` yet: other transitional readers still require
-separate adoption.
+ship tracked `config/ade.toml` at that stage: other transitional readers still required
+separate adoption (superseded by the 2026-11-16 cutover above).
 
 ## A. Mapping table (one explicit projection)
 
@@ -305,10 +312,10 @@ from `config/ade.toml` when it carries one (`MODEL_TIERS_TOML` and explicit path
 read by that hook; a present but unreadable `ade.toml` is an error, never a quiet legacy read). **Writers follow:** `model_tiers.promote`/`set_role` (and `ade-model-tiers promote|set`) refuse
 while `ade.toml` carries tiers (also for `--root`), naming the file, rather than editing a dead legacy copy.
 
-**Not committed in this PR (2026-11-12 decision).** A tracked `config/ade.toml` duplicates `config/install.toml`,
-which other open slices (S3b key probes, installer work) still edit; a mirror committed now would go stale and the
-cut-over must be one mechanical commit. Cut-over checklist, after those slices merge: (1) `ade-config
-export-unified --write` in a claimed workspace; (2) `ade-config check` and the full suite; (3) delete the five legacy
-files in the same commit (they are no longer read once `ade.toml` exists), keeping `ROUTING_POLICY`, `GATES_TOML`,
-`MODEL_TIERS_TOML` and explicit-path readers for isolated tests; (4) repoint docs that name the legacy files as the
-edit surface; (5) land the `ade-model-tiers` writer on `ade.toml`. The old files remain readable until then.
+**Landed cutover (2026-11-16).** `config/ade.toml` is the single source of the five domains. The former
+`config/routing.toml`, `config/gates.toml`, `config/model-tiers.toml`, `config/install.toml` and
+`config/context-budget.toml` files are deleted as editable production inputs; complete isolated copies live under
+`tests/fixtures/config/legacy/` for explicit-path readers and parity tests. `ROUTING_POLICY`, `GATES_TOML`,
+`MODEL_TIERS_TOML` and explicit legacy paths remain isolated. `ade-model-tiers promote|set` refuses to edit a dead
+legacy copy while unified tiers exist. The pre-cutover `export-unified --write` / `--check` round trip proved
+equivalence with the legacy fixtures; after cutover `ade-config check` validates the effective tree.

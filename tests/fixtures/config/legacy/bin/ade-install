@@ -1,0 +1,2 @@
+#!/bin/sh
+exit 99 # Frozen argv fixture only; never execute a copied production installer.

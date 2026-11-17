@@ -223,7 +223,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    retired (2026-11-06) the router reaches Paseo's antigravity provider only through the `antigravity-argon` row,
    frontier fallback only (planner emits that Choice when codex or claude is short of
    frontier quota); its Flash and Claude/GPT pools are `never_route`
-   (`config/routing.toml`), so a research-kind slice there is refused. The lead merges
+   (`config/ade.toml`), so a research-kind slice there is refused. The lead merges
    the three evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the lead picks among the three
    writer drafts or merges them into one `report.md`; the counter files

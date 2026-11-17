@@ -183,7 +183,7 @@ def _frontier_text(st):
             f"better than {JUDGMENT}; give the reason in one line "
             f"(Agent/Task tool: a \"frontier-reason: ...\" prompt line — the "
             f"frontier PreToolUse gate enforces that path only; a Bash/`paseo run` "
-            f"frontier slice is admitted by ade_gates / config/gates.toml instead, "
+            f"frontier slice is admitted by ade_gates / config/ade.toml [gates.frontier] instead, "
             f"not by PreToolUse), {cap}")
 
 

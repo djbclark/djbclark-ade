@@ -1,5 +1,8 @@
 #!/usr/bin/env -S python3 -I
-"""ade-model-tiers: show/resolve/classify/validate/promote/set for config/model-tiers.toml.
+"""ade-model-tiers: show/resolve/classify/validate/promote/set tier config.
+
+The default is config/ade.toml [model_tiers] when present, else
+config/model-tiers.toml. MODEL_TIERS_TOML selects an isolated file for tests.
 
   ade-model-tiers show [--json] [--root DIR]
   ade-model-tiers resolve VENDOR ROLE [--route ROUTE] [--json] [--root DIR]
@@ -47,15 +50,9 @@ def _tiers_path(args: argparse.Namespace) -> Path | None:
         return Path(env)
     root = _root_path(args)
     if root is not None:
-        return root / "config" / "model-tiers.toml"
+        unified = mt.unified_source(root)
+        return unified if unified is not None else root / "config" / "model-tiers.toml"
     return None
-
-
-def _guard_write(args: argparse.Namespace) -> None:
-    """Writers edit the legacy file only; refuse for a --root whose ade.toml carries the tiers (W16)."""
-    root = _root_path(args)
-    if root is not None and not os.environ.get("MODEL_TIERS_TOML") and mt.unified_source(root) is not None:
-        raise mt.TiersError(f"{root / 'config/ade.toml'} carries [model_tiers]; the legacy tier writer cannot edit it yet")
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -116,6 +113,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
     else:
         path = path or mt.default_path()
         raw, err = mt._read_toml(path)
+    if raw is not None and isinstance(raw.get("model_tiers"), dict):
+        raw = raw["model_tiers"]
     if err or raw is None:
         print(f"validate: FAIL {err}", file=sys.stderr)
         return 3
@@ -136,7 +135,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_promote(args: argparse.Namespace) -> int:
     try:
-        _guard_write(args)
         result = mt.promote(
             vendor=args.vendor,
             new_id=args.new,
@@ -177,7 +175,6 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 def cmd_set(args: argparse.Namespace) -> int:
     try:
-        _guard_write(args)
         result = mt.set_role(
             vendor=args.vendor,
             role=args.role,
@@ -210,7 +207,7 @@ def cmd_set(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ade-model-tiers",
-        description="Model tier roles as data (config/model-tiers.toml).",
+        description="Model tier roles as data (config/ade.toml or legacy model-tiers.toml).",
     )
     p.add_argument("--root", help="repo root (default: this checkout)")
     sub = p.add_subparsers(dest="cmd", required=True)

@@ -45,7 +45,7 @@ The `acp-dispatch` shim (deleted 2026-11-14) never launched Pi.
 
 ## B. Model policy and reassessment
 
-B1. Concrete profiles and fitness ranks remain in `config/routing.toml`. The
+B1. Concrete profiles and fitness ranks remain in `config/ade.toml`. The
 router already combines fitness, headroom, pace, expected unused capacity and
 quality bands. Pi uses that same decision code. The startup choice is a policy,
 not a fixed preference for Z.ai or whichever provider has the largest percentage.

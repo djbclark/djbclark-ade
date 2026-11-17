@@ -4,7 +4,7 @@
     context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
                          [--state-dir DIR] [--date YYYY-MM-DD] [--json] [--instruction-lint]
 
-Runs `claude -p "/context"` in each configured directory (legacy config/context-budget.toml; default
+Runs `claude -p "/context"` in each configured directory (config/ade.toml [context_budget]; default
 ~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
 the Memory files, MCP tools, Skills and Custom agents sub-tables, writes
 ~/.local/state/context-budget/<YYYY-MM-DD>.json, and compares each directory with
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     sys.dont_write_bytecode = True
 
 REPO = Path(__file__).resolve().parent.parent
-CONFIG = REPO / "config" / "context-budget.toml"
+CONFIG = REPO / "config" / "ade.toml"
 CLAUDE_TIMEOUT_S = 180
 PING_PREFIX = "djbclark-ade"
 LINT = REPO / "bin" / "instruction-lint"

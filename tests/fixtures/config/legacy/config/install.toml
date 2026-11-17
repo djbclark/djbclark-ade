@@ -1,5 +1,5 @@
-# Transitional install catalog (schema_version=1), 2026-11-09.
-# Used when config/ade.toml is absent. Values are references and recipes, never secret values.
+# Install catalog values (legacy schema_version=1), captured 2026-11-09.
+# Production authority is config/ade.toml [install] and [keys]. Values are references and recipes, never secret values.
 # install/update/probe = "UNKNOWN" means not yet recorded. presence = PATH basename fallback for doctor.
 # install_argv / probe_argv = argv lists (tokens: {bin} {root} {home} {prefix}); doctor prefers probe_argv.
 # probe_warn_exit = nonzero probe exits that mean "advisory issues" -> warn (doctor exit 0) when probe_summary_re matches a stdout line; else error.

@@ -39,11 +39,13 @@ def write_acceptance(tmp_path, text: str) -> Path:
 def test_shipped_file_accepts_only_the_live_cursor_and_zai_shortlist():
     rows = pools.load_acceptance(REPO / "config" / "pi-pool-acceptance.toml")
     assert rows["cursor"]["accepted"] is True and rows["zai"]["accepted"] is True
-    for name in ("grok", "antigravity", "sipb", "go"):
+    for name in ("grok", "antigravity", "sipb", "go", "clinepass"):
         assert rows[name]["accepted"] is False
+    # clinepass dispatches through Pi for manual use (agent = "pi") but stays
+    # unaccepted, so the fail-closed gate reports it and never auto-routes it.
+    assert set(pools.routing_pi_services()) == {"cursor", "zai", "clinepass"}
     code, _, blocking = pools.check_auto(REPO / "config" / "pi-pool-acceptance.toml")
-    assert code == 0 and blocking == []
-    assert set(pools.routing_pi_services()) == {"cursor", "zai"}
+    assert code == 2 and blocking == ["clinepass"]
 
 
 def test_unaccepted_routing_pi_service_blocks_check_and_auto_choose(monkeypatch, tmp_path):
@@ -56,15 +58,15 @@ note = "revoked for test"
 accepted = true
 """)
     monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
-    assert pools.unaccepted_auto_services() == {"cursor"}
+    assert pools.unaccepted_auto_services() == {"clinepass", "cursor"}
     code, _, blocking = pools.check_auto()
-    assert code == 2 and blocking == ["cursor"]
+    assert code == 2 and blocking == ["clinepass", "cursor"]
     result = defaults.choose("code", MODELS, quota={"cursor": reading(90), "zai": reading(80)})
     assert result["service"] == "zai"
     result = defaults.choose("code", MODELS, quota={"cursor": reading(90), "zai": reading(90)},
                              excluded={"zai"})
     assert result["service"] is None
-    assert "unaccepted pool(s): cursor" in result["reason"]
+    assert "unaccepted pool(s): clinepass, cursor" in result["reason"]
     assert "pi-pool-acceptance.toml" in result["reason"]
 
 
@@ -74,13 +76,13 @@ def test_missing_acceptance_row_for_a_routing_pi_service_fails_closed(monkeypatc
 accepted = true
 """)
     monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
-    assert pools.unaccepted_auto_services() == {"cursor"}
+    assert pools.unaccepted_auto_services() == {"clinepass", "cursor"}
     assert pools.check_auto()[0] == 2
 
 
 def test_missing_acceptance_file_blocks_every_routing_pi_service(monkeypatch, tmp_path):
     monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(tmp_path / "absent.toml"))
-    assert pools.unaccepted_auto_services() == {"cursor", "zai"}
+    assert pools.unaccepted_auto_services() == {"clinepass", "cursor", "zai"}
     assert pools.check_auto()[0] == 2
     assert defaults.choose("code", MODELS, quota={"cursor": reading(90), "zai": reading(90)})["service"] is None
 

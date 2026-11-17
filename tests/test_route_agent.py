@@ -27,6 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import route_agent as r
 from test_gates import close_frontier_baseline
 
+LEGACY_ROUTING = (Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+                  / "config" / "legacy" / "config" / "routing.toml")
+LEGACY_GATES = (Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+                / "config" / "legacy" / "config" / "gates.toml")
+
 IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
     "claude": {"remaining": 47.0}, "codex": {"remaining": 100.0},
@@ -834,12 +839,13 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
 
     def test_codex_takes_only_frontier_and_the_plentiful_everyday_kinds(self):
         """2026-10-25 widened this: judgment, code, bulk and mechanical only while plentiful (see
-        TestCodexEverydayKinds); every other kind stays off codex at any headroom."""
+        TestCodexEverydayKinds); research joined them 2026-11-16 (it has no vendor-specific
+        capability limit). Every other kind stays off codex at any headroom."""
         q = {s.name: {"remaining": 0.0} for s in r.SERVICES}
         q["codex"] = {"remaining": 100.0}
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical"):
+            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical", "research"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
@@ -885,7 +891,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         """Env pointing the frontier gate at a temp gates.toml copy (`closed` closes its [frontier] baseline, the pre-2026-10-27 rule)
         and the Claude reading at a canned Paseo usage report (`claude_usage`); aiuse and its snapshot file are pinned away."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
-        toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
+        toml = LEGACY_GATES.read_text()
         if closed:
             toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
@@ -1041,22 +1047,26 @@ class TestRoutingPolicyToml(unittest.TestCase):
     EXPECTED: ClassVar[dict[str, dict[str, Any]]] = {
         "claude": {
             "cli": "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)",
-            "good_at": {"judgment": 1, "frontier": 2, "code": 12},
+            "good_at": {"judgment": 1, "frontier": 2, "code": 12, "research": 10,
+                        "bulk": 32, "mechanical": 30},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"judgment": "opus --effort high", "frontier": "fable --effort high",
-                       "code": "sonnet --effort high"},
+                       "code": "sonnet --effort high", "research": "opus --effort high",
+                       "bulk": "haiku --effort low", "mechanical": "haiku --effort low"},
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
             "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds "
                     "while quota is plentiful)"),
-            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20},
+            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20,
+                        "research": 13},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"frontier": "gpt-6-astra --effort high", "judgment": "gpt-6.1-sol --effort high",
                        "code": "gpt-6.1-sol --effort medium",
-                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
+                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low",
+                       "research": "gpt-6.1-sol --effort high"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
         "cursor-auto": {
@@ -1072,7 +1082,16 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def tearDown(self):
         # Restore the repo policy after any test that reloads a temp file.
-        r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+        r.reload_policy(LEGACY_ROUTING)
+
+    def test_clinepass_dispatches_through_configured_pi_provider(self):
+        # Native clinepass is not a Paseo provider; Pi registers provider
+        # clinepass, whose model ids themselves start cline-pass/.
+        svc = r.BY_NAME["clinepass"]
+        self.assertEqual(svc.agent, "pi")
+        for model in svc.models.values():
+            self.assertTrue(model.startswith("clinepass/cline-pass/"), model)
+            self.assertTrue(f"{svc.agent}/{model}".startswith("pi/clinepass/cline-pass/"))
 
     def test_loaded_services_match_frozen_expectation(self):
         for name, expect in self.EXPECTED.items():
@@ -1090,7 +1109,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
     def test_routing_policy_env_changes_route_output(self):
         import tempfile
         import textwrap
-        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        base = (LEGACY_ROUTING).read_text()
         # Make claude lose judgment (rank 99) and invent a fake judgment winner.
         patched = base.replace(
             'good_at = { judgment = 1, frontier = 2 }',
@@ -1285,7 +1304,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
             Path(tmp).unlink(missing_ok=True)
 
         # Present sections but a missing routing key → apply_policy ValueError.
-        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml"
+        base = (LEGACY_ROUTING
                 ).read_text()
         patched = base.replace(
             "pace_penalty_judgment_factor = 0.5\n", "", 1)
@@ -1304,7 +1323,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         finally:
             Path(tmp).unlink(missing_ok=True)
             r.reload_policy(
-                Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+                LEGACY_ROUTING)
 
     def test_policy_md_contains_codex_frontier_row(self):
         import io
@@ -1366,7 +1385,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
                     self.assertIn("| lead.fable_lead | false |", md.getvalue())
                     self.assertIn("not on Fable", md.getvalue())
                 finally:
-                    r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+                    r.reload_policy(LEGACY_ROUTING)
         for value in ('"yes"', "1"):
             path = self._lead_policy_variant('pipeline_effort = "medium"\n', f"fable_lead = {value}\n")
             with self.assertRaises(ValueError) as ctx:
@@ -1377,7 +1396,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         """Write routing.toml with the pipeline_effort line replaced (and, given `fable_line`, the fable_lead line too);
         return the temp path."""
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('pipeline_effort = "medium"\n', replacement)
         if fable_line is not None:
             self.assertIn("fable_lead = true\n", bad)
@@ -1406,7 +1425,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def test_a_judgment_lead_effort_outside_the_claude_levels_is_rejected(self):
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('effort = "high"\npipeline_model', 'effort = "minimal"\npipeline_model')
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
@@ -1420,7 +1439,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
     def test_a_lead_effort_xhigh_and_max_load(self):
         """Paseo's top Claude levels are valid [lead] effort and pipeline_effort (PR 33 round 2)."""
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         for value in ("xhigh", "max"):
             for key, needle in (("effort", 'effort = "high"\n'), ("pipeline_effort", 'pipeline_effort = "medium"\n')):
                 with self.subTest(key=key, value=value):
@@ -1441,7 +1460,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
 
     def test_a_lead_table_missing_a_key_is_rejected_naming_the_file(self):
         import tempfile
-        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        src = (LEGACY_ROUTING).read_text()
         bad = src.replace('pipeline_model = "sonnet"\n', "")
         self.assertNotEqual(src, bad)
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
@@ -1518,12 +1537,86 @@ class TestQualityBand(unittest.TestCase):
         self.assertNotEqual(nxt.name, best.name)
 
 
+class TestArgonResearchRank(unittest.TestCase):
+    """Argon research is a structural last resort (r7 Low, r8 A7, 2026-11-16).
+
+    Rank 24 only orders equal-pressure candidates; a usable pool that is merely
+    headroom-penalised could still lose to it (22 + 8 = 30 > 24), so the intent is
+    expressed with `fallback_kinds`, the same structural rule as Claude's
+    bulk/mechanical. The winner assertions here stay on pools that need no provider
+    probe, because a Pi-agent pool's readiness depends on the live `paseo` CLI.
+    """
+
+    @staticmethod
+    def reading(left):
+        # A pooled service needs a complete per-window reading, or it is ineligible.
+        return {"remaining": left, "age_s": 0, "windows": {"weekly": left}}
+
+    def quota(self, **left):
+        q = {s.name: self.reading(0.0) for s in r.SERVICES}
+        q.update({name: self.reading(value) for name, value in left.items()})
+        return q
+
+    def test_research_is_a_declared_last_resort(self):
+        argon = r.BY_NAME["antigravity-argon"]
+        self.assertIn("research", argon.fallback_kinds)
+        self.assertNotIn("frontier", argon.fallback_kinds)   # frontier keeps its named gate
+
+    def test_the_rank_sits_behind_the_pools_it_names(self):
+        argon = r.BY_NAME["antigravity-argon"].rank_for("research")
+        for name in ("cursor", "zai", "cursor-cloud"):
+            self.assertGreater(argon, r.BY_NAME[name].rank_for("research"), name)
+
+    def test_argon_takes_research_only_when_nothing_else_can(self):
+        q = self.quota(**{"antigravity-argon": 100.0})
+        self.assertEqual(r.route("research", quota=q).service.name, "antigravity-argon")
+
+    def test_fallback_after_still_gates_research_behind_claude(self):
+        # Blocked only while BOTH named peers can take the kind; claude here can.
+        q = self.quota(**{"antigravity-argon": 100.0, "claude": 100.0})
+        self.assertEqual(r.route("research", quota=q).service.name, "claude")
+
+
+class TestLastResortKinds(unittest.TestCase):
+    """`fallback_kinds`: a pool that may take a kind only when nothing else can (r5 A6).
+
+    A weak rank cannot express this, because the winner is rank + headroom pressure + pace
+    penalty: claude bulk 32 lost nothing to cursor-cloud bulk 26 at 20% headroom (26 + 8 = 34).
+    """
+
+    def drained(self, **over):
+        return {**{s.name: {"remaining": 0.0} for s in r.SERVICES}, **over}
+
+    def test_claude_is_declared_a_last_resort_for_bulk_and_mechanical(self):
+        claude = next(s for s in r.SERVICES if s.name == "claude")
+        self.assertEqual(set(claude.fallback_kinds), {"bulk", "mechanical"})
+        # It is not a last resort for the kinds the weekly pool is kept for.
+        for kind in ("judgment", "code", "research", "frontier"):
+            self.assertNotIn(kind, claude.fallback_kinds)
+
+    def test_a_penalised_but_usable_pool_still_beats_the_last_resort(self):
+        # cursor-cloud bulk 26 at 20% headroom scores 26 + 8 = 34; claude bulk 32 scores 32.
+        # Rank alone hands it to claude; the structural rule must not.
+        q = self.drained(**{"claude": {"remaining": 100.0}, "cursor-cloud": {"remaining": 20.0}})
+        self.assertNotEqual(r.route("bulk", quota=q).service.name, "claude")
+        self.assertNotEqual(r.route("mechanical", quota=q).service.name, "claude")
+
+    def test_the_last_resort_still_takes_the_slice_when_nothing_else_can(self):
+        q = self.drained(claude={"remaining": 90.0})
+        self.assertEqual(r.route("bulk", quota=q).service.name, "claude")
+        self.assertEqual(r.route("mechanical", quota=q).service.name, "claude")
+
+    def test_the_last_resort_does_not_leak_into_judgment_or_code(self):
+        q = self.drained(claude={"remaining": 90.0})
+        self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
+
+
 class TestCodexEverydayKinds(unittest.TestCase):
     """Operator 2026-10-25: "if we have lots of codex quota and it is the best of available
     options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of
     the binding headroom; astra stays frontier-only; ranking is the normal one."""
 
-    EVERYDAY = ("judgment", "code", "bulk", "mechanical")
+    EVERYDAY = ("judgment", "code", "bulk", "mechanical", "research")
 
     def codex(self):
         return r.BY_NAME["codex"]
@@ -1535,7 +1628,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         q = {"codex": {"remaining": 100.0}}
         for kind in self.EVERYDAY:
             self.assertTrue(self.codex().eligible(kind, q), kind)
-        for kind in ("research", "github", "api-only", "realtime-web"):
+        for kind in ("github", "api-only", "realtime-web"):
             self.assertFalse(self.codex().eligible(kind, q), kind)
         self.assertTrue(self.codex().eligible("frontier", q))
 
@@ -1626,7 +1719,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         pub = r.policy_public()
         self.assertEqual(pub["routing"]["plenty_min"], 20.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
-        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical"])
+        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical", "research"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)

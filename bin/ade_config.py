@@ -241,7 +241,7 @@ SERVICE_KEYS = frozenset({
     "name", "cli", "good_at", "billing", "note", "never_bulk", "retired",
     "judgment_tier", "access", "hermes_only", "burn_first", "pool", "pool_family", "max_parallel",
     "agent", "models", "reserve_floor", "measured_only", "grant_days", "ready_probe",
-    "shares_pool", "plenty_kinds", "fallback_after", "window",
+    "shares_pool", "plenty_kinds", "fallback_after", "fallback_kinds", "window",
 })
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
 LEAD_KEYS = ("model", "effort", "pipeline_model")

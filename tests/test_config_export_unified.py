@@ -16,6 +16,7 @@ sys.path.insert(0, str(BIN))
 import ade_config as ac  # noqa: E402
 import ade_config_edit as edit  # noqa: E402
 import ade_config_export as acx  # noqa: E402
+import model_tiers as mt  # noqa: E402
 
 LEGACY = ("routing.toml", "gates.toml", "model-tiers.toml", "install.toml", "context-budget.toml",
           "ade.schema.json", "install.schema.json")
@@ -26,7 +27,7 @@ def root(tmp_path, monkeypatch):
     r = tmp_path / "repo"
     (r / "config").mkdir(parents=True)
     for name in LEGACY:
-        shutil.copy2(REPO / "config" / name, r / "config" / name)
+        shutil.copy2(REPO / "tests/fixtures/config/legacy/config" / name, r / "config" / name)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in ("ROUTING_POLICY", "GATES_TOML", "MODEL_TIERS_TOML"):
         monkeypatch.delenv(name, raising=False)
@@ -41,6 +42,27 @@ def effective(root: Path, tmp_path: Path):
 
 def test_shipped_legacy_files_round_trip_and_keep_comments(root, tmp_path):
     text = acx.generate_unified(root)
+    # Canonicalize regenerated tier formatting/comments on both sides while
+    # retaining exact comparison of tier data and every other domain's bytes.
+    production = (REPO / "config/ade.toml").read_text()
+    assert tomllib.loads(production)["model_tiers"] == tomllib.loads(text)["model_tiers"], (
+        "production/frozen-fixture model_tiers data drifted (including writer reason metadata)"
+    )
+    production_path = tmp_path / "production-ade.toml"
+    production_path.write_text(production)
+    production_canonical = mt.rewrite_unified(
+        production_path, tomllib.loads(production)["model_tiers"]
+    )
+    expected_path = tmp_path / "expected-ade.toml"
+    expected_path.write_text(text)
+    expected_canonical = mt.rewrite_unified(
+        expected_path, tomllib.loads(text)["model_tiers"]
+    )
+    assert production_canonical == expected_canonical, (
+        "production unified config drifted from the frozen legacy fixture projection; "
+        "regenerate with bin/ade-config export-unified and, after an intentional "
+        "tier change, update the frozen model-tiers fixture data"
+    )
     parsed = tomllib.loads(text)
     assert parsed["schema_version"] == 1
     assert {"routing", "lead", "service", "gates", "model_tiers", "install", "keys", "context_budget"} <= set(parsed)

@@ -142,8 +142,9 @@ def test_no_breach_inside_budget():
     assert cbc.compare(DIR, e, None, None, b) == []
 
 
-def test_real_config_parses_and_overrides_home():
-    cfg = cbc.load_config(cbc.CONFIG)
+def test_real_config_parses_and_overrides_home(tmp_path):
+    # Production unified source; explicit load_config remains legacy-only.
+    cfg = cbc.load_effective_config(home=tmp_path, environ={})
     assert cfg["dirs"] == [DIR, "~"]
     base = cbc.budget_for(cfg, DIR)
     assert (base["total"], base["memory"], base["skills"], base["mcp_tools"],

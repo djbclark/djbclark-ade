@@ -30,7 +30,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 | `bin/` | the tools; [published roster](https://github.com/djbclark/djbclark-ade/blob/generated-roster/ROSTER.md). `libexec/git-hooks/` and `libexec/agent-bin/git` are the git guard's hooks and shim; `libexec/agent-bin/paseo` is the archived-send guard's `paseo` shim |
 | `claude/` | Claude Code `agents/` (`adversary`, `backend`, `fable-deep`, `ux`), `hooks/`, `commands/` (only `resume.md`), linked from `~/.claude/` |
 | `agents/<tui>/*.tmpl` | live Claude, Codex and Hermes config templates (opencode tmpl is residual packaging); secrets as `{{ secret "NAME" }}`; `bin/ade-template-check` is their gate ([agents/README.md](agents/README.md)) |
-| `config/` | `routing.toml` (pools, `[lead].fable_lead`), `gates.toml` (frontier allowance), `secret-deny.toml`, `pr-policy.toml`, schemas |
+| `config/` | `ade.toml` (routing, model tiers, frontier allowance, install catalog, context budget), `secret-deny.toml`, `pr-policy.toml`, schemas |
 | `opencode-plugins/`, `omp/` | OpenCode plugins; omp's commands — Pi is the sole 3rd-party TUI policy ([docs/tui-security-and-pi-migration.md](docs/tui-security-and-pi-migration.md)) |
 | `docs/` | AGENTS.md lists the live docs; `docs/history/` holds retired designs and records, `docs/slim/` the slim-down's plan and log |
 | `changelog.d/`, `graft/` | one changelog fragment per PR (review rule 10); the generated context graph (`graft build`) |
