@@ -104,7 +104,9 @@ The operator requires every eligible lead and worker to transition with reserve.
 best-effort preventive requests, not measured prevention of exhaustion. `--transition-below PERCENT`
 uses inclusive remaining-percent semantics: request at remaining <= PERCENT. Values must be finite in
 (0,100]; missing, stale, erroneous, ambiguous or unmeasured quota stays observable `transition-unknown`.
-Full aiuse snapshots, including exhausted accounts, are refreshed once each scan tick. Measurements
+Full aiuse snapshots, including exhausted accounts, are refreshed once each scan tick. Explicit exhausted state on a selected own, shared or ceiling window contributes zero
+headroom even when an active note-exhausted overlay leaves its numbers high. A foreign independent
+family does not bind. This applies equally to requests, destination evidence and source recovery. Measurements
 must be explicitly fresh with valid source timestamps and age no more than 600 seconds. Family-specific
 windows, declared shared parents and referenced umbrella ceiling windows bind; effective and ceiling
 headroom can tighten own headroom. Malformed raw windows or missing required relationships are unknown; ceiling-aware headroom takes precedence. Native billing
@@ -114,7 +116,10 @@ A dry run records `would-transition`. Apply reserves a durable account/family/wi
 before sending, with a full CLI timeout plus reservation margin. `transition-submitted` means only CLI
 acceptance (including queued exit 5); failures are `transition-uncertain`. Elapsed time never permits a
 second request for that same unresolved episode. A fresh positively healthy source reading after a request can close its semantic depletion episode;
-only a newer depleted reading can rearm it. Reset estimates, carried metadata, elapsed time and
+only a newer depleted reading can rearm it. Earliest ledger reservations missing source identity or
+request token are held as observable `transition-unbound`: no new request, healthy destination
+observation or source recovery for that agent can be inferred until explicit provenance reconciliation.
+The scanner never invents the old identity, erases history or automatically reconciles it. Reset estimates, carried metadata, elapsed time and
 A-to-B-to-A account churn cannot rearm unresolved requests. An observed healthy account change is recorded separately;
 it is not proof of checkpoint preservation. A changed reset string alone cannot re-arm. No lead exemption applies.
 Acknowledgements require an exact unfenced/unquoted current assistant reply after the unique

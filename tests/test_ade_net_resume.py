@@ -1566,3 +1566,91 @@ def test_r2_no_rearm_from_old_healthy_sample(quota, acknowledged):
     assert q["scan"](transition_below=40)==0
     q["put"](exhausted_account());assert q["scan"](transition_below=40)==0
     assert len(q["sent"].read_text().splitlines())==1
+
+
+# Round four: note-exhausted overlays intentionally leave quota numbers unchanged.
+def overlay_window(**fields):
+    return dict(window("exhausted", 10), state_source="agent-reported", **fields)
+
+
+def test_r4_overlay_requests_and_new_healthy_rearms(quota):
+    q=quota;q["data"]["agents"][CHILD]["Status"]="running"
+    q["data"]["send_rc"]=1  # uncertain request remains unresolved during overlay
+    q["put"](account([overlay_window()]));assert q["scan"](transition_below=40)==0
+    assert len(q["sent"].read_text().splitlines())==1
+    q["clock"](NOW+60)
+    q["put"](account([overlay_window()],collected="2026-11-12T20:01:00Z"))
+    assert q["scan"](transition_below=40)==0
+    assert "transition-recovered" not in q["actions"]()
+    assert len(q["sent"].read_text().splitlines())==1
+    # Override expires and a genuinely new healthy source sample wins.
+    q["clock"](NOW+31*60)
+    q["put"](account([window("ok",10,resets="2026-11-12T23:30:00Z")],collected="2026-11-12T20:31:00Z"))
+    assert q["scan"](transition_below=40)==0
+    assert "transition-recovered" in q["actions"]()
+    q["clock"](NOW+32*60)
+    q["put"](account([window(resets="2026-11-12T23:30:00Z")],collected="2026-11-12T20:32:00Z"))
+    assert q["scan"](transition_below=40)==0
+    assert q["scan"](transition_below=40)==0
+    assert len(q["sent"].read_text().splitlines())==2
+
+
+@pytest.mark.parametrize("binding", ["own","shared","ceiling","foreign"])
+def test_r4_selected_exhausted_precedence(fake,binding):
+    _,_,_,state=fake;scanner=Scanner(LEAD,state)
+    record={"Provider":"pi","Model":"zai/model"}
+    rows=[overlay_window()]
+    provider="zai"
+    if binding=="shared":
+        record={"Provider":"claude","Model":"fable"};provider="claude"
+        rows=[dict(window("ok",10),pool_family="fable",quota_scope="model_sublimit",shared_pool_family="default"),overlay_window(pool_family="default")]
+    if binding=="ceiling":
+        record={"Provider":"pi","Model":"cursor/gpt-model"};provider="cursor"
+        rows=[dict(window("ok",10),role="breakdown",pool_family="third_party",ceiling_window_id="total"),overlay_window(window_id="total",role="ceiling",pool_family="total")]
+    if binding=="foreign":
+        record={"Provider":"antigravity","Model":"gemini-flash"};provider="antigravity"
+        rows=[dict(window("ok",10),pool_family="gemini"),overlay_window(pool_family="claude_gpt")]
+    scanner._aiuse=[account(rows,provider=provider)]
+    assert scanner.measurement(record)[0]==(90 if binding=="foreign" else 0)
+
+
+@pytest.mark.parametrize("successor", [False,True])
+@pytest.mark.parametrize("ceiling", [False,True])
+def test_r4_overlay_not_healthy_destination(quota,monkeypatch,tmp_path,successor,ceiling):
+    q=quota;q["data"]["agents"][CHILD]["Status"]="running"
+    q["put"](exhausted_account());assert q["scan"](transition_below=40)==0
+    target=CHILD
+    if successor:
+        ledger,home=tmp_path/"links",tmp_path/"daemon"
+        monkeypatch.setenv("ADE_SELF_SESSION_STATE",str(ledger));monkeypatch.setenv("PASEO_HOME",str(home))
+        link(ledger,home,CHILD,NEW_LEAD);q["data"]["agents"][CHILD]["Archived"]=True
+        q["data"]["agents"][NEW_LEAD]=dict(q["data"]["agents"][CHILD],Id=NEW_LEAD,ParentAgentId=None,Archived=False)
+        target=NEW_LEAD
+    q["data"]["agents"][target]["Model"]="opencode-go-dclark/model"
+    dest=dict(account([overlay_window()],provider="opencode-go"),account="dclark")
+    if ceiling:
+        q["data"]["agents"][target]["Model"]="cursor/gpt-model"
+        dest=account([dict(window("ok",10),role="breakdown",pool_family="third_party",ceiling_window_id="total"),
+                      overlay_window(window_id="total",role="ceiling",pool_family="total")],provider="cursor")
+    q["put"](exhausted_account(),dest)
+    assert q["scan"](transition_below=40)==0
+    assert not any(r["action"] in ("transition-observed-account-change","transition-observed-successor") for r in q["rows"]())
+
+
+@pytest.mark.parametrize("healthy,successor", [(False,False),(True,False),(True,True)])
+def test_r4_earliest_unbound_request_held(quota,monkeypatch,tmp_path,healthy,successor):
+    q=quota;q["data"]["agents"][CHILD]["Status"]="running"
+    q["state"].mkdir(parents=True,exist_ok=True)
+    old={"agent":CHILD,"time":NOW-30,"lead":LEAD,"action":"transition-requested","headroom":10.0}
+    (q["state"]/"events.jsonl").write_text(json.dumps(old)+"\n")
+    if successor:
+        ledger,home=tmp_path/"links",tmp_path/"daemon"
+        monkeypatch.setenv("ADE_SELF_SESSION_STATE",str(ledger));monkeypatch.setenv("PASEO_HOME",str(home))
+        link(ledger,home,CHILD,NEW_LEAD);q["data"]["agents"][CHILD]["Archived"]=True
+        q["data"]["agents"][NEW_LEAD]=dict(q["data"]["agents"][CHILD],Id=NEW_LEAD,ParentAgentId=None,Archived=False)
+    q["put"](account([window("ok",0 if healthy else 100)]))
+    assert q["scan"](transition_below=40)==0
+    assert "transition-unbound" in q["actions"]()
+    assert not any(r["action"] in ("transition-recovered","transition-observed-account-change","transition-observed-successor") for r in q["rows"]())
+    assert sum(r["action"]=="transition-requested" and r["agent"]==CHILD for r in q["rows"]())==1
+    assert not q["sent"].exists()

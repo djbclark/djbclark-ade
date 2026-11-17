@@ -455,6 +455,11 @@ class Scanner:
                         "effective_left_percent", "ceiling_headroom_percent"):
                 if w.get(key) is not None and not self.percent_number(w[key]):
                     return None
+            # note-exhausted overlays state without editing numeric fields. Only
+            # selected own/shared/ceiling windows reach here, so foreign pools stay isolated.
+            if w.get("state") == "exhausted":
+                values.append(0.0)
+                continue
             rem = w.get("headroom_percent", w.get("remaining_percent"))
             if rem is None:
                 return None  # never invent a model ceiling from used_percent
@@ -503,6 +508,16 @@ class Scanner:
     def safety_identity(record):
         return tuple(record.get(k) for k in ("Id", "Provider", "Model", "ParentAgentId", "Archived"))
 
+    @staticmethod
+    def unbound_transition_agents(events):
+        # Earliest reservations have no source identity/receipt token. A healthy
+        # current account cannot establish provenance or recover that unknown source.
+        return {e.get("agent") for e in events if e.get("action") == "transition-requested"
+                and (not isinstance(e.get("identity"), str)
+                     or re.fullmatch(r"[0-9a-f]{64}", e["identity"]) is None
+                     or not isinstance(e.get("episode"), str)
+                     or re.fullmatch(r"(?:[0-9a-f]{32}|[0-9a-f]{64})", e["episode"]) is None)}
+
     def transition_ahead(self, agents, history, events):
         """Ask every agent whose pool is nearly spent to transition before it stops.
 
@@ -511,6 +526,7 @@ class Scanner:
         """
         if self.transition_below is None:
             return
+        unbound = self.unbound_transition_agents(events)
         # Completed self-session records are evidence of succession, not evidence of quota escape.
         for pending in list(events):
             if pending.get("action") != "transition-requested":
@@ -518,6 +534,9 @@ class Scanner:
             aid = pending.get("agent")
             try:
                 if not self.in_chain(aid):
+                    continue
+                if aid in unbound:
+                    self.note(history, events, aid, "transition-unbound", key="missing-request-provenance")
                     continue
                 successor = succ.effective_lead(aid)
                 if successor == aid or not self.in_chain(successor):
@@ -543,6 +562,9 @@ class Scanner:
                     continue
                 record = self.inspect(aid)
                 if record.get("Archived") is not False or not self.in_chain(aid):
+                    continue
+                if aid in unbound:
+                    self.note(history, events, aid, "transition-unbound", key="missing-request-provenance")
                     continue
                 measured = self.measurement(record)
                 if measured is None:
