@@ -392,9 +392,9 @@ Ranked with 4.1 and 4.3: it adds an asset, an entry point and a bypass.
   so the dialog control above does not apply and every control for it is prose; nothing confines it. Any process as this user
   with a shell, and any agent with Bash that reads untrusted pages or GitHub text, can list, adopt, script and close tabs in
   every profile that has the extension. `--force` on a user's tab is a speed bump any caller can pass, not an authorization;
-  `tab adopt` attaches existing tabs. Three update channels can replace code that holds the debugger: a daily self-upgrade of
+  `tab adopt` attaches existing tabs. Three update paths can replace code that holds or drives the debugger: a daily self-upgrade of
   the CLI that runs as a launchd job and skips Gatekeeper, the extension's Web Store auto-update, and a popup "Update CLI"
-  button; `install.sh`'s checksum is fail-open and proves integrity only. The side panel adds an entry point: it starts local
+  button (the same GitHub-release install as the self-upgrade); `install.sh`'s checksum is fail-open and proves integrity only. The side panel adds an entry point: it starts local
   agents with page context, and with the full-access option Claude runs with `bypassPermissions`. Each profile that gets the
   extension adds its accounts to this route (`docs/mcp-servers.md`).
 * Gap. All of these controls are prose except the dialog and the flags; `evaluate_script` stays on; `npx -y ...@latest`
