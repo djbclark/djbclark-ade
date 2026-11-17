@@ -83,7 +83,7 @@ Exit codes: 0 completed scan/watch, 2 invalid usage or unreadable CLI/state,
 3 lock held for a one-shot (watch retries at the next interval). The unloaded template
 `config/launchd/com.djbclark.ade-net-resume.plist` runs a one-shot `--quota --apply` scan
 every minute (sends enabled by operator decision, 2026-11-16). Render it with
-`ade-sched render ... --set __LEAD__=UUID --set __STATE__=/absolute/log/dir`; installing still requires a
+`ade-sched --set __LEAD__=UUID --set __STATE__=/absolute/log/dir --set __TRANSITION__=40 render config/launchd/com.djbclark.ade-net-resume.plist` (40 is a render-only illustration, not an approved deployment margin); installing still requires a
 deliberate operator action. `--apply` is bounded by the reservation, the per-pool gap and the
 re-reads below, so a scan resumes at most one session per pool per gap and never repeats a delivery.
 The scheduler render fixtures supply `__LEAD__` using the same substitution
@@ -99,16 +99,33 @@ archived predecessors, so the job needs no reinstall. If the chain ends at an ar
 
 ## Transitions before exhaustion (`--transition-below`, 2026-11-16)
 
-The operator's rule: no agent should run out of tokens; every agent should transition in time. So the job also runs a
-**preventive** pass. `--transition-below PERCENT` reads each live agent's aiuse account (a Pi agent's account or pool is
-the first segment of its model, so a named account such as `opencode-go-djbclark` matches its own row) and asks every
-agent whose lowest window is at or below that percent to hand off or switch account **now**, with its checkpoint and the
-same report path.
+The operator requires every eligible lead and worker to transition with reserve. This source implements
+best-effort preventive requests, not measured prevention of exhaustion. `--transition-below PERCENT`
+uses inclusive remaining-percent semantics: request at remaining <= PERCENT. Values must be finite in
+(0,100]; missing, stale, erroneous, ambiguous or unmeasured quota stays observable `transition-unknown`.
+Full aiuse snapshots, including exhausted accounts, are refreshed once each scan tick. Measurements
+must be explicitly fresh with valid source timestamps and age no more than 600 seconds. Family-specific
+windows and declared shared parents bind; ceiling-aware headroom takes precedence. Native billing
+aliases and the three exact named Go account labels are supported; duplicate identities refuse selection.
 
-**No agent is special.** The message, the threshold and the 600 s per-agent gap are identical for a lead and a worker,
-and the pass covers the current lead exactly like a descendant (`in_chain`): during the 2026-11-16 incident the lead
-itself hit a 5-hour window and only a manual switch kept the project moving. A dry run records `would-transition`
-instead of sending. The template fills `__TRANSITION__`; a low percentage transitions late, a high one often.
+A dry run records `would-transition`. Apply reserves a durable account/family/window/reset episode
+before sending, with a full CLI timeout plus reservation margin. `transition-submitted` means only CLI
+acceptance (including queued exit 5); failures are `transition-uncertain`. Elapsed time never permits a
+second request for that same unresolved episode. An observed healthy account change is recorded separately;
+it is not proof of checkpoint preservation. A new reset episode can re-arm. No lead exemption applies.
+Completed delivery records suppress requests; eligibility and lineage are re-inspected immediately before
+reservation. A conditional-send race remains because Paseo has no atomic inspect-and-send operation.
+
+Render-only example (finite 40 is illustrative, not a deployment recommendation):
+
+```sh
+bin/ade-sched --set __LEAD__=LEAD_UUID --set __STATE__=/absolute/log/dir --set __TRANSITION__=40 render config/launchd/com.djbclark.ade-net-resume.plist
+```
+
+For installation, follow the validated explicit `TRANSITION_REMAINING_PERCENT` recipe in
+[scheduling.md](scheduling.md). No deployment margin is approved here. Deployment still requires
+measurement of collection age, queue delay, checkpoint/handoff latency and token consumption, including
+concurrent shared-pool consumers. A successor on the same depleted pool does not meet transition acceptance.
 
 **Install order.** The job runs whichever checkout `__ADE__` names (the shared one), so install a template only after the
 release that adds the flags it passes: on 2026-11-16 a template carrying `--transition-below` was installed while the
@@ -204,7 +221,7 @@ before the send, the lock, dry-run unless `--apply`, the scan deadline) plus:
 beside it.
 
 The quota implementation slice (2026-11-12) did not change the launchd plist or run a canary or live `--apply`.
-The template update (2026-11-12) adds only dry-run quota scanning; it installs or loads nothing.
+The current template enables `--apply` and preventive requests; this source repair installs or loads nothing.
 
 Offline tests use a fake Paseo executable, a fake `aiuse` and mocked endpoint health. CI runs
 them on Linux; no real agent is resumed by the tests.

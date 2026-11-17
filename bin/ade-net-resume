@@ -167,6 +167,7 @@ class Scanner:
         self.guard_state = guard_state or Path.home() / ".paseo/plugin-data/session-guard/state.json"
         self.transition_below = transition_below
         self._aiuse = None
+        self._aiuse_snapshot = None
 
     def remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -330,38 +331,115 @@ class Scanner:
         return any(isinstance(p, dict) and p.get("agentId") == aid and p.get("phase") not in GUARD_TERMINAL
                    for p in pauses)
 
+    def billing_identity(self, record):
+        # Reuse routing's transport aliases; named transports need an exact account.
+        from route_agent import map_agent_to_provider
+        provider, model = record.get("Provider"), record.get("Model")
+        if not isinstance(model, str):
+            return None
+        transport = model.split("/", 1)[0] if provider == "pi" else None
+        names = {"opencode-go-djbclark": "djbclark", "opencode-go-dclark": "dclark",
+                 "opencode-go-t-e": "t-e"}
+        if transport in names:
+            return "opencode-go", None, names[transport]
+        mapped = map_agent_to_provider(provider, model)
+        if provider == "antigravity":
+            lower = model.lower()
+            family = ("gemini_argon" if lower.startswith("gemini-4-argon") else
+                      "gemini" if lower.startswith("gemini-") else
+                      "claude_gpt" if lower.startswith(("claude-", "gpt-")) else None)
+            mapped = (provider, family) if family else None
+        if mapped is None:
+            return None
+        pool, family = mapped
+        if pool == "claude" and "fable" in model.lower():
+            family = "fable"
+        return pool, family, None
+
     def account_for(self, record):
-        """The aiuse account behind one agent, whatever its provider shape.
-
-        Pi agents carry their account or pool as the model's first segment
-        (`zai/...`, `opencode-go-djbclark/...`), so a named account is matched by
-        prefix as well as exactly; nothing here distinguishes a lead from a worker.
-        """
-        ident = record.get("Provider") or ""
-        model = record.get("Model") or ""
-        if ident == "pi" and isinstance(model, str) and "/" in model:
-            ident = model.split("/", 1)[0]
-        if not ident:
+        identity = self.billing_identity(record)
+        if identity is None:
             return None
-        self.aiuse_account(ident)  # populate the cached snapshot
-        found = self._aiuse
-        if not isinstance(found, list):
+        pool, _, name = identity
+        self.aiuse_account(pool)  # one full snapshot per tick, including exhausted accounts
+        aliases = {"pi": "openai:openai_api", "omp": "anthropic:claude_api",
+                   "claude": "anthropic:subscription", "codex": "openai:codex"}
+        if not isinstance(self._aiuse, list):
             return None
-        exact = [a for a in found if isinstance(a, dict) and a.get("provider") == ident]
-        if len(exact) == 1:
-            return exact[0]
-        prefixed = [a for a in found if isinstance(a, dict)
-                    and isinstance(a.get("provider"), str) and a["provider"]
-                    and ident.startswith(a["provider"])]
-        # Longest provider name wins, so opencode-go-djbclark beats a bare opencode-go row.
-        prefixed.sort(key=lambda a: len(a["provider"]), reverse=True)
-        return prefixed[0] if prefixed else None
+        matches = [a for a in self._aiuse if isinstance(a, dict)
+                   and (a.get("provider") == pool or a.get("pool_id") == aliases.get(pool, pool))
+                   and (name is None or a.get("account") == name)]
+        return matches[0] if len(matches) == 1 else None
 
-    def headroom(self, account):
-        """Lowest remaining percentage across the account's windows, or None when unknown."""
-        used = [w.get("used_percent") for w in self.windows(account)]
-        used = [u for u in used if isinstance(u, (int, float)) and not isinstance(u, bool) and math.isfinite(u)]
-        return None if not used else 100.0 - max(used)
+    def measurement(self, record):
+        identity = self.billing_identity(record)
+        account = self.account_for(record)
+        if identity is None or account is None:
+            return None
+        now = time.time()
+        collected = stamp(account.get("collected_at"))
+        if self._aiuse_snapshot is not None:
+            snapshot_time = stamp(self._aiuse_snapshot.get("collected_at"))
+            if not 0 <= now - snapshot_time <= 600:
+                return None
+        # Use a bounded source age even when the collector labels a cached row fresh.
+        if (account.get("fresh") is not True or account.get("stale") is True
+                or account.get("reading_expired") is True or account.get("error")
+                or collected is None or not 0 <= now - collected <= 600):
+            return None
+        age = account.get("age_seconds")
+        if age is not None and (not self.percent_number(age, maximum=None) or age > 600):
+            return None
+        family = identity[1]
+        windows = self.windows(account)
+        own = [w for w in windows if w.get("pool_family") == family] if family else [
+            w for w in windows if w.get("quota_scope") != "model_sublimit"]
+        if family == "default":
+            own += [w for w in windows if not w.get("pool_family") and w.get("quota_scope") != "model_sublimit"]
+        parents = {w.get("shared_pool_family") for w in own if w.get("shared_pool_family")}
+        if identity[0] == "claude" and family != "default":
+            parents.add("default")
+        if any(not any(w.get("pool_family") == parent for w in windows) for parent in parents):
+            return None
+        applicable = own + [w for w in windows if w.get("pool_family") in parents and w not in own]
+        if not applicable:
+            return None
+        values = []
+        for w in applicable:
+            if w.get("resets_at") is not None and stamp(w["resets_at"]) <= now:
+                return None
+            if w.get("state") == "unknown":
+                return None
+            for key in ("used_percent", "remaining_percent", "headroom_percent"):
+                if w.get(key) is not None and not self.percent_number(w[key]):
+                    return None
+            rem = w.get("headroom_percent", w.get("remaining_percent"))
+            if rem is None:
+                return None  # never invent a model ceiling from used_percent
+            if w.get("measurement_frozen") is True:
+                return None
+            values.append(float(rem))
+        episode = hashlib.sha256(json.dumps([identity, account.get("account"),
+            sorted((str(w.get("window_id") or w.get("id") or w.get("label")),
+                    str(w.get("pool_family")), str(w.get("resets_at"))) for w in applicable)],
+            sort_keys=True).encode()).hexdigest()
+        return min(values), episode
+
+    @staticmethod
+    def percent_number(value, maximum=100):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0 and (maximum is None or value <= maximum))
+
+    def transition_acknowledged(self, aid, episode):
+        data = json.loads(self.cli("logs", aid, "--json"))
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ScanError("invalid transition timeline")
+        expected = "ack quota-transition " + episode
+        # Named receipt is evidence only; it never completes or re-arms the request.
+        return any(isinstance(item, dict) and item.get("type") == "assistant_message"
+                   and isinstance(item.get("text"), str)
+                   and expected in item["text"].splitlines() for item in items)
 
     def transition_ahead(self, agents, history, events):
         """Ask every agent whose pool is nearly spent to transition before it stops.
@@ -371,6 +449,24 @@ class Scanner:
         """
         if self.transition_below is None:
             return
+        # Completed self-session records are evidence of succession, not evidence of quota escape.
+        for pending in list(events):
+            if pending.get("action") != "transition-requested":
+                continue
+            aid = pending.get("agent")
+            try:
+                if not self.in_chain(aid):
+                    continue
+                successor = succ.effective_lead(aid)
+                if successor == aid or not self.in_chain(successor):
+                    continue
+                destination = self.inspect(successor)
+                measured = self.measurement(destination)
+                if destination.get("Archived") is False and measured and measured[0] > self.transition_below:
+                    self.note(history, events, aid, "transition-observed-successor", key=pending.get("episode"),
+                              successor=successor, destination_headroom=measured[0])
+            except (ScanError, ValueError, succ.SuccessionError):
+                continue
         for row in agents:
             try:
                 if not isinstance(row, dict) or row.get("status") == "closed":
@@ -381,20 +477,52 @@ class Scanner:
                 record = self.inspect(aid)
                 if record.get("Archived") is not False or not self.in_chain(aid):
                     continue
-                left = self.headroom(self.account_for(record))
-                if left is None or left > self.transition_below:
+                measured = self.measurement(record)
+                if measured is None:
+                    self.note(history, events, aid, "transition-unknown",
+                              key=str(int(time.time() // 600)))
                     continue
-                last = next((e for e in reversed(events)
-                             if e.get("action") == "transition-requested" and e.get("agent") == aid), None)
-                if last is not None and time.time() - last["time"] < QUOTA_POOL_GAP_SECONDS:
+                left, episode = measured
+                pending = next((e for e in reversed(events) if e.get("agent") == aid
+                                and e.get("action") == "transition-requested"), None)
+                identity = hashlib.sha256(json.dumps([self.billing_identity(record),
+                    self.account_for(record).get("account")], sort_keys=True).encode()).hexdigest()
+                if pending is not None:
+                    if pending.get("identity") != identity and left > self.transition_below:
+                        self.note(history, events, aid, "transition-observed-account-change",
+                                  key=pending.get("episode"), destination_headroom=left)
+                    # Time cannot prove delivery or a successful escape from this pool.
+                    # A new measured reset episode is the only automatic re-arm.
+                    if pending.get("episode") == episode:
+                        if self.transition_acknowledged(aid, episode):
+                            self.note(history, events, aid, "transition-acknowledged", key=episode)
+                        continue
+                if left > self.transition_below:
+                    continue
+                if record.get("Status") not in ("running", "idle"):
+                    continue
+                if self.delivered(aid, record.get("Provider")):
+                    self.note(history, events, aid, "transition-delivered", key=episode)
+                    continue
+                chain = self.leads
+                latest = self.inspect(aid)
+                if (self.resolve_lead() is None or self.leads != chain
+                        or latest != record or latest.get("Archived") is not False
+                        or not self.in_chain(aid)):
+                    self.note(history, events, aid, "transition-changed", key=episode)
                     continue
                 if not self.apply:
-                    self.event(history, aid, "would-transition", headroom=round(left, 1))
+                    self.note(history, events, aid, "would-transition", key=episode, headroom=left)
                     continue
-                self.event(history, aid, "transition-requested", headroom=round(left, 1))
-                events.append({"agent": aid, "action": "transition-requested", "time": time.time()})
-                self.cli("send", "--json", "--no-wait", "--", aid, TRANSITION_PROMPT, accepted=True)
-                self.event(history, aid, "transition-sent", headroom=round(left, 1))
+                if self.remaining() < CLI_TIMEOUT + 1:
+                    raise ScanError("insufficient transition send budget")
+                self.note(history, events, aid, "transition-requested", episode=episode, identity=identity, headroom=left)
+                try:
+                    self.cli("send", "--json", "--no-wait", "--", aid, TRANSITION_PROMPT + f" Reply with ack quota-transition {episode} before acting.", accepted=True)
+                except ScanError:
+                    self.note(history, events, aid, "transition-uncertain", key=episode)
+                    continue
+                self.note(history, events, aid, "transition-submitted", key=episode)
             except (ScanError, ValueError, TypeError, AttributeError):
                 self.event(history, row.get("id") if isinstance(row, dict) else None, "unavailable")
 
@@ -406,6 +534,7 @@ class Scanner:
                 result = subprocess.run(["aiuse", "--json"], capture_output=True, text=True,
                                         timeout=min(AIUSE_TIMEOUT, self.remaining()))
                 snapshot = json.loads(result.stdout).get("snapshot") if result.returncode == 0 else None
+                self._aiuse_snapshot = snapshot
                 found = snapshot.get("accounts") if isinstance(snapshot, dict) else None
                 accounts = found if isinstance(found, list) else False
             except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
@@ -535,7 +664,6 @@ class Scanner:
         return rows
 
     def quota_scan(self, agents, history, events):
-        self._aiuse = None
         waits = self.quota_waits(history, events)
         firsts = self.quota_first_rows(events)
         sent = {(e.get("agent"), e.get("signature")) for e in events if e.get("action") == "reserved"}
@@ -685,6 +813,9 @@ class Scanner:
         waits[aid] = events[-1]
 
     def scan(self):
+        # A snapshot (including failure) belongs to one tick, shared by both passes.
+        self._aiuse = None
+        self._aiuse_snapshot = None
         self.state.mkdir(parents=True, exist_ok=True)
         with (self.state / "lock").open("a") as lock:
             try:
@@ -801,6 +932,9 @@ def main(argv=None):
     parser.add_argument("--only-agent", action="append", default=[], metavar="UUID",
                         help="restrict both passes to this full agent UUID (repeatable)")
     args = parser.parse_args(argv)
+    if args.transition_below is not None and (
+            not math.isfinite(args.transition_below) or not 0 < args.transition_below <= 100):
+        parser.error("transition-below must be positive, finite and at most 100 (inclusive remaining percent)")
     if args.quota_per_pool < 1:
         parser.error("quota-per-pool must be at least 1")
     if not math.isfinite(args.quota_grace_seconds) or args.quota_grace_seconds < 0:

@@ -27,7 +27,7 @@ SUBST = {"@TARGET@": "claude", "@STATE@": "/st/cpu", "__STATE__": "/st/state", "
          "__INDEX_DIR__": "/i/index", "__LEAD__": "11111111-1111-4111-8111-111111111111",
          "__TRANSITION__": TRANSITION}
 NASTY = "a&b <c> 'd' %x $y \"z\""
-TRANSITION = "40"
+
 # (plist stem, backend) pairs that must refuse with 69 rather than render
 REFUSE = {("dev.herdr.server", "cron"),                     # KeepAlive: cron cannot supervise
           ("com.djbclark.load-watch", "cron")}              # StartInterval 20 s: below cron's minute
@@ -851,3 +851,35 @@ def test_pasted_cron_block_creates_its_lock_dir():
     """A block printed by --no-activate/--dry-run and pasted before ~/.local/state/ade exists must still run (adversary C1)."""
     block, _ = S.render_cron(job(StartInterval=600), home="/h", flock="/usr/bin/flock")
     assert "mkdir -p /h/.local/state/ade && /usr/bin/flock -n /h/.local/state/ade/" in block
+
+
+def test_net_resume_documented_render_argv(tmp_path):
+    import shlex
+    text = (REPO / "docs/net-resume.md").read_text()
+    line = next(line for line in text.splitlines() if line.startswith("bin/ade-sched --set"))
+    args = shlex.split(line)
+    substitutions = dict(args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == "--set")
+    job = S.Job.from_plist(REPO / args[-1], substitutions, ade=tmp_path)
+    assert job.argv[-2:] == ("--transition-below", "40")
+    assert "--apply" in job.argv
+    assert not any("__" in arg for arg in job.argv)
+
+
+@pytest.mark.parametrize("value", [None, "nan", "inf", "-inf", "0", "-1", "101", "40"])
+def test_net_resume_documented_install_validation(monkeypatch, value):
+    import subprocess
+    text = (REPO / "docs/scheduling.md").read_text()
+    recipe = text.split("python3 - <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: calls.append(argv))
+    if value is None:
+        monkeypatch.delenv("TRANSITION_REMAINING_PERCENT", raising=False)
+    else:
+        monkeypatch.setenv("TRANSITION_REMAINING_PERCENT", value)
+    if value == "40":
+        exec(recipe, {})
+        assert calls[0][-3:] == ["__TRANSITION__=40", "install", "config/launchd/com.djbclark.ade-net-resume.plist"]
+    else:
+        with pytest.raises((SystemExit, KeyError)):
+            exec(recipe, {})
+        assert calls == []
