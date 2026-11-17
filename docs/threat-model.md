@@ -388,9 +388,15 @@ Ranked with 4.1 and 4.3: it adds an asset, an entry point and a bypass.
   `--no-usage-statistics` and `--no-performance-crux`; written rules in `docs/mcp-servers.md` (no account writes without the
   operator's yes, page text is data, no secrets copied out); `bin/review-launch` runs with `--strict-mcp-config`, so
   outside-PR review does not get the server.
-* chrome-use (2026-11-17) is the unattended route: an extension holding `chrome.debugger` plus a local CLI, no dialog at all, so
-  the dialog control above does not apply to it; it adds a single-maintainer dependency with a daily self-upgrading binary
-  (`docs/mcp-servers.md`), and forced actions on the operator's own tabs need `--force`.
+* chrome-use (2026-11-17) is the unattended route: an extension holding `chrome.debugger` plus a local CLI, with no dialog at all,
+  so the dialog control above does not apply and every control for it is prose; nothing confines it. Any process as this user
+  with a shell, and any agent with Bash that reads untrusted pages or GitHub text, can list, adopt, script and close tabs in
+  every profile that has the extension. `--force` on a user's tab is a speed bump any caller can pass, not an authorization;
+  `tab adopt` attaches existing tabs. Three update channels can replace code that holds the debugger: a daily self-upgrade of
+  the CLI that runs as a launchd job and skips Gatekeeper, the extension's Web Store auto-update, and a popup "Update CLI"
+  button; `install.sh`'s checksum is fail-open and proves integrity only. The side panel adds an entry point: it starts local
+  agents with page context, and with the full-access option Claude runs with `bypassPermissions`. Each profile that gets the
+  extension adds its accounts to this route (`docs/mcp-servers.md`).
 * Gap. All of these controls are prose except the dialog and the flags; `evaluate_script` stays on; `npx -y ...@latest`
   runs unpinned code with the operator's rights (accepted by the operator's no-pinning rule, `~/CLAUDE.md` item 5; the 4.7 gap stands); remote debugging stays on, so any local process can ask.
 
