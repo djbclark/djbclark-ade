@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""ade-pi-stuck: list live Pi agents and flag any whose billing account is quota-exhausted.
+
+Usage: ade-pi-stuck [--json]
+
+Read-only. Maps each live Pi agent's model to a billing account, cross-references
+aiuse/paseo quota, and flags agents on an account with no headroom. For each stuck
+agent prints a comparable healthy alternative (for a re-handoff). The actual switch
+(archive + relaunch + tell-to-continue) is a separate gated action, not this script.
+
+Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
+others are cross-checked against aiuse pools when a clean mapping exists. The
+supervisor refines this as it learns account->quota mappings.
+"""
+import json, subprocess, sys
+
+def j(cmd, timeout=30):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    r.check_returncode()
+    return json.loads(r.stdout)
+
+def account_of(model):
+    if not model:
+        return "unknown"
+    for pre in ("openrouter/","opencode-go-djbclark/","opencode-go-t-e/","opencode-go/",
+                "clinepass/","cursor/","anthropic/","google/","openai/","deepseek/","qwen/"):
+        if model.startswith(pre):
+            return pre.rstrip("/")
+    return model.split("/")[0] if "/" in model else model
+
+# aiuse pool_id -> Pi billing account prefix.  Deliberately explicit: two
+# pools can share a vendor (openai:codex is the Codex CLI subscription, NOT the
+# Pi prepaid "openai" account; the opencode:go pools are not name-mappable to a
+# single account).  A pool whose provider is not listed here never marks an
+# account exhausted.
+POOL_TO_ACCOUNT = {
+    "openai:openai_api": "openai",
+    "anthropic:subscription": "anthropic",
+    "anthropic:fable": "anthropic",
+    "google:gemini": "google",
+    "google:gemini_argon": "google",
+    "clinepass:default": "clinepass",
+}
+
+
+def quota_by_account(avail):
+    """Return {account: {"headroom": %, "usable": bool, "stale": bool, "pool": id}}.
+
+    Reads aiuse JSON schema >=1.6, whose pools live in the "available" array
+    (older drafts used a "pools" dict).  The *worst* pool for an account wins.
+    """
+    pools = avail.get("available")
+    if pools is None:
+        pools = list((avail.get("pools") or {}).values())
+    out = {}
+    for p in pools or []:
+        if not isinstance(p, dict):
+            continue
+        acct = POOL_TO_ACCOUNT.get(str(p.get("pool_id")))
+        if not acct and str(p.get("pool_id")) == "opencode:go":
+            # One pool_id, three billing accounts; aiuse's account field names
+            # them (djbclark / t-e / dclark) and Pi prefixes them opencode-go-<acct>.
+            name = p.get("account")
+            if name:
+                acct = f"opencode-go-{name}"
+        if not acct:
+            continue
+        hr = p.get("headroom_percent")
+        usable = p.get("usable_now", True)
+        stale = bool(p.get("stale"))
+        rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
+        prev = out.get(acct)
+        if prev is None or (hr is not None and (prev["headroom"] is None or hr < prev["headroom"])):
+            out[acct] = rec
+    return out
+
+
+def low_effort(model):
+    return any(k in (model or "") for k in ("luna","flash","haiku","mini","lite","4o-mini"))
+
+def alt(model):
+    return ("pi/opencode-go-t-e/deepseek-v4.1-flash" if low_effort(model)
+            else "pi/opencode-go-t-e/deepseek-v4-pro")
+
+def main():
+    as_json = "--json" in sys.argv
+    agents = j(["paseo","ls","-g","--json"])
+    rows = agents if isinstance(agents, list) else agents.get("agents", [])
+    # Operator-known baseline: OpenAI prepaid was at $0.  Treat it as suspect
+    # only until a fresh aiuse reading says otherwise (a stale/absent reading
+    # must not flap every openai agent).
+    exhausted = set()
+    accounts = {}
+    try:
+        avail = j(["aiuse","--available","--json"])
+        accounts = quota_by_account(avail)
+        fresh = avail.get("fresh", True)
+        for acct, rec in accounts.items():
+            bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
+            if bad and (fresh or not rec["stale"]):
+                exhausted.add(acct)
+        if "openai" not in accounts:
+            exhausted.add("openai")  # baseline until quota is readable
+    except Exception:
+        exhausted = {"openai"}
+    out = []
+    for a in rows:
+        prov = a.get("provider") or ""
+        if not prov.startswith("pi"):
+            continue
+        # paseo ls provider is "pi/<account>/<model>" (e.g. pi/openai/gpt-6.1-sol)
+        rest = prov[3:] if prov.startswith("pi/") else prov
+        model = rest
+        acct = account_of(rest)
+        status = a.get("status") or ""
+        stuck = acct in exhausted and status not in ("closed", "archived")
+        q = accounts.get(acct) or {}
+        out.append({"id": a.get("id"), "name": a.get("name"), "model": model,
+                    "account": acct, "status": status, "stuck": stuck,
+                    "headroom_percent": q.get("headroom"),
+                    "quota_stale": q.get("stale"),
+                    "alternative": alt(model) if stuck else None})
+    stuck = [o for o in out if o["stuck"]]
+    if as_json:
+        print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
+                          "exhausted": sorted(exhausted)}, indent=1))
+    else:
+        for o in out:
+            hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
+            print(f"{'STUCK' if o['stuck'] else 'ok   '}  {o['account']:22} {o['status']:9} {hr}% {o['model']:38} {o['id']}")
+            if o["stuck"]:
+                print(f"        -> switch to {o['alternative']}")
+        print(f"\n{len(stuck)} stuck / {len(out)} live Pi agents")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
