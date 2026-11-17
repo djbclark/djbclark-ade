@@ -69,6 +69,51 @@ a tab over raw CDP is untested here; do either only on the operator's yes for a 
    report an unexpected prompt; switch remote debugging off when it is not needed.
 5. Never kill, reload or restart Chrome without the operator's yes (a restart closes windows).
 
+## chrome-use: unattended tab control without Chrome's dialog (added 2026-11-17)
+
+Why: the "Allow remote debugging?" dialog above blocks any connection while the operator is away, and Chrome offers no
+way to skip it (upstream [chrome-devtools-mcp#825](https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/825) is open).
+[chrome-use](https://github.com/leeguooooo/chrome-use) (Apache-2.0, single maintainer, forked from vercel-labs/agent-browser)
+is a Chrome extension plus a local CLI over native messaging: no port, no token, no dialog. It is a CLI, not a registered MCP
+server (it can run `chrome-use mcp`; nothing here registers it). `chrome-devtools-mcp` stays registered as the attended backup.
+
+**What is installed (operator, 2026-11-17).** (1) The extension from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/chrome-use/knfcmbamhjmaonkfnjhldjedeobeafmk), version 0.5.108,
+added by the operator in the Default profile. (2) The CLI, `~/.local/bin/chrome-use` 1.5.292, from the project's `install.sh`
+(read first; it verifies a checksum) run with `AGENT_BROWSER_NO_SKILL=1 AGENT_BROWSER_NO_SETUP=1`. (3)
+`chrome-use extension install --no-profile` wrote the native-messaging host manifests. The policy-profile route is not used: it
+puts Chrome in "managed by your organization" mode and locks the secure-DNS setting. (4) `extension install --all-profiles`
+opens the Web Store page in every other profile; the operator presses "Add to Chrome" in each (the extension runs per
+profile; `chrome-use browsers` lists which are connected). A source clone for reading is at `~/src/chrome-use`.
+
+**Observed 2026-11-17.** `chrome-use tab list --all` listed 29 tabs in 2 windows of the Default profile, read-only, with no
+dialog. Acting on a tab the session did not create needs `--tab <handle> --force` (or `tab close <handle> --force`); closing the
+operator's named prime95 tab that way was verified (`Tab closed`, forced-action warning, tab gone from the next listing). No
+discard or freeze command was found. The extension holds the `debugger` permission and reads the Google profile email.
+
+**Surprises to re-check after every upgrade.** (a) The installer wrote a `chrome-use` skill into `~/.claude/skills`,
+`~/.agents/skills` and `~/.cursor/skills` although `AGENT_BROWSER_NO_SKILL=1` was set; its description tells agents to prefer
+chrome-use over every other web tool, which breaks the Firecrawl-first rule. It was deleted by hand; delete again if it returns,
+and add chrome-use as a skill only through this repo. (b) The CLI upgrades itself daily by default (`CHROME_USE_AUTO_UPGRADE=0`
+turns that off; the repo's no-pinning rule leaves it on). (c) `extension install` also wrote native-host manifests into the
+Chrome Beta, Canary and Edge support directories. (d) `chrome-use extension connect --silent` removes the "controlled by
+automated test software" bar by restarting Chrome: never without the operator's yes.
+
+**Side panel and the Pi gap.** The panel lists Codex and Claude Code (both chat fine), Pi and Hermes. Pi shows "CLI metadata
+inspection timed out": the panel runs `pi --mode rpc --no-session --no-mcp --no-tools --no-approve`, asks `get_available_models`
+and gives up after 10 s (`cli/src/agent_panel/inspection.rs:535` at commit `3a670cb`); the same probe took 11.5 s here and
+returned 913 models. A Pi chat in the panel fails with "ADE Auto could not select an available model"
+(`pi-extensions/dynamic-defaults/index.mjs`, `FIXED_ERROR`) because the panel starts `ade/auto`. The Pi lead's reading: `ade`
+is an intentional pseudo-provider, so `~/.pi/agent/settings.json` is not corrupt; a sourced answer on the failure path was still
+pending. Do not use the panel's "Preview changes": it rewrites each agent's own settings file (`~/.claude/settings.json`,
+`~/.codex/config.toml`, `~/.pi/agent/settings.json`).
+
+**Vetting (2026-11-17).** Neither Playwriter nor chrome-use was audited at source level. Playwriter needs a click per tab, sends
+telemetry despite its store text, and its listing differs from its manifest. chrome-use asks only optional host permissions, but
+it is a young single-maintainer fork whose author sells paid setup help and sponsorship by email (no paid tier of the software);
+see the research notes in the PR. Risks are the same class as the DevTools section: `chrome.debugger` on a logged-in profile,
+the browser bypassing the repo's write gates, and page text as untrusted data. All the rules of that section apply unchanged.
+
 ## Firecrawl developer search (2026-10-24)
 
 The stock Firecrawl API mounts `/v2/search/developer` only when `RESEARCH_PROXY_URL` is set and then forwards to Firecrawl's

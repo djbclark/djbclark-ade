@@ -388,6 +388,9 @@ Ranked with 4.1 and 4.3: it adds an asset, an entry point and a bypass.
   `--no-usage-statistics` and `--no-performance-crux`; written rules in `docs/mcp-servers.md` (no account writes without the
   operator's yes, page text is data, no secrets copied out); `bin/review-launch` runs with `--strict-mcp-config`, so
   outside-PR review does not get the server.
+* chrome-use (2026-11-17) is the unattended route: an extension holding `chrome.debugger` plus a local CLI, no dialog at all, so
+  the dialog control above does not apply to it; it adds a single-maintainer dependency with a daily self-upgrading binary
+  (`docs/mcp-servers.md`), and forced actions on the operator's own tabs need `--force`.
 * Gap. All of these controls are prose except the dialog and the flags; `evaluate_script` stays on; `npx -y ...@latest`
   runs unpinned code with the operator's rights (accepted by the operator's no-pinning rule, `~/CLAUDE.md` item 5; the 4.7 gap stands); remote debugging stays on, so any local process can ask.
 
