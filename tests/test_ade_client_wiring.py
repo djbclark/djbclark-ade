@@ -496,6 +496,13 @@ def test_stdio_missing_wrong_args_wrong_type_disabled(tmp_path, roster):
     st, detail = mcp(tmp_path, roster)["claude/chrome-devtools"]
     assert st == "warn" and "wrong-command" in detail and "s3cret" not in detail
     assert "claude mcp add --scope user chrome-devtools -- npx -y chrome-devtools-mcp@latest" in detail
+    assert "re-add it" in detail
+    write_claude(tmp_path, {"chrome-devtools": {"type": "stdio", "command": "node", "args": CDT_ARGS}})
+    assert "wrong-command" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]  # wrong command, right args
+    write_claude(tmp_path, {"chrome-devtools": {"type": "stdio", "command": "npx", "args": ["--token=s3cret"]}})
+    assert "s3cret" not in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
+    write_claude(tmp_path, {"chrome-devtools": "nope"})
+    assert "wrong-type" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
     write_claude(tmp_path, {})
     assert "missing" in mcp(tmp_path, roster)["claude/chrome-devtools"][1]
     write_claude(tmp_path, {"chrome-devtools": {"type": "http", "url": "http://x/mcp"}})
@@ -511,6 +518,10 @@ def test_stdio_missing_wrong_args_wrong_type_disabled(tmp_path, roster):
     'command="npx"\nargs=["$(id)"]\nclients=["claude"]\n',
     'command="npx"\nargs=[1]\nclients=["claude"]\n',
     'command="npx"\nargs=[]\nclients=["codex"]\n',
+    'command="npx"\nargs="x"\nclients=["claude"]\n',
+    'command="npx"\nargs={a=1}\nclients=["claude"]\n',
+    'command=1\nargs=[]\nclients=["claude"]\n',
+    'command="npx"\nargs=["x\\n"]\nclients=["claude"]\n',
     'command="npx"\nurl="http://x/mcp"\nclients=["claude"]\n',
 ])
 def test_stdio_roster_validation(tmp_path, body):

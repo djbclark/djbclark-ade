@@ -204,7 +204,7 @@ _LOADERS: dict[str, Callable[[Path], tuple[Path, dict[str, Any] | None]]] = {
 
 
 def _judge_stdio(sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, str]:
-    """Claude Code stdio entry: (state, detail) with the same states as ``_judge``."""
+    """Claude Code stdio entry: (state, detail); ``_judge``'s states plus ``wrong-command``."""
     q = shlex.quote
     want = " ".join([q(cmd), *(q(a) for a in args)])
     add = f"claude mcp add --scope user {q(sid)} -- {want}"
@@ -219,9 +219,10 @@ def _judge_stdio(sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, 
         return "wrong-type", f"entry type is {shown}, want 'stdio'; run: {swap}"
     if entry.get("enabled") is False:
         return "disabled", f"present but enabled = false; set enabled = true for {sid}"
-    if entry.get("command") != cmd or entry.get("args") != args:
+    if entry.get("command") != cmd or entry.get("args", []) != args:
         # Command and args only: never print env or other keys (they can hold secrets).
-        return "wrong-command", f"command or args differ from the roster; run: {swap}"
+        note = "; the entry has env, re-add it" if "env" in entry and entry["env"] else ""
+        return "wrong-command", f"command or args differ from the roster{note}; run: {swap}"
     return "ok", f"registered: {want}"
 
 
@@ -275,7 +276,10 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
             sid = r["id"]
             if "command" in r:
                 if servers is None:
-                    out[tui].append(("mcp", f"{tui}/{sid}", "warn", f"missing: {path} absent (TUI not set up?)"))
+                    add = "claude mcp add --scope user " + shlex.quote(sid) + " -- " + " ".join(
+                        shlex.quote(a) for a in [r["command"], *r.get("args", [])])
+                    out[tui].append(("mcp", f"{tui}/{sid}", "warn",
+                                     f"missing: {path} absent (TUI not set up?); {add}"))
                     continue
                 state, detail = _judge_stdio(sid, r["command"], r.get("args", []), servers.get(sid))
                 out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",

@@ -384,12 +384,12 @@ Ranked with 4.1 and 4.3: it adds an asset, an entry point and a bypass.
 * Entry point. Page content. Any page, PR, issue or bot comment an agent opens can carry an instruction (4.1).
 * Bypass. A click, form submit or `evaluate_script` in Chrome never passes `adversary_marker_gate.py`, the `gh` shim or
   `upstream_review_gate.py`; GitHub attributes it to `djbclark`, which the Trust rule treats as the operator's own.
-* Control. The "Allow remote debugging?" dialog per connection (it does not name the client); `--redact-network-headers`,
+* Control. The "Allow remote debugging?" dialog per connection (observed 2026-11-16 not to name the client); `--redact-network-headers`,
   `--no-usage-statistics` and `--no-performance-crux`; written rules in `docs/mcp-servers.md` (no account writes without the
   operator's yes, page text is data, no secrets copied out); `bin/review-launch` runs with `--strict-mcp-config`, so
   outside-PR review does not get the server.
 * Gap. All of these controls are prose except the dialog and the flags; `evaluate_script` stays on; `npx -y ...@latest`
-  runs unpinned code with the operator's rights (accepted, 4.7); remote debugging stays on, so any local process can ask.
+  runs unpinned code with the operator's rights (accepted by the operator's no-pinning rule, `~/CLAUDE.md` item 5; the 4.7 gap stands); remote debugging stays on, so any local process can ask.
 
 ## 5. Out of scope and accepted risks
 
