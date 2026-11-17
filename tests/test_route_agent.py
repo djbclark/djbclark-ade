@@ -839,12 +839,13 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
 
     def test_codex_takes_only_frontier_and_the_plentiful_everyday_kinds(self):
         """2026-10-25 widened this: judgment, code, bulk and mechanical only while plentiful (see
-        TestCodexEverydayKinds); every other kind stays off codex at any headroom."""
+        TestCodexEverydayKinds); research joined them 2026-11-16 (it has no vendor-specific
+        capability limit). Every other kind stays off codex at any headroom."""
         q = {s.name: {"remaining": 0.0} for s in r.SERVICES}
         q["codex"] = {"remaining": 100.0}
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical"):
+            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical", "research"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
@@ -1046,22 +1047,24 @@ class TestRoutingPolicyToml(unittest.TestCase):
     EXPECTED: ClassVar[dict[str, dict[str, Any]]] = {
         "claude": {
             "cli": "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)",
-            "good_at": {"judgment": 1, "frontier": 2, "code": 12},
+            "good_at": {"judgment": 1, "frontier": 2, "code": 12, "research": 10},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"judgment": "opus --effort high", "frontier": "fable --effort high",
-                       "code": "sonnet --effort high"},
+                       "code": "sonnet --effort high", "research": "opus --effort high"},
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
             "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds "
                     "while quota is plentiful)"),
-            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20},
+            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20,
+                        "research": 13},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"frontier": "gpt-6-astra --effort high", "judgment": "gpt-6.1-sol --effort high",
                        "code": "gpt-6.1-sol --effort medium",
-                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
+                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low",
+                       "research": "gpt-6.1-sol --effort high"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
         "cursor-auto": {
@@ -1537,7 +1540,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
     options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of
     the binding headroom; astra stays frontier-only; ranking is the normal one."""
 
-    EVERYDAY = ("judgment", "code", "bulk", "mechanical")
+    EVERYDAY = ("judgment", "code", "bulk", "mechanical", "research")
 
     def codex(self):
         return r.BY_NAME["codex"]
@@ -1549,7 +1552,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         q = {"codex": {"remaining": 100.0}}
         for kind in self.EVERYDAY:
             self.assertTrue(self.codex().eligible(kind, q), kind)
-        for kind in ("research", "github", "api-only", "realtime-web"):
+        for kind in ("github", "api-only", "realtime-web"):
             self.assertFalse(self.codex().eligible(kind, q), kind)
         self.assertTrue(self.codex().eligible("frontier", q))
 
@@ -1640,7 +1643,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         pub = r.policy_public()
         self.assertEqual(pub["routing"]["plenty_min"], 20.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
-        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical"])
+        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical", "research"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)

@@ -237,7 +237,7 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 name = "claude"
 pool_family = "default"
 cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
-good_at = { judgment = 1, frontier = 2, code = 12 }
+good_at = { judgment = 1, frontier = 2, code = 12, research = 10 }
 billing = "subscription"
 note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
 judgment_tier = true
@@ -247,7 +247,7 @@ access = "cli-only"
 # This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
 # Haiku lookups go through the Agent tool, not a dispatched slice. Fable at xhigh is never
 # suggested: it remains an operator-approved run (2026-10-18).
-models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
+models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high", research = "opus --effort high" }
 
 # The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
 # "omp credits", provider `omp`). The omp executable is retired (2026-11-08); the intended
@@ -283,7 +283,7 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 [[service]]
 name = "codex"
 cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
-good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20 }
+good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20, research = 13 }
 billing = "subscription"
 note = "frontier: only a slice that really needs astra to look it over; judgment/code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
 judgment_tier = true
@@ -314,8 +314,8 @@ access = "cli-only"
 # so re-plan before each launch (skills/model-routing D5). max_parallel = 1 keeps one codex slice per `plan`.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
 # and the lost in-flight rule await re-calibration from `route_agent.py calibrate`.
-plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
-models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
+plenty_kinds = ["judgment", "code", "bulk", "mechanical", "research"]
+models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low", research = "gpt-6.1-sol --effort high" }
 
 # opencode-zen-free is NOT a separate provider — it is the free subset of
 # opencode-zen's models. Kept as its own row because the free and paid
@@ -405,12 +405,12 @@ models = { code = "zai/glm-5.3-flash --effort high", mechanical = "zai/glm-5.3-f
 [[service]]
 name = "cursor-cloud"
 cli = "cursor-cloud (Cursor Cloud Agents)"
-good_at = { code = 24, bulk = 26, mechanical = 18 }
+good_at = { code = 24, bulk = 26, mechanical = 18, research = 22 }
 billing = "subscription"
 note = "Cursor Cloud Agent: leaves the Mac, pushes a branch, lead opens the PR; API price on the Cursor pool"
 shares_pool = "cursor"
 max_parallel = 2
-models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
+models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5", research = "claude-sonnet-5-5" }
 
 # The Google AI Pro plan's Gemini 4 Argon window: frontier FALLBACK only (operator 2026-10-31, PR 224). Retired with the
 # agy TUI on 2026-11-06 and restored 2026-11-07 (slim-down E7) on Paseo's antigravity provider, because tendcf and nix2cf
@@ -422,7 +422,7 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 [[service]]
 name = "antigravity-argon"
 cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable)"
-good_at = { frontier = 5 }
+good_at = { frontier = 5, research = 16 }
 billing = "subscription"
 note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
 judgment_tier = true
@@ -434,12 +434,12 @@ access = "cli-only"
 agent = "antigravity"
 # Paseo's antigravity provider folds the effort into the model id (`paseo provider models antigravity`: gemini-4-argon-high);
 # the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and the deleted acp-dispatch used to map a bare one, so write the full id.
-models = { frontier = "gemini-4-argon-high" }
+models = { frontier = "gemini-4-argon-high", research = "gemini-4-argon-high" }
 
 [[service]]
 name = "clinepass"
 cli = "cline-pass API (Hermes/Dann substrate; no TUI)"
-good_at = { bulk = 40, code = 40, mechanical = 40 }
+good_at = { bulk = 40, code = 40, mechanical = 40, research = 38 }
 billing = "subscription"
 # An API-key bundle we hold, so Hermes may call it directly. The
 # old blanket never_bulk rule was retired 2026-08-24 in favour of
@@ -448,7 +448,7 @@ billing = "subscription"
 note = "Hermes-usable API pool; watch the burn alert"
 access = "api"
 agent = "pi"
-models = { bulk = "clinepass/cline-pass/deepseek-v4.1-flash", mechanical = "clinepass/cline-pass/deepseek-v4.1-flash", code = "clinepass/cline-pass/glm-5.3" }
+models = { bulk = "clinepass/cline-pass/deepseek-v4.1-flash", mechanical = "clinepass/cline-pass/deepseek-v4.1-flash", code = "clinepass/cline-pass/glm-5.3", research = "clinepass/cline-pass/glm-5.3" }
 
 # The paid half of the same provider. Retired with the prepaid tier, not
 # because the provider is unusable — restoring it is a top-up decision.

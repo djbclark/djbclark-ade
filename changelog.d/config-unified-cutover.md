@@ -5,3 +5,4 @@
 ### Fixed
 
 - Routed manual ClinePass dispatches through configured Pi with fully namespaced model IDs, kept the pool manual-only, made unified tier span scanning linear and TOML-string-aware, preserved writer reason metadata and exact suffix bytes, and made projection drift check parsed tier equality as well as outside-subtree bytes. (#766)
+- Gave `research` a profile on every live pool, including claude and codex, which had none: no vendor here lacks research capability, and the two strongest pools were the ones excluded. Codex's `research` is also `plenty_kinds`-gated like its other everyday kinds. Kept `ade-harden` and `ade-github-setup` usable when `config/ade.toml` exists without their domain, instead of refusing on mere presence. (#766)
