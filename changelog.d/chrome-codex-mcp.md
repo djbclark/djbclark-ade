@@ -1,1 +1,3 @@
-Chrome DevTools MCP is now required for Codex as well as Claude Code. The wiring doctor checks both clients' stdio commands, arguments, transport and enablement, and prints the correct client-specific repair command without exposing configuration secrets.
+### Fixed
+
+- Registered Chrome DevTools MCP for Codex alongside Claude Code, and extended the wiring doctor to check both clients' stdio commands, arguments, transport and enablement with client-specific, secret-safe repair commands. (#774)
