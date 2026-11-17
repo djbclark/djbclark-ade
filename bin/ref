@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Usage: ref [--dir DIR] <BOT>
+
+Prints the next Ref line, e.g. "Ref: ADE-2s". One GLOBAL counter is shared by
+all bots, encoded in base 36 (0-9a-z) and never reset, so the id is unique
+across every bot and cross-references are unambiguous.
+
+The <BOT> argument is normalized the same way every caller should treat a
+prefix: uppercase, then strip spaces and hyphens. "Chief of Staff" -> CHIEFOFSTAFF.
+
+The refs directory defaults to ~/.local/state/djbclark-ade/refs (this Mac;
+Grok Bot on its own box uses its own HOME's path). Override with --dir or the
+REFS_DIR environment variable (the flag wins) so tests can use a throwaway
+copy without consuming real ids.
+
+issued.log is append-only. New lines are tab-separated:
+
+    <id>\t<BOT>\t<ISO-8601 timestamp with offset>\t<agent hint or empty>
+
+Older 2-column lines (<id>\t<BOT>) must be left as-is.
+"""
+import fcntl
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+DEFAULT_DIR = os.path.expanduser("~/.local/state/djbclark-ade/refs")
+DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+USAGE = "usage: ref [--dir DIR] <BOT>   (prints next global base-36 Ref line)"
+
+
+def normalize_bot(name: str) -> str:
+    return name.upper().replace(" ", "").replace("-", "")
+
+
+def parse_args(argv):
+    d = os.environ.get("REFS_DIR") or DEFAULT_DIR
+    args = list(argv[1:])
+    if args and args[0] in ("--dir", "-d"):
+        if len(args) < 2:
+            sys.exit(USAGE)
+        d, args = args[1], args[2:]
+    elif args and args[0].startswith("--dir="):
+        d, args = args[0].split("=", 1)[1], args[1:]
+    if not args or args[0].startswith("-") or len(args) > 1:
+        sys.exit(USAGE)
+    return d, normalize_bot(args[0])
+
+
+def agent_hint() -> str:
+    for key in ("REF_AGENT", "PASEO_AGENT_ID", "AGENT_ID", "CURSOR_CONVERSATION_ID"):
+        val = os.environ.get(key)
+        if val and val.strip():
+            return re.sub(r"[\t\n\r]+", " ", val).strip()[:120]
+    return ""
+
+
+def base36(n: int) -> str:
+    if n <= 0:
+        return "0"
+    s = ""
+    while n:
+        s = DIGITS[n % 36] + s
+        n //= 36
+    return s
+
+
+def atomic_write(path: str, data: str) -> None:
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-count-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def main() -> None:
+    d, bot = parse_args(sys.argv)
+    os.makedirs(d, exist_ok=True)
+    lock_path = os.path.join(d, ".lock")
+    count_path = os.path.join(d, "GLOBAL.count")
+    log_path = os.path.join(d, "issued.log")
+    with open(lock_path, "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            raw = open(count_path).read().strip() if os.path.exists(count_path) else ""
+            n = int(raw) if raw else 0
+        except ValueError:
+            sys.exit(f"ref: corrupt counter {count_path!r}")
+        n += 1
+        ident = base36(n)
+        atomic_write(count_path, str(n) + "\n")
+        ts = datetime.now(ET).isoformat(timespec="seconds")
+        line = f"{ident}\t{bot}\t{ts}\t{agent_hint()}\n"
+        with open(log_path, "a") as log:
+            log.write(line)
+            log.flush()
+            os.fsync(log.fileno())
+    print(f"Ref: {bot}-{ident}")
+
+
+if __name__ == "__main__":
+    main()
