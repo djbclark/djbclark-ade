@@ -455,14 +455,14 @@ class Scanner:
                         "effective_left_percent", "ceiling_headroom_percent"):
                 if w.get(key) is not None and not self.percent_number(w[key]):
                     return None
+            rem = w.get("headroom_percent", w.get("remaining_percent"))
+            if rem is None:
+                return None  # never invent a model ceiling from used_percent
             # note-exhausted overlays state without editing numeric fields. Only
             # selected own/shared/ceiling windows reach here, so foreign pools stay isolated.
             if w.get("state") == "exhausted":
                 values.append(0.0)
                 continue
-            rem = w.get("headroom_percent", w.get("remaining_percent"))
-            if rem is None:
-                return None  # never invent a model ceiling from used_percent
             if w.get("measurement_frozen") is True:
                 return None
             values.append(float(rem))
