@@ -3014,7 +3014,8 @@ class JobAdmission:
     An adapter must exclude new launches, observe this job's running work,
     and stop future triggers without killing work. The launchd adapter (`launchd_admission`) does that for a loaded
     job only when its installed plist routes every launch through `bin/ade-job-run` (the per-label admission lock);
-    otherwise it admits only jobs that are not loaded, and every other backend keeps the conservative default.
+    otherwise it admits only jobs that are not loaded. Paseo creation/adoption uses vacuous
+    quiescence evidence: those actions never interrupt existing runs; removal stays unproven.
     """
 
     all_launch_paths: bool = False
@@ -3648,6 +3649,9 @@ def reconcile(
     adapter (``launchd_admission``) when no explicit ``admission`` is given, the backend is launchd and activation is on:
     absent or provably-ADE unloaded jobs are admitted, loaded jobs defer unless wrapper-routed and provably ADE's (W21c: reload/removal under the label's exclusive admission lock); every other case keeps the conservative default.
 
+    Native Paseo install/adopt-ledger is admitted independently of host state; removal
+    defers because active-run safety is unproven. Explicit admission still wins.
+
     Exit 0 when the plan is clean (dry-run) or every touch succeeded; 1 on a failed
     mutation or blocked step; 6 when work is durably deferred; 2 when ``--yes`` refuses host writes on a non-write
     backend (planned ``refuse-backend`` counted even alongside paseo work).
@@ -3682,7 +3686,7 @@ def reconcile(
     native_install = False  # True: installs go through install_launchd_native (create-exclusive + bootstrap, no bootout)
     if admission is None and native_admission and b.name == "launchd" and activate:
         native_install = True
-        # The one native adapter (launchd); systemd/cron/paseo keep the conservative default. An explicit
+        # The host native adapter (launchd); systemd/cron keep the conservative default. An explicit
         # `admission` always wins, and no environment or CLI switch reaches this branch.
         nc = _ctx(b, env, overrides)
 
@@ -3761,10 +3765,25 @@ def reconcile(
             wrapped=wrapped_provenance, state_dir=state_dir,
         )
 
+        admission = launchd_native
+
+    native_paseo = native_admission and (admission is None or native_install)
+    if native_paseo:
+        host_admission = admission
+
         def admission(step: ReconcileStep) -> Any:  # noqa: F811 - the resolved adapter
             if _step_targets_paseo(step):
-                return contextlib.nullcontext(JobAdmission())
-            return launchd_native(step)
+                if step.action in ("install", "adopt-ledger"):
+                    # No existing run is touched: create waits for cron (no --run-now),
+                    # and adoption writes only the ownership ledger. These obligations
+                    # are vacuously satisfied, not observations of active agent state.
+                    return contextlib.nullcontext(JobAdmission(
+                        all_launch_paths=True, activity="idle", triggers_drained=True,
+                    ))
+                return contextlib.nullcontext(JobAdmission(
+                    hold="Paseo removal deferred; native schedule active-run safety is unproven",
+                ))
+            return host_admission(step) if host_admission else contextlib.nullcontext(JobAdmission())
 
     if live is None:
         try:
@@ -3922,7 +3941,9 @@ def reconcile(
                 previous = entries.get(step.name)
                 # A missing label in a stale/incomplete scan is no absence proof.
                 # Even an initial systemd install may remove a cron trigger.
-                disruptive = step.action in ("install", "remove")
+                disruptive = step.action in ("install", "remove") or (
+                    step.action == "adopt-ledger" and native_admission and _step_targets_paseo(step)
+                )
                 evidence: Any = None
                 if step.name in deferred_names:
                     reason = "earlier operation for this logical job deferred"
@@ -3996,6 +4017,12 @@ def reconcile(
                             prev if isinstance(prev, dict) else None,
                             new_label=label,
                         )
+                        if native_admission:
+                            # Commit adoption while the selected (including explicit)
+                            # admission context is still held, just like native install.
+                            ledger["generation"] = generation
+                            ledger["entries"] = entries
+                            save_jobs_ledger(ledger, state_dir, env=env)
                         mutated = True
                         row["action"] = "adopted"
                         results.append(row)
