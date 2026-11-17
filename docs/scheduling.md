@@ -563,7 +563,10 @@ for these actions, rather than measurements of running agents.
 Native `remove` remains deferred (exit 6) with a Paseo-specific active-run safety
 reason. The adapter does not prove whether deletion kills, preserves or drains
 an active run and issues no delete. Renames remain gated behind old-identity
-removal. An explicitly supplied admission callback still takes precedence.
+removal. An explicitly supplied admission callback still takes precedence for creation,
+adoption and removal with native admission enabled. Its denial prevents adoption;
+the adoption ownership commit occurs before its context exits. Non-native adoption
+keeps its existing ledger-only behavior.
 Host adapters and dry-run planning retain their existing behavior.
 
 Sources: [official schedules](https://github.com/getpaseo/paseo/blob/main/public-docs/schedules.md)

@@ -3942,7 +3942,7 @@ def reconcile(
                 # A missing label in a stale/incomplete scan is no absence proof.
                 # Even an initial systemd install may remove a cron trigger.
                 disruptive = step.action in ("install", "remove") or (
-                    step.action == "adopt-ledger" and native_paseo and _step_targets_paseo(step)
+                    step.action == "adopt-ledger" and native_admission and _step_targets_paseo(step)
                 )
                 evidence: Any = None
                 if step.name in deferred_names:
@@ -4017,6 +4017,12 @@ def reconcile(
                             prev if isinstance(prev, dict) else None,
                             new_label=label,
                         )
+                        if native_admission:
+                            # Commit adoption while the selected (including explicit)
+                            # admission context is still held, just like native install.
+                            ledger["generation"] = generation
+                            ledger["entries"] = entries
+                            save_jobs_ledger(ledger, state_dir, env=env)
                         mutated = True
                         row["action"] = "adopted"
                         results.append(row)
