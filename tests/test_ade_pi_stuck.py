@@ -13,6 +13,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "bin" / "ade-pi-stuck"
+NL = chr(10)
 
 AGENTS = [
     {"id": "a1", "name": "openai agent", "provider": "pi/openai/gpt-6.1-sol", "status": "running"},
@@ -39,10 +40,13 @@ def _run(tmp_path: Path, pools=None, aiuse_rc: int = 0, agents=None):
     (bin_dir / "paseo").write_text(
         "#!/bin/sh\ncat <<'JSON'\n%s\nJSON\n" % json.dumps(agents if agents is not None else AGENTS))
     (bin_dir / "paseo").chmod(0o755)
-    aiuse = "#!/bin/sh\nexit %d\n" % aiuse_rc
+    lines = ["#!/bin/sh"]
     if pools is not None:
-        aiuse = "#!/bin/sh\ncat <<'JSON'\n%s\nJSON\n" % json.dumps(pools)
-    (bin_dir / "aiuse").write_text(aiuse)
+        lines.append("cat <<'JSON'")
+        lines.append(json.dumps(pools))
+        lines.append("JSON")
+    lines.append("exit %d" % aiuse_rc)                       # the exit code is honoured with or without a reading
+    (bin_dir / "aiuse").write_text(NL.join(lines) + NL)
     (bin_dir / "aiuse").chmod(0o755)
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
     r = subprocess.run([str(CLI), "--json"], env=env, capture_output=True, text=True)

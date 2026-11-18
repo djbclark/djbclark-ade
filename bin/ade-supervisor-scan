@@ -173,7 +173,8 @@ elif [ -n "$msg" ] && [ -n "$send_to" ]; then
     printf '%s to %s: %s\n' "$(now)" "$send_to" "$msg" >>"$LOG"
     paseo send --json --no-wait -- "$send_to" "$msg" >>"$LOG" 2>&1
     rc=$?
-    # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
+    # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case: ~/CLAUDE.md item 10 and
+    # docs/orchestration-practices.md 5a state that contract; ADE 10 relies on it for every send).
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
         send_failed=1
         printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
