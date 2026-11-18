@@ -57,8 +57,21 @@ B1. The Linux workflow `.github/workflows/nats-recovery.yml` resolves current
 released server/CLI and maintained clients, creates a real report/artifact and
 inbox receipt, takes network snapshots, restores to another broker, verifies
 the retained records/bytes, and checks generation/corruption/destination
-refusals. It uses two processes on one CI host. Actual off-host backup and
-two-host live recovery remain rollout acceptance work until recorded.
+refusals. It uses two processes on one CI host. Actual off-host backup,
+isolated restore, independent-generation refusal and production restart were
+subsequently exercised in the approved disposable pilot; see the dated
+[rollout evidence](nats-rollout-evidence.md) for scope and measurements.
+
+B1a. Client rollback must retain broker data, local outboxes and enrollment
+markers. Quiesce enrolled writers before selecting a previous verified bundle;
+never restore an old ownership database into production. Inspect
+`paseo plugin ls ade-coord --json` before changing plugin state: enable only
+when disabled, and reload an already-running plugin. Enable is not idempotent
+on the exercised daemon. Reconcile an uncertain restore from current
+state/results rather than replaying the rollback. Verify retained authority,
+reports, artifacts, local journals and claim projections before restoring
+the saved controller settings. Disabling the plugin cannot grant legacy
+ownership or bypass an enrolled claim's authority checks.
 
 B2. Primary API evidence: native [backup/restore command definitions](https://github.com/nats-io/natscli/blob/main/cli/backup_command.go),
 [environment flags](https://github.com/nats-io/natscli/blob/main/nats/main.go),

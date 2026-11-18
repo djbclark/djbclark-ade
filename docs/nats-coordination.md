@@ -1,6 +1,9 @@
 # Opt-in NATS coordination adapters (issue 779)
 
-This source is uninstalled and disabled until the controlled pilot is approved.
+Installation and enrollment are opt-in and require the applicable rollout grant.
+The approved dedicated pilot has exercised native Mac installation/reload;
+existing workstreams remain unenrolled. See the dated
+[rollout evidence and remaining gates](nats-rollout-evidence.md).
 Unenrolled paths retain legacy claims, succession, completion and prompt-ack
 behavior. Enrolled acquisition and authority decisions fail closed on missing
 configuration, unavailable broker, stale owner, resource mismatch or generation
@@ -363,8 +366,10 @@ send an agent ID blindly to another daemon.
 
 Plugin tests use the audited beta.2 strict shape, real signal-resistant local
 children in Linux CI, synthetic native wake transports and real broker shared
-operation/receipt fences. No real agent is messaged during implementation. Actual
-Paseo wake/retirement and two-host behavior remain rollout evidence for root.
+operation/receipt fences. Those tests do not message real agents. Separately,
+the approved live pilot exercised native Mac wake/retirement and physical
+two-host protocol delivery; [the evidence record](nats-rollout-evidence.md)
+distinguishes them from the remaining native cross-host pilot.
 
 ## Queued-old-wake provider-open fence
 

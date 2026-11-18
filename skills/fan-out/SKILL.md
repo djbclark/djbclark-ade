@@ -31,6 +31,9 @@ in mechanical/probe briefs even when a deliberate READY-only task uses
 `--no-footer`. If a caller already lost the handle, inspect the named owned
 PID or durable result/exit artifact; never restart a possibly live operation
 or replace its stable ID merely to recover visible output.
+For CI, copy workflow IDs/paths from `gh api repos/OWNER/REPO/actions/workflows`
+or the workflow/run listing. Do not guess a filename such as `tests.yaml` from
+the display name; use a discovered run ID for status and logs.
 Recipe detail: [docs/orchestration-practices.md](../../docs/orchestration-practices.md).
 
 ## 1. Slice first
