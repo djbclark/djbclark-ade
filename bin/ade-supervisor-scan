@@ -11,7 +11,16 @@ LEAD="${ADE_SUPERVISOR_LEAD:-b0b47ad8-8801-4780-a8e0-08824cd5ce27}"
 mkdir -p "$STATE_DIR"
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
 [ -x "$SCAN" ] || SCAN="$HOME/src/djbclark-ade/bin/ade-pi-stuck"
-json="$("$SCAN" --json 2>&1)" || { printf '%s\n' "$json" >>"$STATE_DIR/supervisor.log"; exit 0; }
+# bin/ade-pi-stuck's stderr is kept out of the JSON: a warning merged into stdout would make every run
+# unparseable, and the scan would go silently blind. It is logged instead.
+err="$STATE_DIR/.scan-stderr.$$"
+json="$("$SCAN" --json 2>"$err")" || {
+    { printf 'ade-pi-stuck failed: '; cat "$err" 2>/dev/null; } >>"$STATE_DIR/supervisor.log"
+    rm -f "$err" "$STATE_DIR/.notified.$$"
+    exit 0
+}
+[ -s "$err" ] && cat "$err" >>"$STATE_DIR/supervisor.log"
+rm -f "$err"
 
 # Dedupe state: `notified` holds the "<agent id>|<account>" keys already told. The
 # pending file is this run's live key set; it replaces the state only after the
@@ -23,7 +32,8 @@ import json, sys
 notified_path, pending_path = sys.argv[1], sys.argv[2]
 try:
     d = json.load(sys.stdin)
-except Exception:
+except Exception as exc:
+    print("supervisor scan: unparseable ade-pi-stuck output: %s" % exc, file=sys.stderr)
     sys.exit(0)
 live = [s for s in d.get("stuck", []) if s.get("status") not in ("closed", "archived")]
 keys = ["%s|%s" % (s.get("id"), s.get("account")) for s in live]

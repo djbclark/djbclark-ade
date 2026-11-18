@@ -128,7 +128,8 @@ def main():
     out = []
     for a in rows:
         prov = a.get("provider") or ""
-        if not prov.startswith("pi"):
+        # "pi/<account>/<model>" only: a bare startswith("pi") would also take any provider merely named "pi…".
+        if not prov.startswith("pi/"):
             continue
         # paseo ls provider is "pi/<account>/<model>" (e.g. pi/openai/gpt-6.1-sol)
         rest = prov[3:] if prov.startswith("pi/") else prov
@@ -143,6 +144,7 @@ def main():
                     "quota_stale": q.get("stale"),
                     "alternative": alt(model) if stuck else None})
     stuck = [o for o in out if o["stuck"]]
+    live = [o for o in out if o["status"] not in ("closed", "archived")]
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
                           "exhausted": sorted(exhausted), "low": low}, indent=1))
@@ -152,7 +154,7 @@ def main():
             print(f"{'STUCK' if o['stuck'] else 'ok   '}  {o['account']:22} {o['status']:9} {hr}% {o['model']:38} {o['id']}")
             if o["stuck"]:
                 print(f"        -> switch to {o['alternative']}")
-        print(f"\n{len(stuck)} stuck / {len(out)} live Pi agents")
+        print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")
     return 0
 
 if __name__ == "__main__":

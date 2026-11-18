@@ -1515,7 +1515,7 @@ label = "com.djbclark.ade-supervisor-scan"
 plist = "config/launchd/com.djbclark.ade-supervisor-scan.plist"
 schedule = "StartInterval 300"
 command = "bin/ade-supervisor-scan"
-set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor"]
+set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor", "__LEAD__=b0b47ad8-8801-4780-a8e0-08824cd5ce27"]
 platforms = ["mac"]
 notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the ADE lead per newly stuck Pi agent. Chosen because it was installed 2026-11-18 to cover the /watch stuck mode of skills/watch/SKILL.md; logs and dedupe state in __STATE__. Setting chosen = false makes doctor quiet and makes reconcile unload it (docs/scheduling.md)."
 
