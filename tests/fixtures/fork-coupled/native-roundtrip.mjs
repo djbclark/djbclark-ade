@@ -84,7 +84,8 @@ export async function runNativeRoundTrip({root, home, manifestSha256, daemon, en
     const response = await cli(root, home, args, {token: privateOwner ? token : null, timeoutMs: 30000});
     // Never include raw BEGIN/operation stdout in an assertion or diagnostic.
     assert.equal(response.code, 0, 'retained native CLI refused the requested phase');
-    return JSON.parse(response.stdout);
+    try { return JSON.parse(response.stdout); }
+    catch { throw new Error('retained native CLI returned invalid JSON'); }
   };
   const status = async () => {
     const value = await call(['daemon', 'maintenance', 'status']);
