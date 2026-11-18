@@ -1,6 +1,6 @@
 # NATS JetStream implementation plan — ADE issue 779
 
-Status: proposed implementation plan; research and GPT Astra review complete. No implementation, service activation, or cloud provisioning has occurred. Prepared on 2026-11-18 from the operator's decisions and the Astra architecture and deployment reviews.
+Status: final implementation plan; research and GPT Astra review complete. Execution has not started. Updated on 2026-11-18 to use the existing NixOS `vps-hub` host instead of Google Cloud.
 
 Issue: [Rethink handoff: pub/sub and leadership-token registry](https://github.com/djbclark/djbclark-ade/issues/779).
 
@@ -21,6 +21,10 @@ B1. Use one authoritative coordination stream containing role-control records, i
 B2. A role has a stable identity independent of its current agent. Its record contains owner identity, ownership epoch, coordination generation, lifecycle state, resource bindings, and handoff evidence. Distinguish the ownership epoch from the record's compare-and-swap revision.
 
 B3. Obtain authoritative ownership state from the stream leader. Transfer ownership using expected-subject-sequence checks. Fence ownership-sensitive receipts against the current role revision; where uniqueness and ownership must be checked together, use a same-stream atomic batch. Prove this exact recipe in CI before building dependent integrations. <sup>[1](#S1) [2](#S2)</sup>
+
+B3a. Use `ADE_COORD_V1` with role-control subjects `ade.v1.role.<role_id>`, immutable report subjects `ade.v1.report.<role_id>.<message_id>`, and receipt subjects `ade.v1.receipt.<role_id>.<message_id>.<stage>`. IDs must be opaque subject tokens. Transfer writes the role subject with `Nats-Expected-Last-Subject-Sequence` set to the observed role revision. To fence a receipt, set that header to the role revision and `Nats-Expected-Last-Subject-Sequence-Subject` to the role subject. Where a receipt must also be unique, atomically publish a guard record checking the role revision and the receipt checking its own subject sequence is `0`. Do not modify the guarded role subject earlier in that batch. A failed condition rejects the entire batch; it never falls back to unconditional publication.
+
+B3b. Use the maintained JavaScript NATS client and its batch API in the shared coordination library, the Paseo plugin, and a narrow JSON CLI called by existing Python helpers. Keep consumer acknowledgements, local storage, and external effects outside the claimed scope of the JetStream atomic batch. The protocol proof must race transfer against receipt publication and test retries after an unknown commit result.
 
 B4. Reports address the stable receiving role, not its current owner's epoch. A handoff must not invalidate a legitimate worker report. Validate the producer's assignment separately.
 
@@ -53,21 +57,21 @@ C2. Handoff follows a persisted sequence: **active → draining → verified qui
 
 C3. Registry fencing does not fence arbitrary filesystem writes. Managed Git operations use the existing guards plus ownership checks; workspace reuse requires one writer and proven quiescence. If a resource cannot enforce authority and its old writer cannot be stopped or isolated, transfer remains blocked.
 
-C4. Preferred broker host: a dedicated NixOS Google Compute Engine VM with Tailscale. Fallback: `vps-hub`. Tailscale explicitly supports GCE; test actual connectivity after NixOS installation and reboot. Relayed connectivity is acceptable if the pilot's measured latency is adequate. <sup>[4](#S4)</sup>
+C4. Run the authoritative NATS broker on the existing NixOS `vps-hub` host, accessed over Tailscale. There is no Google VM or cloud fallback in the NATS implementation. Prove authenticated broker connectivity from two participating hosts, including reconnect behavior and public-interface isolation.
 
-C5. Reuse the established Debian → `nixos-anywhere` plus disko installation method used for `vps-hub`. Reuse the method and shared service modules, not Contabo-specific disks or networking. The migration is recorded in the introducing commit. <sup>[5](#S5)</sup>
+C5. Extend the existing host configuration; do not reinstall NixOS, invoke `nixos-anywhere`, repartition disks, or replace the host's current networking. Preserve its other services and Tailscale settings. Survey capacity, disk availability, current ownership and running jobs before proposing the deployment. <sup>[4](#S4)</sup>
 
-C6. Bootstrap only a newly created, disposable x86 Google VM. Verify its exact boot disk and recovery access before destructive installation. Build Nix artifacts in Linux CI. If GCE blocks the required installation mechanism, build a current native GCE image from the same configuration in CI rather than use stale public images. <sup>[6](#S6)</sup>
+C6. Build the NixOS system and required NATS artifacts in Linux CI, not on the Mac or `vps-hub`. Promote the reviewed, published head through the existing `deploy-vps-hub` branch and verify the running configuration revision after activation. Preserve recovery access before changing the firewall or service configuration. <sup>[5](#S5)</sup>
 
-C7. Put reusable NATS and host configuration in the existing public site NixOS repository. Add a minimal GCE host; do not copy unrelated `vps-hub` services. Explicitly enable the guest firewall, expose NATS only over the tailnet, and avoid unnecessary subnet routing or exit-node configuration.
+C7. Put a reusable `nixos/modules/ade-nats.nix` module in the existing public site NixOS repository and import it from the current `vps-hub` configuration. Add explicit CI coverage for the hub output and affected shared modules. Expose NATS only over the tailnet; keep its monitoring endpoint local. Do not add subnet routing or exit-node functionality for the broker.
 
-C8. Keep broker data on a separately identified persistent disk. NATS must refuse startup when its data mount is absent. Installation must never repartition that disk. Store credentials through the existing managed-secret mechanism, outside Nix expressions, images, metadata scripts, and logs.
+C8. Persist broker data in a service-owned `/var/lib/nats` directory on the hub's existing persistent filesystem. Set explicit capacity limits and service startup checks; if the surveyed host uses a dedicated data mount, require that mount before NATS starts. Back up the stream, artifacts, and generation manifest to another existing host. Store credentials through the existing managed-secret mechanism, outside Nix expressions, the Nix store, and logs.
 
-C9. Build and deploy only reviewed, published branch heads using the established promotion-branch pattern. Add explicit CI coverage for the new host and affected hub configuration. OS rollback must not restore an older coordination database.
+C9. Deploy only reviewed, published branch heads using the existing promotion pattern. Verify that adding NATS does not disrupt the hub's existing services. OS rollback must not restore an older coordination database.
 
-C10. Use `technoeuphora@gmail.com` and the existing ADE Google project only after verifying unupgraded, non-billable Free Trial status, remaining credits, and expiry. Existing API results do not establish these facts. If billing eligibility or usable Tailscale connectivity cannot be established, use `vps-hub` before authority activation.
+C10. Google billing verification, project creation, VM provisioning, image builds and trial-expiry migration are removed from the NATS critical path. No Google Cloud or Temporal paid subscription, upgrade or post-trial charge is authorized.
 
-C11. No paid upgrades or post-trial continuation. Prepare and test off-Google export and quiesced migration to `vps-hub` before trial expiry or credit exhaustion. This is a controlled cutover, not two simultaneously authoritative brokers.
+C11. Before enrolling a real workstream, test off-host backup and restore in an isolated broker instance. Keep the restored instance outside the production authority namespace. Any later host move requires quiescence, generation reconciliation and one deliberate client cutover; never run independently writable brokers for the same roles.
 
 ## D. Parallel implementation and dynamic staffing
 
@@ -75,16 +79,18 @@ D1. Before every wave and each launch, refresh provider availability and pool-sp
 
 D2. The table specifies capabilities rather than a frozen roster. Runtime recommendations come from the current policy: eligible coding profiles for implementation, high-quality judgment profiles for protocol decisions, and an independent family for review where available. Astra remains an option for genuinely difficult protocol adjudication.
 
+D2a. Use actual router kinds `research`, `code`, `judgment` and, only for a justified hard protocol decision, `frontier`. Coding candidates normally include eligible Sonnet-class or everyday Codex profiles; judgment normally uses an eligible Opus-class profile, with Astra as a frontier candidate. These are recommendations, not entitlements or pinned model IDs. At each launch, obtain an ordered eligible shortlist from the current router and select using live pool-specific headroom, quality gates, native-tool suitability and concurrency limits. Do not fan out to every vendor.
+
 | Step | Dependencies | Exclusive responsibility | Task kind | Parallel work |
 |---|---|---|---|---|
 | D3. Baseline and contract | Approved plan | Map routing/ack paths; define schemas and receipt policy | Research + judgment | Infrastructure preparation |
-| D4. Protocol proof | D3 contract | CAS, atomic batch, stale-owner and duplicate-ID conformance tests | Strong code profile | Measurement and resource audit |
+| D4. Protocol proof | D3 contract | CAS, atomic batch, stale-owner and duplicate-ID conformance tests | `code`; concurrency expertise | Measurement and resource audit |
 | D5. Resource/quiescence audit | D3 | Enumerate guarded write paths and transfer blockers | Judgment | D4 and infrastructure |
 | D6. Coordination library | D4 passes | Authoritative reads, conditional writes, records, typed errors | Code | D7 and D8 |
 | D7. Delivery persistence | D3 contract | Outbox, artifacts, inbox, receipts, reconciliation | Code | D6 and D8 |
-| D8. Resource adapters | D5 | Guard integration, tracked jobs, quiescence evidence | Systems code | D6 and D7 |
-| D9. NixOS infrastructure | Configuration contract | NATS module, GCE host, disks, Tailscale, promotion configuration | NixOS code | Application work; separate CI-workflow owner |
-| D10. ADE integration | D6–D8 | Claims, handoff, send guard, completion helper, plugin adapters | Integration code | Documentation finalization |
+| D8. Resource adapters | D5 | Guard integration, tracked jobs, quiescence evidence | `code`; systems expertise | D6 and D7 |
+| D9. NixOS infrastructure | Configuration contract | Hub NATS module, persistent state, tailnet access, backup and promotion configuration | `code`; NixOS expertise | Application work; separate CI-workflow owner |
+| D10. ADE integration | D6–D8 | Claims, handoff, send guard, completion helper, plugin adapters | `code`; integration expertise | Documentation finalization |
 | D11. Independent verification | Integrated heads | Fault harness, exact-head review, CI and bot triage | Code + independent judgment | Per-PR reviews as slices finish |
 | D12. Pilot and activation | Checks and deployment approval | One rollout owner: observation, shadow, two-host proof, enrollment | Operations | Optional Temporal experiment |
 
@@ -93,6 +99,8 @@ D13. Give every worker disjoint ownership and a claimed workspace, including rev
 D14. Commit and push coherent units through the prescribed helper. Run heavy tests and builds in CI. Obtain the required adversary verdict before PR creation; satisfy exact-head CI, approval-marker policy, and review-bot triage before merge.
 
 D15. Recover autonomously from quota and agent failures. Classify quota exhaustion, rate limits, authentication failures, permission requests, and genuine stalls separately. Use bounded retries, then dynamically select an eligible equivalent-quality route. Preserve unfinished output and reconcile effects before replacement. Establish quiescence before transferring write ownership.
+
+D15a. Default to at most three retries for a transient transport failure, honoring server retry timing and retaining the same operation IDs. Then reroute an affected agent to an eligible peer or park its slice until reset. Register a checkpoint deadline for each slice; elapsed quiet time alone is not proof of a stall. Inspect tracked jobs and request a checkpoint before declaring the agent stuck. After two unsuccessful replacement attempts for the same diagnosed event, the lead investigates the underlying failure autonomously while other ready work continues. Escalate to the human only for a genuine permission, spending or unresolved product decision; never bypass it by changing the tool or credentials.
 
 D16. Never cancel healthy paid work, launch overlapping replacement writers, bypass a denied permission, or switch to metered credits to evade quota limits. If no eligible route is available, park that slice and advance another ready task.
 
@@ -110,11 +118,11 @@ E4. Require zero lost accepted reports, duplicate committed dispositions, unauth
 
 E5. Rollback preserves the stream, artifacts, and outboxes. Quiesce writers, reconcile pending work, and explicitly designate one authority per role. Disabling the plugin must not create independently writable legacy ownership.
 
-E6. Optional Temporal experiment: at most half an engineering day, outside the NATS critical path. Use a fake agent adapter to wait for simulated CI and approval, restart its worker, retry a fake operation, and verify one recorded effect. No paid models, real merges, or production dependencies. Run in CI or on the verified Google trial VM; otherwise skip it. <sup>[7](#S7)</sup>
+E6. Optional Temporal experiment: at most half an engineering day, outside the NATS critical path. Use a fake agent adapter to wait for simulated CI and approval, restart its worker, retry a fake operation, and verify one recorded effect. No paid models, real merges, or production dependencies. Run in isolated Linux CI by default; use a local test environment only if explicitly allowed by the normal test policy. Do not provision Google resources for this experiment. If it cannot fit this bound, record the finding and defer it. <sup>[6](#S7)</sup>
 
-E7. Do not enroll in Temporal Cloud's standard trial: its credits can expire into billable usage. Its managed trial becomes eligible only if a separately verified arrangement guarantees no charges. The small OSS experiment provides the useful learning without that billing exposure. <sup>[8](#S8)</sup>
+E7. Do not enroll in Temporal Cloud's standard trial: its credits can expire into billable usage. Its managed trial becomes eligible only if a separately verified arrangement guarantees no charges and is separately approved. The small OSS experiment provides the useful learning without that billing exposure. <sup>[7](#S8)</sup>
 
-E8. Complete the native goal only after implementation, pilot, activation, documentation, and recovery evidence are verified. Genuine approval or infrastructure blockers remain explicit; they are not treated as completed work.
+E8. Complete the future implementation goal only after implementation, pilot, activation, documentation, and recovery evidence are verified. This is separate from the current goal to finish and deliver this plan. Genuine approval or infrastructure blockers remain explicit; they are not treated as completed work.
 
 ## F. Sources
 
@@ -124,12 +132,10 @@ F2. <a id="S2"></a>JetStream atomic batch publishing: [ADR-50](https://github.co
 
 F3. <a id="S3"></a>JetStream consistency and persistence: [upstream documentation](https://github.com/nats-io/nats.docs/blob/master/nats-concepts/jetstream/README.md).
 
-F4. <a id="S4"></a>Tailscale on Google Compute Engine: [vendor installation guidance](https://tailscale.com/docs/install/cloud/gce).
+F4. <a id="S4"></a>Existing NixOS hub and Tailscale configuration: [site host configuration](https://github.com/djbclark/site-djbclark/blob/master/nixos/vps-hub/configuration.nix).
 
-F5. <a id="S5"></a>Existing Debian-to-NixOS migration: [site repository commit 3b64cfe](https://github.com/djbclark/site-djbclark/commit/3b64cfe5bb40d9ae3fb9203bf757d824f9ae5370).
-
-F6. <a id="S6"></a>NixOS Google Compute Engine deployment: [official wiki](https://wiki.nixos.org/wiki/Install_NixOS_on_GCE).
+F5. <a id="S5"></a>NixOS source, CI and published-head deployment conventions: [site deployment documentation](https://github.com/djbclark/site-djbclark/blob/master/docs/nixos-in-git.md).
 
 F7. <a id="S7"></a>Temporal mocked Activities and time-skipping tests: [Python testing guidance](https://docs.temporal.io/develop/python/best-practices/testing-suite).
 
-F8. <a id="S8"></a>Temporal trial credits and billing: [pricing terms](https://temporal.io/pricing.md). Google non-billable trial conditions: [Free Trial documentation](https://docs.cloud.google.com/free/docs/free-cloud-features).
+F8. <a id="S8"></a>Temporal trial credits and billing: [pricing terms](https://temporal.io/pricing.md).
