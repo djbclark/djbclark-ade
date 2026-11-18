@@ -111,6 +111,9 @@ def test_source_commit_ignores_candidate_dirty_build_claims(synthetic):
     lambda r: next(iter(r['cohort'].values())).pop('loaded'),
     lambda r: next(iter(r['cohort'].values())).update(enabled=0),
     lambda r: r['bindings']['dependencies'].clear(),
+    lambda r: r['bindings'].update(dependencies=None),
+    lambda r: r['bindings'].update(dependencies=42),
+    lambda r: r['bindings'].update(dependencies=[{}]),
     lambda r: r['policy']['features'].clear(),
     lambda r: r['evidence'].update(node='fake-node'),
     lambda r: r['native'].update(compiler_sha256='0' * 64),
@@ -281,3 +284,84 @@ def test_native_artifact_substitution_is_independent_of_manifest(tmp_path):
     assert e.check_native(root, expected) == root / 'runtime/node'
     manifest.write_bytes(b'different manifest')
     with pytest.raises(e.ContractError): e.check_native(root, expected)
+
+
+@pytest.fixture
+def malformed_production_handoff(synthetic, tmp_path, monkeypatch):
+    """Run real evaluate/main setup, mock ONLY fixed harness stdout; no runtime proof."""
+    _, recipe, payload, observations, reports = synthetic
+    root = tmp_path / 'evaluator'; (root / 'bin').mkdir(parents=True)
+    git(root, 'init', '-q'); git(root, 'config', 'user.name', 'Malformed protected handoff fixture')
+    git(root, 'config', 'user.email', 'fixture@example.invalid')
+    for name in ('ade_fork_plugins.py', 'ade_fork_release.py'):
+        shutil.copyfile(e.ROOT / 'bin' / name, root / 'bin' / name)
+    protected = copy.deepcopy(recipe)
+    protected['evaluator_commit'] = '@evaluator'; protected['bindings']['evaluator'] = '@evaluator'
+    protected['evidence']['python'] = e.file_hash(sys.executable, system_tool=True)
+    protected['evidence']['git'] = e.file_hash(shutil.which('git'), system_tool=True)
+    native = tmp_path / 'qualified-native'; (native / 'runtime').mkdir(parents=True)
+    for relative, key in [('runtime/node', 'node_sha256'), ('role.cjs', 'entry_sha256'), ('compiler-code.mjs', 'compiler_sha256')]:
+        file = native / relative; file.write_bytes(('SYNTHETIC NEVER EXECUTED ' + relative).encode()); file.chmod(0o444)
+        protected['native'][key] = e.file_hash(file)
+    manifest = Path(str(native) + '.manifest.json'); manifest.write_bytes(b'SYNTHETIC no native capability')
+    protected['native']['distribution_sha256'] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    protected['evidence']['node'] = protected['native']['node_sha256']
+    protected['evidence']['paseo_compiler'] = protected['native']['compiler_sha256']
+    file = root / e.RECIPE; file.parent.mkdir(parents=True); file.write_bytes(canonical(protected))
+    harness = root / e.HARNESS; harness.write_text('// SYNTHETIC fixture, never executed')
+    git(root, 'add', '.'); git(root, 'commit', '-qm', 'reviewed synthetic error-path fixture')
+    evaluator_sha = git(root, 'rev-parse', 'HEAD')
+    for key, value in {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': 'djbclark/djbclark-ade',
+                       'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_SHA': evaluator_sha,
+                       'GITHUB_RUN_ID': '654', 'GITHUB_RUN_ATTEMPT': '1'}.items():
+        monkeypatch.setenv(key, value)
+    actual_command, actual_evaluate, actual_read = e.command, e.evaluate, e.read_file
+    state = {'stdout': None, 'launches': 0, 'schema_errors': []}
+    def command(argv, cwd, env, **options):
+        if argv[:2] == [str(native / 'runtime/node'), str(harness)]:
+            state['launches'] += 1
+            assert 'GITHUB_TOKEN' not in env and 'ACTIONS_RUNTIME_TOKEN' not in env
+            return canonical(state['stdout'])
+        return actual_command(argv, cwd, env, **options)
+    def read(path, *args, **kwargs):
+        if Path(path).name in {domain + '.xml' for domain in e.DOMAINS} or Path(path).name.startswith('compiled-server-'):
+            pytest.fail('malformed stdout must fail before consuming report/bundle files')
+        return actual_read(path, *args, **kwargs)
+    def evaluate(*args):
+        try:
+            return actual_evaluate(*args, root=root)
+        except e.ContractError as error:
+            state['schema_errors'].append(str(error))
+            raise
+    monkeypatch.setattr(e, 'command', command)
+    monkeypatch.setattr(e, 'read_file', read)
+    monkeypatch.setattr(e, 'evaluate', evaluate)
+    # Metadata is valid so a denial cannot be masked by unrelated identity errors.
+    observations.update(evaluator_commit=evaluator_sha, native=copy.deepcopy(protected['native']))
+    return state, observations, e.inspect(payload)['commit'], tmp_path
+
+
+@pytest.mark.parametrize('kind', ['array', 'null', 'string', 'boolean', 'number', 'empty-object',
+                                 'compiler-null', 'compiler-array', 'compiler-string', 'compiler-number',
+                                 'runtime-null', 'native-array', 'helpers-null', 'cohort-string', 'digest-null', 'digest-array'])
+def test_malformed_harness_stdout_returns_stable_cli_hold_without_output(malformed_production_handoff, kind, capsys):
+    state, valid, source_sha, directory = malformed_production_handoff
+    row = copy.deepcopy(valid)
+    root_shapes = {'array': [], 'null': None, 'string': 'not-an-object', 'boolean': False, 'number': 42, 'empty-object': {}}
+    if kind in root_shapes:
+        row = root_shapes[kind]
+    elif kind.startswith('compiler-'):
+        row['compiler'] = {'null': None, 'array': [], 'string': 'not-an-object', 'number': 42}[kind.split('-')[1]]
+    elif kind == 'runtime-null': row['runtime'] = None
+    elif kind == 'native-array': row['native'] = []
+    elif kind == 'helpers-null': row['helpers'] = None
+    elif kind == 'cohort-string': row['cohort'] = 'not-an-object'
+    elif kind == 'digest-null': row['compiler']['server_bundle_sha256'] = None
+    elif kind == 'digest-array': row['compiler']['server_bundle_sha256'] = []
+    state['stdout'] = row
+    assert e.main(['--source-sha', source_sha]) == 78
+    output = json.loads(capsys.readouterr().out)
+    assert output == {'status': 'HOLD', 'reason': 'ContractError', 'qualified_output': False}
+    assert state['launches'] == 1 and len(state['schema_errors']) == 1
+    assert state['schema_errors'][0] in ('invalid protected measurement schema', 'invalid nested measurement container', 'SHA256 identity required')
+    assert not (directory / 'qualified-output').exists()

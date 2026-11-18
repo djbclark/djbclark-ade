@@ -153,7 +153,7 @@ def recipe_validate(recipe, evaluator_sha):
         if set(record) != {'identity', 'enabled', 'loaded'} or type(record['enabled']) is not bool or type(record['loaded']) is not bool:
             raise ContractError('explicit full-cohort identity/enabled/loaded states required')
         hash_id(record['identity'])
-    if type(recipe['bindings']) is not dict or type(recipe['policy']) is not dict or type(recipe['policy'].get('features')) is not dict or set(recipe['policy'].get('features', {})) != features or set(recipe['bindings'].get('dependencies', {})) != cohort:
+    if type(recipe['bindings']) is not dict or type(recipe['policy']) is not dict or type(recipe['policy'].get('features')) is not dict or set(recipe['policy'].get('features', {})) != features or type(recipe['bindings'].get('dependencies')) is not dict or set(recipe['bindings']['dependencies']) != cohort:
         raise ContractError('complete protected features/dependencies required')
     if recipe['bindings'].get('component') != 'ade-yolo' or recipe['bindings'].get('authority') != 'protected-ci' or recipe['bindings'].get('evaluator') != evaluator_sha:
         raise ContractError('protected evaluator authority mismatch')
@@ -236,6 +236,19 @@ class Output:
         return out.getvalue()
 
 
+def measurement_containers(observations):
+    """Validate untrusted parsed containers before any nested access or report IO."""
+    fields = {'schema_version', 'launch_id', 'evaluator_commit', 'source_commit',
+              'native', 'compiler', 'runtime', 'helpers', 'cohort'}
+    if type(observations) is not dict or set(observations) != fields or type(observations['schema_version']) is not int or observations['schema_version'] != 1:
+        raise ContractError('invalid protected measurement schema')
+    if any(type(observations[field]) is not dict for field in ('native', 'compiler', 'runtime', 'helpers', 'cohort')):
+        raise ContractError('invalid nested measurement container')
+    compiler = observations['compiler']
+    hash_id(compiler.get('server_bundle_sha256'))
+    return compiler
+
+
 def finish(recipe, payload, observations, reports, *, evaluator_sha, source_sha, run_id, attempt, launch_id):
     """Trusted in-process protected harness handoff ONLY, never JSON authentication.
 
@@ -247,10 +260,7 @@ def finish(recipe, payload, observations, reports, *, evaluator_sha, source_sha,
     source = inspect(payload)
     if source['commit'] != source_sha or type(launch_id) is not str or not launch_id:
         raise ContractError('source/session binding mismatch')
-    fields = {'schema_version', 'launch_id', 'evaluator_commit', 'source_commit',
-              'native', 'compiler', 'runtime', 'helpers', 'cohort'}
-    if type(observations) is not dict or set(observations) != fields or type(observations['schema_version']) is not int or observations['schema_version'] != 1:
-        raise ContractError('invalid protected measurement schema')
+    compiler = measurement_containers(observations)
     if (observations['launch_id'] != launch_id or observations['evaluator_commit'] != evaluator_sha or observations['source_commit'] != source_sha or canonical(observations['native']) != canonical(recipe['native']) or canonical(observations['helpers']) != canonical(recipe['native']['helpers']) or canonical(observations['cohort']) != canonical(recipe['cohort'])):
         raise ContractError('runtime/source/compiler/helper/full-cohort substitution')
     compiler = observations['compiler']
@@ -359,10 +369,11 @@ def evaluate(source_sha, evaluator_sha, run_id, attempt, *, root=ROOT):
     # Child receives no Actions/GitHub/cloud credentials or candidate-selected env.
     raw = command([str(node), str(root / HARNESS), str(request_path)], root, env, timeout=1200)
     observations = parse(raw.decode())
+    compiler = measurement_containers(observations)
     reports = {domain: read_file(work / (domain + '.xml'), REPORT_LIMIT) for domain in DOMAINS}
     for index in (1, 2):
         bundle = read_file(work / f'compiled-server-{index}.cjs')
-        if observations.get('compiler', {}).get('server_bundle_sha256') != hashlib.sha256(bundle).hexdigest():
+        if compiler['server_bundle_sha256'] != hashlib.sha256(bundle).hexdigest():
             raise ContractError('cold compiled output bytes substituted')
     reviewed_checkout(root, evaluator_sha, env)
     check_native(native, recipe['native'])
