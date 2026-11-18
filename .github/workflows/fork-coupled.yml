@@ -1,0 +1,30 @@
+name: Fork coupled acceptance
+on:
+  push:
+    branches: [fork-maintenance-coupled]
+  pull_request:
+    paths:
+      - 'tests/fixtures/fork-coupled/**'
+      - '.github/workflows/fork-coupled.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fork-coupled-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  transport-boundaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+      - name: Descriptor and bounded IPC transport tests, not runtime qualification
+        run: node --test tests/fixtures/fork-coupled/retained-daemon.test.mjs
+      # The actual retained daemon/evaluator/controller round trip requires the
+      # completed authenticated native build plus protected recipe and cohort.
+      # This job emits no qualified artifact or promotion approval.

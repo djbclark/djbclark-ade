@@ -1,0 +1,175 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { constants } from 'node:fs';
+import { lstat, open, realpath } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const MAX_FILE = 512 * 1024 * 1024;
+const MAX_REPLY = 16 * 1024 * 1024;
+const hex = /^[a-f0-9]{64}$/;
+export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+function stable(a, b) {
+  return ['dev', 'ino', 'uid', 'gid', 'mode', 'size', 'mtimeNs', 'ctimeNs']
+    .every((key) => a[key] === b[key]);
+}
+
+export async function readRegular(file, limit = MAX_FILE) {
+  const descriptor = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await descriptor.stat({ bigint: true });
+    assert.ok(before.isFile() && before.nlink === 1n && before.size <= BigInt(limit), 'regular bounded leaf required');
+    const chunks = [];
+    let count = 0;
+    for (;;) {
+      const buffer = Buffer.alloc(Math.min(65536, limit + 1 - count));
+      const { bytesRead } = await descriptor.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      count += bytesRead;
+      assert.ok(count <= limit && count <= Number(before.size), 'leaf grew during read');
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+    const after = await descriptor.stat({ bigint: true });
+    const named = await lstat(file, { bigint: true });
+    assert.ok(stable(before, after) && stable(after, named), 'leaf replaced during read');
+    assert.equal(count, Number(before.size), 'leaf truncated during read');
+    return Buffer.concat(chunks);
+  } finally {
+    await descriptor.close();
+  }
+}
+
+async function rootOwned(file, directory) {
+  const metadata = await lstat(file);
+  assert.ok(directory ? metadata.isDirectory() : metadata.isFile(), 'unexpected retained node');
+  assert.equal(metadata.uid, 0, 'retained closure must be root owned');
+  assert.equal(metadata.mode & (directory ? 0o022 : 0o222), 0, 'retained closure is writable');
+  assert.ok(!metadata.isSymbolicLink(), 'retained closure cannot contain symlinks');
+  return metadata;
+}
+
+// This independent pre-exec check protects importing the retained launcher itself.
+// Its successful result is never an execution capability; the real producer still
+// checks protected enrollment and actual executing process/module ownership.
+export async function validateRetainedDistribution(root, expectedManifest) {
+  assert.equal(process.platform, 'linux', 'finite Linux acceptance only');
+  assert.notEqual(process.getuid(), 0, 'runtime account must be unprivileged');
+  assert.ok(path.isAbsolute(root) && root !== '/' && hex.test(expectedManifest));
+  assert.equal(await realpath(root), root, 'canonical retained root required');
+  for (let current = root;; current = path.dirname(current)) {
+    await rootOwned(current, true);
+    if (current === '/') break;
+  }
+  await rootOwned(`${root}.manifest.json`, false);
+  const bytes = await readRegular(`${root}.manifest.json`, MAX_REPLY);
+  assert.equal(sha256(bytes), expectedManifest, 'protected final manifest mismatch');
+  const manifest = JSON.parse(bytes);
+  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.profile, 'enclosing-daemon-v2');
+  assert.ok(Array.isArray(manifest.files) && manifest.files.length);
+  const names = new Set();
+  for (const member of manifest.files) {
+    assert.ok(typeof member.path === 'string' && member.path && !path.isAbsolute(member.path));
+    assert.ok(!member.path.split('/').some((part) => !part || part === '.' || part === '..'));
+    assert.ok(!names.has(member.path) && hex.test(member.sha256));
+    names.add(member.path);
+    const file = path.join(root, member.path);
+    for (let parent = path.dirname(file); parent !== root; parent = path.dirname(parent)) {
+      await rootOwned(parent, true);
+    }
+    const metadata = await rootOwned(file, false);
+    assert.equal(metadata.size, member.size);
+    assert.equal(metadata.mode & 0o777, member.mode & 0o777);
+    assert.equal(sha256(await readRegular(file)), member.sha256, 'retained member integrity mismatch');
+  }
+  for (const name of ['runtime/node', 'role.cjs', 'daemon-launcher.mjs', 'daemon.mjs', 'compiler-code.mjs']) {
+    assert.ok(names.has(name), 'finite distribution entry absent');
+  }
+  return manifest;
+}
+
+function onceClosed(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('owned daemon did not close')), timeoutMs);
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
+}
+
+export async function launchObservedDaemon(root, home, expectedManifest) {
+  await validateRetainedDistribution(root, expectedManifest);
+  const launcher = await import(pathToFileURL(path.join(root, 'daemon-launcher.mjs')).href);
+  const invocation = await launcher.createQualifiedDaemonInvocation(root, home);
+  assert.equal(invocation.command, path.join(root, 'runtime/node'));
+  assert.deepEqual(invocation.args, [path.join(root, 'role.cjs')]);
+  assert.equal(invocation.closure.runtimeClosureSha256, expectedManifest);
+  const child = spawn(invocation.command, invocation.args, {
+    env: invocation.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  const closed = onceClosed(child, 1_180_000);
+  // Always observe rejection, including when startup fails before disposal.
+  closed.catch(() => {});
+  let outputBytes = 0;
+  let overflow = false;
+  let childError = null;
+  child.on('error', (error) => { childError = error; });
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on('data', (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > MAX_REPLY) overflow = true;
+    });
+  }
+  const observation = async () => {
+    assert.ok(child.connected && child.exitCode === null && child.signalCode === null && !childError);
+    assert.ok(!overflow, 'daemon output exceeded bound');
+    const nonce = randomBytes(32).toString('hex');
+    const reply = await new Promise((resolve, reject) => {
+      const finish = (error, value) => {
+        clearTimeout(timer);
+        child.off('message', receive);
+        child.off('close', lost);
+        error ? reject(error) : resolve(value);
+      };
+      const lost = () => finish(new Error('owned daemon exited before observation'));
+      const receive = (raw) => {
+        if (raw?.type !== 'qualified.measurement.response' || raw.nonce !== nonce) return;
+        try {
+          assert.ok(Buffer.byteLength(JSON.stringify(raw)) <= MAX_REPLY);
+          assert.equal(raw.schemaVersion, 1);
+          assert.equal(raw.daemon?.pid, child.pid, 'observation must identify the owned child');
+          finish(null, raw);
+        } catch (error) { finish(error); }
+      };
+      const timer = setTimeout(() => finish(new Error('owned observation timed out')), 30_000);
+      child.on('message', receive);
+      child.once('close', lost);
+      child.send({ type: 'qualified.measurement.request', schemaVersion: 1, nonce }, (error) => {
+        if (error) finish(error);
+      });
+    });
+    assert.ok(!overflow && !childError && child.exitCode === null && child.connected);
+    return reply;
+  };
+  const dispose = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    let timer;
+    let result;
+    try {
+      result = await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('owned daemon stop timed out')), 30_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(result.code, 0, 'owned daemon must stop successfully');
+    return result;
+  };
+  return Object.freeze({ child, observation, dispose });
+}
