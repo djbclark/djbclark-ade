@@ -1,0 +1,3 @@
+### Changed
+
+- `agents/codex/config.toml.tmpl`: the seven third-party git marketplaces (composio, adhd, claude-plugins-official, mattpocock, claude-code-mods, typesafe-ai, anthropic-agent-skills) are now local sources into the operator-pinned `~/.codex-runtime/plugins/cache` (Codex rejected the git form at startup — "trusted Git repository root escapes Codex home" through the `~/.codex/plugins` symlink — and local sources also drop the unpinned-git pull risk); `claude-code-mods` and its `context-bar` plugin are removed from Codex (a Claude Code UI mod, kept for Claude), and `project_doc_max_bytes = 65536` is set so the global + project instruction docs stop truncating at the 32768 default. (#781)
