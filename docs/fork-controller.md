@@ -67,9 +67,9 @@ Administrator-controlled private filesystem semantics remain required.
 ## Controller ports and transactions
 
 Trusted in-process callers may invoke Controller.acquire, adapters and
-tick('enroll'|'deploy'|'recover') with actual native ports. CLI exposes none of
-those mutation modes or dependency injection. Default NativeFacade.supported is
-False, so production tick mutations HOLD before acquisition/staging/journal work.
+tick('enroll'|'deploy'|'recover') with actual native ports. CLI exposes fixed
+apply/recover but no enrollment or dependency-injection override. NativeFacade.supported requires the finite manifest, genuine enclosing authority
+and complete qualified cohort; missing support holds before transaction work.
 Its bounded read-only list_observations helper is not called by shipped CLI and
 does not establish support. No guessed mutating CLI fallback exists.
 
@@ -228,10 +228,10 @@ distributionSha256 bind the reviewed retained transport expectation. Source
 checks exact read-only regular bridge bytes/digests before use and pins the whole
 mapping through a transaction, refusing changed identity before writing any token.
 These on-disk checks DO NOT prove qualified executing namespace/incarnation.
-Native qualified status/cohort metadata is still being coordinated; supported()
-stays false and observe() refuses until its genuine owner-producer coupling is
-implemented. No speculative feature/status keys or brand constructors are added.
-Thus CLI deployment remains unavailable, even though the concrete transport methods
+Native qualified status/cohort metadata follows the coordinated strict v1
+consumer below; supported/observe refuse missing or mismatched genuine
+owner-producer coupling. No speculative feature/status keys or brand constructors are added.
+Thus CLI apply/recover refuse unavailable support, even though the concrete transport methods
 are now real source, and none of these commands was executed on a live daemon.
 
 The private reserve context deliberately never sends END in finally. Journal may
@@ -251,3 +251,68 @@ orders provenance by run/attempt rather than hash. All local attestation files
 are still validated before use, including obsolete files; corruption remains a
 hard refusal. A current attempt or current-policy authentication failure propagates
 without a catch-and-ignore fallback to older evidence.
+
+
+## Fixed explicit transaction commands
+
+`ade-fork-controller apply` invokes the existing Journal deployment path;
+`ade-fork-controller recover` invokes retained-baseline recovery. Both read only
+the fixed real-account protected enrollment and use the real NativeFacade.
+There are no port/path/grant override flags. They emit one canonical structured
+result; HOLD/recovery_required returns nonzero, runtime_verified returns zero.
+Default status/plan and discovery tick retain their existing roles. An approved
+scheduled promotion can invoke apply under current consent once genuine native
+support is available; selection is not a permanent planning-only substitute.
+The commands do not bypass unavailable execution/cohort qualification.
+
+
+## Finite Linux cohort facade
+
+The real facade consumes the coordinated strict ManagedPluginCohortStatus v1 via
+`plugin cohort-status --json` (RPC plugins.managed.cohort.status, native feature
+managedPluginCohortStatus). Only a coherent complete union of actual config,
+builtin, runtime and enrollment IDs is usable. Uncertain/missing endpoints refuse.
+Each loaded entry must have an actual qualified execution descriptor and a native
+journal currentReceipt equal to its loaded receipt. Its execution incarnation must
+equal loaded.processStartToken by construction of the private owned-child path;
+legacy random tokens have no execution metadata and refuse. The journal CAS and
+loaded activation generation remain separate.
+
+Protected native adds distributionRoot, distributionBuildId and closure with the
+runtime/helper/qualification SHA256 triple. Enclosing serverId/incarnation/build
+and triple must match exactly. Daemon cohort member paseo is represented by
+`{role:"daemon",enabled:true,loaded:true,distributionBuildId,closure}` and never
+as an alias plugin entry. Every non-target protected plugin record is exactly
+`{enabled,loaded,registration,receipt,execution}`: receipt is null or stable
+sourcePath/snapshotRoot/snapshotSha256/serverBundleSha256; execution is null or
+contract/distributionBuildId/closure. Fresh pid/start token are observations.
+All enrolled catalog members remain required; explicit additional protected
+builtin members may be declared, with dependency bindings. Extra active or
+omitted members refuse rather than being silently dropped or disabled.
+
+Target running identity is resolved against validated retained receipt records:
+exact immutable source/root/tree/bundle AND exact executing profile closure triple
+must match. Different recipe qualifications of the same bytes cannot be relabelled
+by requested target or loaded generation; missing/ambiguous mapping refuses.
+Supported status also requires actual native enclosing authority/features, but a
+qualified boolean alone cannot satisfy the full cohort and bridge checks.
+
+Before EVERY transport call, Python independently verifies the existing producer
+manifest algorithm: canonical root-owned non-runtime-writable ancestry;
+ROOT.manifest.json raw SHA256 equals distributionSha256 and runtimeClosureSha256;
+schemaVersion2/profile enclosing-daemon-v2; exact build and fixed entries/binding
+keys; complete symlink-free retained file set; exact path/size/mode/content hashes;
+explicit external native library hashes and reconstructed helper inventory/hash.
+Helper hashing preserves producer JSON field order, not release canonical sorting.
+Node is exactly ROOT/runtime/node, CLI exactly ROOT/cli-entry.mjs, and both entry
+hashes match protected enrollment. No unverified executable bootstraps this check.
+The fixed verified CLI then performs its producer kernel/runtime/maps/current
+qualification-enrollment checks before importing CLI code. Mac/dev/root execution
+or missing/changed bridge/HOME qualification remains unsupported. No new manifest,
+role brand, authority flag or journal is introduced.
+
+Parser/identity tests use clearly synthetic wire facts; a separate CI test checks
+actual disposable root-owned /var/lib inventory bytes without executing its dummy
+Node. These do not qualify a production host. Root owns the real integrated
+producer/native/evaluator A-to-B-to-A proof, and the proposed wire must still be
+implemented/reviewed in that exact distribution before any real support can pass.
