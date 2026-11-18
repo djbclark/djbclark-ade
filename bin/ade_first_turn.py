@@ -1,6 +1,7 @@
 """Secret-safe, fail-closed Pi v3 durable first-turn evidence (local daemon only)."""
 from __future__ import annotations
 import datetime
+import hashlib
 import json
 import os
 import stat
@@ -35,7 +36,7 @@ def owned_read(path, limit):
     finally:
         os.close(fd)
 
-def pi_first_turn(home, record, snapshot):
+def pi_first_turn(home, record, snapshot, *, proof=None):
     """No credentials or transcript content leave this function, even on failure.
 
     Conservative subset: new, unbranched Pi v3 session. Native terminal stop,
@@ -47,7 +48,7 @@ def pi_first_turn(home, record, snapshot):
             raise EvidenceError('first-turn adapter unavailable for this provider')
         if snapshot.get('Status') == 'error':
             return {'state': 'failed', 'cause': 'runtime-error'}
-        if snapshot.get('Status') != 'idle':
+        if snapshot.get('Status') != 'idle' and not (proof and snapshot.get('Status') == 'running'):
             return {'state': 'pending', 'cause': 'turn-not-settled'}
         cwd = record['cwd']
         key = cwd.strip('/').replace('/', '-') or 'root'
@@ -65,11 +66,12 @@ def pi_first_turn(home, record, snapshot):
         if (header.get('type') != 'session' or header.get('version') != 3 or
                 header.get('id') != handle.get('sessionId') or header.get('cwd') != cwd):
             raise EvidenceError('native session header mismatch')
-        after = stamp(record['acknowledged_at'])
+        after = stamp(record['ack_observed_at'])
         parent = None
         seen = set()
         final = None
         final_time = None
+        proven = None
         for entry in rows[1:]:
             eid = entry.get('id')
             if not isinstance(eid, str) or eid in seen or entry.get('parentId') != parent:
@@ -86,7 +88,16 @@ def pi_first_turn(home, record, snapshot):
                 continue
             if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
                 return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
+            if proof and entry['id'] == proof.get('entry_id'):
+                proven = (entry, when)
             final, final_time = (entry, when)
+        if proof:
+            if proven is None or header['id'] != proof.get('session_id'):
+                raise EvidenceError('accepted native terminal no longer exists')
+            final, final_time = proven
+            actual = hashlib.sha256(json.dumps(final, sort_keys=True).encode()).hexdigest()
+            if actual != proof.get('terminal_digest'):
+                raise EvidenceError('accepted native terminal changed')
         if final is None:
             return {'state': 'pending', 'cause': 'no-post-ack-turn'}
         msg = final['message']
@@ -99,7 +110,8 @@ def pi_first_turn(home, record, snapshot):
                     and isinstance(c.get('text'), str) and c['text'].strip() for c in content)):
             return {'state': 'pending', 'cause': 'no-successful-terminal-output'}
         return {'state': 'complete', 'adapter': 'pi-v3', 'entry_id': final['id'],
-                'session_id': header['id'], 'completed_at': final_time.isoformat()}
+                'session_id': header['id'], 'completed_at': final_time.isoformat(),
+                'terminal_digest': hashlib.sha256(json.dumps(final, sort_keys=True).encode()).hexdigest()}
     except EvidenceError:
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError):

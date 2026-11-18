@@ -770,7 +770,9 @@ class Service:
             record['status'] = 'ack-pending-turn' if record.get('requires_first_turn') else 'acknowledged'
             # when the successor attested: ade_lead_succession redirects peers to it only while this is recent (rq-38); a
             # repeated accept keeps the first stamp, so a stuck handoff cannot be kept "fresh" by re-running it
-            record.setdefault('acknowledged_at', datetime.datetime.now(datetime.timezone.utc).isoformat())
+            acknowledged = datetime.datetime.now(datetime.timezone.utc)
+            record.setdefault('acknowledged_at', acknowledged.strftime('%Y-%m-%dT%H:%M:%SZ'))
+            record.setdefault('ack_observed_at', acknowledged.isoformat())
             if not record.get('requires_first_turn'):
                 self.reassert_identity(record, 'accept')
             self.save(target, record)
@@ -973,7 +975,18 @@ class Service:
 
         HEAD may have moved forward (head_drift); that is recorded as `head_advanced` so the successor sees what landed.
         """
-        self.verify_successor(record)
+        row = self.verify_successor(record)
+        if record.get('requires_first_turn'):
+            from ade_first_turn import pi_first_turn, EvidenceError
+            try:
+                proof = record.get('first_real_turn')
+                if not proof:
+                    raise SessionError('FIRST-REAL-TURN evidence required before retirement')
+                evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, proof=proof)
+                if evidence.get('state') != 'complete':
+                    raise SessionError('successor terminal evidence failed after acceptance; preserve predecessor')
+            except EvidenceError as error:
+                raise SessionError(str(error)) from None
         if digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']:
             raise SessionError('checkpoint or HEAD changed; preserve predecessor')
         drift = self.head_drift(record)

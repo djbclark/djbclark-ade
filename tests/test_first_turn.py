@@ -12,7 +12,7 @@ def evidence(tmp_path):
     cwd = '/fixture/project'
     transcript = tmp_path / 'session.jsonl'
     record = {'provider': 'pi', 'successor': 'fixture-id', 'cwd': cwd, 'model': 'pool/model',
-              'acknowledged_at': '2026-11-18T12:00:00.500000+00:00'}
+              'ack_observed_at': '2026-11-18T12:00:00.500000+00:00'}
     home = tmp_path / 'home'
     p = home / 'agents/fixture-project/fixture-id.json'
     p.parent.mkdir(parents=True)
@@ -69,3 +69,24 @@ def test_header_identity_and_symlink_fail_closed(evidence, tmp_path):
     target = tmp_path / 'target.jsonl'; target.write_text(original); transcript.symlink_to(target)
     with pytest.raises(EvidenceError):
         pi_first_turn(home, record, {'Status': 'idle'})
+
+
+def test_retirement_rereads_errors_after_original_success(evidence):
+    home, record, _, terminal, write = evidence
+    proof = pi_first_turn(home, record, {'Status': 'idle'})
+    failed = {**terminal, 'id': 'e2', 'parentId': 'e1', 'timestamp': '2026-11-18T12:00:02Z',
+              'message': {**terminal['message'], 'stopReason': 'error', 'errorMessage': 'SECRET'}}
+    write(terminal, failed)
+    assert pi_first_turn(home, record, {'Status': 'running'}, proof=proof)['state'] == 'failed'
+
+def test_retirement_allows_finish_turn_but_rechecks_original_proof(evidence):
+    home, record, _, terminal, write = evidence
+    proof = pi_first_turn(home, record, {'Status': 'idle'})
+    pending = {**terminal, 'id': 'e2', 'parentId': 'e1', 'timestamp': '2026-11-18T12:00:02Z',
+               'message': {'role': 'user', 'content': 'finish'}}
+    write(terminal, pending)
+    assert pi_first_turn(home, record, {'Status': 'running'}, proof=proof)['state'] == 'complete'
+    terminal['message']['content'][0]['text'] = 'changed'
+    write(terminal, pending)
+    with pytest.raises(EvidenceError, match='changed'):
+        pi_first_turn(home, record, {'Status': 'running'}, proof=proof)

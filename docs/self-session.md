@@ -479,3 +479,8 @@ logs/timeline and protocol source. Local Paseo Pi provider source and upstream
 Pi session-manager v3 schema establish the terminal and persistence contracts.
 The isolated named-recipient fixture exercises only the fake native runner;
 [upstream issue 10118](https://github.com/getpaseo/paseo/issues/10118) remains open.
+
+For a completed chain, the incumbent becomes the continuation predecessor and
+must run `verify-turn` externally after the appointed lead ends its first turn.
+This is coordinated takeover, not autonomous recovery of an unavailable or dead
+incumbent; such a case remains blocked without a separate verified observer.
