@@ -364,6 +364,25 @@ def test_tab_stripping_heredoc_ends_only_at_its_tab_stripped_delimiter():
     assert denied("cat <<-'PY'\nbody\n\tPY\necho ==\n")
 
 
+@pytest.mark.parametrize("prefix", [
+    "echo '<<true'",
+    'echo "<<true"',
+    r'echo "escaped \" <<true"',
+    r"echo \<\<true",
+    "echo text # <<true",
+    "echo 'multiline\n<<true\ntext'",
+])
+@pytest.mark.parametrize("live", ["sed -n 1p f", "echo =="])
+def test_quoted_or_escaped_heredoc_examples_do_not_hide_live_commands(prefix, live):
+    assert denied(prefix + "\n  true\n" + live + "\n")
+
+
+def test_two_heredocs_on_one_header_preserve_the_following_shell_command():
+    command = "cat <<'A' <<'B'\n== data\nA\n== more data\nB\n"
+    assert not denied(command)
+    assert denied(command + "sed -n 1p f\n")
+
+
 @pytest.mark.parametrize("command", [
     "open -a Quicksilver",                                  # the 2026-11-02 leak
     "open https://example.com",

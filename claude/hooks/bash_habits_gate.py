@@ -180,15 +180,43 @@ def _heredoc_terminates(line: str, delimiter: str, strip_tabs: bool) -> bool:
     return (line.lstrip("\t") if strip_tabs else line) == delimiter
 
 
+def _heredoc_introducers(line: str, quote: str | None):
+    """Recognize unescaped shell redirects, not quoted/comment delimiter examples."""
+    matches, i = [], 0
+    while i < len(line):
+        ch = line[i]
+        if quote is not None:
+            if ch == "\\" and quote != "'":
+                i += 2
+                continue
+            if ch == quote[-1]:
+                quote = None
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "#" and (i == 0 or line[i - 1].isspace() or line[i - 1] in ";&|("):
+            break
+        elif ch in "'\"":
+            quote = "$'" if ch == "'" and i > 0 and line[i - 1] == "$" else ch
+        elif ch == "<" and (i == 0 or line[i - 1] != "<") and not line.startswith("<<<", i):
+            match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", line[i:])
+            if match:
+                matches.append(match)
+                i += match.end()
+                continue
+        i += 1
+    return matches, quote
+
+
 def strip_literals(c: str) -> str:
     """Drop heredoc bodies, quoted strings and comments; a quoted `$?` leaves a marker."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, quote = [], c.split("\n"), 0, None
     while i < len(lines):
         out.append(lines[i])
-        m = re.search(r"<<(-?)\s*['\"]?(\w+)['\"]?", lines[i])
-        if m:
+        matches, quote = _heredoc_introducers(lines[i], quote)
+        for m in matches:
             i += 1
-            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(2), m.group(1) == "-"):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
         i += 1
     s = "\n".join(out)
@@ -1098,18 +1126,15 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
     scan uncertain returns None rather than denying a legitimate command.
     """
     lines = cmd.split("\n")
-    i = 0
+    i, quote = 0, None
     while i < len(lines):
         # An introducer INSIDE a quoted string is not a heredoc (`rg -n '<<EOF' file` must pass).
         # Do not blank quoted runs: the delimiter of `<<'EOF'` is itself quoted, so blanking would
         # hide the very introducer being sought. Instead compute the quoted spans and skip a match
         # whose start falls inside one.
-        quoted: list[tuple[int, int]] = []
-        for q in re.finditer(r"'[^']*'|\"[^\"]*\"", lines[i]):
-            quoted.append((q.start(), q.end()))
-        for m in re.finditer(r"(?<!\\)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", lines[i]):
-            if any(a <= m.start() < b for a, b in quoted):
-                continue  # this `<<` is inside a string, not an introducer
+        matches, quote = _heredoc_introducers(lines[i], quote)
+        introduced_at = i + 1
+        for m in matches:
             delim = m.group(3)
             strip_tabs = m.group(1) == "-"
             j = i + 1
@@ -1121,7 +1146,7 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
                 j += 1
             if not found:
                 return (f"Unterminated heredoc: `<<{m.group(1)}{m.group(2)}{delim}{m.group(2)}` "
-                        f"on line {i + 1} has no `{delim}` line after it. bash does NOT fail on "
+                        f"on line {introduced_at} has no `{delim}` line after it. bash does NOT fail on "
                         f"this — it writes the PARTIAL body, warns on stderr and exits 0, so the "
                         f"file is silently truncated (2026-10-24: a peer message arrived cut off "
                         f"mid-sentence). Close the heredoc, or write the text to a file and pass "
