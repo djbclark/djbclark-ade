@@ -1,2 +1,2 @@
-import { contribute } from "./hook.mjs";
+import { contribute } from "./server/hook.mjs";
 export default contribute;

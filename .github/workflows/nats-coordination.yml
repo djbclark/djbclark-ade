@@ -74,3 +74,20 @@ jobs:
         with:
           name: nats-protocol-dependencies
           path: lib/ade-coord/package-lock.json
+
+  plugin-loader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Resolve current released Paseo without provider calls
+        run: |
+          timeout 300 npm install --prefix "$RUNNER_TEMP/paseo-loader" --ignore-scripts --no-audit --no-fund @getpaseo/server@latest
+          npm ls --prefix "$RUNNER_TEMP/paseo-loader" @getpaseo/server @getpaseo/plugin esbuild
+      - name: Actual released compiler and CJS evaluator load-dispose-reload
+        env:
+          ADE_PASEO_LOADER_PREFIX: ${{ runner.temp }}/paseo-loader
+        run: timeout 90 node lib/ade-coord/test/plugin-loader-smoke.mjs
