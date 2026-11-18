@@ -181,7 +181,7 @@ def _heredoc_terminates(line: str, delimiter: str, strip_tabs: bool) -> bool:
     return (line.lstrip("\t") if strip_tabs else line) == delimiter
 
 
-def _heredoc_introducers(line: str, state):
+def _heredoc_introducers(line: str, state, source: str, offset: int):
     """Recognize unescaped shell redirects, not quoted/comment delimiter examples."""
     quote, arithmetic = state or (None, 0)
     matches, i = [], 0
@@ -203,7 +203,10 @@ def _heredoc_introducers(line: str, state):
         elif arithmetic:
             arithmetic += (ch == "(") - (ch == ")")
         elif line.startswith("((", i):
-            arithmetic = 2
+            # `$((cmd); tail)` starts a subshell, so its redirects are real.
+            # Classify against the complete source: true arithmetic may span lines.
+            arithmetic = 2 if i == 0 or line[i - 1] != "$" or \
+                _is_arithmetic_expansion(source, offset + i - 1) else 0
             i += 2
             continue
         elif ch == "<" and (i == 0 or line[i - 1] != "<") and not line.startswith("<<<", i):
@@ -216,12 +219,21 @@ def _heredoc_introducers(line: str, state):
     return matches, (quote, arithmetic)
 
 
+def _line_offsets(lines: list[str]) -> list[int]:
+    offsets, offset = [], 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line) + 1
+    return offsets
+
+
 def strip_literals(c: str) -> str:
     """Drop heredoc bodies, quoted strings and comments; a quoted `$?` leaves a marker."""
     out, lines, i, quote = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
-        matches, quote = _heredoc_introducers(lines[i], quote)
+        matches, quote = _heredoc_introducers(lines[i], quote, c, offsets[i])
         for m in matches:
             i += 1
             while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
@@ -707,6 +719,7 @@ def live_bodies(text: str) -> list[str]:
 def _join_continuations(c: str) -> str:
     """Join backslash-newline pairs (an odd run of backslashes), outside heredoc bodies."""
     out, lines, i, state = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     pending: list[str] = []
     while i < len(lines):
         if i + 1 < len(lines) and re.search(r"(?<!\\)(?:\\\\)*\\$", lines[i]):
@@ -714,9 +727,12 @@ def _join_continuations(c: str) -> str:
             i += 1
             continue
         line = "".join(pending) + lines[i]
+        source, offset = (c, offsets[i])
+        if pending and "$((" in line:
+            source, offset = line + "\n" + "\n".join(lines[i + 1:]), 0
         pending = []
         out.append(line)
-        matches, state = _heredoc_introducers(line, state)
+        matches, state = _heredoc_introducers(line, state, source, offset)
         for m in matches:                              # copy data and its exact delimiter untouched
             i += 1
             while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
@@ -733,9 +749,10 @@ def _join_continuations(c: str) -> str:
 def _drop_heredocs(c: str) -> str:
     """The command without heredoc bodies (their text is data, not commands)."""
     out, lines, i, state = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
-        matches, state = _heredoc_introducers(lines[i], state)
+        matches, state = _heredoc_introducers(lines[i], state, c, offsets[i])
         for m in matches:
             i += 1
             while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
@@ -1205,6 +1222,7 @@ def unterminated_heredoc_reason(cmd: str, depth: int = 0) -> str | None:
     if depth > 16:
         return None
     lines = cmd.split("\n")
+    offsets = _line_offsets(lines)
     headers = []
     i, quote = 0, None
     while i < len(lines):
@@ -1213,7 +1231,7 @@ def unterminated_heredoc_reason(cmd: str, depth: int = 0) -> str | None:
         # Do not blank quoted runs: the delimiter of `<<'EOF'` is itself quoted, so blanking would
         # hide the very introducer being sought. Instead compute the quoted spans and skip a match
         # whose start falls inside one.
-        matches, quote = _heredoc_introducers(lines[i], quote)
+        matches, quote = _heredoc_introducers(lines[i], quote, cmd, offsets[i])
         introduced_at = i + 1
         for m in matches:
             delim = m.group(3)
