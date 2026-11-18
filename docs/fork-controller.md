@@ -67,8 +67,8 @@ Administrator-controlled private filesystem semantics remain required.
 ## Controller ports and transactions
 
 Trusted in-process callers may invoke Controller.acquire, adapters and
-tick('enroll'|'deploy'|'recover') with actual native ports. CLI exposes none of
-those mutation modes or dependency injection. Default NativeFacade.supported is
+tick('enroll'|'deploy'|'recover') with actual native ports. CLI exposes fixed
+apply/recover but no enrollment or dependency-injection override. Default NativeFacade.supported is
 False, so production tick mutations HOLD before acquisition/staging/journal work.
 Its bounded read-only list_observations helper is not called by shipped CLI and
 does not establish support. No guessed mutating CLI fallback exists.
@@ -231,7 +231,7 @@ These on-disk checks DO NOT prove qualified executing namespace/incarnation.
 Native qualified status/cohort metadata is still being coordinated; supported()
 stays false and observe() refuses until its genuine owner-producer coupling is
 implemented. No speculative feature/status keys or brand constructors are added.
-Thus CLI deployment remains unavailable, even though the concrete transport methods
+Thus CLI apply/recover refuse unavailable support, even though the concrete transport methods
 are now real source, and none of these commands was executed on a live daemon.
 
 The private reserve context deliberately never sends END in finally. Journal may
