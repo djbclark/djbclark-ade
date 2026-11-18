@@ -2,7 +2,7 @@
   "id": "ade-coord",
   "name": "ADE durable coordination",
   "description": "Optional enrolled-role launch context and bounded machine inbox controller; no delivery hook or model ack inference. Uninstalled until approved pilot.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "requirements": {
     "paseo": ">=0.16.0-beta.2"
   }
