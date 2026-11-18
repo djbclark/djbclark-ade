@@ -51,7 +51,7 @@ B10. Preserve existing behavior for unenrolled roles. For enrolled roles, NATS b
 
 ## C. Ownership and infrastructure
 
-C1. Disconnected agents may continue existing authorized work and buffer reports. They cannot acquire new ownership or expand their scope. Heartbeat expiry, quota exhaustion, or an idle agent does not authorize takeover.
+C1. Initial pilot policy (operator confirmed 2026-11-18): disconnected agents may keep editing, continue already-running jobs and buffer reports. Guarded Git mutations and new job launches wait for NATS connectivity. They cannot acquire new ownership or expand their scope. Broader cached-grant execution is deferred. Heartbeat expiry, quota exhaustion, or an idle agent does not authorize takeover.
 
 C2. Handoff follows a persisted sequence: **active → draining → verified quiescence → durable checkpoint → conditional transfer → successor reconciliation**. Quiescence includes tracked subprocesses, background jobs, and outstanding external-operation intents.
 

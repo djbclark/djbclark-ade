@@ -62,3 +62,5 @@ F5. Adapterd42 review blocks live enrollment on actual plugin schema, launch/dra
 F6. Running daemons: bigmac0.16.0-beta.2; hub and vps-primary0.14.0 under /home/djbclark/.paseo. Correct service-user census found no active agents. Root default home is unused; a failed/empty root-home census is not absence proof. Actual pilot hosts are bigmac and vps-primary, not hubPaseo.
 
 F7. Validation correction: invoking reference checkout changelog-fold checks its own repository, regardless of cwd. Run the task workspace absolute executable. Exact integrated workspace reported438 valid fragments; the earlier430 count was the reference checkout.
+
+F8. Operator confirmed offline option1: edits, already-running jobs and report buffering continue; guarded Git writes/new jobs require NATS. Broader offline-grant execution is deferred. Managed runtime credential was provisioned on hub through reviewed consumer; signed public-cache paths copied successfully. CI custom NAR transfer is in progress; no activation yet.
