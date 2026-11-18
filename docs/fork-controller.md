@@ -451,9 +451,9 @@ extra builtin, mixed identities and non-target absence all HOLD.
 
 The manifest mapping argument is an internal pure-parser dependency, not a CLI,
 configuration override, authority factory or extractor invented by this adapter.
-The committed mapping and observation CLI binding are described below; retained
-system-library namespace verification and the scoped recovery successor remain
-separate pending gates. Unsupported V2 never calls the V1 transport. Parser
+The committed mapping, observation CLI and shared namespace-port binding are
+described below; actual retained-system/private-runtime qualification remains a
+separate pending gate. Unsupported V2 never calls the V1 transport. Parser
 fixtures use explicitly synthetic independent wire/host/manifest values and do
 not establish executing-instance qualification. Production acceptance requires a
 separate exact-source review and actual native/producer coupled proof.
@@ -504,9 +504,9 @@ cross references. External rows now bind absolute loader paths to
 loader member. Preexec verifies the sealed backing inventory rather than reading
 host libraries as a substitute. The builtin canonical module table additionally
 binds systemClosureSha256. This structural validation cannot establish namespace,
-ELF resolver or kernel-map identity. Execution still HOLDs explicitly until the
-actual accepted namespace/loader/inode verifier is integrated. The separately
-blocked namespace helper is neither imported nor executed here.
+ELF resolver or kernel-map identity. The shared read-only port below now supplies
+that verification boundary; execution HOLDs unless its actual current-namespace
+checks pass. Superseded blocked helper revisions are never imported or executed.
 
 Native `2410a2c4a050c7568d506e6bfbe0c2158d908356` supplies the actual scoped
 recovery guard and installed-only `maintenanceHeldRecoveryV1`. The existing SAME
