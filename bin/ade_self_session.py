@@ -439,7 +439,7 @@ class Service:
             raise SessionError('supported unattended successor mode unavailable')
         return plan
 
-    def verify_successor(self, record):
+    def verify_successor(self, record, *, allow_failed=False):
         verifier = self.verifier
         if verifier is None:
             from paseo_yolo import verify_unattended_snapshot
@@ -447,9 +447,9 @@ class Service:
         row = self.inspect(record['successor'])
         # A correctly placed successor can still have failed its provider turn.
         # Only classify native fields: error text may contain credentials.
-        if row.get('Status') not in ('idle', 'running'):
+        if row.get('Status') not in ('idle', 'running') and not (allow_failed and row.get('Status') == 'error'):
             raise SessionError('successor runtime is not healthy; preserve predecessor')
-        if row.get('stopReason') == 'error' or row.get('StopReason') == 'error':
+        if not allow_failed and (row.get('stopReason') == 'error' or row.get('StopReason') == 'error'):
             raise SessionError('successor provider turn failed; preserve predecessor')
         if (row.get('Archived') is not False or row.get('Cwd') != record['cwd']
                 or row.get('Provider') != record['provider'] or row.get('Model') != record['model']
@@ -736,8 +736,12 @@ class Service:
             if not isinstance(rows, list) or len(rows) != 1:
                 raise SessionError('need exactly one token-labelled successor; no create replayed')
             record['successor'] = ident(rows[0].get('id', ''))
-            self.verify_successor(record)
+            row = self.verify_successor(record, allow_failed=bool(record.get('requires_first_turn')))
             record['status'] = 'awaiting-ack'
+            if record.get('requires_first_turn') and (row.get('Status') == 'error'
+                    or row.get('stopReason') == 'error' or row.get('StopReason') == 'error'):
+                record['status'] = 'first-turn-failed'
+                record['first_turn_failure'] = {'state': 'failed', 'cause': 'runtime-error-before-ack'}
             self.resolve_native_error(record)
             self.save(target, record)
             return record
@@ -890,13 +894,17 @@ class Service:
                 raise SessionError('only recorded predecessor verifies the first real turn')
             if record.get('status') == 'acknowledged' and record.get('first_real_turn'):
                 return record
-            if record.get('status') != 'ack-pending-turn' or not record.get('ack'):
+            if record.get('status') not in ('awaiting-ack', 'ack-pending-turn') or not record.get('requires_first_turn'):
+                raise SessionError('routed successor required before first-turn verification')
+            if record['status'] == 'ack-pending-turn' and not record.get('ack'):
                 raise SessionError('successor acknowledgement required before first-turn verification')
-            row = self.inspect(record['successor'])
+            row = self.verify_successor(record, allow_failed=True)
             from ade_first_turn import pi_first_turn, EvidenceError
             try:
                 if row.get('Status') == 'error' or row.get('stopReason') == 'error' or row.get('StopReason') == 'error':
                     evidence = {'state': 'failed', 'cause': 'runtime-error'}
+                elif not record.get('ack'):
+                    return record  # known identity, but never accept output before acknowledgement
                 else:
                     self.verify_successor(record)
                     evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row)

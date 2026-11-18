@@ -2312,3 +2312,24 @@ def test_later_idle_native_error_preserves_predecessor_and_allows_retry(setup):
     service.env['PASEO_AGENT_ID'] = PRED
     native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
     assert service.retry(path)['pool'] == 'go-account-b'
+
+
+def test_auth_failure_before_ack_can_be_retried_without_fabricated_ack(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'error'
+    failed = service.verify_turn(path)
+    assert failed['status'] == 'first-turn-failed' and failed['ack'] is None
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['status'] == 'awaiting-ack'
+    assert native.archived == 0
+
+
+def test_wrong_provider_error_is_not_valid_retry_evidence(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    native.rows[SUCC].update(Status='error', Provider='other-provider')
+    with pytest.raises(ss.SessionError, match='identity'):
+        service.verify_turn(Path(record['record']))
+    assert service.status(Path(record['record']))['status'] == 'awaiting-ack'
