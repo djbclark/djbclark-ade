@@ -35,3 +35,5 @@
 - Report truthful read-only Journal/native/cohort status instead of a universal unsupported placeholder, and show a separately authorized standing apply schedule source for automatic promotion. (#796)
 ### Fixed
 - Require the independently reviewed exact packaged namespace-helper bytes before import; remove the generic AST safety predicate and refuse matching-manifest rebinding/subscription variants before compilation. (#796)
+### Added
+- Consume the committed strict finiteGit G data only for worktree-include, binding independent recipe and retained tool identities without granting helper admission or changing ordinary Git configuration. (#796)

@@ -624,3 +624,56 @@ journal_unavailable, journal_unsettled, verified_artifact_unavailable,
 native_observer_unavailable, native_observation_unavailable,
 native_identity_mismatch and state_changed_during_status. Status provides no
 operation grant; apply rechecks current authority and all actual native boundaries.
+
+### Optional finiteGit G data, separate from helper qualification
+
+Committed producer `9b62e77941d6c1563cf7d09726cceb2a3dfaa722` adds optional
+`finiteGit` ONLY on the `worktree-include` protected builtin profile row. Other
+builtin IDs retain their original exact schema. Its strict wrapper is
+`{schemaVersion:1,recipeSha256,recipe}`; recipeSha256 hashes canonicalBuiltinJson
+of the recipe ONLY. The independent parent profileSha256 continues to represent
+external behavior approval and is never replaced by that recipe digest.
+
+The G recipe has only contract, distributionManifestSha256, systemClosureSha256,
+literal retained tools/argv, direct-dotgit repository, original environment,
+system/global/local configRoots, ordered includes, sorted unique readonly file
+identities and sorted unique disjoint protectedAbsent. Parser checks exact nested
+keys, UTF-8/no-NUL and native text limits, 64KiB canonical recipe, environment
+32-key/32KiB limits, 64 files/1MiB each/8MiB aggregate, 32 include edges and
+64 absent paths. Config roots and include endpoints must appear in the files.
+Original GIT_CONFIG_SYSTEM/GLOBAL values must match their declared roots; local
+must equal cwd/.git/config. Include order and duplicate edges are preserved.
+No flags/path aliases/unknown tool/argv fields or profileSha256 alias are accepted.
+
+Retained mapping additionally binds the recipe's distribution/systemClosure SHA
+to the actually verified raw manifest and canonical retained system closure, and
+requires the literal runtime/git, runtime/git-observer and runtime/git-gate.so
+members with sealed modes in the actual measured inventory. Missing identities
+HOLD. No new executable path/config override or command is exposed or invoked by
+this data parser. The existing fixed real-account policy path/HOME behavior is
+unchanged; private gate additions are not part of the original recipe environment.
+
+This parser reads no Git config and launches nothing. It cannot establish actual
+original environment equality/real-account HOME, recursive include depth, complete
+immutable config/source/index/ancestor/absence coverage, actual Git semantics,
+private once-only SDK request/start or descendant settlement. Those are private
+producer audit/admission facts. Unsupported ordinary helper behavior remains
+unchanged with maintenance HOLD; neither parser success, recipe digest nor an
+external profile hash mints admission. CI fixtures include nonempty system/global,
+relative unconditional includes, excludesFile and safe.directory as DATA only;
+they do not establish real helper qualification.
+
+### Verification scope is not another native policy grant
+
+Native protected plugin policy accepts only activate/recover. Verification sends
+current CAS and exact artifact claims through the held operation, but native
+qualification consumes the original loaded ticket's unchanged authorization row.
+No verify row, activate-at-current row or recover-at-current row is needed for
+verification. The controller's existing concrete description is not installed or
+consumed as such a new policy row. Initial Aactivate0, Bactivate1, Arecover2 remain
+the three unchanged rows for normal A-B-A: successful plugin CAS/loaded generations
+are1/2/3; verifies at2 and3 leave CAS and loaded receipts unchanged. Recovered A has
+a fresh execution receipt; retained baseline A remains separately available. The
+same-live synthetic failure trace uses replace expected8->failure CAS9, recover
+expected9->CAS10, then two verifies expected10 with CAS10 unchanged. These counters
+remain distinct from the ADE Journal and native reservation generations.

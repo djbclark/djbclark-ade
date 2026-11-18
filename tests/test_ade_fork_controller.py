@@ -1567,3 +1567,127 @@ def test_status_unsettled_journal_never_observes_or_recovers(readonly_status_fix
     result=controller.status()
     assert result['status']=='hold' and result['reason']=='journal_unsettled'
     assert calls==[] and journal.read()==current
+
+
+@pytest.fixture
+def finite_git_fixture(tmp_path):
+    """Meaningful config/source DATA fixture; no Git read-set/admission proof."""
+    repo=tmp_path/'immutable-source';(repo/'.git').mkdir(parents=True)
+    configs=tmp_path/'original-config';(configs/'includes').mkdir(parents=True)
+    roots={'system':str(configs/'system.gitconfig'),'global':str(configs/'global.gitconfig'),'local':str(repo/'.git/config')}
+    included=str(configs/'includes/base.gitconfig');excludes=str(configs/'original-excludes')
+    bodies={roots['system']:f'[safe]\n directory = {repo}\n',
+        roots['global']:f'[include]\n path = includes/base.gitconfig\n[include]\n path = includes/base.gitconfig\n[core]\n excludesFile = {excludes}\n',
+        included:'[core]\n fsmonitor = false\n',roots['local']:'[core]\n repositoryFormatVersion = 0\n bare = false\n',
+        excludes:'*.private\n',str(repo/'.git/HEAD'):'ref: refs/heads/master\n',str(repo/'.worktreeinclude'):'*.private\n'}
+    files=[]
+    for name,body in bodies.items():
+        path=Path(name);path.write_text(body);path.chmod(0o444);raw=path.read_bytes()
+        files.append({'path':name,'mode':0o444,'size':len(raw),'sha256':c.hashlib.sha256(raw).hexdigest()})
+    recipe={'contract':'worktree-include-git-config-v1','distributionManifestSha256':'1'*64,'systemClosureSha256':'2'*64,
+        'tools':dict(c.FINITE_GIT_TOOLS),'argv':c.parse(c.canonical(c.FINITE_GIT_ARGV).decode()),
+        'repository':{'cwd':str(repo),'gitDirectory':str(repo/'.git'),'layout':'direct-dotgit-v1'},
+        'environment':{'HOME':c.pwd.getpwuid(os.getuid()).pw_dir,'PATH':'/usr/bin:/bin',
+                       'GIT_CONFIG_SYSTEM':roots['system'],'GIT_CONFIG_GLOBAL':roots['global']},
+        'configRoots':roots,'includes':[{'from':roots['global'],'to':included},{'from':roots['global'],'to':included}],
+        'files':sorted(files,key=lambda row:row['path'].encode()),
+        'protectedAbsent':sorted([str(repo/'.git/commondir'),str(repo/'.git/config.worktree')],key=lambda item:item.encode())}
+    return {'schemaVersion':1,'recipeSha256':c.hashlib.sha256(c.builtin_json(recipe)).hexdigest(),'recipe':recipe}
+
+
+def test_finite_git_G_meaningful_config_data_preserves_original_roots_order(finite_git_fixture,monkeypatch):
+    value=finite_git_fixture
+    monkeypatch.setattr(c,'read_regular',lambda *args,**kwargs:pytest.fail('DATA parse must not pretend to audit config files'))
+    monkeypatch.setattr(c.subprocess,'Popen',lambda *args,**kwargs:pytest.fail('DATA parse must not start Git/Node'))
+    result=c.finite_git_profile(value)
+    assert result==value and result is not value
+    recipe=result['recipe']
+    assert recipe['configRoots']['system']==recipe['environment']['GIT_CONFIG_SYSTEM']
+    assert recipe['configRoots']['global']==recipe['environment']['GIT_CONFIG_GLOBAL']
+    assert recipe['configRoots']['local']==recipe['repository']['cwd']+'/.git/config'
+    assert len(recipe['includes'])==2 and recipe['includes'][0]==recipe['includes'][1]
+    assert result['recipeSha256']==c.hashlib.sha256(c.builtin_json(recipe)).hexdigest()
+
+
+@pytest.mark.parametrize('mutation',['wrapper-field','recipe-field','schema-bool','digest','argv','tool','gitfile','system-env',
+    'missing-root','missing-include','duplicate-file','unsorted-file','duplicate-absent','overlap','mode','size','total-size',
+    'invalid-env-name','nul-env','surrogate-env','env-count','env-bytes','path-traversal','too-many-includes','recipe-bytes'])
+def test_finite_git_G_strict_refusals(finite_git_fixture,mutation):
+    value=finite_git_fixture;r=value['recipe']
+    if mutation=='wrapper-field':value['allowed']=True
+    elif mutation=='recipe-field':r['profileSha256']='f'*64
+    elif mutation=='schema-bool':value['schemaVersion']=True
+    elif mutation=='digest':value['recipeSha256']='f'*64
+    elif mutation=='argv':r['argv']['lsFiles'].append('--recurse-submodules')
+    elif mutation=='tool':r['tools']['git']='/usr/bin/git'
+    elif mutation=='gitfile':r['repository']['layout']='gitfile'
+    elif mutation=='system-env':r['environment']['GIT_CONFIG_SYSTEM']='/other/system'
+    elif mutation=='missing-root':r['files']=[row for row in r['files'] if row['path']!=r['configRoots']['system']]
+    elif mutation=='missing-include':r['includes'][0]['to']='/missing/include'
+    elif mutation=='duplicate-file':r['files'].append(r['files'][0])
+    elif mutation=='unsorted-file':r['files'].reverse()
+    elif mutation=='duplicate-absent':r['protectedAbsent'].append(r['protectedAbsent'][0])
+    elif mutation=='overlap':r['protectedAbsent']=[r['files'][0]['path']]
+    elif mutation=='mode':r['files'][0]['mode']=0o644
+    elif mutation=='size':r['files'][0]['size']=1048577
+    elif mutation=='total-size':
+        for index in range(9):r['files'].append({'path':f'/retained/config-{index}','mode':0o444,'size':1048576,'sha256':'f'*64})
+        r['files'].sort(key=lambda row:row['path'].encode())
+    elif mutation=='invalid-env-name':r['environment']['LD-NAME']='value'
+    elif mutation=='nul-env':r['environment']['EXTRA']='bad\0value'
+    elif mutation=='surrogate-env':r['environment']['EXTRA']='\ud800'
+    elif mutation=='env-count':r['environment'].update({f'EXTRA_{index}':'x' for index in range(33)})
+    elif mutation=='env-bytes':r['environment'].update({f'EXTRA_{index}':'x'*4096 for index in range(9)})
+    elif mutation=='path-traversal':r['files'][0]['path']='/config/../escape'
+    elif mutation=='too-many-includes':r['includes']*=17
+    elif mutation=='recipe-bytes':
+        for index in range(32):r['files'].append({'path':'/'+str(index)+'x'*2000,'mode':0o444,'size':0,'sha256':'f'*64})
+        r['files'].sort(key=lambda row:row['path'].encode())
+    if mutation not in ('digest','surrogate-env'):
+        value['recipeSha256']=c.hashlib.sha256(c.builtin_json(r)).hexdigest()
+    with pytest.raises(c.ContractError):c.finite_git_profile(value)
+
+
+def finite_git_retained_mapping(manifest,config,policy,retained,finite):
+    manifest['externalLibraries']=retained['externalLibraries'];manifest['files']+=retained['files'][:2]
+    manifest['systemClosure']=retained['systemClosure'];manifest['systemClosureSha256']=retained['systemClosureSha256']
+    for role,member in c.FINITE_GIT_TOOLS.items():
+        manifest['files'].append({'path':member,'mode':0o444 if role=='gate' else 0o555,'size':10,'sha256':digest(member)})
+    table=dict(manifest['builtinModuleTable'],externalLibraries=manifest['externalLibraries'],systemClosureSha256=manifest['systemClosureSha256'])
+    sha=c.hashlib.sha256(c.builtin_json(table)).hexdigest();manifest.update(builtinModuleTable=table,moduleTableSha256=sha)
+    for row in [*manifest['builtinArtifacts'],*policy['qualifications'][0]['builtinProfiles']]:row['moduleTableSha256']=sha
+    finite['recipe'].update(distributionManifestSha256=config['distributionSha256'],systemClosureSha256=manifest['systemClosureSha256'])
+    finite['recipeSha256']=c.hashlib.sha256(c.builtin_json(finite['recipe'])).hexdigest()
+
+
+def test_finite_git_optional_only_worktree_profile_and_actual_retained_binding(builtin_manifest_fixture,retained_system_fixture,finite_git_fixture):
+    manifest,config,policy=builtin_manifest_fixture
+    finite_git_retained_mapping(manifest,config,policy,retained_system_fixture,finite_git_fixture)
+    baseline=c.builtin_manifest_identities(manifest,config,policy)
+    assert len(baseline)==14
+    profiles=policy['qualifications'][0]['builtinProfiles']
+    target=next(row for row in profiles if row['id']=='worktree-include')
+    old_profile=target['profileSha256']
+    target['finiteGit']=finite_git_fixture
+    assert c.builtin_manifest_identities(manifest,config,policy)==baseline
+    assert target['profileSha256']==old_profile!=finite_git_fixture['recipeSha256']
+    target.pop('finiteGit')
+    assert c.builtin_manifest_identities(manifest,config,policy)==baseline
+    profiles[0]['finiteGit']=finite_git_fixture
+    with pytest.raises(c.ContractError,match='only'):c.builtin_manifest_identities(manifest,config,policy)
+
+
+@pytest.mark.parametrize('mutation',['distribution','system-closure','missing-tool','unsealed-tool','profile-alias'])
+def test_finite_git_mapping_never_substitutes_manifest_tools_or_parent_approval(builtin_manifest_fixture,retained_system_fixture,finite_git_fixture,mutation):
+    manifest,config,policy=builtin_manifest_fixture
+    finite_git_retained_mapping(manifest,config,policy,retained_system_fixture,finite_git_fixture)
+    target=next(row for row in policy['qualifications'][0]['builtinProfiles'] if row['id']=='worktree-include')
+    target['finiteGit']=finite_git_fixture
+    if mutation=='distribution':finite_git_fixture['recipe']['distributionManifestSha256']='f'*64
+    elif mutation=='system-closure':finite_git_fixture['recipe']['systemClosureSha256']='f'*64
+    elif mutation=='missing-tool':manifest['files']=[row for row in manifest['files'] if row['path']!='runtime/git-observer']
+    elif mutation=='unsealed-tool':next(row for row in manifest['files'] if row['path']=='runtime/git')['mode']=0o755
+    else:target['finiteGit']={'schemaVersion':1,'profileSha256':target['profileSha256'],'recipe':finite_git_fixture['recipe']}
+    if mutation in ('distribution','system-closure'):
+        finite_git_fixture['recipeSha256']=c.hashlib.sha256(c.builtin_json(finite_git_fixture['recipe'])).hexdigest()
+    with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)

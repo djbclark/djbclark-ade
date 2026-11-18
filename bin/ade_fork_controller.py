@@ -369,6 +369,81 @@ def read_native_host_policy():
     return policy,hashlib.sha256(raw).hexdigest()
 
 
+FINITE_GIT_ARGV = {'lsFiles':['ls-files','--others','--ignored','--exclude-from=.worktreeinclude','-z'],
+                   'checkIgnore':['check-ignore','--stdin','-z']}
+FINITE_GIT_TOOLS = {'git':'runtime/git','observer':'runtime/git-observer','gate':'runtime/git-gate.so'}
+
+
+def finite_git_profile(value):
+    """Mirror9b62 strict G DATA parser; no helper/config/readset qualification."""
+    def exact(item,keys):
+        if type(item) is not dict or set(item)!=set(keys):raise ContractError('invalid finiteGit keys')
+        return item
+    def text(item):
+        if type(item) is not str or '\0' in item:raise ContractError('invalid finiteGit text')
+        try:
+            item.encode('utf8',errors='strict')
+            if len(item.encode('utf-16-le'))//2>4096:raise ContractError('finiteGit text bound')
+        except UnicodeError as error:raise ContractError('invalid finiteGit Unicode') from error
+        return item
+    def absolute(item):
+        text(item)
+        normalized=posixpath.normpath(item)
+        if normalized.startswith('//'):normalized='/'+normalized.lstrip('/')
+        if item.endswith('/') and normalized!='/':normalized+='/'
+        if not item.startswith('/') or normalized!=item:raise ContractError('invalid finiteGit absolute path')
+        return item
+    def sha(item):
+        if type(item) is not str or not re.fullmatch('[a-f0-9]{64}',item):raise ContractError('invalid finiteGit digest')
+    def sequence(item,maximum):
+        if type(item) is not list or len(item)>maximum:raise ContractError('finiteGit list bound')
+        return item
+    def ordered_unique(items):
+        return all(before.encode('utf8')<after.encode('utf8') for before,after in zip(items,items[1:]))
+    profile=exact(value,('schemaVersion','recipeSha256','recipe'))
+    if type(profile['schemaVersion']) is not int or profile['schemaVersion']!=1:raise ContractError('unsupported finiteGit schema')
+    sha(profile['recipeSha256'])
+    recipe=exact(profile['recipe'],('contract','distributionManifestSha256','systemClosureSha256','tools','argv',
+        'repository','environment','configRoots','includes','files','protectedAbsent'))
+    if recipe['contract']!='worktree-include-git-config-v1':raise ContractError('unsupported finiteGit contract')
+    sha(recipe['distributionManifestSha256']);sha(recipe['systemClosureSha256'])
+    if type(recipe['tools']) is not dict or recipe['tools']!=FINITE_GIT_TOOLS or type(recipe['argv']) is not dict or recipe['argv']!=FINITE_GIT_ARGV:
+        raise ContractError('finiteGit literal tools/argv mismatch')
+    repository=exact(recipe['repository'],('cwd','gitDirectory','layout'))
+    absolute(repository['cwd']);absolute(repository['gitDirectory'])
+    if repository['layout']!='direct-dotgit-v1' or repository['gitDirectory']!=repository['cwd']+'/.git':
+        raise ContractError('unsupported finiteGit repository layout')
+    environment=recipe['environment']
+    if type(environment) is not dict or len(environment)>32:raise ContractError('finiteGit environment bound')
+    for key,item in environment.items():
+        if type(key) is not str or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,127}',key):raise ContractError('invalid finiteGit environment name')
+        text(item)
+    if len(builtin_json(environment))>32768:raise ContractError('finiteGit environment bytes bound')
+    roots=exact(recipe['configRoots'],('system','global','local'))
+    for item in roots.values():absolute(item)
+    if (roots['local']!=repository['gitDirectory']+'/config' or roots['system']!=environment.get('GIT_CONFIG_SYSTEM') or
+            roots['global']!=environment.get('GIT_CONFIG_GLOBAL')):raise ContractError('finiteGit original config roots mismatch')
+    includes=sequence(recipe['includes'],32)
+    for edge in includes:
+        exact(edge,('from','to'));absolute(edge['from']);absolute(edge['to'])
+    files=sequence(recipe['files'],64);total=0
+    for row in files:
+        exact(row,('path','mode','size','sha256'));absolute(row['path']);sha(row['sha256'])
+        if (type(row['mode']) is not int or row['mode']!=0o444 or type(row['size']) is not int or not 0<=row['size']<=1048576):
+            raise ContractError('invalid finiteGit file identity')
+        total+=row['size']
+    absent=sequence(recipe['protectedAbsent'],64)
+    for item in absent:absolute(item)
+    paths=[row['path'] for row in files];known=set(paths)
+    if (not ordered_unique(paths) or not ordered_unique(absent) or total>8*1048576 or any(item in known for item in absent) or
+            any(item not in known for item in roots.values()) or any(edge['from'] not in known or edge['to'] not in known for edge in includes)):
+        raise ContractError('incomplete or duplicate finiteGit config coverage')
+    encoded=builtin_json(recipe)
+    if len(encoded)>65536 or hashlib.sha256(encoded).hexdigest()!=profile['recipeSha256']:
+        raise ContractError('finiteGit canonical recipe digest/bound mismatch')
+    return parse(canonical(profile).decode())
+
+
 def builtin_manifest_identities(manifest,config,host_policy):
     """Map verified manifest bytes plus current protected native profiles, never wire."""
     rows=[row for row in host_policy['qualifications'] if row.get('immutableRoot')==config['distributionRoot']]
@@ -383,12 +458,16 @@ def builtin_manifest_identities(manifest,config,host_policy):
     if type(profiles) is not list or len(profiles)!=14: raise ContractError('all14 protected builtin profiles required')
     by_id={}
     for profile in profiles:
-        if (type(profile) is not dict or set(profile) != {'id','sourceSha256','serverBundleSha256','moduleTableSha256','activityContract','profileSha256'} or
+        fields={'id','sourceSha256','serverBundleSha256','moduleTableSha256','activityContract','profileSha256'}
+        if (type(profile) is not dict or set(profile) not in (fields,fields|{'finiteGit'}) or
                 type(profile['id']) is not str or profile['id'] not in BUILTIN_IDS or profile['id'] in by_id or
                 profile['activityContract'] != 'builtin-in-process-v1' or
                 any(type(profile[key]) is not str or not re.fullmatch('[a-f0-9]{64}',profile[key])
                     for key in ('sourceSha256','serverBundleSha256','moduleTableSha256','profileSha256'))):
             raise ContractError('invalid protected builtin profile')
+        if 'finiteGit' in profile:
+            if profile['id']!='worktree-include':raise ContractError('finiteGit profile belongs only to worktree-include')
+            finite_git_profile(profile['finiteGit'])
         by_id[profile['id']]=profile
     files={item['path']:item for item in manifest['files']}
     table={'schemaVersion':1,'recipe':BUILTIN_RECIPE,'runtimeSha256':manifest['runtime']['sha256'],
@@ -407,6 +486,15 @@ def builtin_manifest_identities(manifest,config,host_policy):
     for plugin,artifact in zip(BUILTIN_IDS,manifest['builtinArtifacts']):
         prefix='builtin-compiled/'+plugin
         profile=by_id[plugin]
+        if 'finiteGit' in profile:
+            recipe=finite_git_profile(profile['finiteGit'])['recipe']
+            if (recipe['distributionManifestSha256']!=config['distributionSha256'] or
+                    recipe['systemClosureSha256']!=manifest.get('systemClosureSha256')):
+                raise ContractError('finiteGit actual distribution/system closure mismatch')
+            for role,member in FINITE_GIT_TOOLS.items():
+                tool=files.get(member)
+                if type(tool) is not dict or tool.get('mode') not in ((0o555,) if role in ('git','observer') else (0o444,0o555)):
+                    raise ContractError('finiteGit actual retained tool identity missing')
         if (type(artifact) is not dict or set(artifact)!=keys or artifact['id']!=plugin or
                 artifact['moduleTableSha256']!=table_sha or
                 artifact['factoryPath']!=prefix+'/server.factory.js' or artifact['manifestPath']!=prefix+'/manifest.json' or
