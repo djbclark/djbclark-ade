@@ -44,6 +44,9 @@ runtime paths are unchanged by this foundation.
    managed install/update/force/system/retry commands cannot run, damaged policy
    holds writes, catalog overrides cannot disable protection, and unmanaged
    recipes still execute. CI and adversary review precede a PR.
+   Before committing each slice, run `python3 bin/changelog-fold --repo . --check`;
+   each fragment entry must have its required PR suffix. Replace any temporary
+   number with the actual PR number once assigned, before the slice is merged.
 2. **Qualification:** trusted feature contracts, immutable source/dependency/
    patch/recipe/artifact receipts, check freshness and exact-head evidence.
    Candidate code cannot redefine its own passing criteria. Missing, pending,
