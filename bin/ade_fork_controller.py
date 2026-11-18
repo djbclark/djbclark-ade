@@ -178,7 +178,9 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
         raise ContractError('protected evaluator identity mismatch')
     native = row['native']
     if native is not None:
-        if type(native) is not dict or set(native) != {'node', 'cli', 'serverId', 'daemonIncarnation', 'distributionSha256', 'distributionBuildId', 'distributionRoot', 'closure'}:
+        if (type(native) is not dict or set(native) not in ({'node','cli','serverId','daemonIncarnation','distributionSha256','distributionBuildId','distributionRoot','closure'},
+                    {'node','cli','serverId','daemonIncarnation','distributionSha256','distributionBuildId','distributionRoot','closure','cohortVersion'}) or
+                    ('cohortVersion' in native and (type(native['cohortVersion']) is not int or native['cohortVersion'] != 2))):
             raise ContractError('invalid retained native transport')
         for key in ('node', 'cli'):
             item = native[key]
@@ -312,6 +314,113 @@ def protected_root_path(path):
     return path
 
 
+BUILTIN_IDS = ('antigravity-provider','claude-usage-source','codex-usage-source','copilot-usage-source',
+    'cursor-usage-source','fx-provider','grok-usage-source','hoplite-provider','kimi-usage-source',
+    'minimax-usage-source','muse-provider','opencode-go-usage-source','worktree-include','zai-usage-source')
+BUILTIN_RECIPE = {'schemaVersion':1,'contract':'builtin-in-process-v1',
+    'sdkKeys':['@getpaseo/plugin','@getpaseo/plugin/server','@getpaseo/plugin/server/provider',
+               '@getpaseo/plugin/server/acp','@getpaseo/plugin/server/usage','zod'],
+    'privateBindings':['@getpaseo/plugin/internal/activity','@getpaseo/plugin/internal/builtin-helper'],
+    'nodeKeys':['node:fs','node:fs/promises','node:os','node:path','node:crypto','node:readline','node:util',
+                'node:timers/promises','node:sqlite','node:child_process'],
+    'globals':{'process':'captured-node-process-finite-getBuiltinModule-v1','fetch':'captured-node-fetch-v1',
+               'timers':'captured-node-timers-v1','dynamicImport':'finite-table-promise-v1','childProcess':'scoped-execFile-only-v1'}}
+
+
+def builtin_json(value):
+    """Mirror committed canonicalBuiltinJson; no new identity algorithm."""
+    def check(item):
+        if item is None or type(item) is bool: return
+        if type(item) is int and abs(item) <= 2**53-1: return
+        if type(item) is str:
+            item.encode('utf8',errors='strict'); return
+        if type(item) is list:
+            for child in item: check(child)
+            return
+        if type(item) is dict:
+            for key,child in item.items():
+                if type(key) is not str: raise ContractError('invalid builtin canonical key')
+                check(key); check(child)
+            return
+        raise ContractError('invalid builtin canonical data')
+    try:
+        check(value)
+        return canonical(value)
+    except UnicodeError as error: raise ContractError('invalid builtin canonical Unicode') from error
+
+
+def read_native_host_policy():
+    """Fixed producer enrollment path; no CLI/env transport or policy overrides."""
+    home=Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    path=home/'.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json'
+    for current in (path,*path.parents):
+        st=current.lstat()
+        if stat.S_ISLNK(st.st_mode) or st.st_uid not in (0,os.getuid()) or st.st_mode & 0o022:
+            raise ContractError('unsafe qualified host policy ancestry')
+        if current==home:break
+    raw=read_regular(path,65536,owner=path.lstat().st_uid)
+    policy=parse(raw.decode())
+    if (type(policy) is not dict or type(policy.get('schemaVersion')) is not int or policy['schemaVersion'] != 1 or
+            type(policy.get('qualifications')) is not list or len(policy['qualifications'])>100):
+        raise ContractError('invalid current native host policy')
+    if any(type(row) is not dict for row in policy['qualifications']): raise ContractError('invalid native host qualification row')
+    return policy,hashlib.sha256(raw).hexdigest()
+
+
+def builtin_manifest_identities(manifest,config,host_policy):
+    """Map verified manifest bytes plus current protected native profiles, never wire."""
+    rows=[row for row in host_policy['qualifications'] if row.get('immutableRoot')==config['distributionRoot']]
+    if len(rows)!=1: raise ContractError('ambiguous or absent protected native qualification')
+    row=rows[0]
+    if (row.get('immutabilityAdapter') != 'linux-root-owned-retained-v1' or
+            row.get('manifestSha256') != config['distributionSha256'] or
+            row.get('distributionBuildId') != config['distributionBuildId'] or
+            row.get('qualificationSha256') != config['closure']['qualificationSha256']):
+        raise ContractError('current native host identity mismatch')
+    profiles=row.get('builtinProfiles')
+    if type(profiles) is not list or len(profiles)!=14: raise ContractError('all14 protected builtin profiles required')
+    by_id={}
+    for profile in profiles:
+        if (type(profile) is not dict or set(profile) != {'id','sourceSha256','serverBundleSha256','moduleTableSha256','activityContract','profileSha256'} or
+                type(profile['id']) is not str or profile['id'] not in BUILTIN_IDS or profile['id'] in by_id or
+                profile['activityContract'] != 'builtin-in-process-v1' or
+                any(type(profile[key]) is not str or not re.fullmatch('[a-f0-9]{64}',profile[key])
+                    for key in ('sourceSha256','serverBundleSha256','moduleTableSha256','profileSha256'))):
+            raise ContractError('invalid protected builtin profile')
+        by_id[profile['id']]=profile
+    files={item['path']:item for item in manifest['files']}
+    table={'schemaVersion':1,'recipe':BUILTIN_RECIPE,'runtimeSha256':manifest['runtime']['sha256'],
+           'daemonSha256':files.get('daemon.mjs',{}).get('sha256'),'externalLibraries':manifest['externalLibraries']}
+    table_sha=hashlib.sha256(builtin_json(table)).hexdigest()
+    if (manifest.get('builtinPlugins') != list(BUILTIN_IDS) or manifest.get('builtinModuleTable') != table or
+            manifest.get('moduleTableSha256') != table_sha or type(manifest.get('builtinArtifacts')) is not list or
+            len(manifest['builtinArtifacts'])!=14):
+        raise ContractError('actual builtin module table/inventory mismatch')
+    result={}
+    keys={'moduleTableSha256','sourceIdentityPath','id','sourceSha256','serverBundleSha256',
+          'originalServerBundleSha256','factoryPath','manifestPath','metafilePath','moduleImports'}
+    for plugin,artifact in zip(BUILTIN_IDS,manifest['builtinArtifacts']):
+        prefix='builtin-compiled/'+plugin
+        profile=by_id[plugin]
+        if (type(artifact) is not dict or set(artifact)!=keys or artifact['id']!=plugin or
+                artifact['moduleTableSha256']!=table_sha or
+                artifact['factoryPath']!=prefix+'/server.factory.js' or artifact['manifestPath']!=prefix+'/manifest.json' or
+                artifact['metafilePath']!=prefix+'/metafile.json' or artifact['sourceIdentityPath']!=prefix+'/source-identity.json' or
+                type(artifact['moduleImports']) is not list or len(artifact['moduleImports'])>1000 or
+                any(type(item) is not str for item in artifact['moduleImports']) or
+                files.get(artifact['factoryPath'],{}).get('sha256')!=artifact['serverBundleSha256'] or
+                files.get(prefix+'/server-original.js',{}).get('sha256')!=artifact['originalServerBundleSha256'] or
+                files.get(artifact['sourceIdentityPath'],{}).get('sha256')!=artifact['sourceSha256'] or
+                artifact['manifestPath'] not in files or artifact['metafilePath'] not in files or
+                'builtin-plugins/'+plugin+'/paseo-plugin.json' not in files or
+                any(artifact[key]!=profile[key] for key in ('sourceSha256','serverBundleSha256','moduleTableSha256'))):
+            raise ContractError('retained builtin artifact/profile mismatch')
+        result[plugin]={'kind':'builtin-in-process','contract':'builtin-in-process-v1',
+            'distributionBuildId':config['distributionBuildId'],'sourcePath':str(Path(config['distributionRoot'])/'builtin-plugins'/plugin),
+            **{key:profile[key] for key in ('sourceSha256','serverBundleSha256','moduleTableSha256','profileSha256')},'closure':config['closure']}
+    return result
+
+
 def verify_transport_distribution(config):
     """Python preexec mirror of producer daemon-verifier.ts finite v2 manifest."""
     if sys.platform != 'linux' or os.getuid() == 0: raise ContractError('finite non-root Linux adapter required')
@@ -324,6 +433,8 @@ def verify_transport_distribution(config):
         raise ContractError('protected raw distribution manifest mismatch')
     raw_manifest = raw
     manifest = parse(raw.decode())
+    if type(manifest) is dict and 'systemClosure' in manifest:
+        raise ContractError('retained systemClosure namespace verifier not yet integrated')
     if (type(manifest) is not dict or manifest.get('schemaVersion') != 2 or manifest.get('profile') != 'enclosing-daemon-v2' or
             manifest.get('distributionBuildId') != config['distributionBuildId'] or
             manifest.get('entries') != {'daemon':'daemon.mjs','pluginChild':'plugin-child-entry.mjs','compiler':'compiler-entry.mjs','terminal':'terminal-entry.mjs'}):
@@ -450,6 +561,86 @@ def cohort_observation(value, config, expected, target, *, allow_target_absent=F
     if not (set(expected) - {'paseo'}) <= ids: raise ContractError('incomplete protected cohort')
     return value
 
+def cohort_v2_observation(value, config, expected, target, manifest_identities, *, allow_target_absent=False):
+    """Pure V2 qualification parser, NOT a producer or transport authority factory.
+
+    manifest_identities must be independently extracted from verified actual manifest
+    bytes by the trusted producer adapter. That production mapping is not available
+    yet; callers must HOLD rather than copying identities from wire or enrollment.
+    Returns original tagged V2 data; directory unwrapping is private validation only.
+    """
+    if type(config.get('cohortVersion')) is not int or config['cohortVersion'] != 2:
+        raise ContractError('protected cohort V2 opt-in required')
+    if (type(value) is not dict or set(value) != {'version','consistency','observationEpoch','enclosing','entries'} or
+            type(value['version']) is not int or value['version'] != 2 or value['consistency'] != 'coherent' or
+            type(value['observationEpoch']) is not int or not 0 <= value['observationEpoch'] < 2**53 or
+            type(value['entries']) is not list or len(value['entries']) > 1000):
+        raise ContractError('cohort V2 observation uncertain')
+    builtin_expected = {key:record for key,record in expected.items()
+                        if type(record) is dict and record.get('kind') == 'builtin-in-process'}
+    if (len(builtin_expected) != 14 or target in builtin_expected or 'paseo' in builtin_expected or
+            type(manifest_identities) is not dict or set(manifest_identities) != set(builtin_expected)):
+        raise ContractError('complete independently verified builtin inventory required')
+    loaded_keys = {'kind','pluginId','instanceId','enclosingIncarnation','sourcePath','sourceSha256',
+                   'serverBundleSha256','moduleTableSha256','profileSha256','closure'}
+    stable_keys = (loaded_keys - {'pluginId','instanceId','enclosingIncarnation'}) | {'contract','distributionBuildId'}
+    seen=set(); builtin_seen=set(); instances=set(); directories=[]
+    for entry in value['entries']:
+        if type(entry) is not dict or type(entry.get('pluginId')) is not str or not entry['pluginId']:
+            raise ContractError('invalid V2 cohort ID')
+        plugin=entry['pluginId']
+        if plugin in seen or plugin == 'paseo': raise ContractError('duplicate V2 cohort ID')
+        seen.add(plugin)
+        if entry.get('kind') == 'directory':
+            if (set(entry) != {'kind','pluginId','registration','enabled','journal','loaded','execution'} or plugin in builtin_expected):
+                raise ContractError('invalid V2 directory tag')
+            loaded=entry['loaded']; execution=entry['execution']
+            if loaded is not None and (type(loaded) is not dict or set(loaded) != {'kind','receipt'} or loaded['kind'] != 'plugin-child'):
+                raise ContractError('invalid V2 child loaded tag')
+            if execution is not None and (type(execution) is not dict or
+                    set(execution) != {'kind','contract','incarnation','distributionBuildId','closure'} or execution['kind'] != 'plugin-child'):
+                raise ContractError('invalid V2 child execution tag')
+            directories.append(dict(pluginId=plugin,registration=entry['registration'],enabled=entry['enabled'],journal=entry['journal'],
+                loaded=None if loaded is None else loaded['receipt'],
+                execution=None if execution is None else {key:item for key,item in execution.items() if key != 'kind'}))
+        elif entry.get('kind') == 'builtin-in-process':
+            if (set(entry) != {'kind','pluginId','registration','enabled','loaded','execution'} or plugin not in builtin_expected or
+                    entry['enabled'] is not True):
+                raise ContractError('unexpected or disabled builtin cohort member')
+            builtin_seen.add(plugin)
+            loaded=entry['loaded']; execution=entry['execution']
+            if (type(loaded) is not dict or set(loaded) != loaded_keys or type(execution) is not dict or
+                    set(execution) != loaded_keys | {'contract','distributionBuildId'} or
+                    any(loaded.get(key) != execution.get(key) for key in loaded_keys) or
+                    loaded['kind'] != 'builtin-in-process' or loaded['pluginId'] != plugin or
+                    execution['contract'] != 'builtin-in-process-v1' or execution['distributionBuildId'] != config['distributionBuildId'] or
+                    loaded['enclosingIncarnation'] != config['daemonIncarnation'] or
+                    type(loaded['instanceId']) is not str or not loaded['instanceId'] or loaded['instanceId'] in instances):
+                raise ContractError('actual builtin instance/execution mismatch')
+            instances.add(loaded['instanceId'])
+            if any(type(loaded[key]) is not str or not re.fullmatch('[a-f0-9]{64}',loaded[key])
+                   for key in ('sourceSha256','serverBundleSha256','moduleTableSha256','profileSha256')):
+                raise ContractError('qualified builtin nonnull profile/digests required')
+            if closure_identity(loaded['closure']) != config['closure']:
+                raise ContractError('builtin enclosing closure mismatch')
+            source=str(Path(config['distributionRoot'])/'builtin-plugins'/plugin)
+            if (plugin in ('.','..') or '/' in plugin or '\\' in plugin or
+                    entry['registration'] != {'path':source} or loaded['sourcePath'] != source):
+                raise ContractError('builtin SAME distribution source path required')
+            stable={key:execution[key] for key in stable_keys}
+            protected={'kind':'builtin-in-process','enabled':True,'loaded':True,
+                       'registration':{'path':source},'execution':stable}
+            if builtin_expected[plugin] != protected or manifest_identities[plugin] != stable:
+                raise ContractError('builtin protected/manifest identity mismatch')
+        else:
+            raise ContractError('unsupported V2 cohort kind')
+    if builtin_seen != set(builtin_expected): raise ContractError('incomplete V2 builtin cohort')
+    # Reuse unchanged directory validation/CAS rules; no fake builtin child/journal.
+    directory_expected={key:record for key,record in expected.items() if key not in builtin_expected}
+    cohort_observation(dict(value,version=1,entries=directories),config,directory_expected,target,allow_target_absent=allow_target_absent)
+    return value
+
+
 
 def native_reservation_plan(status, config, plugin):
     """Read-only exact native counter snapshot. Null/old generation is never zero."""
@@ -496,6 +687,8 @@ class NativeFacade:
         self.original_native = None
         self.known_held = None
         self.read_only_reconciliation = False
+        self.host_policy_binding = None
+        self.builtin_identities = None
 
     def supported(self):
         if self.uncertain and not getattr(self, 'read_only_reconciliation', False): return False
@@ -515,6 +708,21 @@ class NativeFacade:
 
     def cohort_status(self, *, allow_target_absent=False):
         row = self.reader(); config = self._transport()
+        if config.get('cohortVersion') == 2:
+            # Committed56faaa CLI independently gates server_info observation availability.
+            # This feature is not readiness; full manifest/profile/cohort checks still apply.
+            value=self._call(['plugin','cohort-v2-status'])
+            config=self._transport()  # recheck native policy/retained bytes after transport await
+            cohort_v2_observation(value,config,row['cohort'],row['component'],self.builtin_identities,
+                                  allow_target_absent=allow_target_absent)
+            directories=[]
+            for entry in value['entries']:
+                if entry['kind']!='directory':continue
+                directories.append(dict(pluginId=entry['pluginId'],registration=entry['registration'],enabled=entry['enabled'],journal=entry['journal'],
+                    loaded=None if entry['loaded'] is None else entry['loaded']['receipt'],
+                    execution=None if entry['execution'] is None else {key:item for key,item in entry['execution'].items() if key!='kind'}))
+            # Internal directory view only after validating the COMPLETE tagged union.
+            return dict(value,entries=directories,builtinEntries=[entry for entry in value['entries'] if entry['kind']=='builtin-in-process'])
         return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'], allow_target_absent=allow_target_absent)
 
     def bind(self, row, context, render, *, recovery=False, origin=None):
@@ -556,7 +764,18 @@ class NativeFacade:
         if self.bridge_binding is not None and self.bridge_binding != binding:
             self.uncertain = True
             raise ContractError('retained native bridge changed during transaction')
-        verify_transport_distribution(config)
+        manifest=verify_transport_distribution(config)
+        if config.get('cohortVersion') == 2:
+            host_policy,host_binding=read_native_host_policy()
+            if self.host_policy_binding is not None and host_binding!=self.host_policy_binding:
+                self.uncertain=True
+                raise ContractError('native protected host policy changed during facade lifetime')
+            inventory=Path(config['distributionRoot'])/'builtin-plugins'
+            actual_ids=sorted(path.name for path in inventory.iterdir() if path.is_dir())
+            if actual_ids!=list(BUILTIN_IDS):raise ContractError('actual builtin directory inventory mismatch')
+            identities=builtin_manifest_identities(manifest,config,host_policy)
+            self.builtin_identities=identities
+            self.host_policy_binding=host_binding
         for key in ('node', 'cli'):
             item = config[key]; path = Path(item['path'])
             data = read_regular(path, 256 * 1024 * 1024, owner=0)

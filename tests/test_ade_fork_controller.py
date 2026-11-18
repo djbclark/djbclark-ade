@@ -981,3 +981,195 @@ def test_known_held_wire_requires_feature_live_bearer_and_exact_baseline(cohort_
     native.token=None
     with pytest.raises(c.ContractError):native._accept_known_held(result,context.target,record)
     assert native.uncertain is True
+
+
+@pytest.fixture
+def cohort_v2_fixture(cohort_mapping_fixture):
+    """Synthetic independently separated manifest/host/wire identities; no runtime proof."""
+    row,receipt,stored,old_config,facts=cohort_mapping_fixture
+    config=dict(old_config,cohortVersion=2,distributionRoot='/retained/fixture-distribution')
+    expected=c.parse(c.canonical(row['cohort']).decode())
+    value=c.parse(c.canonical(facts).decode());value['version']=2
+    for entry in value['entries']:
+        entry['kind']='directory'
+        if entry['loaded'] is not None:entry['loaded']={'kind':'plugin-child','receipt':entry['loaded']}
+        if entry['execution'] is not None:entry['execution']['kind']='plugin-child'
+    manifests={}
+    for index in range(14):
+        plugin=f'builtin-{index:02d}'
+        source=config['distributionRoot']+'/builtin-plugins/'+plugin
+        stable={'kind':'builtin-in-process','contract':'builtin-in-process-v1','distributionBuildId':config['distributionBuildId'],
+                'sourcePath':source,'sourceSha256':digest(['source',plugin]),'serverBundleSha256':digest(['bundle',plugin]),
+                'moduleTableSha256':digest(['modules',plugin]),'profileSha256':digest(['profile',plugin]),'closure':config['closure']}
+        manifests[plugin]=c.parse(c.canonical(stable).decode())
+        expected[plugin]={'kind':'builtin-in-process','enabled':True,'loaded':True,'registration':{'path':source},
+                          'execution':c.parse(c.canonical(stable).decode())}
+        loaded={key:item for key,item in stable.items() if key not in ('contract','distributionBuildId')}
+        loaded.update(pluginId=plugin,instanceId=f'actual-instance-{index}',enclosingIncarnation=config['daemonIncarnation'])
+        execution=dict(loaded,contract='builtin-in-process-v1',distributionBuildId=config['distributionBuildId'])
+        value['entries'].append({'kind':'builtin-in-process','pluginId':plugin,'registration':{'path':source},
+                                'enabled':True,'loaded':loaded,'execution':execution})
+    return value,config,expected,manifests
+
+
+def test_v2_pure_parser_keeps_real_builtin_shape_and_v1_strict(cohort_v2_fixture):
+    value,config,expected,manifests=cohort_v2_fixture
+    assert c.cohort_v2_observation(value,config,expected,'ade-yolo',manifests) is value
+    assert all('journal' not in entry and 'pid' not in entry['loaded'] and 'activationGeneration' not in entry['loaded']
+               for entry in value['entries'] if entry['kind']=='builtin-in-process')
+    with pytest.raises(c.ContractError):c.cohort_observation(value,config,expected,'ade-yolo')
+    unopted=dict(config);unopted.pop('cohortVersion')
+    with pytest.raises(c.ContractError,match='opt-in'):c.cohort_v2_observation(value,unopted,expected,'ade-yolo',manifests)
+
+
+@pytest.mark.parametrize('mutation',['null-profile','missing-execution','wrong-instance','duplicate-instance','duplicate-id',
+    'missing-builtin','extra-builtin','wrong-root','forged-wire-and-host','wrong-tag','fake-journal','child-tag','uncertain'])
+def test_v2_negative_identity_matrix(cohort_v2_fixture,mutation):
+    value,config,expected,manifests=cohort_v2_fixture
+    builtins=[entry for entry in value['entries'] if entry['kind']=='builtin-in-process']
+    entry=builtins[0]
+    if mutation=='null-profile':
+        entry['loaded']['profileSha256']=None;entry['execution']['profileSha256']=None
+        expected[entry['pluginId']]['execution']['profileSha256']=None
+        manifests[entry['pluginId']]['profileSha256']=None
+    elif mutation=='missing-execution':entry['execution']=None
+    elif mutation=='wrong-instance':entry['execution']['instanceId']='other-instance'
+    elif mutation=='duplicate-instance':
+        builtins[1]['loaded']['instanceId']=entry['loaded']['instanceId']
+        builtins[1]['execution']['instanceId']=entry['loaded']['instanceId']
+    elif mutation=='duplicate-id':value['entries'].append(entry)
+    elif mutation=='missing-builtin':value['entries'].remove(entry)
+    elif mutation=='extra-builtin':
+        extra=c.parse(c.canonical(entry).decode());extra['pluginId']='unexpected-active-builtin';value['entries'].append(extra)
+    elif mutation=='wrong-root':
+        entry['registration']['path']='/mutable/builtin-plugins/'+entry['pluginId']
+        entry['loaded']['sourcePath']=entry['registration']['path'];entry['execution']['sourcePath']=entry['registration']['path']
+    elif mutation=='forged-wire-and-host':
+        entry['loaded']['moduleTableSha256']='e'*64;entry['execution']['moduleTableSha256']='e'*64
+        expected[entry['pluginId']]['execution']['moduleTableSha256']='e'*64  # independent manifest still refuses
+    elif mutation=='wrong-tag':entry['kind']='directory'
+    elif mutation=='fake-journal':entry['journal']={'generation':1}
+    elif mutation=='child-tag':
+        directory=next(entry for entry in value['entries'] if entry['kind']=='directory')
+        directory['loaded']['kind']='builtin-in-process'
+    elif mutation=='uncertain':value={'version':2,'consistency':'uncertain','reason':'incomplete'}
+    with pytest.raises(c.ContractError):c.cohort_v2_observation(value,config,expected,'ade-yolo',manifests,allow_target_absent=True)
+
+
+def test_v2_requires_independent_manifest_inventory(cohort_v2_fixture):
+    value,config,expected,manifests=cohort_v2_fixture
+    with pytest.raises(c.ContractError):c.cohort_v2_observation(value,config,expected,'ade-yolo',{})
+    manifests.pop(next(iter(manifests)))
+    with pytest.raises(c.ContractError):c.cohort_v2_observation(value,config,expected,'ade-yolo',manifests)
+
+
+def test_v2_opt_in_does_not_fall_back_to_v1_transport(cohort_v2_fixture,monkeypatch):
+    _,config,_,_=cohort_v2_fixture
+    native=c.NativeFacade(lambda:{'cohort':{},'component':'ade-yolo'})
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    calls=[]
+    def unavailable(args):
+        calls.append(args)
+        raise c.ContractError('actual V2 unavailable')
+    monkeypatch.setattr(native,'_call',unavailable)
+    assert native.supported() is False
+    assert calls==[['plugin','cohort-v2-status']]
+
+
+@pytest.fixture
+def builtin_manifest_fixture():
+    """Canonical producer shape, synthetic file digests; no native process qualification."""
+    config={'distributionRoot':'/retained/native','distributionBuildId':'native-fixture',
+        'distributionSha256':'1'*64,'closure':{'runtimeClosureSha256':'1'*64,'helperClosureSha256':'2'*64,'qualificationSha256':'3'*64}}
+    files=[]
+    def identity(path):
+        item={'path':path,'size':10,'mode':0o444,'sha256':digest(path)}
+        files.append(item);return item
+    runtime=identity('runtime/node');daemon=identity('daemon.mjs')
+    table={'schemaVersion':1,'recipe':c.BUILTIN_RECIPE,'runtimeSha256':runtime['sha256'],'daemonSha256':daemon['sha256'],'externalLibraries':[]}
+    table_sha=c.hashlib.sha256(c.builtin_json(table)).hexdigest()
+    artifacts=[];profiles=[]
+    for plugin in c.BUILTIN_IDS:
+        prefix='builtin-compiled/'+plugin
+        factory=identity(prefix+'/server.factory.js');original=identity(prefix+'/server-original.js')
+        source=identity(prefix+'/source-identity.json')
+        identity(prefix+'/manifest.json');identity(prefix+'/metafile.json');identity('builtin-plugins/'+plugin+'/paseo-plugin.json')
+        artifacts.append({'id':plugin,'moduleTableSha256':table_sha,'sourceIdentityPath':source['path'],'sourceSha256':source['sha256'],
+            'serverBundleSha256':factory['sha256'],'originalServerBundleSha256':original['sha256'],'factoryPath':factory['path'],
+            'manifestPath':prefix+'/manifest.json','metafilePath':prefix+'/metafile.json','moduleImports':[]})
+        profiles.append({'id':plugin,'sourceSha256':source['sha256'],'serverBundleSha256':factory['sha256'],
+            'moduleTableSha256':table_sha,'activityContract':'builtin-in-process-v1','profileSha256':digest(['protected-profile',plugin])})
+    manifest={'files':files,'runtime':runtime,'externalLibraries':[],'builtinPlugins':list(c.BUILTIN_IDS),
+        'builtinArtifacts':artifacts,'builtinModuleTable':table,'moduleTableSha256':table_sha}
+    policy={'schemaVersion':1,'qualifications':[{'immutableRoot':config['distributionRoot'],'immutabilityAdapter':'linux-root-owned-retained-v1',
+        'manifestSha256':config['distributionSha256'],'distributionBuildId':config['distributionBuildId'],
+        'qualificationSha256':config['closure']['qualificationSha256'],'builtinProfiles':profiles}]}
+    return manifest,config,policy
+
+
+def test_actual_builtin_manifest_profile_mapping_uses_adapted_factory(builtin_manifest_fixture):
+    manifest,config,policy=builtin_manifest_fixture
+    identities=c.builtin_manifest_identities(manifest,config,policy)
+    assert set(identities)==set(c.BUILTIN_IDS)
+    for plugin,artifact in zip(c.BUILTIN_IDS,manifest['builtinArtifacts']):
+        assert identities[plugin]['sourcePath']==config['distributionRoot']+'/builtin-plugins/'+plugin
+        assert identities[plugin]['serverBundleSha256']==artifact['serverBundleSha256']!=artifact['originalServerBundleSha256']
+        assert identities[plugin]['moduleTableSha256']==manifest['moduleTableSha256']
+
+
+@pytest.mark.parametrize('mutation',['missing-profile','null-profile','duplicate-profile','wrong-current-row','wrong-bundle',
+    'original-substitution','wrong-table','wrong-recipe','source-file','factory-path','inventory','duplicate-host-row'])
+def test_manifest_profile_mapping_refusals(builtin_manifest_fixture,mutation):
+    manifest,config,policy=builtin_manifest_fixture
+    row=policy['qualifications'][0];artifact=manifest['builtinArtifacts'][0]
+    if mutation=='missing-profile':row['builtinProfiles'].pop()
+    elif mutation=='null-profile':row['builtinProfiles'][0]['profileSha256']=None
+    elif mutation=='duplicate-profile':row['builtinProfiles'][1]=row['builtinProfiles'][0]
+    elif mutation=='wrong-current-row':row['manifestSha256']='a'*64
+    elif mutation=='wrong-bundle':row['builtinProfiles'][0]['serverBundleSha256']='a'*64
+    elif mutation=='original-substitution':
+        artifact['serverBundleSha256']=artifact['originalServerBundleSha256']
+        row['builtinProfiles'][0]['serverBundleSha256']=artifact['originalServerBundleSha256']
+    elif mutation=='wrong-table':manifest['moduleTableSha256']='a'*64
+    elif mutation=='wrong-recipe':manifest['builtinModuleTable']=dict(manifest['builtinModuleTable'],recipe={})
+    elif mutation=='source-file':manifest['files']=[item for item in manifest['files'] if item['path']!=artifact['sourceIdentityPath']]
+    elif mutation=='factory-path':artifact['factoryPath']='builtin-compiled/other/server.factory.js'
+    elif mutation=='inventory':manifest['builtinPlugins']=manifest['builtinPlugins'][:-1]
+    elif mutation=='duplicate-host-row':policy['qualifications'].append(row)
+    with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)
+
+
+def test_v2_facade_validates_complete_tagged_union_before_directory_view(cohort_v2_fixture,monkeypatch):
+    value,config,expected,identities=cohort_v2_fixture
+    row={'cohort':expected,'component':'ade-yolo'}
+    native=c.NativeFacade(lambda:row)
+    native.builtin_identities=identities
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    calls=[]
+    def wire(args):
+        calls.append(args);assert args==['plugin','cohort-v2-status'];return value
+    monkeypatch.setattr(native,'_call',wire)
+    view=native.cohort_status()
+    assert len(view['builtinEntries'])==14 and all('journal' not in item for item in view['builtinEntries'])
+    assert all('activationGeneration' in item['loaded'] for item in view['entries'])
+    value['entries'].pop()
+    with pytest.raises(c.ContractError):native.cohort_status(allow_target_absent=True)
+    assert all(args==['plugin','cohort-v2-status'] for args in calls)
+
+
+def test_native_host_policy_fixed_account_path_and_safe_ancestry(tmp_path,monkeypatch):
+    home=tmp_path/'real-account';home.mkdir(mode=0o700)
+    path=home/'.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json'
+    path.parent.mkdir(parents=True)
+    raw=c.canonical({'schemaVersion':1,'qualifications':[]})
+    path.write_bytes(raw);path.chmod(0o600)
+    monkeypatch.setattr(c.pwd,'getpwuid',lambda uid:SimpleNamespace(pw_dir=str(home)))
+    monkeypatch.setenv('HOME',str(tmp_path/'untrusted-env-home'))
+    policy,binding=c.read_native_host_policy()
+    assert policy=={'schemaVersion':1,'qualifications':[]} and binding==c.hashlib.sha256(raw).hexdigest()
+    path.chmod(0o666)
+    with pytest.raises(c.ContractError,match='ancestry'):c.read_native_host_policy()
+    path.chmod(0o600);path.write_bytes(c.canonical({'schemaVersion':1,'qualifications':[None]}))
+    with pytest.raises(c.ContractError,match='row'):c.read_native_host_policy()
+    path.unlink();path.symlink_to(home/'other-policy.json')
+    with pytest.raises(c.ContractError):c.read_native_host_policy()

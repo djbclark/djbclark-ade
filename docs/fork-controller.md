@@ -423,3 +423,72 @@ and a fresh Journal context/plugin CAS through the explicit reuse hook, without
 another BEGIN, bearer reconnect or fallback reservation. Missing API or producer
 facts HOLD. Synthetic CI ports demonstrate orchestration only; actual coupled
 producer/native proof is a separate acceptance gate.
+
+### Explicit cohort V2 parser boundary
+
+Protected `native.cohortVersion: 2` opts in to the separate committed native V2
+schema (`22285d1f1`, `ManagedPluginCohortV2StatusSchema`). Absence keeps the exact
+V1 path. No malformed/uncertain/unsupported V2 response falls back to V1.
+
+The pure `cohort_v2_observation` parser accepts tagged `directory` entries with
+`plugin-child` receipt/execution wrappers and separately tagged
+`builtin-in-process` entries. Directory validation reuses the unchanged V1
+receipt/CAS checks after validating the wrappers. It never constructs a child
+receipt, PID, activation ordinal or journal for an in-process builtin.
+
+All fourteen protected builtin records are required. Each stable record is
+`{kind:"builtin-in-process",enabled:true,loaded:true,registration:{path},execution}`.
+Its execution binds kind, contract `builtin-in-process-v1`, distributionBuildId,
+sourcePath/sourceSha256/serverBundleSha256/moduleTableSha256/profileSha256 and
+closure. Source paths must equal the SAME protected
+`distributionRoot/builtin-plugins/ID`. The complete stable identity must match
+both the protected record and the independently verified manifest mapping.
+Fresh actual instance IDs must be nonempty and unique; enclosing incarnation
+must match the same protected daemon. Loaded/execution observations must agree.
+A null profile is provenance only and cannot qualify any maintenance operation,
+even if both host and manifest describe null. Missing builtin, wrong tags,
+extra builtin, mixed identities and non-target absence all HOLD.
+
+The manifest mapping argument is an internal pure-parser dependency, not a CLI,
+configuration override, authority factory or extractor invented by this adapter.
+The committed mapping and observation CLI binding are described below; retained
+system-library namespace verification and the scoped recovery successor remain
+separate pending gates. Unsupported V2 never calls the V1 transport. Parser
+fixtures use explicitly synthetic independent wire/host/manifest values and do
+not establish executing-instance qualification. Production acceptance requires a
+separate exact-source review and actual native/producer coupled proof.
+
+### Committed builtin manifest/profile mapping and V2 transport
+
+The V2 read facade now uses the committed `56faaa4de` `plugin cohort-v2-status
+--json` command, whose CLI checks `server_info.features.managedPluginCohortV2`.
+That is API availability only. Global native operation readiness remains a
+separate check. V2 never retries the V1 command.
+
+Before any retained Node execution, Python still verifies the raw manifest digest,
+complete protected file inventory, runtime/helper/external-library identities and
+fixed Node/CLI bytes. For V2 it additionally reads the producer's fixed real-account
+`.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` through protected
+ancestry, matching exactly one immutableRoot row to the configured raw manifest,
+build, qualification and immutability adapter. All fourteen exact external builtin
+profiles are required. Changing that policy during the facade lifetime latches HOLD.
+
+The map mirrors committed `6acaa01dd4d86f6dcf91f7882f705d26fbb4e387`
+`daemon-verifier.ts`, `builtin-profile.ts`, `builtin-inventory.json`,
+`builtin-bindings-recipe.json` and `canonicalBuiltinJson`. The canonical module
+table binds the finite recipe, runtime bytes, daemon bytes and external library
+inventory. Every builtin artifact binds source-identity bytes, original bundle
+bytes, adapted `server.factory.js` bytes, manifest/metafile and the same module
+table. Loaded bundle identity is the adapted evaluated factory digest, never the
+original bundle digest. Actual SAME-root builtin directory inventory must be the
+exact fourteen IDs. Protected profile source/bundle/table fields must match those
+independently verified manifest identities. The public profile hash does not mint
+executing-instance authority.
+
+Only after the complete tagged V2 union validates does the facade expose a private
+unwrapped directory view to the existing retained-target/CAS code; actual builtin
+entries remain separate and never become fake receipts/journals. Missing profiles,
+changed external policy, unsupported current native readiness or incomplete runtime
+facts still HOLD. New `systemClosure` manifests explicitly HOLD before Node until
+the producer's exact retained-library/private-namespace verifier contract is
+integrated; old host-library or missing mount facts are not substituted.

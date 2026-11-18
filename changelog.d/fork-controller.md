@@ -23,3 +23,7 @@
 - Parse explicit bounded versioned standing grants with separate recorded recovery selectors, exact resume/release scope, and matching-denial precedence. (#796)
 ### Added
 - Bind repeated standing promotions, recorded rollback and exact resume/release reconciliation to the same Journal transaction API with separate native counters and gated same-bearer recovery. (#796)
+### Added
+- Parse explicitly opted-in tagged V2 directory and fourteen in-process builtin observations against independent protected/manifest identities; retain production HOLD until the genuine native bridge exists. (#796)
+### Added
+- Bind committed V2 observations to the producer's adapted builtin factories, canonical module table and current fixed protected host profiles, keeping unintegrated system namespaces on preexecution HOLD. (#796)
