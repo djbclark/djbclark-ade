@@ -330,3 +330,34 @@ After a successful recovery response, the inspection allowance is removed before
 verification: fresh actual running/enabled receipt and complete cohort mapping
 must pass. A lost child after apparent recovery keeps recovery_required/hold and
 never triggers END. This does not adopt an unmanaged or missing native baseline.
+
+
+## Version2 protected rule schema (Journal context amendment)
+
+schema_version2 keeps the immutable protected enrollment separate from current
+transaction state. Each operations value is exactly
+`{version:1,grants:[...]}` with1–32 explicit grants; duplicate canonical grants
+reject. An exact grant has mode exact, literal allowed bool, SHA256 identity and
+nonnegative generation. A standing grant has mode standing, literal allowed bool
+and a nonempty unique finite selector list. Unknown fields/selectors/wildcards
+reject. V1 dictionaries retain exact numeric-generation scope; they are never
+reinterpreted as standing permission. Missing Journal context support holds V2
+mutations instead of invoking an older transaction engine.
+
+The selector table is explicit:
+
+| Context / operation | Matching standing selector |
+| --- | --- |
+| deploy: retain/preflight/stage/activate/verify | qualified-latest, exact freshly authenticated selected target |
+| failed-deploy reconcile: recover/verify | recorded-verified, exact context verified target |
+| verified-rollback or its interrupted intent: recover/verify | recorded-baseline, exact context baseline target |
+| resume / reconcile-release, including their verify | NONE; exact current identity+JournalCAS required |
+
+Matching allowed=false vetoes all matching allows. Absent matching allow denies.
+Exact resume/release verification can coexist explicitly with standing candidate
+verification in the bounded list; no union/widening is inferred. The whole rule
+digest must match the immutable context produced under Journal lock, and current
+rule is reread at authority boundaries. Reconciliation uses recorded authority,
+not a candidate GitHub query or a synthetic loaded receipt. Transaction context,
+intent-before-BEGIN and final release hooks are pending the separately owned
+same-Journal source amendment; these parser helpers do not manufacture that API.

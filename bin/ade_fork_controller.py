@@ -24,13 +24,14 @@ import tempfile
 import zipfile
 
 from ade_fork_ci import Evaluation, GitHubEvaluation
+import ade_fork_release as release
 from ade_fork_release import Adapters, ContractError, Journal, Receipt, canonical, digest, parse, validate
 from ade_fork_plugins import inspect, payload_tree_hash, qualify, stage, tree_hash
 from ade_forks import load_policy
 
 LIMIT = 96 * 1024 * 1024
 MEMBERS = {'receipt.json', 'snapshot.json', 'evaluator-evidence.json'}
-OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain'}
+OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain', 'resume', 'reconcile-release'}
 FIELDS = {'schema_version', 'component', 'channel', 'repository', 'repository_id',
           'cohort', 'policy', 'expected', 'evaluation', 'operations', 'previous',
           'generation', 'master_commit', 'evidence', 'discovery', 'native'}
@@ -73,9 +74,78 @@ def read_regular(path: Path, limit=LIMIT, *, owner=None) -> bytes:
     finally: os.close(parent)
 
 
+STANDING_SELECTORS = {
+    'retain': {'qualified-latest'}, 'preflight': {'qualified-latest'},
+    'stage': {'qualified-latest'}, 'activate': {'qualified-latest'},
+    'recover': {'recorded-verified', 'recorded-baseline'},
+    'verify': {'qualified-latest', 'recorded-verified', 'recorded-baseline'},
+}
+
+
+def validate_operations(row):
+    ops = row['operations']
+    if type(ops) is not dict or set(ops) - OPERATIONS: raise ContractError('invalid operation consent')
+    for operation, value in ops.items():
+        if row['schema_version'] == 1:
+            if (type(value) is not dict or set(value) != {'allowed', 'identity', 'generation'} or
+                    type(value['allowed']) is not bool or type(value['generation']) is not int or value['generation'] != row['generation'] or
+                    type(value['identity']) is not str or not (re.fullmatch('[a-f0-9]{64}', value['identity']) or
+                    (value['identity'] == 'qualified-latest' and operation in {'retain','preflight','stage','activate','verify'}))):
+                raise ContractError('invalid exact legacy consent')
+            continue
+        if (type(value) is not dict or set(value) != {'version','grants'} or type(value['version']) is not int or value['version'] != 1 or
+                type(value['grants']) is not list or not 1 <= len(value['grants']) <= 32):
+            raise ContractError('invalid versioned grants wrapper')
+        seen = set()
+        for grant in value['grants']:
+            if type(grant) is not dict or type(grant.get('allowed')) is not bool: raise ContractError('invalid literal grant')
+            identity = digest(grant)
+            if identity in seen: raise ContractError('duplicate canonical grant')
+            seen.add(identity)
+            if grant.get('mode') == 'exact':
+                if (set(grant) != {'mode','allowed','identity','generation'} or type(grant['identity']) is not str or
+                        not re.fullmatch('[a-f0-9]{64}', grant['identity']) or type(grant['generation']) is not int or grant['generation'] < 0):
+                    raise ContractError('invalid exact transaction grant')
+            elif grant.get('mode') == 'standing':
+                selectors = grant.get('selectors')
+                if (set(grant) != {'mode','allowed','selectors'} or type(selectors) is not list or not selectors or
+                        any(type(item) is not str for item in selectors) or len(selectors) != len(set(selectors)) or
+                        not set(selectors) <= STANDING_SELECTORS.get(operation, set())):
+                    raise ContractError('invalid finite standing selector')
+            else: raise ContractError('invalid consent mode')
+
+
+def rule_allows(row, operation, identity, context, *, selected_current=False):
+    """Pure scope match; context is produced under Journal lock, never candidate JSON."""
+    if context is not None and (context.rule_digest != digest(row) or context.group != row['policy']['compatibility_group']):
+        return False
+    generation = row['generation'] if context is None else context.cas_generation
+    value = row['operations'].get(operation)
+    if value is None: return False
+    if row['schema_version'] == 1:
+        return (value['allowed'] is True and value['generation'] == generation and
+                (value['identity'] == identity or value['identity'] == 'qualified-latest' and selected_current and
+                 (context is None or context.kind == 'deploy')))
+    matched = []
+    for grant in value['grants']:
+        match = False
+        if grant['mode'] == 'exact':
+            match = grant['identity'] == identity and grant['generation'] == generation
+        elif context is not None and context.kind not in ('resume','reconcile-release'):
+            for selector in grant['selectors']:
+                if selector == 'qualified-latest':
+                    match |= context.kind == 'deploy' and context.target == identity and selected_current
+                elif selector == 'recorded-verified':
+                    match |= context.kind == 'reconcile' and context.target == identity == context.verified
+                elif selector == 'recorded-baseline':
+                    match |= context.kind == 'verified-rollback' and context.target == identity == context.baseline
+        if match: matched.append(grant['allowed'])
+    return bool(matched) and all(matched)  # matching explicit denial wins
+
+
 def enrollment(encoded: bytes, registry: list[dict]) -> dict:
     row = parse(encoded.decode('utf-8'))
-    if type(row) is not dict or set(row) != FIELDS or type(row['schema_version']) is not int or row['schema_version'] != 1:
+    if type(row) is not dict or set(row) != FIELDS or type(row['schema_version']) is not int or row['schema_version'] not in (1, 2):
         raise ContractError('unsupported controller enrollment')
     if row['component'] != 'ade-yolo' or row['channel'] != 'master' or row['repository'] != 'djbclark/djbclark-ade':
         raise ContractError('unsupported controller pilot')
@@ -126,16 +196,7 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
             type(discovery['enabled']) is not bool or discovery['artifact_prefix'] != 'ade-yolo-qualified' or
             type(discovery['baseline_run_id']) is not int or discovery['baseline_run_id'] <= 0):
         raise ContractError('invalid protected discovery contract')
-    ops = row['operations']
-    if type(ops) is not dict or set(ops) - OPERATIONS:
-        raise ContractError('invalid operation consent')
-    for operation, consent in ops.items():
-        if (type(consent) is not dict or set(consent) != {'allowed', 'identity', 'generation'} or
-                type(consent['allowed']) is not bool or type(consent['generation']) is not int or
-                consent['generation'] != row['generation'] or not isinstance(consent['identity'], str) or
-                not (re.fullmatch('[a-f0-9]{64}', consent['identity']) or
-                     (consent['identity'] == 'qualified-latest' and operation in {'retain', 'preflight', 'stage', 'activate', 'verify'}))):
-            raise ContractError('invalid scoped consent')
+    validate_operations(row)
     return row
 
 
@@ -625,6 +686,7 @@ class Controller:
         self.reader = reader
         self.evaluator = evaluator or GitHubEvaluation()
         self.native = native or NativeFacade(reader, root)
+        self.context = None
         self.selection = None
         self.fresh_attestations = {}
         self.root = Path(root) if root is not None else locations()[1]
@@ -813,18 +875,15 @@ class Controller:
     def permits(self, row, operation, identity):
         current = self.reader()
         if canonical(current) != canonical(row): return False
-        grant = current['operations'].get(operation)
-        if not (type(grant) is dict and grant['allowed'] is True and grant['generation'] == current['generation']):
-            return False
-        if grant['identity'] == identity: return True
-        if grant['identity'] != 'qualified-latest' or not self.selection:
-            return False
-        selected = self.selection['selected']
-        if (not selected or selected['identity'] != identity or self.selection['enrollment_sha256'] != digest(current)):
-            return False
-        # Current consent permits only the independently selected exact artifact under
-        # unchanged protected constraints. New master requires fresh selection.
-        return self.discover_master()['discovered'] == self.selection['latest']
+        selected_current = False
+        value = current['operations'].get(operation)
+        candidate_scope = (value is not None and ((current['schema_version'] == 1 and value['identity'] == 'qualified-latest') or
+            (current['schema_version'] == 2 and any(grant['mode'] == 'standing' and 'qualified-latest' in grant['selectors'] for grant in value['grants']))))
+        if self.selection and candidate_scope and (self.context is None or self.context.kind == 'deploy'):
+            selected = self.selection['selected']
+            if (selected and selected['identity'] == identity and self.selection['enrollment_sha256'] == digest(current)):
+                selected_current = self.discover_master()['discovered'] == self.selection['latest']
+        return rule_allows(current, operation, identity, self.context, selected_current=selected_current)
 
 
     def acquire(self, row):
@@ -979,6 +1038,8 @@ class Controller:
         row = self.reader()
         if operation == 'plan': return self.plan()
         if operation == 'select': return self.select_latest()
+        if row['schema_version'] == 2 and not hasattr(release, 'TransactionContext'):
+            return {'status':'hold','reason':'journal_transaction_context_unsupported','authorized':False}
         # No acquisition, staging, journal or native mutations on unsupported runtime.
         if self.native.supported() is not True:
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}

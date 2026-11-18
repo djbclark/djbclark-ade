@@ -754,3 +754,92 @@ def test_failed_target_state_inspection_does_not_relax_other_cohort(cohort_mappi
     other=next(e for e in facts['entries'] if e['pluginId']!='ade-yolo')
     other.update(loaded=None,execution=None)
     with pytest.raises(c.ContractError,match='non-target'):c.cohort_observation(facts,config,row['cohort'],'ade-yolo',allow_target_absent=True)
+
+
+def versioned_rule(row):
+    result=c.parse(c.canonical(row).decode());result['schema_version']=2
+    result['operations']={key:{'version':1,'grants':[dict(mode='exact',**grant)]} for key,grant in row['operations'].items()}
+    return result
+
+
+def consent_context(row,kind,target,*,verified=None,baseline=None,generation=7):
+    return SimpleNamespace(rule_digest=digest(row),group='paseo-runtime',kind=kind,target=target,
+        verified=verified or target,baseline=baseline,cas_generation=generation)
+
+
+@pytest.mark.parametrize('kind,selector,target',[
+    ('deploy','qualified-latest','b'),('reconcile','recorded-verified','c'),('verified-rollback','recorded-baseline','a')])
+def test_v2_finite_explicit_selector_table(fixture,kind,selector,target):
+    row,*_=fixture;row=versioned_rule(row)
+    identity=target*64
+    operation='activate' if kind=='deploy' else 'recover'
+    for op in (operation,'verify'):
+        row['operations'][op]={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':[selector]}]}
+    c.enrollment(c.canonical(row),c.load_policy())
+    ctx=consent_context(row,kind,identity,verified='c'*64,baseline='a'*64)
+    assert c.rule_allows(row,operation,identity,ctx,selected_current=True)
+    assert c.rule_allows(row,'verify',identity,ctx,selected_current=True)
+    assert not c.rule_allows(row,operation,'f'*64,ctx,selected_current=True)
+
+
+def test_recorded_baseline_never_authorizes_verified_reconciliation(fixture):
+    row,*_=fixture;row=versioned_rule(row)
+    row['operations']['recover']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-baseline']}]}
+    ctx=consent_context(row,'reconcile','b'*64,verified='b'*64,baseline='a'*64)
+    assert not c.rule_allows(row,'recover','b'*64,ctx)
+
+
+@pytest.mark.parametrize('kind',['resume','reconcile-release'])
+def test_resume_release_and_verify_require_exact_grants(fixture,kind):
+    row,*_=fixture;row=versioned_rule(row);identity='a'*64
+    row['operations'][kind]={'version':1,'grants':[{'mode':'exact','allowed':True,'identity':identity,'generation':7}]}
+    row['operations']['verify']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-baseline','recorded-verified','qualified-latest']}]}
+    ctx=consent_context(row,kind,identity,baseline=identity)
+    assert c.rule_allows(row,kind,identity,ctx)
+    assert not c.rule_allows(row,'verify',identity,ctx,selected_current=True)
+    row['operations']['verify']['grants'].append({'mode':'exact','allowed':True,'identity':identity,'generation':7})
+    ctx=consent_context(row,kind,identity,baseline=identity)
+    assert c.rule_allows(row,'verify',identity,ctx)
+    ctx.cas_generation=8
+    assert not c.rule_allows(row,kind,identity,ctx)
+
+
+def test_matching_denial_wins_and_legacy_generation_not_widened(fixture):
+    row,receipt,*_=fixture;legacy=c.parse(c.canonical(row).decode())
+    ctx=consent_context(legacy,'deploy',receipt.sha256,generation=1)
+    assert not c.rule_allows(legacy,'activate',receipt.sha256,ctx)
+    row=versioned_rule(row)
+    row['operations']['activate']={'version':1,'grants':[
+        {'mode':'standing','allowed':True,'selectors':['qualified-latest']},
+        {'mode':'exact','allowed':False,'identity':receipt.sha256,'generation':7}]}
+    ctx=consent_context(row,'deploy',receipt.sha256)
+    assert not c.rule_allows(row,'activate',receipt.sha256,ctx,selected_current=True)
+    ctx.cas_generation=8
+    assert c.rule_allows(row,'activate',receipt.sha256,ctx,selected_current=True)
+
+
+@pytest.mark.parametrize('bad',['empty','duplicate','wildcard','nonliteral','unknown','standing-resume','too-many'])
+def test_strict_versioned_grants_schema(fixture,bad):
+    row,*_=fixture;row=versioned_rule(row)
+    wrapper=row['operations']['activate'];grant=wrapper['grants'][0]
+    if bad=='empty':wrapper['grants']=[]
+    elif bad=='duplicate':wrapper['grants'].append(dict(grant))
+    elif bad=='wildcard':wrapper['grants']=[{'mode':'standing','allowed':True,'selectors':['*']}]
+    elif bad=='nonliteral':grant['allowed']=1
+    elif bad=='unknown':grant['unprotected']=True
+    elif bad=='standing-resume':row['operations']['resume']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-verified']}]}
+    elif bad=='too-many':wrapper['grants']=[dict(grant,generation=i) for i in range(33)]
+    with pytest.raises(c.ContractError):c.enrollment(c.canonical(row),c.load_policy())
+
+
+def test_recorded_reconciliation_consent_does_not_query_latest_master(fixture,monkeypatch):
+    row,receipt,*_=fixture;row=versioned_rule(row)
+    for operation in ('recover','verify'):
+        selectors=['recorded-verified'] if operation=='recover' else ['qualified-latest','recorded-verified']
+        row['operations'][operation]={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':selectors}]}
+    controller=c.Controller(lambda:row)
+    controller.context=consent_context(row,'reconcile',receipt.sha256,verified=receipt.sha256)
+    controller.selection={'enrollment_sha256':digest(row),'latest':row['master_commit'],'selected':{'identity':receipt.sha256}}
+    monkeypatch.setattr(controller,'discover_master',lambda:pytest.fail('reconciliation must not depend on candidate discovery'))
+    assert controller.permits(row,'recover',receipt.sha256)
+    assert controller.permits(row,'verify',receipt.sha256)

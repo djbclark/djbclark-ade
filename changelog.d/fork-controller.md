@@ -18,3 +18,6 @@
 
 ### Fixed
 - Permit authorized failed-target recovery inspection without inventing a loaded receipt, preserving complete non-target cohort and strict post-recovery verification. (#796)
+
+### Added
+- Parse explicit bounded versioned standing grants with separate recorded recovery selectors, exact resume/release scope, and matching-denial precedence. (#796)
