@@ -15,6 +15,9 @@ values). Apply defaults to dry-run; ``--yes`` executes user ``install_argv``
 ``--system --dry-run`` / ``--print-system-argv`` preview ``system_argv``. Live
 ``system_argv`` needs ``--yes --system --apply-system`` (opt-in; default refuse).
 Secrets are never read. A full apply (no ``--id``) also runs ``ade-sched reconcile`` for ADE-owned labeled jobs unless ``--no-reconcile-sched``.
+Fork enrollment beside this module holds generic component install/update/repair
+and retry execution; missing/invalid policy holds all component commands. This
+does not govern scheduler/credential operations or external updaters.
 """
 from __future__ import annotations
 
