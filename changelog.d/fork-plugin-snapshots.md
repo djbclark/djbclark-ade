@@ -6,3 +6,6 @@
 
 ### Fixed
 - Bind managed plugin helpers to the native candidate source directory and preserve regular materialized Git shim helper layout, with CI closure fixtures. (#793)
+
+### Fixed
+- Supply the explicit cold CJS fixture compiler in both existing full-suite CI jobs without skipping candidate binding assertions. (#793)
