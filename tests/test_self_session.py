@@ -2220,7 +2220,7 @@ def test_routed_ack_is_not_acceptance_and_external_complete_turn_required(setup)
     service.env['PASEO_AGENT_ID'] = PRED
     service.evidence_reader = lambda *_: {'state': 'pending', 'cause': 'no-post-ack-turn'}
     assert service.verify_turn(path)['status'] == 'ack-pending-turn'
-    service.evidence_reader = lambda *_: {'state': 'complete', 'adapter': 'fixture', 'entry_id': 'e1'}
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'adapter': 'fixture', 'entry_id': 'e1'}
     native.rows[SUCC]['Status'] = 'idle'
     accepted = service.verify_turn(path)
     assert accepted['status'] == 'acknowledged' and accepted['first_real_turn']['entry_id'] == 'e1'
@@ -2382,3 +2382,16 @@ def test_completed_custody_continues_chain_and_rebinds_claim_once(setup, tmp_pat
     assert ade_claims.read_claim('c-incumbent')['history'] == moved['history']
     assert archive_calls == [SUCC]
     assert native.rows[OTHER]['Archived'] is False
+
+
+def test_predecessor_can_classify_failure_after_accept_without_successor_action(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'idle'
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    assert service.verify_turn(path)['status'] == 'acknowledged'
+    native.rows[SUCC]['Status'] = 'error'
+    assert service.verify_turn(path)['status'] == 'first-turn-failed'
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['pool'] == 'go-account-b'
+    assert native.archived == 0

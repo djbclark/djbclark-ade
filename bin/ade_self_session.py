@@ -893,9 +893,7 @@ class Service:
         with self.transaction(self.load_record(path)) as (target, record):
             if not record or record.get('home') != str(self.home) or self.actor() != record['predecessor']:
                 raise SessionError('only recorded predecessor verifies the first real turn')
-            if record.get('status') == 'acknowledged' and record.get('first_real_turn'):
-                return record
-            if record.get('status') not in ('awaiting-ack', 'ack-pending-turn') or not record.get('requires_first_turn'):
+            if record.get('status') not in ('awaiting-ack', 'ack-pending-turn', 'acknowledged') or not record.get('requires_first_turn'):
                 raise SessionError('routed successor required before first-turn verification')
             if record['status'] == 'ack-pending-turn' and not record.get('ack'):
                 raise SessionError('successor acknowledgement required before first-turn verification')
@@ -908,7 +906,10 @@ class Service:
                     return record  # known identity, but never accept output before acknowledgement
                 else:
                     self.verify_successor(record)
-                    evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row)
+                    if record.get('first_real_turn'):
+                        evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, proof=record['first_real_turn'])
+                    else:
+                        evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row)
                 if evidence.get('state') == 'complete':
                     # Re-read runtime after file I/O. A new running turn cannot inherit proof.
                     settled = self.verify_successor(record)
