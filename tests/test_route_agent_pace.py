@@ -171,11 +171,11 @@ class TestLoadSnapshotBindFields(unittest.TestCase):
                     "provider": "codex",
                     "billing_kind": "subscription_window",
                     "windows": [
-                        {"label": "5-hour", "remaining_percent": 10.0,
+                        {"label": "5-hour", "pool_family": "openai_api", "remaining_percent": 10.0,
                          "headroom_percent": 10.0, "pace_ratio": 3.2,
                          "resets_at": (now + timedelta(hours=2)).isoformat(),
                          "window_minutes": 300, "state": "ok"},
-                        {"label": "weekly", "remaining_percent": 82.0,
+                        {"label": "weekly", "pool_family": "openai_api", "remaining_percent": 82.0,
                          "headroom_percent": 82.0, "pace_ratio": 0.5,
                          "resets_at": (now + timedelta(days=4)).isoformat(),
                          "window_minutes": 10080, "state": "ok"},

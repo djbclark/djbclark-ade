@@ -2717,11 +2717,23 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
 
 def canary_pool(svc: Service) -> str | None:
-    """Quota identity for pools whose meter cannot warn before a first refusal."""
+    """Quota identity for pools whose meter cannot warn before a first refusal.
+
+    A canary name may be a provider (``antigravity``, ``zai``) or a pool
+    family (``openai_api``): match the service's provider, its ``pool`` family
+    and its declared ``pool_family`` so a family-named canary actually gates
+    (2026-11-17, D3: ``openai_api`` never matched while only ``svc.pool[0]``
+    was checked).
+    """
     provider = svc.pool[0] if svc.pool else (svc.shares_pool or svc.name)
     if svc.acp_agent == "antigravity":
-        provider = "antigravity"
-    return provider if provider in CANARY_POOLS else None
+        return "antigravity"
+    candidates = [provider]
+    if svc.pool and len(svc.pool) > 1 and svc.pool[1]:
+        candidates.append(svc.pool[1])
+    if svc.pool_family:
+        candidates.append(svc.pool_family)
+    return next((c for c in candidates if c in CANARY_POOLS), None)
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
@@ -3086,6 +3098,13 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
         return "cursor", "third_party"
+    if agent == "codex":
+        # codex is split by billing identity: gpt-6-luna bills the ChatGPT
+        # subscription (default family), gpt-6.1-sol / gpt-6-astra bill the
+        # OpenAI API prepaid credits (openai_api family).
+        if model and "luna" in model.lower():
+            return "codex", "default"
+        return "codex", "openai_api"
     if agent == "antigravity":
         # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
         return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
