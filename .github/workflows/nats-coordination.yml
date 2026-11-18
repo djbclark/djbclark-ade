@@ -40,6 +40,7 @@ jobs:
         run: |
           timeout 180 npm install --ignore-scripts
           node --version
+          node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync(':memory:'); console.log(db.prepare('select sqlite_version() as sqlite_version').get()); db.close();"
           npm ls --all
       - name: Real broker protocol proof
         env:

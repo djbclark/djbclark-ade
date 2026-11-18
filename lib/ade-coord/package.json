@@ -1,1 +1,22 @@
-{"name":"@ade/coord","version":"0.1.0","private":true,"type":"module","exports":"./index.js","engines":{"node":">=22"},"scripts":{"test":"node --test test/*.test.js"},"dependencies":{"@nats-io/jetstream":"latest","@nats-io/transport-node":"latest","@nats-io/nats-core":"latest"}}
+{
+  "name": "@ade/coord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "latest",
+    "@nats-io/transport-node": "latest",
+    "@nats-io/nats-core": "latest",
+    "@nats-io/obj": "latest"
+  },
+  "bin": {
+    "ade-coord": "./cli.js"
+  }
+}
