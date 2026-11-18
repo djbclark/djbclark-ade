@@ -147,10 +147,10 @@ class ResourceTests(unittest.TestCase):
             state.close()
 
     def test_spawn_unknown_requires_stopped_launcher_or_identity_binding(self):
-        launcher = {"pid": 55, "pgid": 55, "birth": "old", "boot": "b"}
+        launcher = {"pid": 55, "pgid": 55, "birth": "old", "boot": "b", "state": "S"}
         child = {"pid": 100, "pgid": 100, "birth": "child", "boot": "b"}
         with tempfile.TemporaryDirectory() as tmp:
-            state = Resources(Path(tmp), inspect=lambda pid: launcher if pid == 55 else child)
+            state = Resources(Path(tmp), inspect=lambda pid: {**launcher, "state": "R"} if pid == 55 else child)
             state.intent("j", "claim", AUTH)
             with state.db:
                 state.db.execute("UPDATE jobs SET state='SPAWN_UNKNOWN',result=? WHERE id='j'", (state.encode({"launcher": launcher}),))

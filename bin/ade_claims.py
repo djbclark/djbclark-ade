@@ -311,6 +311,10 @@ def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: 
 
 def write_claim(claim: dict[str, Any]) -> Path:
     """Atomically OVERWRITE `claim`'s registry file (no exclusivity: use create_claim to make a new claim)."""
+    from ade_coord import authorize_claim, CoordinationError
+    authorize_claim(claim)
+    if "coordination" in claim and claim.get("state") != "active":
+        raise CoordinationError("ENROLLED_PROJECTION_CANNOT_BE_LEGACY_RELEASED")
     target = claim_file(str(claim.get("id") or ""))
     atomic_write(target, json.dumps(claim, indent=2, sort_keys=True) + "\n")
     return target
@@ -328,6 +332,10 @@ def create_claim(claim: dict[str, Any], pointer_for: Optional[str | os.PathLike[
     A re-claim by the SAME owner (shared owner.record/session) releases the owner's older active record(s) of that
     path inside the same lock, so one path never carries two active records. `pointer_for` (a directory of the
     workspace) also publishes `<git-dir>/ade-claim` under the lock, so the pointer and the registry change together."""
+    from ade_coord import authorize_claim
+    marker = authorize_claim(claim)
+    if marker is not None:
+        claim = {**claim, "coordination": marker, "expires_at": None}
     target = claim_file(str(claim.get("id") or ""))
     with _claims_lock():
         if target.exists():
@@ -378,6 +386,9 @@ def _sanitize(data: dict[str, Any], claim_id: str) -> dict[str, Any]:
 
 def is_expired(claim: Optional[dict[str, Any]], now: Optional[float] = None) -> bool:
     """True when the claim's `expires_at` parses and has passed. A missing or unparseable value is never expired."""
+    if claim and "coordination" in claim:
+        return False
+
     raw = (claim or {}).get("expires_at")
     if not isinstance(raw, str) or not raw:
         return False
@@ -1616,6 +1627,12 @@ BANG_ALT = {"shell alias": "a `!` alias runs a shell that reaches the real git p
 
 def _ws_decision(call: GitCall, ws: Optional[Workspace], ident: Optional[str], bang: str) -> Optional[Decision]:
     claim = find_claim(ws) if ws else None
+    if claim is not None and not is_readonly(call):
+        from ade_coord import authorize_claim, CoordinationError
+        try:
+            authorize_claim(claim, os.environ.get("PASEO_AGENT_ID") or ident)
+        except CoordinationError:
+            return _foreign(claim, "coordination-authority-unavailable", "enrolled claims require current broker authority; no local fallback")
     if claim is not None and not is_mine(claim, ident):
         if not is_readonly(call):
             return _foreign(claim, "foreign-claim", FOREIGN_ALT)
@@ -2437,7 +2454,7 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
     if deny is None:
         return ALLOW
     deny.detail = {"sub": sub, "cwd": str(ws_any.root if ws_any else call.cwd), "ident": ident or ""}
-    if OVERRIDE in approved:
+    if OVERRIDE in approved and deny.rule != "coordination-authority-unavailable":
         deny.override = True
         deny.allowed = True
     return deny
@@ -2541,6 +2558,19 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
     call also installs the ref hooks into its repository when they are missing (lazy install; never fails the call)."""
     env = os.environ if env is None else env
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
+        from ade_coord import authorize_claim, CoordinationError
+        try:
+            check = parse_git_argv(argv, cwd or os.getcwd(), env)
+            if not is_readonly(check):
+                spaces, unresolved = call_workspaces(check)
+                if unresolved and any("coordination" in claim for claim in list_claims("active")):
+                    return EXIT_REFUSED
+                for workspace in spaces:
+                    claim = find_claim(workspace) if workspace else None
+                    if claim:
+                        authorize_claim(claim, env.get("PASEO_AGENT_ID") or None)
+        except CoordinationError:
+            return EXIT_REFUSED
         return 0
     try:
         base = cwd or os.getcwd()

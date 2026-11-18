@@ -270,3 +270,7 @@ preapproved tools. Inspect those when a graft card persists; this helper does no
 edit `site-private`'s `codex/config.toml` or broaden MCP tool policies.
 
 Before committing or pushing a changelog fragment, run `python3 bin/changelog-fold --repo . --check` and inspect its exit status. A failed check stops the dependent commit/push; fix the fragment first. Fragments require a valid section heading as well as a trailing PR reference on every bullet.
+
+## Opt-in NATS coordination
+
+For explicitly enrolled NATS roles, completion-notice persists stable-ID reports and artifacts; --lead-ack records durable ADE intake plus disk projection and suppresses routine model prompt ack. Processed requires explicit inbox disposition under current authority. See [coordination contract](../../docs/nats-coordination.md); unenrolled paths retain the existing receipt policy.

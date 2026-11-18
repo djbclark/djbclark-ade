@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Bounded JSON driver; credentials supplied by the existing managed environment."""
+import json
+import sys
+from ade_coord import call, run_managed, job_status, materialize, CoordinationError
+try:
+    if len(sys.argv) != 3:
+        raise CoordinationError("COMMAND_PAIR_REQUIRED")
+    request = json.load(sys.stdin)
+    command = " ".join(sys.argv[1:])
+    if command == "handoff transfer":
+        from ade_coord_handoff import transfer
+        result = transfer(request)
+    elif command == "artifact materialize":
+        result = materialize(request)
+    elif command in ("job inspect", "job reconcile", "job bind", "job complete"):
+        result = job_status(request, command)
+    else:
+        result = run_managed(request) if command == "job run" else call(command, request)
+    print(json.dumps({"ok": True, "result": result}))
+except Exception as error:
+    print(json.dumps({"ok": False, "error": {"code": str(error) if isinstance(error, CoordinationError) else "UNKNOWN"}}))
+    sys.exit(1)

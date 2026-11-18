@@ -70,6 +70,11 @@ def group_members(pgid: int) -> list[int]:
         raise ResourceError("process group inspection unavailable") from exc
 
 
+def same_process(left, right):
+    """Scheduling state is mutable; PID, birth, boot and group bind identity."""
+    return bool(left and right and all(left.get(k) == right.get(k) for k in ("pid", "birth", "boot", "pgid")))
+
+
 class Resources:
     def __init__(self, directory: Path, *, inspect: Callable = process_identity,
                  members: Callable = group_members):
@@ -148,7 +153,7 @@ class Resources:
         identity = row["process"]
         if not identity or row["state"] not in ("RUNNING", "QUIESCENT"):
             raise ResourceError("unknown launch requires independent reconciliation")
-        if self.inspect(identity["pid"]) == identity or self.members(identity["pgid"]):
+        if same_process(self.inspect(identity["pid"]), identity) or self.members(identity["pgid"]):
             raise ResourceError("job process or group still exists")
         with self.db:
             if row["state"] == "QUIESCENT" and row["result"] != result:
@@ -174,7 +179,7 @@ class Resources:
                 if evidence.get("no_child_proven") is not True or not evidence.get("source"):
                     raise ResourceError("consumed launch requires independent no-child proof")
                 if not launch.get("popen_failed"):
-                    if not launcher or evidence.get("launcher") != launcher or self.inspect(launcher["pid"]) == launcher:
+                    if not launcher or evidence.get("launcher") != launcher or same_process(self.inspect(launcher["pid"]), launcher):
                         raise ResourceError("launcher must be proven stopped before reconciliation")
             self._cas(row, state="NOT_STARTED", result={"evidence": evidence, "launch": row["result"]})
         return self.get(job)
@@ -187,14 +192,14 @@ class Resources:
                 blockers.append(row["id"])
                 continue
             identity = row["process"]
-            if identity and (self.inspect(identity["pid"]) == identity or self.members(identity["pgid"])):
+            if identity and (same_process(self.inspect(identity["pid"]), identity) or self.members(identity["pgid"])):
                 blockers.append(row["id"])
         return {"claim": claim, "authority": authority, "jobs_stopped": not blockers,
                 "blockers": blockers, "jobs": rows, "scope": "explicitly tracked jobs only"}
 
 
 def run_job(resources: Resources, *, job: str, claim: str, authority: dict, argv: list[str],
-            authorize: Callable):
+            authorize: Callable, output=None):
     """Caller supplies an ONLINE authority check. A launch is never auto-retried."""
     if not argv or not all(isinstance(x, str) for x in argv):
         raise ResourceError("command argv required")
@@ -211,7 +216,7 @@ def run_job(resources: Resources, *, job: str, claim: str, authority: dict, argv
     if changed != 1:
         raise ResourceError("job launch already attempted")
     try:
-        process = subprocess.Popen(argv, start_new_session=True)
+        process = subprocess.Popen(argv, start_new_session=True, stdout=output, stderr=output)
     except OSError:
         # Popen waits/reaps a failed exec before raising. Preserve consumed intent
         # and its no-child evidence for explicit reconciliation; never retry it.

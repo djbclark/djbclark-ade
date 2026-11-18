@@ -166,7 +166,9 @@ def chain(lead: str, state_dir: Path | None = None, home: Path | None = None) ->
 
 def effective_lead(lead: str, state_dir: Path | None = None, home: Path | None = None) -> str:
     """The current holder of `lead`'s role: the end of its chain (`lead` itself when it was never replaced)."""
-    return chain(lead, state_dir, home)[-1]
+    from ade_coord import current_role
+    enrolled = current_role(lead)
+    return enrolled if enrolled is not None else chain(lead, state_dir, home)[-1]
 
 
 def predecessors_by_distance(lead: str, state_dir: Path | None = None, home: Path | None = None) -> list[str]:

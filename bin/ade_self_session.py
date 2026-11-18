@@ -455,6 +455,9 @@ class Service:
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
                 requested_title=None, requested_role=None):
         predecessor = self.actor()
+        from ade_coord import role_for, CoordinationError
+        if role_for(predecessor) is not None:
+            raise SessionError("enrolled handoff blocked: runtime/resource census and shared operation reconciliation required; --quiesced is insufficient")
         explicit_thinking = None if requested_thinking is None else thinking_ident(requested_thinking)
         explicit_title = None if requested_title is None else title_ident(requested_title)
         explicit_role = None if requested_role is None else role_ident(requested_role)
