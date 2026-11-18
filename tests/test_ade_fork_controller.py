@@ -1387,7 +1387,9 @@ def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,mo
     with pytest.raises(c.ContractError) as caught:c.verify_readonly_namespace(config,manifest)
     # The accepted real function is entered, with the actual packaged __file__;
     # this fixture lacks its real manifest/root-owned/private mount proof.
-    assert isinstance(caught.value.__cause__,FileNotFoundError)
+    cause=caught.value.__cause__
+    assert type(cause).__name__=='Hold' and type(cause).__module__==name
+    assert str(cause)=='unprotected-ancestor'
     assert sys.modules[name] is previous
 
 
