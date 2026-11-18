@@ -2395,3 +2395,17 @@ def test_predecessor_can_classify_failure_after_accept_without_successor_action(
     native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
     assert service.retry(path)['pool'] == 'go-account-b'
     assert native.archived == 0
+
+
+@pytest.mark.parametrize('enrolled', [PRED, SUCC, OTHER])
+def test_legacy_appointment_cannot_bypass_enrolled_retirement_gate(setup, monkeypatch, enrolled):
+    from types import SimpleNamespace
+    service, native, record, path = start(setup)
+    service.env['PASEO_AGENT_ID'] = OTHER
+    before, calls = path.read_bytes(), len(native.calls)
+    monkeypatch.setattr(ss, '_coord', lambda: SimpleNamespace(role_for=lambda agent: 'pilot' if agent == enrolled else None))
+    with pytest.raises(ss.SessionError, match='enrolled appointment blocked'):
+        service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b')
+    assert path.read_bytes() == before
+    assert len(native.calls) == calls
+    assert native.created == 1 and native.archived == 0

@@ -39,6 +39,30 @@ class SuccessionError(Exception):
     """A cycle: the ledger is inconsistent, so nothing is resolved from it."""
 
 
+
+def _coord():
+    """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().with_name("ade_coord.py")
+    name = "ade_coord"
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_coord_" + str(path)
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        raise
+    return module
+
+
 def default_state_dir(env=None) -> Path:
     env = os.environ if env is None else env
     return Path(env.get("ADE_SELF_SESSION_STATE") or Path.home() / ".local/state/djbclark-ade/self-session")
@@ -166,7 +190,9 @@ def chain(lead: str, state_dir: Path | None = None, home: Path | None = None) ->
 
 def effective_lead(lead: str, state_dir: Path | None = None, home: Path | None = None) -> str:
     """The current holder of `lead`'s role: the end of its chain (`lead` itself when it was never replaced)."""
-    return chain(lead, state_dir, home)[-1]
+    current_role = _coord().current_role
+    enrolled = current_role(lead)
+    return enrolled if enrolled is not None else chain(lead, state_dir, home)[-1]
 
 
 def predecessors_by_distance(lead: str, state_dir: Path | None = None, home: Path | None = None) -> list[str]:

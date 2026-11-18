@@ -1,7 +1,7 @@
 name: Self-session evidence
 on:
   push:
-    branches: [carried73-session-evidence]
+    branches: [carried73-session-evidence, feat/nats-adapters-64881586]
   pull_request:
     paths:
       - 'bin/ade_self_session.py'

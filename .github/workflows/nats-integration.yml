@@ -1,0 +1,17 @@
+name: NATS integration
+on:
+  push:
+    branches: ['feat/nats-integration-*']
+  pull_request:
+    paths: ['bin/ade_coord*.py', 'tests/test_ade_coord*.py', '.github/workflows/nats-integration.yml']
+  workflow_dispatch:
+jobs:
+  resources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python -m unittest discover -s tests -p 'test_ade_coord*.py' -v

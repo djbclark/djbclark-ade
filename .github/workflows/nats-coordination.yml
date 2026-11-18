@@ -1,0 +1,93 @@
+name: NATS coordination conformance
+on:
+  push:
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', 'tests/coord_wake_probe.py', 'tests/coord_admission_probe.py', '.github/workflows/nats-coordination.yml']
+  pull_request:
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', 'tests/coord_wake_probe.py', 'tests/coord_admission_probe.py', '.github/workflows/nats-coordination.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lib/ade-coord
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install current released server
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          timeout 120 gh release download --repo nats-io/nats-server --pattern 'nats-server-*-linux-amd64.tar.gz' --dir "$RUNNER_TEMP/nats-download"
+          python3 - <<'PYCODE'
+          import os, tarfile, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive, = (root / 'nats-download').glob('*.tar.gz')
+          with tarfile.open(archive) as t:
+              member, = [m for m in t.getmembers() if m.name.endswith('/nats-server')]
+              target = root / 'nats-server'
+              target.write_bytes(t.extractfile(member).read())
+              target.chmod(0o755)
+          PYCODE
+          "$RUNNER_TEMP/nats-server" --version
+      - name: Resolve latest maintained clients and record exact versions
+        run: |
+          timeout 180 npm install --ignore-scripts
+          node --version
+          node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync(':memory:'); console.log(db.prepare('select sqlite_version() as sqlite_version').get()); db.close();"
+          npm ls --all
+      - name: Install Linux process-user census tool
+        run: |
+          timeout 120 sudo apt-get update -qq
+          timeout 120 sudo apt-get install -y lsof
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Legacy seam compatibility
+        run: timeout 180 uv run --with pytest python -m pytest ../../tests/test_completion_notice.py ../../tests/test_ade_lead_succession.py ../../tests/test_archived_send_guard.py ../../tests/test_self_session.py ../../tests/test_ade_claims_bind_owner.py ../../tests/test_ade_claims_successor.py ../../tests/test_ade_claims_release.py -q
+      - name: Resource ledger conformance
+        run: python3 -m unittest discover -s ../../tests -p 'test_ade_coord*.py' -v
+      - name: Mount bounded disposable filesystem for actual ENOSPC proof
+        run: |
+          set -eu
+          mkdir -m 700 "$RUNNER_TEMP/nats-fault-tmpfs"
+          timeout 15 sudo mount -t tmpfs -o "size=32m,mode=0700,uid=$(id -u),gid=$(id -g)" ade-nats-fault "$RUNNER_TEMP/nats-fault-tmpfs"
+          echo "ADE_FAULT_TMPFS=$RUNNER_TEMP/nats-fault-tmpfs" >> "$GITHUB_ENV"
+      - name: Real broker protocol proof
+        env:
+          NATS_SERVER: ${{ runner.temp }}/nats-server
+        run: timeout 240 npm test
+      - name: Unmount only the disposable fault filesystem
+        if: always()
+        run: |
+          set -eu
+          if mountpoint -q "$RUNNER_TEMP/nats-fault-tmpfs"; then
+            timeout 15 sudo umount "$RUNNER_TEMP/nats-fault-tmpfs"
+          fi
+      - name: Preserve exact dependency resolution
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nats-protocol-dependencies
+          path: lib/ade-coord/package-lock.json
+
+  plugin-loader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Resolve current released Paseo without provider calls
+        run: |
+          timeout 300 npm install --prefix "$RUNNER_TEMP/paseo-loader" --ignore-scripts --no-audit --no-fund @getpaseo/server@latest
+          npm ls --prefix "$RUNNER_TEMP/paseo-loader" @getpaseo/server @getpaseo/plugin esbuild
+      - name: Actual released compiler and CJS evaluator load-dispose-reload
+        env:
+          ADE_PASEO_LOADER_PREFIX: ${{ runner.temp }}/paseo-loader
+        run: timeout 90 node lib/ade-coord/test/plugin-loader-smoke.mjs

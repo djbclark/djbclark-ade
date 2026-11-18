@@ -1,0 +1,11 @@
+{
+  "name": "ade-temporal-small-experiment",
+  "private": true,
+  "description": "Bounded local Temporal behavior experiment; no Cloud account or paid effects",
+  "scripts": { "test": "node --test experiment.test.cjs" },
+  "dependencies": {
+    "@temporalio/testing": "latest",
+    "@temporalio/worker": "latest",
+    "@temporalio/workflow": "latest"
+  }
+}

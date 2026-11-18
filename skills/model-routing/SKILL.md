@@ -21,6 +21,8 @@ reasons behind the rules are in `docs/model-routing.md`; this skill is the metho
 with their Paseo provider and billing, the gates and caps, the lead's model). Run it; copy no rank, model id or
 threshold from this file or any other.
 
+Native `paseo run` accepts brief text as one final positional argv item. Read a saved brief into that item with a subprocess argv list; never pass `--prompt-file`, which native Paseo does not support. `ade-worker-run --no-footer` uses the same native argument shape.
+
 ## A. Claude tiers by role (PLAN section G, 2026-11-06)
 
 | Tier | Roles | Effort |
@@ -100,7 +102,9 @@ retired: `plan` leaves them queued.
 
 ## D. Routing, the frontier allowance and quota
 
-D1. **Plan a wave with the router, re-plan at every slice boundary:** `bin/route_agent.py plan --kinds code,code,bulk
+D1. Pass all `plan --kinds` values as one comma-separated argument, for example `--kinds code,judgment`. `route` takes one `--kind`; neither command takes `--task`.
+
+**Plan a wave with the router, re-plan at every slice boundary:** `bin/route_agent.py plan --kinds code,code,bulk
 [--repo NAME] [--lead ID --slice A --slice B … --cwd DIR [--window-middle WORK]]` (`--window-middle` is optional since 2026-11-14: only the `(<work>)` text of the lead's WORKER box when the launch opens it) prints, for every pool, an `ade-worker-run --lead … --slice … --cwd … -- --provider …`
 line (rd-01, 2026-11-14: a bare `paseo run` has no workspace and Paseo ignores `--cwd`, getpaseo/paseo#9699), or `cursor-cloud launch …` for
 the Cursor Cloud row. `--lead` defaults to `$PASEO_AGENT_ID`, `--slice` is once per kind, `--cwd` is the WORKER box's directory (the repo checkout); an input left out keeps `<lead>` / `<slice>`
@@ -177,7 +181,7 @@ most 5 z.ai agents running; on a 1302, switch that agent in place to another sub
 "continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
 API, not the Codex subscription**: never a switch target (2026-11-12: one switch hit the org's enforced spend limit at
 once, while Codex showed 65% left). A Codex-pool agent is `paseo run --provider codex/...`, a new agent.
-E1c. Apply the canary-first wave rule in E1d, and match the route’s declared `pool_family` (or `pool` pair); missing/unmatched families are unknown, never a pass. Cursor `grok_bot` cannot fund Composer/Auto; Gemini, Argon and Claude/GPT stay separate; Fable only caps Claude’s shared default (2026-11-12).
+E1c. Apply the canary-first wave rule in E1d, and match the route’s declared `pool_family` or explicit canonical vendor/pool identity. Schema 1.6 `vendor=openai` plus `pool_id=openai:codex` identifies the Codex subscription even when its residual family is null; it cannot fund `openai_api` models. Missing or unmatched identity remains unknown. Cursor `grok_bot` cannot fund Composer/Auto; Gemini, Argon and Claude/GPT stay separate; Fable only caps Claude’s shared default (2026-11-12).
 E1d. Canary first for `[routing].canary_pools` (antigravity, Pi openai_api and Pi zai): `plan` caps each pool at one agent and prints max=1. These meters cannot warn before the first refusal (2026-11-12). Launch one canary, observe at least one successful turn, then re-probe and add work within normal pool limits; a quiet timer alone is insufficient. Repeated plans do not authorize extra canaries while one is unproven.
 E1e. Generated dispatches carry `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex/Antigravity `full-access`; Pi reports no selectable modes and omits `--mode` (2026-11-12). Keep provider-native mode IDs explicit so a worker never inherits Default permissions. Always pass the unattended mode at launch: Codex sessions started without `--mode full-access` kept showing approval cards even after `set_agent_mode full-access` mid-run (observed 2026-11-12 for graft MCP, commits, pushes, gh and bg tests).
 E2. `used_percent` is the share consumed: 100 means empty. Quote "X% used / Y% left".

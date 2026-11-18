@@ -46,6 +46,13 @@ enclosing symbol** and ranked by coupling; it also reports files it couldn't rea
   raw filesystem search for indexed code.
 - `-i` case-insensitive; `--in <path>` scopes to a subtree. Scoped `rg` is the
   fallback for files graft genuinely doesn't index (docs, configs, new files).
+  If graft reports a parent repository instead of the requested checkout,
+  treat that answer as outside scope. For an unindexed checkout, list scoped
+  filenames first, then read the exact matching source files. Use bounded
+  `rg -n --max-columns 240` when discovery still requires a directory search;
+  exclude generated chunks/bundles and do not search the same tree through
+  both relative and absolute paths. A minified bundle can otherwise flood the
+  context even when the tool's displayed output is truncated.
 
 ### 3 · `graft skeleton <file>`: a file's API at a glance
 Signatures-only view of one file (every function / method / type with its span)
