@@ -280,3 +280,29 @@ def test_a_guard_redirect_with_an_unusable_successor_is_refused(tmp_path: Path) 
     assert 'successor id "--not-an-id" is unusable' in log        # %r would have cut the line short here
     assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
     assert not (state / "lead").exists()
+
+
+def test_a_quota_unread_run_keeps_the_thin_accounts_it_already_told(tmp_path: Path) -> None:
+    """Nothing can be read during an outage, so a thin account told before it is not announced again after it."""
+    extra = {"low": ["anthropic"], "accounts": {"anthropic": {"headroom": 4.0, "usable": True, "stale": False}}}
+    bin_dir, home, state, sent = _harness(tmp_path, [], extra=extra)
+    assert _run(bin_dir, home) == 0
+    assert len(_messages(sent)) == 1
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [], "quota_error": "aiuse exited 1"}))
+    assert _run(bin_dir, home) == 0
+    (bin_dir / "feed.json").write_text(json.dumps(
+        {"stuck": [], "low": ["anthropic"], "accounts": {"anthropic": {"headroom": 4.0, "usable": True, "stale": False}}}))
+    assert _run(bin_dir, home) == 0
+    assert len(_messages(sent)) == 2                                     # the outage notice only, no repeat of thin|anthropic
+    assert "anthropic is thin" not in _messages(sent)[-1]
+
+
+def test_only_a_delivery_clears_the_escalation_marker(tmp_path: Path) -> None:
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    _paseo(bin_dir, tmp_path, sent, rc=2)                                # the send fails
+    assert _run(bin_dir, home) == 0
+    assert (state / ".lead-unreachable").exists()
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": []}))        # nothing to send: no proof either
+    _paseo(bin_dir, tmp_path, sent, rc=5)
+    assert _run(bin_dir, home) == 0
+    assert (state / ".lead-unreachable").exists()

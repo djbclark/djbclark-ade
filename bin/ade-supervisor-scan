@@ -71,6 +71,8 @@ else:
     if d.get("quota_error"):
         items.append(("scan|quota-unread",
                       "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
+        # Nothing could be read, so the thin-account keys cannot be re-checked: keep the ones already told.
+        items += [(key, None) for key in sorted(told) if key.startswith("thin|")]
     for acct in d.get("low") or []:
         rec = (d.get("accounts") or {}).get(acct) or {}
         items.append(("thin|%s" % acct,
@@ -110,6 +112,7 @@ except Exception:
 print(d.get("reason") or "")' 2>>"$LOG")"
 
 send_failed=0
+delivered=0
 case "$guard_rc" in
     0) send_to="$LEAD" ;;
     3)  # a completed self-handoff replaced the lead: the notice follows it, under the same id check
@@ -142,6 +145,8 @@ if [ -n "$msg" ] && [ -n "$send_to" ]; then
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
         send_failed=1
         printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
+    else
+        delivered=1
     fi
 fi
 unreachable="$STATE_DIR/.lead-unreachable"
@@ -161,7 +166,8 @@ if [ "$send_failed" -eq 1 ]; then
     fi
     exit 0
 fi
-# The guard answered (pass or redirect): the lead is reachable again, so the escalation marker may go, even on a quiet run.
-rm -f "$unreachable"
+# Only a delivery proves the lead is reachable again (the guard fails open on a Paseo outage), so only a delivery
+# clears the escalation marker; a quiet run leaves it for the next real send.
+[ "$delivered" -eq 1 ] && rm -f "$unreachable"
 [ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
 exit 0
