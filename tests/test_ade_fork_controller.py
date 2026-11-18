@@ -88,37 +88,24 @@ class FakeNative:
         self.identity=identity
     def recover(self, identity, record): self.calls.append(('recover',identity)); self.identity=identity
     def verify(self, identity, record): return self.identity==identity
-    @contextmanager
-    def reserve(self): yield True
+    def prepare(self,context):
+        self.context=context
+        return c.release.ReservationIntent(12,7,'fixture-server','fixture-incarnation')
+    def reserve(self,context,intent): return c.release.BeginResult('held')
+    def finish(self,context,intent): self.calls.append(('finish',context.target)); return True
+    def released(self,context,intent): return True
+    def reuse(self,*args): raise AssertionError('ordinary fake port cannot reuse a bearer')
 
 
-def test_real_archive_retention_and_enroll_deploy(fixture,tmp_path):
+def test_real_archive_retention_and_noop_is_not_activation(fixture,tmp_path):
     row,receipt,payload,archive=fixture
     native=FakeNative(receipt.sha256)
     controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),native,tmp_path/'private')
     assert controller.tick('enroll')['status']=='enrolled'
     assert controller.retained(receipt.sha256)
-    row['previous']=receipt.sha256
-    result=controller.tick('deploy')
-    assert result['status']=='runtime_verified' and result['generation']==1
-    assert native.calls==[('activate',receipt.sha256)]
-    # A stale scheduled job never repeats activation.
-    assert controller.tick('deploy')['reason']=='stale_job'
-    assert len(native.calls)==1
+    assert controller.tick('deploy')['reason']=='already_verified'
+    assert native.calls==[]
 
-
-def test_lost_ack_is_not_retried_and_recovery_is_explicit(fixture,tmp_path):
-    row,receipt,payload,archive=fixture
-    native=FakeNative(receipt.sha256)
-    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),native,tmp_path/'private')
-    controller.tick('enroll'); row['previous']=receipt.sha256; native.fail=True
-    assert controller.tick('deploy')['status']=='recovery_required'
-    row['generation']=1
-    for grant in row['operations'].values(): grant['generation']=1
-    assert controller.tick('deploy')['reason']=='unfinished_transaction'
-    assert len(native.calls)==1
-    assert controller.tick('recover')['status']=='runtime_verified'
-    assert native.calls[-1]==('recover',receipt.sha256)
 
 
 def test_production_unsupported_does_no_acquisition(fixture,tmp_path):
@@ -401,7 +388,7 @@ def test_qualified_latest_deploy_uses_selected_record_not_fixed_candidate(fixtur
     result=controller.tick('deploy')
     assert result['status']=='runtime_verified'
     assert native.identity==new.sha256 != receipt.sha256
-    assert native.calls==[('activate',new.sha256)]
+    assert native.calls==[('activate',new.sha256),('finish',new.sha256)]
     # Current-policy mismatch cannot preserve a derived concrete grant.
     old=dict(row)
     row['operations']['activate']['allowed']=False
@@ -468,23 +455,16 @@ def test_real_facade_private_fd_transport_and_nonzero_refusal(tmp_path,monkeypat
     with pytest.raises(c.ContractError,match='refused'):facade._call(['fixture'])
 
 
-def test_native_reservation_context_never_ends_implicitly(monkeypatch):
+def test_native_reservation_never_ends_on_uncertain_operation(monkeypatch):
     facade=c.NativeFacade()
-    facade.prepare({'generation':1,'policy':{'compatibility_group':'fixture'}},'a'*64,None)
-    monkeypatch.setattr(facade,'supported',lambda:True)
-    monkeypatch.setattr(facade,'_identity_args',lambda:[])
-    calls=[]
-    def invoke(args,token=None):
-        calls.append(args)
-        return {'state':'held','recoveryRequired':False,'generation':2,
-                'transactionId':facade.reservation['transactionId'],'ownerToken':'s'*43}
-    monkeypatch.setattr(facade,'_call',invoke)
-    with facade.reserve():facade.verified=True
-    assert len(calls)==1 and 'begin' in calls[0]
-    assert facade.token=='s'*43
-    facade.uncertain=True
-    with pytest.raises(c.ContractError):facade.finish()
-    assert len(calls)==1
+    context=c.release.TransactionContext(1,'fixture','deploy',4,5,'a'*32,'b'*64,None,'c'*64,'d'*64)
+    intent=c.release.ReservationIntent(12,7,'server','incarnation')
+    facade.context=context;facade.intent=intent
+    facade.token='s'*43;facade.reservation={'generation':12,'transactionId':context.transaction_id}
+    facade.verified=True;facade.uncertain=True
+    monkeypatch.setattr(facade,'_call',lambda *args:pytest.fail('uncertain operation cannot END'))
+    with pytest.raises(c.ContractError):facade.finish(context,intent)
+
 
 
 def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,monkeypatch):
@@ -522,8 +502,8 @@ def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,m
     journal.enroll(receipt.sha256,controller.adapters(row,SimpleNamespace(authenticates=lambda actual:True)))
     for operation in ('preflight','stage','activate','verify'):
         row['operations'][operation]['identity']='qualified-latest'
-    assert controller.tick('deploy')['status']=='runtime_verified'
-    assert controller.native.calls==[('activate',receipt.sha256)]
+    assert controller.tick('deploy')['reason']=='already_verified'
+    assert controller.native.calls==[]
     assert calls==[fresh,fresh]
     # A CURRENT authentication refusal still stops, without falling back to old evidence.
     def revoked(expected,path):raise c.ContractError('current policy refused')
@@ -535,7 +515,7 @@ def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,m
     with pytest.raises(c.ContractError,match='corruption'):controller.selected_release(row)
 
 
-@pytest.mark.parametrize('command,operation', [('apply','deploy'),('recover','recover')])
+@pytest.mark.parametrize('command,operation', [('apply','deploy'),('recover','recover'),('resume','resume'),('reconcile-release','reconcile-release')])
 def test_fixed_cli_explicit_transaction_dispatch(monkeypatch,capsys,command,operation):
     calls=[]
     class Transaction:
@@ -596,7 +576,7 @@ def test_cohort_parser_and_retained_receipt_map(cohort_mapping_fixture,monkeypat
     row,receipt,controller,config,facts=cohort_mapping_fixture
     assert c.cohort_observation(facts,config,row['cohort'],'ade-yolo') is facts
     facade=c.NativeFacade(lambda:row,controller.root)
-    monkeypatch.setattr(facade,'cohort_status',lambda:c.cohort_observation(facts,config,row['cohort'],'ade-yolo'))
+    monkeypatch.setattr(facade,'cohort_status',lambda **options:c.cohort_observation(facts,config,row['cohort'],'ade-yolo',**options))
     assert facade.observe(row['cohort'])==receipt.sha256
     target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
     # Native CAS is8 while loaded generation2; identity matching does not rewrite either.
@@ -671,3 +651,333 @@ def test_python_preexec_manifest_verifier_real_protected_inventory(tmp_path):
         with pytest.raises(c.ContractError,match='mismatch'):c.verify_transport_distribution(config)
     finally:
         sudo('rm','-rf','--',root,str(root)+'.manifest.json')
+
+
+@pytest.mark.parametrize('restores_child',[True,False])
+def test_real_facade_absent_target_recovery_keeps_postverify_strict(cohort_mapping_fixture,monkeypatch,restores_child):
+    """Actual facade+Journal, synthetic authenticated wire; no production qualification."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    row['previous']=receipt.sha256
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    original=c.parse(c.canonical(target['loaded']).decode())
+    target['journal']['baseline']={'source':target['registration'],'receipt':original}
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    calls=[]
+    def wire(args,token=None):
+        calls.append((args,token))
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:
+            return {'schemaVersion':1,'state':'idle','generation':None,'reservationGeneration':11,'ready':True,'transactionId':None,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
+                'daemonIncarnation':config['daemonIncarnation'],
+                'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':True}}}
+        if args==['plugin','managed-status','ade-yolo']:
+            return {'version':1,'pluginId':'ade-yolo','consistency':'coherent',
+                'registration':target['registration'],'journal':target['journal'],'loaded':target['loaded']}
+        if args[:3]==['daemon','maintenance','begin']:
+            return dict(native.reservation,state='held',recoveryRequired=False,ownerToken='s'*43)
+        if args[:3]==['daemon','maintenance','plugin-operation']:
+            assert token=='s'*43
+            operation=args[args.index('--operation')+1]
+            assert operation in ('recover','verify')
+            assert args[args.index('--expected-generation')+1]==str(target['journal']['generation'])
+            if operation=='recover':
+                loaded=dict(original,activationGeneration=9,processStartToken='recovered-owned-child')
+                target['loaded']=loaded;target['enabled']=True
+                target['execution']={'contract':'native-passive-contract-1','incarnation':loaded['processStartToken'],
+                    'distributionBuildId':'fixture-build','closure':config['closure']}
+                target['journal'].update(generation=9,currentReceipt=loaded)
+                facts['observationEpoch']+=1
+            result={'plugin':{'id':'ade-yolo','enabled':True,'status':'running','loaded':target['loaded']},
+                'nativeGeneration':target['journal']['generation'],'maintenance':{'state':'held'},
+                'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+            if operation=='recover' and not restores_child:
+                # An apparent successful response cannot substitute for later actual liveness.
+                target['loaded']=None;target['execution']=None
+            return result
+        if args[:3]==['daemon','maintenance','end']:
+            assert token=='s'*43
+            return dict(native.reservation,state='idle',recoveryRequired=False,reservationGeneration=native.reservation['generation'])
+        raise AssertionError(args)
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    journal.enroll(receipt.sha256,controller.adapters(row,None))
+    pending=journal.read()
+    context=c.release.TransactionContext(1,journal.group,'deploy',0,1,'f'*32,receipt.sha256,None,'e'*64,digest(row))
+    intent=c.release.ReservationIntent(10,7,config['serverId'],config['daemonIncarnation'])
+    pending.update(generation=1,state='recovery_required',candidate='e'*64,
+        transaction={'context':asdict(context),'reservation':asdict(intent)})
+    journal.write(pending)
+    row['generation']=1
+    for grant in row['operations'].values():grant['generation']=1
+    # Failed activation/crash: no child, no execution metadata; other cohort remains unchanged.
+    target['loaded']=None;target['execution']=None
+    assert native.supported() is True  # operation capability, not a fake loaded receipt
+    with pytest.raises(c.ContractError):native.observe(row['cohort'])  # ordinary observation strict
+    native.recovery_inspection=True
+    inspected=native.observe(row['cohort'])
+    assert inspected.startswith('native-target-absent:v1:') and inspected!=receipt.sha256
+    result=controller.tick('recover')
+    operations=[args[args.index('--operation')+1] for args,_ in calls if args[:3]==['daemon','maintenance','plugin-operation']]
+    assert operations and operations[0]=='recover',result
+    if restores_child:
+        assert result['status']=='runtime_verified'
+        assert native.observe(row['cohort'])==receipt.sha256
+        assert operations==['recover','verify','verify']
+        assert any(args[:3]==['daemon','maintenance','end'] for args,_ in calls)
+    else:
+        assert result['status']=='recovery_required'
+        assert not any(args[:3]==['daemon','maintenance','end'] for args,_ in calls)
+        assert native.recovery_inspection is False
+
+
+@pytest.mark.parametrize('enabled',[False,None])
+def test_failed_target_state_inspection_does_not_relax_other_cohort(cohort_mapping_fixture,enabled):
+    row,_,_,config,facts=cohort_mapping_fixture
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    target.update(loaded=None,execution=None,enabled=enabled)
+    assert c.cohort_observation(facts,config,row['cohort'],'ade-yolo',allow_target_absent=True) is facts
+    with pytest.raises(c.ContractError):c.cohort_observation(facts,config,row['cohort'],'ade-yolo')
+    other=next(e for e in facts['entries'] if e['pluginId']!='ade-yolo')
+    other.update(loaded=None,execution=None)
+    with pytest.raises(c.ContractError,match='non-target'):c.cohort_observation(facts,config,row['cohort'],'ade-yolo',allow_target_absent=True)
+
+
+def versioned_rule(row):
+    result=c.parse(c.canonical(row).decode());result['schema_version']=2
+    result['operations']={key:{'version':1,'grants':[dict(mode='exact',**grant)]} for key,grant in row['operations'].items()}
+    return result
+
+
+def consent_context(row,kind,target,*,verified=None,baseline=None,generation=7):
+    return SimpleNamespace(rule_digest=digest(row),group='paseo-runtime',kind=kind,target=target,
+        verified=verified or target,baseline=baseline,cas_generation=generation)
+
+
+@pytest.mark.parametrize('kind,selector,target',[
+    ('deploy','qualified-latest','b'),('reconcile','recorded-verified','c'),('verified-rollback','recorded-baseline','a')])
+def test_v2_finite_explicit_selector_table(fixture,kind,selector,target):
+    row,*_=fixture;row=versioned_rule(row)
+    identity=target*64
+    operation='activate' if kind=='deploy' else 'recover'
+    for op in (operation,'verify'):
+        row['operations'][op]={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':[selector]}]}
+    c.enrollment(c.canonical(row),c.load_policy())
+    ctx=consent_context(row,kind,identity,verified='c'*64,baseline='a'*64)
+    assert c.rule_allows(row,operation,identity,ctx,selected_current=True)
+    assert c.rule_allows(row,'verify',identity,ctx,selected_current=True)
+    assert not c.rule_allows(row,operation,'f'*64,ctx,selected_current=True)
+
+
+def test_recorded_baseline_never_authorizes_verified_reconciliation(fixture):
+    row,*_=fixture;row=versioned_rule(row)
+    row['operations']['recover']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-baseline']}]}
+    ctx=consent_context(row,'reconcile','b'*64,verified='b'*64,baseline='a'*64)
+    assert not c.rule_allows(row,'recover','b'*64,ctx)
+
+
+@pytest.mark.parametrize('kind',['resume','reconcile-release'])
+def test_resume_release_and_verify_require_exact_grants(fixture,kind):
+    row,*_=fixture;row=versioned_rule(row);identity='a'*64
+    row['operations'][kind]={'version':1,'grants':[{'mode':'exact','allowed':True,'identity':identity,'generation':7}]}
+    row['operations']['verify']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-baseline','recorded-verified','qualified-latest']}]}
+    ctx=consent_context(row,kind,identity,baseline=identity)
+    assert c.rule_allows(row,kind,identity,ctx)
+    assert not c.rule_allows(row,'verify',identity,ctx,selected_current=True)
+    row['operations']['verify']['grants'].append({'mode':'exact','allowed':True,'identity':identity,'generation':7})
+    ctx=consent_context(row,kind,identity,baseline=identity)
+    assert c.rule_allows(row,'verify',identity,ctx)
+    ctx.cas_generation=8
+    assert not c.rule_allows(row,kind,identity,ctx)
+
+
+def test_matching_denial_wins_and_legacy_generation_not_widened(fixture):
+    row,receipt,*_=fixture;legacy=c.parse(c.canonical(row).decode())
+    ctx=consent_context(legacy,'deploy',receipt.sha256,generation=1)
+    assert not c.rule_allows(legacy,'activate',receipt.sha256,ctx)
+    row=versioned_rule(row)
+    row['operations']['activate']={'version':1,'grants':[
+        {'mode':'standing','allowed':True,'selectors':['qualified-latest']},
+        {'mode':'exact','allowed':False,'identity':receipt.sha256,'generation':7}]}
+    ctx=consent_context(row,'deploy',receipt.sha256)
+    assert not c.rule_allows(row,'activate',receipt.sha256,ctx,selected_current=True)
+    ctx.cas_generation=8
+    assert c.rule_allows(row,'activate',receipt.sha256,ctx,selected_current=True)
+
+
+@pytest.mark.parametrize('bad',['empty','duplicate','wildcard','nonliteral','unknown','standing-resume','too-many'])
+def test_strict_versioned_grants_schema(fixture,bad):
+    row,*_=fixture;row=versioned_rule(row)
+    wrapper=row['operations']['activate'];grant=wrapper['grants'][0]
+    if bad=='empty':wrapper['grants']=[]
+    elif bad=='duplicate':wrapper['grants'].append(dict(grant))
+    elif bad=='wildcard':wrapper['grants']=[{'mode':'standing','allowed':True,'selectors':['*']}]
+    elif bad=='nonliteral':grant['allowed']=1
+    elif bad=='unknown':grant['unprotected']=True
+    elif bad=='standing-resume':row['operations']['resume']={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':['recorded-verified']}]}
+    elif bad=='too-many':wrapper['grants']=[dict(grant,generation=i) for i in range(33)]
+    with pytest.raises(c.ContractError):c.enrollment(c.canonical(row),c.load_policy())
+
+
+def test_recorded_reconciliation_consent_does_not_query_latest_master(fixture,monkeypatch):
+    row,receipt,*_=fixture;row=versioned_rule(row)
+    for operation in ('recover','verify'):
+        selectors=['recorded-verified'] if operation=='recover' else ['qualified-latest','recorded-verified']
+        row['operations'][operation]={'version':1,'grants':[{'mode':'standing','allowed':True,'selectors':selectors}]}
+    controller=c.Controller(lambda:row)
+    controller.context=consent_context(row,'reconcile',receipt.sha256,verified=receipt.sha256)
+    controller.selection={'enrollment_sha256':digest(row),'latest':row['master_commit'],'selected':{'identity':receipt.sha256}}
+    monkeypatch.setattr(controller,'discover_master',lambda:pytest.fail('reconciliation must not depend on candidate discovery'))
+    assert controller.permits(row,'recover',receipt.sha256)
+    assert controller.permits(row,'verify',receipt.sha256)
+
+
+@pytest.mark.parametrize('case',['typed-busy','generic','stdout','other-operation','malformed'])
+def test_retained_cli_typed_busy_only_not_messages_or_idle(tmp_path,monkeypatch,case):
+    script=tmp_path/'native-begin.py'
+    error={'error':{'code':'MAINTENANCE_KNOWN_BUSY','message':'Maintenance reservation refused'}}
+    if case=='generic':error={'error':{'message':'MAINTENANCE_KNOWN_BUSY'}}
+    if case=='malformed':error={'error':{'code':'MAINTENANCE_KNOWN_BUSY','message':'Maintenance reservation refused','extra':True}}
+    program='import sys,json\n'
+    if case=='stdout':program+='print(json.dumps({"state":"idle"}))\n'
+    program+='print('+repr(c.json.dumps(error))+',file=sys.stderr)\nsys.exit(1)\n'
+    script.write_text(program)
+    native=c.NativeFacade()
+    monkeypatch.setattr(native,'_transport',lambda:{'node':{'path':sys.executable},'cli':{'path':str(script)}})
+    args=['daemon','maintenance','begin' if case!='other-operation' else 'end']
+    expected=c.NativeKnownBusy if case=='typed-busy' else c.ContractError
+    with pytest.raises(expected) as caught:native._call(args)
+    assert isinstance(caught.value,c.NativeKnownBusy)==(case=='typed-busy')
+
+
+def test_native_reservation_counter_is_explicit_and_distinct():
+    config={'serverId':'fixed-server','daemonIncarnation':'fixed-incarnation'}
+    status={'schemaVersion':1,'state':'idle','generation':None,'reservationGeneration':40,'ready':True,'recoveryRequired':False,
+        'authority':{'schemaVersion':1,'qualified':True,**config,
+            'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':True}}}
+    plugin={'journal':{'generation':8},'loaded':{'activationGeneration':2}}
+    assert c.native_reservation_plan(status,config,plugin)=={'native_generation':41,'plugin_generation':8,
+        'server_id':'fixed-server','daemon_incarnation':'fixed-incarnation'}
+    # Neither outer Journal generation nor loaded generation is a reservation counter.
+    del status['reservationGeneration']
+    with pytest.raises(c.ContractError):c.native_reservation_plan(status,config,plugin)
+    status['reservationGeneration']=0
+    assert c.native_reservation_plan(status,config,plugin)['native_generation']==1
+    for key,value in [('ready',False),('state','held'),('recoveryRequired',True),('reservationGeneration',None)]:
+        invalid=dict(status,**{key:value})
+        with pytest.raises(c.ContractError):c.native_reservation_plan(invalid,config,plugin)
+
+
+def test_controller_standing_repeats_rollback_hold_and_exact_resume(fixture,tmp_path,monkeypatch):
+    """Journal+real retained bytes with synthetic ports, never production qualification."""
+    row,first,payload,archive=fixture
+    native=FakeNative(first.sha256)
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,first),native,tmp_path/'private')
+    controller.tick('enroll')
+    row['schema_version']=2
+    row['operations']={op:{'version':1,'grants':[{'mode':'standing','allowed':True,
+        'selectors':sorted(c.STANDING_SELECTORS[op])}]} for op in ('retain','preflight','stage','activate','recover','verify')}
+    c.validate_operations(row)
+    original_rule=digest(row)
+    def candidate(recipe):
+        record=c.parse(c.read_regular(controller.root/'records'/(first.sha256+'.json')).decode())
+        record['expected']['recipe_revision']=recipe
+        receipt=make_receipt(record['expected'],row['policy'],{k:{'status':'passed','contract_digest':digest(v)} for k,v in row['policy']['features'].items()})
+        record['receipt']=base64.b64encode(receipt.encoded).decode()
+        c.immutable(controller.root/'records'/(receipt.sha256+'.json'),c.canonical(record))
+        def selected(rule):
+            controller.selection={'enrollment_sha256':digest(rule),'latest':rule['master_commit'],
+                'selected':{'identity':receipt.sha256,'commit':rule['master_commit']}}
+            return receipt,payload,SimpleNamespace(authenticates=lambda actual:actual.sha256==receipt.sha256),record
+        monkeypatch.setattr(controller,'selected_release',selected)
+        return receipt
+    monkeypatch.setattr(controller,'discover_master',lambda:{'discovered':row['master_commit']})
+    second=candidate('standing-B')
+    assert controller.tick('deploy')['status']=='runtime_verified'
+    third=candidate('standing-C')
+    assert controller.tick('deploy')['status']=='runtime_verified'
+    journal=controller.journal
+    assert journal.read()['generation']==2 and journal.read()['baseline']==second.sha256
+    assert digest(row)==original_rule  # no protected generation rewrite for standing consent
+    assert controller.tick('recover')['status']=='runtime_verified'
+    assert native.identity==second.sha256
+    assert journal.read()['promotion_hold'] is True and journal.read()['baseline'] is None
+    assert controller.tick('deploy')['reason']=='promotion_hold'
+    assert controller.tick('resume')['status']=='hold'  # standing verify cannot authorize resume
+    cas=journal.read()['generation']
+    exact={'mode':'exact','allowed':True,'identity':second.sha256,'generation':cas}
+    row['operations']['resume']={'version':1,'grants':[exact]}
+    row['operations']['verify']['grants'].append(exact)
+    c.validate_operations(row)
+    before=list(native.calls)
+    assert controller.tick('resume')['reason']=='resumed'
+    assert native.calls==before  # no reservation, END, or binary operation on resume
+    assert journal.read()['generation']==cas+1
+    assert controller.tick('deploy')['status']=='runtime_verified'
+    assert native.identity==third.sha256
+
+
+def test_real_facade_success_callbacks_return_none(monkeypatch):
+    native=c.NativeFacade()
+    monkeypatch.setattr(native,'_operation',lambda *args:{'plugin':{'id':'fixture'}})
+    assert native.activate('a'*64,{}) is None
+    assert native.recover('a'*64,{}) is None
+
+
+@pytest.mark.parametrize('outcome',['throw','dict'])
+def test_controller_unconfirmed_native_outcome_is_sticky(fixture,tmp_path,outcome):
+    row,baseline,payload,archive=fixture
+    class Unconfirmed(FakeNative):
+        def activate(self,identity,record):
+            self.calls.append(('activate',identity))
+            if outcome=='throw':raise RuntimeError('lost ACK')
+            return {'outcome':'known_failed_held','reason':'compiler_error'}
+    native=Unconfirmed(baseline.sha256)
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,baseline),native,tmp_path/'private')
+    controller.tick('enroll')
+    expected=dict(row['expected'],recipe_revision='unconfirmed-candidate')
+    candidate=make_receipt(expected,row['policy'],{k:{'status':'passed','contract_digest':digest(v)} for k,v in row['policy']['features'].items()})
+    candidate_archive=zip_bytes({'receipt.json':candidate.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(row['evidence'])})
+    row['expected']=expected
+    row['evaluation'].update(receipt_sha256=candidate.sha256,archive_sha256=c.hashlib.sha256(candidate_archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=candidate.sha256
+    controller.evaluator=FakeEvaluator(candidate_archive,candidate)
+    assert controller.tick('deploy')['status']=='recovery_required'
+    assert controller.journal.read()['state']=='reservation_unknown'
+    before=list(native.calls)
+    assert controller.tick('recover')['reason']=='reservation_unknown'
+    assert native.calls==before
+
+
+def test_known_held_wire_requires_feature_live_bearer_and_exact_baseline(cohort_mapping_fixture,monkeypatch):
+    """Actual facade parser with synthetic wire; does NOT mint native driver authority."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    context=c.release.TransactionContext(1,row['policy']['compatibility_group'],'deploy',0,1,'a'*32,receipt.sha256,None,'b'*64,digest(row))
+    intent=c.release.ReservationIntent(12,8,config['serverId'],config['daemonIncarnation'])
+    native.bind(row,context,None)
+    native.intent=intent;native.original_native=(context,intent)
+    native.reservation={'generation':12,'transactionId':context.transaction_id};native.token='s'*43;native.plugin_generation=8
+    record=c.parse(c.read_regular(stored.root/'records'/(receipt.sha256+'.json')).decode())
+    root=stored.root/'snapshots'/record['payload_sha256']
+    baseline={'path':str(root/'plugins/ade-yolo'),'snapshotSha256':record['evidence']['native_tree_sha256'],
+              'serverBundleSha256':record['evidence']['server_bundle_sha256']}
+    target.update(loaded=None,execution=None)
+    target['journal']['generation']=9
+    restriction={'pluginId':'ade-yolo','baseline':baseline,'nativeGeneration':9,'phase':'recover-required'}
+    status={'state':'held','reservationGeneration':12,'generation':12,'transactionId':context.transaction_id,
+        'recoveryRequired':False,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
+            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceKnownFailedHeldV1':True}}}
+    result={'outcome':'known_failed_held','reason':'compiler_error','pluginId':'ade-yolo','nativeGeneration':9,
+        'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
+        'baseline':baseline,'maintenance':status,'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+    monkeypatch.setattr(native,'_call',lambda args:status)
+    monkeypatch.setattr(native,'cohort_status',lambda **kwargs:facts)
+    observation=native._accept_known_held(result,context.target,record)
+    assert type(observation) is c.release.KnownFailedHeld and observation.plugin_generation==9
+    native.token=None
+    with pytest.raises(c.ContractError):native._accept_known_held(result,context.target,record)
+    assert native.uncertain is True

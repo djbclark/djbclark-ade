@@ -316,3 +316,110 @@ actual disposable root-owned /var/lib inventory bytes without executing its dumm
 Node. These do not qualify a production host. Root owns the real integrated
 producer/native/evaluator A-to-B-to-A proof, and the proposed wire must still be
 implemented/reviewed in that exact distribution before any real support can pass.
+
+
+Recovery capability and target liveness are separate. A coherent qualified daemon
+and unchanged complete non-target cohort can support recovery even when the named
+failed target is absent or disabled. Ordinary observation and deployment still
+require its actual loaded receipt. Only a currently recover+verify-authorized
+baseline transaction enables absent-target inspection, which returns an explicit
+native-target-absent observation identity, never a fake retained-baseline receipt.
+Native journal CAS/retained baseline/grants remain mandatory. Managed recovery
+inspection can carry loaded=null; uncertain/missing non-target state still refuses.
+After a successful recovery response, the inspection allowance is removed before
+verification: fresh actual running/enabled receipt and complete cohort mapping
+must pass. A lost child after apparent recovery keeps recovery_required/hold and
+never triggers END. This does not adopt an unmanaged or missing native baseline.
+
+
+## Version2 protected rule schema (Journal context amendment)
+
+schema_version2 keeps the immutable protected enrollment separate from current
+transaction state. Each operations value is exactly
+`{version:1,grants:[...]}` with1–32 explicit grants; duplicate canonical grants
+reject. An exact grant has mode exact, literal allowed bool, SHA256 identity and
+nonnegative generation. A standing grant has mode standing, literal allowed bool
+and a nonempty unique finite selector list. Unknown fields/selectors/wildcards
+reject. V1 dictionaries retain exact numeric-generation scope; they are never
+reinterpreted as standing permission. Missing Journal context support holds V2
+mutations instead of invoking an older transaction engine.
+
+The selector table is explicit:
+
+| Context / operation | Matching standing selector |
+| --- | --- |
+| deploy: retain/preflight/stage/activate/verify | qualified-latest, exact freshly authenticated selected target |
+| failed-deploy reconcile: recover/verify | recorded-verified, exact context verified target |
+| verified-rollback or its interrupted intent: recover/verify | recorded-baseline, exact context baseline target |
+| resume / reconcile-release, including their verify | NONE; exact current identity+JournalCAS required |
+
+Matching allowed=false vetoes all matching allows. Absent matching allow denies.
+Exact resume/release verification can coexist explicitly with standing candidate
+verification in the bounded list; no union/widening is inferred. The whole rule
+digest must match the immutable context produced under Journal lock, and current
+rule is reread at authority boundaries. Reconciliation uses recorded authority,
+not a candidate GitHub query or a synthetic loaded receipt. Transaction context,
+intent-before-BEGIN and final release hooks are pending the separately owned
+same-Journal source amendment; these parser helpers do not manufacture that API.
+
+
+Native prepare uses the new explicit reservationGeneration+ready fields from
+qualified idle maintenance status. Missing fields, old generation:null, held,
+pending, unready or unknown status never imply zero or permission. Next native
+generation is only validated reservationGeneration+1; native plugin CAS is its
+own coherent journal.generation. BEGIN BUSY is recognized only from nonzero
+retained CLI with empty stdout and exact typed MAINTENANCE_KNOWN_BUSY stderr.
+Generic messages, malformed/truncated stderr, later idle, timeout or another
+operation cannot close an allocated attempt as BUSY. The separate Journal owner
+will consume only this authoritative refusal through BeginResult; until its new
+hooks are integrated, no old context-manager behavior is relabelled as success.
+
+### Versioned standing authority and the existing Journal
+
+Enrollment schema 1 remains exact identity plus its explicit Journal generation.
+Schema 2 makes each operation a strict `{version:1,grants:[...]}` wrapper (1–32
+unique canonical grants). An exact grant names `mode:exact`, literal `allowed`,
+receipt `identity`, and current Journal CAS `generation`. A standing grant names
+`mode:standing`, literal `allowed`, and a finite `selectors` list. Any matching
+denial vetoes matching allows. No matching allow denies. The immutable digest of
+the whole current protected enrollment binds every Journal context; rereads after
+waits and at the native boundary reject revocation or policy replacement.
+
+| Context / operations | Finite standing selector |
+| --- | --- |
+| Deploy retain/preflight/stage/activate/verify | `qualified-latest`: freshly authenticated selected release, with current master recheck |
+| Failed-deploy reconciliation recover/verify | `recorded-verified`: the Journal's verified identity |
+| Explicit verified rollback recover/verify | `recorded-baseline`: the Journal's retained baseline |
+| Resume, release reconciliation, and their verify | None: separate exact identity + current CAS grants required |
+
+`apply` reads the existing Journal generation and verified identity and passes
+both to its lock/CAS operation. It never advances enrollment on a candidate's
+behalf. Journal `prepare` binds the actual locked context and a read-only native
+plan. The Journal persists that context and reservation intent before BEGIN.
+Native reservation generation comes only from explicit qualified ready-idle
+`reservationGeneration + 1`; plugin CAS comes only from native journal status.
+Neither counter comes from the ADE Journal or loaded activation generation.
+Only the exact authenticated typed native known-BUSY response closes an allocated
+unstarted attempt. Other BEGIN failures keep the durable uncertainty intent.
+
+`recover` on a healthy verified record explicitly selects its recorded baseline;
+an unfinished transaction keeps its recorded recovery direction. Verified rollback
+consumes the baseline and installs the same Journal's promotion HOLD. The fixed
+`resume` command clears that HOLD only under separately current exact resume and
+verify grants. It performs no BEGIN, END, restart or replacement. The fixed
+`reconcile-release` command similarly requires separate current exact grants and
+independent qualified stable-idle evidence matching the original reservation
+server/incarnation/generation/transaction plus the actual verified target. It never
+retries END. No token is persisted in the Journal.
+
+The native known-failure lane additionally requires the actual reviewed
+`maintenanceKnownFailedHeldV1` transport, an allowlisted normal return, the same
+live in-memory bearer, and fresh matching complete-cohort/current-CAS/baseline
+facts. It maps to the Journal's exact descriptive `KnownFailedHeld` type; that
+type is not native authority. Successful activate/recover callbacks return `None`.
+Unexpected values, arbitrary throws, timeouts, lost acknowledgements or process
+loss remain sticky unknown. Same-held recovery uses the original native intent
+and a fresh Journal context/plugin CAS through the explicit reuse hook, without
+another BEGIN, bearer reconnect or fallback reservation. Missing API or producer
+facts HOLD. Synthetic CI ports demonstrate orchestration only; actual coupled
+producer/native proof is a separate acceptance gate.

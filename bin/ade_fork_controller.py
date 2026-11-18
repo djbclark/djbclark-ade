@@ -1,7 +1,7 @@
-"""ADE fork controller v1. Production native execution deliberately unsupported.
+"""ADE protected fork controller; finite Linux producer/cohort facts gate execution.
 
-Only trusted in-process ports can exercise transactions until native status,
-reservation and genuine execution-host qualification are integrated.
+Missing genuine retained transport, qualified closure or current authority holds.
+Synthetic CI ports exercise orchestration only and confer no production support.
 """
 from __future__ import annotations
 
@@ -24,13 +24,14 @@ import tempfile
 import zipfile
 
 from ade_fork_ci import Evaluation, GitHubEvaluation
+import ade_fork_release as release
 from ade_fork_release import Adapters, ContractError, Journal, Receipt, canonical, digest, parse, validate
 from ade_fork_plugins import inspect, payload_tree_hash, qualify, stage, tree_hash
 from ade_forks import load_policy
 
 LIMIT = 96 * 1024 * 1024
 MEMBERS = {'receipt.json', 'snapshot.json', 'evaluator-evidence.json'}
-OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain'}
+OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain', 'resume', 'reconcile-release'}
 FIELDS = {'schema_version', 'component', 'channel', 'repository', 'repository_id',
           'cohort', 'policy', 'expected', 'evaluation', 'operations', 'previous',
           'generation', 'master_commit', 'evidence', 'discovery', 'native'}
@@ -73,9 +74,78 @@ def read_regular(path: Path, limit=LIMIT, *, owner=None) -> bytes:
     finally: os.close(parent)
 
 
+STANDING_SELECTORS = {
+    'retain': {'qualified-latest'}, 'preflight': {'qualified-latest'},
+    'stage': {'qualified-latest'}, 'activate': {'qualified-latest'},
+    'recover': {'recorded-verified', 'recorded-baseline'},
+    'verify': {'qualified-latest', 'recorded-verified', 'recorded-baseline'},
+}
+
+
+def validate_operations(row):
+    ops = row['operations']
+    if type(ops) is not dict or set(ops) - OPERATIONS: raise ContractError('invalid operation consent')
+    for operation, value in ops.items():
+        if row['schema_version'] == 1:
+            if (type(value) is not dict or set(value) != {'allowed', 'identity', 'generation'} or
+                    type(value['allowed']) is not bool or type(value['generation']) is not int or value['generation'] != row['generation'] or
+                    type(value['identity']) is not str or not (re.fullmatch('[a-f0-9]{64}', value['identity']) or
+                    (value['identity'] == 'qualified-latest' and operation in {'retain','preflight','stage','activate','verify'}))):
+                raise ContractError('invalid exact legacy consent')
+            continue
+        if (type(value) is not dict or set(value) != {'version','grants'} or type(value['version']) is not int or value['version'] != 1 or
+                type(value['grants']) is not list or not 1 <= len(value['grants']) <= 32):
+            raise ContractError('invalid versioned grants wrapper')
+        seen = set()
+        for grant in value['grants']:
+            if type(grant) is not dict or type(grant.get('allowed')) is not bool: raise ContractError('invalid literal grant')
+            identity = digest(grant)
+            if identity in seen: raise ContractError('duplicate canonical grant')
+            seen.add(identity)
+            if grant.get('mode') == 'exact':
+                if (set(grant) != {'mode','allowed','identity','generation'} or type(grant['identity']) is not str or
+                        not re.fullmatch('[a-f0-9]{64}', grant['identity']) or type(grant['generation']) is not int or grant['generation'] < 0):
+                    raise ContractError('invalid exact transaction grant')
+            elif grant.get('mode') == 'standing':
+                selectors = grant.get('selectors')
+                if (set(grant) != {'mode','allowed','selectors'} or type(selectors) is not list or not selectors or
+                        any(type(item) is not str for item in selectors) or len(selectors) != len(set(selectors)) or
+                        not set(selectors) <= STANDING_SELECTORS.get(operation, set())):
+                    raise ContractError('invalid finite standing selector')
+            else: raise ContractError('invalid consent mode')
+
+
+def rule_allows(row, operation, identity, context, *, selected_current=False):
+    """Pure scope match; context is produced under Journal lock, never candidate JSON."""
+    if context is not None and (context.rule_digest != digest(row) or context.group != row['policy']['compatibility_group']):
+        return False
+    generation = row['generation'] if context is None else context.cas_generation
+    value = row['operations'].get(operation)
+    if value is None: return False
+    if row['schema_version'] == 1:
+        return (value['allowed'] is True and value['generation'] == generation and
+                (value['identity'] == identity or value['identity'] == 'qualified-latest' and selected_current and
+                 (context is None or context.kind == 'deploy')))
+    matched = []
+    for grant in value['grants']:
+        match = False
+        if grant['mode'] == 'exact':
+            match = grant['identity'] == identity and grant['generation'] == generation
+        elif context is not None and context.kind not in ('resume','reconcile-release'):
+            for selector in grant['selectors']:
+                if selector == 'qualified-latest':
+                    match |= context.kind == 'deploy' and context.target == identity and selected_current
+                elif selector == 'recorded-verified':
+                    match |= context.kind == 'reconcile' and context.target == identity == context.verified
+                elif selector == 'recorded-baseline':
+                    match |= context.kind == 'verified-rollback' and context.target == identity == context.baseline
+        if match: matched.append(grant['allowed'])
+    return bool(matched) and all(matched)  # matching explicit denial wins
+
+
 def enrollment(encoded: bytes, registry: list[dict]) -> dict:
     row = parse(encoded.decode('utf-8'))
-    if type(row) is not dict or set(row) != FIELDS or type(row['schema_version']) is not int or row['schema_version'] != 1:
+    if type(row) is not dict or set(row) != FIELDS or type(row['schema_version']) is not int or row['schema_version'] not in (1, 2):
         raise ContractError('unsupported controller enrollment')
     if row['component'] != 'ade-yolo' or row['channel'] != 'master' or row['repository'] != 'djbclark/djbclark-ade':
         raise ContractError('unsupported controller pilot')
@@ -126,16 +196,7 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
             type(discovery['enabled']) is not bool or discovery['artifact_prefix'] != 'ade-yolo-qualified' or
             type(discovery['baseline_run_id']) is not int or discovery['baseline_run_id'] <= 0):
         raise ContractError('invalid protected discovery contract')
-    ops = row['operations']
-    if type(ops) is not dict or set(ops) - OPERATIONS:
-        raise ContractError('invalid operation consent')
-    for operation, consent in ops.items():
-        if (type(consent) is not dict or set(consent) != {'allowed', 'identity', 'generation'} or
-                type(consent['allowed']) is not bool or type(consent['generation']) is not int or
-                consent['generation'] != row['generation'] or not isinstance(consent['identity'], str) or
-                not (re.fullmatch('[a-f0-9]{64}', consent['identity']) or
-                     (consent['identity'] == 'qualified-latest' and operation in {'retain', 'preflight', 'stage', 'activate', 'verify'}))):
-            raise ContractError('invalid scoped consent')
+    validate_operations(row)
     return row
 
 
@@ -218,16 +279,17 @@ def immutable(path, content):
     finally: os.unlink(name)
 
 
-def coherent_native_status(value, plugin_id):
+def coherent_native_status(value, plugin_id, *, allow_target_absent=False, require_baseline=False):
     """Consumer for proposed ManagedPluginStatus v1; observations grant no support."""
     if (type(value) is not dict or value.get('version') != 1 or value.get('pluginId') != plugin_id or
             value.get('consistency') != 'coherent'):
         raise ContractError('native status uncertain')
     registration, journal, loaded = (value.get(key) for key in ('registration', 'journal', 'loaded'))
-    if (type(registration) is not dict or type(journal) is not dict or type(loaded) is not dict or
+    if (type(registration) is not dict or type(journal) is not dict or (type(loaded) is not dict and not (allow_target_absent and loaded is None)) or
             type(journal.get('generation')) is not int or journal['generation'] < 0 or
             journal.get('phase') not in ('ready', 'activating', 'replacing', 'held') or
-            type(journal.get('baseline')) is not dict or type(journal.get('currentReceipt')) is not dict):
+            (require_baseline and type(journal.get('baseline')) is not dict) or
+            (type(journal.get('currentReceipt')) is not dict and not (allow_target_absent and journal.get('currentReceipt') is None))):
         raise ContractError('native status incomplete')
     # Native CAS is exclusively journal.generation, never loaded.activationGeneration.
     return value
@@ -327,7 +389,7 @@ def verify_transport_distribution(config):
     return manifest
 
 
-def cohort_observation(value, config, expected, target):
+def cohort_observation(value, config, expected, target, *, allow_target_absent=False):
     """Strict proposed d174 v1 consumer. Native producer binds executing facts privately."""
     if (type(value) is not dict or set(value) != {'version', 'consistency', 'observationEpoch', 'enclosing', 'entries'} or
             type(value['version']) is not int or value['version'] != 1 or value['consistency'] != 'coherent' or
@@ -378,7 +440,8 @@ def cohort_observation(value, config, expected, target):
             if loaded is not None or entry['enabled'] is True: raise ContractError('unexpected active cohort member')
             continue
         if plugin == target:
-            if loaded is None or entry['enabled'] is not True: raise ContractError('target not running')
+            if not allow_target_absent and (loaded is None or entry['enabled'] is not True):
+                raise ContractError('target not running')
             continue
         stable = {'enabled': entry['enabled'], 'loaded': loaded is not None, 'registration': registration,
                   'receipt': None if loaded is None else {k: loaded.get(k) for k in ('sourcePath', 'snapshotRoot', 'snapshotSha256', 'serverBundleSha256')},
@@ -388,11 +451,33 @@ def cohort_observation(value, config, expected, target):
     return value
 
 
-class NativeFacade:
-    """Actual bounded retained CLI transport; qualification/status coupling still absent.
+def native_reservation_plan(status, config, plugin):
+    """Read-only exact native counter snapshot. Null/old generation is never zero."""
+    if (type(status) is not dict or type(status.get('schemaVersion')) is not int or status['schemaVersion'] != 1 or
+            status.get('state') != 'idle' or status.get('recoveryRequired') is not False or status.get('ready') is not True or
+            type(status.get('reservationGeneration')) is not int or not 0 <= status['reservationGeneration'] < 2**53 - 1):
+        raise ContractError('qualified native idle reservation unavailable')
+    authority = status.get('authority')
+    if (type(authority) is not dict or authority.get('qualified') is not True or
+            authority.get('serverId') != config['serverId'] or authority.get('daemonIncarnation') != config['daemonIncarnation'] or
+            type(authority.get('features')) is not dict or authority['features'].get('maintenanceReservationV1') is not True or
+            authority['features'].get('maintenancePluginOperationV1') is not True):
+        raise ContractError('native reservation authority unavailable')
+    generation = plugin['journal']['generation']
+    if type(generation) is not int or not 0 <= generation < 2**53:
+        raise ContractError('native plugin CAS unavailable')
+    return {'native_generation': status['reservationGeneration'] + 1, 'plugin_generation': generation,
+            'server_id': config['serverId'], 'daemon_incarnation': config['daemonIncarnation']}
 
-    No source/dev/PATH fallback. supported remains false until native owners publish
-    and implement genuine qualified status/feature metadata for this exact bridge.
+
+class NativeKnownBusy(ContractError):
+    """Only the retained native CLI's authoritative typed BEGIN refusal."""
+
+
+class NativeFacade:
+    """Bounded retained Linux CLI transport with independent manifest/cohort checks.
+
+    Exact native facts gate each operation; missing producer/API facts hold.
     """
     def __init__(self, reader=None, root=None):
         self.reader = reader or read_enrollment
@@ -405,11 +490,17 @@ class NativeFacade:
         self.render = None
         self.bridge_binding = None
         self.operation = 'activate'
+        self.recovery_inspection = False
+        self.context = None
+        self.intent = None
+        self.original_native = None
+        self.known_held = None
+        self.read_only_reconciliation = False
 
     def supported(self):
-        if self.uncertain: return False
+        if self.uncertain and not getattr(self, 'read_only_reconciliation', False): return False
         try:
-            self.cohort_status()
+            self.cohort_status(allow_target_absent=True)
             authority = self._call(['daemon', 'maintenance', 'status']).get('authority')
             config = self._transport()
             if (type(authority) is not dict or authority.get('schemaVersion') != 1 or authority.get('qualified') is not True or
@@ -422,14 +513,41 @@ class NativeFacade:
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return False
 
-    def cohort_status(self):
+    def cohort_status(self, *, allow_target_absent=False):
         row = self.reader(); config = self._transport()
-        return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'])
+        return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'], allow_target_absent=allow_target_absent)
 
-    def prepare(self, row, identity, render):
+    def bind(self, row, context, render, *, recovery=False, origin=None):
         self.transaction_row = row
-        self.target = identity
+        self.context = context
+        self.target = context.target
         self.render = render
+        self.recovery_inspection = recovery
+        self.read_only_reconciliation = context.kind == 'reconcile-release'
+        if origin is not None: self.original_native = origin
+        self.operation = 'recover' if context.kind in ('reconcile','verified-rollback') else 'activate'
+
+    def prepare(self, context):
+        """Read-only native plan; Journal persists this exact intent BEFORE reserve."""
+        if context != self.context or digest(self.reader()) != context.rule_digest:
+            raise ContractError('protected rule/context changed before native planning')
+        facts = self.cohort_status(allow_target_absent=self.recovery_inspection)
+        plugin = next(item for item in facts['entries'] if item['pluginId'] == self.transaction_row['component'])
+        status = self._call(['daemon','maintenance','status'])
+        config = self._transport()
+        if self.known_held is not None and context.kind in ('reconcile','verified-rollback'):
+            if not self.token or self.uncertain or not self.original_native:
+                raise ContractError('same-held recovery capability unavailable')
+            old_context, old_intent = self.original_native
+            self._check_same_held(status, old_context, old_intent, plugin)
+            generation = plugin['journal']['generation']
+            plan = {'native_generation':old_intent.native_generation,'plugin_generation':generation,
+                    'server_id':old_intent.server_id,'daemon_incarnation':old_intent.daemon_incarnation}
+        else:
+            plan = native_reservation_plan(status, config, plugin)
+        self.intent = release.ReservationIntent(**plan)
+        if digest(self.reader()) != context.rule_digest: raise ContractError('protected rule changed during native planning')
+        return self.intent
 
     def _transport(self):
         config = self.reader()['native']
@@ -455,29 +573,45 @@ class NativeFacade:
         if token is not None and not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
             raise ContractError('invalid private owner token')
         with subprocess.Popen(args, stdin=subprocess.PIPE if token is not None else subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as proc:
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
             deadline = time.monotonic() + 30
             data = bytearray()
+            errors = bytearray()
             try:
                 if token is not None:
                     # Only <=44 bytes to a private anonymous pipe, never argv/env/file path.
                     proc.stdin.write((token + '\n').encode('ascii')); proc.stdin.close()
                 with selectors.DefaultSelector() as selector:
-                    selector.register(proc.stdout, selectors.EVENT_READ)
-                    while True:
+                    selector.register(proc.stdout, selectors.EVENT_READ, (data, 1024 * 1024))
+                    selector.register(proc.stderr, selectors.EVENT_READ, (errors, 16384))
+                    while selector.get_map():
                         remaining = deadline - time.monotonic()
-                        if remaining <= 0 or not selector.select(remaining): raise ContractError('native transport timed out')
-                        chunk = os.read(proc.stdout.fileno(), min(65536, 1024 * 1024 + 1 - len(data)))
-                        if not chunk: break
-                        data.extend(chunk)
-                        if len(data) > 1024 * 1024: raise ContractError('native transport output too large')
+                        if remaining <= 0: raise ContractError('native transport timed out')
+                        events = selector.select(remaining)
+                        if not events: raise ContractError('native transport timed out')
+                        for key, _ in events:
+                            buffer, bound = key.data
+                            chunk = os.read(key.fileobj.fileno(), min(65536, bound + 1 - len(buffer)))
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            buffer.extend(chunk)
+                            if len(buffer) > bound: raise ContractError('native transport output too large')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0: raise ContractError('native transport timed out')
                 try: code = proc.wait(timeout=remaining)
                 except subprocess.TimeoutExpired as error: raise ContractError('native transport timed out') from error
-                if code: raise ContractError('native transport refused')
+                if code:
+                    if not data and arguments[:3] == ['daemon', 'maintenance', 'begin']:
+                        try: refusal = parse(errors.decode())
+                        except (ValueError, UnicodeError): refusal = None
+                        if refusal == {'error': {'code': 'MAINTENANCE_KNOWN_BUSY', 'message': 'Maintenance reservation refused'}}:
+                            raise NativeKnownBusy('authoritative native known busy')
+                    raise ContractError('native transport refused')
                 # Native CLI --json contract is one BARE JSON result, not an RPC envelope.
                 return parse(data.decode())
+            except NativeKnownBusy:
+                raise
             except Exception:
                 if self.reservation is not None: self.uncertain = True
                 raise
@@ -488,8 +622,8 @@ class NativeFacade:
     def list_observations(self):
         return self._call(['plugin', 'ls'])
 
-    def managed_status(self, plugin_id):
-        return coherent_native_status(self._call(['plugin', 'managed-status', plugin_id]), plugin_id)
+    def managed_status(self, plugin_id, *, allow_target_absent=False):
+        return coherent_native_status(self._call(['plugin', 'managed-status', plugin_id]), plugin_id, allow_target_absent=allow_target_absent)
 
     def _identity_args(self):
         config = self._transport()
@@ -499,50 +633,118 @@ class NativeFacade:
         if not self.reservation or not self.token: raise ContractError('native private reservation absent')
         return ['--generation', str(self.reservation['generation']), '--transaction-id', self.reservation['transactionId'], *self._identity_args()]
 
-    @__import__('contextlib').contextmanager
-    def reserve(self):
-        if self.supported() is not True or not self.target:
-            raise ContractError('native qualified reservation unavailable')
-        row = self.transaction_row
-        generation = row['generation'] + 1
-        tx = digest({'group': row['policy']['compatibility_group'], 'generation': generation, 'target': self.target})
-        self.reservation = {'generation': generation, 'transactionId': tx}
+    def reserve(self, context, intent):
+        if context != self.context or intent != self.intent or self.supported() is not True:
+            raise ContractError('native prepared reservation unavailable')
+        # Recheck the exact original read-only plan, never rescope a changed counter.
+        facts = self.cohort_status(allow_target_absent=self.recovery_inspection)
+        plugin = next(item for item in facts['entries'] if item['pluginId'] == self.transaction_row['component'])
+        current = native_reservation_plan(self._call(['daemon','maintenance','status']), self._transport(), plugin)
+        if release.ReservationIntent(**current) != intent: raise ContractError('native reservation plan stale')
+        self.reservation = {'generation':intent.native_generation,'transactionId':context.transaction_id}
+        self.plugin_generation = intent.plugin_generation
         self.verified = False
         try:
-            result = self._call(['daemon', 'maintenance', 'begin', '--generation', str(generation), '--transaction-id', tx, *self._identity_args()])
-            if (type(result) is not dict or result.get('state') != 'held' or result.get('recoveryRequired') is not False or
-                    result.get('generation') != generation or result.get('transactionId') != tx or
-                    type(result.get('ownerToken')) is not str or not re.fullmatch('[A-Za-z0-9_-]{43}', result['ownerToken'])):
-                raise ContractError('native begin uncertain')
-            self.token = result['ownerToken']
-            yield True
-        except BaseException:
+            result = self._call(['daemon','maintenance','begin', *self._reservation_args_without_token(context, intent)])
+        except NativeKnownBusy:
+            self.reservation = None
+            return release.BeginResult('busy')
+        except Exception:
             self.uncertain = True
             raise
-        finally:
-            # Journal can return recovery_required without raising. Therefore context
-            # exit NEVER sends END. Controller acknowledges only a committed verified result.
-            pass
+        if type(result) is dict and type(result.get('ownerToken')) is str and re.fullmatch('[A-Za-z0-9_-]{43}', result['ownerToken']):
+            self.token = result['ownerToken']
+        if (type(result) is not dict or result.get('state') != 'held' or result.get('recoveryRequired') is not False or
+                result.get('generation') != intent.native_generation or result.get('transactionId') != context.transaction_id or not self.token):
+            self.uncertain = True
+            raise ContractError('native begin uncertain')
+        self.original_native = (context, intent)
+        return release.BeginResult('held')
 
-    def finish(self):
-        if not self.verified or self.uncertain or not self.token:
+    def _reservation_args_without_token(self, context, intent):
+        config = self._transport()
+        if config['serverId'] != intent.server_id or config['daemonIncarnation'] != intent.daemon_incarnation:
+            raise ContractError('native reservation identity changed')
+        return ['--generation',str(intent.native_generation),'--transaction-id',context.transaction_id,*self._identity_args()]
+
+    def finish(self, context, intent):
+        if context != self.context or intent != self.intent or not self.verified or self.uncertain or not self.token:
             raise ContractError('native release not verified')
-        result = self._call(['daemon', 'maintenance', 'end', *self._reservation_args(), '--owner-token-fd', '0'], self.token)
-        if type(result) is not dict or result.get('state') != 'idle' or result.get('recoveryRequired') is not False:
+        result = self._call(['daemon','maintenance','end',*self._reservation_args(),'--owner-token-fd','0'],self.token)
+        if (type(result) is not dict or result.get('state') != 'idle' or result.get('recoveryRequired') is not False or
+                result.get('reservationGeneration') != intent.native_generation or
+                result.get('transactionId') != self.reservation['transactionId']):
             self.uncertain = True
             raise ContractError('native end uncertain')
-        self.token = None; self.reservation = None
+        self.token = None; self.reservation = None; self.known_held = None
+        return True
+
+    def released(self, original_context, original_intent):
+        if not self.context or self.context.kind != 'reconcile-release': return False
+        native_context, native_intent = self.original_native or (original_context, original_intent)
+        status = self._call(['daemon','maintenance','status'])
+        config = self._transport()
+        if (type(status) is not dict or status.get('state') != 'idle' or status.get('recoveryRequired') is not False or
+                status.get('ready') is not True or status.get('reservationGeneration') != native_intent.native_generation or
+                status.get('transactionId') != native_context.transaction_id or
+                config['serverId'] != native_intent.server_id or config['daemonIncarnation'] != native_intent.daemon_incarnation):
+            return False
+        authority = status.get('authority')
+        if (type(authority) is not dict or authority.get('qualified') is not True or
+                authority.get('serverId') != native_intent.server_id or authority.get('daemonIncarnation') != native_intent.daemon_incarnation):
+            return False
+        return self.observe(self.transaction_row['cohort']) == self.context.target
+
+    def _check_same_held(self, status, original_context, original_intent, plugin):
+        # Current metadata can confirm, never create, the same-process private eligibility.
+        restriction = status.get('recoveryOnly') if type(status) is dict else None
+        if (not self.known_held or not self.token or self.uncertain or type(restriction) is not dict or
+                status.get('state') != 'held' or status.get('reservationGeneration') != original_intent.native_generation or
+                status.get('transactionId') != original_context.transaction_id or
+                restriction.get('pluginId') != self.transaction_row['component'] or restriction.get('phase') != 'recover-required' or
+                restriction.get('nativeGeneration') != plugin['journal']['generation'] or
+                restriction.get('baseline') != self.known_held['baseline']):
+            raise ContractError('same-held recovery restriction unavailable')
+        config = self._transport()
+        authority = status.get('authority')
+        if (config['serverId'] != original_intent.server_id or config['daemonIncarnation'] != original_intent.daemon_incarnation or
+                type(authority) is not dict or authority.get('qualified') is not True or
+                authority.get('serverId') != original_intent.server_id or authority.get('daemonIncarnation') != original_intent.daemon_incarnation or
+                type(authority.get('features')) is not dict or authority['features'].get('maintenanceKnownFailedHeldV1') is not True or
+                digest(self.reader()) != self.context.rule_digest):
+            raise ContractError('same-held native incarnation or authority changed')
+
+    def reuse(self, context, intent, original_context, original_intent):
+        if (context != self.context or intent != self.intent or self.original_native != (original_context,original_intent) or
+                not self.known_held or not self.token or self.uncertain or self.target != context.target or
+                intent.native_generation != original_intent.native_generation or intent.server_id != original_intent.server_id or
+                intent.daemon_incarnation != original_intent.daemon_incarnation):
+            raise ContractError('same live bearer reuse unavailable')
+        facts = self.cohort_status(allow_target_absent=True)
+        plugin = next(item for item in facts['entries'] if item['pluginId'] == self.transaction_row['component'])
+        self._check_same_held(self._call(['daemon','maintenance','status']),original_context,original_intent,plugin)
+        if plugin['journal']['generation'] != intent.plugin_generation: raise ContractError('same-held plugin CAS stale')
+        self.reservation = {'generation':original_intent.native_generation,'transactionId':original_context.transaction_id}
+        self.plugin_generation = intent.plugin_generation
+        self.verified = False
+        return release.BeginResult('held')
 
     def preflight(self, record):
         return self.supported() is True and self.token is not None and not self.uncertain
 
     def observe(self, cohort):
-        if self.uncertain: raise ContractError('native execution uncertain')
-        facts = self.cohort_status()
+        if self.uncertain and not getattr(self, 'read_only_reconciliation', False): raise ContractError('native execution uncertain')
+        facts = self.cohort_status(allow_target_absent=self.recovery_inspection)
         if canonical(self.reader()['cohort']) != canonical(cohort): raise ContractError('protected cohort changed')
         target = self.reader()['component']
         entry = next(item for item in facts['entries'] if item['pluginId'] == target)
         loaded = entry['loaded']; execution = entry['execution']
+        if loaded is None or entry['enabled'] is not True:
+            if not self.recovery_inspection: raise ContractError('target runtime receipt unavailable')
+            # Independent absent-state identity, never a fabricated baseline receipt.
+            # Journal.recover inspects it; strict verification is restored after recovery.
+            return 'native-target-absent:v1:' + digest({'pluginId': target, 'registration': entry['registration'],
+                'enabled': entry['enabled'], 'journal': entry['journal']})
         paths = sorted((self.root / 'records').iterdir())
         if not paths or len(paths) > 100: raise ContractError('retained release inventory unavailable')
         matches = []
@@ -568,9 +770,19 @@ class NativeFacade:
         return matches[0]
 
     def _operation(self, kind, identity, record):
+        try:
+            return self._operation_bound(kind,identity,record)
+        except Exception:
+            # A throw/lost ACK can never retain the confirmed same-held reuse lane.
+            self.uncertain = True
+            self.known_held = None
+            raise
+
+    def _operation_bound(self, kind, identity, record):
         if self.supported() is not True or self.render is None or identity != self.target:
             raise ContractError('native held operation unavailable')
-        status = self.managed_status(record['expected']['component'])
+        status = self.managed_status(record['expected']['component'], allow_target_absent=kind == 'recover' and self.recovery_inspection)
+        if status['journal']['generation'] != self.plugin_generation: raise ContractError('prepared plugin CAS changed')
         rendered = self.render(identity, status, self.operation)
         grant = rendered['authorization']
         result = self._call(['daemon', 'maintenance', 'plugin-operation', '--operation', kind,
@@ -578,10 +790,14 @@ class NativeFacade:
             '--expected-path', rendered['expectedPath'], '--expected-generation', str(grant['expectedGeneration']),
             '--snapshot-sha256', grant['snapshotSha256'], '--server-bundle-sha256', grant['serverBundleSha256'],
             '--owner-token-fd', '0'], self.token)
+        if type(result) is dict and result.get('outcome') == 'known_failed_held':
+            return self._accept_known_held(result, identity, record)
         config = self._transport()
-        if (type(result) is not dict or result.get('serverId') != config['serverId'] or
+        if (type(result) is not dict or set(result) != {'plugin','nativeGeneration','maintenance','serverId','daemonIncarnation'} or result.get('serverId') != config['serverId'] or
                 result.get('daemonIncarnation') != config['daemonIncarnation'] or
-                type(result.get('nativeGeneration')) is not int or type(result.get('plugin')) is not dict):
+                type(result.get('nativeGeneration')) is not int or type(result.get('plugin')) is not dict or
+                result['plugin'].get('id') != rendered['pluginId'] or result['plugin'].get('enabled') is not True or
+                result['plugin'].get('status') != 'running'):
             self.uncertain = True
             raise ContractError('native operation identity uncertain')
         loaded = result['plugin'].get('loaded')
@@ -591,16 +807,79 @@ class NativeFacade:
                 type(loaded.get('pid')) is not int or not loaded.get('startedAt')):
             self.uncertain = True
             raise ContractError('native loaded receipt uncertain')
+        self.plugin_generation = result['nativeGeneration']
         return result
+
+    def _accept_known_held(self, result, identity, record):
+        # Only the authenticated retained CLI normal alternative, never an exception.
+        # Descriptive JSON is insufficient without this object's existing live bearer.
+        required = {'outcome','reason','pluginId','nativeGeneration','current','baseline',
+                    'maintenance','serverId','daemonIncarnation'}
+        if (set(result) != required or result['reason'] not in ('compiler_error','initialization_rejected') or
+                not hasattr(release,'KnownFailedHeld') or not self.token or self.uncertain or
+                not self.original_native or not self.context or self.operation not in ('activate','recover') or result['pluginId'] != self.transaction_row['component'] or
+                type(result['nativeGeneration']) is not int or result['nativeGeneration'] < self.plugin_generation):
+            self.uncertain = True
+            raise ContractError('known-held alternative unsupported or ambiguous')
+        config = self._transport()
+        if result['serverId'] != config['serverId'] or result['daemonIncarnation'] != config['daemonIncarnation']:
+            self.uncertain = True
+            raise ContractError('known-held identity changed')
+        baseline_id = self.context.verified if self.context.kind == 'deploy' else self.context.target
+        baseline_record = parse(read_regular(self.root/'records'/(baseline_id+'.json')).decode())
+        retained_receipt = Receipt(base64.b64decode(baseline_record['receipt'],validate=True))
+        payload = read_regular(self.root/'payloads'/baseline_record['payload_sha256'])
+        validate(retained_receipt,baseline_record['expected'],baseline_record['policy'],artifact=payload)
+        if retained_receipt.sha256 != baseline_id: raise ContractError('known-held retained baseline corrupt')
+        baseline_root = self.root/'snapshots'/baseline_record['payload_sha256']
+        baseline = {'path':str(baseline_root/'plugins'/result['pluginId']),
+                    'snapshotSha256':baseline_record['evidence']['native_tree_sha256'],
+                    'serverBundleSha256':baseline_record['evidence']['server_bundle_sha256']}
+        if result['baseline'] != baseline or tree_hash(baseline_root) != baseline['snapshotSha256']:
+            self.uncertain = True
+            raise ContractError('known-held baseline binding mismatch')
+        fresh = self._call(['daemon','maintenance','status'])
+        facts = self.cohort_status(allow_target_absent=True)
+        plugin = next(e for e in facts['entries'] if e['pluginId'] == result['pluginId'])
+        expected_current = {'registration':None if plugin['registration'] is None else
+                            {'path':plugin['registration']['path'],'enabled':plugin['enabled']},'loaded':plugin['loaded']}
+        restriction = {'pluginId':result['pluginId'],'baseline':baseline,
+                       'nativeGeneration':result['nativeGeneration'],'phase':'recover-required'}
+        for status in (result['maintenance'],fresh):
+            authority = status.get('authority') if type(status) is dict else None
+            if (type(authority) is not dict or authority.get('qualified') is not True or
+                    authority.get('serverId') != config['serverId'] or authority.get('daemonIncarnation') != config['daemonIncarnation'] or
+                    type(authority.get('features')) is not dict or authority['features'].get('maintenanceKnownFailedHeldV1') is not True or
+                    status.get('state') != 'held' or status.get('recoveryRequired') is not False or
+                    status.get('reservationGeneration') != self.reservation['generation'] or
+                    status.get('transactionId') != self.reservation['transactionId'] or status.get('recoveryOnly') != restriction):
+                self.uncertain = True
+                raise ContractError('known-held fresh restriction unavailable')
+        if (result['current'] != expected_current or plugin['journal']['generation'] != result['nativeGeneration'] or
+                digest(self.reader()) != self.context.rule_digest):
+            self.uncertain = True
+            raise ContractError('known-held current facts changed')
+        self.known_held = {'baseline':baseline}
+        self.plugin_generation = result['nativeGeneration']
+        return release.KnownFailedHeld(result['reason'],result['nativeGeneration'])
 
     def activate(self, identity, record):
         self.operation = 'activate'
-        self._operation('replace', identity, record)
+        result = self._operation('replace', identity, record)
+        if type(result) is getattr(release, 'KnownFailedHeld', None): return result
     def recover(self, identity, record):
         self.operation = 'recover'
-        self._operation('recover', identity, record)
+        result = self._operation('recover', identity, record)
+        if type(result) is getattr(release, 'KnownFailedHeld', None): return result
+        self.known_held = None
+        self.recovery_inspection = False  # subsequent receipt/cohort verification is strict
     def verify(self, identity, record):
-        self._operation('verify', identity, record)
+        if self.context and self.context.kind in ('resume','reconcile-release'):
+            return self.supported() is True and self.observe(self.transaction_row['cohort']) == identity
+        result = self._operation('verify', identity, record)
+        if type(result) is getattr(release,'KnownFailedHeld',None):
+            self.uncertain = True
+            raise ContractError('verify cannot return a known failure alternative')
         self.verified = True
         return True
 
@@ -611,6 +890,7 @@ class Controller:
         self.reader = reader
         self.evaluator = evaluator or GitHubEvaluation()
         self.native = native or NativeFacade(reader, root)
+        self.context = None
         self.selection = None
         self.fresh_attestations = {}
         self.root = Path(root) if root is not None else locations()[1]
@@ -799,18 +1079,15 @@ class Controller:
     def permits(self, row, operation, identity):
         current = self.reader()
         if canonical(current) != canonical(row): return False
-        grant = current['operations'].get(operation)
-        if not (type(grant) is dict and grant['allowed'] is True and grant['generation'] == current['generation']):
-            return False
-        if grant['identity'] == identity: return True
-        if grant['identity'] != 'qualified-latest' or not self.selection:
-            return False
-        selected = self.selection['selected']
-        if (not selected or selected['identity'] != identity or self.selection['enrollment_sha256'] != digest(current)):
-            return False
-        # Current consent permits only the independently selected exact artifact under
-        # unchanged protected constraints. New master requires fresh selection.
-        return self.discover_master()['discovered'] == self.selection['latest']
+        selected_current = False
+        value = current['operations'].get(operation)
+        candidate_scope = (value is not None and ((current['schema_version'] == 1 and value['identity'] == 'qualified-latest') or
+            (current['schema_version'] == 2 and any(grant['mode'] == 'standing' and 'qualified-latest' in grant['selectors'] for grant in value['grants']))))
+        if self.selection and candidate_scope and (self.context is None or self.context.kind == 'deploy'):
+            selected = self.selection['selected']
+            if (selected and selected['identity'] == identity and self.selection['enrollment_sha256'] == digest(current)):
+                selected_current = self.discover_master()['discovered'] == self.selection['latest']
+        return rule_allows(current, operation, identity, self.context, selected_current=selected_current)
 
 
     def acquire(self, row):
@@ -872,7 +1149,24 @@ class Controller:
             r = record(identity)
             if hashlib.sha256(payload).hexdigest() != r['payload_sha256']: raise ContractError('staging substitution')
             stage(payload, self.root / 'snapshots', payload_tree_hash(payload))
-        return Adapters(
+        def prepare(context):
+            # Called by Journal while its existing lock owns the actual CAS/context.
+            if digest(self.reader()) != context.rule_digest or digest(row) != context.rule_digest:
+                raise ContractError('current protected rule changed')
+            self.context = context
+            if isinstance(native, NativeFacade):
+                pending = self.journal.read().get('transaction')
+                origin = None
+                if pending:
+                    original = pending.get('origin', pending)
+                    origin = (release.TransactionContext(**original['context']),
+                              release.ReservationIntent(**original['reservation']))
+                recovery = (context.kind in ('reconcile','verified-rollback') and
+                            self.permits(row,'recover',context.target) and self.permits(row,'verify',context.target))
+                native.bind(row,context,lambda identity,status,operation: self.concrete_grant(row,identity,status,operation),
+                            recovery=recovery,origin=origin)
+            return native.prepare(context)
+        kwargs = dict(
             observe=lambda: native.observe(row['cohort']),
             preflight=lambda identity: native.preflight(record(identity)),
             stage=staging,
@@ -882,7 +1176,11 @@ class Controller:
             retained=self.retained,
             authority=lambda operation, identity: self.permits(row, operation, identity),
             authenticate=verified.authenticates if verified is not None else lambda receipt: False,
-            policy=lambda: self.reader()['policy'], reserve=native.reserve)
+            policy=lambda: self.reader()['policy'], prepare=prepare,reserve=native.reserve,
+            finish=native.finish,released=native.released)
+        if 'reuse' in Adapters.__dataclass_fields__:
+            kwargs['reuse'] = native.reuse
+        return Adapters(**kwargs)
 
     def concrete_grant(self, row, identity, native_status, operation='activate'):
         """Pure artifact scope/authorization renderer, never a permission or transport.
@@ -893,7 +1191,7 @@ class Controller:
         if operation not in ('activate', 'recover') or not self.permits(row, operation, identity):
             raise ContractError('current concrete operation consent absent')
         if not self.retained(identity): raise ContractError('concrete grant artifact missing')
-        status = coherent_native_status(native_status, row['component'])
+        status = coherent_native_status(native_status, row['component'], allow_target_absent=operation == 'recover', require_baseline=operation == 'recover')
         record = parse(read_regular(self.root / 'records' / (identity + '.json')).decode())
         root = self.root / 'snapshots' / record['payload_sha256']
         expected_tree = record['evidence']['native_tree_sha256']
@@ -909,6 +1207,13 @@ class Controller:
         bundle = record['evidence']['server_bundle_sha256']
         if type(bundle) is not str or not re.fullmatch('[a-f0-9]{64}', bundle):
             raise ContractError('protected compiled bundle identity unavailable')
+        if operation == 'recover':
+            baseline = status['journal']['baseline']
+            saved = baseline['receipt']
+            if (baseline['source'].get('path') != source or saved.get('sourcePath') != source or
+                    saved.get('snapshotRoot') != str(root) or saved.get('snapshotSha256') != expected_tree or
+                    saved.get('serverBundleSha256') != bundle):
+                raise ContractError('native retained baseline differs from authorized target')
         grant = {'operation': operation, 'expectedGeneration': status['journal']['generation'],
                  'sourcePath': source, 'snapshotRoot': str(root), 'snapshotSha256': expected_tree,
                  'serverBundleSha256': bundle, 'state': 'binary-only',
@@ -963,61 +1268,65 @@ class Controller:
 
     def tick(self, operation='plan'):
         row = self.reader()
+        self.context = None
         if operation == 'plan': return self.plan()
         if operation == 'select': return self.select_latest()
-        # No acquisition, staging, journal or native mutations on unsupported runtime.
+        if not hasattr(release, 'TransactionContext'):
+            return {'status':'hold','reason':'journal_transaction_context_unsupported','authorized':False}
+        if operation == 'reconcile-release' and isinstance(self.native,NativeFacade):
+            self.native.read_only_reconciliation = True
         if self.native.supported() is not True:
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}
-        journal = Journal(self.root / 'journal', row['policy']['compatibility_group'])
-        if isinstance(self.native, NativeFacade):
-            self.native.prepare(row, row['previous'], lambda identity, status, operation: self.concrete_grant(row, identity, status, operation))
-        if operation == 'recover':
-            # Recovery never depends on candidate CI availability or current candidate retention consent.
-            adapters = self.adapters(row, None)
-            result = asdict(journal.recover(adapters, generation=row['generation']))
-            if result['status'] == 'runtime_verified' and isinstance(self.native, NativeFacade):
-                if not self.permits(row, 'verify', row['previous']):
-                    self.native.uncertain = True
-                    raise ContractError('native recovery release consent revoked')
-                self.native.finish()
-            return result
-        if operation == 'deploy' and row['operations'].get('activate', {}).get('identity') == 'qualified-latest':
-            receipt, payload, verified, release = self.selected_release(row)
-            expected = release['expected']
+        self.journal = Journal(self.root / 'journal', row['policy']['compatibility_group'])
+        rule_digest = digest(row)
+        if operation in ('recover','resume','reconcile-release'):
+            current = self.journal.read()
+            adapters = self.adapters(row,None)
+            if operation == 'recover':
+                # Only the Journal's recorded baseline can be an explicit healthy rollback.
+                rollback = current['baseline'] if current['state'] == 'runtime_verified' else None
+                result = self.journal.recover(adapters,generation=current['generation'],rollback_target=rollback,rule_digest=rule_digest)
+            elif operation == 'resume':
+                result = self.journal.resume(adapters,generation=current['generation'],rule_digest=rule_digest)
+            else:
+                result = self.journal.reconcile_release(adapters,generation=current['generation'],rule_digest=rule_digest)
+            if operation == 'reconcile-release' and result.status == 'runtime_verified' and isinstance(self.native,NativeFacade):
+                # Only SAME Journal's authorized stable-idle reconciliation settles uncertainty.
+                self.native.token=None; self.native.reservation=None
+                self.native.uncertain=False; self.native.known_held=None
+                self.native.read_only_reconciliation=False
+            return asdict(result)
+        selected = row['schema_version'] == 2 or row['operations'].get('activate',{}).get('identity') == 'qualified-latest'
+        if operation == 'deploy' and selected:
+            receipt,payload,verified,record = self.selected_release(row)
+            expected = record['expected']
         else:
-            receipt, payload, verified = self.acquire(row)
+            receipt,payload,verified = self.acquire(row)
             expected = row['expected']
-        if isinstance(self.native, NativeFacade):
-            self.native.prepare(row, receipt.sha256, lambda identity, status, operation: self.concrete_grant(row, identity, status, operation))
-        adapters = self.adapters(row, verified)
+        adapters = self.adapters(row,verified)
         if operation == 'enroll':
-            journal.enroll(receipt.sha256, adapters)
-            return {'status': 'enrolled', 'identity': receipt.sha256, 'authorized': False}
+            self.journal.enroll(receipt.sha256,adapters)
+            return {'status':'enrolled','identity':receipt.sha256,'authorized':False}
         if operation != 'deploy': raise ContractError('unsupported operation')
-        result = asdict(journal.deploy(receipt, expected, row['policy'], payload, adapters,
-                                    previous=row['previous'], generation=row['generation'], migration='binary_only'))
-        if result['status'] == 'runtime_verified' and isinstance(self.native, NativeFacade):
-            if not self.permits(row, 'verify', receipt.sha256):
-                self.native.uncertain = True
-                raise ContractError('native release consent revoked')
-            self.native.finish()
-        return result
+        current = self.journal.read()
+        return asdict(self.journal.deploy(receipt,expected,row['policy'],payload,adapters,
+            previous=current['verified'],generation=current['generation'],migration='binary_only',rule_digest=rule_digest))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('status', 'plan', 'tick', 'apply', 'recover'))
+    parser.add_argument('command', choices=('status', 'plan', 'tick', 'apply', 'recover', 'resume', 'reconcile-release'))
     args = parser.parse_args(argv)
     try:
         # No arbitrary path, grant, port or transport override is exposed.
         controller = Controller()
         if args.command == 'apply': result = controller.tick('deploy')
-        elif args.command == 'recover': result = controller.tick('recover')
+        elif args.command in ('recover','resume','reconcile-release'): result = controller.tick(args.command)
         elif args.command == 'tick': result = controller.select_latest()
         else: result = controller.plan()
         if args.command == 'status': result['status'] = 'hold'; result['reason'] = 'native_execution_status_reservation_unsupported'
         print(canonical(result).decode())
-        return 1 if args.command in ('apply', 'recover') and result['status'] != 'runtime_verified' else 0
+        return 1 if args.command in ('apply','recover','resume','reconcile-release') and result['status'] != 'runtime_verified' else 0
     except (OSError, ValueError, TypeError, KeyError) as error:
         print(canonical({'status': 'hold', 'reason': type(error).__name__, 'authorized': False}).decode()); return 1
 

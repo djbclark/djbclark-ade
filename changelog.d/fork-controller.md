@@ -15,3 +15,11 @@
 
 ### Added
 - Bind the finite Linux controller facade to the producer manifest and complete executing cohort, mapping retained receipts through exact runtime profile identities. (#796)
+
+### Fixed
+- Permit authorized failed-target recovery inspection without inventing a loaded receipt, preserving complete non-target cohort and strict post-recovery verification. (#796)
+
+### Added
+- Parse explicit bounded versioned standing grants with separate recorded recovery selectors, exact resume/release scope, and matching-denial precedence. (#796)
+### Added
+- Bind repeated standing promotions, recorded rollback and exact resume/release reconciliation to the same Journal transaction API with separate native counters and gated same-bearer recovery. (#796)
