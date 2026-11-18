@@ -40,6 +40,26 @@ def census(path):
     except Exception:
         raise CoordinationError("WORKSPACE_CENSUS_UNKNOWN") from None
 
+def local_role_claims(role):
+    module=_sibling("ade_claims");directory=module.claims_dir()
+    if not directory.exists():return []
+    try:
+        if directory.is_symlink() or not directory.is_dir():raise ValueError()
+        rows=[]
+        for file in directory.iterdir():
+            if file.suffix!=".json" or file.name.startswith("."):continue
+            if file.is_symlink():raise ValueError()
+            claim=module.read_claim(file.stem)
+            if claim is None:raise ValueError()
+            if "coordination" not in claim:continue
+            marker=claim["coordination"]
+            if not isinstance(marker,dict) or not isinstance(marker.get("role_id"),str) or not isinstance(marker.get("generation"),str):raise ValueError()
+            if marker.get("role_id")==role and claim.get("state")=="active":rows.append(claim)
+        return rows
+    except Exception:
+        raise CoordinationError("LOCAL_ROLE_CLAIM_CENSUS_UNKNOWN") from None
+
+
 def transfer(request, *, cfg=None, native_call=native, inspect=process_identity, users=census, protocol=call):
     cfg = cfg or config(); role = request["role_id"]
     settings = cfg["roles"].get(role, {})
@@ -89,10 +109,18 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             initial=protocol("role get",{"role_id":role},cfg=cfg)
             if initial["record"]["state"]!="active":
                 raise CoordinationError("UNJOURNALED_LIFECYCLE_UNKNOWN")
+            resource_free=settings.get("resource_free") is True
+            local_bindings={key:value for key,value in cfg["claims"].items() if value["role_id"]==role}
+            marked=local_role_claims(role)
+            if resource_free and (initial["record"]["bindings"] or local_bindings or marked):
+                raise CoordinationError("RESOURCE_FREE_SCOPE_MISMATCH")
+            remote=any(next_owner[key]!=initial["record"]["owner"][key] for key in ("host","server"))
+            if remote and not resource_free:
+                raise CoordinationError("REMOTE_RESOURCE_ADAPTER_REQUIRED")
             with Path(request["checkpoint_path"]).open("rb") as stream:
                 checkpoint=stream.read(12*1024*1024+1);os.fsync(stream.fileno())
             if len(checkpoint)>12*1024*1024:raise CoordinationError("CHECKPOINT_TOO_LARGE")
-            intent={"initial":initial,"next_owner":next_owner,"attempt_id":attempt,"checkpoint_digest":hashlib.sha256(checkpoint).hexdigest(),"runtime":settings.get("runtime"),"resources":sorted(initial["record"]["bindings"])}
+            intent={"initial":initial,"next_owner":next_owner,"attempt_id":attempt,"checkpoint_digest":hashlib.sha256(checkpoint).hexdigest(),"runtime":settings.get("runtime"),"resources":sorted(initial["record"]["bindings"]),"resource_free":resource_free}
             evidence={}
             with db:
                 db.execute("INSERT INTO handoff_attempts VALUES (?,?,?,?,?,NULL,'pending',NULL)",(role,attempt,initial["record"]["ownership_epoch"],json.dumps(intent,sort_keys=True),checkpoint))
@@ -130,7 +158,10 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
                 raise CoordinationError("RUNNING_DAEMON_CONTRACT_MISMATCH")
             if manifest.get("retirement_contract") != codex_contract or codex_contract.get("server") != prior["owner"]["server"] or codex_contract.get("provider") != "codex" or codex_contract.get("verified") is not True:
                 raise CoordinationError("LIVE_DAEMON_CLOSE_CONTRACT_NOT_VERIFIED")
-        if next_owner["host"] != prior["owner"]["host"] or next_owner["server"] != prior["owner"]["server"]:
+        resource_free=intent.get("resource_free",False)
+        if resource_free != (settings.get("resource_free") is True):
+            raise CoordinationError("RESOURCE_SCOPE_CHANGED_DURING_HANDOFF")
+        if (next_owner["host"] != prior["owner"]["host"] or next_owner["server"] != prior["owner"]["server"]) and not resource_free:
             raise CoordinationError("REMOTE_RESOURCE_ADAPTER_REQUIRED")
         # Alias/enrollment mapping must already retain both old and new agent IDs.
         if any(cfg["aliases"].get(agent) != role for agent in (prior["owner"]["agent"],next_owner["agent"])):
@@ -155,7 +186,11 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             read_claim = _sibling("ade_claims").read_claim
             bindings = {claim:binding for claim,binding in cfg["claims"].items() if binding["role_id"] == role}
             resources = sorted({path for binding in bindings.values() for path in binding["resources"]})
-            if resources != intent["resources"] or not bindings:
+            if resource_free:
+                marked=local_role_claims(role)
+                if resources or bindings or marked or current["record"]["bindings"]:
+                    raise CoordinationError("RESOURCE_FREE_SCOPE_MISMATCH")
+            elif resources != intent["resources"] or not bindings:
                 raise CoordinationError("ALL_BOUND_RESOURCES_REQUIRED")
             jobs = Resources(root / "jobs")
             try:
@@ -243,6 +278,11 @@ def project(current,cfg):
     read_claim = _sibling("ade_claims").read_claim
     update_claim = _sibling("ade_claims").update_claim
     role=current["record"]["role_id"]
+    if cfg["roles"][role].get("resource_free") is True:
+        marked=local_role_claims(role)
+        if current["record"]["bindings"] or marked or any(binding["role_id"]==role for binding in cfg["claims"].values()):
+            raise CoordinationError("RESOURCE_FREE_SCOPE_MISMATCH")
+        return {"status":"transferred","role":current,"scope":"resource-free coordination role; no local projections"}
     for claim_id,binding in cfg["claims"].items():
         if binding["role_id"]!=role: continue
         claim=read_claim(claim_id)

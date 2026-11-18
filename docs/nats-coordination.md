@@ -264,3 +264,17 @@ before a new attempt starts. After completion, a new request takes a fresh activ
 snapshot/runtime proof and may advance the next epoch. Repeating an old completed
 request returns the current broker role plus its historical result; it never
 re-runs retirement, rolls a claim projection back or increments ownership again.
+
+## Resource-free cross-host succession
+
+A role explicitly marked resource_free:true may move to an approved different
+host/server only when the broker bindings, configured local claims, and inspected
+active local role claims are all empty. The controller still executes on the
+verified prior host and retires its runtime; native close/birth evidence, shared
+UNKNOWN resolution, durable checkpoint retrieval, generation and alias fences
+remain mandatory. The receiving host enrolls independently with its own state
+and server identity. No local resource claim is projected to a foreign owner.
+This is not permission to migrate a nonempty workspace or unknown remote writer.
+Unreadable local claim census is unknown and blocks. CI uses separate host/server
+IDs and directories with a real broker; live two-host provider evidence is still
+a pilot gate.
