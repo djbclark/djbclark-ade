@@ -18,6 +18,9 @@ authenticate caller-supplied mappings. `GitHubEvaluation.verify` reads run,
 attempt-specific paginated jobs and artifact metadata from GitHub, requires all
 expected jobs completed/success at the exact SHA and attempt, rejects expired
 or mismatched artifacts, downloads the ZIP and verifies SHA256 itself. The
+API's workflow path may be bare or include an `@ref` suffix; the protected file
+identity and exact evaluator commit remain mandatory. Enrollment may additionally
+bind `workflow_ref`; an absent or different suffix then fails verification. The
 artifact name ends in `-RUN_ID-ATTEMPT` so rerun artifacts cannot silently stand
 in for another attempt. Expected names must come from the trusted evaluator's
 own upload step, not a candidate build's chosen filename.
@@ -39,7 +42,8 @@ its digest before staging; the ZIP transport digest is not the payload digest.
 The adapter returns no success on failed CLI requests, pending/skipped checks,
 missing/duplicate jobs, reruns, wrong repositories/workflows/actors or digest
 mismatches. Errors are `ContractError` with bounded stable messages; raw CLI
-output and credentials are never included. Trusted test runners are injectable
+output and credentials are never included. Filesystem failures are normalized;
+cleanup errors cannot mask a primary failure. Trusted test runners are injectable
 for CI only; no candidate-controlled subprocess or shell command is accepted.
 
 Primary references: [workflow runs API](https://docs.github.com/en/rest/actions/workflow-runs),

@@ -51,6 +51,7 @@ def fixture():
     ("evaluator_commit", "short"), ("receipt_sha256", "invalid"),
     ("event", "pull_request_target"), ("jobs", ()), ("jobs", ("x", "x")),
     ("artifact_name", "qualified-pilot-3-2"),
+    ("workflow_ref", "bad ref"),
 ])
 def test_invalid_protected_expectations(field, value):
     with pytest.raises(ContractError):
@@ -85,6 +86,21 @@ def test_missing_and_duplicate_jobs_fail():
     for values in ([], jobs + jobs):
         with pytest.raises(ContractError):
             validate_metadata(expected, run, values, artifact)
+
+
+def test_documented_workflow_path_ref_and_bare_api_variant():
+    expected, run, jobs, artifact = fixture()
+    run["path"] += "@main"
+    validate_metadata(expected, run, jobs, artifact)
+    validate_metadata(replace(expected, workflow_ref="main"), run, jobs, artifact)
+    with pytest.raises(ContractError, match="workflow path or ref"):
+        validate_metadata(replace(expected, workflow_ref="other"), run, jobs, artifact)
+    for wrong in (".github/workflows/untrusted.yml@main", expected.workflow_path + "@", expected.workflow_path + "@bad ref"):
+        run["path"] = wrong
+        with pytest.raises(ContractError):
+            validate_metadata(expected, run, jobs, artifact)
+    run["path"] = expected.workflow_path
+    validate_metadata(expected, run, jobs, artifact)
 
 
 @pytest.mark.parametrize("key,value", [
@@ -172,3 +188,29 @@ def test_cli_failure_does_not_echo_raw_output():
         return subprocess.CompletedProcess(argv, 1, "private error", "private error")
     with pytest.raises(ContractError, match="^github_read_failed$"):
         GitHubEvaluation(runner).api("repos/djbclark/evaluator")
+
+
+@pytest.mark.parametrize("operation", ["mkdir", "mkstemp", "fsync", "link"])
+def test_archive_io_errors_use_stable_contract(tmp_path, monkeypatch, operation):
+    import ade_fork_ci as module
+    def fail(*args, **kwargs):
+        raise OSError("private underlying path")
+    if operation == "mkdir":
+        monkeypatch.setattr(Path, "mkdir", fail)
+    elif operation == "mkstemp":
+        monkeypatch.setattr(module.tempfile, "mkstemp", fail)
+    else:
+        monkeypatch.setattr(module.os, operation, fail)
+    github = FakeGitHub()
+    with pytest.raises(ContractError, match="^archive_io_failed$"):
+        GitHubEvaluation(github).verify(github.expected, tmp_path)
+
+
+@pytest.mark.parametrize("body,reason", [(ZIP, "archive_cleanup_failed"), (b"wrong", "artifact_download_digest_mismatch")])
+def test_cleanup_does_not_mask_primary_failure(tmp_path, monkeypatch, body, reason):
+    def fail(*args, **kwargs):
+        raise OSError("cleanup path")
+    monkeypatch.setattr(Path, "unlink", fail)
+    github = FakeGitHub(body=body)
+    with pytest.raises(ContractError, match="^" + reason + "$"):
+        GitHubEvaluation(github).verify(github.expected, tmp_path)

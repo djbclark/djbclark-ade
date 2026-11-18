@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ class Evaluation:
     artifact_name: str
     archive_sha256: str
     receipt_sha256: str
+    workflow_ref: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.repository, str) or not REPOSITORY.fullmatch(self.repository) or self.repository.split("/")[-1] in (".", ".."):
@@ -65,6 +67,8 @@ class Evaluation:
             raise ContractError("expected jobs must be unique nonempty names")
         if not isinstance(self.artifact_name, str) or not self.artifact_name.endswith(f"-{self.run_id}-{self.run_attempt}"):
             raise ContractError("artifact name must bind evaluation run and attempt")
+        if self.workflow_ref is not None and (not isinstance(self.workflow_ref, str) or not self.workflow_ref or any(c.isspace() or ord(c) < 32 for c in self.workflow_ref)):
+            raise ContractError("invalid protected workflow ref")
 
 
 def validate_metadata(expected: Evaluation, run: Any, jobs: Any, artifact: Any) -> None:
@@ -73,12 +77,18 @@ def validate_metadata(expected: Evaluation, run: Any, jobs: Any, artifact: Any) 
         raise ContractError("malformed GitHub evidence")
     wanted = {
         "id": expected.run_id, "run_attempt": expected.run_attempt,
-        "workflow_id": expected.workflow_id, "path": expected.workflow_path,
+        "workflow_id": expected.workflow_id,
         "head_sha": expected.evaluator_commit, "event": expected.event,
         "status": "completed", "conclusion": "success",
     }
     if any(type(run.get(k)) is not type(v) or run[k] != v for k, v in wanted.items()):
         raise ContractError("evaluation run identity or outcome mismatch")
+    path = run.get("path")
+    if not isinstance(path, str):
+        raise ContractError("evaluation workflow path mismatch")
+    filename, separator, ref = path.partition("@")
+    if filename != expected.workflow_path or (separator and (not ref or any(c.isspace() or ord(c) < 32 for c in ref))) or (expected.workflow_ref is not None and (not separator or ref != expected.workflow_ref)):
+        raise ContractError("evaluation workflow path or ref mismatch")
     for name in ("repository", "head_repository"):
         repo = run.get(name)
         if not isinstance(repo, dict) or type(repo.get("id")) is not int or repo["id"] != expected.repository_id or repo.get("full_name") != expected.repository:
@@ -156,6 +166,12 @@ class GitHubEvaluation:
         expiry/deletion. Deployment authority and current policy revocation must
         additionally be checked by the executor immediately before activation.
         """
+        try:
+            return self._verify(expected, archive_dir)
+        except OSError as error:
+            raise ContractError("archive_io_failed") from error
+
+    def _verify(self, expected: Evaluation, archive_dir: Path) -> VerifiedArtifact:
         base = "repos/" + expected.repository
         run_path = f"{base}/actions/runs/{expected.run_id}"
         artifact_path = f"{base}/actions/artifacts/{expected.artifact_id}"
@@ -201,7 +217,12 @@ class GitHubEvaluation:
                 os.close(directory_fd)
             return VerifiedArtifact(expected, destination, _VERIFIED)
         finally:
-            temporary.unlink(missing_ok=True)
+            primary_failure = sys.exc_info()[0] is not None
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                if not primary_failure:
+                    raise ContractError("archive_cleanup_failed") from error
 
 
 def _file_digest(path: Path) -> str:
