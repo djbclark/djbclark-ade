@@ -60,10 +60,11 @@ Exports: `Coordination`, `CoordError`, `safeToken`, `subject`, `digest`,
 `streamConfig`. `CoordError.code`: INVALID, CONFLICT, STALE, GENERATION,
 UNKNOWN, IMMUTABLE, UNSUPPORTED. Unknown outcomes require reconciliation with
 stable IDs; errors never authorize unconditional retry or local authority.
-There is no implicit local fallback, blob implementation, persisted outbox,
-operation ledger, watcher, CLI or plugin in this unit. Artifact availability,
-producer assignment validation and external-effect reconciliation remain adapter
-responsibilities; they have not been tested here.
+The additive delivery layer now provides persisted outbox/intake, verified
+Object Store artifacts, a local operation journal and a JSON CLI; see
+[DELIVERY.md](DELIVERY.md) for its commands and separate test evidence. There is
+no implicit local fallback, watcher or plugin. Producer assignment validation
+and external-effect endpoint reconciliation remain adapter responsibilities.
 
 ## Evidence and sources
 
