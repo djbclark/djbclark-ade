@@ -105,9 +105,73 @@ def test_evidence_mismatch_holds(source, mutation):
     protected['master_commit'] = commit
     protected['native_tree_sha256'] = p.payload_tree_hash(payload)
     evidence = dict(protected)
-    expected = {'fork_commit': commit, 'toolchain': {'plugin_snapshot_evidence': p.sha(p.canonical(protected))}}
+    expected = {'fork_commit': commit, 'toolchain': p.canonical({'plugin_snapshot_evidence': p.sha(p.canonical(protected))}).decode()}
     if mutation == 'missing': del evidence['python']
     if mutation == 'toolchain': evidence['node'] = 'other-node'
     if mutation == 'cold': evidence['cold_compatibility'] = False
-    if mutation == 'binding': expected['toolchain']['plugin_snapshot_evidence'] = '0' * 64
+    if mutation == 'binding': expected['toolchain'] = p.canonical({'plugin_snapshot_evidence': '0' * 64}).decode()
     assert p.qualify(payload, 'ade-yolo', None, expected, {}, None, evidence, protected) == 'HOLD'
+
+
+def test_positive_qualification_real_core_receipt(source):
+    """Trusted synthetic evaluator only; this is no claim of real plugin closure."""
+    from ade_fork_release import digest, make_receipt
+    from types import SimpleNamespace
+    root, _ = source
+    plugin = root / 'plugins/ade-yolo'; plugin.mkdir(parents=True)
+    (plugin / 'index.server.ts').write_text('export {}')
+    (plugin / 'paseo-plugin.json').write_text('{}')
+    command(root, 'add', 'plugins'); command(root, 'commit', '-qm', 'plugin')
+    commit = command(root, 'rev-parse', 'HEAD'); payload = p.produce(root, commit)
+    evidence = dict.fromkeys((*p.TOOLS, 'helper_bindings', 'cold_compatibility',
+                             'native_tree_sha256', 'server_bundle_sha256', 'master_commit'), 'synthetic-fixture')
+    evidence.update(master_commit=commit, native_tree_sha256=p.payload_tree_hash(payload))
+    policy = {'compatibility_group': 'fixture', 'features': {'closure': {'assertion': 'fixture-only'}}}
+    expected = dict(schema_version=1, component='ade-yolo', upstream_commit=commit,
+                    fork_commit=commit, dependencies={}, applied_patches=[],
+                    patch_manifest_digest=digest([]), recipe_revision='fixture', platform='linux',
+                    toolchain=p.canonical({'plugin_snapshot_evidence': digest(evidence)}).decode(),
+                    artifact_sha256=p.sha(payload), policy_digest=digest(policy),
+                    feature_contract_digest=digest(policy['features']), authority='fixture', evaluator='fixture')
+    results = {k: {'status': 'passed', 'contract_digest': digest(v)} for k, v in policy['features'].items()}
+    receipt = make_receipt(expected, policy, results)
+    auth = SimpleNamespace(authenticates=lambda candidate: candidate.sha256 == receipt.sha256)
+    assert p.qualify(payload, 'ade-yolo', receipt, expected, policy, auth, evidence, evidence) == 'QUALIFIED'
+    denied = SimpleNamespace(authenticates=lambda candidate: False)
+    assert p.qualify(payload, 'ade-yolo', receipt, expected, policy, denied, evidence, evidence) == 'HOLD'
+    wrong = dict(expected, toolchain=p.canonical({'plugin_snapshot_evidence': '0' * 64}).decode())
+    assert p.qualify(payload, 'ade-yolo', receipt, wrong, policy, auth, evidence, evidence) == 'HOLD'
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_stalled_git_child_is_bounded_and_reaped(monkeypatch, tmp_path, partial):
+    import time
+    real_popen = subprocess.Popen
+    children = []
+    def fake_git(argv, **kwargs):
+        assert kwargs['env']['GIT_NO_LAZY_FETCH'] == '1'
+        code = ('import os,time; ' + ('os.write(1,b"partial"); ' if partial else '') + 'time.sleep(60)')
+        child = real_popen([sys.executable, '-c', code], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(p.subprocess, 'Popen', fake_git)
+    monkeypatch.setattr(p, 'GIT_TIMEOUT', 0.2)
+    start = time.monotonic()
+    with pytest.raises(p.ContractError, match='timed out'):
+        p.git(tmp_path, 'cat-file', 'blob', 'a' * 40)
+    assert time.monotonic() - start < 5
+    assert children[0].returncode is not None
+
+
+def test_git_output_bound(monkeypatch, tmp_path):
+    real_popen = subprocess.Popen
+    children = []
+    def fake_git(argv, **kwargs):
+        child = real_popen([sys.executable, '-c', 'import os,time; os.write(1,b"x"*1024); time.sleep(60)'], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(p.subprocess, 'Popen', fake_git)
+    monkeypatch.setattr(p, 'MAX_BYTES', 16)
+    with pytest.raises(p.ContractError, match='exceeds bound'):
+        p.git(tmp_path, 'cat-file', 'blob', 'a' * 40)
+    assert children[0].returncode is not None

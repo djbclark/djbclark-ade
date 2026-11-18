@@ -12,7 +12,7 @@ with their own complete qualification evidence.
 `produce(repo, master_commit)` accepts a full immutable commit identity. Trusted
 integration must establish that identity is currently eligible master independently;
 this API deliberately does not interpret a mutable branch name as eligibility.
-It reads `ls-tree` and `cat-file` object bytes with replace refs disabled. Dirty
+It reads `ls-tree` and `cat-file` object bytes with replace refs and lazy fetching disabled. Reads use a selector deadline and byte cap; timeout/overflow kills and reaps only the exact child. Dirty
 and untracked files, Git archive export substitutions and candidate build commands
 are never used. The canonical bounded JSON payload includes commit/tree identities
 and every tracked path's source mode/object, materialized target/object, sealed
@@ -51,8 +51,9 @@ traversal/race repairs remain the Paseo worker's responsibility.
 
 `qualify` reuses release-core receipt validation and separately supplied
 `VerifiedArtifact.authenticates`. It grants no merge, publication, channel,
-activation or recovery authority. The protected expected receipt toolchain mapping
-must contain `plugin_snapshot_evidence = sha256(canonical(trusted_evidence))`.
+activation or recovery authority. The protected expected receipt toolchain is a canonical JSON **string** encoding
+`{"plugin_snapshot_evidence":"<sha256(canonical(trusted_evidence))>"}`.
+This preserves the release core string schema while binding structured evidence.
 The protected evaluator evidence must bind Python, Git, Node and Paseo compiler
 identities, helper bindings, cold compatibility, native tree SHA256, exact compiled
 server bundle SHA256 and master commit. Candidate evidence must exactly match;
