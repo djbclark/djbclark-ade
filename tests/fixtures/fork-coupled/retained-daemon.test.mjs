@@ -23,6 +23,18 @@ test('a bounded matching HOLD is data; observed replies must identify the owned 
   assert.equal(validateDaemonObservation(observed, raw.nonce, 2, 1), observed);
 });
 
+test('V2 requires an explicit request version and cannot fall back to a V1 observation', () => {
+  const raw = {type: 'qualified.measurement.response', schemaVersion: 2,
+    nonce: 'fixed-v2-nonce', parentPid: 1, status: 'hold', daemon: null, runtime: null, terminal: null};
+  assert.equal(validateDaemonObservation(raw, raw.nonce, 2, 1, 2), raw);
+  assert.throws(() => validateDaemonObservation(raw, raw.nonce, 2, 1));
+  assert.throws(() => validateDaemonObservation({...raw, schemaVersion: 1}, raw.nonce, 2, 1, 2));
+  assert.throws(() => validateDaemonObservation(raw, raw.nonce, 2, 1, 3));
+  assert.throws(() => validateDaemonObservation({...raw, daemon: {pid: 3}}, raw.nonce, 2, 1, 2));
+  const observed = {...raw, status: 'observed', daemon: {pid: 2}};
+  assert.equal(validateDaemonObservation(observed, raw.nonce, 2, 1, 2), observed);
+});
+
 test('bounded descriptor reader accepts exact data and refuses oversized and special leaves', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'fork-coupled-read-'));
   try {

@@ -74,7 +74,7 @@ assert.ok(actualNode.dev === retainedNode.dev && actualNode.ino === retainedNode
   'probe must freshly execute the retained Node');
 let daemon, failure, result;
 try {
-  daemon = await launchObservedDaemon(root, home, expectedManifest);
+  daemon = await launchObservedDaemon(root, home, expectedManifest, 2);
   let plugins;
   const deadline = performance.now() + 180_000;
   while (performance.now() < deadline) {

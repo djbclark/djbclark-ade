@@ -10,3 +10,7 @@
   namespace bootstrap and copied Git fixture bytes, verify retained library/cache
   backing inodes inside the private view, and preserve backing files when actual
   probe settlement is unknown. Old artifacts without retained system bytes refuse. (#0)
+
+### Changed
+
+- Request the complete-cohort V2 observation explicitly in the registration probe; reject a V1 reply to that request without changing default V1 consumers. (#0)

@@ -51,11 +51,12 @@ async function rootOwned(file, directory) {
   return metadata;
 }
 
-export function validateDaemonObservation(raw, nonce, childPid, parentPid) {
+export function validateDaemonObservation(raw, nonce, childPid, parentPid, version = 1) {
+  assert.ok(version === 1 || version === 2, 'explicit supported measurement version required');
   assert.equal(raw.type, 'qualified.measurement.response');
   assert.equal(raw.nonce, nonce);
   assert.ok(Buffer.byteLength(JSON.stringify(raw)) <= MAX_REPLY);
-  assert.equal(raw.schemaVersion, 1);
+  assert.equal(raw.schemaVersion, version, 'measurement version must match the actual request');
   assert.equal(raw.parentPid, parentPid, 'observation must bind the actual parent');
   assert.ok(raw.status === 'hold' || raw.status === 'observed');
   if (raw.status === 'observed' || raw.daemon !== null) {
@@ -147,7 +148,8 @@ export async function validateRetainedDistribution(root, expectedManifest) {
   return manifest;
 }
 
-export async function launchObservedDaemon(root, home, expectedManifest) {
+export async function launchObservedDaemon(root, home, expectedManifest, measurementVersion = 1) {
+  assert.ok(measurementVersion === 1 || measurementVersion === 2);
   await validateRetainedDistribution(root, expectedManifest);
   const launcher = await import(pathToFileURL(path.join(root, 'daemon-launcher.mjs')).href);
   const invocation = await launcher.createQualifiedDaemonInvocation(root, home);
@@ -185,13 +187,13 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
       const receive = (raw) => {
         if (raw?.type !== 'qualified.measurement.response' || raw.nonce !== nonce) return;
         try {
-          finish(null, validateDaemonObservation(raw, nonce, child.pid, process.pid));
+          finish(null, validateDaemonObservation(raw, nonce, child.pid, process.pid, measurementVersion));
         } catch (error) { finish(error); }
       };
       const timer = setTimeout(() => finish(new Error('owned observation timed out')), 30_000);
       child.on('message', receive);
       child.once('close', lost);
-      child.send({ type: 'qualified.measurement.request', schemaVersion: 1, nonce }, (error) => {
+      child.send({ type: 'qualified.measurement.request', schemaVersion: measurementVersion, nonce }, (error) => {
         if (error) finish(error);
       });
     });
