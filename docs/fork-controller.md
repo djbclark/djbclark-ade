@@ -361,3 +361,15 @@ rule is reread at authority boundaries. Reconciliation uses recorded authority,
 not a candidate GitHub query or a synthetic loaded receipt. Transaction context,
 intent-before-BEGIN and final release hooks are pending the separately owned
 same-Journal source amendment; these parser helpers do not manufacture that API.
+
+
+Native prepare uses the new explicit reservationGeneration+ready fields from
+qualified idle maintenance status. Missing fields, old generation:null, held,
+pending, unready or unknown status never imply zero or permission. Next native
+generation is only validated reservationGeneration+1; native plugin CAS is its
+own coherent journal.generation. BEGIN BUSY is recognized only from nonzero
+retained CLI with empty stdout and exact typed MAINTENANCE_KNOWN_BUSY stderr.
+Generic messages, malformed/truncated stderr, later idle, timeout or another
+operation cannot close an allocated attempt as BUSY. The separate Journal owner
+will consume only this authoritative refusal through BeginResult; until its new
+hooks are integrated, no old context-manager behavior is relabelled as success.

@@ -451,6 +451,29 @@ def cohort_observation(value, config, expected, target, *, allow_target_absent=F
     return value
 
 
+def native_reservation_plan(status, config, plugin):
+    """Read-only exact native counter snapshot. Null/old generation is never zero."""
+    if (type(status) is not dict or type(status.get('schemaVersion')) is not int or status['schemaVersion'] != 1 or
+            status.get('state') != 'idle' or status.get('recoveryRequired') is not False or status.get('ready') is not True or
+            type(status.get('reservationGeneration')) is not int or not 0 <= status['reservationGeneration'] < 2**53 - 1):
+        raise ContractError('qualified native idle reservation unavailable')
+    authority = status.get('authority')
+    if (type(authority) is not dict or authority.get('qualified') is not True or
+            authority.get('serverId') != config['serverId'] or authority.get('daemonIncarnation') != config['daemonIncarnation'] or
+            type(authority.get('features')) is not dict or authority['features'].get('maintenanceReservationV1') is not True or
+            authority['features'].get('maintenancePluginOperationV1') is not True):
+        raise ContractError('native reservation authority unavailable')
+    generation = plugin['journal']['generation']
+    if type(generation) is not int or not 0 <= generation < 2**53:
+        raise ContractError('native plugin CAS unavailable')
+    return {'native_generation': status['reservationGeneration'] + 1, 'plugin_generation': generation,
+            'server_id': config['serverId'], 'daemon_incarnation': config['daemonIncarnation']}
+
+
+class NativeKnownBusy(ContractError):
+    """Only the retained native CLI's authoritative typed BEGIN refusal."""
+
+
 class NativeFacade:
     """Actual bounded retained CLI transport; qualification/status coupling still absent.
 
@@ -521,29 +544,45 @@ class NativeFacade:
         if token is not None and not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
             raise ContractError('invalid private owner token')
         with subprocess.Popen(args, stdin=subprocess.PIPE if token is not None else subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as proc:
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
             deadline = time.monotonic() + 30
             data = bytearray()
+            errors = bytearray()
             try:
                 if token is not None:
                     # Only <=44 bytes to a private anonymous pipe, never argv/env/file path.
                     proc.stdin.write((token + '\n').encode('ascii')); proc.stdin.close()
                 with selectors.DefaultSelector() as selector:
-                    selector.register(proc.stdout, selectors.EVENT_READ)
-                    while True:
+                    selector.register(proc.stdout, selectors.EVENT_READ, (data, 1024 * 1024))
+                    selector.register(proc.stderr, selectors.EVENT_READ, (errors, 16384))
+                    while selector.get_map():
                         remaining = deadline - time.monotonic()
-                        if remaining <= 0 or not selector.select(remaining): raise ContractError('native transport timed out')
-                        chunk = os.read(proc.stdout.fileno(), min(65536, 1024 * 1024 + 1 - len(data)))
-                        if not chunk: break
-                        data.extend(chunk)
-                        if len(data) > 1024 * 1024: raise ContractError('native transport output too large')
+                        if remaining <= 0: raise ContractError('native transport timed out')
+                        events = selector.select(remaining)
+                        if not events: raise ContractError('native transport timed out')
+                        for key, _ in events:
+                            buffer, bound = key.data
+                            chunk = os.read(key.fileobj.fileno(), min(65536, bound + 1 - len(buffer)))
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            buffer.extend(chunk)
+                            if len(buffer) > bound: raise ContractError('native transport output too large')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0: raise ContractError('native transport timed out')
                 try: code = proc.wait(timeout=remaining)
                 except subprocess.TimeoutExpired as error: raise ContractError('native transport timed out') from error
-                if code: raise ContractError('native transport refused')
+                if code:
+                    if not data and arguments[:3] == ['daemon', 'maintenance', 'begin']:
+                        try: refusal = parse(errors.decode())
+                        except (ValueError, UnicodeError): refusal = None
+                        if refusal == {'error': {'code': 'MAINTENANCE_KNOWN_BUSY', 'message': 'Maintenance reservation refused'}}:
+                            raise NativeKnownBusy('authoritative native known busy')
+                    raise ContractError('native transport refused')
                 # Native CLI --json contract is one BARE JSON result, not an RPC envelope.
                 return parse(data.decode())
+            except NativeKnownBusy:
+                raise
             except Exception:
                 if self.reservation is not None: self.uncertain = True
                 raise

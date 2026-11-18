@@ -843,3 +843,39 @@ def test_recorded_reconciliation_consent_does_not_query_latest_master(fixture,mo
     monkeypatch.setattr(controller,'discover_master',lambda:pytest.fail('reconciliation must not depend on candidate discovery'))
     assert controller.permits(row,'recover',receipt.sha256)
     assert controller.permits(row,'verify',receipt.sha256)
+
+
+@pytest.mark.parametrize('case',['typed-busy','generic','stdout','other-operation','malformed'])
+def test_retained_cli_typed_busy_only_not_messages_or_idle(tmp_path,monkeypatch,case):
+    script=tmp_path/'native-begin.py'
+    error={'error':{'code':'MAINTENANCE_KNOWN_BUSY','message':'Maintenance reservation refused'}}
+    if case=='generic':error={'error':{'message':'MAINTENANCE_KNOWN_BUSY'}}
+    if case=='malformed':error={'error':{'code':'MAINTENANCE_KNOWN_BUSY','message':'Maintenance reservation refused','extra':True}}
+    program='import sys,json\n'
+    if case=='stdout':program+='print(json.dumps({"state":"idle"}))\n'
+    program+='print('+repr(c.json.dumps(error))+',file=sys.stderr)\nsys.exit(1)\n'
+    script.write_text(program)
+    native=c.NativeFacade()
+    monkeypatch.setattr(native,'_transport',lambda:{'node':{'path':sys.executable},'cli':{'path':str(script)}})
+    args=['daemon','maintenance','begin' if case!='other-operation' else 'end']
+    expected=c.NativeKnownBusy if case=='typed-busy' else c.ContractError
+    with pytest.raises(expected) as caught:native._call(args)
+    assert isinstance(caught.value,c.NativeKnownBusy)==(case=='typed-busy')
+
+
+def test_native_reservation_counter_is_explicit_and_distinct():
+    config={'serverId':'fixed-server','daemonIncarnation':'fixed-incarnation'}
+    status={'schemaVersion':1,'state':'idle','generation':None,'reservationGeneration':40,'ready':True,'recoveryRequired':False,
+        'authority':{'schemaVersion':1,'qualified':True,**config,
+            'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':True}}}
+    plugin={'journal':{'generation':8},'loaded':{'activationGeneration':2}}
+    assert c.native_reservation_plan(status,config,plugin)=={'native_generation':41,'plugin_generation':8,
+        'server_id':'fixed-server','daemon_incarnation':'fixed-incarnation'}
+    # Neither outer Journal generation nor loaded generation is a reservation counter.
+    del status['reservationGeneration']
+    with pytest.raises(c.ContractError):c.native_reservation_plan(status,config,plugin)
+    status['reservationGeneration']=0
+    assert c.native_reservation_plan(status,config,plugin)['native_generation']==1
+    for key,value in [('ready',False),('state','held'),('recoveryRequired',True),('reservationGeneration',None)]:
+        invalid=dict(status,**{key:value})
+        with pytest.raises(c.ContractError):c.native_reservation_plan(invalid,config,plugin)
