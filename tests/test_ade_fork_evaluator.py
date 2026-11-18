@@ -60,7 +60,7 @@ def synthetic(tmp_path):
                     policy_digest=digest(policy), feature_contract_digest=digest(policy['features']),
                     authority='protected-ci', evaluator=evaluator)
     recipe = dict(schema_version=1, evaluator_commit=evaluator, bindings=bindings, policy=policy,
-                  evidence=evidence, native=native, cohort={key: {'identity': 'fixture-' + key, 'enabled': False} for key in ids},
+                  evidence=evidence, native=native, cohort={key: {'identity': digest({'synthetic-cohort': key}), 'enabled': False, 'loaded': False} for key in ids},
                   assertions={domain: ['synthetic-unit-' + domain] for domain in e.DOMAINS})
     recipe['assertions']['features'] = sorted(features)
     runtime = {key: native[key] for key in ('distribution_sha256', 'node_sha256', 'entry_sha256', 'sdk_sha256', 'activity_sha256')}
@@ -108,6 +108,8 @@ def test_source_commit_ignores_candidate_dirty_build_claims(synthetic):
 
 @pytest.mark.parametrize('mutation', [
     lambda r: r['cohort'].pop(next(iter(r['cohort']))),
+    lambda r: next(iter(r['cohort'].values())).pop('loaded'),
+    lambda r: next(iter(r['cohort'].values())).update(enabled=0),
     lambda r: r['bindings']['dependencies'].clear(),
     lambda r: r['policy']['features'].clear(),
     lambda r: r['evidence'].update(node='fake-node'),

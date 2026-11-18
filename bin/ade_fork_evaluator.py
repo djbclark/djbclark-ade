@@ -149,6 +149,10 @@ def recipe_validate(recipe, evaluator_sha):
     cohort, features = catalog_contract()
     if type(recipe['cohort']) is not dict or set(recipe['cohort']) != cohort or any(type(v) is not dict or not v for v in recipe['cohort'].values()):
         raise ContractError('complete protected cohort required')
+    for record in recipe['cohort'].values():
+        if set(record) != {'identity', 'enabled', 'loaded'} or type(record['enabled']) is not bool or type(record['loaded']) is not bool:
+            raise ContractError('explicit full-cohort identity/enabled/loaded states required')
+        hash_id(record['identity'])
     if type(recipe['bindings']) is not dict or type(recipe['policy']) is not dict or type(recipe['policy'].get('features')) is not dict or set(recipe['policy'].get('features', {})) != features or set(recipe['bindings'].get('dependencies', {})) != cohort:
         raise ContractError('complete protected features/dependencies required')
     if recipe['bindings'].get('component') != 'ade-yolo' or recipe['bindings'].get('authority') != 'protected-ci' or recipe['bindings'].get('evaluator') != evaluator_sha:

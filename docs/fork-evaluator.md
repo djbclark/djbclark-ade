@@ -60,7 +60,10 @@ an evaluator-source recheck. The root-owned harness supplies stdout with exactly
    activity_sha256, positive pid, start_token, incarnation, from the actual
    enclosing execution owner. No phantom role aliases or PID-only proof.
 5. helpers: exact protected helper identities; cohort: every protected expected
-   catalog identity/enabled-state record, including unloaded members.
+   catalog record, including unloaded members. Each record has exactly identity
+   (SHA256 of the complete protected expected identity), enabled and loaded
+   (literal booleans). Root must derive the identity from genuine complete
+   native/cohort observations, not a candidate label or arbitrary chosen digest.
 
 The harness writes compiler.xml, runtime.xml, helpers.xml, cohort.xml,
 features.xml in its owned work root. assertions maps those domains to exact
