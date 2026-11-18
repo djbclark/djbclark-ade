@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on
+# an exhausted account, sends ONE notice to the ADE lead (b0b47ad8). Never a model
+# prompt; always exits 0 so launchd stays quiet.
+set -uo pipefail
+STATE_DIR="${HOME}/.local/state/djbclark-ade/supervisor"
+mkdir -p "$STATE_DIR"
+SELF="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
+[ -x "$SELF" ] || SELF="$HOME/src/djbclark-ade/bin/ade-pi-stuck"
+json="$("$SELF" --json 2>&1)" || { printf '%s\n' "$json" >>"$STATE_DIR/supervisor.log"; exit 0; }
+findings="$(printf '%s' "$json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+live = [s for s in d.get("stuck", []) if s.get("status") not in ("closed", "archived")]
+for s in live:
+    print("id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"), s.get("alternative")))
+')"
+if [ -n "$findings" ]; then
+    msg="supervisor scan: $(printf '%s\n' "$findings" | wc -l | tr -d ' ') stuck Pi agent(s) — $(printf '%s' "$findings" | tr '\n' '; ')"
+    paseo send b0b47ad8-8801-4780-a8e0-08824cd5ce27 --no-wait --json "$msg" >>"$STATE_DIR/supervisor.log" 2>&1 || true
+fi
+exit 0
