@@ -19,8 +19,13 @@ The watcher derives `fork:<repo-name>` from `fork_repo`, not from `id`.
 GitHub discovery uses the [RepositoryOwner connection](https://docs.github.com/en/graphql/reference/repos#repositoryowner)
 with `isFork: true`, explicit owner affiliation, cursor pagination and rate
 budget checks. Archived forks remain inventoried with release watching disabled.
-Curated rows cover mirrors and ADE's own master snapshots; they merge with a
-discovered fork only when the upstream matches. Discovery is metadata inventory,
+Curated rows cover mirrors and ADE's own master snapshots, and define the owner's
+intended synchronization source. That can differ from GitHub's original fork
+parent: PR Radar follows `omercnet/paseo-plugins`, while its GitHub network parent
+is `gpambrozio/paseo-plugins` (verified 2026-11-18). Optional `github_parent_repo`
+preserves the observed lineage, and `upstream_source` says `curated` or
+`github-parent`. Curated overrides retain discovered privacy/archival metadata.
+Discovery is metadata inventory,
 never a feature contract or permission to promote a newly discovered component.
 
 `complete` means the full connection visible to the current authenticated
@@ -33,7 +38,7 @@ An unavailable owner, missing parent, bad cursor, duplicate, malformed response,
 or exhausted budget marks that owner's coverage incomplete and retains its last
 known rows. It never drops known forks because a partial query succeeded. Fresh
 complete discovery replaces that owner's prior discovered rows; curated rows
-remain. Malformed prior snapshots and curated-parent disagreements hold the
+remain. Malformed prior snapshots hold the
 entire write. The process serializes refreshes, atomically replaces the snapshot,
 and fsyncs it and its directory. Exit 0 means all credential-visible connections
 complete, 1 means an incomplete snapshot was saved, and 2 means refresh held.

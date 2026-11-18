@@ -80,6 +80,7 @@ def discovered_row(node, owner):
         raise InventoryError("invalid fork metadata")
     return {"id": "github-" + fork.lower().replace("/", "--"),
             "upstream_repo": upstream, "fork_repo": fork,
+            "github_parent_repo": upstream, "upstream_source": "github-parent",
             "upstream": parent["url"], "fork": node["url"], "base_tag": None,
             "watch_releases": not node["isArchived"],
             "private": node["isPrivate"] or parent["isPrivate"], "catalog_ids": []}
@@ -194,10 +195,12 @@ def project(policy, previous=None, *, discover_owner=discover, now=None):
             raise InventoryError("curated fork outside maintained owners")
         key = fork.lower()
         existing = rows.get(key)
-        if existing and existing["upstream_repo"].lower() != upstream.lower():
-            raise InventoryError("curated/discovered parent mismatch")
+        # GitHub lineage and the owner's chosen synchronization source differ
+        # for forks intentionally following a maintained sibling fork.
         merged = existing or {"base_tag": None, "watch_releases": fork.lower() != upstream.lower(),
                               "private": False}
+        merged.setdefault("github_parent_repo", None)
+        merged["upstream_source"] = "curated"
         merged.update(id=row["id"], fork_repo=fork, upstream_repo=upstream,
                       fork=row["fork"], upstream=row["upstream"], catalog_ids=row["catalog_ids"])
         rows[key] = merged

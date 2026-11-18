@@ -105,11 +105,14 @@ def test_failed_owner_retains_every_previous_row_without_claiming_completeness()
                                      if r["fork_repo"].startswith("djbclark/")]
 
 
-def test_parent_mismatch_holds_instead_of_rewriting_upstream():
+def test_curated_source_can_follow_sibling_fork_without_rewriting_github_lineage():
     policy = curated()
     policy[0]["upstream"] = "https://github.com/other/demo"
-    with pytest.raises(inv.InventoryError):
-        inv.project(policy, discover_owner=discovery)
+    snapshot = inv.project(policy, discover_owner=discovery)
+    row = next(r for r in snapshot["components"] if r["id"] == "demo")
+    assert row["upstream_repo"] == "other/demo"
+    assert row["github_parent_repo"] == "upstream/demo"
+    assert row["upstream_source"] == "curated"
 
 
 def test_foreign_discovery_is_incomplete_not_complete():
