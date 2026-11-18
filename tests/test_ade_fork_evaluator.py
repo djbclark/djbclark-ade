@@ -225,3 +225,37 @@ def test_unreviewed_checkout_and_no_cli_measurement_grant(synthetic, tmp_path, m
     assert e.main(['--source-sha', sha]) == 78
     assert json.loads(capsys.readouterr().out)['qualified_output'] is False
     with pytest.raises(SystemExit): e.main(['--source-sha', sha, '--measurements', 'candidate.json'])
+
+
+
+def test_actual_protected_source_runner_holds_before_missing_native(synthetic, tmp_path):
+    """Real isolated Git/snapshot runner; deliberately NO native/daemon stand-in."""
+    candidate, recipe, payload, _, _ = synthetic
+    root = tmp_path / 'evaluator'; (root / 'bin').mkdir(parents=True)
+    git(root, 'init', '-q'); git(root, 'config', 'user.name', 'Protected source runner fixture')
+    git(root, 'config', 'user.email', 'fixture@example.invalid')
+    for name in ('ade_fork_plugins.py', 'ade_fork_release.py'):
+        shutil.copyfile(e.ROOT / 'bin' / name, root / 'bin' / name)
+    protected = copy.deepcopy(recipe)
+    protected['evaluator_commit'] = '@evaluator'; protected['bindings']['evaluator'] = '@evaluator'
+    protected['evidence']['python'] = e.file_hash(sys.executable, system_tool=True)
+    protected['evidence']['git'] = e.file_hash(shutil.which('git'), system_tool=True)
+    file = root / e.RECIPE; file.parent.mkdir(parents=True); file.write_bytes(canonical(protected))
+    git(root, 'add', '.'); git(root, 'commit', '-qm', 'protected fixture recipe/source')
+    evaluator_sha = git(root, 'rev-parse', 'HEAD')
+    with pytest.raises((e.ContractError, OSError)):
+        e.evaluate(e.inspect(payload)['commit'], evaluator_sha, 77, 1, root=root)
+    work = tmp_path / 'fork-evaluator-77-1'
+    staged = list((work / 'snapshots').iterdir())
+    assert len(staged) == 1 and (staged[0] / 'helper').read_text() == 'retained exact source bytes'
+    assert not (tmp_path / 'qualified-output').exists()
+    assert not (work / 'request.json').exists()  # never launched an unqualified runtime
+
+
+def test_native_input_symlinks_and_mutability_refused(tmp_path):
+    native = tmp_path / 'node'; native.write_bytes(b'exact retained binary'); native.chmod(0o444)
+    assert e.file_hash(native) == hashlib.sha256(b'exact retained binary').hexdigest()
+    alias = tmp_path / 'alias'; alias.symlink_to(native)
+    with pytest.raises(e.ContractError): e.file_hash(alias)
+    native.chmod(0o644)
+    with pytest.raises(e.ContractError): e.file_hash(native)
