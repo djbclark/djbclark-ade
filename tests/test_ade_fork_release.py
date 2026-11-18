@@ -289,3 +289,50 @@ def test_changed_group_is_rejected(deployment, evidence):
     other = m.Journal(j.directory, 'incompatible')
     with pytest.raises(m.ContractError, match='group'):
         deploy(other, f, evidence)
+
+
+@pytest.mark.parametrize('after_replace', [False, True])
+def test_final_commit_failure_recovers_previous_baseline(deployment, evidence, monkeypatch, after_replace):
+    j, f = deployment
+    original_write = j.write
+    failed = False
+
+    def fail_final(row):
+        nonlocal failed
+        if row['state'] == 'runtime_verified' and row['verified'] != 'old' and not failed:
+            failed = True
+            if after_replace:
+                original_write(row)
+                assert j.read()['verified'] == receipt(evidence).sha256
+            raise OSError('final journal commit acknowledgement lost')
+        original_write(row)
+
+    monkeypatch.setattr(j, 'write', fail_final)
+    outcome = deploy(j, f, evidence)
+    assert failed
+    assert outcome.status == 'recovery_required'
+    assert f.actual == receipt(evidence).sha256
+    row = j.read()
+    assert row['verified'] == 'old'
+    assert row['candidate'] == receipt(evidence).sha256
+    assert row['state'] == 'recovery_required'
+    assert row['generation'] == 1
+    assert j.recover(f.adapter, generation=1).status == 'runtime_verified'
+    assert f.actual == 'old'
+    assert j.read()['verified'] == 'old'
+    assert j.read()['generation'] == 2
+    assert f.artifacts['old'] == b'old'
+
+
+def test_invalid_receipt_utf8_is_contract_error(evidence):
+    with pytest.raises(m.ContractError, match='UTF-8'):
+        m.validate(m.Receipt(b'\xff'), evidence[2], evidence[1], artifact=evidence[0])
+
+
+def test_array_journal_state_is_contract_error(deployment):
+    j, f = deployment
+    row = j.read()
+    row['state'] = []
+    j.write(row)
+    with pytest.raises(m.ContractError, match='journal state'):
+        j.read()

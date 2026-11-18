@@ -101,7 +101,10 @@ staging, activation and runtime verification. Policy, actual previous identity,
 recovery artifact and activate permission are checked again at activation.
 Every callback intent is atomically persisted with file fsync, replace, and
 parent-directory fsync first. Transaction start increments the generation even
-when the attempt later fails. The last verified identity is preserved on failure.
+when the attempt later fails. The last verified identity is preserved on failure. The final success record is
+constructed separately from the attempt record: if its write raises before or
+after replacement, failure recording retains the previous baseline and candidate
+identity for explicit recovery.
 
 `recover(adapters, *, generation) -> Result` independently observes runtime,
 requires recovery and verify authority, retained baseline bytes and reservation,

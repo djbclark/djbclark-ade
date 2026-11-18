@@ -123,7 +123,10 @@ def validate(receipt: Receipt, expected: dict, policy: dict, *,
              artifact: bytes | None = None, artifact_digest: str | None = None) -> None:
     """Pure exact binding check. Caller must separately authenticate CI evidence."""
     _expected(expected, policy)
-    record = parse(receipt.encoded.decode('utf-8'))
+    try:
+        record = parse(receipt.encoded.decode('utf-8'))
+    except UnicodeError as e:
+        raise ContractError('invalid receipt UTF-8') from e
     if canonical(record) != receipt.encoded or type(record) is not dict or set(record) != {'bindings', 'results'}:
         raise ContractError('noncanonical receipt')
     if canonical(record['bindings']) != canonical(expected):
@@ -187,7 +190,7 @@ class Journal:
             raise ContractError('invalid generation')
         if not isinstance(row.get('verified'), str) or not row['verified']:
             raise ContractError('missing verified identity')
-        if row.get('state') not in {'runtime_verified', 'preflight', 'stage', 'activate', 'verify', 'recover', 'recovery_required'}:
+        if type(row.get('state')) is not str or row['state'] not in {'runtime_verified', 'preflight', 'stage', 'activate', 'verify', 'recover', 'recovery_required'}:
             raise ContractError('invalid journal state')
         return row
 
@@ -283,8 +286,8 @@ class Journal:
                             raise ContractError(operation + ' refused')
                     if adapters.observe() != target or adapters.retained(target) is not True:
                         raise ContractError('runtime or retained artifact mismatch')
-                    row.update(state='runtime_verified', verified=target, candidate=None)
-                    self.write(row)
+                    success = dict(row, state='runtime_verified', verified=target, candidate=None)
+                    self.write(success)
                     return result('runtime_verified', 'verified')
                 except Exception:
                     row['state'] = 'recovery_required'
