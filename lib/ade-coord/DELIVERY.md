@@ -28,7 +28,8 @@ reconciled authority evidence. Commands are exactly these two-token pairs:
 |---|---|
 | role get | role_id |
 | role create | record (core schema) |
-| role transition | snapshot, priorOwner, priorEpoch, nextOwner, quiescence |
+| role transition | snapshot, state, quiescence?, checkpoint_digest? |
+| role transfer | snapshot, priorOwner, priorEpoch, nextOwner, quiescence, checkpoint_digest? |
 | report publish | report, artifacts?: [{base64,media_type}] |
 | report status | role_id, message_id |
 | inbox list | snapshot, authority |
@@ -104,3 +105,21 @@ No external effects, plugin/controller or legacy .done projections are included.
 Maintained APIs checked: Node `node:sqlite` DatabaseSync exec/prepare/get/run,
 NATS `@nats-io/obj` 3.5.0 Objm/open/putBlob/getBlob/put. CI resolves current
 packages and Node LTS, records exact dependency resolution and SQLite version.
+
+## Review repairs: pending disposition and artifact recovery
+
+Processing intent is distinct from processed confirmation. `beginDisposition`
+records an authority-bound pending intent before the fenced broker call;
+`confirmDisposition` exposes processed only with the actual broker receipt.
+`LocalState.dispositions(role,id)` retains confirmed/abandoned/pending evidence.
+Successor authority may abandon old pending intent and choose another result.
+An existing authoritative broker result is adopted before evaluating a conflicting
+request; it cannot be poisoned by local uncommitted intent. Parent-version
+processed rows had no broker proof: schema migration retains those rows as
+legacy-unconfirmed abandoned evidence and requires broker reconciliation.
+
+Matching-report recovery now verifies artifacts before broker-accepted. It
+restores absent objects from persisted bytes and rechecks retrieval without
+republishing the report. Existing digest corruption is an explicit failure;
+recovery never overwrites it silently. Accepted rows remain evidence rather than
+an ongoing artifact-health monitor; future health/backup policies are separate.
