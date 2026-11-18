@@ -140,6 +140,16 @@ jobs:
           "$RUNNER_TEMP/hub-nats-package/bin/nats-server" --version
           timeout 120 sudo apt-get update -qq
           timeout 120 sudo apt-get install -y lsof
+      - name: Mount bounded filesystem for deployment-package ENOSPC conformance
+        run: |
+          python3 - <<'PYCODE'
+          import os, pathlib, subprocess
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nats-fault-tmpfs'
+          path.mkdir(mode=0o700)
+          subprocess.run(['sudo', 'mount', '-t', 'tmpfs', '-o', f'size=32m,mode=0700,uid={os.getuid()},gid={os.getgid()}', 'ade-nats-fault', str(path)], check=True, timeout=15)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'ADE_FAULT_TMPFS={path}\n')
+          PYCODE
       - name: Verify this coordination source against the deployment broker package
         working-directory: lib/ade-coord
         env:
@@ -148,3 +158,12 @@ jobs:
           timeout 180 npm install --ignore-scripts
           npm ls --all
           timeout 240 npm test
+      - name: Unmount only the deployment-package fault filesystem
+        if: always()
+        run: |
+          python3 - <<'PYCODE'
+          import os, pathlib, subprocess
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nats-fault-tmpfs'
+          if subprocess.run(['mountpoint', '-q', str(path)]).returncode == 0:
+              subprocess.run(['sudo', 'umount', str(path)], check=True, timeout=15)
+          PYCODE
