@@ -158,9 +158,10 @@ def main():
         fresh = avail.get("fresh", False)
         for acct, rec in accounts.items():
             bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
-            # Fail closed, deliberately: a *stale* zero or unusable pool still marks its account exhausted (losing a
-            # re-handoff target is worse than a false alarm), while only a fresh reading can ever clear it below.
-            if bad and (fresh or not rec["stale"]):
+            # Fail closed, deliberately: any pool reading zero or unusable marks its account exhausted, stale or not —
+            # a false alarm is recoverable, a missed exhaustion leaves an agent wedged. Only a *fresh* positive reading
+            # on a known-empty account can clear one (below).
+            if bad:
                 exhausted.add(acct)
             # Fail closed on a known-empty account: stale/suspect readings never
             # clear it, only a fresh positive balance does.
@@ -205,8 +206,9 @@ def main():
     live = [o for o in out if o["status"] not in NOT_LIVE]
     # An account with no aiuse mapping (a bare `opencode-go/` provider names no billing sub-account) cannot be judged:
     # say so instead of showing a bare "?" that reads as healthy.
-    unmapped = sorted({o["account"] for o in out
-                       if o["account"] not in accounts and o["account"] not in KNOWN_EMPTY and o["account"] != "unknown"})
+    unmapped = sorted({o["account"] for o in live
+                       if o["account"] not in accounts and o["account"] not in KNOWN_EMPTY and o["account"] != "unknown"}) \
+        if not quota_error else []      # an unread quota is the quota_error alert, not a mapping finding per account
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
                           "exhausted": sorted(exhausted), "low": low, "unmapped": unmapped,

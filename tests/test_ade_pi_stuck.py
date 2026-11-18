@@ -177,6 +177,7 @@ def test_an_aiuse_failure_is_reported_not_hidden(tmp_path: Path) -> None:
     """A caller must be able to tell "every account is healthy" from "the quota read failed"."""
     report = _run(tmp_path, aiuse_rc=1)
     assert report["quota_error"] and "exited 1" in report["quota_error"]
+    assert report["unmapped"] == []           # an unread quota is one alert, not one "no mapping" per account
     assert _run(tmp_path, _pools(**{"openai:openai_api": (5.0, True, False)}))["quota_error"] is None
 
 
