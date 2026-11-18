@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { setTimeout as pause } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -107,3 +109,45 @@ for (const mode of ['nonzero', 'signal', 'zero-with-live-helper']) {
     } finally { await owner.dispose().catch(() => {}); }
   });
 }
+
+test('delayed initial group scan expires and cannot continue after failed teardown', { timeout: 8000 }, async () => {
+  const source = "const{spawn}=require('node:child_process');const h=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});process.send(h.pid);process.once('message',()=>process.exit(0));";
+  const child = spawn(process.execPath, ['-e', source], {
+    detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  const owner = ownDisposableGroup(child, { gracefulMs: 50, forcedMs: 2000 });
+  const nativeReaddir = fs.readdir;
+  const nativeReadFile = fs.readFile;
+  let release;
+  let deadlineFallback;
+  let lateReads = 0;
+  let finished = false;
+  try {
+    await once(child, 'message');
+    child.send('exit');
+    assert.equal((await owner.closed).code, 0);
+    let first = true;
+    fs.readdir = async (...args) => {
+      if (args[0] !== '/proc' || !first) return nativeReaddir(...args);
+      first = false;
+      await new Promise((resolve) => { release = resolve; deadlineFallback = setTimeout(resolve, 4000); });
+      return nativeReaddir(...args);
+    };
+    fs.readFile = (...args) => {
+      if (finished && String(args[0]).startsWith('/proc/')) lateReads += 1;
+      return nativeReadFile(...args);
+    };
+    await assert.rejects(owner.dispose(), /graceful stop timed out/);
+    finished = true;
+    clearTimeout(deadlineFallback);
+    release();
+    await pause(30);
+    assert.equal(lateReads, 0, 'expired initial inventory must not continue reading processes');
+  } finally {
+    clearTimeout(deadlineFallback);
+    release?.();
+    fs.readdir = nativeReaddir;
+    fs.readFile = nativeReadFile;
+    await owner.dispose().catch(() => {});
+  }
+});

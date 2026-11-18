@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import { setTimeout as pause } from 'node:timers/promises';
 
 async function deadline(promise, milliseconds, message) {
@@ -13,12 +13,12 @@ async function deadline(promise, milliseconds, message) {
 }
 
 async function liveGroup(group, signal) {
-  const members = (await readdir('/proc')).filter((name) => /^[0-9]+$/.test(name));
+  const members = (await fs.readdir('/proc')).filter((name) => /^[0-9]+$/.test(name));
   assert.ok(members.length <= 65_536, 'fixture process inventory exceeds bound');
   for (const member of members) {
     signal?.throwIfAborted();
     let raw;
-    try { raw = await readFile(`/proc/${member}/stat`, { encoding: 'utf8', signal }); }
+    try { raw = await fs.readFile(`/proc/${member}/stat`, { encoding: 'utf8', signal }); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     const fields = raw.slice(raw.lastIndexOf(') ') + 2).split(' ');
     // The detached fixture starts its own session and group. Exited zombies
@@ -46,11 +46,17 @@ export function ownDisposableGroup(child, { gracefulMs = 30_000, forcedMs = 5000
     if (!cleanup) cleanup = (async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       let result;
+      const graceful = new AbortController();
       try {
-        result = await deadline(closed, gracefulMs, 'owned fixture graceful stop timed out');
-        if (result.code !== 0) throw new Error(`owned fixture exited code=${result.code} signal=${result.signal}`);
-        assert.equal(await liveGroup(child.pid), false, 'owned helpers survived fixture leader');
+        result = await deadline((async () => {
+          const exited = await closed;
+          graceful.signal.throwIfAborted();
+          if (exited.code !== 0) throw new Error(`owned fixture exited code=${exited.code} signal=${exited.signal}`);
+          assert.equal(await liveGroup(child.pid, graceful.signal), false, 'owned helpers survived fixture leader');
+          return exited;
+        })(), gracefulMs, 'owned fixture graceful stop timed out');
       } catch (original) {
+        graceful.abort();
         // Every member of this group descends from our detached fixture child.
         // Even if the leader exits during escalation, remaining owned helpers
         // must not survive an unsuccessful disposable acceptance run.
@@ -69,7 +75,7 @@ export function ownDisposableGroup(child, { gracefulMs = 30_000, forcedMs = 5000
           child.unref();
         } finally { abort.abort(); }
         throw original;
-      }
+      } finally { graceful.abort(); }
       assert.equal(result.code, 0, 'owned fixture must stop successfully');
       return result;
     })();
