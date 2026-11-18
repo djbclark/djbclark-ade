@@ -21,6 +21,8 @@ reasons behind the rules are in `docs/model-routing.md`; this skill is the metho
 with their Paseo provider and billing, the gates and caps, the lead's model). Run it; copy no rank, model id or
 threshold from this file or any other.
 
+Native `paseo run` accepts brief text as one final positional argv item. Read a saved brief into that item with a subprocess argv list; never pass `--prompt-file`, which native Paseo does not support. `ade-worker-run --no-footer` uses the same native argument shape.
+
 ## A. Claude tiers by role (PLAN section G, 2026-11-06)
 
 | Tier | Roles | Effort |

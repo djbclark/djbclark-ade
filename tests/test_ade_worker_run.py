@@ -892,6 +892,15 @@ def test_footer_refuses_when_the_last_argument_is_not_the_brief(env, rest):
     assert r.returncode == 1 and "brief" in r.stderr and not env.calls()
 
 
+@pytest.mark.parametrize("flag", ["--prompt-file", "--prompt-file=/tmp/brief.md"])
+@pytest.mark.parametrize("no_footer", [False, True])
+def test_unsupported_prompt_file_refused_before_native_calls(env, flag, no_footer):
+    extra = ["--no-footer"] if no_footer else []
+    r = env.run("--lead", LEAD, "--slice", "alpha", *extra, "--", "--no-wait", flag, "BRIEF")
+    assert r.returncode == 1 and "final positional argument" in r.stderr
+    assert not env.calls()
+
+
 def test_interactive_legacy_main_migration_uses_the_windows_own_repo(main_env):  # F4
     main_env.data["workspaces"][0].update(name="MAIN Wave 7", cwd="/somewhere/djbclark-ade")
     r = interactive(main_env, "--interactive", "--cwd", "/somewhere/djbclark-ade")
