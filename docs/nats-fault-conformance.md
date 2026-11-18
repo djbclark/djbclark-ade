@@ -14,6 +14,10 @@ CI logs, rather than this document, establish their execution result.
 | Handoff and delayed ack | Publish concurrently with role transfer while a real consumer holds an earlier report. Ack after transfer; successor still intakes and processes both retained reports, and stale predecessor receipt fails. |
 | Older restore | Stop the broker and copy its store, restart and advance ownership, durably advance an independent generation file, kill broker and restore the older copy. Restored old authority exists under the obsolete generation; the separately retained generation rejects it. |
 
+The ENOSPC fixture reserves 8 MiB for its coordination stream inside the 32 MiB
+tmpfs; production stream limits remain unchanged. Disk pressure is induced by
+actual filesystem allocation, independently of that stream limit.
+
 The ENOSPC test refuses absent/non-tmpfs filesystems and any filesystem over
 64 MiB. It never fills general runner storage. The workflow mounts only its
 `RUNNER_TEMP/nats-fault-tmpfs`, and its always-run cleanup unmounts that path.
