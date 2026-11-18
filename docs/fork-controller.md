@@ -457,3 +457,38 @@ Parser fixtures use explicitly synthetic independent wire/host/manifest values;
 they do not establish executing-instance qualification. Wiring production V2
 requires the committed native transport and actual canonical manifest/profile
 mapping, plus a separate exact-source review and coupled proof.
+
+### Committed builtin manifest/profile mapping and V2 transport
+
+The V2 read facade now uses the committed `56faaa4de` `plugin cohort-v2-status
+--json` command, whose CLI checks `server_info.features.managedPluginCohortV2`.
+That is API availability only. Global native operation readiness remains a
+separate check. V2 never retries the V1 command.
+
+Before any retained Node execution, Python still verifies the raw manifest digest,
+complete protected file inventory, runtime/helper/external-library identities and
+fixed Node/CLI bytes. For V2 it additionally reads the producer's fixed real-account
+`.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` through protected
+ancestry, matching exactly one immutableRoot row to the configured raw manifest,
+build, qualification and immutability adapter. All fourteen exact external builtin
+profiles are required. Changing that policy during the facade lifetime latches HOLD.
+
+The map mirrors committed `6acaa01dd4d86f6dcf91f7882f705d26fbb4e387`
+`daemon-verifier.ts`, `builtin-profile.ts`, `builtin-inventory.json`,
+`builtin-bindings-recipe.json` and `canonicalBuiltinJson`. The canonical module
+table binds the finite recipe, runtime bytes, daemon bytes and external library
+inventory. Every builtin artifact binds source-identity bytes, original bundle
+bytes, adapted `server.factory.js` bytes, manifest/metafile and the same module
+table. Loaded bundle identity is the adapted evaluated factory digest, never the
+original bundle digest. Actual SAME-root builtin directory inventory must be the
+exact fourteen IDs. Protected profile source/bundle/table fields must match those
+independently verified manifest identities. The public profile hash does not mint
+executing-instance authority.
+
+Only after the complete tagged V2 union validates does the facade expose a private
+unwrapped directory view to the existing retained-target/CAS code; actual builtin
+entries remain separate and never become fake receipts/journals. Missing profiles,
+changed external policy, unsupported current native readiness or incomplete runtime
+facts still HOLD. New `systemClosure` manifests explicitly HOLD before Node until
+the producer's exact retained-library/private-namespace verifier contract is
+integrated; old host-library or missing mount facts are not substituted.

@@ -1067,5 +1067,91 @@ def test_v2_opt_in_does_not_fall_back_to_v1_transport(cohort_v2_fixture,monkeypa
     _,config,_,_=cohort_v2_fixture
     native=c.NativeFacade(lambda:{'cohort':{},'component':'ade-yolo'})
     monkeypatch.setattr(native,'_transport',lambda:config)
-    monkeypatch.setattr(native,'_call',lambda *args:pytest.fail('unimplemented V2 must not call legacy V1'))
+    calls=[]
+    def unavailable(args):
+        calls.append(args)
+        raise c.ContractError('actual V2 unavailable')
+    monkeypatch.setattr(native,'_call',unavailable)
     assert native.supported() is False
+    assert calls==[['plugin','cohort-v2-status']]
+
+
+@pytest.fixture
+def builtin_manifest_fixture():
+    """Canonical producer shape, synthetic file digests; no native process qualification."""
+    config={'distributionRoot':'/retained/native','distributionBuildId':'native-fixture',
+        'distributionSha256':'1'*64,'closure':{'runtimeClosureSha256':'1'*64,'helperClosureSha256':'2'*64,'qualificationSha256':'3'*64}}
+    files=[]
+    def identity(path):
+        item={'path':path,'size':10,'mode':0o444,'sha256':digest(path)}
+        files.append(item);return item
+    runtime=identity('runtime/node');daemon=identity('daemon.mjs')
+    table={'schemaVersion':1,'recipe':c.BUILTIN_RECIPE,'runtimeSha256':runtime['sha256'],'daemonSha256':daemon['sha256'],'externalLibraries':[]}
+    table_sha=c.hashlib.sha256(c.builtin_json(table)).hexdigest()
+    artifacts=[];profiles=[]
+    for plugin in c.BUILTIN_IDS:
+        prefix='builtin-compiled/'+plugin
+        factory=identity(prefix+'/server.factory.js');original=identity(prefix+'/server-original.js')
+        source=identity(prefix+'/source-identity.json')
+        identity(prefix+'/manifest.json');identity(prefix+'/metafile.json');identity('builtin-plugins/'+plugin+'/paseo-plugin.json')
+        artifacts.append({'id':plugin,'moduleTableSha256':table_sha,'sourceIdentityPath':source['path'],'sourceSha256':source['sha256'],
+            'serverBundleSha256':factory['sha256'],'originalServerBundleSha256':original['sha256'],'factoryPath':factory['path'],
+            'manifestPath':prefix+'/manifest.json','metafilePath':prefix+'/metafile.json','moduleImports':[]})
+        profiles.append({'id':plugin,'sourceSha256':source['sha256'],'serverBundleSha256':factory['sha256'],
+            'moduleTableSha256':table_sha,'activityContract':'builtin-in-process-v1','profileSha256':digest(['protected-profile',plugin])})
+    manifest={'files':files,'runtime':runtime,'externalLibraries':[],'builtinPlugins':list(c.BUILTIN_IDS),
+        'builtinArtifacts':artifacts,'builtinModuleTable':table,'moduleTableSha256':table_sha}
+    policy={'schemaVersion':1,'qualifications':[{'immutableRoot':config['distributionRoot'],'immutabilityAdapter':'linux-root-owned-retained-v1',
+        'manifestSha256':config['distributionSha256'],'distributionBuildId':config['distributionBuildId'],
+        'qualificationSha256':config['closure']['qualificationSha256'],'builtinProfiles':profiles}]}
+    return manifest,config,policy
+
+
+def test_actual_builtin_manifest_profile_mapping_uses_adapted_factory(builtin_manifest_fixture):
+    manifest,config,policy=builtin_manifest_fixture
+    identities=c.builtin_manifest_identities(manifest,config,policy)
+    assert set(identities)==set(c.BUILTIN_IDS)
+    for plugin,artifact in zip(c.BUILTIN_IDS,manifest['builtinArtifacts']):
+        assert identities[plugin]['sourcePath']==config['distributionRoot']+'/builtin-plugins/'+plugin
+        assert identities[plugin]['serverBundleSha256']==artifact['serverBundleSha256']!=artifact['originalServerBundleSha256']
+        assert identities[plugin]['moduleTableSha256']==manifest['moduleTableSha256']
+
+
+@pytest.mark.parametrize('mutation',['missing-profile','null-profile','duplicate-profile','wrong-current-row','wrong-bundle',
+    'original-substitution','wrong-table','wrong-recipe','source-file','factory-path','inventory','duplicate-host-row'])
+def test_manifest_profile_mapping_refusals(builtin_manifest_fixture,mutation):
+    manifest,config,policy=builtin_manifest_fixture
+    row=policy['qualifications'][0];artifact=manifest['builtinArtifacts'][0]
+    if mutation=='missing-profile':row['builtinProfiles'].pop()
+    elif mutation=='null-profile':row['builtinProfiles'][0]['profileSha256']=None
+    elif mutation=='duplicate-profile':row['builtinProfiles'][1]=row['builtinProfiles'][0]
+    elif mutation=='wrong-current-row':row['manifestSha256']='a'*64
+    elif mutation=='wrong-bundle':row['builtinProfiles'][0]['serverBundleSha256']='a'*64
+    elif mutation=='original-substitution':
+        artifact['serverBundleSha256']=artifact['originalServerBundleSha256']
+        row['builtinProfiles'][0]['serverBundleSha256']=artifact['originalServerBundleSha256']
+    elif mutation=='wrong-table':manifest['moduleTableSha256']='a'*64
+    elif mutation=='wrong-recipe':manifest['builtinModuleTable']=dict(manifest['builtinModuleTable'],recipe={})
+    elif mutation=='source-file':manifest['files']=[item for item in manifest['files'] if item['path']!=artifact['sourceIdentityPath']]
+    elif mutation=='factory-path':artifact['factoryPath']='builtin-compiled/other/server.factory.js'
+    elif mutation=='inventory':manifest['builtinPlugins']=manifest['builtinPlugins'][:-1]
+    elif mutation=='duplicate-host-row':policy['qualifications'].append(row)
+    with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)
+
+
+def test_v2_facade_validates_complete_tagged_union_before_directory_view(cohort_v2_fixture,monkeypatch):
+    value,config,expected,identities=cohort_v2_fixture
+    row={'cohort':expected,'component':'ade-yolo'}
+    native=c.NativeFacade(lambda:row)
+    native.builtin_identities=identities
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    calls=[]
+    def wire(args):
+        calls.append(args);assert args==['plugin','cohort-v2-status'];return value
+    monkeypatch.setattr(native,'_call',wire)
+    view=native.cohort_status()
+    assert len(view['builtinEntries'])==14 and all('journal' not in item for item in view['builtinEntries'])
+    assert all('activationGeneration' in item['loaded'] for item in view['entries'])
+    value['entries'].pop()
+    with pytest.raises(c.ContractError):native.cohort_status(allow_target_absent=True)
+    assert all(args==['plugin','cohort-v2-status'] for args in calls)
