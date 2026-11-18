@@ -7,5 +7,5 @@ import { registerAdeWindowNameHooks } from "./server/name-lib.mjs";
  * from the daemon, runs it, and calls `workspaces.ref(id).setTitle`.
  */
 export default function contribute(server: PluginServerContext) {
-  return registerAdeWindowNameHooks(server);
+  return registerAdeWindowNameHooks(server, server.sourceDirectory === undefined ? {} : { pluginRoot: server.sourceDirectory, managed: true });
 }

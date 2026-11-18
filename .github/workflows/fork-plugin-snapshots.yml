@@ -15,4 +15,8 @@ jobs:
         with:
           node-version: latest
       - uses: astral-sh/setup-uv@v10.3.2
+      - name: Prepare CI-only CJS fixture compiler
+        run: timeout 600 npm install --prefix "$RUNNER_TEMP/ade-cjs-fixture" --no-audit --no-fund esbuild
       - run: uv run --with pytest python -m pytest tests/test_ade_fork_plugins.py -q
+        env:
+          ADE_CI_ESBUILD: ${{ runner.temp }}/ade-cjs-fixture/node_modules/.bin/esbuild

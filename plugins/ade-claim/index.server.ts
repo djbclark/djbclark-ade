@@ -9,5 +9,5 @@ import { registerAdeClaimHooks } from "./server/hook.mjs";
  * - W4: prepend libexec/agent-bin to PATH on agent.open.before
  */
 export default function contribute(server: PluginServerContext) {
-  return registerAdeClaimHooks(server);
+  return registerAdeClaimHooks(server, server.sourceDirectory === undefined ? {} : { pluginRoot: server.sourceDirectory, managed: true });
 }
