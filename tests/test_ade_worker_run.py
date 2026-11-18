@@ -2466,7 +2466,7 @@ def test_modeless_provider_drops_mode_before_run(env, provider, mode, equals):
 @pytest.mark.parametrize("catalog,mode,ok", [
     ([{"id": "full-access"}], "full-access", True),
     ([{"id": "full-access"}], "default", False),
-    ("Full Access", "full-access", False),
+    ("Full Access", "full-access", True),
     (None, "default", False),
 ])
 def test_explicit_mode_requires_catalog_id_before_mutation(env, catalog, mode, ok):
@@ -2485,15 +2485,17 @@ def test_create_failure_archives_minted_orphan(env):
     assert "archived failed-create workspace wks_abc123" in r.stderr
 
 
-@pytest.mark.parametrize("unsafe", ["preexisting", "occupied", "unplaced", "ambiguous", "unrelated_failure"])
+@pytest.mark.parametrize("unsafe", ["preexisting", "occupied", "unplaced", "ambiguous", "malformed_placement", "unrelated_failure"])
 def test_failed_create_cleanup_does_not_archive_uncertain_workspace(env, unsafe):
     env.data.update(run_rc=1, run_out={"code": "AGENT_CREATE_FAILED"})
     if unsafe == "preexisting":
         env.data["workspaces"] = [{"workspaceId": "wks_abc123", "name": "unowned", "cwd": "/elsewhere"}]
-    elif unsafe in ("occupied", "unplaced"):
+    elif unsafe in ("occupied", "unplaced", "malformed_placement"):
         env.data["agents"] = [{"id": AGENT, "status": "running"}]
         if unsafe == "occupied":
             env.state(AGENT, "wks_abc123")
+        elif unsafe == "malformed_placement":
+            env.state(AGENT, "not-a-workspace")
     elif unsafe == "ambiguous":
         env.data["run_err"] += "Created workspace wks_other - main\n"
     else:

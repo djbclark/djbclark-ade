@@ -227,7 +227,9 @@ Always launch our own Codex agents with `--mode full-access`, Claude with
 For Pi, ClinePass, or any provider with no modes: **omit --mode**, including
 `--mode default`. Add `--mode CATALOG_MODE_ID` to the example only when the provider exposes that exact ID.
 `ade-worker-run` drops explicit modes for a ready modeless catalog with a stderr note;
-unknown, unavailable, or label-only catalogs fail before launch when a mode is requested. Set it at
+unknown, unavailable, or malformed catalogs fail before launch when a mode is requested.
+If the CLI supplies only nonempty display labels, existing explicit modes pass through
+with a validation-limitation note; Paseo validates the ID, and failed-create cleanup applies. Set it at
 creation; changing a running agent's mode did not reliably remove old cards.
 The locally inspected `ProviderOverrideSchema` has no provider default-mode field.
 Omitted modes inherit same-provider parents, or fall through to the provider

@@ -704,8 +704,14 @@ def preflight_mode(args: list[str]) -> list[str]:
     if catalog == [] or catalog == "":
         sys.stderr.write(f"ade-worker-run: provider {provider!r} has no modes; dropping --mode {requested!r}\n")
         return args[:start] + args[end:]
+    if isinstance(catalog, str) and catalog.strip():
+        # Current CLI flattens IDs to display labels. Do not invent IDs or break
+        # existing valid launches: Paseo remains authoritative for nonempty modes.
+        sys.stderr.write(f"ade-worker-run: provider {provider!r} catalog exposes mode labels only; "
+                         "Paseo will validate the requested mode ID\n")
+        return args
     if not isinstance(catalog, list) or any(not isinstance(m, dict) or not isinstance(m.get("id"), str) for m in catalog):
-        raise Refused(f"provider {provider!r} catalog exposes labels, not mode IDs; cannot validate --mode before launch")
+        raise Refused(f"provider {provider!r} mode catalog is malformed")
     if requested not in [m["id"] for m in catalog]:
         raise Refused(f"invalid --mode {requested!r} for provider {provider!r}")
     return args
@@ -729,7 +735,7 @@ def cleanup_failed_workspace(err: str, before: set[str]) -> None:
                 raise Refused("live agent inventory malformed")
             state = state_file(row["id"])
             workspace = row.get("workspaceId") or (state or {}).get("workspaceId")
-            if not workspace or workspace == wks:
+            if not isinstance(workspace, str) or not WKS_RE.fullmatch(workspace) or workspace == wks:
                 raise Refused("workspace is occupied or a live agent cannot be placed")
         run_ok(["workspace", "archive", wks])
         sys.stderr.write(f"ade-worker-run: archived failed-create workspace {wks}\n")
