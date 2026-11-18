@@ -31,3 +31,5 @@
 - Validate committed retained system-closure metadata and module-table binding while holding unproved namespace execution; consume native scoped same-bearer recovery with separate verification and no retry of unknown failures. (#796)
 ### Added
 - Invoke the authenticated shared read-only namespace verifier immediately before retained CLI execution, with controlled import and refusal before subprocess start on missing or changed proof. (#796)
+### Fixed
+- Report truthful read-only Journal/native/cohort status instead of a universal unsupported placeholder, and show a separately authorized standing apply schedule source for automatic promotion. (#796)

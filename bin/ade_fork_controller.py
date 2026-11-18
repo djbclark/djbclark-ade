@@ -1035,6 +1035,31 @@ class NativeFacade:
                 if proc.poll() is None: proc.kill()
                 proc.wait()
 
+    def status_observation(self, cohort):
+        """Stable read-only current identity; never reservation or mutation authority."""
+        if self.uncertain:raise ContractError('native observation uncertain')
+        config=self._transport()
+        before=self.cohort_status()
+        target=next((item for item in before['entries'] if item['pluginId']==self.reader()['component']),None)
+        if target is None or type(target['journal']) is not dict or target['journal'].get('phase')!='ready':
+            raise ContractError('native target journal not ready')
+        observed=self.observe(cohort)
+        maintenance=self._call(['daemon','maintenance','status'])
+        authority=maintenance.get('authority') if type(maintenance) is dict else None
+        if (type(maintenance) is not dict or type(maintenance.get('schemaVersion')) is not int or maintenance['schemaVersion']!=1 or
+                maintenance.get('state')!='idle' or maintenance.get('recoveryRequired') is not False or maintenance.get('recoveryOnly') is not None or
+                type(maintenance.get('reservationGeneration')) is not int or not 0<=maintenance['reservationGeneration']<2**53 or
+                type(authority) is not dict or authority.get('schemaVersion')!=1 or authority.get('qualified') is not True or
+                authority.get('serverId')!=config['serverId'] or authority.get('daemonIncarnation')!=config['daemonIncarnation']):
+            raise ContractError('native qualified idle observation unavailable')
+        # Ordinary activity can make promotion unavailable without changing the
+        # already executing identity. No readiness/feature bit grants status authority.
+        after=self.cohort_status()
+        current=self._call(['daemon','maintenance','status'])
+        if canonical(before)!=canonical(after) or canonical(maintenance)!=canonical(current):
+            raise ContractError('native observation changed')
+        return observed
+
     def list_observations(self):
         return self._call(['plugin', 'ls'])
 
@@ -1342,6 +1367,32 @@ class Controller:
         self.selection = None
         self.fresh_attestations = {}
         self.root = Path(root) if root is not None else locations()[1]
+
+    def status(self):
+        """Read existing Journal and actual native observations; creates nothing."""
+        result={'status':'hold','authorized':False,'observation_only':True}
+        try:row=parse(canonical(self.reader()).decode())
+        except (OSError,ValueError,TypeError,KeyError):return dict(result,reason='protected_enrollment_unavailable')
+        result.update(component=row['component'],channel=row['channel'])
+        journal=Journal(self.root/'journal',row['policy']['compatibility_group'])
+        try:
+            original=read_regular(journal.path,1024*1024)
+            current=journal.read()
+            if canonical(current)!=original:raise ContractError('noncanonical or changed Journal')
+        except (OSError,ValueError,TypeError,KeyError):return dict(result,reason='journal_unavailable')
+        result.update(generation=current['generation'],verified=current['verified'],journal_state=current['state'],promotion_hold=current['promotion_hold'])
+        if current['state']!='runtime_verified':return dict(result,reason='journal_unsettled')
+        if not self.retained(current['verified']):return dict(result,reason='verified_artifact_unavailable')
+        if not isinstance(self.native,NativeFacade):return dict(result,reason='native_observer_unavailable')
+        try:observed=self.native.status_observation(row['cohort'])
+        except (OSError,ValueError,TypeError,KeyError):return dict(result,reason='native_observation_unavailable')
+        if observed!=current['verified']:return dict(result,reason='native_identity_mismatch',observed=observed)
+        try:
+            if (canonical(self.reader())!=canonical(row) or read_regular(journal.path,1024*1024)!=original or
+                    canonical(journal.read())!=original or not self.retained(current['verified'])):
+                return dict(result,reason='state_changed_during_status')
+        except (OSError,ValueError,TypeError,KeyError):return dict(result,reason='state_changed_during_status')
+        return dict(result,status='runtime_verified',reason='retained_verified_matches_current_native',observed=observed)
 
     def plan(self):
         row = self.reader()
@@ -1772,8 +1823,8 @@ def main(argv=None):
         if args.command == 'apply': result = controller.tick('deploy')
         elif args.command in ('recover','resume','reconcile-release'): result = controller.tick(args.command)
         elif args.command == 'tick': result = controller.select_latest()
+        elif args.command == 'status': result = controller.status()
         else: result = controller.plan()
-        if args.command == 'status': result['status'] = 'hold'; result['reason'] = 'native_execution_status_reservation_unsupported'
         print(canonical(result).decode())
         return 1 if args.command in ('apply','recover','resume','reconcile-release') and result['status'] != 'runtime_verified' else 0
     except (OSError, ValueError, TypeError, KeyError) as error:

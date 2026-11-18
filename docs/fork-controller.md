@@ -3,8 +3,11 @@
 `bin/ade-fork-controller status|plan|tick` reads the real account's fixed
 `.local/state/djbclark-ade/forks/controller.json`. HOME, CLI flags and environment
 cannot substitute a grant path. No file is installed by this source change.
-status/plan are deterministic protected-candidate planning; tick performs read-only GitHub discovery and private evidence retention, with no runtime mutations. Missing
-or unsupported enrollment returns HOLD. No runtime adapter is selected by JSON.
+`status` reads the existing Journal, retained verified payload and actual stable
+qualified native/cohort identity without writing state or obtaining transaction
+adapters. `plan` reports the protected candidate; `tick` performs GitHub discovery
+and private evidence retention without runtime mutations. Missing, unknown or
+mismatched facts return HOLD. No runtime adapter is selected by JSON.
 
 `bin/ade_fork_controller.py` owns the pilot integration. Existing release,
 GitHub CI, snapshot and updater containment libraries remain unchanged. The
@@ -132,8 +135,9 @@ Result exposes latest_discovered separately from selected_qualified. Latest mast
 may fail while an older newly qualified ancestor or retained verified baseline wins.
 Master and the entire protected policy are reread before retaining a selection and
 again before returning it; changed state holds rather than publishing stale success.
-Native mutation remains unsupported; later apply must recheck both under native
-reservation at its own commit boundary, not trust an earlier selection response.
+`apply` rechecks current master and protected policy under the actual native
+reservation at its commit boundary. Earlier selection/status responses grant no
+permission. Missing qualified execution or current authority still HOLDs.
 
 Discovery is bounded to five history pages, 80 metadata calls and four candidate
 transport/receipt verification pairs per tick; exceeded bounds hold, never truncate
@@ -142,9 +146,9 @@ No scheduled job or evaluator runs are launched by discovery. No locally constru
 fixture receipt proves actual qualified producer/runtime execution.
 
 Do not route master-snapshot through Sync's merge strategy: ADE upstream/fork
-are identical, and that API rejects this strategy. Future scheduling can use the
-existing ade-sched source mechanism. A read-only source example, deliberately
-not installed, is:
+are identical, and that API rejects this strategy. The existing ade-sched source
+mechanism can run separate discovery and authorized promotion jobs. This discovery
+source example is deliberately not installed and does not promote anything:
 
 ```xml
 <plist version="1.0"><dict>
@@ -156,8 +160,29 @@ not installed, is:
 </dict></plist>
 ```
 
-No schedule, operational enrollment, native policy, secrets or live plugin calls
-were installed/executed. Installing schedules needs separate consent.
+Automatic standing promotion is a separate authorized `apply` job, not discovery
+`tick`. Under an explicitly installed current schema2 standing qualified-latest
+rule, each apply selects/authenticates the latest eligible retained master ancestor,
+reads actual Journal CAS and executes the bounded native transaction only when all
+producer/cohort/namespace/authority checks pass. A source-only example is:
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.djbclark.ade-fork-controller-promote</string>
+  <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/ade-fork-controller</string><string>apply</string>
+  </array>
+  <key>StartInterval</key><integer>3600</integer>
+</dict></plist>
+```
+
+This example creates no consent and is not installed. Required current retain,
+preflight, stage, activate and verify grants must match qualified-latest; matching
+denial wins. A rollback promotion HOLD, uncertain reservation or revoked rule
+prevents automatic promotion. Neither schedule performs enrollment, automatic
+resume, bearer recovery or an evaluator run. Installing schedules, operational
+enrollment or native policy requires separately authorized deployment. No schedule,
+config or live plugin call was installed/executed by this source change.
 
 ## Validation limits
 
@@ -203,13 +228,13 @@ execution/runtime/helper digests; absence holds, and no profile is synthesized.
 The result carries no token and grants no support by itself. It is not a newly
 invented held-operation wire ABI: final native endpoint must validate and consume
 it under its genuine private owner lease/current policy and exact CAS.
-Private held-operation transport is being specified by native owner049; no
-unpublished endpoint/FD protocol is guessed. Until that reviewed bridge and real
-producer are integrated, production NativeFacade remains unsupported, and there
-is no automatic END/reopen path on failed or uncertain operations.
+The committed private held-operation transport is bound below to retained bytes,
+actual native identity and current authorization. NativeFacade remains unavailable
+when those genuine facts are missing. There is no automatic END/reopen path on
+failed or uncertain operations; feature availability alone grants no support.
 
 
-## Proposed native held-operation CLI transport
+## Bound native held-operation CLI transport
 
 The native owner published paseo-held-operation-api-v1.md as proposed/unqualified.
 The facade implements its exact commands: retained Node + retained CLI,
@@ -260,9 +285,9 @@ without a catch-and-ignore fallback to older evidence.
 the fixed real-account protected enrollment and use the real NativeFacade.
 There are no port/path/grant override flags. They emit one canonical structured
 result; HOLD/recovery_required returns nonzero, runtime_verified returns zero.
-Default status/plan and discovery tick retain their existing roles. An approved
-scheduled promotion can invoke apply under current consent once genuine native
-support is available; selection is not a permanent planning-only substitute.
+Read-only status, protected-candidate plan and discovery tick have separate roles.
+The standing apply schedule source above promotes automatically only under current
+consent and genuine native support; discovery alone does not complete promotion.
 The commands do not bypass unavailable execution/cohort qualification.
 
 
@@ -558,3 +583,33 @@ Dedicated controller CI checks out the exact shared-source revision for a real
 import/refusal case. The normal protocol tests use clearly synthetic helpers and
 never establish actual namespace qualification. Root's disposable actual Linux
 namespace proof and exact source review of this adapter delta remain separate gates.
+
+
+### Truthful read-only status
+
+`status` never acquires a Journal lock, writes/repairs/enrolls state, obtains
+transaction adapters, retains/downloads candidates, compiles a candidate, reserves,
+reconnects a bearer or performs recovery. It reads a canonical existing SAME
+Journal twice around native observation, requires settled runtime_verified state
+and retained validated verified bytes, then checks actual full qualified cohort,
+ready target native journal/current loaded identity, bound enclosing authority and
+stable idle/no-recovery native status. The full cohort/epoch and maintenance read
+must remain equal across the bounded observation. Protected enrollment and Journal
+bytes/retention are rechecked before reporting success; this is a stable read
+observation, not a claim that independent APIs form an atomic transaction.
+
+Success reports runtime_verified with matching verified/observed receipt, actual
+Journal CAS/state and promotion_hold; authorized is always false and
+observation_only true. A promotion HOLD remains visible even when running identity
+is verified. Ordinary activity may block promotion while leaving the currently
+executing qualified identity unchanged; status does not use an operation-readiness
+flag as qualification or predict apply admission. Native mutable/unknown/held state,
+missing/unqualified/fullcohort mismatch or identity drift HOLDs. Injected synthetic
+ports cannot provide the shipped status path; tests with real facade/parser and
+synthetic wire demonstrate source behavior only.
+
+Finite refusal reasons include protected_enrollment_unavailable,
+journal_unavailable, journal_unsettled, verified_artifact_unavailable,
+native_observer_unavailable, native_observation_unavailable,
+native_identity_mismatch and state_changed_during_status. Status provides no
+operation grant; apply rechecks current authority and all actual native boundaries.

@@ -1448,3 +1448,115 @@ def test_readonly_port_last_check_refusal_never_starts_cli(monkeypatch):
 ])
 def test_readonly_source_filter_rejects_import_time_dispatch(source):
     with pytest.raises(c.ContractError):c.readonly_namespace_source(source,'fixed-member.py')
+
+
+@pytest.fixture
+def readonly_status_fixture(cohort_mapping_fixture,monkeypatch):
+    """Real retained bytes + existing Journal + facade, synthetic read wire ONLY."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    target=next(entry for entry in facts['entries'] if entry['pluginId']=='ade-yolo')
+    target['journal']['phase']='ready'
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    maintenance={'schemaVersion':1,'state':'idle','reservationGeneration':12,'generation':None,'transactionId':None,
+        'ready':False,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
+            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenancePluginOperationV1':False}}}
+    calls=[]
+    def wire(args,token=None):
+        assert token is None,'status must not send a private owner bearer'
+        calls.append(args)
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:return c.parse(c.canonical(maintenance).decode())
+        pytest.fail('status attempted non-read native command')
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    # Unit fixture enrollment only; status below never invokes enrollment/adapters.
+    journal.enroll(receipt.sha256,c.Adapters(observe=lambda:receipt.sha256,preflight=lambda identity:False,
+        stage=lambda *args:None,activate=lambda *args:None,verify=lambda identity:False,recover=lambda *args:None,
+        retained=controller.retained,authority=lambda operation,identity:operation=='enroll'))
+    return controller,journal,row,receipt,facts,maintenance,calls
+
+
+def test_status_current_verified_is_truthful_readonly_observation(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    before={path.relative_to(controller.root):path.read_bytes() for path in controller.root.rglob('*') if path.is_file()}
+    monkeypatch.setattr(c.Journal,'write',lambda *args:pytest.fail('status cannot write Journal'))
+    monkeypatch.setattr(c.Journal,'locked',lambda *args:pytest.fail('status cannot create/acquire transaction lock'))
+    monkeypatch.setattr(controller,'adapters',lambda *args,**kwargs:pytest.fail('status cannot obtain transaction adapters'))
+    monkeypatch.setattr(controller,'acquire',lambda *args:pytest.fail('status cannot acquire/evaluate candidates'))
+    result=controller.status()
+    assert result['status']=='runtime_verified' and result['verified']==result['observed']==receipt.sha256
+    assert result['authorized'] is False and result['observation_only'] is True
+    # Current executing identity can be verified while ordinary work blocks apply.
+    assert maintenance['ready'] is False and maintenance['authority']['features']['maintenancePluginOperationV1'] is False
+    assert {tuple(args) for args in calls}=={('plugin','cohort-status'),('daemon','maintenance','status')}
+    assert {path.relative_to(controller.root):path.read_bytes() for path in controller.root.rglob('*') if path.is_file()}==before
+
+
+@pytest.mark.parametrize('mutation',['missing-journal','corrupt-journal','noncanonical-journal','missing-retained','raw-flag-only',
+    'missing-cohort','wrong-loaded','unqualified','wrong-incarnation','native-held','native-unknown','target-held','changed-epoch'])
+def test_status_missing_mismatched_unknown_facts_hold(readonly_status_fixture,monkeypatch,mutation):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    if mutation=='missing-journal':journal.path.unlink()
+    elif mutation=='corrupt-journal':journal.path.write_bytes(b'{}')
+    elif mutation=='noncanonical-journal':journal.path.write_bytes(journal.path.read_bytes()+b'\n')
+    elif mutation=='missing-retained':(controller.root/'records'/(receipt.sha256+'.json')).unlink()
+    elif mutation=='raw-flag-only':facts.clear();facts.update(qualified=True)
+    elif mutation=='missing-cohort':facts['entries'].pop()
+    elif mutation=='wrong-loaded':next(item for item in facts['entries'] if item['pluginId']=='ade-yolo')['loaded']['snapshotSha256']='f'*64
+    elif mutation=='unqualified':maintenance['authority']['qualified']=False
+    elif mutation=='wrong-incarnation':maintenance['authority']['daemonIncarnation']='other'
+    elif mutation=='native-held':maintenance['state']='held'
+    elif mutation=='native-unknown':maintenance['recoveryRequired']=True
+    elif mutation=='target-held':next(item for item in facts['entries'] if item['pluginId']=='ade-yolo')['journal']['phase']='held'
+    else:
+        original=controller.native.cohort_status
+        def changed(**kwargs):
+            facts['observationEpoch']+=1
+            return original(**kwargs)
+        monkeypatch.setattr(controller.native,'cohort_status',changed)
+    assert controller.status()['status']=='hold'
+
+
+def test_status_identity_and_policy_changes_refuse(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    # This tests controller comparison independently of the strict native parser.
+    monkeypatch.setattr(controller.native,'status_observation',lambda cohort:'f'*64)
+    assert controller.status()['reason']=='native_identity_mismatch'
+    def revoked(cohort):
+        row['operations']['activate']['allowed']=False
+        return receipt.sha256
+    monkeypatch.setattr(controller.native,'status_observation',revoked)
+    assert controller.status()['reason']=='state_changed_during_status'
+
+
+def test_status_absent_store_creates_nothing(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    root=tmp_path/'absent'
+    controller=c.Controller(lambda:row,native=FakeNative(receipt.sha256),root=root)
+    assert controller.status()['reason']=='journal_unavailable'
+    assert not root.exists()
+
+
+def test_cli_status_dispatch_does_not_overwrite_verified_observation(monkeypatch,capsys):
+    class Observation:
+        def status(self):return {'status':'runtime_verified','reason':'retained_verified_matches_current_native','authorized':False}
+        def plan(self):pytest.fail('status cannot use candidate planning')
+    monkeypatch.setattr(c,'Controller',Observation)
+    assert c.main(['status'])==0
+    assert c.parse(capsys.readouterr().out)['status']=='runtime_verified'
+
+
+def test_status_unsettled_journal_never_observes_or_recovers(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    current=journal.read()
+    context=c.release.TransactionContext(1,journal.group,'deploy',0,1,'b'*32,receipt.sha256,None,'c'*64,digest(row))
+    intent=c.release.ReservationIntent(12,8,'fixture-server','fixture-daemon')
+    current.update(generation=1,state='reservation_unknown',candidate=context.target,
+                   transaction={'context':asdict(context),'reservation':asdict(intent)})
+    journal.write(current)
+    monkeypatch.setattr(controller.native,'status_observation',lambda *args:pytest.fail('unsettled Journal cannot become verified from metadata'))
+    result=controller.status()
+    assert result['status']=='hold' and result['reason']=='journal_unsettled'
+    assert calls==[] and journal.read()==current
