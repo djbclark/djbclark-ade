@@ -39,6 +39,9 @@ try:
     if command == "handoff transfer":
         transfer = _coord()._sibling("ade_coord_handoff").transfer
         result = transfer(request)
+    elif command in ("wake status", "wake reconcile"):
+        module = _coord()._sibling("ade_coord_wake")
+        result = module.status(_coord().config(), request["role_id"]) if command == "wake status" else module.reconcile(_coord().config(), request)
     elif command == "artifact materialize":
         result = materialize(request)
     elif command in ("job inspect", "job reconcile", "job bind", "job complete"):

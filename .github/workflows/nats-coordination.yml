@@ -1,9 +1,9 @@
 name: NATS coordination conformance
 on:
   push:
-    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', '.github/workflows/nats-coordination.yml']
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', 'tests/coord_wake_probe.py', 'tests/coord_admission_probe.py', '.github/workflows/nats-coordination.yml']
   pull_request:
-    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', '.github/workflows/nats-coordination.yml']
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', 'tests/coord_wake_probe.py', 'tests/coord_admission_probe.py', '.github/workflows/nats-coordination.yml']
   workflow_dispatch:
 permissions:
   contents: read

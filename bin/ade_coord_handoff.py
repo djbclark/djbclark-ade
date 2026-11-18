@@ -20,6 +20,7 @@ Resources = _sibling("ade_coord_resources").Resources
 process_identity = _sibling("ade_coord_resources").process_identity
 same_process = _sibling("ade_coord_resources").same_process
 admission = _sibling("ade_coord_resources").admission
+mark_admission = _sibling("ade_coord_resources").mark_admission
 
 def native(*args):
     started = time.monotonic()
@@ -125,6 +126,7 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             with db:
                 db.execute("INSERT INTO handoff_attempts VALUES (?,?,?,?,?,NULL,'pending',NULL)",(role,attempt,initial["record"]["ownership_epoch"],json.dumps(intent,sort_keys=True),checkpoint))
         def finish(current):
+            mark_admission(root,role,intent["initial"]["record"],"retired",attempt)
             with db:
                 db.execute("UPDATE handoff_attempts SET status='transferred',result=? WHERE role=? AND attempt=?",(json.dumps(current,sort_keys=True),role,attempt))
             result=project(current,cfg)
@@ -170,6 +172,27 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             raise CoordinationError("SUCCESSOR_NO_LONGER_ENROLLED")
         if current["record"]["owner"] != prior["owner"] or current["record"]["ownership_epoch"] != prior["ownership_epoch"]:
             raise CoordinationError("HANDOFF_AUTHORITY_CHANGED")
+        mark_admission(root,role,prior,"draining",attempt)
+        def verify_resources():
+            read_claim = _sibling("ade_claims").read_claim
+            bindings = {claim:binding for claim,binding in cfg["claims"].items() if binding["role_id"] == role}
+            resources = sorted({path for binding in bindings.values() for path in binding["resources"]})
+            if resource_free:
+                marked=local_role_claims(role)
+                if resources or bindings or marked or current["record"]["bindings"]:
+                    raise CoordinationError("RESOURCE_FREE_SCOPE_MISMATCH")
+            elif resources != intent["resources"] or sorted(current["record"]["bindings"]) != intent["resources"] or not bindings:
+                raise CoordinationError("ALL_BOUND_RESOURCES_REQUIRED")
+            jobs = Resources(root / "jobs")
+            try:
+                for claim_id,binding in bindings.items():
+                    claim = read_claim(claim_id)
+                    if not claim or claim.get("coordination") != {"role_id":role,"generation":cfg["generation"]} or claim["owner"]["agent"] != prior["owner"]["agent"] or claim["path"] not in binding["resources"]:
+                        raise CoordinationError("CLAIM_PROJECTION_MISMATCH")
+                    if not jobs.quiescence(claim_id, prior)["jobs_stopped"]:
+                        raise CoordinationError("TRACKED_JOBS_NOT_QUIESCENT")
+            finally:
+                jobs.close()
         if current["record"]["state"] == "active":
             if current != initial:
                 raise CoordinationError("INITIAL_ROLE_REVISION_CHANGED")
@@ -183,25 +206,9 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             if evidence.get("draining_revision",current["revision"]) != current["revision"]:
                 raise CoordinationError("DRAINING_REVISION_CHANGED")
             evidence["draining_revision"] = current["revision"]; save()
-            read_claim = _sibling("ade_claims").read_claim
-            bindings = {claim:binding for claim,binding in cfg["claims"].items() if binding["role_id"] == role}
-            resources = sorted({path for binding in bindings.values() for path in binding["resources"]})
-            if resource_free:
-                marked=local_role_claims(role)
-                if resources or bindings or marked or current["record"]["bindings"]:
-                    raise CoordinationError("RESOURCE_FREE_SCOPE_MISMATCH")
-            elif resources != intent["resources"] or not bindings:
-                raise CoordinationError("ALL_BOUND_RESOURCES_REQUIRED")
-            jobs = Resources(root / "jobs")
-            try:
-                for claim_id,binding in bindings.items():
-                    claim = read_claim(claim_id)
-                    if not claim or claim.get("coordination") != {"role_id":role,"generation":cfg["generation"]} or claim["owner"]["agent"] != prior["owner"]["agent"] or claim["path"] not in binding["resources"]:
-                        raise CoordinationError("CLAIM_PROJECTION_MISMATCH")
-                    if not jobs.quiescence(claim_id, prior)["jobs_stopped"]:
-                        raise CoordinationError("TRACKED_JOBS_NOT_QUIESCENT")
-            finally:
-                jobs.close()
+            verify_resources()
+            if _sibling("ade_coord_wake").blockers(cfg,role,prior["ownership_epoch"]):
+                raise CoordinationError("WAKE_OUTCOME_UNKNOWN")
             operations = protocol("shared-operation list", {"role_id":role},cfg=cfg)
             if any(op["record"]["state"] == "UNKNOWN" for op in operations):
                 raise CoordinationError("SHARED_OPERATION_UNKNOWN")
@@ -231,6 +238,7 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
                 if same_process(inspect(identity["pid"]), identity):
                     raise CoordinationError("PROVIDER_PROCESS_STILL_PRESENT")
             census_evidence = {}
+            resources=intent["resources"]
             for path in resources:
                 if not Path(path).is_absolute() or not Path(path).is_dir():
                     raise CoordinationError("RESOURCE_PATH_UNAVAILABLE")
@@ -246,6 +254,7 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
         if current["record"]["state"] in ("quiescent","checkpointed"):
             if not evidence.get("checkpoint") or current["record"].get("quiescence",{}).get("prior_revision") != evidence.get("draining_revision"):
                 raise CoordinationError("PERSISTED_RETIREMENT_EVIDENCE_REQUIRED")
+            verify_resources()
             # Recheck evidence at resumption; saved booleans do not hide a new
             # process, restored object, unknown operation or unclosed runtime.
             retired = native_call("inspect",prior["owner"]["agent"])
@@ -257,6 +266,8 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             if any(users(path) for path in intent["resources"]):
                 raise CoordinationError("WORKSPACE_PROCESS_USERS_REMAIN")
             protocol("artifact read", {"artifact":evidence["checkpoint"]},cfg=cfg)
+            if _sibling("ade_coord_wake").blockers(cfg,role,prior["ownership_epoch"]):
+                raise CoordinationError("WAKE_OUTCOME_UNKNOWN")
             if any(op["record"]["state"] == "UNKNOWN" for op in protocol("shared-operation list",{"role_id":role},cfg=cfg)):
                 raise CoordinationError("SHARED_OPERATION_UNKNOWN")
             if current["record"]["state"] == "quiescent":

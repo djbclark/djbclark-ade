@@ -9,6 +9,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
 import json
+import hashlib
+import tempfile
 import os
 from pathlib import Path
 import sqlite3
@@ -88,6 +90,23 @@ def admission(directory):
         yield
     finally:
         os.close(fd)
+
+
+def mark_admission(directory, role, record, state, attempt):
+    """Durable deny marker for the waiting provider-open hook, never a grant."""
+    directory=Path(directory)
+    target=directory/("admission-"+hashlib.sha256(role.encode()).hexdigest()+".json")
+    value={"role_id":role,"generation":record["generation"],"owner":record["owner"],"ownership_epoch":record["ownership_epoch"],"state":state,"attempt_id":attempt}
+    fd,temp=tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd,"w") as stream:
+            json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+        os.replace(temp,target)
+        parent=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(parent)
+        finally:os.close(parent)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
 
 
 class Resources:

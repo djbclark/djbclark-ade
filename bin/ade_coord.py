@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _sibling(name):
     import importlib.util
     import sys
-    if name not in {"ade_claims", "ade_coord_resources", "ade_coord_handoff"}:
+    if name not in {"ade_claims", "ade_coord_resources", "ade_coord_handoff", "ade_coord_wake"}:
         raise CoordinationError("UNSUPPORTED_SIBLING")
     path = Path(__file__).resolve().with_name(name + ".py")
     found = sys.modules.get(name)
@@ -246,7 +246,8 @@ def pump(role):
         validate_assignment(item["record"]["report"], cfg)
         call("inbox intake", {**request, "message_id": item["record"]["report"]["message_id"]}, cfg=cfg)
         count += 1
-    return {"role_id": role, "ADE_inbox_recorded": count, "processed": False}
+    notification = _sibling("ade_coord_wake").wake(cfg,role)
+    return {"role_id": role, "ADE_inbox_recorded": count, "processed": False, "wake": notification}
 
 
 def validate_assignment(report, cfg):

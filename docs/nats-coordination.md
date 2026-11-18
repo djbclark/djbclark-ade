@@ -83,11 +83,10 @@ base64 for caller materialization; a local path alone is never an artifact ref.
 intake pass; it checks producer assignment and current local authority, verifies
 artifacts, records durable intake and never dispositions. The optional plugin
 runs this bounded pass at startup and every 30 seconds, coalescing concurrent
-passes per role. This is machine work, not recurring model prompts. No automatic
-prompt wakes are installed in this unit: durable inbox is the truth and manual
-reads are the first usable path. Adding notification wakes later must coalesce
-them and preserve the ownership/archive fence. Goal completion still requires
-approved live pilot/controller evidence, not this source alone.
+passes per role. This is machine work, not recurring model prompts. Opt-in wake:true now enables coalesced notifications under the ownership/archive
+fence; it defaults off until pilot approval. Durable inbox remains the truth and
+queued notifications never mean intake or processing. Goal completion still
+requires approved live pilot/controller evidence, not this source alone.
 
 ## Shared external-operation intent
 
@@ -156,9 +155,10 @@ CAS uses persisted quiescence/checkpoint proof. A lost transfer reply reconciles
 owner/epoch and checkpoint provenance, never blindly increments epoch again.
 Projection repair is idempotent after authoritative transfer.
 
-Cross-host writer retirement/resource migration is deliberately unsupported by
-this first gate: it blocks rather than inventing remote census or ownership.
-This does not block NATS artifact/report retrieval across independent clients.
+Nonempty cross-host resource migration remains unsupported and blocks rather
+than inventing remote census. Explicitly resource-free roles may transfer to an
+approved remote successor after the prior local runtime is retired; that is not
+filesystem migration. NATS artifacts/reports remain retrievable independently.
 The explicit pilot excludes arbitrary untracked filesystem writes; no hard
 filesystem fencing guarantee is made. Further adapters can supply independently
 verified remote retirement/census under the same evidence contract.
@@ -209,8 +209,9 @@ a silent overwrite. It accepts no arbitrary output path or source-resource grant
 ## Audited plugin compatibility and enrolled role brief
 
 The actual beta.2 agent.open.before strict schema permits only env/tools/MCP
-changes. The plugin contributes role/instruction-path environment only, including
-history opens without changing the target. It does not append a system prompt.
+changes. The plugin contributes role/instruction-path environment only for interactive
+opens. Provider history opens are authority-fenced but receive no additions.
+It does not append a system prompt.
 Supply this explicit role brief through the supported agent creation prompt:
 
 > This role uses the durable ADE inbox. Read docs/nats-coordination.md. Routine
@@ -240,9 +241,14 @@ shared reference checkout, change global PATH, or switch global plugin enforceme
 Sibling modules load from trusted absolute __file__ paths, including Python -I
 callbacks after temporary path restoration; no cwd/PYTHONPATH dependency is added.
 
+Pilot default (operator-selected conservative option1): ordinary edits within
+already-authorized scope, already-running jobs and report buffering may continue.
+Git mutations and NEW managed job launches wait for NATS. This wave adds no
+cached-grant engine or expanded offline authority.
+
 Offline allowed: inspect local outbox/evidence and already materialized artifacts;
 persist report intent/artifact bytes and completion reports as local-buffered;
-read local history with no new role grant; an already admitted process can finish
+read local transcript/cache files without starting a provider; an already admitted process can finish
 its existing computation and record observed process/group exit locally. Local
 operation notes remain UNKNOWN and cannot authorize an external retry.
 
@@ -297,3 +303,60 @@ current managed consumer. If the boundary is unavailable, completion can still
 return verified local-buffered; it does not silently use a stale inherited token.
 Offline inspection/local journaling executes a sanitized child without credentials.
 No daemon or unrelated agent is restarted by this mechanism.
+
+## Opt-in machine wakes and recovery
+
+Set wake:true on an enrolled local role to enable notifications; default is off.
+Each pass re-resolves the active role, local host/server and daemon serverId,
+inspects the exact current native owner, refuses archived/replaced/wrong-daemon
+targets and defers busy or permission-blocked owners. The common admission barrier
+serializes this native-send seam with controlled drain/retirement.
+
+The journal coalesces by generation/owner/epoch and pending-report sequence
+high-water, so removals/unchanged reports do not repeatedly prompt. A new owner
+epoch can receive one wake for retained unfinished reports. Local intent commits
+before a same-stream shared operation intent, then before native send. Queued,
+sent and completed native statuses mean acceptance of a notification only: they
+never create an intake/processed receipt or imply understanding. Model processing
+still requires explicit inbox disposition under current authority.
+
+Unknown responses are never automatically resent. Local RESERVED/UNKNOWN and
+accepted-but-ledger-unreconciled wakes block handoff; shared UNKNOWN also survives
+host changes and blocks core quiescence. `wake status` takes `{role_id}` and reads
+safe retained evidence. `wake reconcile` takes `{wake_id,state,result,evidence}`
+with endpoint-confirmed SUCCEEDED or NOT_APPLIED. Only an explicit rearm:true
+alongside verified NOT_APPLIED permits another attempt; all old evidence remains.
+This is an operator/endpoint decision, not an arbitrary retry engine. Already
+resolved authoritative operation results cannot be overwritten. Standalone
+controller timers perform machine work only; when there are no new reports there
+is no model prompt. Remote host controllers handle their own local owner, never
+send an agent ID blindly to another daemon.
+
+Plugin tests use the audited beta.2 strict shape, real signal-resistant local
+children in Linux CI, synthetic native wake transports and real broker shared
+operation/receipt fences. No real agent is messaged during implementation. Actual
+Paseo wake/retirement and two-host behavior remain rollout evidence for root.
+
+## Queued-old-wake provider-open fence
+
+The waiting open hook checks authoritative active owner/host/server for both
+interactive and provider-history opens, and checks a durable deny-only admission
+marker before/after the lookup. The gate atomically writes that marker before
+drain and retains it for the retired epoch. A stale alias, nonactive role or
+matching draining marker throws before the provider opens. A newer owner epoch
+still needs its own fresh broker grant; the old marker never grants authority.
+Direct local transcript/cache reads remain offline-readable, but enrolled provider
+history reopen is deferred offline just like other provider starts.
+
+Root audited exact beta.2 commit23bae61535542a45ade7196a7b3c152705f16de3:
+AgentManager.runLifecycleMutation2956 serializes create1484, import1498,
+resume1630, reload1838, close2126, archive2203 and history-upgrade3165.
+Thus a pre-marker in-flight native opening is completed before archive closes
+that runtime; an opening queued afterward must pass the new waiting hook.
+Source: [agent-manager.ts](https://github.com/getpaseo/paseo/blob/23bae61535542a45ade7196a7b3c152705f16de3/packages/server/src/server/agent/agent-manager.ts#L2956).
+This does not prove detached descendants dead; all job/census/operation checks
+remain separate. No live-agent test or provider opening was performed here.
+
+The plugin minimum is >=0.16.0-beta.2, the audited compatible prerelease, rather
+than a stable-only minimum that might reject the running beta. This is a lower
+compatibility bound, not a software version pin or permission to upgrade/restart.

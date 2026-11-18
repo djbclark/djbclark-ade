@@ -30,6 +30,12 @@ def native(*args):
 
 def protocol(command,body,**kwargs):
     value=call(command,body,**kwargs)
+    phase=os.environ.get("ADE_TEST_PHASE_CRASH")
+    if command=="role transition" and body.get("state")==phase:
+        marker=Path(cfg["state_dir"])/("phase-crash-"+phase+"-"+request["attempt_id"])
+        if not marker.exists():
+            marker.write_text("actual broker phase committed before controller death")
+            raise CoordinationError("INJECTED_PHASE_CRASH")
     # A real committed state change whose client response is lost.
     if command in ("role transition","role transfer"):
         lost=Path(cfg["state_dir"])/("lost-"+command.replace(" ","-")+"-"+request["attempt_id"])
@@ -48,6 +54,16 @@ if os.environ.get("ADE_TEST_PROJECTION_CRASH") == request["attempt_id"]:
             raise CoordinationError("INJECTED_PROJECTION_CRASH")
         return original_project(current,config)
     module.project=crash_project
+
+if os.environ.get("ADE_TEST_ADMISSION_READY"):
+    import contextlib
+    import ade_coord_handoff as module
+    original_admission=module.admission
+    @contextlib.contextmanager
+    def announced(directory):
+        print("WAITING_ADMISSION",file=sys.stderr,flush=True)
+        with original_admission(directory):yield
+    module.admission=announced
 
 try:
     result=transfer(request,cfg=cfg,native_call=native,protocol=protocol)

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { homedir } from "node:os";
 import { join, delimiter } from "node:path";
 import { readFileSync } from "node:fs";
@@ -13,6 +15,19 @@ function configuration() {
   }
   try { return {...JSON.parse(readFileSync(file,"utf8")),_adeConfigPath:file}; } catch { throw new Error("ADE enrollment unavailable"); }
 }
+function admissionMarker(cfg,role) {
+  if(!cfg.state_dir)throw new Error("Enrolled admission state directory required");
+  const path=join(cfg.state_dir,"admission-"+createHash("sha256").update(role).digest("hex")+".json");
+  try{
+    const value=JSON.parse(readFileSync(path,"utf8"));
+    if(value.role_id!==role||typeof value.generation!=="string"||!value.owner||(!Number.isSafeInteger(value.ownership_epoch)||value.ownership_epoch<1)||!['host','server','agent'].every(key=>typeof value.owner[key]==='string'&&value.owner[key])||!["draining","retired"].includes(value.state))throw new Error();
+    return value;
+  }catch(error){if(error.code==="ENOENT")return null;throw new Error("Enrolled admission marker unavailable");}
+}
+function assertAdmission(marker,current) {
+  if(marker&&marker.generation===current.record.generation&&marker.ownership_epoch===current.record.ownership_epoch&&isDeepStrictEqual(marker.owner,current.record.owner))throw new Error("Enrolled role admission is draining or retired");
+}
+
 export function execute(argv,input,{signal,timeoutMs=30000,killGraceMs=2000}={}) {
   return new Promise((resolve,reject)=>{
     const allowed=new Set(["PATH","HOME","XDG_CONFIG_HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","TMP","TEMP","ADE_NATS_URL","ADE_COORD_CONFIG","ADE_COORD_NODE","ADE_COORD_ENROLLMENT_MARKER","ADE_STATE_DIR","ADE_COORD_METRICS","PASEO_HOME","PASEO_DAEMON_HOME"]);
@@ -56,13 +71,16 @@ export function contribute(server,deps={}) {
     }
   };
   const remove=server.addHook("agent.open.before",async({request})=>{
-    if(request.purpose==="history")return; // Read-only history obtains no grant.
     const cfg=read(); const enrolled=request.labels?.["ade.coord.role"];
     const role=enrolled??cfg?.aliases?.[request.agentId];
     if(!role) return;
     if(!cfg?.roles?.[role]) throw new Error("Enrolled role configuration missing");
+    const before=admissionMarker(cfg,role);
     const current=await run([driver,"role","get"],{role_id:role},{signal:abort.signal});
-    if(current?.record?.state!=="active"||current.record.owner.agent!==request.agentId) throw new Error("Current active enrolled role authority required");
+    if(current?.record?.state!=="active"||current.record.owner.agent!==request.agentId||current.record.owner.host!==cfg.identity?.host||current.record.owner.server!==cfg.identity?.server) throw new Error("Current active local enrolled role authority required");
+    assertAdmission(before,current);assertAdmission(admissionMarker(cfg,role),current);
+    if(request.purpose==="history")return; // Provider history reopen is fenced too; no new env grant.
+
     // beta.2's real strict schema permits env/tools/mcpServers only. The
     // enrolled role brief is supplied explicitly at creation, never here.
     return {...request,env:{...request.env,ADE_COORD_ROLE:role,ADE_COORD_CONFIG:cfg._adeConfigPath??request.env.ADE_COORD_CONFIG??process.env.ADE_COORD_CONFIG??"",PATH:fileURLToPath(new URL("../../libexec/agent-bin",import.meta.url))+delimiter+(request.env.PATH??process.env.PATH??""),ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
