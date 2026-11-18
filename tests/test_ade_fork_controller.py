@@ -637,7 +637,7 @@ def test_python_preexec_manifest_verifier_real_protected_inventory(tmp_path):
     """CI-only root-owned disposable tree, no Node execution or runtime qualification."""
     import uuid
     if sys.platform!='linux':pytest.fail('finite adapter regression requires Linux CI')
-    root=Path('/opt')/('ade-controller-unit-'+uuid.uuid4().hex)
+    root=Path('/var/lib')/('ade-controller-unit-'+uuid.uuid4().hex)
     staging=tmp_path/'distribution';staging.mkdir()
     paths=['runtime/node','runtime/esbuild','cli-entry.mjs','daemon.mjs','plugin-child-entry.mjs','compiler-entry.mjs','terminal-entry.mjs']
     files=[]

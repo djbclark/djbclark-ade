@@ -312,7 +312,7 @@ or missing/changed bridge/HOME qualification remains unsupported. No new manifes
 role brand, authority flag or journal is introduced.
 
 Parser/identity tests use clearly synthetic wire facts; a separate CI test checks
-actual disposable root-owned /opt inventory bytes without executing its dummy
+actual disposable root-owned /var/lib inventory bytes without executing its dummy
 Node. These do not qualify a production host. Root owns the real integrated
 producer/native/evaluator A-to-B-to-A proof, and the proposed wire must still be
 implemented/reviewed in that exact distribution before any real support can pass.
