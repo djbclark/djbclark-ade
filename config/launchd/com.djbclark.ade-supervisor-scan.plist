@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Supervisor Pi-stuck scan, every 5 minutes: a zero-token host script (no model prompt), one `paseo ls`, one
+     `aiuse --available` and the `paseo agent inspect` calls bin/ade_send_guard.py needs (the target, and after a
+     handoff its successor, up to the end of the chain), then at most ONE `paseo send` per run, naming every new
+     finding (deduped in the state dir).
+     Inventoried in config/ade.toml [install.jobs] as `ade-supervisor-scan`; install command in docs/scheduling.md.
+     Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__ and __ADMISSION__; the lead is not a placeholder (see the
+     script header: ADE_SUPERVISOR_LEAD or __STATE__/lead), so the job renders and reconciles without one. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.ade-supervisor-scan</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.ade-supervisor-scan</string><string>--</string>
+    <string>__ADE__/bin/ade-supervisor-scan</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>RELAY_SENDER_NAME</key><string>ade-supervisor-scan</string>
+    <key>ADE_SUPERVISOR_STATE_DIR</key><string>__STATE__</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/scan.out</string>
+  <key>StandardErrorPath</key><string>__STATE__/scan.err</string>
+</dict>
+</plist>

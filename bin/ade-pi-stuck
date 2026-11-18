@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""ade-pi-stuck: list live Pi agents and flag any whose billing account is quota-exhausted.
+
+Usage: ade-pi-stuck [--json]
+
+Read-only. Maps each live Pi agent's model to a billing account, cross-references
+aiuse/paseo quota, and flags agents on an account with no headroom. For each stuck
+agent prints a comparable healthy alternative (for a re-handoff). The actual switch
+(archive + relaunch + tell-to-continue) is a separate gated action, not this script.
+
+Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
+others are cross-checked against aiuse pools when a clean mapping exists. The
+supervisor refines this as it learns account->quota mappings.
+"""
+import json, re, subprocess, sys
+
+def j(cmd, timeout=30, ok=(0,)):
+    """Run a JSON-producing command. `ok` lists accepted exit codes: aiuse exits 3 when every pool is unusable but
+    still prints its JSON, and refusing that read would report every exhausted account except the known-empty ones
+    as healthy (fail open)."""
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode not in ok:
+        raise RuntimeError(f"{cmd[0]} exited {r.returncode}: {r.stderr.strip()[:200]}")
+    return json.loads(r.stdout)
+
+def account_of(model):
+    if not model:
+        return "unknown"
+    for pre in ("openrouter/","opencode-go-djbclark/","opencode-go-t-e/","opencode-go/",
+                "clinepass/","cursor/","anthropic/","google/","openai/","deepseek/","qwen/"):
+        if model.startswith(pre):
+            return pre.rstrip("/")
+    return model.split("/")[0] if "/" in model else model
+
+# aiuse pool_id -> Pi billing account prefix.  Deliberately explicit: two
+# pools can share a vendor (openai:codex is the Codex CLI subscription, NOT the
+# Pi prepaid "openai" account; the opencode:go pools are not name-mappable to a
+# single account).  A pool whose provider is not listed here never marks an
+# account exhausted.
+POOL_TO_ACCOUNT = {
+    "openai:openai_api": "openai",
+    "anthropic:subscription": "anthropic",
+    "anthropic:fable": "anthropic",
+    "google:gemini": "google",
+    "google:gemini_argon": "google",
+    "clinepass:default": "clinepass",
+}
+
+# Accounts the operator has confirmed empty.  Only a fresh reading that shows
+# positive headroom can clear one: a stale reading is not evidence of balance
+# (2026-11-17: openai prepaid reported 28.8% from a 21 h old reading while the
+# real Credit Grants balance was 217/217 inactive, i.e. $0).
+KNOWN_EMPTY = {"openai"}
+
+# Below this, an account is thin enough to flag before it hits zero.
+LOW_HEADROOM_PERCENT = 10.0
+
+# Statuses that mean the agent is not running and cannot be re-handoff-ed as it stands: `error` is what
+# bin/ade-progress treats as dead, so flagging one "stuck on an exhausted account" would be noise.
+NOT_LIVE = ("closed", "archived", "error")
+
+
+def quota_by_account(avail):
+    """Return {account: {"headroom": %, "usable": bool, "stale": bool, "pool": id}}.
+
+    Reads aiuse JSON schema >=1.6, whose pools live in the "available" array
+    (older drafts used a "pools" dict).  The *worst* pool for an account wins.
+    """
+    pools = avail.get("available")
+    if pools is None:
+        pools = list((avail.get("pools") or {}).values())
+    out = {}
+    for p in pools or []:
+        if not isinstance(p, dict):
+            continue
+        acct = POOL_TO_ACCOUNT.get(str(p.get("pool_id")))
+        if not acct and str(p.get("pool_id")) == "opencode:go":
+            # One pool_id, three billing accounts; aiuse's account field names
+            # them (djbclark / t-e / dclark) and Pi prefixes them opencode-go-<acct>.
+            name = p.get("account")
+            if name:
+                acct = f"opencode-go-{name}"
+        if not acct:
+            continue
+        hr = p.get("headroom_percent")
+        usable = p.get("usable_now")          # absent or null is not a "usable" reading: fail closed below
+        stale = bool(p.get("stale"))
+        rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
+        prev = out.get(acct)
+        # The worst pool wins: an unusable pool first, then the lowest headroom (an unread one counts as worst).
+        if prev is None or _badness(rec) < _badness(prev):
+            out[acct] = rec
+    return out
+
+
+def _badness(rec):
+    """Sort key: smaller is a worse pool for its account."""
+    # An unusable pool outranks a readable one, and an unread pool is the worst of all: nothing vouches for it.
+    return (0 if rec["usable"] is not True else 1, -1.0 if rec["headroom"] is None else rec["headroom"])
+
+
+# A model's last path segment decides whether it is a low-effort tier. Matched as a token, not a substring: a
+# substring "mini" would also match every "gemini" model.
+LOW_EFFORT_RE = re.compile(r"(?:^|[-_/])(luna|flash|haiku|mini|lite)(?:[-_.]|$)", re.I)
+
+# Candidate alternatives in preference order, by effort tier. `alt()` skips the agent's own account and any
+# exhausted one, so a re-handoff never lands on the account that just ran dry.
+ALT_CANDIDATES = {
+    True: ("opencode-go-t-e/deepseek-v4.1-flash", "opencode-go-djbclark/deepseek-v4.1-flash",
+           "opencode-go-t-e/deepseek-v4-pro", "opencode-go-djbclark/deepseek-v4-pro"),
+    False: ("opencode-go-t-e/deepseek-v4-pro", "opencode-go-djbclark/deepseek-v4-pro",
+            "opencode-go-t-e/deepseek-v4.1-flash", "opencode-go-djbclark/deepseek-v4.1-flash"),
+}
+
+
+def low_effort(model):
+    return bool(LOW_EFFORT_RE.search((model or "").rsplit("/", 1)[-1]))
+
+
+def alt(model, acct, exhausted, accounts):
+    """A comparable model under a *different* account that is not exhausted, or None when there is none.
+
+    An account with a fresh reading above the thin line is preferred; one with no reading, or only a stale or thin
+    one, is offered only when nothing better exists (the switch is gated and re-checked, but a re-handoff must not be
+    aimed at an account that is probably dry)."""
+    known_healthy, unread = [], []
+    for cand in ALT_CANDIDATES[low_effort(model)]:
+        cand_acct = account_of(cand)
+        if cand_acct == acct or cand == model or cand_acct in exhausted:
+            continue
+        rec = accounts.get(cand_acct) or {}
+        headroom = rec.get("headroom")
+        if rec.get("usable") is False:
+            continue          # explicitly unusable; a record with no usable reading stays a last resort
+        if headroom is not None and headroom <= LOW_HEADROOM_PERCENT:
+            continue          # thin, empty or negative, stale or not: never a re-handoff target
+        readable = not rec.get("stale") and headroom is not None and headroom > LOW_HEADROOM_PERCENT
+        (known_healthy if readable else unread).append("pi/" + cand)
+    return (known_healthy or unread or [None])[0]
+
+def main():
+    as_json = "--json" in sys.argv
+    # --background: without it a Pi agent in a background workspace is left out and never flagged (ade-progress,
+    # context-watch and ade-update-auto all pass it for that reason).
+    agents = j(["paseo","ls","-g","--background","--json"])
+    rows = agents if isinstance(agents, list) else agents.get("agents", [])
+    # Operator-known baseline: OpenAI prepaid was at $0.  Treat it as suspect
+    # only until a fresh aiuse reading says otherwise (a stale/absent reading
+    # must not flap every openai agent).
+    exhausted = set()
+    accounts = {}
+    quota_error = None
+    try:
+        avail = j(["aiuse","--available","--json"], ok=(0, 3))
+        accounts = quota_by_account(avail)
+        # Default False: aiuse >= 1.6 always emits `fresh`, and an absent flag must not be read as "this
+        # reading is fresh" — that would clear a known-empty account on a stale balance.
+        fresh = avail.get("fresh", False)
+        for acct, rec in accounts.items():
+            bad = rec["usable"] is not True or (rec["headroom"] is not None and rec["headroom"] <= 0)
+            # Fail closed, deliberately: any pool reading zero or unusable marks its account exhausted, stale or not —
+            # a false alarm is recoverable, a missed exhaustion leaves an agent wedged. Only a *fresh* positive reading
+            # on a known-empty account can clear one (below).
+            if bad:
+                exhausted.add(acct)
+            # Fail closed on a known-empty account: stale/suspect readings never
+            # clear it, only a fresh positive balance does.
+            if acct in KNOWN_EMPTY and not (
+                fresh and not rec["stale"] and (rec["headroom"] or 0) > 0
+            ):
+                exhausted.add(acct)
+        for acct in KNOWN_EMPTY:
+            if acct not in accounts:
+                exhausted.add(acct)
+        low = sorted(
+            a for a, r in accounts.items()
+            if a not in exhausted and r["headroom"] is not None
+            and r["headroom"] <= LOW_HEADROOM_PERCENT
+        )
+    except Exception as exc:
+        # Fail closed, and say so: without the reading every account except the known-empty ones is unread, and a
+        # caller (ade-supervisor-scan) must be able to tell "all healthy" from "I could not look".
+        exhausted = set(KNOWN_EMPTY)
+        accounts = {}          # a partial reading is not used either: alt() and the per-agent headroom must not
+        low = []               # come from a pass that failed half-way
+        quota_error = str(exc)[:200] or exc.__class__.__name__
+    out = []
+    for a in rows:
+        prov = a.get("provider") or ""
+        # "pi/<account>/<model>" only: a bare startswith("pi") would also take any provider merely named "pi…".
+        if not prov.startswith("pi/"):
+            continue
+        # paseo ls provider is "pi/<account>/<model>" (e.g. pi/openai/gpt-6.1-sol)
+        rest = prov[3:] if prov.startswith("pi/") else prov
+        model = rest
+        acct = account_of(rest)
+        status = a.get("status") or ""
+        stuck = acct in exhausted and status not in NOT_LIVE
+        q = accounts.get(acct) or {}
+        out.append({"id": a.get("id"), "name": a.get("name"), "model": model,
+                    "account": acct, "status": status, "stuck": stuck,
+                    "headroom_percent": q.get("headroom"),
+                    "quota_stale": q.get("stale"),
+                    "alternative": alt(model, acct, exhausted, accounts) if stuck else None})
+    stuck = [o for o in out if o["stuck"]]
+    live = [o for o in out if o["status"] not in NOT_LIVE]
+    # An account with no aiuse mapping (a bare `opencode-go/` provider names no billing sub-account) cannot be judged:
+    # say so instead of showing a bare "?" that reads as healthy.
+    unmapped = sorted({o["account"] for o in live
+                       if o["account"] not in accounts and o["account"] not in KNOWN_EMPTY and o["account"] != "unknown"}) \
+        if not quota_error else []      # an unread quota is the quota_error alert, not a mapping finding per account
+    if as_json:
+        print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
+                          "exhausted": sorted(exhausted), "low": low, "unmapped": unmapped,
+                          "quota_error": quota_error}, indent=1))
+    else:
+        for o in out:
+            hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
+            print(f"{'STUCK' if o['stuck'] else 'ok   '}  {o['account']:22} {o['status']:9} {hr}% {o['model']:38} {o['id']}")
+            if o["stuck"]:
+                print(f"        -> switch to {o['alternative']}" if o["alternative"]
+                      else "        -> no healthy alternative found")
+        for acct in unmapped:
+            print(f"\nno quota mapping for account {acct}: its agents cannot be judged")
+        if quota_error:
+            print(f"\nquota read failed ({quota_error}): only the known-empty accounts are flagged")
+        print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

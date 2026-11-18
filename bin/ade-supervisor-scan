@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on an
+# exhausted account (or an account is thin, or the scan cannot read quota), it sends
+# at most one message per run naming every new finding to the lead named in
+# ADE_SUPERVISOR_LEAD, or failing that in $STATE_DIR/lead (one Paseo agent id). The
+# plist and its config/ade.toml inventory row carry no lead at all, so `ade-sched
+# diff`/`reconcile` render the job and a lead handoff cannot leave a stale id in a
+# template; docs/scheduling.md says how to write the file.
+#
+# The recipient is decided first, by the repo's own guard (bin/ade_send_guard.py,
+# ls-02): it refuses an archived lead (a delivery would un-archive it) and redirects
+# to the recorded successor after a lead self-handoff. Dedupe keys are namespaced by
+# that recipient, so a successor is told everything once and nothing twice, and a
+# failed send keeps its keys for the next run instead of losing or repeating them.
+# Every degraded path (no lead, a bad lead id, a broken scan, an unreadable quota
+# read) alerts once and keeps what it already knew. Never a model prompt; always
+# exits 0, so launchd stays quiet.
+set -uo pipefail
+STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
+LEAD="${ADE_SUPERVISOR_LEAD:-}"
+lead_from_env=1
+if [ -z "$LEAD" ]; then
+    lead_from_env=0
+    LEAD="$(head -1 "$STATE_DIR/lead" 2>/dev/null || true)"
+fi
+mkdir -p "$STATE_DIR"
+LOG="$STATE_DIR/supervisor.log"
+NOTIFIED="$STATE_DIR/notified"
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+ping_operator_once() {   # once per cause per outage; only a successful ping marks it as reported
+    local cause="$1" slug="$2" hint="${3:-check the lead and Paseo, then docs/scheduling.md}"
+    local marker="$STATE_DIR/.lead-unreachable.$slug"
+    [ -f "$marker" ] && return 0
+    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($cause); $hint" >>"$LOG" 2>&1; then
+        : >"$marker"
+    else
+        printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
+    fi
+}
+
+case "$LEAD" in
+    "") # nothing configured
+        printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md\n' \
+            "$(now)" "$STATE_DIR" >>"$LOG"
+        ping_operator_once "no lead is configured" no-lead "write the lead id to $STATE_DIR/lead (docs/scheduling.md)"
+        exit 0
+        ;;
+    -*) LEAD="" ;;                                       # a value starting with "-" would be read as an option
+    *[!A-Za-z0-9._:-]*) LEAD="" ;;                       # Paseo ids are UUIDs: nothing else is a target
+esac
+if [ -z "$LEAD" ]; then
+    printf '%s ade-supervisor-scan: the lead value in ADE_SUPERVISOR_LEAD or %s/lead is not an agent id\n' \
+        "$(now)" "$STATE_DIR" >>"$LOG"
+    ping_operator_once "the configured lead is not an agent id" bad-lead \
+        "write a Paseo agent id to $STATE_DIR/lead (docs/scheduling.md)"
+    exit 0
+fi
+
+# Who gets the notice? The guard refuses an archived lead and reports a replacement.
+GUARD="$(cd "$(dirname "$0")" && pwd)/ade_send_guard.py"
+[ -f "$GUARD" ] || GUARD="$HOME/src/djbclark-ade/bin/ade_send_guard.py"
+guard_json="$(python3 "$GUARD" "$LEAD" 2>>"$LOG")"
+guard_rc=$?
+field() {   # one field of the guard's JSON decision
+    printf '%s' "$guard_json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get(sys.argv[1]) or "")' "$1" 2>>"$LOG"
+}
+guard_target="$(field target)"
+guard_reason="$(field reason)"
+send_to=""
+refused=""
+marker=""
+case "$guard_rc" in
+    0) send_to="$LEAD" ;;
+    3) case "$guard_target" in
+           ''|-*|*[!A-Za-z0-9._:-]*) refused="the replacement lead id \"$guard_target\" is unusable" ;;
+           *) send_to="$guard_target"
+              marker="$STATE_DIR/.redirect-noted.$(printf '%s' "$LEAD---$send_to" | tr -c 'A-Za-z0-9._-' '_')"
+              if [ ! -f "$marker" ]; then
+                  printf '%s ade-supervisor-scan: lead %s was replaced; following the handoff to %s (%s)\n' \
+                      "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+                  if [ "$lead_from_env" -eq 1 ]; then
+                      printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD still names %s; update it to %s\n' \
+                          "$(now)" "$LEAD" "$send_to" >>"$LOG"
+                  else
+                      printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"
+                  fi
+              fi
+              ;;
+       esac ;;
+    *) refused="${guard_reason:-the guard refused}" ;;
+esac
+
+SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
+[ -x "$SCAN" ] || SCAN="$HOME/src/djbclark-ade/bin/ade-pi-stuck"
+# bin/ade-pi-stuck's stderr is kept out of the JSON it prints: a warning merged into stdout would make every run
+# unparseable. It goes to the log instead.
+err="$STATE_DIR/.scan-stderr.$$"
+json="$("$SCAN" --json 2>"$err")"
+scan_rc=$?
+[ -s "$err" ] && cat "$err" >>"$LOG"
+rm -f "$err"
+
+# Dedupe state: `notified` holds every key already told, each namespaced by the recipient it was told to
+# ("<recipient>|<agent id>|<account>", or "<recipient>|scan|broken" and so on). The pending file is the key set this
+# run produced; it replaces the state only once the notice is accepted (or when there was nothing to send), so a failed
+# send retries next run and a condition that clears frees its key. A degraded run cannot re-check anything, so it keeps
+# the keys it already had.
+pending="$STATE_DIR/.notified.$$"
+msg="$(printf '%s' "$json" | python3 -c '
+import json, sys
+notified_path, pending_path, scan_rc, recipient = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+try:
+    d = json.load(sys.stdin) if scan_rc == 0 else None
+except Exception:
+    d = None
+if not isinstance(d, dict):
+    d = None
+try:
+    raw_told = json.load(open(notified_path))
+    told = set(raw_told) if isinstance(raw_told, list) else set()      # a corrupt file is empty, never a set of its characters
+except Exception:
+    told = set()
+items = []                                  # (key, text): every condition true now; text None = no notice
+carry = []                                  # keys already told that this run cannot re-check
+if d is None:
+    items.append((recipient + "|scan|broken",
+                  "ade-pi-stuck failed or printed no usable JSON (exit %d) — the Pi-stuck watch is blind" % scan_rc))
+    carry = sorted(told)
+else:
+    if d.get("quota_error"):
+        items.append((recipient + "|scan|quota-unread",
+                      "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
+        carry = sorted(told)
+    for acct in d.get("unmapped") or []:
+        items.append((recipient + "|unmapped|%s" % acct,
+                      "account %s has no quota mapping — its Pi agents cannot be judged" % acct))
+    for acct in d.get("low") or []:
+        rec = (d.get("accounts") or {}).get(acct) or {}
+        items.append((recipient + "|thin|%s" % acct,
+                      "account %s is thin (%s%% headroom%s) — re-handoffs to it are already refused" %
+                      (acct, rec.get("headroom"), ", stale reading" if rec.get("stale") else "")))
+    stuck = d.get("stuck")
+    if not isinstance(stuck, list) or not all(isinstance(s, dict) for s in stuck):
+        items.append((recipient + "|scan|broken",
+                      "ade-pi-stuck printed a stuck list this scan cannot read — the watch is blind"))
+        carry = sorted(told)
+    else:
+        for s in stuck:
+            if s.get("status") in ("closed", "archived", "error"):      # ade-pi-stuck already filters these
+                continue
+            items.append((recipient + "|%s|%s" % (s.get("id"), s.get("account")),
+                          "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
+                                                               s.get("alternative") or "no healthy alternative")))
+seen = {key for key, _ in items}
+items += [(key, None) for key in carry if key not in seen]
+with open(pending_path, "w") as fh:
+    json.dump(list(dict.fromkeys(k for k, _ in items)), fh)              # one entry per key, in order
+new = [text for key, text in items if text and key not in told]
+if new:
+    print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))
+' "$NOTIFIED" "$pending" "$scan_rc" "${send_to:--}" 2>>"$LOG")"
+
+send_failed=0
+delivered=0
+if [ -n "$refused" ]; then
+    send_failed=1
+    printf '%s ade-supervisor-scan: not sending to %s: %s\n' "$(now)" "$LEAD" "$refused" >>"$LOG"
+elif [ -n "$msg" ] && [ -n "$send_to" ]; then
+    printf '%s to %s: %s\n' "$(now)" "$send_to" "$msg" >>"$LOG"
+    paseo send --json --no-wait -- "$send_to" "$msg" >>"$LOG" 2>&1
+    rc=$?
+    # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case: ~/CLAUDE.md item 10 and
+    # docs/orchestration-practices.md 5a state that contract; ADE 10 relies on it for every send).
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+        send_failed=1
+        printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
+    else
+        delivered=1
+        [ -n "${marker:-}" ] && : >"$marker"      # the handoff is only reported once the notice reached it
+    fi
+fi
+
+if [ "$send_failed" -eq 1 ]; then
+    if [ -n "$msg" ]; then
+        # Something wanted saying and it could not be said: tell the operator once per cause per outage.
+        if [ -n "$refused" ]; then cause_slug=refused; else cause_slug=send-failed; fi
+        ping_operator_once "${refused:-send failed}" "$cause_slug"
+    else
+        printf '%s ade-supervisor-scan: quiet run, nothing lost (%s)\n' "$(now)" "${refused:-send failed}" >>"$LOG"
+    fi
+    rm -f "$pending"                     # keep the old state and retry next run
+    exit 0
+fi
+if [ "$delivered" -eq 1 ]; then
+    rm -f "$STATE_DIR"/.lead-unreachable.*      # a delivery proves the lead is reachable for every cause
+fi
+[ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
+exit 0
