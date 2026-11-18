@@ -451,12 +451,12 @@ extra builtin, mixed identities and non-target absence all HOLD.
 
 The manifest mapping argument is an internal pure-parser dependency, not a CLI,
 configuration override, authority factory or extractor invented by this adapter.
-Its actual producer mapping and native capability/CLI binding remain pending.
-Production V2 `supported` currently returns false before any V1 transport call.
-Parser fixtures use explicitly synthetic independent wire/host/manifest values;
-they do not establish executing-instance qualification. Wiring production V2
-requires the committed native transport and actual canonical manifest/profile
-mapping, plus a separate exact-source review and coupled proof.
+The committed mapping and observation CLI binding are described below; retained
+system-library namespace verification and the scoped recovery successor remain
+separate pending gates. Unsupported V2 never calls the V1 transport. Parser
+fixtures use explicitly synthetic independent wire/host/manifest values and do
+not establish executing-instance qualification. Production acceptance requires a
+separate exact-source review and actual native/producer coupled proof.
 
 ### Committed builtin manifest/profile mapping and V2 transport
 

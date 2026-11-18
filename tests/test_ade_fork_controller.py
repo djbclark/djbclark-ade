@@ -1155,3 +1155,21 @@ def test_v2_facade_validates_complete_tagged_union_before_directory_view(cohort_
     value['entries'].pop()
     with pytest.raises(c.ContractError):native.cohort_status(allow_target_absent=True)
     assert all(args==['plugin','cohort-v2-status'] for args in calls)
+
+
+def test_native_host_policy_fixed_account_path_and_safe_ancestry(tmp_path,monkeypatch):
+    home=tmp_path/'real-account';home.mkdir(mode=0o700)
+    path=home/'.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json'
+    path.parent.mkdir(parents=True)
+    raw=c.canonical({'schemaVersion':1,'qualifications':[]})
+    path.write_bytes(raw);path.chmod(0o600)
+    monkeypatch.setattr(c.pwd,'getpwuid',lambda uid:SimpleNamespace(pw_dir=str(home)))
+    monkeypatch.setenv('HOME',str(tmp_path/'untrusted-env-home'))
+    policy,binding=c.read_native_host_policy()
+    assert policy=={'schemaVersion':1,'qualifications':[]} and binding==c.hashlib.sha256(raw).hexdigest()
+    path.chmod(0o666)
+    with pytest.raises(c.ContractError,match='ancestry'):c.read_native_host_policy()
+    path.chmod(0o600);path.write_bytes(c.canonical({'schemaVersion':1,'qualifications':[None]}))
+    with pytest.raises(c.ContractError,match='row'):c.read_native_host_policy()
+    path.unlink();path.symlink_to(home/'other-policy.json')
+    with pytest.raises(c.ContractError):c.read_native_host_policy()
