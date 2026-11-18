@@ -259,3 +259,23 @@ def test_native_input_symlinks_and_mutability_refused(tmp_path):
     with pytest.raises(e.ContractError): e.file_hash(alias)
     native.chmod(0o644)
     with pytest.raises(e.ContractError): e.file_hash(native)
+
+
+
+def test_native_artifact_substitution_is_independent_of_manifest(tmp_path):
+    """Real file identities only; these synthetic files are never executed."""
+    root = tmp_path / 'qualified-native'; (root / 'runtime').mkdir(parents=True)
+    expected = {}
+    for relative, key in [('runtime/node', 'node_sha256'), ('role.cjs', 'entry_sha256'), ('compiler-code.mjs', 'compiler_sha256')]:
+        file = root / relative; file.write_bytes(('synthetic-' + relative).encode()); file.chmod(0o444)
+        expected[key] = e.file_hash(file)
+    manifest = Path(str(root) + '.manifest.json'); manifest.write_bytes(b'synthetic manifest, no runtime capability')
+    expected['distribution_sha256'] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert e.check_native(root, expected) == root / 'runtime/node'
+    compiler = root / 'compiler-code.mjs'; before = compiler.read_bytes()
+    compiler.chmod(0o644); compiler.write_bytes(b'substituted compiler bytes'); compiler.chmod(0o444)
+    with pytest.raises(e.ContractError): e.check_native(root, expected)
+    compiler.chmod(0o644); compiler.write_bytes(before); compiler.chmod(0o444)
+    assert e.check_native(root, expected) == root / 'runtime/node'
+    manifest.write_bytes(b'different manifest')
+    with pytest.raises(e.ContractError): e.check_native(root, expected)

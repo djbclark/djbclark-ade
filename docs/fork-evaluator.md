@@ -29,7 +29,8 @@ All compiler/helper/tool identities are protected template fields. Python/Git
 binaries actually used are rehashed. Source reads run in isolated Python with
 sanitized environment. The sealed distribution slot is sibling `qualified-native`:
 runtime/node, role.cjs, compiler-code.mjs, with external
-qualified-native.manifest.json. These bytes are checked before any launch.
+qualified-native.manifest.json. These bytes are checked before launch and after assessment; sealed candidate
+source and Python/Git identities are also rechecked after the measurement wait.
 Retained-root provisioning remains root integration work.
 
 ## Exact owned measurement handoff

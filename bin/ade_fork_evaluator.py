@@ -23,7 +23,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-from ade_fork_plugins import produce, inspect, payload_tree_hash
+from ade_fork_plugins import produce, inspect, payload_tree_hash, tree_hash
 from ade_fork_release import ContractError, canonical, digest, make_receipt, parse, validate
 from ade_forks import load_policy
 
@@ -293,6 +293,19 @@ def measure_source(repo, commit):
     return produce(Path(repo), full_sha(commit))
 
 
+def check_native(native, expected):
+    """Known finite artifact identities, before launch and after measurements."""
+    node = native / 'runtime/node'
+    if file_hash(node) != expected['node_sha256']:
+        raise ContractError('qualified retained Node unavailable')
+    if hashlib.sha256(read_file(Path(str(native) + '.manifest.json'))).hexdigest() != expected['distribution_sha256']:
+        raise ContractError('qualified distribution manifest mismatch')
+    for file, key in [('role.cjs', 'entry_sha256'), ('compiler-code.mjs', 'compiler_sha256')]:
+        if file_hash(native / file) != expected[key]:
+            raise ContractError('protected native entry substituted')
+    return node
+
+
 def evaluate(source_sha, evaluator_sha, run_id, attempt, *, root=ROOT):
     """Fixed protected launch; missing genuine producer/harness means HOLD/no output."""
     full_sha(source_sha); full_sha(evaluator_sha); positive(run_id); positive(attempt)
@@ -327,13 +340,7 @@ def evaluate(source_sha, evaluator_sha, run_id, attempt, *, root=ROOT):
     from ade_fork_plugins import stage
     source_root = stage(payload, work / 'snapshots', payload_tree_hash(payload))
     native = root.parent / 'qualified-native'
-    node = native / 'runtime/node'
-    if file_hash(node) != recipe['native']['node_sha256']:
-        raise ContractError('qualified retained Node unavailable')
-    if hashlib.sha256(read_file(Path(str(native) + '.manifest.json'))).hexdigest() != recipe['native']['distribution_sha256']:
-        raise ContractError('qualified distribution manifest mismatch')
-    for file, key in [('role.cjs', 'entry_sha256'), ('compiler-code.mjs', 'compiler_sha256')]:
-        if file_hash(native / file) != recipe['native'][key]: raise ContractError('protected native entry substituted')
+    node = check_native(native, recipe['native'])
     # Existing real owned compiler worker is invoked through the fixed root-owned
     # coupled fixture/daemon owner, never by a candidate-selected compiler command.
     harness = read_file(root / HARNESS, REPORT_LIMIT)
@@ -354,6 +361,12 @@ def evaluate(source_sha, evaluator_sha, run_id, attempt, *, root=ROOT):
         if observations.get('compiler', {}).get('server_bundle_sha256') != hashlib.sha256(bundle).hexdigest():
             raise ContractError('cold compiled output bytes substituted')
     reviewed_checkout(root, evaluator_sha, env)
+    check_native(native, recipe['native'])
+    if tree_hash(source_root) != payload_tree_hash(payload):
+        raise ContractError('sealed candidate source changed during measurement')
+    for name, executable in (('python', sys.executable), ('git', git_path)):
+        if file_hash(executable, system_tool=True) != recipe['evidence'][name]:
+            raise ContractError('measurement tool changed during assessment')
     output = finish(recipe, payload, observations, reports, evaluator_sha=evaluator_sha,
                     source_sha=source_sha, run_id=run_id, attempt=attempt, launch_id=launch_id)
     directory = root.parent / 'qualified-output'
