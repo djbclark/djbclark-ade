@@ -13,17 +13,30 @@ function configuration() {
   }
   try { return JSON.parse(readFileSync(file,"utf8")); } catch { throw new Error("ADE enrollment unavailable"); }
 }
-function execute(argv,input,{signal}={}) {
+export function execute(argv,input,{signal,timeoutMs=30000,killGraceMs=2000}={}) {
   return new Promise((resolve,reject)=>{
     const child=spawn(process.env.ADE_COORD_PYTHON??"python3",argv,{detached:true,stdio:["pipe","pipe","ignore"]});
-    let text="",failed=false;
-    const stop=()=>{try{if(child.pid)process.kill(-child.pid,"SIGTERM");}catch{}};
+    let text="",failed=false,stopping=false,settled=false,hardTimer,finalTimer;
+    const error=()=>Object.assign(new Error(stopping?"ADE controller timed out or was aborted":"ADE controller failed closed"),{code:stopping?"EXECUTOR_TIMEOUT":"EXECUTOR_FAILED",pid:child.pid});
+    const rejectOnce=()=>{if(!settled){settled=true;reject(error());}};
+    const kill=signalName=>{try{if(child.pid)process.kill(-child.pid,signalName);}catch{}};
+    const stop=()=>{
+      if(stopping)return; stopping=true;kill("SIGTERM");
+      hardTimer=setTimeout(()=>kill("SIGKILL"),killGraceMs);
+      finalTimer=setTimeout(rejectOnce,killGraceMs*2);
+    };
     signal?.addEventListener("abort",stop,{once:true});
     if(signal?.aborted)stop();
-    const timeout=setTimeout(stop,30000);
-    child.stdout.on("data",d=>{text+=d; if(text.length>4*1024*1024)stop();});
+    const timeout=setTimeout(stop,timeoutMs);
+    child.stdout.on("data",d=>{text+=d;if(text.length>4*1024*1024)stop();});
     child.once("error",()=>{failed=true;});
-    child.once("close",code=>{clearTimeout(timeout);signal?.removeEventListener("abort",stop);try{const value=JSON.parse(text);if(failed||code!==0||!value.ok)throw new Error();resolve(value.result);}catch{reject(new Error("ADE controller failed closed"));}});
+    child.once("close",code=>{
+      clearTimeout(timeout);clearTimeout(hardTimer);clearTimeout(finalTimer);signal?.removeEventListener("abort",stop);
+      if(settled)return;
+      try{const value=JSON.parse(text);if(stopping||failed||code!==0||!value.ok)throw new Error();settled=true;resolve(value.result);}
+      catch{rejectOnce();}
+    });
+    child.stdin.on("error",()=>{});
     child.stdin.end(JSON.stringify(input??{}));
   });
 }
@@ -41,14 +54,16 @@ export function contribute(server,deps={}) {
     }
   };
   const remove=server.addHook("agent.open.before",async({request})=>{
+    if(request.purpose==="history")return; // Read-only history obtains no grant.
     const cfg=read(); const enrolled=request.labels?.["ade.coord.role"];
     const role=enrolled??cfg?.aliases?.[request.agentId];
     if(!role) return;
     if(!cfg?.roles?.[role]) throw new Error("Enrolled role configuration missing");
     const current=await run([driver,"role","get"],{role_id:role},{signal:abort.signal});
     if(current?.record?.state!=="active"||current.record.owner.agent!==request.agentId) throw new Error("Current active enrolled role authority required");
-    if(request.purpose==="history") return;
-    return {...request,env:{...request.env,ADE_COORD_ROLE:role},appendSystemPrompt:[...(request.appendSystemPrompt??[]),"This role uses durable ADE inbox intake. Routine prompt acknowledgements are suppressed. Queued notifications and turn completion do not prove processing. Use the ADE inbox read/dispose commands; processing requires an explicit disposition under current authority."]};
+    // beta.2's real strict schema permits env/tools/mcpServers only. The
+    // enrolled role brief is supplied explicitly at creation, never here.
+    return {...request,env:{...request.env,ADE_COORD_ROLE:role,ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
   });
   const timer=schedule(pump,30000); pump();
   return async()=>{stopped=true;cancel(timer);remove();abort.abort();await Promise.allSettled([...inflight.values()]);};

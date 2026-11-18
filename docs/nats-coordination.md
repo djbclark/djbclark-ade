@@ -205,3 +205,20 @@ may read retained local evidence offline.
 private content-addressed local state cache, atomically and at mode0600. It
 returns `{path,sha256,size}`. Existing corrupt cache content is a conflict, never
 a silent overwrite. It accepts no arbitrary output path or source-resource grant.
+
+## Audited plugin compatibility and enrolled role brief
+
+The actual beta.2 agent.open.before strict schema permits only env/tools/MCP
+changes. The plugin contributes role/instruction-path environment only, including
+history opens without changing the target. It does not append a system prompt.
+Supply this explicit role brief through the supported agent creation prompt:
+
+> This role uses the durable ADE inbox. Read docs/nats-coordination.md. Routine
+> prompt acknowledgements are suppressed. ADE-inbox-recorded is machine intake,
+> not model understanding or processing. Read the inbox and explicitly dispose
+> under current active authority. Queued wakes and completed turns prove neither.
+
+This is an explicit enrollment prerequisite, not automatic injection through an
+unsupported field. Executor shutdown sends SIGTERM to its owned group, escalates
+to SIGKILL after a bounded grace, and rejects by a final deadline. A remaining
+unreaped/uninterruptible process is an unknown failure, never successful intake.
