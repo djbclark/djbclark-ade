@@ -1,0 +1,23 @@
+name: Fork CI evidence
+on:
+  push:
+    branches: [fork-maintenance-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest python -m pytest tests/test_ade_fork_ci.py tests/test_ade_fork_release.py tests/test_ade_forks.py -q
+      - name: Create transport verification fixture
+        run: python3 -c 'from pathlib import Path; Path("ci-transport-probe.txt").write_text("Transport fixture only; not a qualified component or deployment authorization.\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-transport-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-transport-probe.txt
+          retention-days: 14
+          if-no-files-found: error
