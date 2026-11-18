@@ -492,3 +492,41 @@ changed external policy, unsupported current native readiness or incomplete runt
 facts still HOLD. New `systemClosure` manifests explicitly HOLD before Node until
 the producer's exact retained-library/private-namespace verifier contract is
 integrated; old host-library or missing mount facts are not substituted.
+
+### Committed retained system-closure metadata and scoped held recovery
+
+Producer `cf96bec96825162457f9adca514faea71bae4093` adds
+`systemClosure` / `systemClosureSha256`. The controller mirrors its strict finite
+metadata schema and canonical digest, bounds, duplicate/path checks, retained
+ELF/interpreter/alias/search/cache/preload declarations and retained-file
+cross references. External rows now bind absolute loader paths to
+`system-closure/elf/...` backing members; the pinned cache binds its retained
+loader member. Preexec verifies the sealed backing inventory rather than reading
+host libraries as a substitute. The builtin canonical module table additionally
+binds systemClosureSha256. This structural validation cannot establish namespace,
+ELF resolver or kernel-map identity. Execution still HOLDs explicitly until the
+actual accepted namespace/loader/inode verifier is integrated. The separately
+blocked namespace helper is neither imported nor executed here.
+
+Native `2410a2c4a050c7568d506e6bfbe0c2158d908356` supplies the actual scoped
+recovery guard and installed-only `maintenanceHeldRecoveryV1`. The existing SAME
+live facade can pass the global operation-capability refusal only for explicit
+recover/verify of its already confirmed failure, with original bearer, private
+origin, unlatched uncertainty and a fresh current context. Journal prepare/reuse
+still checks its persisted original context/intent, current recover+verify consent,
+coherent complete non-target cohort, original reservation/server/incarnation and
+fresh plugin CAS. No new BEGIN, reconnect, generic-error fallback, ordinary replace,
+END shortcut or public readiness flag is introduced. Native private eligibility
+and real fresh barriers remain the final gate.
+
+The committed CLI's confirmed alternative has nonidle maintenance state and
+`recoveryRequired:true`; older synthetic `false` assumptions are rejected.
+Installed known-failure or held-recovery API flags only permit parsing the
+separately authenticated exact normal result. Same-held recovery requires the
+new installed held-recovery API plus actual restriction, not availability alone.
+The private confirmed cache persists through `recover-required` to
+`verify-required` and clears only after the separately authorized verify response
+and fresh same-tuple status prove durable restriction removal. Generic throws,
+malformed results or lost acknowledgements latch UNKNOWN and discard reuse
+eligibility. All tests with synthetic wire remain source orchestration evidence;
+actual coupled native qualification and exact-source review remain required.

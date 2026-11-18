@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import posixpath
 import re
 import stat
 import selectors
@@ -391,6 +392,9 @@ def builtin_manifest_identities(manifest,config,host_policy):
     files={item['path']:item for item in manifest['files']}
     table={'schemaVersion':1,'recipe':BUILTIN_RECIPE,'runtimeSha256':manifest['runtime']['sha256'],
            'daemonSha256':files.get('daemon.mjs',{}).get('sha256'),'externalLibraries':manifest['externalLibraries']}
+    if 'systemClosure' in manifest or 'systemClosureSha256' in manifest:
+        system_closure_metadata(manifest)
+        table['systemClosureSha256']=manifest['systemClosureSha256']
     table_sha=hashlib.sha256(builtin_json(table)).hexdigest()
     if (manifest.get('builtinPlugins') != list(BUILTIN_IDS) or manifest.get('builtinModuleTable') != table or
             manifest.get('moduleTableSha256') != table_sha or type(manifest.get('builtinArtifacts')) is not list or
@@ -421,6 +425,94 @@ def builtin_manifest_identities(manifest,config,host_policy):
     return result
 
 
+def system_closure_metadata(manifest):
+    """Mirror cf96 structural/backing cross references; never approves a namespace."""
+    def exact(value,keys):
+        if type(value) is not dict or set(value)!=set(keys):raise ContractError('invalid systemClosure keys')
+        return value
+    def text(value):
+        if type(value) is not str or not 1<=len(value)<=4096 or '\0' in value:raise ContractError('invalid systemClosure text')
+        try:value.encode('utf8',errors='strict')
+        except UnicodeError as error:raise ContractError('invalid systemClosure Unicode') from error
+        return value
+    def path(value,absolute):
+        text(value)
+        if posixpath.isabs(value)!=absolute or posixpath.normpath(value)!=value or any(part in ('.','..') for part in value.split('/')):
+            raise ContractError('unsafe systemClosure path')
+        return value
+    def sequence(value,maximum):
+        if type(value) is not list or len(value)>maximum:raise ContractError('systemClosure bound exceeded')
+        return value
+    def number(value,maximum):
+        if type(value) is not int or not 0<=value<=maximum:raise ContractError('invalid systemClosure integer')
+    def sha(value):
+        if type(value) is not str or not re.fullmatch('[a-f0-9]{64}',value):raise ContractError('invalid systemClosure digest')
+    def unique(values):
+        if len(values)!=len(set(values)):raise ContractError('duplicate systemClosure identity')
+    closure=exact(manifest.get('systemClosure'),('schemaVersion','profile','loaderResolution'))
+    if type(closure['schemaVersion']) is not int or closure['schemaVersion']!=1 or closure['profile']!='linux-retained-system-closure-v1':
+        raise ContractError('unsupported systemClosure profile')
+    sha(manifest.get('systemClosureSha256'))
+    if hashlib.sha256(builtin_json(closure)).hexdigest()!=manifest['systemClosureSha256']:
+        raise ContractError('canonical systemClosure digest mismatch')
+    layout=exact(closure['loaderResolution'],('schemaVersion','policy','elf','interpreters','aliases','searchDirectories','hwcaps','cache','preload'))
+    if type(layout['schemaVersion']) is not int or layout['schemaVersion']!=1 or layout['policy']!='glibc-pinned-cache-existing-layout-v1':
+        raise ContractError('unsupported loader resolution policy')
+    if layout['hwcaps']!={'policy':'no-relevant-hwcaps-v1'} or layout['preload']!={'path':'/etc/ld.so.preload','state':'absent'}:
+        raise ContractError('unsupported loader selection/preload policy')
+    files=manifest.get('files')
+    if type(files) is not list or any(type(row) is not dict or type(row.get('path')) is not str for row in files):
+        raise ContractError('invalid systemClosure file inventory')
+    unique([row['path'] for row in files]);by_path={row['path']:row for row in files}
+    external=sequence(manifest.get('externalLibraries'),128);total=0
+    for row in external:
+        exact(row,('path','retainedPath','mode','size','sha256'));path(row['path'],True);path(row['retainedPath'],False)
+        if type(row['mode']) is not int or row['mode'] not in (0o444,0o555):raise ContractError('unsealed retained external mode')
+        number(row['size'],536870912);sha(row['sha256']);total+=row['size']
+        if row['retainedPath']!='system-closure/elf/'+row['path'][1:]:raise ContractError('retained external path binding mismatch')
+    unique([row['path'] for row in external]);unique([row['retainedPath'] for row in external])
+    if not external or total>536870912:raise ContractError('retained external payload bound')
+    elfs=sequence(layout['elf'],512)
+    for row in elfs:
+        exact(row,('member','machine','interpreter','needed','rpath','runpath','soname'));path(row['member'],False)
+        if type(row['machine']) is not int or row['machine'] not in (62,183):raise ContractError('unsupported ELF machine')
+        for key in ('interpreter','soname'):
+            if row[key] is not None:text(row[key])
+        for key in ('needed','rpath','runpath'):
+            for item in sequence(row[key],128):text(item)
+        if row['member'] not in by_path:raise ContractError('ELF member absent from retained inventory')
+    unique([row['member'] for row in elfs])
+    interpreters=sequence(layout['interpreters'],32)
+    for row in interpreters:
+        exact(row,('request','target'));path(row['request'],True);path(row['target'],True)
+        if not any(item['path']==row['target'] and item['mode']==0o555 for item in external):
+            raise ContractError('retained ELF interpreter unavailable')
+    unique([row['request'] for row in interpreters])
+    directories=sequence(layout['searchDirectories'],64)
+    for row in directories:
+        exact(row,('kind','path'))
+        if row['kind'] not in ('system','retained'):raise ContractError('invalid loader search kind')
+        path(row['path'],row['kind']=='system')
+    unique([(row['kind'],row['path']) for row in directories])
+    aliases=sequence(layout['aliases'],512)
+    for row in aliases:
+        exact(row,('path','target','linkText'));path(row['path'],True);path(row['target'],True);text(row['linkText'])
+        if not any(item['path']==row['target'] for item in external) and not any(item['kind']=='system' and item['path']==row['target'] for item in directories):
+            raise ContractError('unbound loader alias target')
+    unique([row['path'] for row in aliases])
+    cache=exact(layout['cache'],('path','retainedPath','mode','size','sha256','entries'))
+    if cache['path']!='/etc/ld.so.cache' or cache['retainedPath']!='system-closure/loader/ld.so.cache' or type(cache['mode']) is not int or cache['mode']!=0o444:
+        raise ContractError('unsupported retained loader cache')
+    number(cache['size'],16777216);sha(cache['sha256'])
+    for row in sequence(cache['entries'],2048):
+        exact(row,('soname','path','target','flags','hwcap'));text(row['soname']);path(row['path'],True);path(row['target'],True)
+        if type(row['flags']) is not int or abs(row['flags'])>2**53-1 or row['hwcap']!='0':raise ContractError('unsupported loader cache selection')
+    for row in [*external,cache]:
+        expected={'path':row['retainedPath'],**{key:row[key] for key in ('mode','size','sha256')}}
+        if by_path.get(row['retainedPath'])!=expected:raise ContractError('retained system backing cross-reference mismatch')
+    return closure
+
+
 def verify_transport_distribution(config):
     """Python preexec mirror of producer daemon-verifier.ts finite v2 manifest."""
     if sys.platform != 'linux' or os.getuid() == 0: raise ContractError('finite non-root Linux adapter required')
@@ -433,8 +525,8 @@ def verify_transport_distribution(config):
         raise ContractError('protected raw distribution manifest mismatch')
     raw_manifest = raw
     manifest = parse(raw.decode())
-    if type(manifest) is dict and 'systemClosure' in manifest:
-        raise ContractError('retained systemClosure namespace verifier not yet integrated')
+    retained_system=type(manifest) is dict and ('systemClosure' in manifest or 'systemClosureSha256' in manifest)
+    if retained_system:system_closure_metadata(manifest)
     if (type(manifest) is not dict or manifest.get('schemaVersion') != 2 or manifest.get('profile') != 'enclosing-daemon-v2' or
             manifest.get('distributionBuildId') != config['distributionBuildId'] or
             manifest.get('entries') != {'daemon':'daemon.mjs','pluginChild':'plugin-child-entry.mjs','compiler':'compiler-entry.mjs','terminal':'terminal-entry.mjs'}):
@@ -482,7 +574,9 @@ def verify_transport_distribution(config):
         raise ContractError('fixed transport entry mismatch')
     external_names = set()
     for item in external:
-        verify(item, True)
+        if retained_system:
+            verify({'path':item['retainedPath'],**{key:item[key] for key in ('mode','size','sha256')}})
+        else:verify(item, True)
         if item['path'] in external_names: raise ContractError('duplicate external library')
         external_names.add(item['path'])
     helpers = [item for item in files if item['path'].startswith('runtime/') or
@@ -497,6 +591,8 @@ def verify_transport_distribution(config):
         raise ContractError('explicit native/helper inventory mismatch')
     if read_regular(manifest_path, 4 * 1024 * 1024, owner=0) != raw_manifest:
         raise ContractError('distribution authority changed during verification')
+    if retained_system:
+        raise ContractError('actual sealed namespace/inode/loader verifier not yet integrated; no host fallback')
     return manifest
 
 
@@ -732,7 +828,10 @@ class NativeFacade:
         self.render = render
         self.recovery_inspection = recovery
         self.read_only_reconciliation = context.kind == 'reconcile-release'
-        if origin is not None: self.original_native = origin
+        if origin is not None:
+            if self.known_held is not None and self.original_native != origin:
+                raise ContractError('private original held identity differs from Journal origin')
+            self.original_native = origin
         self.operation = 'recover' if context.kind in ('reconcile','verified-rollback') else 'activate'
 
     def prepare(self, context):
@@ -914,13 +1013,14 @@ class NativeFacade:
             return False
         return self.observe(self.transaction_row['cohort']) == self.context.target
 
-    def _check_same_held(self, status, original_context, original_intent, plugin):
+    def _check_same_held(self, status, original_context, original_intent, plugin, *, phase='recover-required'):
         # Current metadata can confirm, never create, the same-process private eligibility.
         restriction = status.get('recoveryOnly') if type(status) is dict else None
         if (not self.known_held or not self.token or self.uncertain or type(restriction) is not dict or
-                status.get('state') != 'held' or status.get('reservationGeneration') != original_intent.native_generation or
+                status.get('state') not in ('held','recovery-required') or status.get('recoveryRequired') is not True or
+                status.get('generation') != original_intent.native_generation or status.get('reservationGeneration') != original_intent.native_generation or
                 status.get('transactionId') != original_context.transaction_id or
-                restriction.get('pluginId') != self.transaction_row['component'] or restriction.get('phase') != 'recover-required' or
+                restriction.get('pluginId') != self.transaction_row['component'] or restriction.get('phase') != phase or
                 restriction.get('nativeGeneration') != plugin['journal']['generation'] or
                 restriction.get('baseline') != self.known_held['baseline']):
             raise ContractError('same-held recovery restriction unavailable')
@@ -929,9 +1029,27 @@ class NativeFacade:
         if (config['serverId'] != original_intent.server_id or config['daemonIncarnation'] != original_intent.daemon_incarnation or
                 type(authority) is not dict or authority.get('qualified') is not True or
                 authority.get('serverId') != original_intent.server_id or authority.get('daemonIncarnation') != original_intent.daemon_incarnation or
-                type(authority.get('features')) is not dict or authority['features'].get('maintenanceKnownFailedHeldV1') is not True or
+                type(authority.get('features')) is not dict or authority['features'].get('maintenanceHeldRecoveryV1') is not True or
                 digest(self.reader()) != self.context.rule_digest):
             raise ContractError('same-held native incarnation or authority changed')
+
+    def can_attempt_same_held_recovery(self):
+        # No metadata/installed flag creates this private SAME-process capability.
+        return bool(self.known_held and self.token and self.original_native and self.reservation and not self.uncertain)
+
+    def _scoped_recovery_supported(self, kind):
+        if (kind not in ('recover','verify') or not self.can_attempt_same_held_recovery() or not self.context or
+                self.context.kind not in ('reconcile','verified-rollback') or self.context.target!=self.target):
+            return False
+        facts=self.cohort_status(allow_target_absent=kind=='recover')
+        plugin=next(entry for entry in facts['entries'] if entry['pluginId']==self.transaction_row['component'])
+        original_context,original_intent=self.original_native
+        if (self.reservation != {'generation':original_intent.native_generation,'transactionId':original_context.transaction_id} or
+                plugin['journal']['generation']!=self.plugin_generation):
+            raise ContractError('scoped recovery original tuple or plugin CAS changed')
+        self._check_same_held(self._call(['daemon','maintenance','status']),original_context,original_intent,plugin,
+                              phase='recover-required' if kind=='recover' else 'verify-required')
+        return True
 
     def reuse(self, context, intent, original_context, original_intent):
         if (context != self.context or intent != self.intent or self.original_native != (original_context,original_intent) or
@@ -998,7 +1116,9 @@ class NativeFacade:
             raise
 
     def _operation_bound(self, kind, identity, record):
-        if self.supported() is not True or self.render is None or identity != self.target:
+        available=self.supported() is True
+        if not available:available=self._scoped_recovery_supported(kind)
+        if not available or self.render is None or identity != self.target:
             raise ContractError('native held operation unavailable')
         status = self.managed_status(record['expected']['component'], allow_target_absent=kind == 'recover' and self.recovery_inspection)
         if status['journal']['generation'] != self.plugin_generation: raise ContractError('prepared plugin CAS changed')
@@ -1027,6 +1147,16 @@ class NativeFacade:
             self.uncertain = True
             raise ContractError('native loaded receipt uncertain')
         self.plugin_generation = result['nativeGeneration']
+        if kind=='verify' and self.known_held is not None:
+            status=self._call(['daemon','maintenance','status'])
+            authority=status.get('authority') if type(status) is dict else None
+            if (type(authority) is not dict or authority.get('qualified') is not True or
+                    authority.get('serverId')!=config['serverId'] or authority.get('daemonIncarnation')!=config['daemonIncarnation'] or
+                    status.get('state')!='held' or status.get('recoveryRequired') is not False or status.get('recoveryOnly') is not None or
+                    status.get('reservationGeneration')!=self.reservation['generation'] or
+                    status.get('transactionId')!=self.reservation['transactionId']):
+                raise ContractError('scoped recovery verification restriction not durably cleared')
+            self.known_held=None
         return result
 
     def _accept_known_held(self, result, identity, record):
@@ -1068,8 +1198,10 @@ class NativeFacade:
             authority = status.get('authority') if type(status) is dict else None
             if (type(authority) is not dict or authority.get('qualified') is not True or
                     authority.get('serverId') != config['serverId'] or authority.get('daemonIncarnation') != config['daemonIncarnation'] or
-                    type(authority.get('features')) is not dict or authority['features'].get('maintenanceKnownFailedHeldV1') is not True or
-                    status.get('state') != 'held' or status.get('recoveryRequired') is not False or
+                    type(authority.get('features')) is not dict or not (authority['features'].get('maintenanceKnownFailedHeldV1') is True or
+                        authority['features'].get('maintenanceHeldRecoveryV1') is True) or
+                    status.get('state') not in ('held','recovery-required') or status.get('recoveryRequired') is not True or
+                    status.get('generation') != self.reservation['generation'] or
                     status.get('reservationGeneration') != self.reservation['generation'] or
                     status.get('transactionId') != self.reservation['transactionId'] or status.get('recoveryOnly') != restriction):
                 self.uncertain = True
@@ -1090,7 +1222,6 @@ class NativeFacade:
         self.operation = 'recover'
         result = self._operation('recover', identity, record)
         if type(result) is getattr(release, 'KnownFailedHeld', None): return result
-        self.known_held = None
         self.recovery_inspection = False  # subsequent receipt/cohort verification is strict
     def verify(self, identity, record):
         if self.context and self.context.kind in ('resume','reconcile-release'):
@@ -1358,9 +1489,10 @@ class Controller:
             return True
         except (OSError, ValueError, KeyError, TypeError): return False
 
-    def adapters(self, row, verified):
+    def adapters(self, row, verified, *, recovery=False):
         native = self.native
-        if native.supported() is not True: raise ContractError('native execution producer/status/reservation unsupported')
+        if native.supported() is not True and not (recovery and isinstance(native,NativeFacade) and native.can_attempt_same_held_recovery()):
+            raise ContractError('native execution producer/status/reservation unsupported')
         def record(identity):
             if not self.retained(identity): raise ContractError('retained evidence unavailable')
             return parse(read_regular(self.root / 'records' / (identity + '.json')).decode())
@@ -1494,13 +1626,13 @@ class Controller:
             return {'status':'hold','reason':'journal_transaction_context_unsupported','authorized':False}
         if operation == 'reconcile-release' and isinstance(self.native,NativeFacade):
             self.native.read_only_reconciliation = True
-        if self.native.supported() is not True:
+        if self.native.supported() is not True and not (operation=='recover' and isinstance(self.native,NativeFacade) and self.native.can_attempt_same_held_recovery()):
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}
         self.journal = Journal(self.root / 'journal', row['policy']['compatibility_group'])
         rule_digest = digest(row)
         if operation in ('recover','resume','reconcile-release'):
             current = self.journal.read()
-            adapters = self.adapters(row,None)
+            adapters = self.adapters(row,None,recovery=operation=='recover')
             if operation == 'recover':
                 # Only the Journal's recorded baseline can be an explicit healthy rollback.
                 rollback = current['baseline'] if current['state'] == 'runtime_verified' else None

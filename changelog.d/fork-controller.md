@@ -27,3 +27,5 @@
 - Parse explicitly opted-in tagged V2 directory and fourteen in-process builtin observations against independent protected/manifest identities; retain production HOLD until the genuine native bridge exists. (#796)
 ### Added
 - Bind committed V2 observations to the producer's adapted builtin factories, canonical module table and current fixed protected host profiles, keeping unintegrated system namespaces on preexecution HOLD. (#796)
+### Added
+- Validate committed retained system-closure metadata and module-table binding while holding unproved namespace execution; consume native scoped same-bearer recovery with separate verification and no retry of unknown failures. (#796)

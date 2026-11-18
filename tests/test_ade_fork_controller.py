@@ -969,7 +969,7 @@ def test_known_held_wire_requires_feature_live_bearer_and_exact_baseline(cohort_
     target['journal']['generation']=9
     restriction={'pluginId':'ade-yolo','baseline':baseline,'nativeGeneration':9,'phase':'recover-required'}
     status={'state':'held','reservationGeneration':12,'generation':12,'transactionId':context.transaction_id,
-        'recoveryRequired':False,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
+        'recoveryRequired':True,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
             'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceKnownFailedHeldV1':True}}}
     result={'outcome':'known_failed_held','reason':'compiler_error','pluginId':'ade-yolo','nativeGeneration':9,
         'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
@@ -1173,3 +1173,166 @@ def test_native_host_policy_fixed_account_path_and_safe_ancestry(tmp_path,monkey
     with pytest.raises(c.ContractError,match='row'):c.read_native_host_policy()
     path.unlink();path.symlink_to(home/'other-policy.json')
     with pytest.raises(c.ContractError):c.read_native_host_policy()
+
+
+@pytest.fixture
+def retained_system_fixture():
+    """Exact cf96 metadata with synthetic payload identities, no namespace assertion."""
+    external={'path':'/usr/lib/ld-fixture.so','retainedPath':'system-closure/elf/usr/lib/ld-fixture.so',
+              'mode':0o555,'size':7,'sha256':digest('retained-loader')}
+    cache={'path':'/etc/ld.so.cache','retainedPath':'system-closure/loader/ld.so.cache','mode':0o444,
+           'size':3,'sha256':digest('cache'),'entries':[]}
+    closure={'schemaVersion':1,'profile':'linux-retained-system-closure-v1','loaderResolution':{
+        'schemaVersion':1,'policy':'glibc-pinned-cache-existing-layout-v1',
+        'elf':[{'member':'runtime/node','machine':62,'interpreter':'/lib/ld-fixture.so','needed':['lib-fixture.so'],
+                'rpath':[],'runpath':[],'soname':None}],
+        'interpreters':[{'request':'/lib/ld-fixture.so','target':external['path']}],
+        'aliases':[{'path':'/lib/ld-fixture.so','target':external['path'],'linkText':external['path']}],
+        'searchDirectories':[{'kind':'system','path':'/usr/lib'}],
+        'hwcaps':{'policy':'no-relevant-hwcaps-v1'},'cache':cache,
+        'preload':{'path':'/etc/ld.so.preload','state':'absent'}}}
+    files=[{'path':row['retainedPath'],**{key:row[key] for key in ('mode','size','sha256')}} for row in (external,cache)]
+    files.append({'path':'runtime/node','mode':0o555,'size':9,'sha256':digest('node')})
+    return {'files':files,'externalLibraries':[external],'systemClosure':closure,'systemClosureSha256':digest(closure)}
+
+
+def test_cf96_retained_system_metadata_and_module_table_binding(retained_system_fixture,builtin_manifest_fixture):
+    retained=retained_system_fixture
+    assert c.system_closure_metadata(retained) is retained['systemClosure']
+    manifest,config,policy=builtin_manifest_fixture
+    manifest['externalLibraries']=retained['externalLibraries']
+    manifest['files']+=retained['files'][:2]
+    manifest['systemClosure']=retained['systemClosure'];manifest['systemClosureSha256']=retained['systemClosureSha256']
+    table=dict(manifest['builtinModuleTable'],externalLibraries=manifest['externalLibraries'],systemClosureSha256=manifest['systemClosureSha256'])
+    table_sha=c.hashlib.sha256(c.builtin_json(table)).hexdigest()
+    manifest.update(builtinModuleTable=table,moduleTableSha256=table_sha)
+    for row in [*manifest['builtinArtifacts'],*policy['qualifications'][0]['builtinProfiles']]:row['moduleTableSha256']=table_sha
+    assert len(c.builtin_manifest_identities(manifest,config,policy))==14
+    manifest['builtinModuleTable'].pop('systemClosureSha256')
+    with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)
+
+
+@pytest.mark.parametrize('mutation',['digest','wrong-backing','host-only','duplicate-target','missing-cache','special-mode',
+    'path-escape','alias-unbound','null-layout','hwcap','preload','too-many-elf','missing-elf-member'])
+def test_retained_system_metadata_refusals(retained_system_fixture,mutation):
+    manifest=retained_system_fixture;layout=manifest['systemClosure']['loaderResolution']
+    if mutation=='digest':manifest['systemClosureSha256']='f'*64
+    elif mutation=='wrong-backing':manifest['externalLibraries'][0]['sha256']='f'*64
+    elif mutation=='host-only':manifest['externalLibraries'][0].pop('retainedPath')
+    elif mutation=='duplicate-target':manifest['externalLibraries'].append(manifest['externalLibraries'][0])
+    elif mutation=='missing-cache':manifest['files']=manifest['files'][::2]
+    elif mutation=='special-mode':manifest['externalLibraries'][0]['mode']=0o777
+    elif mutation=='path-escape':manifest['externalLibraries'][0]['retainedPath']='system-closure/../escape'
+    elif mutation=='alias-unbound':layout['aliases'][0]['target']='/unbound/loader'
+    elif mutation=='null-layout':manifest['systemClosure']['loaderResolution']=None
+    elif mutation=='hwcap':layout['cache']['entries']=[{'soname':'libfixture','path':'/usr/lib/libfixture','target':'/usr/lib/libfixture','flags':1,'hwcap':'1'}]
+    elif mutation=='preload':layout['preload']['state']='present'
+    elif mutation=='too-many-elf':layout['elf']*=513
+    elif mutation=='missing-elf-member':layout['elf'][0]['member']='missing/member'
+    if mutation!='digest':manifest['systemClosureSha256']=digest(manifest['systemClosure'])
+    with pytest.raises(c.ContractError):c.system_closure_metadata(manifest)
+
+
+def test_same_live_facade_scoped_recovery_uses_one_begin_and_original_tuple(cohort_mapping_fixture,tmp_path,monkeypatch):
+    """Actual facade+Journal with synthetic authenticated2410 wire, NOT native proof."""
+    row,baseline,stored,config,facts=cohort_mapping_fixture
+    target=next(entry for entry in facts['entries'] if entry['pluginId']=='ade-yolo')
+    baseline_loaded=c.parse(c.canonical(target['loaded']).decode())
+    baseline_source=dict(target['registration'])
+    target['journal']['baseline']={'source':baseline_source,'receipt':baseline_loaded}
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    trace=[];state={'failed':False,'restriction':None,'begins':0,'ends':0}
+    def status():
+        reservation=native.reservation
+        return {'schemaVersion':1,'state':'recovery-required' if state['restriction'] else ('held' if reservation else 'idle'),
+            'generation':reservation['generation'] if reservation else None,'reservationGeneration':12 if reservation else 11,
+            'transactionId':reservation['transactionId'] if reservation else None,'ready':not state['failed'],
+            'recoveryRequired':bool(state['restriction']),'recoveryOnly':state['restriction'],
+            'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation'],
+                'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':not state['failed'],
+                            'maintenanceKnownFailedHeldV1':False,'maintenanceHeldRecoveryV1':True}}}
+    def wire(args,token=None):
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:return status()
+        if args==['plugin','managed-status','ade-yolo']:
+            return {'version':1,'pluginId':'ade-yolo','consistency':'coherent','registration':target['registration'],
+                    'journal':target['journal'],'loaded':target['loaded']}
+        if args[:3]==['daemon','maintenance','begin']:
+            state['begins']+=1
+            return dict(native.reservation,state='held',recoveryRequired=False,ownerToken='s'*43)
+        if args[:3]==['daemon','maintenance','end']:
+            assert token=='s'*43 and state['restriction'] is None
+            state['ends']+=1
+            return dict(native.reservation,state='idle',reservationGeneration=12,recoveryRequired=False)
+        assert args[:3]==['daemon','maintenance','plugin-operation'] and token=='s'*43
+        kind=args[args.index('--operation')+1]
+        trace.append((kind,args[args.index('--generation')+1],args[args.index('--transaction-id')+1],args[args.index('--expected-generation')+1]))
+        if kind=='replace':
+            target.update(registration={'source':'directory','path':args[args.index('--path')+1],'enabled':True},loaded=None,execution=None)
+            target['journal'].update(generation=9,currentReceipt=None)
+            state['failed']=True
+            baseline_binding={'path':baseline_loaded['sourcePath'],'snapshotSha256':baseline_loaded['snapshotSha256'],
+                              'serverBundleSha256':baseline_loaded['serverBundleSha256']}
+            state['restriction']={'pluginId':'ade-yolo','baseline':baseline_binding,'nativeGeneration':9,'phase':'recover-required'}
+            return {'outcome':'known_failed_held','reason':'initialization_rejected','pluginId':'ade-yolo','nativeGeneration':9,
+                'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
+                'baseline':baseline_binding,'maintenance':status(),'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+        if kind=='recover':
+            assert state['restriction']['phase']=='recover-required'
+            loaded=dict(baseline_loaded,activationGeneration=77,processStartToken='recovered-real-child-fixture')
+            target.update(registration=baseline_source,enabled=True,loaded=loaded,
+                execution={'contract':'native-passive-contract-1','incarnation':loaded['processStartToken'],
+                           'distributionBuildId':config['distributionBuildId'],'closure':config['closure']})
+            target['journal'].update(generation=10,currentReceipt=loaded)
+            state['restriction']=dict(state['restriction'],nativeGeneration=10,phase='verify-required')
+        else:
+            assert kind=='verify'
+            state['restriction']=None;state['failed']=False
+        return {'plugin':{'id':'ade-yolo','enabled':True,'status':'running','loaded':target['loaded']},'nativeGeneration':target['journal']['generation'],
+            'maintenance':status(),'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    journal.enroll(baseline.sha256,controller.adapters(row,None))
+    repo=tmp_path/'source'
+    (repo/'plugins/ade-yolo/index.server.ts').write_text('export default ()=>{throw Error("synthetic initialized failure")}')
+    git(repo,'add','.');git(repo,'commit','-qm','candidate fixture')
+    commit=git(repo,'rev-parse','HEAD');payload=snapshots.produce(repo,commit)
+    evidence=dict(row['evidence'],master_commit=commit,native_tree_sha256=snapshots.payload_tree_hash(payload))
+    expected=dict(row['expected'],fork_commit=commit,upstream_commit=commit,artifact_sha256=c.hashlib.sha256(payload).hexdigest(),
+                  toolchain=c.canonical({'plugin_snapshot_evidence':digest(evidence)}).decode())
+    candidate=make_receipt(expected,row['policy'],{key:{'status':'passed','contract_digest':digest(value)} for key,value in row['policy']['features'].items()})
+    archive=zip_bytes({'receipt.json':candidate.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(evidence)})
+    row.update(expected=expected,evidence=evidence,master_commit=commit)
+    row['evaluation'].update(receipt_sha256=candidate.sha256,archive_sha256=c.hashlib.sha256(archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=candidate.sha256
+    controller.evaluator=FakeEvaluator(archive,candidate)
+    assert controller.tick('deploy')['status']=='known_failed_held'
+    original=journal.read()['transaction']['origin']
+    assert native.supported() is False and native.can_attempt_same_held_recovery()
+    row['generation']=1
+    for grant in row['operations'].values():grant.update(identity=baseline.sha256,generation=1)
+    result=controller.tick('recover')
+    assert result['status']=='runtime_verified',result
+    assert result['generation']==2 and journal.read()['verified']==baseline.sha256
+    assert state['begins']==1 and state['ends']==1
+    assert [entry[0] for entry in trace]==['replace','recover','verify','verify']
+    assert {entry[1] for entry in trace}=={'12'}
+    assert {entry[2] for entry in trace}=={original['context']['transaction_id']}
+    assert [entry[3] for entry in trace]==['8','9','10','10']
+    assert native.known_held is None and native.token is None
+
+
+@pytest.mark.parametrize('missing',['token','known','origin','uncertain'])
+def test_scoped_availability_cannot_create_same_live_capability(missing):
+    native=c.NativeFacade()
+    native.token='s'*43;native.known_held={'baseline':{}};native.original_native=('context','intent')
+    native.reservation={'generation':12,'transactionId':'original'}
+    if missing=='token':native.token=None
+    elif missing=='known':native.known_held=None
+    elif missing=='origin':native.original_native=None
+    else:native.uncertain=True
+    assert not native.can_attempt_same_held_recovery()
+    assert native._scoped_recovery_supported('recover') is False
+    assert native._scoped_recovery_supported('replace') is False
