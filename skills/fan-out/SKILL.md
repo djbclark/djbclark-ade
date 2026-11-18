@@ -21,6 +21,16 @@ For native MCP directory results, prefer `structuredContent` and filter to the r
 `content` often duplicates the same roster. Do not print an entire workspace/agent directory to select one entry.
 CLI schemas differ: `paseo ls --json` uses lowercase `id/provider/status`; `agent inspect --json` uses `Id/Provider/Status`.
 Do not reuse inspect-field casing to conclude that a list contains no running model/agent.
+
+For Codex tool orchestration, preserve the **whole command result**:
+`const r = await tools.exec_command(args); text(r);`. Printing only `r.output`
+and `r.exit_code` drops a yielded `session_id`. A yielded command is still
+running; resume that exact session with `write_stdin`, forwarding its full
+result too. Undefined `exit_code` is not completion or failure. Put this rule
+in mechanical/probe briefs even when a deliberate READY-only task uses
+`--no-footer`. If a caller already lost the handle, inspect the named owned
+PID or durable result/exit artifact; never restart a possibly live operation
+or replace its stable ID merely to recover visible output.
 Recipe detail: [docs/orchestration-practices.md](../../docs/orchestration-practices.md).
 
 ## 1. Slice first
