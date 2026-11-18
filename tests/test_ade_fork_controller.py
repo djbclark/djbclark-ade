@@ -668,7 +668,7 @@ def test_real_facade_absent_target_recovery_keeps_postverify_strict(cohort_mappi
         calls.append((args,token))
         if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
         if args==['daemon','maintenance','status']:
-            return {'state':'idle','generation':None,'reservationGeneration':11,'ready':True,'transactionId':None,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
+            return {'schemaVersion':1,'state':'idle','generation':None,'reservationGeneration':11,'ready':True,'transactionId':None,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
                 'daemonIncarnation':config['daemonIncarnation'],
                 'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':True}}}
         if args==['plugin','managed-status','ade-yolo']:
@@ -720,7 +720,7 @@ def test_real_facade_absent_target_recovery_keeps_postverify_strict(cohort_mappi
     assert inspected.startswith('native-target-absent:v1:') and inspected!=receipt.sha256
     result=controller.tick('recover')
     operations=[args[args.index('--operation')+1] for args,_ in calls if args[:3]==['daemon','maintenance','plugin-operation']]
-    assert operations[0]=='recover'
+    assert operations and operations[0]=='recover',result
     if restores_child:
         assert result['status']=='runtime_verified'
         assert native.observe(row['cohort'])==receipt.sha256
@@ -923,3 +923,61 @@ def test_real_facade_success_callbacks_return_none(monkeypatch):
     monkeypatch.setattr(native,'_operation',lambda *args:{'plugin':{'id':'fixture'}})
     assert native.activate('a'*64,{}) is None
     assert native.recover('a'*64,{}) is None
+
+
+@pytest.mark.parametrize('outcome',['throw','dict'])
+def test_controller_unconfirmed_native_outcome_is_sticky(fixture,tmp_path,outcome):
+    row,baseline,payload,archive=fixture
+    class Unconfirmed(FakeNative):
+        def activate(self,identity,record):
+            self.calls.append(('activate',identity))
+            if outcome=='throw':raise RuntimeError('lost ACK')
+            return {'outcome':'known_failed_held','reason':'compiler_error'}
+    native=Unconfirmed(baseline.sha256)
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,baseline),native,tmp_path/'private')
+    controller.tick('enroll')
+    expected=dict(row['expected'],recipe_revision='unconfirmed-candidate')
+    candidate=make_receipt(expected,row['policy'],{k:{'status':'passed','contract_digest':digest(v)} for k,v in row['policy']['features'].items()})
+    candidate_archive=zip_bytes({'receipt.json':candidate.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(row['evidence'])})
+    row['expected']=expected
+    row['evaluation'].update(receipt_sha256=candidate.sha256,archive_sha256=c.hashlib.sha256(candidate_archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=candidate.sha256
+    controller.evaluator=FakeEvaluator(candidate_archive,candidate)
+    assert controller.tick('deploy')['status']=='recovery_required'
+    assert controller.journal.read()['state']=='reservation_unknown'
+    before=list(native.calls)
+    assert controller.tick('recover')['reason']=='reservation_unknown'
+    assert native.calls==before
+
+
+def test_known_held_wire_requires_feature_live_bearer_and_exact_baseline(cohort_mapping_fixture,monkeypatch):
+    """Actual facade parser with synthetic wire; does NOT mint native driver authority."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    context=c.release.TransactionContext(1,row['policy']['compatibility_group'],'deploy',0,1,'a'*32,receipt.sha256,None,'b'*64,digest(row))
+    intent=c.release.ReservationIntent(12,8,config['serverId'],config['daemonIncarnation'])
+    native.bind(row,context,None)
+    native.intent=intent;native.original_native=(context,intent)
+    native.reservation={'generation':12,'transactionId':context.transaction_id};native.token='s'*43;native.plugin_generation=8
+    record=c.parse(c.read_regular(stored.root/'records'/(receipt.sha256+'.json')).decode())
+    root=stored.root/'snapshots'/record['payload_sha256']
+    baseline={'path':str(root/'plugins/ade-yolo'),'snapshotSha256':record['evidence']['native_tree_sha256'],
+              'serverBundleSha256':record['evidence']['server_bundle_sha256']}
+    target.update(loaded=None,execution=None)
+    target['journal']['generation']=9
+    restriction={'pluginId':'ade-yolo','baseline':baseline,'nativeGeneration':9,'phase':'recover-required'}
+    status={'state':'held','reservationGeneration':12,'generation':12,'transactionId':context.transaction_id,
+        'recoveryRequired':False,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
+            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceKnownFailedHeldV1':True}}}
+    result={'outcome':'known_failed_held','reason':'compiler_error','pluginId':'ade-yolo','nativeGeneration':9,
+        'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
+        'baseline':baseline,'maintenance':status,'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+    monkeypatch.setattr(native,'_call',lambda args:status)
+    monkeypatch.setattr(native,'cohort_status',lambda **kwargs:facts)
+    observation=native._accept_known_held(result,context.target,record)
+    assert type(observation) is c.release.KnownFailedHeld and observation.plugin_generation==9
+    native.token=None
+    with pytest.raises(c.ContractError):native._accept_known_held(result,context.target,record)
+    assert native.uncertain is True
