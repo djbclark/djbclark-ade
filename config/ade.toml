@@ -1517,9 +1517,7 @@ schedule = "StartInterval 300"
 command = "bin/ade-supervisor-scan"
 set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor"]
 platforms = ["mac"]
-notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the agent in __LEAD__ per newly stuck Pi agent; a broken or quota-blind scan alerts once, and an archived/unreachable lead is escalated once with hermes-ping (the lead id is not a placeholder: ADE_SUPERVISOR_LEAD or __STATE__/lead (one Paseo agent id), so a lead handoff
-cannot leave notices aimed at an archived session and the job still renders for `ade-sched diff`/`reconcile`
-(docs/scheduling.md)). Chosen because it was installed 2026-11-18 to cover the /watch stuck mode of skills/watch/SKILL.md; logs and dedupe state in __STATE__. Setting chosen = false makes doctor quiet and makes reconcile unload it (docs/scheduling.md)."
+notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the lead named in ADE_SUPERVISOR_LEAD or __STATE__/lead per newly stuck Pi agent; a broken or quota-blind scan alerts once, an archived or unverifiable lead is never messaged (a delivery would un-archive it) and is escalated once with hermes-ping; the lead id is a file, not a placeholder, so the job renders for `ade-sched diff`/`reconcile` and a lead handoff cannot leave a stale id (docs/scheduling.md)."
 
 [[install.jobs]]
 name = "ade-helper-prune"

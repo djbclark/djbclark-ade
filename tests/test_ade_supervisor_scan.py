@@ -35,10 +35,18 @@ def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": feed}))
     _script(bin_dir / "ade-pi-stuck", "#!/bin/sh", "cat " + str(bin_dir / "feed.json"))
     sent = tmp_path / "sent.log"
-    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in',
-            '  send) echo "$*" >> ' + str(sent) + '; exit ' + str(paseo_rc) + ";;",
-            "esac", "exit 0")
+    _paseo(bin_dir, tmp_path, sent, rc=paseo_rc)
     return bin_dir, home, state, sent
+
+
+def _paseo(bin_dir: Path, tmp_path: Path, sent: Path, rc: int = 5, archived: bool = False) -> None:
+    """A fake `paseo`: `send` logs and exits with `rc`; `agent inspect` answers from a file (live unless `archived`)."""
+    inspect = tmp_path / "inspect.json"
+    inspect.write_text(json.dumps({"Archived": archived, "Id": LEAD, "Status": "idle"}))
+    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in',
+            '  send) echo "$*" >> ' + str(sent) + "; exit " + str(rc) + ";;",
+            "  agent) cat " + str(inspect) + ";;",
+            "esac", "exit 0")
 
 
 def _run(bin_dir: Path, home: Path, lead: str | None = LEAD) -> int:
@@ -107,7 +115,7 @@ def test_an_undelivered_send_keeps_the_notice_for_the_next_run(tmp_path: Path) -
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 1
     assert not (state / "notified").exists() or json.loads((state / "notified").read_text()) == []
-    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in', '  send) echo "$*" >> ' + str(sent) + "; exit 5;;", "esac")
+    _paseo(bin_dir, tmp_path, sent, rc=5)
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 2 and json.loads((state / "notified").read_text()) == ["a1|openai"]
 
@@ -175,12 +183,7 @@ def test_a_transient_failure_does_not_reannounce_known_agents(tmp_path: Path) ->
 def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_path: Path) -> None:
     """A send to an archived agent un-archives it, so the scan refuses; the operator hears about it once."""
     bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
-    inspect = tmp_path / "inspect.json"
-    inspect.write_text(json.dumps({"Archived": True}))
-    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in',
-            '  send) echo "$*" >> ' + str(sent) + ";;",
-            "  *) cat " + str(inspect) + ";;",
-            "esac")
+    _paseo(bin_dir, tmp_path, sent, archived=True)
     pinged = tmp_path / "hermes.log"
     _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(pinged))
     for _ in range(2):
@@ -188,3 +191,29 @@ def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_pa
     assert _messages(sent) == []
     assert len(pinged.read_text().splitlines()) == 1
     assert not (state / "notified").exists()          # nothing was told, so the notice is still pending
+
+
+def test_an_unverifiable_lead_is_not_messaged(tmp_path: Path) -> None:
+    """`paseo agent inspect` failing means the scan cannot prove the lead is live, so it must not send."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in',
+            '  send) echo "$*" >> ' + str(sent) + ";;",
+            "  agent) exit 4;;",
+            "esac")
+    pinged = tmp_path / "hermes.log"
+    _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(pinged))
+    assert _run(bin_dir, home) == 0
+    assert _messages(sent) == []
+    assert len(pinged.read_text().splitlines()) == 1
+
+
+def test_a_failed_escalation_is_retried_next_run(tmp_path: Path) -> None:
+    """The unreachable marker is written only after hermes-ping succeeds, so a failed ping is retried."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    _paseo(bin_dir, tmp_path, sent, archived=True)
+    calls = tmp_path / "ping.calls"
+    _script(bin_dir / "hermes-ping", "#!/bin/sh", "echo x >> " + str(calls), "exit 1")
+    assert _run(bin_dir, home) == 0
+    assert _run(bin_dir, home) == 0
+    assert len(calls.read_text().splitlines()) == 2          # retried, because it never reached the operator
+    assert not (state / ".lead-unreachable").exists()
