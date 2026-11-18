@@ -107,3 +107,45 @@ def test_the_worst_pool_for_an_account_wins(tmp_path: Path) -> None:
 def test_only_pi_prefixed_providers_are_listed(tmp_path: Path) -> None:
     report = _run(tmp_path, _pools(**{"openai:openai_api": (0.0, True, False)}))
     assert "d4" not in {o["id"] for o in report["all_pi"]}           # provider "pipeline/…" is not a Pi account
+
+
+def test_aiuse_exit_3_still_reads_its_pools(tmp_path: Path) -> None:
+    """aiuse exits 3 when no pool is usable, but prints the JSON: refusing the read would fail open."""
+    pools = _pools(**{"openai:openai_api": (0.0, True, False), "anthropic:subscription": (0.0, False, False)})
+    assert set(_run(tmp_path, pools, aiuse_rc=3)["exhausted"]) == {"openai", "anthropic"}
+
+
+def test_an_unusable_pool_outranks_a_usable_one_with_less_headroom(tmp_path: Path) -> None:
+    raw = {"fresh": True, "available": [
+        {"pool_id": "anthropic:subscription", "headroom_percent": 10.0, "usable_now": True, "stale": False},
+        {"pool_id": "anthropic:fable", "headroom_percent": 90.0, "usable_now": False, "stale": False},
+    ]}
+    report = _run(tmp_path, raw)
+    assert report["accounts"]["anthropic"]["usable"] is False
+    assert "anthropic" in report["exhausted"]
+
+
+def test_the_alternative_is_never_the_agents_own_exhausted_account(tmp_path: Path) -> None:
+    report = _run(tmp_path, _pools(**{"opencode:go": (0.0, True, False)}))
+    stuck = [s for s in report["stuck"] if s["id"] == "b2"][0]
+    assert stuck["account"] == "opencode-go-t-e"
+    assert stuck["alternative"] and not stuck["alternative"].startswith("pi/opencode-go-t-e/")
+
+
+def test_a_gemini_model_is_not_mistaken_for_a_low_effort_tier(tmp_path: Path) -> None:
+    agents = [{"id": "g1", "provider": "pi/google/gemini-2.5-pro", "status": "running"}]
+    report = _run(tmp_path, _pools(**{"google:gemini": (0.0, True, False)}), agents=agents)
+    assert report["stuck"][0]["alternative"] == "pi/opencode-go-t-e/deepseek-v4-pro"   # not the flash tier
+    agents = [{"id": "g2", "provider": "pi/google/gemini-2.5-flash", "status": "running"}]
+    report = _run(tmp_path, _pools(**{"google:gemini": (0.0, True, False)}), agents=agents)
+    assert report["stuck"][0]["alternative"] == "pi/opencode-go-t-e/deepseek-v4.1-flash"
+
+
+def test_no_healthy_candidate_means_no_alternative(tmp_path: Path) -> None:
+    raw = {"fresh": True, "available": [
+        {"pool_id": "openai:openai_api", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+        {"pool_id": "opencode:go", "account": "t-e", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+        {"pool_id": "opencode:go", "account": "djbclark", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+    ]}
+    report = _run(tmp_path, raw)
+    assert [s["alternative"] for s in report["stuck"] if s["id"] == "a1"] == [None]
