@@ -51,10 +51,23 @@ jobs:
         run: timeout 180 uv run --with pytest python -m pytest ../../tests/test_completion_notice.py ../../tests/test_ade_lead_succession.py ../../tests/test_archived_send_guard.py ../../tests/test_self_session.py ../../tests/test_ade_claims_bind_owner.py ../../tests/test_ade_claims_successor.py ../../tests/test_ade_claims_release.py -q
       - name: Resource ledger conformance
         run: python3 -m unittest discover -s ../../tests -p 'test_ade_coord*.py' -v
+      - name: Mount bounded disposable filesystem for actual ENOSPC proof
+        run: |
+          set -eu
+          mkdir -m 700 "$RUNNER_TEMP/nats-fault-tmpfs"
+          timeout 15 sudo mount -t tmpfs -o "size=32m,mode=0700,uid=$(id -u),gid=$(id -g)" ade-nats-fault "$RUNNER_TEMP/nats-fault-tmpfs"
+          echo "ADE_FAULT_TMPFS=$RUNNER_TEMP/nats-fault-tmpfs" >> "$GITHUB_ENV"
       - name: Real broker protocol proof
         env:
           NATS_SERVER: ${{ runner.temp }}/nats-server
-        run: timeout 180 npm test
+        run: timeout 240 npm test
+      - name: Unmount only the disposable fault filesystem
+        if: always()
+        run: |
+          set -eu
+          if mountpoint -q "$RUNNER_TEMP/nats-fault-tmpfs"; then
+            timeout 15 sudo umount "$RUNNER_TEMP/nats-fault-tmpfs"
+          fi
       - name: Preserve exact dependency resolution
         if: always()
         uses: actions/upload-artifact@v6
