@@ -1,0 +1,14 @@
+name: Fork maintenance core
+on:
+  push:
+    branches: ['fork-maintenance*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - run: uv run --with pytest python -m pytest tests/test_ade_forks.py tests/test_ade_fork_release.py tests/test_ade_install.py
