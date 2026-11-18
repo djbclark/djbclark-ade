@@ -48,21 +48,40 @@ class Fake:
         self.plugin_counter = 9
         self.release_failure = False
         self.idle_proven = True
+        self.original_context = None
+        self.original_intent = None
+        self.live_token = False
+        self.confirmed = False
+        self.known_activation = None
+        self.known_recovery = None
         self.adapter = m.Adapters(self.observe, self.preflight, self.stage, self.activate,
                                   self.verify, self.recover, lambda t: t in self.artifacts,
                                   authority=lambda op, t: self.allowed,
                                   authenticate=lambda r: self.authenticated,
                                   policy=lambda: self.current_policy, reserve=self.reserve,
-                                   prepare=self.prepare, finish=self.finish, released=self.released)
+                                   prepare=self.prepare, finish=self.finish, released=self.released, reuse=self.reuse)
 
     def prepare(self, context):
         self.contexts.append(context)
-        return m.ReservationIntent(self.native_counter + 1, self.plugin_counter, 'server', 'incarnation')
+        return m.ReservationIntent(self.native_counter if self.confirmed else self.native_counter + 1, self.plugin_counter, 'server', 'incarnation')
 
     def reserve(self, context, intent):
         self.calls.append('begin')
         if self.busy: return m.BeginResult('busy')
         self.native_counter = intent.native_generation
+        self.original_context, self.original_intent = context, intent
+        self.live_token = True
+        return m.BeginResult('held')
+
+    def reuse(self, context, intent, original_context, original_intent):
+        self.calls.append('reuse')
+        if not self.live_token or not self.confirmed:
+            raise RuntimeError('no live confirmed owner')
+        assert original_context == self.original_context
+        assert original_intent == self.original_intent
+        assert intent.native_generation == original_intent.native_generation
+        assert intent.plugin_generation == self.plugin_counter
+        self.confirmed = False
         return m.BeginResult('held')
 
     def finish(self, context, intent):
@@ -92,6 +111,11 @@ class Fake:
 
     def activate(self, target):
         self.calls.append('activate')
+        if self.known_activation:
+            self.actual = 'absent'
+            self.plugin_counter += 1
+            self.confirmed = True
+            return m.KnownFailedHeld(self.known_activation, self.plugin_counter)
         self.actual = target
         if self.crash:
             raise SystemExit('process death')
@@ -104,6 +128,11 @@ class Fake:
 
     def recover(self, target):
         self.calls.append('recover')
+        if self.known_recovery:
+            self.actual = 'absent'
+            self.plugin_counter += 1
+            self.confirmed = True
+            return m.KnownFailedHeld(self.known_recovery, self.plugin_counter)
         if self.fail == 'recover':
             raise RuntimeError('recovery failed')
         self.actual = target
@@ -229,7 +258,7 @@ def test_failure_preserves_last_verified(deployment, evidence, failure):
     if failure == 'policy': assert count == 0
 
 
-def test_process_crash_then_explicit_recovery_new_generation(deployment, evidence):
+def test_process_crash_holds_without_reconnect_or_new_generation(deployment, evidence):
     j, f = deployment
     f.crash = True
     with pytest.raises(SystemExit): deploy(j, f, evidence)
@@ -237,10 +266,10 @@ def test_process_crash_then_explicit_recovery_new_generation(deployment, evidenc
     assert f.actual == receipt(evidence).sha256
     assert deploy(j, f, evidence, generation=1).status == 'recovery_required'
     assert f.calls.count('activate') == 1
-    assert j.recover(f.adapter, rule_digest=RULE, generation=1).status == 'runtime_verified'
-    assert j.read()['generation'] == 2
-    assert j.read()['verified'] == f.actual == 'old'
-    assert j.recover(f.adapter, rule_digest=RULE, generation=1).reason == 'stale_job'
+    assert j.recover(f.adapter, rule_digest=RULE, generation=1).reason == 'reservation_unknown'
+    assert j.read()['generation'] == 1
+    assert j.read()['verified'] == 'old' and f.actual == receipt(evidence).sha256
+    assert j.recover(f.adapter, rule_digest=RULE, generation=0).reason == 'stale_job'
 
 
 def test_drift_and_recovery_failure(deployment, evidence):
@@ -248,7 +277,7 @@ def test_drift_and_recovery_failure(deployment, evidence):
     f.actual = 'foreign'
     assert deploy(j, f, evidence).reason == 'runtime_drift'
     f.actual = 'old'
-    f.fail = 'activate'
+    f.fail = 'preflight'
     deploy(j, f, evidence)
     f.fail = 'recover'
     assert j.recover(f.adapter, rule_digest=RULE, generation=1).status == 'recovery_required'
@@ -316,7 +345,7 @@ def test_changed_group_is_rejected(deployment, evidence):
 
 
 @pytest.mark.parametrize('after_replace', [False, True])
-def test_final_commit_failure_recovers_previous_baseline(deployment, evidence, monkeypatch, after_replace):
+def test_final_commit_failure_preserves_baseline_but_holds_unknown(deployment, evidence, monkeypatch, after_replace):
     j, f = deployment
     original_write = j.write
     failed = False
@@ -339,12 +368,12 @@ def test_final_commit_failure_recovers_previous_baseline(deployment, evidence, m
     row = j.read()
     assert row['verified'] == 'old'
     assert row['candidate'] == receipt(evidence).sha256
-    assert row['state'] == 'recovery_required'
+    assert row['state'] == 'reservation_unknown'
     assert row['generation'] == 1
-    assert j.recover(f.adapter, rule_digest=RULE, generation=1).status == 'runtime_verified'
-    assert f.actual == 'old'
+    assert j.recover(f.adapter, rule_digest=RULE, generation=1).reason == 'reservation_unknown'
+    assert f.actual == receipt(evidence).sha256
     assert j.read()['verified'] == 'old'
-    assert j.read()['generation'] == 2
+    assert j.read()['generation'] == 1
     assert f.artifacts['old'] == b'old'
 
 
@@ -386,7 +415,7 @@ def test_rotation_failed_c_preserves_b_and_a(deployment, evidence):
     assert promote(j, f, evidence).status == 'runtime_verified'
     b = receipt(evidence).sha256
     assert j.read()['baseline'] == 'old'
-    f.fail = 'activate'
+    f.fail = 'preflight'
     assert promote(j, f, next_evidence(evidence, b'C')).status == 'recovery_required'
     assert (j.read()['verified'], j.read()['baseline']) == (b, 'old')
     f.fail = None
@@ -461,10 +490,11 @@ def test_interrupted_rollback_keeps_direction(deployment, evidence, monkeypatch,
     assert row['transaction']['context']['kind'] == 'verified-rollback'
     assert row['transaction']['context']['target'] == 'old'
     monkeypatch.setattr(j, 'write', original)
-    # Default reconciliation resumes the durable rollback target, never verified B.
-    assert j.recover(f.adapter, generation=2, rule_digest=RULE).status == 'runtime_verified'
-    assert f.actual == j.read()['verified'] == 'old'
-    assert j.read()['baseline'] is None and j.read()['promotion_hold']
+    # Lost process/ACK cannot reconnect/recover, and cannot reverse the durable target.
+    before = list(f.calls)
+    assert j.recover(f.adapter, generation=2, rule_digest=RULE).reason == 'reservation_unknown'
+    assert f.calls == before
+    assert j.read()['transaction']['context']['target'] == 'old'
 
 
 def test_busy_consumes_only_journal_sequence_no_end_or_native_increment(deployment, evidence):
@@ -713,3 +743,197 @@ def test_release_observation_cannot_relabel_original_transaction(deployment, evi
     assert j.reconcile_release(f.adapter, generation=1, rule_digest='f' * 64).status == 'hold'
     assert j.read()['transaction'] == original
     assert f.calls.count('end') == 1
+
+
+
+@pytest.mark.parametrize('reason', ['compiler_error', 'initialization_rejected'])
+def test_confirmed_known_failure_recovery_reuses_exact_original_reservation(deployment, evidence, reason):
+    j, f = deployment
+    f.known_activation = reason
+    assert promote(j, f, evidence).status == 'known_failed_held'
+    row = j.read()
+    assert row['state'] == 'known_failed_held' and row['verified'] == 'old'
+    original = copy.deepcopy(row['transaction']['origin'])
+    assert original['context'] == m.asdict(f.original_context)
+    assert original['reservation'] == m.asdict(f.original_intent)
+    assert row['transaction']['reservation']['plugin_generation'] == 10
+    assert not set(f.calls) & {'verify', 'end', 'recover'}
+    f.known_activation = None
+    def must_not_begin(c, r): raise AssertionError('second BEGIN forbidden')
+    f.adapter.reserve = must_not_begin
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).status == 'runtime_verified'
+    assert f.calls.count('begin') == f.calls.count('reuse') == f.calls.count('end') == 1
+    assert f.native_counter == 41 and f.plugin_counter == 10
+    assert j.read()['verified'] == f.actual == 'old' and j.read()['generation'] == 2
+    assert f.contexts[-1].transaction_id != original['context']['transaction_id']
+    assert f.contexts[-1].kind == 'reconcile' and f.contexts[-1].target == 'old'
+    assert set(f.artifacts) == {'old', receipt(evidence).sha256}
+
+
+def test_known_failure_failed_c_preserves_b_baseline_a(deployment, evidence):
+    j, f = deployment
+    promote(j, f, evidence)
+    b = receipt(evidence).sha256
+    f.known_activation = 'compiler_error'
+    assert promote(j, f, next_evidence(evidence, b'C')).status == 'known_failed_held'
+    assert (j.read()['verified'], j.read()['baseline']) == (b, 'old')
+    f.known_activation = None
+    assert j.recover(f.adapter, generation=2, rule_digest=RULE).status == 'runtime_verified'
+    assert (j.read()['verified'], j.read()['baseline']) == (b, 'old')
+    assert f.contexts[-1].target == b
+    assert f.native_counter == 42 and f.calls.count('begin') == 2
+
+
+def test_repeated_confirmed_recovery_failure_preserves_origin_target_and_kind(deployment, evidence):
+    j, f = deployment
+    promote(j, f, evidence)
+    f.known_recovery = 'initialization_rejected'
+    assert rollback(j, f).status == 'known_failed_held'
+    origin = copy.deepcopy(j.read()['transaction']['origin'])
+    assert origin['context']['kind'] == 'verified-rollback'
+    assert j.recover(f.adapter, generation=2, rule_digest=RULE).status == 'known_failed_held'
+    row = j.read()
+    assert row['transaction']['origin'] == origin
+    assert row['transaction']['context']['kind'] == 'verified-rollback'
+    assert row['transaction']['context']['target'] == 'old'
+    assert row['transaction']['reservation']['plugin_generation'] == 11
+    assert row['verified'] == receipt(evidence).sha256 and row['baseline'] == 'old'
+    assert f.calls.count('begin') == 2 and f.calls.count('end') == 1
+    f.known_recovery = None
+    assert j.recover(f.adapter, generation=3, rule_digest=RULE).status == 'runtime_verified'
+    assert f.calls.count('begin') == 2 and f.calls.count('reuse') == 2
+    assert j.read()['verified'] == 'old' and j.read()['baseline'] is None
+    assert j.read()['promotion_hold'] is True
+
+
+@pytest.mark.parametrize('bad', [
+    {}, {'outcome': 'known_failed_held', 'reason': 'compiler_error', 'plugin_generation': 10},
+    m.KnownFailedHeld('other', 10), m.KnownFailedHeld('compiler_error', True),
+    m.KnownFailedHeld('compiler_error', -1), m.KnownFailedHeld('compiler_error', 8),
+    m.KnownFailedHeld('compiler_error', 2**53),
+])
+def test_unconfirmed_or_malformed_callback_result_is_unknown_never_reused(deployment, evidence, bad):
+    j, f = deployment
+    f.adapter.activate = lambda target: bad
+    assert promote(j, f, evidence).status == 'recovery_required'
+    assert j.read()['state'] == 'reservation_unknown'
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).reason == 'reservation_unknown'
+    assert f.calls.count('begin') == 1 and 'reuse' not in f.calls and 'end' not in f.calls
+
+
+@pytest.mark.parametrize('mode', ['throw', 'unbranded', 'busy', 'lost-token'])
+def test_failed_reuse_is_sticky_unknown_without_new_begin(deployment, evidence, mode):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    origin = copy.deepcopy(j.read()['transaction']['origin'])
+    if mode == 'throw':
+        def fail(*args): raise RuntimeError('lost acknowledgement')
+        f.adapter.reuse = fail
+    elif mode == 'unbranded': f.adapter.reuse = lambda *args: {'status': 'held'}
+    elif mode == 'busy': f.adapter.reuse = lambda *args: m.BeginResult('busy')
+    else: f.live_token = False
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).reason == 'reservation_unknown'
+    row = j.read()
+    assert row['transaction']['origin'] == origin
+    assert row['state'] == 'reservation_unknown'
+    assert j.recover(f.adapter, generation=2, rule_digest=RULE).reason == 'reservation_unknown'
+    assert f.calls.count('begin') == 1 and 'recover' not in f.calls and 'end' not in f.calls
+
+
+@pytest.mark.parametrize('field,value', [
+    ('native_generation', 42), ('server_id', 'other'), ('daemon_incarnation', 'new'),
+    ('plugin_generation', 11), ('plugin_generation', 9),
+])
+def test_fresh_plan_must_match_original_native_identity_and_recorded_plugin_cas(deployment, evidence, field, value):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    before = j.path.read_bytes()
+    prepare = f.adapter.prepare
+    def substitute(c):
+        data = m.asdict(prepare(c)); data[field] = value; return m.ReservationIntent(**data)
+    f.adapter.prepare = substitute
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).reason == 'same_held_identity_or_CAS_changed'
+    assert j.path.read_bytes() == before
+    assert 'reuse' not in f.calls and f.calls.count('begin') == 1
+
+
+@pytest.mark.parametrize('operation', ['recover', 'verify'])
+def test_known_failure_does_not_grant_recovery_consent(deployment, evidence, operation):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    before = j.path.read_bytes()
+    f.adapter.authority = lambda op, t: op != operation
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).status == 'hold'
+    assert j.path.read_bytes() == before and 'reuse' not in f.calls
+    f.allowed = False
+
+
+@pytest.mark.parametrize('phase', ['prepare', 'reuse'])
+def test_revocation_during_same_held_boundaries_never_recovers(deployment, evidence, phase):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    callback = getattr(f.adapter, phase)
+    def revoke(*args):
+        result = callback(*args); f.allowed = False; return result
+    setattr(f.adapter, phase, revoke)
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).status in {'hold', 'recovery_required'}
+    assert 'recover' not in f.calls and 'end' not in f.calls and f.calls.count('begin') == 1
+
+
+@pytest.mark.parametrize('state', ['reservation_intent', 'recover', 'verified_held', 'release_intent'])
+def test_same_held_crash_never_rebegins_or_reverses_direction(deployment, evidence, monkeypatch, state):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    origin = copy.deepcopy(j.read()['transaction']['origin'])
+    write = j.write
+    def crash(row):
+        write(row)
+        if row['state'] == state: raise SystemExit('process lost')
+    monkeypatch.setattr(j, 'write', crash)
+    with pytest.raises(SystemExit): j.recover(f.adapter, generation=1, rule_digest=RULE)
+    row = j.read()
+    assert row['transaction']['origin'] == origin
+    assert row['transaction']['context']['target'] == 'old'
+    assert row['transaction']['context']['transaction_id'] != origin['context']['transaction_id']
+    monkeypatch.setattr(j, 'write', write)
+    assert j.recover(f.adapter, generation=2, rule_digest=RULE).status == 'hold'
+    assert f.calls.count('begin') == 1
+
+
+def test_same_held_release_loss_reconciles_origin_without_replaying_end(deployment, evidence):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    origin = copy.deepcopy(j.read()['transaction']['origin'])
+    f.release_failure = True
+    assert j.recover(f.adapter, generation=1, rule_digest=RULE).status == 'release_uncertain'
+    def released(context, intent):
+        assert context.target == 'old'  # Current recovered target, never original failed B.
+        assert j.read()['transaction']['origin'] == origin
+        assert intent.native_generation == origin['reservation']['native_generation']
+        return True
+    f.adapter.released = released
+    assert j.reconcile_release(f.adapter, generation=2, rule_digest=RULE).status == 'runtime_verified'
+    assert f.calls.count('begin') == f.calls.count('end') == 1
+    assert j.read()['verified'] == 'old'
+
+
+@pytest.mark.parametrize('corruption', ['missing', 'extra', 'tx', 'native', 'direction'])
+def test_corrupt_known_failure_origin_never_reconstructs_ownership(deployment, evidence, corruption):
+    j, f = deployment
+    f.known_activation = 'compiler_error'
+    promote(j, f, evidence)
+    row = j.read(); origin = row['transaction']['origin']
+    if corruption == 'missing': del row['transaction']['origin']
+    elif corruption == 'extra': origin['token'] = 'not-authority'
+    elif corruption == 'tx': origin['context']['transaction_id'] = '0' * 32
+    elif corruption == 'native': origin['reservation']['native_generation'] = 42
+    else: origin['context']['verified'] = 'other'
+    j.write(row)
+    with pytest.raises(m.ContractError): j.read()
+    assert f.calls.count('begin') == 1 and 'reuse' not in f.calls
