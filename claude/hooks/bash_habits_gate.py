@@ -1107,7 +1107,7 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
-def unterminated_heredoc_reason(cmd: str) -> str | None:
+def unterminated_heredoc_reason(cmd: str, depth: int = 0) -> str | None:
     """An unterminated heredoc: bash writes the PARTIAL body and still exits 0.
 
     Probed on this Mac 2026-10-24: `cat > f <<'EOF'` with no `EOF` line creates `f` holding
@@ -1125,9 +1125,13 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
     escaped `<<` is a literal and does not introduce one. Fails open: any oddity that makes the
     scan uncertain returns None rather than denying a legitimate command.
     """
+    if depth > 16:
+        return None
     lines = cmd.split("\n")
+    headers = []
     i, quote = 0, None
     while i < len(lines):
+        headers.append(lines[i])
         # An introducer INSIDE a quoted string is not a heredoc (`rg -n '<<EOF' file` must pass).
         # Do not blank quoted runs: the delimiter of `<<'EOF'` is itself quoted, so blanking would
         # hide the very introducer being sought. Instead compute the quoted spans and skip a match
@@ -1153,6 +1157,12 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
                         f"the path (`--file`/`-f`) instead of inlining a long body.")
             i = j  # continue after the delimiter
         i += 1
+    # Double quotes still execute substitutions. Inspect their shell bodies afresh,
+    # after removing actual outer heredoc data, which may contain literal examples.
+    for body in live_bodies("\n".join(headers)):
+        reason = unterminated_heredoc_reason(body, depth + 1)
+        if reason:
+            return reason
     return None
 
 
