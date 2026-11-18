@@ -232,7 +232,7 @@ def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -
     assert _run(bin_dir, home, lead=None) == 0
     messages = _messages(sent)
     assert len(messages) == 1 and "-- SUCCESSOR-ID " in messages[0]     # `--` before the id, as ade-net-resume does
-    assert json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert json.loads((state / "notified").read_text()) == []          # nothing told to the successor yet
     assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
     assert (state / "lead").read_text().strip() == "SUCCESSOR-ID"      # the handoff is followed, not logged forever
     assert json.loads((state / "notified").read_text()) == []          # the successor has heard none of it yet
