@@ -340,6 +340,15 @@ def test_closed_substitution_and_outer_heredoc_examples_pass(command):
     assert not denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    "echo $(cat <<EOF\nbody\nEOF\n)",
+    "echo $(cat <<'EOF'\nbody\nEOF\n)",
+    "echo `cat <<EOF\nbody\nEOF\n`",
+])
+def test_verified_substitution_heredoc_terminators_survive_rescan(command):
+    assert not denied(command)
+
+
 @pytest.mark.parametrize("operator,inner", [
     ("<<", "  PY"),
     ("<<", "\tPY"),

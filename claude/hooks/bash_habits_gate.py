@@ -1155,6 +1155,7 @@ def unterminated_heredoc_reason(cmd: str, depth: int = 0) -> str | None:
                         f"file is silently truncated (2026-10-24: a peer message arrived cut off "
                         f"mid-sentence). Close the heredoc, or write the text to a file and pass "
                         f"the path (`--file`/`-f`) instead of inlining a long body.")
+            headers.append(lines[j])  # preserve the verified terminator for substitution scans
             i = j  # continue after the delimiter
         i += 1
     # Double quotes still execute substitutions. Inspect their shell bodies afresh,
