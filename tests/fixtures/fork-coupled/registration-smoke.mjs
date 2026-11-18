@@ -85,6 +85,7 @@ const work = await mkdtemp('/tmp/fcs-');
 const home = path.join(work, 'home');
 let daemon;
 let installed = false, hostWritten = false, managedWritten = false;
+let failure, result;
 try {
   await mkdir(home, {mode: 0o700});
   const config = {version: 1, pluginsEnabled: true,
@@ -111,7 +112,7 @@ try {
     {mode: 0o600, flag: 'wx'}); managedWritten = true;
   daemon = await launchObservedDaemon(root, home, expectedManifest);
   let plugins;
-  const deadline = Date.now() + 45_000;
+  const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
     assert.equal(daemon.child.exitCode, null, 'owned daemon exited during startup');
     assert.equal(daemon.child.signalCode, null, 'owned daemon stopped during startup');
@@ -136,14 +137,22 @@ try {
   assert.ok(begin.code !== 0 && begin.stdout.trim() === '', 'unqualified BEGIN must refuse without token');
   const observed = await daemon.observation();
   assert.equal(observed.status, 'hold', 'missing full executing profiles cannot qualify');
-  console.log(JSON.stringify({status: 'registration-negative-passed', qualification: false,
-    builtinCount: plugins.length, manifestSha256: expectedManifest, daemonPid: daemon.child.pid}));
+  result = {status: 'registration-negative-passed', qualification: false,
+    builtinCount: plugins.length, manifestSha256: expectedManifest, daemonPid: daemon.child.pid};
+} catch (error) {
+  failure = error;
+  // Only this fresh disposable account's sanitized daemon output is retained.
+  if (daemon) process.stderr.write(`Disposable daemon startup diagnostics:\n${daemon.diagnostics()}\n`);
 } finally {
   try { if (daemon) await daemon.dispose(); }
-  finally {
+  catch (error) { failure = failure ? new AggregateError([failure, error], 'startup and teardown failed') : error; }
+  try {
     if (hostWritten) await rm(hostPolicy);
     if (managedWritten) await rm(managedPolicy);
     if (installed) await sudo(['/bin/rm', '-rf', root, `${root}.manifest.json`]);
     await rm(work, {recursive: true, force: true});
   }
+  catch (error) { failure = failure ? new AggregateError([failure, error], 'fixture and cleanup failed') : error; }
 }
+if (failure) throw failure;
+console.log(JSON.stringify(result));

@@ -134,10 +134,12 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
   const { dispose } = ownDisposableGroup(child);
   let outputBytes = 0;
   let overflow = false;
+  let outputTail = '';
   for (const stream of [child.stdout, child.stderr]) {
     stream.on('data', (chunk) => {
       outputBytes += chunk.length;
       if (outputBytes > MAX_REPLY) overflow = true;
+      outputTail = (outputTail + chunk.toString('utf8')).slice(-8192);
     });
   }
   const observation = async () => {
@@ -168,5 +170,5 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
     assert.ok(!overflow && !childError && child.exitCode === null && child.connected);
     return reply;
   };
-  return Object.freeze({ child, observation, dispose });
+  return Object.freeze({ child, observation, dispose, diagnostics: () => outputTail });
 }
