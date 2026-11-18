@@ -29,3 +29,5 @@
 - Bind committed V2 observations to the producer's adapted builtin factories, canonical module table and current fixed protected host profiles, keeping unintegrated system namespaces on preexecution HOLD. (#796)
 ### Added
 - Validate committed retained system-closure metadata and module-table binding while holding unproved namespace execution; consume native scoped same-bearer recovery with separate verification and no retry of unknown failures. (#796)
+### Added
+- Invoke the authenticated shared read-only namespace verifier immediately before retained CLI execution, with controlled import and refusal before subprocess start on missing or changed proof. (#796)

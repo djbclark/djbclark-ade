@@ -6,6 +6,7 @@ Synthetic CI ports exercise orchestration only and confer no production support.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 from dataclasses import asdict, replace
 import hashlib
@@ -22,6 +23,7 @@ import time
 import subprocess
 import sys
 import tempfile
+import types
 import zipfile
 
 from ade_fork_ci import Evaluation, GitHubEvaluation
@@ -591,9 +593,93 @@ def verify_transport_distribution(config):
         raise ContractError('explicit native/helper inventory mismatch')
     if read_regular(manifest_path, 4 * 1024 * 1024, owner=0) != raw_manifest:
         raise ContractError('distribution authority changed during verification')
-    if retained_system:
-        raise ContractError('actual sealed namespace/inode/loader verifier not yet integrated; no host fallback')
     return manifest
+
+
+def readonly_namespace_source(source,filename):
+    """Reject import-time dispatch/effects; source authority still comes from manifest."""
+    tree=ast.parse(source,filename=filename)
+    imports={'argparse','ctypes','errno','grp','hashlib','json','os','pathlib','pwd','re','select','stat','struct','sys'}
+    guard=ast.parse('if __name__ == "__main__":\n    sys.exit(main())').body[0]
+    def literal(node):
+        return all(isinstance(part,(ast.Constant,ast.Tuple,ast.List,ast.Set,ast.Dict,ast.Load,ast.UnaryOp,ast.UAdd,ast.USub,
+            ast.BinOp,ast.LShift,ast.RShift,ast.BitOr,ast.BitAnd,ast.Add,ast.Sub,ast.Mult)) for part in ast.walk(node))
+    def definition(node):
+        if isinstance(node,ast.FunctionDef):
+            if node.decorator_list:raise ContractError('readonly helper import decorator refused')
+            header=[*node.args.defaults,*[item for item in node.args.kw_defaults if item is not None]]
+            header += [arg.annotation for arg in [*node.args.posonlyargs,*node.args.args,*node.args.kwonlyargs] if arg.annotation is not None]
+            if node.args.vararg and node.args.vararg.annotation:header.append(node.args.vararg.annotation)
+            if node.args.kwarg and node.args.kwarg.annotation:header.append(node.args.kwarg.annotation)
+            if node.returns:header.append(node.returns)
+            if any(isinstance(part,(ast.Call,ast.NamedExpr,ast.Await,ast.Yield,ast.YieldFrom)) for item in header for part in ast.walk(item)):
+                raise ContractError('readonly helper import header effects refused')
+            return
+        if isinstance(node,ast.ClassDef):
+            if node.keywords or any(not isinstance(item,ast.Name) or item.id!='dataclass' for item in node.decorator_list):
+                raise ContractError('readonly helper class import effects refused')
+            for base in node.bases:
+                if ast.dump(base) not in (ast.dump(ast.Name(id='Exception',ctx=ast.Load())),
+                        ast.dump(ast.Attribute(value=ast.Name(id='argparse',ctx=ast.Load()),attr='ArgumentParser',ctx=ast.Load()))):
+                    raise ContractError('readonly helper class base refused')
+            for item in node.body:
+                if isinstance(item,ast.FunctionDef):definition(item)
+                elif isinstance(item,ast.Expr) and isinstance(item.value,ast.Constant) and type(item.value.value) is str:pass
+                elif isinstance(item,ast.AnnAssign) and isinstance(item.target,ast.Name) and isinstance(item.annotation,ast.Name) and (item.value is None or literal(item.value)):pass
+                elif isinstance(item,ast.Assign) and literal(item.value) and all(
+                        all(isinstance(part,(ast.Name,ast.Tuple,ast.List,ast.Store)) for part in ast.walk(target)) for target in item.targets):pass
+                else:raise ContractError('readonly helper class import statement refused')
+            return
+        raise ContractError('readonly helper definition refused')
+    for node in tree.body:
+        if isinstance(node,ast.Import):
+            if any(item.name not in imports or item.asname is not None for item in node.names):raise ContractError('readonly helper import refused')
+        elif isinstance(node,ast.ImportFrom):
+            if node.level or node.module!='dataclasses' or len(node.names)!=1 or node.names[0].name!='dataclass' or node.names[0].asname is not None:
+                raise ContractError('readonly helper imported binding refused')
+        elif isinstance(node,(ast.FunctionDef,ast.ClassDef)):
+            if node.name.startswith('__'):raise ContractError('readonly helper reserved module binding refused')
+            definition(node)
+        elif isinstance(node,ast.Expr) and isinstance(node.value,ast.Constant) and type(node.value.value) is str:pass
+        elif isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='ENVIRONMENT' and literal(node.value):pass
+        elif isinstance(node,ast.If) and ast.dump(node)==ast.dump(guard):pass
+        else:raise ContractError('readonly helper import-time statement refused')
+    return tree
+
+
+def verify_readonly_namespace(config, manifest):
+    """Invoke only the measured fixed packaged389bb read-only port; no resolver copy."""
+    if type(manifest) is not dict:
+        if config.get('cohortVersion')==2:raise ContractError('verified V2 transport manifest absent')
+        return
+    if 'systemClosure' not in manifest and 'systemClosureSha256' not in manifest:return
+    root=Path(config['distributionRoot'])
+    member='system-closure/namespace-bootstrap.py'
+    rows=[row for row in manifest['files'] if row['path']==member]
+    if len(rows)!=1 or rows[0]['mode']!=0o444:raise ContractError('fixed sealed namespace verifier member absent')
+    path=protected_root_path(root/member)
+    source=read_regular(path,rows[0]['size'],owner=0)
+    if len(source)!=rows[0]['size'] or hashlib.sha256(source).hexdigest()!=rows[0]['sha256']:
+        raise ContractError('namespace verifier member identity mismatch')
+    name='_ade_retained_namespace_'+rows[0]['sha256']
+    module=types.ModuleType(name)
+    module.__file__=str(path)
+    previous=sys.modules.get(name)
+    sys.modules[name]=module  # dataclass introspection requires the exact executing module.
+    try:
+        # Definitions-only, measured shared helper. Never __main__/Admin/launch dispatch.
+        exec(compile(readonly_namespace_source(source,str(path)),str(path),'exec'),module.__dict__)
+        verify=getattr(module,'verify_existing_namespace',None)
+        if not callable(verify) or verify(str(root),config['distributionSha256']) is not None:
+            raise ContractError('readonly namespace verification refused')
+        if read_regular(path,rows[0]['size'],owner=0)!=source:
+            raise ContractError('namespace verifier source changed during check')
+    except BaseException as error:
+        # Every helper refusal/exception is HOLD, never an authority/result object.
+        raise ContractError('actual readonly namespace verification refused') from error
+    finally:
+        if previous is None:sys.modules.pop(name,None)
+        else:sys.modules[name]=previous
 
 
 def cohort_observation(value, config, expected, target, *, allow_target_absent=False):
@@ -785,6 +871,7 @@ class NativeFacade:
         self.read_only_reconciliation = False
         self.host_policy_binding = None
         self.builtin_identities = None
+        self.transport_manifest = None
 
     def supported(self):
         if self.uncertain and not getattr(self, 'read_only_reconciliation', False): return False
@@ -888,6 +975,7 @@ class NativeFacade:
             if path.stat().st_mode & 0o222 or hashlib.sha256(data).hexdigest() != item['sha256']:
                 raise ContractError('retained native bridge identity mismatch')
         self.bridge_binding = binding
+        self.transport_manifest = manifest
         return config
 
     def _call(self, arguments, token=None):
@@ -897,6 +985,8 @@ class NativeFacade:
                'HOME': pwd.getpwuid(os.getuid()).pw_dir}
         if token is not None and not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
             raise ContractError('invalid private owner token')
+        # Last synchronous check before exec: shared port verifies CURRENT namespace.
+        verify_readonly_namespace(config,self.transport_manifest)
         with subprocess.Popen(args, stdin=subprocess.PIPE if token is not None else subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
             deadline = time.monotonic() + 30

@@ -530,3 +530,31 @@ and fresh same-tuple status prove durable restriction removal. Generic throws,
 malformed results or lost acknowledgements latch UNKNOWN and discard reuse
 eligibility. All tests with synthetic wire remain source orchestration evidence;
 actual coupled native qualification and exact-source review remain required.
+
+### Shared read-only namespace port
+
+Reviewed native source `389bb84ea48c8c800a3c528b23e1d192be052959` provides
+`verify_existing_namespace(root, expected_manifest_sha256) -> None` in the SAME
+packaged `ROOT/system-closure/namespace-bootstrap.py`, mode 0444. Controller
+preexec now consumes this real port instead of unconditional systemClosure HOLD.
+It first independently authenticates the raw manifest and full sealed inventory,
+then measures that exact member and filters import-time statements. Controlled
+import uses the actual fixed `__file__`, definitions-only execution and a temporary
+private module name, never the `__main__`/Admin launch path. No arbitrary module,
+PID, command, recipe or policy path is exposed. Every exception, missing port,
+changed source or non-None return is HOLD.
+
+Immediately before the retained Node/CLI subprocess starts, the shared port
+rechecks the CURRENT process namespace with its existing finite Distribution
+resolver, ELF/cache/alias/hwcaps/absence/path authority, retained/current same inode,
+actual readonly/nosuid/nodev target mounts, private propagation and stable final
+snapshots. This code does not copy those checks, enter/create a namespace, invoke
+Admin, mount, unshare, change identity or execute a privileged helper. A caller
+outside the proved namespace refuses. Successful read-only verification is not an
+execution-owner or qualification brand; genuine native private daemon/child/cohort
+facts and current transaction authority remain mandatory.
+
+Dedicated controller CI checks out the exact shared-source revision for a real
+import/refusal case. The normal protocol tests use clearly synthetic helpers and
+never establish actual namespace qualification. Root's disposable actual Linux
+namespace proof and exact source review of this adapter delta remain separate gates.
