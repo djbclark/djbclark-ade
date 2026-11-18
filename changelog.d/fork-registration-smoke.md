@@ -20,3 +20,5 @@
   no native ownership or runtime qualification. (#0)
 
 - Pin the exact source-reviewed namespace bootstrap repair; preserve refusal of older blocked script bytes and the separate actual Linux proof gate. (#0)
+
+- Pin the separately source-reviewed read-only namespace verifier without treating its successful filesystem check as execution authority. (#0)
