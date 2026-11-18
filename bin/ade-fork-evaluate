@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Protected evaluator entry; no live installation or schedule."""
+from ade_fork_evaluator import main
+raise SystemExit(main())
