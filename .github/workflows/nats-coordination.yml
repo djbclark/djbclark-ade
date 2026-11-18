@@ -1,0 +1,53 @@
+name: NATS coordination conformance
+on:
+  push:
+    paths: ['lib/ade-coord/**', '.github/workflows/nats-coordination.yml']
+  pull_request:
+    paths: ['lib/ade-coord/**', '.github/workflows/nats-coordination.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lib/ade-coord
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install current released server
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          timeout 120 gh release download --repo nats-io/nats-server --pattern 'nats-server-*-linux-amd64.tar.gz' --dir "$RUNNER_TEMP/nats-download"
+          python3 - <<'PYCODE'
+          import os, tarfile, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive, = (root / 'nats-download').glob('*.tar.gz')
+          with tarfile.open(archive) as t:
+              member, = [m for m in t.getmembers() if m.name.endswith('/nats-server')]
+              target = root / 'nats-server'
+              target.write_bytes(t.extractfile(member).read())
+              target.chmod(0o755)
+          PYCODE
+          "$RUNNER_TEMP/nats-server" --version
+      - name: Resolve latest maintained clients and record exact versions
+        run: |
+          timeout 180 npm install --ignore-scripts
+          node --version
+          npm ls --all
+      - name: Real broker protocol proof
+        env:
+          NATS_SERVER: ${{ runner.temp }}/nats-server
+        run: timeout 180 npm test
+      - name: Preserve exact dependency resolution
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nats-protocol-dependencies
+          path: lib/ade-coord/package-lock.json
