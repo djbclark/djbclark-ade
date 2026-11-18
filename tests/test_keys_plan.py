@@ -156,7 +156,7 @@ def test_cold_actual_cli_has_no_writes_or_probes(tmp_path, option, json_output):
     root = tmp_path / 'repo'
     bindir = root / 'bin'
     bindir.mkdir(parents=True)
-    for name in ('ade-install', 'ade_install.py', 'ade_install_catalog.py', 'ade_config.py', 'model_tiers.py'):
+    for name in ('ade-install', 'ade_install.py', 'ade_install_catalog.py', 'ade_forks.py', 'ade_config.py', 'model_tiers.py'):
         shutil.copyfile(REPO / 'bin' / name, bindir / name)
     cli = bindir / 'ade-install'
     cli.chmod(0o755)

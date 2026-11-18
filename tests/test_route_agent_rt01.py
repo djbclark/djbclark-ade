@@ -111,7 +111,7 @@ def test_an_error_snapshot_account_counts_as_an_unmeasured_account(order):
 def test_a_lone_error_account_builds_no_pool_and_an_error_elsewhere_does_not_touch_other_providers():
     assert "claude" not in r._providers_from_accounts([ERROR], 60)
     assert "claude" not in r._providers_from_available([ERROR], 60)
-    codex = {"provider": "codex", "pool_family": None, "usable_now": True, "headroom_percent": 70, "age_seconds": 60,
+    codex = {"provider": "codex", "pool_family": "openai_api", "usable_now": True, "headroom_percent": 70, "age_seconds": 60,
              "binding_window": "Codex weekly"}
     pool = r._providers_from_available([codex, ERROR], 60)["codex"]
     assert r.UNMEASURED_WINDOW not in pool["windows"] and r.plenty_remaining(pool) == 70

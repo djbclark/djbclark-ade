@@ -1,0 +1,17 @@
+name: Fork inventory contract
+on:
+  push:
+    branches: [fork-maintenance-inventory]
+  pull_request:
+    paths: [bin/ade_fork_inventory.py, bin/ade-fork-inventory, tests/test_ade_fork_inventory.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest python -m pytest tests/test_ade_fork_inventory.py tests/test_ade_forks.py -q

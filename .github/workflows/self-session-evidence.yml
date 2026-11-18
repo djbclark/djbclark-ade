@@ -1,0 +1,23 @@
+name: Self-session evidence
+on:
+  push:
+    branches: [carried73-session-evidence, feat/nats-adapters-64881586]
+  pull_request:
+    paths:
+      - 'bin/ade_self_session.py'
+      - 'bin/ade-self-session'
+      - 'bin/ade_first_turn.py'
+      - 'tests/test_self_session.py'
+      - 'tests/test_first_turn.py'
+      - '.github/workflows/self-session-evidence.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --with pytest --with pyyaml python -m pytest tests/test_self_session.py tests/test_first_turn.py -q

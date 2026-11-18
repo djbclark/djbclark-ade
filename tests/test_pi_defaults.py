@@ -83,7 +83,8 @@ def test_mechanical_effort_differs_from_substantive_native_work():
 
 def test_physical_pools_remain_distinct():
     assert router.map_agent_to_provider("pi", "openai/gpt-6.1-sol") == ("pi", "codex_api")
-    assert router.map_agent_to_provider("codex", "gpt-6.1-sol") == ("codex", None)
+    assert router.map_agent_to_provider("codex", "gpt-6.1-sol") == ("codex", "openai_api")
+    assert router.map_agent_to_provider("codex", "gpt-6-luna") == ("codex", "default")
     assert router.map_agent_to_provider("pi", MODELS[0]) == ("zai", None)
     # Composer uses the explicit included family retained in routing policy;
     # provider-only or Grok Bot quota must never stand in for this family.

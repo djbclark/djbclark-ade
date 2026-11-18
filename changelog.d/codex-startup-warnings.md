@@ -1,0 +1,3 @@
+### Changed
+
+- `agents/codex/config.toml.tmpl`: removed the `claude-code-mods` marketplace and its `context-bar` plugin from Codex (a Claude Code UI mod, kept for Claude), added `project_doc_max_bytes = 65536` so the global + project instruction docs stop truncating at the 32768 default, captured the live-drift additions (`anthropic-agent-skills` marketplace with `document-skills`/`example-skills`, and `typescript-lsp@claude-plugins-official`), and documented the "trusted Git repository root escapes Codex home" root cause (the `~/.codex/.tmp` symlink escaping `~/.codex`, raised by git_policy.rs before git discovery; fix by making `.tmp` a real directory — not by converting the git marketplaces to local). (#781)
