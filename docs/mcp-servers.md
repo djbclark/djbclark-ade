@@ -39,7 +39,11 @@ usage statistics default to on, and CrUX sends the traced page URLs (which can c
 (lands in `~/.codex/config.toml`). (2) The operator switches on
 `chrome://inspect/#remote-debugging` and restarts Chrome once. Chrome then writes `DevToolsActivePort` (port and a
 `/devtools/browser/<id>` path) under `~/Library/Application Support/Google/Chrome`. Plain HTTP `/json/list` returns nothing; only
-the websocket works. (3) A running Claude Code session needs a fresh start or `/mcp` reconnect to load the tools. Codex needs a fresh session to load a new MCP registration; adding it does not inject tools into an already running session.
+the websocket works. (3) A running Claude Code session may need a fresh start or `/mcp` reconnect to load the tools. For Codex,
+verify actual callable tools after registration; configuration readback alone does not prove runtime access. A fresh Codex
+worker exposed 33 Chrome DevTools tools and successfully called `list_pages`, non-focusing `select_page` and a metadata-only
+`evaluate_script` on 2026-11-17. The namespace later also became available in the original session; do not assume a session's
+tool list can never change. If tools remain missing, use a fresh session and verify the calls there.
 Cursor and Hermes are not registered.
 
 **Observed 2026-11-16.** `list_pages` returned the operator's 20 tabs; a raw CDP `Target.getTargets` listed pages, workers and
@@ -47,8 +51,9 @@ extension service workers, all in one `browserContextId`. Chrome showed an "Allo
 connection (the MCP server holds one, so one prompt per MCP start; a second raw CDP connection prompted again). Profiles:
 upstream says auto-connect reaches the default profile (as Chrome determines it) and all open windows of that profile only
 (`docs/advanced-usage.md` in ChromeDevTools/chrome-devtools-mcp). A window opened in "Profile 1" by command line did not show up
-as a target. Treat coverage as the default profile only. Freezing (`Page.setWebLifecycleState`) or closing (`Target.closeTarget`)
-a tab over raw CDP is untested here; do either only on the operator's yes for a named tab.
+as a target. Treat coverage as the default profile only. Raw-CDP closing (`Target.closeTarget`) remains untested here.
+Freeze/resume and discard/recovery were subsequently verified as attended checks below. Lifecycle actions on operator-owned
+tabs still require the operator's yes for the named tab.
 
 **Security.**
 
@@ -98,6 +103,38 @@ read-only, with no dialog. Acting on a tab the session did not create needs `--t
 listing). `--force` is a flag any caller can pass, not an authorization, and upstream also documents `tab adopt`, which
 attaches an already-open tab (not tested for `--force`). No discard or freeze command was found. The extension requires
 `debugger`, `tabs`, `scripting`, `nativeMessaging`, `downloads` and `identity.email` among others; only host access is optional.
+
+**Attended lifecycle verification (2026-11-17/18 UTC).** These checks used an operator-approved account page and inspected
+only tab identity and lifecycle metadata, not page contents, screenshots, network traffic or credentials. Freeze/resume used
+the named existing tab; discard/recovery used an agent-created temporary tab at the same approved URL after the original tab
+changed. A changed or disappeared target requires identity verification, not an assumption about what caused the change.
+
+1. **Freeze/resume:** a raw CDP connection sent `Page.setWebLifecycleState` with `frozen`, then `active`. An isolated-world
+   timer stopped advancing during the freeze and advanced after resume. Both protocol calls succeeded, the timer was removed
+   and the debugger detached.
+2. **Discard/recovery:** another raw CDP connection evaluated Chrome's `tabs` API in the chrome-use extension's service
+   worker. This is a privileged, attended diagnostic path, not a chrome-use CLI command or a Chrome DevTools MCP discard
+   tool. The MCP tool rejected navigation to `chrome://discards`; no internal-page navigation was used as a workaround.
+   For any repeat, verify the profile, exact URL and current tab ID, require an inactive loaded tab, and pass that ID to
+   `chrome.tabs.discard(id)`. Never omit the ID: Chrome may otherwise choose a different tab. Stop if preparation fails or
+   identity/state changes; stale inventory is not authority to act.
+3. **Follow replacement, then verify recovery:** Chrome emitted `tabs.onReplaced` during discard and returned a new tab ID.
+   The returned tab and a separate `tabs.get(newId)` both reported `discarded: true`. Follow the returned ID and replacement
+   event, not the old ID or a guessed same-URL tab. Approved `tabs.reload(newId)` plus activation with
+   `tabs.update(newId, {active: true})` restored the exact URL with `discarded: false` and `status: complete`. The controlled
+   test and blank helper tabs were closed, the previously active tab restored, and the debugger detached.
+
+**Limits:** reload alone left `discarded: true` in one direct observation; this does not establish that activation is always
+required. Upstream [chrome-use PR 381](https://github.com/leeguooooo/chrome-use/pull/381) already handles replacement IDs and
+describes background reload recovery. The test environment also returned an active tab from creation requested with
+`active: false`; its cause was not isolated to Chrome, chrome-use or MCP. The final test therefore used an owned blank helper
+to make the target inactive. Keep this as an unconfirmed focus observation, not a newly established upstream bug.
+
+These successful checks do not prove unattended freeze/discard or coverage of every profile. They used raw CDP, which can
+show Chrome's Allow dialog, with the operator present and with explicit permission for launch and reload. Activation also
+changes the visible tab; the successful recovery above is not a silent background workflow. The earlier dialog-free CLI
+inventory/close checks remain separate evidence. No generic freeze/discard CLI was added, and this documentation grants no
+standing permission to launch, reload, close or discard the operator's tabs.
 
 **Surprises to re-check after every upgrade.** (a) The installer wrote a `chrome-use` skill into `~/.claude/skills`,
 `~/.agents/skills` and `~/.cursor/skills` although `AGENT_BROWSER_NO_SKILL=1` was set; its description tells agents to prefer
