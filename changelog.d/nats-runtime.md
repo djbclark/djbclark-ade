@@ -4,3 +4,4 @@
 
 - Include the enrolled-role instructions in the portable coordinator runtime (#779)
 - Verify the current coordination source against the broker package from published hub configuration. (#779)
+- Audit only installed production dependencies when building the runtime bundle. (#779)

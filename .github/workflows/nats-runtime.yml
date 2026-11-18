@@ -36,7 +36,7 @@ jobs:
         working-directory: lib/ade-coord
         run: |
           timeout 180 npm install --omit=dev --ignore-scripts
-          npm ls --all
+          npm ls --omit=dev --all
       - name: Verify atomic runtime credential consumer
         run: python3 -m unittest discover -s tests -p test_nats_credential.py -v
       - name: Download native CLI distributions and verify release checksums
