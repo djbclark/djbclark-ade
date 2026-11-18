@@ -45,7 +45,8 @@ def fixture():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("repository", "../upstream"), ("repository_id", True), ("run_id", -1),
+    ("repository", "../upstream"), ("repository", "djbclark/.."),
+    ("repository_id", True), ("run_id", -1),
     ("workflow_path", ".github/workflows/../../other.yml"),
     ("evaluator_commit", "short"), ("receipt_sha256", "invalid"),
     ("event", "pull_request_target"), ("jobs", ()), ("jobs", ("x", "x")),

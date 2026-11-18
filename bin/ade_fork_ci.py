@@ -18,7 +18,7 @@ from typing import Any
 
 from ade_fork_release import ContractError, Receipt
 
-REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
@@ -45,7 +45,7 @@ class Evaluation:
     receipt_sha256: str
 
     def __post_init__(self):
-        if not isinstance(self.repository, str) or not REPOSITORY.fullmatch(self.repository):
+        if not isinstance(self.repository, str) or not REPOSITORY.fullmatch(self.repository) or self.repository.split("/")[-1] in (".", ".."):
             raise ContractError("invalid evaluator repository")
         for name in ("repository_id", "workflow_id", "run_id", "run_attempt", "actor_id", "artifact_id"):
             value = getattr(self, name)
