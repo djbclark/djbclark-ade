@@ -18,3 +18,5 @@
   tree, byte hashes and original held operation/CAS; reject an unrelated latest
   pair, unsettled work or reused Worker identities. Synthetic parser tests grant
   no native ownership or runtime qualification. (#0)
+
+- Pin the exact source-reviewed namespace bootstrap repair; preserve refusal of older blocked script bytes and the separate actual Linux proof gate. (#0)
