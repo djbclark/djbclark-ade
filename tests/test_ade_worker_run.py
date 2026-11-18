@@ -141,7 +141,7 @@ def test_first_launch_creates_and_renames(env):
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert run[run.index("--cwd") + 1] == os.path.realpath("/repo")
     assert run[-1] == f"BRIEF TEXT\n\n{FOOTER_LINE}" and "--provider" in run
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
     update = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["agent", "update"])
