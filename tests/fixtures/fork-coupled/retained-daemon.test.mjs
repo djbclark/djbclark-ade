@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -76,3 +76,34 @@ test('unresponsive owned fixture is killed and closed before original timeout is
     await assert.rejects(owner.dispose(), /graceful stop timed out/);
   } finally { await owner.dispose().catch(() => {}); }
 });
+
+for (const mode of ['nonzero', 'signal', 'zero-with-live-helper']) {
+  test(`early ${mode} fixture leader cannot abandon its owned helper`, { timeout: 7000 }, async () => {
+    const source = `
+      const {spawn}=require('node:child_process');
+      const helper=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+      process.send({pid:helper.pid});
+      process.once('message',()=>{
+        if(process.argv[1]==='signal') process.kill(process.pid,'SIGKILL');
+        else process.exit(process.argv[1]==='nonzero'?7:0);
+      });
+    `;
+    const child = spawn(process.execPath, ['-e', source, mode], {
+      detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+    const owner = ownDisposableGroup(child, { gracefulMs: 1000, forcedMs: 3000 });
+    try {
+      const [ready] = await once(child, 'message');
+      assert.ok(Number.isInteger(ready.pid) && ready.pid > 0);
+      child.send('exit');
+      const leader = await owner.closed;
+      if (mode === 'nonzero') assert.equal(leader.code, 7);
+      if (mode === 'signal') assert.equal(leader.signal, 'SIGKILL');
+      await assert.rejects(owner.dispose(), /owned (fixture exited|helpers survived)/);
+      try {
+        const raw = await readFile(`/proc/${ready.pid}/stat`, 'utf8');
+        assert.equal(raw.slice(raw.lastIndexOf(') ') + 2).split(' ')[0], 'Z', 'owned helper must have exited');
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    } finally { await owner.dispose().catch(() => {}); }
+  });
+}
