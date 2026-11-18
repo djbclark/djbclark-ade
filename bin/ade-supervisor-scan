@@ -24,6 +24,15 @@ if [ -z "$LEAD" ]; then
         "$(now)" "$STATE_DIR" >>"$LOG"
     exit 0
 fi
+case "$LEAD" in
+    -*) LEAD="" ;;                                       # a value starting with "-" would be read as an option
+    *[!A-Za-z0-9._:-]*) LEAD="" ;;                       # Paseo ids are UUIDs: nothing else is a target
+esac
+if [ -z "$LEAD" ]; then
+    printf '%s ade-supervisor-scan: the lead value in ADE_SUPERVISOR_LEAD/%s/lead is not an agent id; nothing to notify\n' \
+        "$(now)" "$STATE_DIR" >>"$LOG"
+    exit 0
+fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
 [ -x "$SCAN" ] || SCAN="$HOME/src/djbclark-ade/bin/ade-pi-stuck"
 # bin/ade-pi-stuck's stderr is kept out of the JSON it prints: a warning merged into stdout would make every run
@@ -62,6 +71,11 @@ else:
     if d.get("quota_error"):
         items.append(("scan|quota-unread",
                       "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
+    for acct in d.get("low") or []:
+        rec = (d.get("accounts") or {}).get(acct) or {}
+        items.append(("thin|%s" % acct,
+                      "account %s is thin (%s%% headroom) — re-handoffs to it are already refused" %
+                      (acct, rec.get("headroom"))))
     for s in d.get("stuck", []):
         if s.get("status") in ("closed", "archived"):
             continue
@@ -129,7 +143,11 @@ if [ "$send_failed" -eq 1 ]; then
             printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
         fi
     fi
-    rm -f "$pending"                     # keep the old state and retry next run
+    if [ -n "$msg" ]; then
+        rm -f "$pending"                 # a notice is pending: keep the old state and retry next run
+    else
+        [ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"   # quiet run: apply the shrink, nothing to retry
+    fi
     exit 0
 fi
 # The guard answered (pass or redirect): the lead is reachable again, so the escalation marker may go, even on a quiet run.

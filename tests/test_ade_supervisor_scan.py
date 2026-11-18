@@ -24,7 +24,7 @@ def _script(path: Path, *lines: str) -> None:
     path.chmod(0o755)
 
 
-def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
+def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5, extra: dict | None = None):
     """A sandbox with a copy of the scan, the fixture behind it and a recording `paseo`."""
     home = tmp_path / "home"
     state = home / ".local" / "state" / "djbclark-ade" / "supervisor"
@@ -34,7 +34,7 @@ def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
     shutil.copy2(SCAN, bin_dir / "ade-supervisor-scan")
     for module in (REPO / "bin").glob("*.py"):      # ade_send_guard.py and its imports, as an install has them
         (bin_dir / module.name).symlink_to(module)
-    (bin_dir / "feed.json").write_text(json.dumps({"stuck": feed}))
+    (bin_dir / "feed.json").write_text(json.dumps(dict({"stuck": feed}, **(extra or {}))))
     _script(bin_dir / "ade-pi-stuck", "#!/bin/sh", "cat " + str(bin_dir / "feed.json"))
     sent = tmp_path / "sent.log"
     _paseo(bin_dir, tmp_path, sent, rc=paseo_rc)
@@ -233,3 +233,21 @@ def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -
     assert len(messages) == 1 and messages[0].split()[1] == "SUCCESSOR-ID"
     assert json.loads((state / "notified").read_text()) == ["a1|openai"]
     assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
+
+
+def test_a_lead_value_that_is_not_an_id_is_ignored(tmp_path: Path) -> None:
+    """A lead value that could be read as a `paseo send` option never reaches the command."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home, lead="--dangerous") == 0
+    assert _messages(sent) == []
+    assert "is not an agent id" in (state / "supervisor.log").read_text()
+
+
+def test_a_thin_account_is_reported_before_it_hits_zero(tmp_path: Path) -> None:
+    extra = {"low": ["anthropic"], "accounts": {"anthropic": {"headroom": 4.0, "usable": True, "stale": False}}}
+    bin_dir, home, state, sent = _harness(tmp_path, [], extra=extra)
+    assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and "anthropic is thin (4.0% headroom)" in messages[0]
+    assert _run(bin_dir, home) == 0
+    assert len(_messages(sent)) == 1                     # told once, not every 300 s
