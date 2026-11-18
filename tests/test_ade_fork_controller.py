@@ -516,6 +516,15 @@ def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,m
     monkeypatch.setattr(controller,'discover_master',lambda:{'discovered':row['master_commit']})
     assert controller.selected_release(row)[0].sha256==receipt.sha256
     assert calls==[fresh]
+    controller.native=FakeNative(receipt.sha256)
+    row['previous']=receipt.sha256
+    journal=c.Journal(controller.root/'journal',row['policy']['compatibility_group'])
+    journal.enroll(receipt.sha256,controller.adapters(row,SimpleNamespace(authenticates=lambda actual:True)))
+    for operation in ('preflight','stage','activate','verify'):
+        row['operations'][operation]['identity']='qualified-latest'
+    assert controller.tick('deploy')['status']=='runtime_verified'
+    assert controller.native.calls==[('activate',receipt.sha256)]
+    assert calls==[fresh,fresh]
     # A CURRENT authentication refusal still stops, without falling back to old evidence.
     def revoked(expected,path):raise c.ContractError('current policy refused')
     controller.evaluator.verify=revoked
