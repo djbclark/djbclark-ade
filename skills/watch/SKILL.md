@@ -2,7 +2,7 @@
 name: watch
 description: >-
   Inspect machine load, memory churn, and active incidents from your terminal with minimal token use, or manage
-  system watchers. Use for `/watch load`, `/watch`, `/loadwatch`, "watch load", "check load", "triage load spikes",
+  system watchers. Use for `/watch paseo`, `/watch load`, `/watch`, `/loadwatch`, "watch load", "check load", "triage load spikes",
   or when investigating machine slowness, compressor churn, and load-watch alerts.
 ---
 
@@ -142,3 +142,24 @@ accepted: a failed quota read keeps the known-empty accounts stuck instead of cl
 The re-handoff itself (archive the exhausted agent, relaunch the same task on the
 healthy alternative, and tell the new agent to continue) is a separate gated
 action — the supervisor agent owns it, not `ade-pi-stuck` (read-only).
+
+## 6. Paseo fork releases (`/watch paseo`)
+
+Zero-token terminal status (no model, app launch or daemon restart):
+
+```sh
+~/ops/site-public-djbclark/bin/fleet-watch upstream-release --status
+```
+
+Prints the Paseo registry row's newest upstream tag, fork base tag from
+`git -C ~/src/paseo-beta2-local-wt describe --tags --abbrev=0 --match 'v*'`,
+installed app version from `plutil` and whether it matches the base, the last
+watcher run, and the count and titles of open Paseo alert issues. It reads
+`gh issue list --repo djbclark/upstream-releases --label radar --state open --json number,title,url`
+(with a 1000-issue limit); it prints titles only, never issue bodies.
+A missing registry fails visibly; generate the fork inventory first.
+
+The zero-model watcher opens an alert for each new upstream tag, including betas.
+Grok Bot Radar reads open alerts. Closing an alert issue is djbclark's act,
+never the watcher's or Radar's. In an agent session, run the status command,
+report the result briefly and stop.
