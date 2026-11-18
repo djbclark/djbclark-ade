@@ -64,10 +64,10 @@ would un-archive it): one Paseo agent id, first line of `~/.local/state/djbclark
 `ADE_SUPERVISOR_LEAD` when run by hand. Install, then write the current lead's id (`paseo ls -g --json`):
 
 ```sh
+mkdir -p ~/.local/state/djbclark-ade/supervisor        # first: the plist logs there and RunAtLoad fires at once
+printf '%s\n' <lead-paseo-agent-id> > ~/.local/state/djbclark-ade/supervisor/lead
 bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ade ~/src/djbclark-ade \
   --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
-mkdir -p ~/.local/state/djbclark-ade/supervisor
-printf '%s\n' <lead-paseo-agent-id> > ~/.local/state/djbclark-ade/supervisor/lead
 ```
 
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan

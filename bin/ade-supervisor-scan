@@ -74,8 +74,8 @@ else:
     for acct in d.get("low") or []:
         rec = (d.get("accounts") or {}).get(acct) or {}
         items.append(("thin|%s" % acct,
-                      "account %s is thin (%s%% headroom) — re-handoffs to it are already refused" %
-                      (acct, rec.get("headroom"))))
+                      "account %s is thin (%s%% headroom%s) — re-handoffs to it are already refused" %
+                      (acct, rec.get("headroom"), ", stale reading" if rec.get("stale") else "")))
     for s in d.get("stuck", []):
         if s.get("status") in ("closed", "archived"):
             continue
@@ -112,10 +112,20 @@ print(d.get("reason") or "")' 2>>"$LOG")"
 send_failed=0
 case "$guard_rc" in
     0) send_to="$LEAD" ;;
-    3)  # a completed self-handoff replaced the lead: the notice follows it
-        send_to="${guard_target:-$LEAD}"
-        printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
-            "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+    3)  # a completed self-handoff replaced the lead: the notice follows it, under the same id check
+        case "$guard_target" in
+            ''|-*|*[!A-Za-z0-9._:-]*)
+                send_to=""
+                send_failed=1
+                printf '%s ade-supervisor-scan: lead %s was replaced but the successor id %r is unusable; not sending\n' \
+                    "$(now)" "$LEAD" "$guard_target" >>"$LOG"
+                ;;
+            *)
+                send_to="$guard_target"
+                printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
+                    "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+                ;;
+        esac
         ;;
     *)
         send_to=""
