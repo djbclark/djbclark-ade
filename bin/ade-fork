@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""ade-fork: inspect fork enrollment and report promotion holds without mutation."""
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ade_forks import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

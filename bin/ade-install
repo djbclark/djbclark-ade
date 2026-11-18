@@ -36,6 +36,11 @@ update executes each candidate's own update_argv with evidence (S4): default
 never touched), observes before/after, runs a scoped doctor over the updated
 ids, retries each doctor-failing component ONCE and reports (never rolls back),
 and writes evidence to <state>/updates.json. See docs/install-catalog.md.
+Enrolled forks in this installer's config/forks.toml are held before generic
+install/update/repair/system/retry execution; --force and catalog --root do not
+bypass enrollment. Missing or invalid fork policy holds component commands.
+Use ade-fork status/check for read-only enrollment/readiness reporting; qualified
+promotion adapters are a later slice. See docs/fork-maintenance.md.
 Default catalog reads adopt effective install/keys metadata; explicit library
 install_path reads retain the legacy unified-presence refusal. No writer expansion.
 See docs/install-catalog.md.

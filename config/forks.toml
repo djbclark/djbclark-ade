@@ -1,0 +1,72 @@
+# Fork-maintenance foundation, 2026-11-18. These requirements do not certify
+# deployed fixes. All enrolled catalog commands are held until a qualified
+# adapter lands. No live installation, Cafe, Brew or updater settings change.
+schema_version = 1
+
+[[component]]
+id = "paseo"
+owner = "djbclark-ade"
+upstream = "https://github.com/getpaseo/paseo"
+fork = "https://github.com/djbclark/paseo"
+channel = "stable"
+strategy = "merge"
+compatibility_group = "paseo-runtime"
+catalog_ids = ["paseo"]
+required_features = ["archive-target-identity", "pi-prompt-lifecycle", "plugin-compatibility"]
+
+[[component]]
+id = "ade-plugins"
+owner = "djbclark-ade"
+upstream = "https://github.com/djbclark/djbclark-ade"
+fork = "https://github.com/djbclark/djbclark-ade"
+channel = "master"
+strategy = "master-snapshot"
+compatibility_group = "paseo-runtime"
+catalog_ids = ["ade-claim", "ade-window-name", "ade-yolo"]
+required_features = ["workspace-claims", "window-naming", "unattended-agent-settings"]
+
+[[component]]
+id = "baton"
+owner = "djbclark-ade"
+upstream = "https://github.com/dennyferra/paseo-baton"
+fork = "https://github.com/djbclark/paseo-baton"
+channel = "stable"
+strategy = "merge"
+compatibility_group = "paseo-runtime"
+catalog_ids = ["paseo-plugin-baton"]
+required_features = ["handoff-writer-contract"]
+
+[[component]]
+id = "pr-radar"
+owner = "djbclark-ade"
+upstream = "https://github.com/omercnet/paseo-plugins"
+fork = "https://github.com/djbclark/paseo-plugins"
+channel = "stable"
+strategy = "merge"
+compatibility_group = "paseo-runtime"
+catalog_ids = ["paseo-plugin-pr-radar"]
+required_features = ["workspace-launch-routing"]
+
+[[component]]
+id = "session-recovery"
+owner = "djbclark-ade"
+upstream = "https://github.com/sm1ee/paseo-session-recovery"
+fork = "https://github.com/djbclark/paseo-session-recovery"
+channel = "stable"
+strategy = "merge"
+compatibility_group = "paseo-runtime"
+catalog_ids = ["paseo-plugin-session-recovery"]
+required_features = ["interrupted-session-recovery"]
+
+[[component]]
+id = "cfengine-libntech"
+owner = "tendcf"
+upstream = "https://github.com/cfengine/core"
+fork = "https://github.com/djbclark/core"
+channel = "master"
+strategy = "patch-queue"
+compatibility_group = "cfengine-libntech"
+catalog_ids = []
+# In the owning tendcf repository; ADE neither copies nor edits it.
+patch_manifest = "overlay/overlay.json"
+required_features = ["strict-json", "embedded-nul-rejection", "json-backslash-roundtrip", "mustache-rendering", "cmdb-all-or-nothing"]
