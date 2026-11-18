@@ -11,6 +11,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
+79. **supervisor-tools follow-ups (post #785)** (peer 22d61b88, 2026-11-18): (a) `bin/ade-pi-stuck` POOL_TO_ACCOUNT has no clinepass-t-e mapping (only clinepass:default -> clinepass), so clinepass-t-e agents read "no quota mapping" — map the aiuse clinepass sub-accounts if aiuse exposes them, else accept the permanent notice; (b) `bin/ade-supervisor-scan` writes the ".redirect-noted" marker only after a delivery, so the "lead was replaced" line repeats every 300s on quiet runs — write the marker on the first resolved redirect.
+
 78. **Harden handoff/session-handoff Step 2 lineage check for no-repo cwd** (peer 228c376c, 2026-11-18): a multi-repo session whose cwd is not a git repo skips the lineage check and creates an orphaned chain (lineage:none, empty parent_handoff_ids) that never lists the touched repo it actually descends from. Fix: when cwd resolves to no repo but the session committed to repos that already have chains, warn/require the check instead of silently writing lineage:none.
 
 77. **ade-merge-ready stack-rebase writes into an unclaimed temp worktree** (peer a9a65e9f, 2026-11-18): `bin/ade-merge-ready` stack-rebase creates a temp worktree (around line 1582) whose comment says "never claimed", then rebases/commits/pushes there — violates order 9 (all development in an exclusively claimed workspace). Fix: claim the temp worktree before writes and release it after, or operate on the caller's existing claimed tree; source+CI+adversary, not just docs.
