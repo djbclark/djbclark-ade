@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on
-# an exhausted account, sends ONE notice per stuck agent to the ADE lead named in
-# ADE_SUPERVISOR_LEAD (the plist's `__LEAD__` placeholder supplies it; the
-# config/ade.toml inventory row carries a machine default, and docs/scheduling.md
-# shows the install command — no second copy lives in this script). Deduped: an
+# an exhausted account, sends ONE notice per stuck agent to the lead named in
+# ADE_SUPERVISOR_LEAD, or failing that in $STATE_DIR/lead (one Paseo agent id). The
+# plist and its config/ade.toml inventory row carry no lead at all, so `ade-sched
+# diff`/`reconcile` render the job and a lead handoff cannot leave a stale id in a
+# template; docs/scheduling.md says how to write the file. Deduped: an
 # agent already told stays quiet while it stays stuck and is told again only after
 # it clears and later sticks again (StartInterval is 300 s, so without this one
 # stuck agent would be 288 notices a day). A broken scan, or a quota read that
-# fails, alerts the lead once instead of going quietly blind; a lead that cannot
-# be reached is pinged to the operator once through hermes-ping, because the scan
-# has no other way to report. Never a model prompt; always exits 0 so launchd stays
-# quiet.
+# fails, alerts the lead once instead of going quietly blind; a lead the guard
+# refuses, or a send that fails, is pinged to the operator once through hermes-ping,
+# because the scan has no other way to report. Never a model prompt; always exits 0,
+# so launchd stays quiet.
 set -uo pipefail
 STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
 LEAD="${ADE_SUPERVISOR_LEAD:-}"
