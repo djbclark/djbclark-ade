@@ -9,8 +9,8 @@ import { verifyOwnedColdPair } from './compiler-observation.mjs';
 
 const target = 'ade-yolo';
 const catalog = [
-  'ade-claim', 'ade-window-name', target, 'paseo-plugin-baton',
-  'paseo-plugin-pr-radar', 'paseo-plugin-session-recovery',
+  // Runtime manifest IDs, distinct from ADE installer catalog aliases.
+  'ade-claim', 'ade-window-name', target, 'baton', 'pr-radar', 'session-recovery',
   'antigravity-provider', 'claude-usage-source', 'codex-usage-source',
   'copilot-usage-source', 'cursor-usage-source', 'fx-provider',
   'grok-usage-source', 'hoplite-provider', 'kimi-usage-source',
