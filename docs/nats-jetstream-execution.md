@@ -12,8 +12,10 @@ A3. Plan: [implementation contract](nats-jetstream-implementation-plan.md). Runt
 |---|---|---|
 | Protocol conformance and coordination library | Pushed; eight Linux integration cases green; independent review pending | `258a247f4e4336274dfe34e94761c16dee763658`, [CI](https://github.com/djbclark/djbclark-ade/actions/runs/44317508893) |
 | Baseline and resource audit | Worker `78743358-b5b0-437e-a126-b3649e35541c` working, return path acknowledged | Report `nats-baseline-audit-report.md` in D1 |
-| Hub NixOS module | Pushed, disabled on host; VM fixture repaired after first CI failure | `b9ac6e77eeee946fa774d50b1d7bc3f554d5bd02`, [replacement CI](https://github.com/djbclark/site-djbclark/actions/runs/44319685074) |
-| Delivery/outbox integration | Worker `8035bc55-449f-4344-bc6b-afbb4e37966c` working | `/Users/djbclark/src/djbclark-ade-nats-delivery-64881586-wt`, based on protocol head |
+| Hub NixOS module | Pushed, disabled on host; VM fixture repaired after first CI failure | `0eef699a2b981d91350db20cb598cc46cd1cdc06`, [VM and full hub build green](https://github.com/djbclark/site-djbclark/actions/runs/44320520909); actual package conformance added at13d4ab56 |
+| Delivery/outbox integration | Green after independent B1/B2 repairs, lifecycle added | `888a016342e49209931407cf6bc8aa85ec6b26a8`, [22 Linux cases green](https://github.com/djbclark/djbclark-ade/actions/runs/44322393004) |
+| ADE resource/claim/handoff/plugin adapters | Worker8035 active, resource review repairs plus opt-in integration | `/Users/djbclark/src/djbclark-ade-nats-adapters-64881586-wt` |
+| Network backup and isolated recovery | Root pushed proof, CI pending | `/Users/djbclark/src/djbclark-ade-nats-integration-64881586-wt`; docs/nats-recovery.md |
 | CI/adversary/pilot | Protocol CI passed; hub CI running; reviews and live pilot pending | No activation or live delivery claims |
 | Optional Temporal microtest | Pending independent ready slot | Isolated CI, no paid model calls |
 
@@ -42,3 +44,5 @@ E2. The first infrastructure VM run exposed an invalid fake Tailscale unit: its 
 E3. Local SQLite intent, report bytes and artifact bytes must precede broker I/O. Receipt stages represent durable transport/inbox/disposition evidence, never model comprehension. An unknown external operation outcome remains unknown until reconciliation.
 
 E4. Tool procedure: route a single judgment with `route_agent.py route --kind frontier --json`; a wave uses `plan --kinds ...`, with documented placement arguments. There is no `--task` argument. Capture quota/router JSON to a private scratch file and print only needed fields; do not stream full quota output into the session.
+
+E5. Independent Astra review closed delivery B1/B2 and found two resource-ledger race/recovery blockers in7ff2d719. Worker repair772b3962 is pushed; renewed review/CI required. Do not treat the earlier five green resource tests as proof of those missing interleavings.
