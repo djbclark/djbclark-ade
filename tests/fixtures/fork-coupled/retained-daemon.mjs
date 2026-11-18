@@ -101,6 +101,21 @@ export async function validateRetainedDistribution(root, expectedManifest) {
   for (const name of ['runtime/node', 'role.cjs', 'daemon-launcher.mjs', 'daemon.mjs', 'compiler-code.mjs']) {
     assert.ok(names.has(name), 'finite distribution entry absent');
   }
+  assert.ok(Array.isArray(manifest.externalLibraries) && manifest.externalLibraries.length <= 128);
+  for (const member of manifest.externalLibraries) {
+    assert.ok(path.isAbsolute(member.path) && hex.test(member.sha256));
+    assert.equal(await realpath(member.path), member.path, 'canonical system library required');
+    for (let current = path.dirname(member.path);; current = path.dirname(current)) {
+      await rootOwned(current, true);
+      if (current === '/') break;
+    }
+    const metadata = await lstat(member.path);
+    assert.ok(metadata.isFile() && metadata.uid === 0 && (metadata.mode & 0o022) === 0);
+    assert.equal(metadata.size, member.size, `external library size mismatch: ${member.path}`);
+    assert.equal(metadata.mode & 0o777, member.mode);
+    assert.equal(sha256(await readRegular(member.path)), member.sha256,
+      `external library bytes mismatch: ${member.path}`);
+  }
   return manifest;
 }
 

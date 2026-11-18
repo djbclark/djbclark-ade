@@ -31,7 +31,9 @@ jobs:
       # completed authenticated native build plus protected recipe and cohort.
       # This job emits no qualified artifact or promotion approval.
   completed-build-input:
-    runs-on: ubuntu-latest
+    # The finite producer artifact includes exact system-library identities from
+    # this target. A different OS profile correctly refuses before daemon entry.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
