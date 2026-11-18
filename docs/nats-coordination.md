@@ -278,3 +278,22 @@ This is not permission to migrate a nonempty workspace or unknown remote writer.
 Unreadable local claim census is unknown and blocks. CI uses separate host/server
 IDs and directories with a real broker; live two-host provider evidence is still
 a pilot gate.
+
+## Current managed credentials without daemon restart
+
+Each network consumer executes `sudo-secretspec run --reason ... --` followed by
+a narrow consumer hop. That hop passes only ADE_NATS_TOKEN and plain broker URL
+plus safe runtime/path/locale fields to Node; unrelated injected secrets and
+NODE_OPTIONS are dropped. It does not read/export/store a token, place it in argv,
+or rely on the old daemon having inherited today's credential. An operator may
+select the installed absolute client via credential_boundary in private config;
+CI uses an explicit fake boundary, never real credentials. Broker URL may be plain
+broker_url config or ADE_NATS_URL environment. Plugin opens supply role, config
+path and shipped guard PATH; the driver itself obtains current credentials.
+
+Report buffer commits canonical intent/artifact bytes offline before boundary
+execution, then report flush reconciles/publishes that stable row through the
+current managed consumer. If the boundary is unavailable, completion can still
+return verified local-buffered; it does not silently use a stale inherited token.
+Offline inspection/local journaling executes a sanitized child without credentials.
+No daemon or unrelated agent is restarted by this mechanism.

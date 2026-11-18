@@ -105,4 +105,14 @@ class AdapterTests(unittest.TestCase):
                 self.assertNotIn("ModuleNotFoundError",result.stderr)
                 self.assertFalse(json.loads(result.stdout)["ok"])
 
+    def test_managed_boundary_real_child_receives_only_selected_fresh_credential(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);boundary=root/"boundary"
+            boundary.write_text("#!/usr/bin/env python3\nimport os,sys\na=sys.argv[sys.argv.index('--')+1:]\nenv={**os.environ,'ADE_NATS_TOKEN':'fresh-fixture','UNRELATED_MANAGED_SECRET':'do-not-propagate'}\nos.execvpe(a[0],a,env)\n");boundary.chmod(0o700)
+            consumer=Path(__file__).resolve().parents[1]/"bin/ade_coord_consumer.py"
+            code="import os,json;print(json.dumps({'fresh':os.environ.get('ADE_NATS_TOKEN')=='fresh-fixture','unrelated_absent':'UNRELATED_MANAGED_SECRET' not in os.environ,'node_options_absent':'NODE_OPTIONS' not in os.environ}))"
+            result=subprocess.run([str(boundary),"run","--reason","fixture","--",sys.executable,"-I",str(consumer),sys.executable,"-I","-c",code],env={**os.environ,"ADE_NATS_TOKEN":"stale-fixture","NODE_OPTIONS":"must-not-propagate"},capture_output=True,text=True,timeout=20,check=True)
+            self.assertEqual(json.loads(result.stdout),{'fresh':True,'unrelated_absent':True,'node_options_absent':True})
+            self.assertNotIn('fresh-fixture',result.stdout)
+
 if __name__=="__main__":unittest.main()

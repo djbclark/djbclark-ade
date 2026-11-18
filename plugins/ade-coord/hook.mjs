@@ -11,11 +11,13 @@ function configuration() {
     try { file=JSON.parse(readFileSync(process.env.ADE_COORD_ENROLLMENT_MARKER??join(homedir(),".local/state/ade-coord/enrollment.json"),"utf8")).config; }
     catch(error) { if(error.code==="ENOENT") return null; throw new Error("ADE enrollment marker unavailable"); }
   }
-  try { return JSON.parse(readFileSync(file,"utf8")); } catch { throw new Error("ADE enrollment unavailable"); }
+  try { return {...JSON.parse(readFileSync(file,"utf8")),_adeConfigPath:file}; } catch { throw new Error("ADE enrollment unavailable"); }
 }
 export function execute(argv,input,{signal,timeoutMs=30000,killGraceMs=2000}={}) {
   return new Promise((resolve,reject)=>{
-    const child=spawn(process.env.ADE_COORD_PYTHON??"python3",argv,{detached:true,stdio:["pipe","pipe","ignore"]});
+    const allowed=new Set(["PATH","HOME","XDG_CONFIG_HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","TMP","TEMP","ADE_NATS_URL","ADE_COORD_CONFIG","ADE_COORD_NODE","ADE_COORD_ENROLLMENT_MARKER","ADE_STATE_DIR","ADE_COORD_METRICS","PASEO_HOME","PASEO_DAEMON_HOME"]);
+    const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>allowed.has(key)));
+    const child=spawn(process.env.ADE_COORD_PYTHON??"python3",argv,{env,detached:true,stdio:["pipe","pipe","ignore"]});
     let text="",failed=false,stopping=false,settled=false,hardTimer,finalTimer;
     const error=()=>Object.assign(new Error(stopping?"ADE controller timed out or was aborted":"ADE controller failed closed"),{code:stopping?"EXECUTOR_TIMEOUT":"EXECUTOR_FAILED",pid:child.pid});
     const rejectOnce=()=>{if(!settled){settled=true;reject(error());}};
@@ -63,7 +65,7 @@ export function contribute(server,deps={}) {
     if(current?.record?.state!=="active"||current.record.owner.agent!==request.agentId) throw new Error("Current active enrolled role authority required");
     // beta.2's real strict schema permits env/tools/mcpServers only. The
     // enrolled role brief is supplied explicitly at creation, never here.
-    return {...request,env:{...request.env,ADE_COORD_ROLE:role,PATH:fileURLToPath(new URL("../../libexec/agent-bin",import.meta.url))+delimiter+(request.env.PATH??process.env.PATH??""),ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
+    return {...request,env:{...request.env,ADE_COORD_ROLE:role,ADE_COORD_CONFIG:cfg._adeConfigPath??request.env.ADE_COORD_CONFIG??process.env.ADE_COORD_CONFIG??"",PATH:fileURLToPath(new URL("../../libexec/agent-bin",import.meta.url))+delimiter+(request.env.PATH??process.env.PATH??""),ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
   });
   const timer=schedule(pump,30000); pump();
   return async()=>{stopped=true;cancel(timer);remove();abort.abort();await Promise.allSettled([...inflight.values()]);};

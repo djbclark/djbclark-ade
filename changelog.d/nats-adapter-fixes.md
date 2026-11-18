@@ -7,3 +7,5 @@
 - Retain per-attempt handoff history with one unfinished selector and idempotent projection recovery across successive transfers. (#779)
 
 - Permit explicitly resource-free cross-host role succession while retaining retirement/operation/checkpoint fences and rejecting resource migration. (#779)
+
+- Acquire current network-consumer credentials through the managed boundary after durable offline buffering, narrowing injected environment to the selected credential. (#779)

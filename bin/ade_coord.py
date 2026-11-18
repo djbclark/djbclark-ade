@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import sys
 import time
 
 class CoordinationError(ValueError):
@@ -84,23 +86,37 @@ def call(command, request, *, cfg=None, _retirement_proof=False):
         raise CoordinationError("EXPLICIT_ENROLLMENT_CONFIRMATION_REQUIRED")
     if not _retirement_proof and (command == "role transfer" or (command == "role transition" and request.get("state") != "draining")):
         raise CoordinationError("RESOURCE_RETIREMENT_PROOF_REQUIRED")
-    allowed = {"role get", "role create", "role transition", "role transfer", "report publish", "report status", "inbox list", "inbox read", "inbox intake", "inbox dispose", "outbox status", "outbox reconcile", "operation intent", "operation inspect", "operation reconcile", "shared-operation intent", "shared-operation inspect", "shared-operation list", "shared-operation reconcile", "artifact read", "artifact upload", "doctor check", "broker provision"}
+    allowed = {"role get", "role create", "role transition", "role transfer", "report publish", "report buffer", "report flush", "report status", "inbox list", "inbox read", "inbox intake", "inbox dispose", "outbox status", "outbox reconcile", "operation intent", "operation inspect", "operation reconcile", "shared-operation intent", "shared-operation inspect", "shared-operation list", "shared-operation reconcile", "artifact read", "artifact upload", "doctor check", "broker provision"}
     if command not in allowed:
         raise CoordinationError("INVALID_COMMAND")
-    payload = json.dumps({**request, "generation": cfg["generation"]}, allow_nan=False).encode()
-    argv = [os.environ.get("ADE_COORD_NODE", "node"), str(ROOT / "lib/ade-coord/cli.js"), *command.split(), "--state-dir", cfg["state_dir"]]
-    started = time.monotonic()
-    try:
-        result = subprocess.run(argv, input=payload, capture_output=True, timeout=30, check=False)
-        metric(command, time.monotonic() - started, len(payload), len(result.stdout))
-        data = json.loads(result.stdout)
-        if result.returncode or not data.get("ok"):
-            raise CoordinationError(data.get("error", {}).get("code", "UNKNOWN"))
-        return data.get("result")
-    except CoordinationError:
-        raise
-    except Exception:
-        raise CoordinationError("UNKNOWN_COORDINATION_OUTCOME") from None
+    offline={"report buffer","outbox status","operation intent","operation inspect","operation reconcile"}
+    def invoke(action,body,network):
+        payload=json.dumps({**body,"generation":cfg["generation"]},allow_nan=False).encode()
+        argv=[os.environ.get("ADE_COORD_NODE","node"),str(ROOT/"lib/ade-coord/cli.js"),*action.split(),"--state-dir",cfg["state_dir"]]
+        safe={key:value for key,value in os.environ.items() if key in {"PATH","HOME","XDG_CONFIG_HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","TMP","TEMP"}}
+        if cfg.get("broker_url") or os.environ.get("ADE_NATS_URL"):
+            safe["ADE_NATS_URL"]=cfg.get("broker_url") or os.environ["ADE_NATS_URL"]
+        if network:
+            boundary=cfg.get("credential_boundary") or shutil.which("sudo-secretspec")
+            if not boundary or not Path(boundary).is_absolute():raise CoordinationError("MANAGED_BOUNDARY_UNAVAILABLE")
+            argv=[boundary,"run","--reason","ADE coordination consumer","--",sys.executable,"-I",str(ROOT/"bin/ade_coord_consumer.py"),*argv]
+        started=time.monotonic()
+        try:
+            result=subprocess.run(argv,input=payload,env=safe,capture_output=True,timeout=30,check=False)
+            metric(action,time.monotonic()-started,len(payload),len(result.stdout))
+            data=json.loads(result.stdout)
+            if result.returncode or not data.get("ok"):
+                raise CoordinationError(data.get("error",{}).get("code","UNKNOWN"))
+            return data.get("result")
+        except CoordinationError:raise
+        except Exception:raise CoordinationError("UNKNOWN_COORDINATION_OUTCOME") from None
+    if command=="report publish":
+        # Canonical bytes are durable even when the current credential service is
+        # unavailable. No network/boundary execution precedes this transaction.
+        invoke("report buffer",request,False)
+        return invoke("report flush",{"role_id":request["report"]["role_id"],"message_id":request["report"]["message_id"]},True)
+    return invoke(command,request,command not in offline)
+
 
 def role_for(identifier, *, cfg=None):
     cfg = cfg or config()
