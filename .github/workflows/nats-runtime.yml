@@ -15,6 +15,7 @@ on:
       - 'bin/ade_lead_succession.py'
       - 'bin/completion-notice'
       - 'plugins/ade-coord/**'
+      - 'docs/nats-coordination.md'
       - '.github/workflows/nats-runtime.yml'
   workflow_dispatch:
 permissions:
@@ -67,7 +68,7 @@ jobs:
         run: |
           python3 - <<'PYCODE'
           import hashlib, json, pathlib, subprocess, datetime
-          for required in ['bin/ade-coord', 'plugins/ade-coord', 'lib/ade-coord/cli.js', 'bin/ade_coord_resources.py']:
+          for required in ['bin/ade-coord', 'plugins/ade-coord', 'lib/ade-coord/cli.js', 'bin/ade_coord_resources.py', 'docs/nats-coordination.md']:
               assert pathlib.Path(required).exists(), 'adapters must be integrated before distributing runtime'
           data = {'schema': 1, 'source_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   'created': datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -76,7 +77,7 @@ jobs:
                   'authority': 'distribution only; never ownership or enrollment evidence'}
           pathlib.Path('ade-runtime-build.json').write_text(json.dumps(data, sort_keys=True))
           PYCODE
-          tar --exclude='__pycache__' --exclude='*.pyc' -czf "$RUNNER_TEMP/ade-coord-runtime.tar.gz" bin config lib/ade-coord libexec/agent-bin plugins/ade-coord vendor/natscli ade-runtime-build.json
+          tar --exclude='__pycache__' --exclude='*.pyc' -czf "$RUNNER_TEMP/ade-coord-runtime.tar.gz" bin config lib/ade-coord libexec/agent-bin plugins/ade-coord docs/nats-coordination.md vendor/natscli ade-runtime-build.json
           python3 - <<'PYCODE'
           import hashlib, os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
@@ -91,6 +92,7 @@ jobs:
           echo '{}' | node "$RUNNER_TEMP/ade-runtime-extracted/lib/ade-coord/cli.js" outbox status --state-dir "$RUNNER_TEMP/runtime-offline-state"
           python3 "$RUNNER_TEMP/ade-runtime-extracted/bin/ade-nats-cli" --version
           python3 -m compileall -q "$RUNNER_TEMP/ade-runtime-extracted/bin"
+          test -s "$RUNNER_TEMP/ade-runtime-extracted/docs/nats-coordination.md"
       - name: Verify the actual installer and atomic pointer
         run: |
           python3 - <<'PYCODE'
