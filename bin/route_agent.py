@@ -775,6 +775,26 @@ def pool_service(provider: str, family: str | None) -> str | None:
 AIUSE_CONFIG = Path(os.environ.get("AIUSE_CONFIG", "~/.config/aiuse/config.toml")).expanduser()
 
 
+def reported_pool_family(provider: str, row: dict[str, Any], parent: dict[str, Any] | None = None) -> str | None:
+    """Honor Schema 1.6's explicit Codex subscription ID without funding API models.
+
+    aiuse intentionally leaves the residual subscription family unnamed. Its
+    canonical vendor/pool ID identifies that allowance. A parent account may
+    identify an unnamed window, but cannot override an explicitly labeled API
+    window. Missing IDs and contradictory metadata never create this bridge.
+    """
+    family = row.get("pool_family")
+    if provider != "codex":
+        return family
+    source = parent if family is None and "pool_id" not in row and parent is not None else row
+    pool_id, vendor = source.get("pool_id"), source.get("vendor")
+    if pool_id == "openai:codex":
+        return "default" if vendor == "openai" and family in (None, "default") else None
+    if family == "default" and pool_id is not None:
+        return None
+    return family
+
+
 def pi_block_state_path() -> Path:
     """Operational failure latches; no credentials or provider error text."""
     return Path(os.environ.get("ADE_PI_DEFAULTS_BLOCKS") or
@@ -995,7 +1015,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         if row.get("error"):
             errored.add(name)                       # an error says nothing about the quota; Paseo may still launch on it (D2)
             continue
-        family = row.get("pool_family")
+        family = reported_pool_family(name, row)
         key = pool_service(name, family)
         if key is None:
             continue
@@ -1118,7 +1138,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                                  dict[str, float | None], dict[str, Any]]] = {}
         sub_resets: dict[str, dict[str, Any]] = {}      # pool key -> {model sublimit family: its resets_at}
         for w in acct.get("windows") or []:
-            family = w.get("pool_family")
+            family = reported_pool_family(name, w, acct)
             key = pool_service(name, family)
             if key is None:
                 continue
@@ -1708,7 +1728,8 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         if not (isinstance(row, dict) and isinstance(row.get("provider"), str)
                 and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))):
             continue
-        name, family = row["provider"], row.get("pool_family")
+        name = row["provider"]
+        family = reported_pool_family(name, row)
         key = pool_service(name, family)
         if key is None:
             continue
