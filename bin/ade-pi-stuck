@@ -158,6 +158,8 @@ def main():
         fresh = avail.get("fresh", False)
         for acct, rec in accounts.items():
             bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
+            # Fail closed, deliberately: a *stale* zero or unusable pool still marks its account exhausted (losing a
+            # re-handoff target is worse than a false alarm), while only a fresh reading can ever clear it below.
             if bad and (fresh or not rec["stale"]):
                 exhausted.add(acct)
             # Fail closed on a known-empty account: stale/suspect readings never
@@ -201,9 +203,14 @@ def main():
                     "alternative": alt(model, acct, exhausted, accounts) if stuck else None})
     stuck = [o for o in out if o["stuck"]]
     live = [o for o in out if o["status"] not in NOT_LIVE]
+    # An account with no aiuse mapping (a bare `opencode-go/` provider names no billing sub-account) cannot be judged:
+    # say so instead of showing a bare "?" that reads as healthy.
+    unmapped = sorted({o["account"] for o in out
+                       if o["account"] not in accounts and o["account"] not in KNOWN_EMPTY and o["account"] != "unknown"})
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
-                          "exhausted": sorted(exhausted), "low": low, "quota_error": quota_error}, indent=1))
+                          "exhausted": sorted(exhausted), "low": low, "unmapped": unmapped,
+                          "quota_error": quota_error}, indent=1))
     else:
         for o in out:
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
@@ -211,6 +218,8 @@ def main():
             if o["stuck"]:
                 print(f"        -> switch to {o['alternative']}" if o["alternative"]
                       else "        -> no healthy alternative found")
+        for acct in unmapped:
+            print(f"\nno quota mapping for account {acct}: its agents cannot be judged")
         if quota_error:
             print(f"\nquota read failed ({quota_error}): only the known-empty accounts are flagged")
         print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")

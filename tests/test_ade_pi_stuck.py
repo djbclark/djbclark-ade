@@ -207,3 +207,11 @@ def test_closed_archived_and_errored_agents_are_not_flagged(tmp_path: Path) -> N
               {"id": "x3", "provider": "pi/openai/gpt-6.1-sol", "status": "closed"}]
     report = _run(tmp_path, _pools(**{"openai:openai_api": (0.0, True, False)}), agents=agents)
     assert report["stuck"] == []
+
+
+def test_an_account_without_a_quota_mapping_is_reported(tmp_path: Path) -> None:
+    """A bare `opencode-go/` provider names no billing sub-account: it cannot be judged, so it is not shown as healthy."""
+    agents = [{"id": "o1", "provider": "pi/opencode-go/deepseek-v4-pro", "status": "running"}]
+    report = _run(tmp_path, _pools(**{"opencode:go": (40.0, True, False)}), agents=agents)
+    assert report["unmapped"] == ["opencode-go"]
+    assert report["stuck"] == []

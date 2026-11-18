@@ -138,6 +138,9 @@ else:
         items.append((recipient + "|scan|quota-unread",
                       "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
         carry = sorted(told)
+    for acct in d.get("unmapped") or []:
+        items.append((recipient + "|unmapped|%s" % acct,
+                      "account %s has no quota mapping — its Pi agents cannot be judged" % acct))
     for acct in d.get("low") or []:
         rec = (d.get("accounts") or {}).get(acct) or {}
         items.append((recipient + "|thin|%s" % acct,
