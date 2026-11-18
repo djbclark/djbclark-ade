@@ -336,3 +336,84 @@ def test_discovery_ancestry_with_real_git_objects(fixture,tmp_path):
     # Corrupting retained identity invalidates it; use trusted enrollment baseline for the graph check.
     row['master_commit']=descendant;observations.head=other
     with pytest.raises(c.ContractError,match='incomparable'):controller.select_latest()
+
+
+def test_same_release_two_authenticated_attestations(fixture,tmp_path):
+    row,receipt,_,archive=fixture
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row)
+    stable=c.read_regular(controller.root/'records'/(receipt.sha256+'.json'))
+    row['evaluation'].update(run_id=41,run_attempt=2,artifact_id=61,artifact_name='qualification-41-2')
+    controller.acquire(row)
+    assert c.read_regular(controller.root/'records'/(receipt.sha256+'.json'))==stable
+    assert len(list((controller.root/'attestations'/receipt.sha256).glob('*.json')))==2
+    assert controller.retained(receipt.sha256)
+
+
+@pytest.mark.parametrize('bad_endpoint,bad_value',[
+    ('quota',None),('quota',{'resources':None}),('quota',{'resources':{'core':None}}),
+    ('runs',{'workflow_runs':[None]}),('runs',{'workflow_runs':[7]}),
+    ('master',{'ref':'refs/heads/master','object':None}),
+])
+def test_malformed_inventory_always_contract_hold(fixture,tmp_path,bad_endpoint,bad_value):
+    row,*_=fixture
+    class Malformed:
+        def api(self,endpoint):
+            if endpoint=='rate_limit':
+                return bad_value if bad_endpoint=='quota' else {'resources':{'core':{'remaining':4000}}}
+            if endpoint=='repos/'+row['repository']:return {'id':row['repository_id']}
+            if endpoint.endswith('/git/ref/heads/master'):
+                return bad_value if bad_endpoint=='master' else {'ref':'refs/heads/master','object':{'type':'commit','sha':row['master_commit']}}
+            if '/actions/workflows/' in endpoint:return bad_value
+            raise AssertionError(endpoint)
+    controller=c.Controller(lambda:row,Malformed(),root=tmp_path/'never')
+    with pytest.raises(c.ContractError):controller.select_latest()
+    assert not controller.root.exists()
+
+
+def test_qualified_latest_deploy_uses_selected_record_not_fixed_candidate(fixture,tmp_path,monkeypatch):
+    row,receipt,payload,archive=fixture
+    native=FakeNative(receipt.sha256)
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),native,tmp_path/'private')
+    controller.tick('enroll')
+    row['previous']=receipt.sha256
+    # A new evaluated recipe identity is distinct from the original fixed candidate.
+    expected=dict(row['expected'],recipe_revision='new-reviewed-fixture-recipe')
+    policy=row['policy']
+    new=make_receipt(expected,policy,{k:{'status':'passed','contract_digest':digest(v)} for k,v in policy['features'].items()})
+    record=c.parse(c.read_regular(controller.root/'records'/(receipt.sha256+'.json')).decode())
+    record.update(receipt=base64.b64encode(new.encoded).decode(),expected=expected)
+    c.immutable(controller.root/'records'/(new.sha256+'.json'),c.canonical(record))
+    ev=c.replace(c.evaluation(row),receipt_sha256=new.sha256)
+    controller.attest(new.sha256,ev)
+    class Auth:
+        def verify(self,ev,path):return SimpleNamespace(authenticates=lambda r:r.sha256==new.sha256)
+    controller.evaluator=Auth()
+    for op in ('preflight','stage','activate','verify'):
+        row['operations'][op]['identity']='qualified-latest'
+    def select():
+        selected={'commit':row['master_commit'],'identity':new.sha256,'retained':True}
+        controller.selection={'enrollment_sha256':digest(row),'latest':row['master_commit'],'selected':selected}
+        return {'selected_qualified':selected}
+    monkeypatch.setattr(controller,'select_latest',select)
+    monkeypatch.setattr(controller,'discover_master',lambda:{'discovered':row['master_commit']})
+    monkeypatch.setattr(controller,'acquire',lambda row:pytest.fail('old fixed candidate acquisition must not run'))
+    result=controller.tick('deploy')
+    assert result['status']=='runtime_verified'
+    assert native.identity==new.sha256 != receipt.sha256
+    assert native.calls==[('activate',new.sha256)]
+    # Current-policy mismatch cannot preserve a derived concrete grant.
+    old=dict(row)
+    row['operations']['activate']['allowed']=False
+    assert not controller.permits(old,'activate',new.sha256)
+
+
+def test_qualified_latest_requires_selected_current_master(fixture,tmp_path):
+    row,receipt,*_=fixture
+    row['operations']['activate']['identity']='qualified-latest'
+    controller=c.Controller(lambda:row,root=tmp_path/'private')
+    assert not controller.permits(row,'activate',receipt.sha256)
+    controller.selection={'enrollment_sha256':digest(row),'latest':row['master_commit'],
+                          'selected':{'identity':receipt.sha256,'commit':row['master_commit']}}
+    controller.discover_master=lambda:{'discovered':'f'*40}
+    assert not controller.permits(row,'activate',receipt.sha256)

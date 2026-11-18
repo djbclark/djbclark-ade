@@ -3,3 +3,6 @@
 
 ### Added
 - Discover protected evaluator outputs automatically and select qualified master ancestors with retained baseline fallback, ancestry checks and stale-policy refusal. (#0)
+
+### Fixed
+- Separate stable release records from authenticated reattestations, hold malformed discovery metadata, and transact selected records under current qualified-latest consent. (#0)

@@ -169,3 +169,41 @@ production. Genuine executing SDK/client/protocol/zod/Node/compiler/supervisor/
 daemon proof, native phase/status/lease integration and separately authorized
 baseline adoption/cutover remain HOLD. Python/Git helper closure for claim and
 window-name remains separate; no macOS/Electron qualification is claimed.
+
+
+## Reattestation and current qualified-latest consent
+
+Stable release records exclude Evaluation run provenance. Each successful
+reauthentication is retained independently under
+attestations/RECEIPT_SHA/ATTESTATION_SHA.json, binding exact evaluator run/attempt/
+archive metadata. Repeated qualification of the same immutable receipt neither
+overwrites nor collides with stable release bytes. Old source-only records have
+no deployed migration claim; no live store is modified by this source work.
+Nested quota/run/artifact/master/ancestry inventory types reject through stable
+ContractError before dereferencing; malformed metadata is HOLD, not success.
+
+Protected operations preflight/stage/activate/verify/retain may explicitly name
+identity `qualified-latest` instead of a receipt SHA. This is a CURRENT operator
+policy grant under the exact enrolled repository/channel/evaluator recipe/features/
+dependency/cohort constraints, not a candidate flag. Enroll and recover still
+require explicit baseline identity. Selection does not modify enrollment.
+Derivation requires a fresh independently selected retained receipt, unchanged
+full enrollment digest and unchanged latest master. Existing Journal transaction
+then consumes that selected record's receipt/expected bindings/payload, rather
+than reacquiring the old fixed candidate. The selected exact receipt is
+reauthenticated against a separately retained attestation from the currently
+protected evaluator. Authority callbacks recheck current consent and master;
+missing native execution transport/lease still holds before any production work.
+
+concrete_grant derives artifact-specific native authorization from current
+consent, coherent native CAS (not loaded generation), actual retained sealed tree,
+compiled bundle and a receipt-bound protected native_passive_profile in policy.
+That profile must be native-passive-contract-1 with independently qualified
+execution/runtime/helper digests; absence holds, and no profile is synthesized.
+The result carries no token and grants no support by itself. It is not a newly
+invented held-operation wire ABI: final native endpoint must validate and consume
+it under its genuine private owner lease/current policy and exact CAS.
+Private held-operation transport is being specified by native owner049; no
+unpublished endpoint/FD protocol is guessed. Until that reviewed bridge and real
+producer are integrated, production NativeFacade remains unsupported, and there
+is no automatic END/reopen path on failed or uncertain operations.

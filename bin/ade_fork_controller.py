@@ -23,7 +23,7 @@ import zipfile
 
 from ade_fork_ci import Evaluation, GitHubEvaluation
 from ade_fork_release import Adapters, ContractError, Journal, Receipt, canonical, digest, parse, validate
-from ade_fork_plugins import inspect, payload_tree_hash, qualify, stage
+from ade_fork_plugins import inspect, payload_tree_hash, qualify, stage, tree_hash
 from ade_forks import load_policy
 
 LIMIT = 96 * 1024 * 1024
@@ -114,7 +114,8 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
         if (type(consent) is not dict or set(consent) != {'allowed', 'identity', 'generation'} or
                 type(consent['allowed']) is not bool or type(consent['generation']) is not int or
                 consent['generation'] != row['generation'] or not isinstance(consent['identity'], str) or
-                not re.fullmatch('[a-f0-9]{64}', consent['identity'])):
+                not (re.fullmatch('[a-f0-9]{64}', consent['identity']) or
+                     (consent['identity'] == 'qualified-latest' and operation in {'retain', 'preflight', 'stage', 'activate', 'verify'}))):
             raise ContractError('invalid scoped consent')
     return row
 
@@ -251,6 +252,7 @@ class Controller:
         self.reader = reader
         self.evaluator = evaluator or GitHubEvaluation()
         self.native = native or NativeFacade()
+        self.selection = None
         self.root = Path(root) if root is not None else locations()[1]
 
     def plan(self):
@@ -288,18 +290,25 @@ class Controller:
             nonlocal calls
             calls += 1
             if calls > 80: raise ContractError('discovery API budget exceeded')
-            return self.evaluator.api(endpoint)
+            response = self.evaluator.api(endpoint)
+            if type(response) is not dict: raise ContractError('malformed discovery metadata')
+            return response
         quota = api('rate_limit')
-        if quota.get('resources', {}).get('core', {}).get('remaining', 0) < 500:
+        resources = quota.get('resources')
+        core = resources.get('core') if type(resources) is dict else None
+        remaining = core.get('remaining') if type(core) is dict else None
+        if type(remaining) is not int: raise ContractError('malformed quota inventory')
+        if remaining < 500:
             raise ContractError('discovery API quota held')
         repo = api('repos/' + row['repository'])
         if repo.get('id') != row['repository_id']: raise ContractError('source repository changed')
         ref_path = 'repos/' + row['repository'] + '/git/ref/heads/master'
         def master():
             ref = api(ref_path)
-            obj = ref.get('object', {})
+            obj = ref.get('object')
+            if type(obj) is not dict: raise ContractError('malformed master object')
             if (ref.get('ref') != 'refs/heads/master' or obj.get('type') != 'commit' or
-                    not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', obj.get('sha', ''))):
+                    type(obj.get('sha')) is not str or not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', obj.get('sha', ''))):
                 raise ContractError('invalid master identity')
             return obj['sha']
         latest = master()
@@ -309,8 +318,10 @@ class Controller:
             key = (older, newer)
             if key not in comparisons:
                 result = api('repos/' + row['repository'] + '/compare/' + older + '...' + newer)
-                if (result.get('base_commit', {}).get('sha') != older or
-                        result.get('merge_base_commit', {}).get('sha') != older):
+                base_commit, merge_base = result.get('base_commit'), result.get('merge_base_commit')
+                if type(base_commit) is not dict or type(merge_base) is not dict:
+                    raise ContractError('malformed ancestry inventory')
+                if (base_commit.get('sha') != older or merge_base.get('sha') != older):
                     comparisons[key] = False
                 else:
                     comparisons[key] = result.get('status') in ('ahead', 'identical')
@@ -331,8 +342,11 @@ class Controller:
         for page in range(1, 6):
             response = api(f'{base}/actions/workflows/{ev.workflow_id}/runs?per_page=100&page={page}')
             entries = response.get('workflow_runs')
-            if type(entries) is not list: raise ContractError('invalid evaluator run inventory')
-            runs.extend(r for r in entries if type(r.get('id')) is int and r['id'] > row['discovery']['baseline_run_id'])
+            if type(entries) is not list or any(type(r) is not dict for r in entries):
+                raise ContractError('invalid evaluator run inventory')
+            if any(type(r.get('id')) is not int or r['id'] <= 0 for r in entries):
+                raise ContractError('invalid evaluator run identity')
+            runs.extend(r for r in entries if r['id'] > row['discovery']['baseline_run_id'])
             if len(entries) < 100 or any(r.get('id', 0) <= row['discovery']['baseline_run_id'] for r in entries):
                 break
         else: raise ContractError('evaluator history exceeds bounded window')
@@ -347,8 +361,10 @@ class Controller:
             attempt = run.get('run_attempt')
             if type(attempt) is not int or attempt <= 0: raise ContractError('invalid evaluator attempt')
             artifacts = api(f"{base}/actions/runs/{run['id']}/artifacts?per_page=100")
-            if type(artifacts.get('artifacts')) is not list or artifacts.get('total_count') != len(artifacts['artifacts']) or len(artifacts['artifacts']) >= 100:
+            if type(artifacts.get('artifacts')) is not list or type(artifacts.get('total_count')) is not int or artifacts.get('total_count') != len(artifacts['artifacts']) or len(artifacts['artifacts']) >= 100:
                 raise ContractError('incomplete artifact inventory')
+            if any(type(item) is not dict or type(item.get('name')) is not str for item in artifacts['artifacts']):
+                raise ContractError('invalid artifact inventory entry')
             prefix = row['discovery']['artifact_prefix']
             pattern = re.compile(re.escape(prefix) + r'-([a-f0-9]{40}|[a-f0-9]{64})-' + str(run['id']) + '-' + str(attempt))
             matching = [(item, pattern.fullmatch(item.get('name', ''))) for item in artifacts['artifacts']]
@@ -362,7 +378,7 @@ class Controller:
                 if ancestor(commit, selected['commit']): continue
                 raise ContractError('incomparable qualified outputs')
             archive_digest = item.get('digest', '')
-            if not re.fullmatch(r'sha256:[a-f0-9]{64}', archive_digest): raise ContractError('artifact digest unavailable')
+            if type(archive_digest) is not str or not re.fullmatch(r'sha256:[a-f0-9]{64}', archive_digest): raise ContractError('artifact digest unavailable')
             verified_candidates += 1
             if verified_candidates > 4: raise ContractError('qualification discovery verification budget exceeded')
             candidate_ev = replace(ev, run_id=run['id'], run_attempt=attempt, artifact_id=item['id'],
@@ -400,17 +416,19 @@ class Controller:
                 raise ContractError('protected candidate did not qualify')
             record = {'receipt': base64.b64encode(receipt.encoded).decode(),
                       'payload_sha256': expected['artifact_sha256'], 'expected': expected,
-                      'policy': row['policy'], 'cohort': row['cohort'], 'evaluation': dict(asdict(candidate_ev), jobs=list(candidate_ev.jobs)),
+                      'policy': row['policy'], 'cohort': row['cohort'],
                       'evidence': evidence}
             if canonical(self.reader()) != canonical(row) or master() != latest:
                 raise ContractError('master or enrollment changed during selection')
             immutable(self.root / 'payloads' / expected['artifact_sha256'], payload)
             immutable(self.root / 'records' / (receipt.sha256 + '.json'), canonical(record))
+            self.attest(receipt.sha256, candidate_ev)
             if selected and selected['commit'] == commit and selected['identity'] != receipt.sha256:
                 raise ContractError('ambiguous qualification identity for source')
             selected = {'commit': commit, 'identity': receipt.sha256, 'retained': True}
         if canonical(self.reader()) != canonical(row) or master() != latest:
             raise ContractError('master or enrollment changed before selection commit')
+        self.selection = {'enrollment_sha256': digest(row), 'latest': latest, 'selected': selected}
         return {'status': 'qualified_available' if selected else 'hold', 'latest_discovered': latest,
                 'selected_qualified': selected, 'authorized': False,
                 'reason': 'no_qualified_ancestor' if not selected else 'protected_evaluator_ancestor'}
@@ -419,8 +437,18 @@ class Controller:
         current = self.reader()
         if canonical(current) != canonical(row): return False
         grant = current['operations'].get(operation)
-        return (type(grant) is dict and grant['allowed'] is True and
-                grant['identity'] == identity and grant['generation'] == current['generation'])
+        if not (type(grant) is dict and grant['allowed'] is True and grant['generation'] == current['generation']):
+            return False
+        if grant['identity'] == identity: return True
+        if grant['identity'] != 'qualified-latest' or not self.selection:
+            return False
+        selected = self.selection['selected']
+        if (not selected or selected['identity'] != identity or self.selection['enrollment_sha256'] != digest(current)):
+            return False
+        # Current consent permits only the independently selected exact artifact under
+        # unchanged protected constraints. New master requires fresh selection.
+        return self.discover_master()['discovered'] == self.selection['latest']
+
 
     def acquire(self, row):
         ev = evaluation(row)
@@ -445,10 +473,18 @@ class Controller:
         record = {'receipt': base64.b64encode(receipt.encoded).decode(),
                   'payload_sha256': hashlib.sha256(payload).hexdigest(),
                   'expected': row['expected'], 'policy': row['policy'], 'cohort': row['cohort'],
-                  'evaluation': row['evaluation'], 'evidence': evidence}
+                  'evidence': evidence}
         immutable(self.root / 'payloads' / record['payload_sha256'], payload)
         immutable(self.root / 'records' / (receipt.sha256 + '.json'), canonical(record))
+        self.attest(receipt.sha256, ev)
         return receipt, payload, verified
+
+    def attest(self, identity, evaluation):
+        # Stable release identity excludes run-specific provenance. Every authenticated
+        # reattestation is retained independently and cannot overwrite another attempt.
+        evidence = dict(asdict(evaluation), jobs=list(evaluation.jobs))
+        value = {'receipt_sha256': identity, 'evaluation': evidence}
+        immutable(self.root / 'attestations' / identity / (digest(value) + '.json'), canonical(value))
 
     def retained(self, identity):
         if not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{64}', identity): return False
@@ -485,6 +521,69 @@ class Controller:
             authenticate=verified.authenticates if verified is not None else lambda receipt: False,
             policy=lambda: self.reader()['policy'], reserve=native.reserve)
 
+    def concrete_grant(self, row, identity, native_status, operation='activate'):
+        """Pure artifact scope/authorization renderer, never a permission or transport.
+
+        Caller must run under the native private held-operation lease. Native rechecks
+        owner/token/reservation/current policy at the actual mutation boundary.
+        """
+        if operation not in ('activate', 'recover') or not self.permits(row, operation, identity):
+            raise ContractError('current concrete operation consent absent')
+        if not self.retained(identity): raise ContractError('concrete grant artifact missing')
+        status = coherent_native_status(native_status, row['component'])
+        record = parse(read_regular(self.root / 'records' / (identity + '.json')).decode())
+        root = self.root / 'snapshots' / record['payload_sha256']
+        expected_tree = record['evidence']['native_tree_sha256']
+        if tree_hash(root) != expected_tree: raise ContractError('concrete grant tree mismatch')
+        profile = record['policy'].get('native_passive_profile')
+        required = {'version', 'contract', 'qualificationSha256', 'runtimeClosureSha256', 'helperClosureSha256', 'initialization'}
+        if (type(profile) is not dict or set(profile) != required or profile['version'] != 1 or
+                profile['contract'] != 'native-passive-contract-1' or profile['initialization'] != 'registration-only' or
+                any(type(profile[key]) is not str or not re.fullmatch('[a-f0-9]{64}', profile[key])
+                    for key in ('qualificationSha256', 'runtimeClosureSha256', 'helperClosureSha256'))):
+            raise ContractError('protected passive execution profile unavailable')
+        source = str(root / 'plugins' / row['component'])
+        bundle = record['evidence']['server_bundle_sha256']
+        if type(bundle) is not str or not re.fullmatch('[a-f0-9]{64}', bundle):
+            raise ContractError('protected compiled bundle identity unavailable')
+        grant = {'operation': operation, 'expectedGeneration': status['journal']['generation'],
+                 'sourcePath': source, 'snapshotRoot': str(root), 'snapshotSha256': expected_tree,
+                 'serverBundleSha256': bundle, 'state': 'binary-only',
+                 'forbiddenEnvironment': ['ADE_CLAIMS_PY', 'ADE_GIT_GUARD', 'ADE_AGENT_BIN',
+                                          'ADE_WS_AUTONAME_PY', 'ADE_PYTHON', 'ADE_REAL_GIT'],
+                 'passiveProfile': profile}
+        return {'pluginId': row['component'], 'receiptSha256': identity,
+                'expectedPath': status['registration']['path'], 'authorization': grant}
+
+    def selected_release(self, row):
+        selection = self.select_latest()
+        selected = selection['selected_qualified']
+        if not selected: raise ContractError('no selected qualified release')
+        identity = selected['identity']
+        if not self.retained(identity): raise ContractError('selected release unavailable')
+        record = parse(read_regular(self.root / 'records' / (identity + '.json')).decode())
+        receipt = Receipt(base64.b64decode(record['receipt'], validate=True))
+        payload = read_regular(self.root / 'payloads' / record['payload_sha256'])
+        # Choose an exact retained attestation, not a run-specific field in the release record.
+        attestations = self.root / 'attestations' / identity
+        names = sorted(attestations.iterdir())
+        if not names or len(names) > 100: raise ContractError('attestation inventory unavailable')
+        for name in names:
+            value = parse(read_regular(name, 1024 * 1024).decode())
+            if digest(value) + '.json' != name.name or value.get('receipt_sha256') != identity:
+                raise ContractError('attestation identity corruption')
+            ev = evaluation({'evaluation': value['evaluation']})
+            trusted = evaluation(row)
+            static = ('repository', 'repository_id', 'workflow_id', 'workflow_path', 'evaluator_commit', 'actor_id', 'event', 'jobs', 'workflow_ref')
+            if any(getattr(ev, key) != getattr(trusted, key) for key in static):
+                continue
+            verified = self.evaluator.verify(ev, self.root / 'archives')
+            if verified.authenticates(receipt) is not True: raise ContractError('selected receipt authentication refused')
+            if canonical(self.reader()) != canonical(row) or self.discover_master()['discovered'] != self.selection['latest']:
+                raise ContractError('selected release stale before transaction')
+            return receipt, payload, verified, record
+        raise ContractError('current protected attestation unavailable')
+
     def tick(self, operation='plan'):
         row = self.reader()
         if operation == 'plan': return self.plan()
@@ -497,13 +596,18 @@ class Controller:
             # Recovery never depends on candidate CI availability or current candidate retention consent.
             adapters = self.adapters(row, None)
             return asdict(journal.recover(adapters, generation=row['generation']))
-        receipt, payload, verified = self.acquire(row)
+        if operation == 'deploy' and row['operations'].get('activate', {}).get('identity') == 'qualified-latest':
+            receipt, payload, verified, release = self.selected_release(row)
+            expected = release['expected']
+        else:
+            receipt, payload, verified = self.acquire(row)
+            expected = row['expected']
         adapters = self.adapters(row, verified)
         if operation == 'enroll':
             journal.enroll(receipt.sha256, adapters)
             return {'status': 'enrolled', 'identity': receipt.sha256, 'authorized': False}
         if operation != 'deploy': raise ContractError('unsupported operation')
-        return asdict(journal.deploy(receipt, row['expected'], row['policy'], payload, adapters,
+        return asdict(journal.deploy(receipt, expected, row['policy'], payload, adapters,
                                     previous=row['previous'], generation=row['generation'], migration='binary_only'))
 
 
