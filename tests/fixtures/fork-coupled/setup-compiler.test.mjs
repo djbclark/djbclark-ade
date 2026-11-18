@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import filesystem from 'node:fs/promises';
+import { setTimeout as pause } from 'node:timers/promises';
 import { appendFile, chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -41,6 +43,10 @@ async function fixture(t, mode = 'normal') {
   const service = `#!${process.execPath}
 process.stdin.resume();
 process.stdin.on('end', () => setTimeout(() => process.stdin.pause(), 120));
+process.stdin.on('data', (chunk) => {
+  if (chunk.toString().includes('exit17')) process.exit(17);
+  if (chunk.toString().includes('exit19')) process.exit(19);
+});
 `;
   await writeFile(path.join(root, 'runtime/esbuild'), service, { mode: 0o755 });
   await writeFile(path.join(root, 'node_modules/esbuild/lib/main.cjs'), `
@@ -51,9 +57,20 @@ exports.start = () => {
   child = cp.spawn(process.env.ESBUILD_BINARY_PATH, ['--service=1.2.3', '--ping'], {stdio:['pipe','pipe','pipe']});
   child.stdout.resume(); child.stderr.resume();
 };
+exports.triggerPrematureFailure = () => new Promise((resolve) => {
+  child.once('exit', resolve);
+  if (${JSON.stringify(mode)} === 'premature-nonzero') child.stdin.write('exit17');
+  else child.kill(); // Outside the exact retained stop() call: never authorized.
+});
 exports.stop = () => {
   if (!exports.admittedSettled) throw new Error('stop before actual admitted settlement');
   if (${JSON.stringify(mode)} === 'stop-fails') throw new Error('synthetic close rejected');
+  const mode = ${JSON.stringify(mode)};
+  if (mode.startsWith('premature-')) return;
+  if (mode === 'stop-nonzero') return child.stdin.write('exit19');
+  if (mode === 'stop-sigkill') return child.kill('SIGKILL');
+  if (mode === 'stop-unowned-term') return setImmediate(() => child.kill());
+  if (mode === 'stop-owned-term') { child.kill(); return; }
   child.stdin.end();
 };
 `);
@@ -83,6 +100,7 @@ parentPort.on('message', (task) => {
       serverBundle: 'server:' + task.version + ':' + server, clientBundle: client } });
     // The reply is deliberately earlier than admitted settlement: setup must
     // await this actual export, not infer drain from receiving bytes.
+    if (${JSON.stringify(mode)}.startsWith('premature-')) await esbuild.triggerPrematureFailure();
     await new Promise((resolve) => setTimeout(resolve, 80));
     esbuild.admittedSettled = true;
   })();
@@ -138,7 +156,8 @@ test('synthetic compiler refusal drains but emits no expected files or false suc
 
 test('synthetic retirement failure never becomes Worker/group success', async (t) => {
   const args = await fixture(t, 'stop-fails');
-  await assert.rejects(setupWorker(args), /setup runner refused input/);
+  // A stop throw is no close acknowledgement: the live helper must time out.
+  await assert.rejects(setupWorker({ ...args, timeoutMs: 1000 }), /timed out/);
   await absent(args.outputDirectory);
 });
 
@@ -211,3 +230,71 @@ test('actual retained BASE60a setup compiles checkout ade-yolo twice; expected b
     version: first.daemonVersion, nodeSha256: first.inputSha256['runtime/node'],
     compilerSha256: first.inputSha256['compiler-code.mjs'], helperSha256: first.inputSha256['runtime/esbuild'] }));
 });
+
+
+for (const mode of ['premature-nonzero', 'premature-signal', 'stop-nonzero', 'stop-sigkill', 'stop-unowned-term'])
+  test(`valid bytes cannot mask abnormal helper lifecycle: ${mode}`, async (t) => {
+    const args = await fixture(t, mode);
+    const expected = mode.includes('nonzero') ? /helper exit code=(17|19) signal=null/ :
+      mode === 'stop-sigkill' ? /helper exit code=null signal=SIGKILL/ : /helper exit code=null signal=SIGTERM/;
+    await assert.rejects(setupWorker(args), expected);
+    await absent(args.outputDirectory);
+  });
+
+test('only an actual synchronous retained stop default-kill accepts SIGTERM', async (t) => {
+  const args = await fixture(t, 'stop-owned-term');
+  const result = await setupWorker(args);
+  assert.equal(result.qualification, false);
+  assert.equal(result.settlement.workerExitCode, 0);
+  assert.equal(result.settlement.helpers.length, 1);
+  assert.equal(result.settlement.helpers[0].code, null);
+  assert.equal(result.settlement.helpers[0].signal, 'SIGTERM');
+  assert.equal(result.settlement.processGroupClosed, true);
+});
+
+for (const scenario of ['within-deadline', 'observed-timeout', 'delayed-timer'])
+  test(`unchanged final inventory barrier: ${scenario}`, { timeout: 30_000 }, async (t) => {
+    const args = await fixture(t);
+    let enter, release;
+    const entered = new Promise((resolve) => { enter = resolve; });
+    const barrier = new Promise((resolve) => { release = resolve; });
+    t.after(() => release());
+    const originalOpen = filesystem.open;
+    let inventories = 0;
+    t.mock.method(filesystem, 'open', async function (file, ...rest) {
+      if (file === args.nativeRoot + '.manifest.json' && ++inventories === 2) {
+        enter();
+        await barrier; // Real unchanged second inventory remains in flight.
+      }
+      return Reflect.apply(originalOpen, this, [file, ...rest]);
+    });
+    const timeoutMs = scenario === 'within-deadline' ? 10_000 : 5000;
+    let postponed = 0;
+    if (scenario === 'delayed-timer') {
+      const originalTimer = globalThis.setTimeout;
+      t.mock.method(globalThis, 'setTimeout', function (callback, delay, ...rest) {
+        // Only postpone this parent's verification timer; monotonic expiry must
+        // still refuse, even though its callback has not latched failed yet.
+        const postpone = delay > 4500 && delay <= 5000;
+        if (postpone) postponed++;
+        const adjusted = postpone ? delay + 20_000 : delay;
+        return Reflect.apply(originalTimer, this, [callback, adjusted, ...rest]);
+      });
+    }
+    const pending = setupWorker({ ...args, timeoutMs });
+    pending.catch(() => {});
+    await Promise.race([entered, pending.then(() => { throw new Error('missing final inventory barrier'); })]);
+    await pause(scenario === 'within-deadline' ? 20 : timeoutMs + 100);
+    release();
+    if (scenario === 'within-deadline') {
+      const result = await pending;
+      assert.equal(result.qualification, false);
+      assert.equal(result.settlement.processGroupClosed, true);
+      assert.ok(result.serverBundle.length > 0);
+    } else {
+      await assert.rejects(pending, scenario === 'delayed-timer' ? /verification deadline exceeded/ : /settlement unknown/);
+      await absent(args.outputDirectory);
+    }
+    assert.equal(inventories, 2);
+    assert.equal(postponed, scenario === 'delayed-timer' ? 1 : 0);
+  });

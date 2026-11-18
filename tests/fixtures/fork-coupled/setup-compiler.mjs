@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import childProcess, { fork } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promises';
+import filesystem from 'node:fs/promises';
+import { lstat, mkdir, readdir, realpath, writeFile } from 'node:fs/promises';
+import { performance } from 'node:perf_hooks';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -36,7 +38,7 @@ async function canonicalDirectory(value) {
 }
 
 async function regular(file, limit = 256 * 1024 * 1024) {
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const handle = await filesystem.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
     assert.ok(before.isFile() && before.size <= BigInt(limit), 'bounded regular retained input required');
@@ -111,7 +113,8 @@ async function setupThread() {
   const executable = path.join(root, 'runtime/esbuild');
   const originalSpawn = childProcess.spawn;
   const children = [];
-  let sealed = false, failed = false, retiring = false;
+  let sealed = false, failed = false, retiring = false, activeStop = null;
+  let helperFailure;
   childProcess.spawn = (command, args, options) => {
     if (sealed || command !== executable || !Array.isArray(args) ||
         args[0] !== `--service=${metadata.version}` || args.length > 2 ||
@@ -121,11 +124,40 @@ async function setupThread() {
     }
     const child = originalSpawn(command, args, { ...options, detached: false,
       cwd: root, env: { PATH: '/usr/bin:/bin' } });
-    const record = { child, closed: deferred(), observation: null };
+    const record = { child, closed: deferred(), observation: null, exited: false, stopKill: null };
     children.push(record); // Keep the real ChildProcess, not a PID-only proxy.
-    child.once('error', (error) => { failed = true; record.closed.reject(error); });
+    const originalKill = child.kill;
+    child.kill = function (...signals) {
+      // The retained CJS stopService synchronously calls THIS exact handle's
+      // default kill(). A retiring flag or a later signal alone is not provenance.
+      const token = activeStop;
+      const eligible = token !== null && this === child && signals.length === 0 &&
+        !record.exited && child.exitCode === null && child.signalCode === null;
+      const accepted = Reflect.apply(originalKill, this, signals);
+      if (eligible && accepted === true) record.stopKill = token;
+      return accepted; // Preserve the actual ChildProcess method/event semantics.
+    };
+    function acceptOutcome(code, signal) {
+      return (code === 0 && signal === null) ||
+        (code === null && signal === 'SIGTERM' && record.stopKill !== null);
+    }
+    function observeFailure(code, signal) {
+      if (!acceptOutcome(code, signal)) {
+        failed = true;
+        helperFailure ??= `setup helper exit code=${code} signal=${signal}`;
+      }
+    }
+    child.once('error', () => { failed = true; helperFailure ??= 'setup helper process error'; });
+    child.once('exit', (code, signal) => {
+      record.exited = true;
+      // Latch premature failure even if stdio close arrives during stop later.
+      observeFailure(code, signal);
+    });
     child.once('close', (code, signal) => {
       record.observation = { pid: child.pid, code, signal };
+      observeFailure(code, signal);
+      // Resolve only on actual close, including failed outcomes; all handles
+      // remain awaited before the combined failure can be reported as retired.
       record.closed.resolve(record.observation);
     });
     return child;
@@ -145,9 +177,21 @@ async function setupThread() {
       // Producer externalizes that CJS package: this is its SAME cached namespace.
       const esbuild = require('esbuild');
       assert.equal(typeof esbuild.stop, 'function');
-      await esbuild.stop();
+      const stop = esbuild.stop;
+      const token = Object.freeze({ stop, namespace: esbuild });
+      let stopFailure;
+      activeStop = token;
+      try {
+        // No await inside this window: only the exact retained stop invocation
+        // may account for a synchronous default helper.kill() that returned true.
+        const stopped = Reflect.apply(stop, esbuild, []);
+        activeStop = null;
+        await stopped;
+      } catch (error) { stopFailure = error; }
+      finally { activeStop = null; }
       await Promise.all(children.map((record) => record.closed.promise));
-      assert.equal(failed, false, 'setup helper failure is not settlement');
+      if (stopFailure) throw stopFailure;
+      assert.equal(failed, false, helperFailure ?? 'setup helper failure is not settlement');
       assert.ok(children.every((record) => record.observation !== null));
       control.postMessage({ type: 'retired', threadId,
         helpers: children.map((record) => record.observation) });
@@ -192,7 +236,7 @@ async function setupChild(request) {
   channel.port1.on('message', (message) => {
     if (message?.type === 'ready') { observedThread = message.threadId; ready.resolve(); }
     else if (message?.type === 'retired') retired.resolve(message);
-    else retired.reject(new Error('actual compiler retirement failed'));
+    else retired.reject(new Error('actual compiler retirement failed: ' + String(message?.message ?? 'unknown').slice(0, 1024)));
   });
   await ready.promise;
   assert.ok(Number.isInteger(observedThread) && observedThread > 0);
@@ -214,7 +258,10 @@ async function setupChild(request) {
 }
 
 /** Setup expected bytes only. All paths are explicit trusted in-process inputs;
- * none are a policy override, native owner claim, compiler measurement or grant. */
+ * none are a policy override, native owner claim, compiler measurement or grant.
+ * timeoutMs bounds process admission through final inventory and byte verification.
+ * Initial input validation precedes this phase. Publication I/O starts only after
+ * the final synchronous latch/deadline guard; it is outside that timeout budget. */
 export async function setupWorker({ nativeRoot, snapshotRoot, directory, outputDirectory, timeoutMs = 60_000 }) {
   assert.equal(process.platform, 'linux', 'Linux-only disposable setup');
   assert.ok(Number.isSafeInteger(timeoutMs) && timeoutMs >= 100 && timeoutMs <= 300_000);
@@ -229,6 +276,7 @@ export async function setupWorker({ nativeRoot, snapshotRoot, directory, outputD
   try { await lstat(output); throw new Error('fresh expected output directory required'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const before = await inputs(root);
+  const verificationDeadline = performance.now() + timeoutMs;
   const child = fork(SELF, [CHILD_ROLE], {
     execPath: path.join(root, 'runtime/node'), execArgv: [], detached: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'], serialization: 'json',
@@ -253,7 +301,16 @@ export async function setupWorker({ nativeRoot, snapshotRoot, directory, outputD
     throw new Error('setup runner has no process');
   }
   const owner = ownDisposableGroup(child, { gracefulMs: 1500, forcedMs: 5000 });
-  timer = setTimeout(() => fail(new Error('setup compiler timed out; settlement unknown')), timeoutMs);
+  function assertVerifiedPhaseCurrent() {
+    if (failed) throw failed;
+    if (performance.now() >= verificationDeadline) {
+      const error = new Error('setup compiler timed out; verification deadline exceeded');
+      fail(error);
+      throw error;
+    }
+  }
+  timer = setTimeout(() => fail(new Error('setup compiler timed out; settlement unknown')),
+    Math.max(0, verificationDeadline - performance.now()));
   child.send({ nativeRoot: root, directory: source, version: before.version });
   let observed;
   try {
@@ -264,36 +321,41 @@ export async function setupWorker({ nativeRoot, snapshotRoot, directory, outputD
       failure.promise,
     ]);
     await owner.dispose(); // Already closed: validates no surviving group members; no signal on success.
-    if (failed) throw failed;
+    assertVerifiedPhaseCurrent();
     assert.deepEqual(await inputs(root), before, 'retained compiler inputs changed');
+    assertVerifiedPhaseCurrent(); // A timeout during the actual inventory await wins.
+    function decoded(value) {
+      if (value === null) return null;
+      assert.ok(typeof value === 'string' && value.length <= Math.ceil(MAX_BUNDLE / 3) * 4);
+      const bytes = Buffer.from(value, 'base64');
+      assert.equal(bytes.toString('base64'), value, 'noncanonical setup byte transport');
+      return bytes;
+    }
+    const server = decoded(observed.server), client = decoded(observed.client);
+    for (const bytes of [server, client]) if (bytes !== null) assert.ok(bytes.length <= MAX_BUNDLE);
+    const receipt = { status: 'setup-expected-bytes', qualification: false,
+      nativeRoot: root, snapshotRoot: snapshot, directory: source, daemonVersion: before.version,
+      inputSha256: before.sha256, inputManifestSha256: before.manifestSha256, manifest: observed.manifest,
+      serverBundleSha256: server === null ? null : sha256(server),
+      clientBundleSha256: client === null ? null : sha256(client),
+      serverBytes: server?.length ?? 0, clientBytes: client?.length ?? 0,
+      settlement: { ...observed.settlement, setupProcessId: child.pid, processGroupClosed: true },
+      files: { server: server === null ? null : path.join(output, 'server.js'),
+        client: client === null ? null : path.join(output, 'client.js'), receipt: path.join(output, 'setup.json') } };
+    // Explicit verification/publication cutoff. A delayed timer callback cannot
+    // evade this absolute monotonic check, and any already observed failure wins.
+    assertVerifiedPhaseCurrent();
+    clearTimeout(timer);
+    await mkdir(output, { mode: 0o700 });
+    if (server !== null) await writeFile(receipt.files.server, server, { flag: 'wx', mode: 0o600 });
+    if (client !== null) await writeFile(receipt.files.client, client, { flag: 'wx', mode: 0o600 });
+    await writeFile(receipt.files.receipt, JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    return { ...receipt, serverBundle: server, clientBundle: client };
   } catch (original) {
     // Killing this disposable group is failure cleanup only, never a quiet proof.
     try { await owner.dispose(); } catch (cleanup) { original.cleanup = cleanup.message; }
     throw original;
   } finally { clearTimeout(timer); }
-  function decoded(value) {
-    if (value === null) return null;
-    assert.ok(typeof value === 'string' && value.length <= Math.ceil(MAX_BUNDLE / 3) * 4);
-    const bytes = Buffer.from(value, 'base64');
-    assert.equal(bytes.toString('base64'), value, 'noncanonical setup byte transport');
-    return bytes;
-  }
-  const server = decoded(observed.server), client = decoded(observed.client);
-  for (const bytes of [server, client]) if (bytes !== null) assert.ok(bytes.length <= MAX_BUNDLE);
-  const receipt = { status: 'setup-expected-bytes', qualification: false,
-    nativeRoot: root, snapshotRoot: snapshot, directory: source, daemonVersion: before.version,
-    inputSha256: before.sha256, inputManifestSha256: before.manifestSha256, manifest: observed.manifest,
-    serverBundleSha256: server === null ? null : sha256(server),
-    clientBundleSha256: client === null ? null : sha256(client),
-    serverBytes: server?.length ?? 0, clientBytes: client?.length ?? 0,
-    settlement: { ...observed.settlement, setupProcessId: child.pid, processGroupClosed: true },
-    files: { server: server === null ? null : path.join(output, 'server.js'),
-      client: client === null ? null : path.join(output, 'client.js'), receipt: path.join(output, 'setup.json') } };
-  await mkdir(output, { mode: 0o700 });
-  if (server !== null) await writeFile(receipt.files.server, server, { flag: 'wx', mode: 0o600 });
-  if (client !== null) await writeFile(receipt.files.client, client, { flag: 'wx', mode: 0o600 });
-  await writeFile(receipt.files.receipt, JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-  return { ...receipt, serverBundle: server, clientBundle: client };
 }
 
 if (!isMainThread && workerData?.role === 'setup-compiler-worker-v1') {
