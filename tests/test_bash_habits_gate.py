@@ -349,6 +349,16 @@ def test_verified_substitution_heredoc_terminators_survive_rescan(command):
     assert not denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    "echo \"$(cat <<'EOF'\ntext )\nEOF\n)\"",
+    "echo \"$(cat <<'EOF'\ntext ( )\nEOF\n)\"",
+    "echo \"$(echo $(cat <<'EOF'\ntext )\nEOF\n))\"",
+    "echo \"$(cat <<'A' <<'B'\n)\nA\n( )\nB\n)\"",
+])
+def test_parentheses_inside_substitution_heredoc_are_data(command):
+    assert not denied(command)
+
+
 @pytest.mark.parametrize("operator,inner", [
     ("<<", "  PY"),
     ("<<", "\tPY"),

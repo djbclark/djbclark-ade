@@ -567,6 +567,7 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
 def _closing_paren(text: str, i: int) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
     depth, j, n = 1, i, len(text)
+    pending = []
     while j < n:
         c = text[j]
         if c == "\\":
@@ -581,6 +582,25 @@ def _closing_paren(text: str, i: int) -> int:
             while j < n and text[j] != '"':
                 j += 2 if text[j] == "\\" else 1
             j += 1
+            continue
+        if c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
+            match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", text[j:])
+            if match:
+                pending.append((match.group(3), match.group(1) == "-"))
+                j += match.end()
+                continue
+        if c == "\n" and pending:
+            j += 1
+            for delimiter, strip_tabs in pending:
+                while j < n:
+                    end = text.find("\n", j)
+                    end = n if end < 0 else end
+                    line, j = text[j:end], end + 1
+                    if _heredoc_terminates(line, delimiter, strip_tabs):
+                        break
+                else:
+                    return n
+            pending.clear()
             continue
         if c == "(":
             depth += 1
