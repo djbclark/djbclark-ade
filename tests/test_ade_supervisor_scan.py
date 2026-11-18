@@ -54,8 +54,13 @@ def _agent(ident: str, account: str = "openai") -> dict:
             "alternative": "pi/opencode-go-t-e/deepseek-v4-pro"}
 
 
+def _calls(sent: Path, verb: str) -> list[str]:
+    return [line for line in sent.read_text().splitlines() if line.startswith(verb + " ")] if sent.exists() else []
+
+
 def _messages(sent: Path) -> list[str]:
-    return [line for line in sent.read_text().splitlines() if line] if sent.exists() else []
+    """The `paseo send` calls only: the scan also inspects the lead before sending."""
+    return _calls(sent, "send")
 
 
 def test_one_message_names_every_newly_stuck_agent(tmp_path: Path) -> None:
@@ -64,7 +69,7 @@ def test_one_message_names_every_newly_stuck_agent(tmp_path: Path) -> None:
     messages = _messages(sent)
     assert len(messages) == 1
     assert f"{LEAD}" in messages[0]
-    assert "2 newly stuck" in messages[0] and "id=a1" in messages[0] and "id=b2" in messages[0]
+    assert "2 new finding(s)" in messages[0] and "id=a1" in messages[0] and "id=b2" in messages[0]
 
 
 def test_a_stuck_agent_is_noticed_once_not_every_run(tmp_path: Path) -> None:
@@ -138,3 +143,20 @@ def test_non_json_output_alerts_the_lead_once(tmp_path: Path) -> None:
         assert _run(bin_dir, home) == 0
     messages = _messages(sent)
     assert len(messages) == 1 and "non-JSON" in messages[0]
+
+
+def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_path: Path) -> None:
+    """A send to an archived agent un-archives it, so the scan refuses; the operator hears about it once."""
+    bin_dir, home, state, _, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "paseo").write_text(
+        '#!/bin/sh\ncase "$1" in\n  send) printf \'%s\\n\' "$*" >> %s; exit 5;;\n  *) echo \'{"Archived": true}\';;\nesac\n'
+        % ("{sent}", sent))
+    (bin_dir / "paseo").chmod(0o755)
+    pinged = tmp_path / "hermes.log"
+    (bin_dir / "hermes-ping").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {pinged}\n")
+    (bin_dir / "hermes-ping").chmod(0o755)
+    for _ in range(2):
+        assert _run(bin_dir, home) == 0
+    assert _messages(sent) == []
+    assert len(pinged.read_text().splitlines()) == 1
+    assert not (state / "notified").exists()          # nothing was told, so the notice is still pending

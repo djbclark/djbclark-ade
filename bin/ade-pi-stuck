@@ -127,8 +127,8 @@ def alt(model, acct, exhausted, accounts):
         headroom = rec.get("headroom")
         if rec.get("usable") is False:
             continue
-        if headroom is not None and not rec.get("stale") and 0 < headroom <= LOW_HEADROOM_PERCENT:
-            continue          # nearly dry: never a re-handoff target
+        if headroom is not None and 0 < headroom <= LOW_HEADROOM_PERCENT:
+            continue          # thin or nearly dry, stale or not: never a re-handoff target
         readable = not rec.get("stale") and headroom is not None and headroom > LOW_HEADROOM_PERCENT
         (known_healthy if readable else unread).append("pi/" + cand)
     return (known_healthy or unread or [None])[0]
@@ -142,6 +142,7 @@ def main():
     # must not flap every openai agent).
     exhausted = set()
     accounts = {}
+    quota_error = None
     try:
         avail = j(["aiuse","--available","--json"], ok=(0, 3))
         accounts = quota_by_account(avail)
@@ -166,9 +167,12 @@ def main():
             if a not in exhausted and r["headroom"] is not None
             and r["headroom"] <= LOW_HEADROOM_PERCENT
         )
-    except Exception:
+    except Exception as exc:
+        # Fail closed, and say so: without the reading every account except the known-empty ones is unread, and a
+        # caller (ade-supervisor-scan) must be able to tell "all healthy" from "I could not look".
         exhausted = set(KNOWN_EMPTY)
         low = []
+        quota_error = str(exc)[:200] or exc.__class__.__name__
     out = []
     for a in rows:
         prov = a.get("provider") or ""
@@ -191,7 +195,7 @@ def main():
     live = [o for o in out if o["status"] not in ("closed", "archived")]
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
-                          "exhausted": sorted(exhausted), "low": low}, indent=1))
+                          "exhausted": sorted(exhausted), "low": low, "quota_error": quota_error}, indent=1))
     else:
         for o in out:
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
@@ -199,6 +203,8 @@ def main():
             if o["stuck"]:
                 print(f"        -> switch to {o['alternative']}" if o["alternative"]
                       else "        -> no healthy alternative found")
+        if quota_error:
+            print(f"\nquota read failed ({quota_error}): only the known-empty accounts are flagged")
         print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")
     return 0
 

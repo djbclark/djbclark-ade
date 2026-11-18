@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on
 # an exhausted account, sends ONE notice per stuck agent to the ADE lead named in
-# ADE_SUPERVISOR_LEAD (the plist and its config/ade.toml inventory row supply it;
-# nothing is baked in here, as with ade-net-resume's LEAD_UUID). Deduped: an agent
-# already told stays quiet while it stays stuck, and is told again only after it
-# clears and later sticks again (StartInterval is 300 s, so without this one stuck
-# agent would be 288 notices a day). A broken scan alerts the lead once instead of
-# going quietly blind. Never a model prompt; always exits 0 so launchd stays quiet.
+# ADE_SUPERVISOR_LEAD (the plist's `__LEAD__` placeholder supplies it; the
+# config/ade.toml inventory row carries a machine default, and docs/scheduling.md
+# shows the install command — no second copy lives in this script). Deduped: an
+# agent already told stays quiet while it stays stuck and is told again only after
+# it clears and later sticks again (StartInterval is 300 s, so without this one
+# stuck agent would be 288 notices a day). A broken scan, or a quota read that
+# fails, alerts the lead once instead of going quietly blind; a lead that cannot
+# be reached is pinged to the operator once through hermes-ping, because the scan
+# has no other way to report. Never a model prompt; always exits 0 so launchd stays
+# quiet.
 set -uo pipefail
 STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
 LEAD="${ADE_SUPERVISOR_LEAD:-}"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD is unset (the plist supplies it; see docs/scheduling.md), nothing to notify\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG"
+        "$(now)" >>"$LOG"
     exit 0
 fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
@@ -27,79 +32,78 @@ scan_rc=$?
 [ -s "$err" ] && cat "$err" >>"$LOG"
 rm -f "$err"
 
-# Dedupe state: `notified` holds the keys already told ("<agent id>|<account>", or an alert key). The pending file is
-# this run's key set; it replaces the state only once the notice is accepted (or there is nothing to send), so a failed
-# send retries on the next run and a condition that clears frees its key.
+# Dedupe state: `notified` holds the keys already told ("<agent id>|<account>", and the `scan|broken` /
+# `scan|quota-unread` alert keys). The pending file is this run's key set; it replaces the state only once the notice is
+# accepted (or there is nothing to send), so a failed send retries next run and a condition that clears frees its key.
 NOTIFIED="$STATE_DIR/notified"
 pending="$STATE_DIR/.notified.$$"
-if [ "$scan_rc" -ne 0 ] || [ -z "$json" ]; then
-    # A broken scan is its own once-per-outage alert: without it the supervisor covers nothing and says nothing.
-    msg="$(python3 -c '
+msg="$(printf '%s' "$json" | python3 -c '
 import json, sys
-notified_path, pending_path, text = sys.argv[1:4]
-key = "scan|broken"
+notified_path, pending_path, scan_rc = sys.argv[1], sys.argv[2], int(sys.argv[3])
+items = []                                  # (key, text) for every condition that is true now
+try:
+    d = json.load(sys.stdin) if scan_rc == 0 else None
+except Exception:
+    d = None
+if d is None:
+    items.append(("scan|broken",
+                  "ade-pi-stuck failed or printed non-JSON (exit %d) — the Pi-stuck watch is blind" % scan_rc))
+else:
+    if d.get("quota_error"):
+        items.append(("scan|quota-unread",
+                      "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
+    for s in d.get("stuck", []):
+        if s.get("status") in ("closed", "archived"):
+            continue
+        items.append(("%s|%s" % (s.get("id"), s.get("account")),
+                      "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
+                                                           s.get("alternative") or "no healthy alternative")))
 try:
     told = set(json.load(open(notified_path)))
 except Exception:
     told = set()
 with open(pending_path, "w") as fh:
-    json.dump(sorted(told | {key}), fh)
-if key not in told:
-    print("supervisor scan: ade-pi-stuck failed or printed nothing (%s) — the Pi-stuck watch is blind until it works" % text)
-' "$NOTIFIED" "$pending" "exit $scan_rc" 2>>"$LOG")"
-else
-    msg="$(printf '%s' "$json" | python3 -c '
+    json.dump([k for k, _ in items], fh)
+new = [text for key, text in items if key not in told]
+if new:
+    print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))
+' "$NOTIFIED" "$pending" "$scan_rc" 2>>"$LOG")"
+
+send_failed=0
+if [ -n "$msg" ]; then
+    printf '%s %s\n' "$(now)" "$msg" >>"$LOG"
+    # An archived lead must not be messaged: Paseo un-archives an agent it delivers to.
+    if paseo agent inspect "$LEAD" --json 2>>"$LOG" | python3 -c '
 import json, sys
-notified_path, pending_path = sys.argv[1], sys.argv[2]
 try:
     d = json.load(sys.stdin)
-except Exception as exc:
-    print("unparseable")
-    sys.exit(0)
-live = [s for s in d.get("stuck", []) if s.get("status") not in ("closed", "archived")]
-keys = ["%s|%s" % (s.get("id"), s.get("account")) for s in live]
-try:
-    told = set(json.load(open(notified_path)))
 except Exception:
-    told = set()
-new = [(s, k) for s, k in zip(live, keys) if k not in told]
-with open(pending_path, "w") as fh:
-    json.dump(keys, fh)
-if new:
-    body = "; ".join("id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
-                                                          s.get("alternative") or "no healthy alternative")
-                     for s, _ in new)
-    print("supervisor scan: %d newly stuck Pi agent(s) — %s" % (len(new), body))
-' "$NOTIFIED" "$pending" 2>>"$LOG")"
-    if [ "$msg" = "unparseable" ]; then
-        # Same once-per-outage alert, for output that is not JSON at all.
-        msg="$(python3 -c '
-import json, sys
-notified_path, pending_path = sys.argv[1], sys.argv[2]
-key = "scan|unparseable"
-try:
-    told = set(json.load(open(notified_path)))
-except Exception:
-    told = set()
-with open(pending_path, "w") as fh:
-    json.dump(sorted(told | {key}), fh)
-if key not in told:
-    print("supervisor scan: ade-pi-stuck printed non-JSON — the Pi-stuck watch is blind until it works")
-' "$NOTIFIED" "$pending" 2>>"$LOG")"
+    sys.exit(1)                                  # unreadable answer: let the send itself decide
+sys.exit(0 if d.get("Archived") else 1)' 2>>"$LOG"; then
+        send_failed=1
+        printf '%s ade-supervisor-scan: lead %s is archived or unknown; not sending (update __LEAD__, docs/scheduling.md)\n' \
+            "$(now)" "$LEAD" >>"$LOG"
+    else
+        paseo send "$LEAD" --no-wait --json "$msg" >>"$LOG" 2>&1
+        rc=$?
+        # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
+        if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+            send_failed=1
+            printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$LEAD" "$rc" >>"$LOG"
+        fi
     fi
 fi
-
-if [ -n "$msg" ]; then
-    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >>"$LOG"
-    paseo send "$LEAD" --no-wait --json "$msg" >>"$LOG" 2>&1
-    rc=$?
-    # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
-    if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
-        printf '%s ade-supervisor-scan: send to %s failed (exit %s); retrying next run\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LEAD" "$rc" >>"$LOG"
-        rm -f "$pending"   # not delivered: keep the old state and retry next run
-        exit 0
+if [ "$send_failed" -eq 1 ]; then
+    # The scan cannot reach its own lead, so it has no in-band channel left: tell the operator once per outage.
+    unreachable="$STATE_DIR/.lead-unreachable"
+    if [ ! -f "$unreachable" ]; then
+        : >"$unreachable"
+        hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot reach its lead $LEAD (archived or send failure); update __LEAD__ in the ade-supervisor-scan install (docs/scheduling.md)" \
+            >>"$LOG" 2>&1 || true
     fi
+    rm -f "$pending"                     # keep the old state and retry next run
+    exit 0
 fi
+rm -f "$STATE_DIR/.lead-unreachable"
 [ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
 exit 0

@@ -167,3 +167,20 @@ def test_a_readable_healthy_account_beats_an_unread_one(tmp_path: Path) -> None:
     ]}
     stuck = [s for s in _run(tmp_path, raw)["stuck"] if s["id"] == "a1"]
     assert stuck and stuck[0]["alternative"].startswith("pi/opencode-go-djbclark/")
+
+
+def test_an_aiuse_failure_is_reported_not_hidden(tmp_path: Path) -> None:
+    """A caller must be able to tell "every account is healthy" from "the quota read failed"."""
+    report = _run(tmp_path, aiuse_rc=1)
+    assert report["quota_error"] and "exited 1" in report["quota_error"]
+    assert _run(tmp_path, _pools(**{"openai:openai_api": (5.0, True, False)}))["quota_error"] is None
+
+
+def test_a_stale_thin_reading_is_never_offered_as_an_alternative(tmp_path: Path) -> None:
+    raw = {"fresh": True, "available": [
+        {"pool_id": "openai:openai_api", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+        {"pool_id": "opencode:go", "account": "t-e", "headroom_percent": 3.0, "usable_now": True, "stale": True},
+        {"pool_id": "opencode:go", "account": "djbclark", "headroom_percent": 9.0, "usable_now": True, "stale": True},
+    ]}
+    stuck = [s for s in _run(tmp_path, raw)["stuck"] if s["id"] == "a1"]
+    assert stuck and stuck[0]["alternative"] is None    # both candidates are thin, so offer nothing
