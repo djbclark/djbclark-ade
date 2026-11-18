@@ -1,0 +1,17 @@
+name: Tendcf eligibility contract
+on:
+  push:
+    branches: [fork-maintenance-tendcf]
+  pull_request:
+    paths: [bin/ade_fork_tendcf.py, tests/test_ade_fork_tendcf.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  eligibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest python -m pytest tests/test_ade_fork_tendcf.py tests/test_ade_fork_release.py tests/test_ade_fork_ci.py -q
