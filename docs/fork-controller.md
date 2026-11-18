@@ -563,9 +563,16 @@ Reviewed native source `389bb84ea48c8c800a3c528b23e1d192be052959` provides
 packaged `ROOT/system-closure/namespace-bootstrap.py`, mode 0444. Controller
 preexec now consumes this real port instead of unconditional systemClosure HOLD.
 It first independently authenticates the raw manifest and full sealed inventory,
-then measures that exact member and filters import-time statements. Controlled
-import uses the actual fixed `__file__`, definitions-only execution and a temporary
-private module name, never the `__main__`/Admin launch path. No arbitrary module,
+then measures that exact member AND requires the independently reviewed source
+identity encoded in controller source: SHA256
+`605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7`, exactly
+52756 bytes. The manifest cannot choose an accepted import implementation. This
+known389 source was independently reviewed to import definitions only; no generic
+AST predicate or Python sandbox is claimed. Unknown/modified future helper bytes
+HOLD until a separately reviewed controller adapter source update. There is no
+JSON flag, path override, approval key or runtime acceptance bypass. Controlled
+import uses the actual fixed `__file__` and a temporary private module name, never
+the `__main__`/Admin launch path. No arbitrary module,
 PID, command, recipe or policy path is exposed. Every exception, missing port,
 changed source or non-None return is HOLD.
 
@@ -580,8 +587,12 @@ execution-owner or qualification brand; genuine native private daemon/child/coho
 facts and current transaction authority remain mandatory.
 
 Dedicated controller CI checks out the exact shared-source revision for a real
-import/refusal case. The normal protocol tests use clearly synthetic helpers and
-never establish actual namespace qualification. Root's disposable actual Linux
+import/refusal case and module cleanup. Unreviewed synthetic helpers, even with
+matching manifest records and the accepted byte length, refuse before compile/exec;
+production acceptance is never relaxed to make a synthetic positive pass. Tests
+cover module/class decorator rebinding and eager defaults/annotations without
+claiming arbitrary Python import safety. These source tests never establish
+actual namespace qualification. Root's disposable actual Linux
 namespace proof and exact source review of this adapter delta remain separate gates.
 
 

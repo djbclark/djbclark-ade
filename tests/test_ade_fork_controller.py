@@ -1364,46 +1364,61 @@ def allow_synthetic_readonly_bytes(monkeypatch):
     monkeypatch.setattr(c,'read_regular',lambda path,limit=c.LIMIT,**kwargs:original(path,limit,owner=os.getuid()))
 
 
-def test_fixed_readonly_port_protocol_import_cleanup(tmp_path,monkeypatch):
-    source=b'''from dataclasses import dataclass
-import sys
-@dataclass
-class Value:
-    root: str
+def committed_readonly_source():
+    source_path=Path(__file__).resolve().parents[1]/'native-readonly-source/packages/server/scripts/qualified-system-namespace.py'
+    if not source_path.is_file():
+        if os.environ.get('ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE')=='1':pytest.fail('required exact native source absent')
+        pytest.skip('exact native source is exercised in dedicated controller workflow')
+    source=source_path.read_bytes()
+    assert len(source)==52756
+    assert c.hashlib.sha256(source).hexdigest()=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+    assert c.READONLY_NAMESPACE_SIZE==52756
+    assert c.READONLY_NAMESPACE_SHA256=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+    return source
 
-def verify_existing_namespace(root, expected_manifest_sha256):
-    assert __name__ != '__main__'
-    assert root + '/system-closure/namespace-bootstrap.py' == __file__
-    assert expected_manifest_sha256 == 'a'*64
-    Value(root)
-    return None
 
-if __name__ == '__main__':
-    sys.exit(main())
-'''
+def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,monkeypatch):
+    source=committed_readonly_source()
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     allow_synthetic_readonly_bytes(monkeypatch)
-    name='_ade_retained_namespace_'+manifest['files'][0]['sha256']
-    assert name not in sys.modules
-    assert c.verify_readonly_namespace(config,manifest) is None
-    assert name not in sys.modules
+    name='_ade_retained_namespace_'+c.READONLY_NAMESPACE_SHA256
+    previous=c.types.ModuleType(name)
+    monkeypatch.setitem(sys.modules,name,previous)
+    with pytest.raises(c.ContractError) as caught:c.verify_readonly_namespace(config,manifest)
+    # The accepted real function is entered, with the actual packaged __file__;
+    # this fixture lacks its real manifest/root-owned/private mount proof.
+    assert isinstance(caught.value.__cause__,FileNotFoundError)
+    assert sys.modules[name] is previous
 
 
-@pytest.mark.parametrize('outcome',['raise','true','dict','missing'])
-def test_readonly_port_exceptions_and_unexpected_results_hold(tmp_path,monkeypatch,outcome):
-    body={'raise':'raise RuntimeError("unproved inode")','true':'return True','dict':'return {"ready": True}',
-          'missing':'return None'}[outcome]
-    source=(('def wrong_port(root,digest):\n' if outcome=='missing' else 'def verify_existing_namespace(root,digest):\n')+'    '+body+'\n').encode()
+@pytest.mark.parametrize('source',[
+    b'import os\ndef dataclass(cls):\n    os.chdir("/")\n    return cls\n@dataclass\nclass Probe:\n    """review module rebinding"""\ndef verify_existing_namespace(root,digest):return None\n',
+    b'import os\ndef property(fn):\n    os.chdir("/")\n    return fn\nclass Probe:\n    @property\n    def value(self):return None\n',
+    b'import os\nclass Probe:\n    def property(fn):\n        os.chdir("/")\n        return fn\n    @property\n    def value(self):return None\n',
+    b'import os\nclass Probe:\n    def __class_getitem__(cls,key):\n        os.chdir("/")\n        return None\ndef eager(value=Probe[0]):pass\n',
+    b'import os\nclass Probe:\n    def __class_getitem__(cls,key):\n        os.chdir("/")\n        return None\ndef eager(value:Probe[0]):pass\n',
+    b'def verify_existing_namespace(root,digest):return {"ready":True}\n',
+    b'def verify_existing_namespace(root,digest):return True\n',
+    b'def verify_existing_namespace(root,digest):return None\n',
+])
+def test_manifest_matching_unreviewed_helper_refuses_before_compile_or_effect(tmp_path,monkeypatch,source):
+    source=source+b'\n'+b' '*(52756-len(source)-1)
+    assert len(source)==52756
     config,manifest,path=readonly_port_fixture(tmp_path,source)
+    assert manifest['files'][0]['sha256']==c.hashlib.sha256(path.read_bytes()).hexdigest()
     allow_synthetic_readonly_bytes(monkeypatch)
-    with pytest.raises(c.ContractError):c.verify_readonly_namespace(config,manifest)
-    assert '_ade_retained_namespace_'+manifest['files'][0]['sha256'] not in sys.modules
+    compiled=[];executed=[]
+    def compile_spy(*args,**kwargs):compiled.append(True);raise RuntimeError('compile must not be reached')
+    def exec_spy(*args,**kwargs):executed.append(True);raise RuntimeError('exec must not be reached')
+    monkeypatch.setattr(c,'compile',compile_spy,raising=False)
+    monkeypatch.setattr(c,'exec',exec_spy,raising=False)
+    with pytest.raises(c.ContractError,match='independently reviewed'):c.verify_readonly_namespace(config,manifest)
+    assert compiled==[] and executed==[]
 
 
 @pytest.mark.parametrize('change',['substitute','mode','member','v2-no-manifest'])
 def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,change):
-    source=b'raise AssertionError("unverified source must not execute")\n'
-    config,manifest,path=readonly_port_fixture(tmp_path,source)
+    config,manifest,path=readonly_port_fixture(tmp_path,b'raise AssertionError("unverified source must not execute")\n')
     allow_synthetic_readonly_bytes(monkeypatch)
     if change=='substitute':manifest['files'][0]['sha256']='f'*64
     elif change=='mode':manifest['files'][0]['mode']=0o555
@@ -1412,18 +1427,16 @@ def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,chang
     with pytest.raises(c.ContractError):c.verify_readonly_namespace(config,manifest)
 
 
-def test_actual_committed_readonly_port_rejects_unprotected_fixture(tmp_path,monkeypatch):
-    source_path=Path(__file__).resolve().parents[1]/'native-readonly-source/packages/server/scripts/qualified-system-namespace.py'
-    if not source_path.is_file():
-        if os.environ.get('ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE')=='1':pytest.fail('required exact native source absent')
-        pytest.skip('exact native source is exercised in dedicated controller workflow')
-    source=source_path.read_bytes()
-    assert isinstance(c.readonly_namespace_source(source,str(source_path)),c.ast.Module)
+def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch):
+    source=committed_readonly_source()
     config,manifest,path=readonly_port_fixture(tmp_path,source)
-    # Only outer byte reader is a unit double. The actual shared port enforces its
-    # OWN root-owned ancestry, full manifest, namespace/mount/loader/inode checks.
     allow_synthetic_readonly_bytes(monkeypatch)
-    with pytest.raises(c.ContractError):c.verify_readonly_namespace(config,manifest)
+    path.chmod(0o600);path.write_bytes(source[:-1]+bytes([source[-1]^1]));path.chmod(0o444)
+    compiled=[]
+    def compile_spy(*args,**kwargs):compiled.append(True);raise RuntimeError('must not compile substituted source')
+    monkeypatch.setattr(c,'compile',compile_spy,raising=False)
+    with pytest.raises(c.ContractError,match='identity mismatch'):c.verify_readonly_namespace(config,manifest)
+    assert compiled==[]
 
 
 def test_readonly_port_last_check_refusal_never_starts_cli(monkeypatch):
@@ -1436,18 +1449,6 @@ def test_readonly_port_last_check_refusal_never_starts_cli(monkeypatch):
     monkeypatch.setattr(c.subprocess,'Popen',lambda *args,**kwargs:pytest.fail('CLI cannot start after namespace refusal'))
     with pytest.raises(c.ContractError):facade._call(['daemon','maintenance','status'])
     assert calls==['readonly-final']
-
-
-@pytest.mark.parametrize('source',[
-    b'import os\nos.system("unreviewed dispatch")\n',
-    b'import arbitrary_plugin_module\n',
-    b'@arbitrary_factory()\ndef verify_existing_namespace(root,digest):pass\n',
-    b'def verify_existing_namespace(root,digest=arbitrary_factory()):pass\n',
-    b'class ImportEffect:\n    os.environ = {}\n',
-    b'if __name__ == "__main__":\n    arbitrary_dispatch()\n',
-])
-def test_readonly_source_filter_rejects_import_time_dispatch(source):
-    with pytest.raises(c.ContractError):c.readonly_namespace_source(source,'fixed-member.py')
 
 
 @pytest.fixture

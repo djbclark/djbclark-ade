@@ -6,7 +6,6 @@ Synthetic CI ports exercise orchestration only and confer no production support.
 from __future__ import annotations
 
 import argparse
-import ast
 import base64
 from dataclasses import asdict, replace
 import hashlib
@@ -596,56 +595,10 @@ def verify_transport_distribution(config):
     return manifest
 
 
-def readonly_namespace_source(source,filename):
-    """Reject import-time dispatch/effects; source authority still comes from manifest."""
-    tree=ast.parse(source,filename=filename)
-    imports={'argparse','ctypes','errno','grp','hashlib','json','os','pathlib','pwd','re','select','stat','struct','sys'}
-    guard=ast.parse('if __name__ == "__main__":\n    sys.exit(main())').body[0]
-    def literal(node):
-        return all(isinstance(part,(ast.Constant,ast.Tuple,ast.List,ast.Set,ast.Dict,ast.Load,ast.UnaryOp,ast.UAdd,ast.USub,
-            ast.BinOp,ast.LShift,ast.RShift,ast.BitOr,ast.BitAnd,ast.Add,ast.Sub,ast.Mult)) for part in ast.walk(node))
-    def definition(node):
-        if isinstance(node,ast.FunctionDef):
-            if any(not isinstance(item,ast.Name) or item.id!='property' for item in node.decorator_list):
-                raise ContractError('readonly helper import decorator refused')
-            header=[*node.args.defaults,*[item for item in node.args.kw_defaults if item is not None]]
-            header += [arg.annotation for arg in [*node.args.posonlyargs,*node.args.args,*node.args.kwonlyargs] if arg.annotation is not None]
-            if node.args.vararg and node.args.vararg.annotation:header.append(node.args.vararg.annotation)
-            if node.args.kwarg and node.args.kwarg.annotation:header.append(node.args.kwarg.annotation)
-            if node.returns:header.append(node.returns)
-            if any(isinstance(part,(ast.Call,ast.NamedExpr,ast.Await,ast.Yield,ast.YieldFrom)) for item in header for part in ast.walk(item)):
-                raise ContractError('readonly helper import header effects refused')
-            return
-        if isinstance(node,ast.ClassDef):
-            if node.keywords or any(not isinstance(item,ast.Name) or item.id!='dataclass' for item in node.decorator_list):
-                raise ContractError('readonly helper class import effects refused')
-            for base in node.bases:
-                if ast.dump(base) not in (ast.dump(ast.Name(id='Exception',ctx=ast.Load())),
-                        ast.dump(ast.Attribute(value=ast.Name(id='argparse',ctx=ast.Load()),attr='ArgumentParser',ctx=ast.Load()))):
-                    raise ContractError('readonly helper class base refused')
-            for item in node.body:
-                if isinstance(item,ast.FunctionDef):definition(item)
-                elif isinstance(item,ast.Expr) and isinstance(item.value,ast.Constant) and type(item.value.value) is str:pass
-                elif isinstance(item,ast.AnnAssign) and isinstance(item.target,ast.Name) and isinstance(item.annotation,ast.Name) and (item.value is None or literal(item.value)):pass
-                elif isinstance(item,ast.Assign) and literal(item.value) and all(
-                        all(isinstance(part,(ast.Name,ast.Tuple,ast.List,ast.Store)) for part in ast.walk(target)) for target in item.targets):pass
-                else:raise ContractError('readonly helper class import statement refused')
-            return
-        raise ContractError('readonly helper definition refused')
-    for node in tree.body:
-        if isinstance(node,ast.Import):
-            if any(item.name not in imports or item.asname is not None for item in node.names):raise ContractError('readonly helper import refused')
-        elif isinstance(node,ast.ImportFrom):
-            if node.level or node.module!='dataclasses' or len(node.names)!=1 or node.names[0].name!='dataclass' or node.names[0].asname is not None:
-                raise ContractError('readonly helper imported binding refused')
-        elif isinstance(node,(ast.FunctionDef,ast.ClassDef)):
-            if node.name.startswith('__'):raise ContractError('readonly helper reserved module binding refused')
-            definition(node)
-        elif isinstance(node,ast.Expr) and isinstance(node.value,ast.Constant) and type(node.value.value) is str:pass
-        elif isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='ENVIRONMENT' and literal(node.value):pass
-        elif isinstance(node,ast.If) and ast.dump(node)==ast.dump(guard):pass
-        else:raise ContractError('readonly helper import-time statement refused')
-    return tree
+# Independently reviewed native389 source identity, not supplied by artifact JSON.
+# A changed helper requires a separately reviewed adapter source update.
+READONLY_NAMESPACE_SHA256 = '605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+READONLY_NAMESPACE_SIZE = 52756
 
 
 def verify_readonly_namespace(config, manifest):
@@ -657,10 +610,12 @@ def verify_readonly_namespace(config, manifest):
     root=Path(config['distributionRoot'])
     member='system-closure/namespace-bootstrap.py'
     rows=[row for row in manifest['files'] if row['path']==member]
-    if len(rows)!=1 or rows[0]['mode']!=0o444:raise ContractError('fixed sealed namespace verifier member absent')
+    if (len(rows)!=1 or rows[0]['mode']!=0o444 or type(rows[0].get('size')) is not int or
+            rows[0]['size']!=READONLY_NAMESPACE_SIZE or rows[0].get('sha256')!=READONLY_NAMESPACE_SHA256):
+        raise ContractError('independently reviewed namespace verifier identity required')
     path=protected_root_path(root/member)
     source=read_regular(path,rows[0]['size'],owner=0)
-    if len(source)!=rows[0]['size'] or hashlib.sha256(source).hexdigest()!=rows[0]['sha256']:
+    if len(source)!=READONLY_NAMESPACE_SIZE or hashlib.sha256(source).hexdigest()!=READONLY_NAMESPACE_SHA256:
         raise ContractError('namespace verifier member identity mismatch')
     name='_ade_retained_namespace_'+rows[0]['sha256']
     module=types.ModuleType(name)
@@ -669,7 +624,7 @@ def verify_readonly_namespace(config, manifest):
     sys.modules[name]=module  # dataclass introspection requires the exact executing module.
     try:
         # Definitions-only, measured shared helper. Never __main__/Admin/launch dispatch.
-        exec(compile(readonly_namespace_source(source,str(path)),str(path),'exec'),module.__dict__)
+        exec(compile(source,str(path),'exec'),module.__dict__)
         verify=getattr(module,'verify_existing_namespace',None)
         if not callable(verify) or verify(str(root),config['distributionSha256']) is not None:
             raise ContractError('readonly namespace verification refused')

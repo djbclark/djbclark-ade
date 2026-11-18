@@ -33,3 +33,5 @@
 - Invoke the authenticated shared read-only namespace verifier immediately before retained CLI execution, with controlled import and refusal before subprocess start on missing or changed proof. (#796)
 ### Fixed
 - Report truthful read-only Journal/native/cohort status instead of a universal unsupported placeholder, and show a separately authorized standing apply schedule source for automatic promotion. (#796)
+### Fixed
+- Require the independently reviewed exact packaged namespace-helper bytes before import; remove the generic AST safety predicate and refuse matching-manifest rebinding/subscription variants before compilation. (#796)
