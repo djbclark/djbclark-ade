@@ -28,7 +28,8 @@ reconciled authority evidence. Commands are exactly these two-token pairs:
 |---|---|
 | role get | role_id |
 | role create | record (core schema) |
-| role transition | snapshot, priorOwner, priorEpoch, nextOwner, quiescence |
+| role transition | snapshot, state, quiescence?, checkpoint_digest? |
+| role transfer | snapshot, priorOwner, priorEpoch, nextOwner, quiescence, checkpoint_digest? |
 | report publish | report, artifacts?: [{base64,media_type}] |
 | report status | role_id, message_id |
 | inbox list | snapshot, authority |

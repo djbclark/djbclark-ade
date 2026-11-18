@@ -18,12 +18,22 @@ Role snapshot: `{record: {role_id, owner: {host,server,agent}, ownership_epoch,
 generation, state, bindings, quiescence?}, revision}`. `revision` is the global
 stream sequence of the last role-subject record, not the ownership epoch.
 `createRole(record)` requires epoch 1. `getRole(role_id)` uses leader API reads.
-`transferRole(snapshot, {priorOwner, priorEpoch, nextOwner, quiescence})` checks
-owner/epoch and CAS revision. Quiescence is explicit evidence bound to the prior
-revision/epoch/owner: `{prior_revision, prior_epoch, prior_owner,
-processes_stopped:true, jobs_stopped:true, operations_reconciled:true,
-checkpoint_digest:<64 hex>}`. The adapter must verify that evidence before
-calling; booleans cannot stop processes or fence external resources. No lease,
+`transitionRole(snapshot,{state,quiescence?,checkpoint_digest?})` persists only
+active -> draining -> quiescent -> checkpointed, preserving owner, epoch,
+generation and bindings. Quiescent requires `{prior_revision,prior_epoch,
+prior_owner,processes_stopped:true,jobs_stopped:true,operations_reconciled:true}`
+bound to the **draining** revision. Checkpointed requires a 64-hex
+`checkpoint_digest`; it retains quiescence unchanged and records the quiescent
+revision. Optional digest in the quiescence evidence must agree with checkpoint.
+`transferRole(snapshot,{priorOwner,priorEpoch,nextOwner,quiescence,
+checkpoint_digest?})` requires this persisted checkpointed record and matching
+proof. It increments epoch once and returns successor active; provenance moves
+into `handoff`. Direct active-to-transfer, skipped/reverse states and stale or
+modified snapshots fail. All writes CAS the exact snapshot revision after a
+fresh leader read. Receipts and delivery intake/disposition require active state;
+report publication to the stable role remains allowed while draining.
+Adapters must prove actual process/resource quiescence and durable checkpoint
+availability: booleans cannot stop processes or fence resources. No lease,
 heartbeat, wall clock or expiry confers authority.
 
 `publishReport({role_id,message_id,payload,producer_assignment?,artifacts?})`
