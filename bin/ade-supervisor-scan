@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on
-# an exhausted account, sends ONE notice per stuck agent to the lead named in
+# an exhausted account, sends at most one message per run, naming every new finding,
+# to the lead named in
 # ADE_SUPERVISOR_LEAD, or failing that in $STATE_DIR/lead (one Paseo agent id). The
 # plist and its config/ade.toml inventory row carry no lead at all, so `ade-sched
 # diff`/`reconcile` render the job and a lead handoff cannot leave a stale id in a
@@ -24,9 +25,10 @@ mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 ping_operator_once() {   # once per cause per outage; only a successful ping marks it as reported
-    local cause="$1" slug="$2" marker="$STATE_DIR/.lead-unreachable.$2"
+    local cause="$1" slug="$2" hint="${3:-check the lead and Paseo, then docs/scheduling.md}"
+    local marker="$STATE_DIR/.lead-unreachable.$slug"
     [ -f "$marker" ] && return 0
-    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($cause); write the lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
+    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($cause); $hint" >>"$LOG" 2>&1; then
         : >"$marker"
     else
         printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
@@ -35,7 +37,7 @@ ping_operator_once() {   # once per cause per outage; only a successful ping mar
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
-    ping_operator_once "no lead is configured" no-lead
+    ping_operator_once "no lead is configured" no-lead "write the lead id to $STATE_DIR/lead (docs/scheduling.md)"
     exit 0
 fi
 case "$LEAD" in
@@ -45,7 +47,7 @@ esac
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: the lead value in ADE_SUPERVISOR_LEAD/%s/lead is not an agent id; nothing to notify\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
-    ping_operator_once "the configured lead is not an agent id" bad-lead
+    ping_operator_once "the configured lead is not an agent id" bad-lead "write a Paseo agent id to $STATE_DIR/lead (docs/scheduling.md)"
     exit 0
 fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
@@ -95,12 +97,16 @@ else:
         items.append(("thin|%s" % acct,
                       "account %s is thin (%s%% headroom%s) — re-handoffs to it are already refused" %
                       (acct, rec.get("headroom"), ", stale reading" if rec.get("stale") else "")))
-    for s in d.get("stuck", []):
-        if s.get("status") in ("closed", "archived"):
-            continue
-        items.append(("%s|%s" % (s.get("id"), s.get("account")),
-                      "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
-                                                           s.get("alternative") or "no healthy alternative")))
+    stuck = d.get("stuck")
+    if not isinstance(stuck, list) or not all(isinstance(s, dict) for s in stuck):
+        items = [("scan|broken", "ade-pi-stuck printed a stuck list this scan cannot read — the watch is blind")]
+    else:
+        for s in stuck:
+            if s.get("status") in ("closed", "archived"):
+                continue
+            items.append(("%s|%s" % (s.get("id"), s.get("account")),
+                          "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
+                                                               s.get("alternative") or "no healthy alternative")))
 with open(pending_path, "w") as fh:
     json.dump([k for k, _ in items], fh)
 new = [text for key, text in items if text and key not in told]
