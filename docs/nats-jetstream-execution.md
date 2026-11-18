@@ -46,3 +46,19 @@ E3. Local SQLite intent, report bytes and artifact bytes must precede broker I/O
 E4. Tool procedure: route a single judgment with `route_agent.py route --kind frontier --json`; a wave uses `plan --kinds ...`, with documented placement arguments. There is no `--task` argument. Capture quota/router JSON to a private scratch file and print only needed fields; do not stream full quota output into the session.
 
 E5. Independent Astra review closed delivery B1/B2 and found two resource-ledger race/recovery blockers in7ff2d719. Worker repair772b3962 is pushed; renewed review/CI required. Do not treat the earlier five green resource tests as proof of those missing interleavings.
+
+## F. Rollout and current gates
+
+F1. Operator explicitly approved infrastructure PR277 at742784405e3792c1a271751928782eb76506b321 for merge, managed credential provisioning and deployment after checks. [PR277](https://github.com/djbclark/site-djbclark/pull/277) merged as237d1417dbad2e3e3be0ccca95a7164d7b7becfc. Published master then advanced to9488e1bb741f125226299633b7c944b01acbe484 (unrelated fleet-watch changes). Build current published head, never deploy the old side branch.
+
+F2. Enabled head742 passed VM/fullhub/package conformance and PR consent/security/build/tests. Consent artifact confirms vps-primary CFEngine unchanged and no closure difference. Cursor approval app was still pending and is not a required site gate; no workflow was cancelled.
+
+F3. Existing managed boundary0.21.1-sudo.7 reports no tracked declaration source. ADE_NATS_TOKEN was declared optional, generated, stored and shape-verified through sudo-secretspec; no value was printed or put in source. Runtime hub credential is not provisioned yet.
+
+F4. Runtime distribution and authenticated backup/isolated restore through the actual native wrapper passed at5b9d9b61. New credential consumer source50c44448 and CI closure exporter0c59953 are in independent review. [Published-head closure build](https://github.com/djbclark/site-djbclark/actions/runs/44336157544) targets9488e1b; host will copy cache paths/import CI-built NAR, not compile.
+
+F5. Adapterd42 review blocks live enrollment on actual plugin schema, launch/drain admission race, repeat handoff journal and resource-free cross-host transfer; worker is repairing all plus coalesced wake and -I sibling import failure. Prior resource R1/R2 and delivery B1/B2 are closed by static review. Legacy CI0aba:747 passed,1 isolated-import failure; not a passing integrated suite.
+
+F6. Running daemons: bigmac0.16.0-beta.2; hub and vps-primary0.14.0 under /home/djbclark/.paseo. Correct service-user census found no active agents. Root default home is unused; a failed/empty root-home census is not absence proof. Actual pilot hosts are bigmac and vps-primary, not hubPaseo.
+
+F7. Validation correction: invoking reference checkout changelog-fold checks its own repository, regardless of cwd. Run the task workspace absolute executable. Exact integrated workspace reported438 valid fragments; the earlier430 count was the reference checkout.
