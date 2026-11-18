@@ -7,6 +7,8 @@ on:
       - 'bin/ade_coord*.py'
       - 'bin/ade-coord*'
       - 'bin/ade-nats-cli'
+      - 'bin/ade-nats-credential'
+      - 'tests/test_nats_credential.py'
       - 'bin/ade_claims.py'
       - 'bin/ade_self_session.py'
       - 'bin/ade_send_guard.py'
@@ -34,6 +36,8 @@ jobs:
         run: |
           timeout 180 npm install --omit=dev --ignore-scripts
           npm ls --all
+      - name: Verify atomic runtime credential consumer
+        run: python3 -m unittest discover -s tests -p test_nats_credential.py -v
       - name: Download native CLI distributions and verify release checksums
         env:
           GH_TOKEN: ${{ github.token }}
