@@ -32,10 +32,15 @@ def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shutil.copy2(SCAN, bin_dir / "ade-supervisor-scan")
+    for module in (REPO / "bin").glob("*.py"):      # ade_send_guard.py and its imports, as an install has them
+        (bin_dir / module.name).symlink_to(module)
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": feed}))
     _script(bin_dir / "ade-pi-stuck", "#!/bin/sh", "cat " + str(bin_dir / "feed.json"))
     sent = tmp_path / "sent.log"
     _paseo(bin_dir, tmp_path, sent, rc=paseo_rc)
+    # Always stub hermes-ping: a real one on PATH would message the operator for real from a test.
+    pinged = tmp_path / "hermes.log"
+    _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(pinged))
     return bin_dir, home, state, sent
 
 
@@ -184,27 +189,24 @@ def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_pa
     """A send to an archived agent un-archives it, so the scan refuses; the operator hears about it once."""
     bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
     _paseo(bin_dir, tmp_path, sent, archived=True)
-    pinged = tmp_path / "hermes.log"
-    _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(pinged))
+    _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(tmp_path / "hermes.log"))
     for _ in range(2):
         assert _run(bin_dir, home) == 0
     assert _messages(sent) == []
-    assert len(pinged.read_text().splitlines()) == 1
+    assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
     assert not (state / "notified").exists()          # nothing was told, so the notice is still pending
 
 
-def test_an_unverifiable_lead_is_not_messaged(tmp_path: Path) -> None:
-    """`paseo agent inspect` failing means the scan cannot prove the lead is live, so it must not send."""
+def test_a_paseo_outage_escalates_after_the_guard_fails_open(tmp_path: Path) -> None:
+    """The guard fails open when Paseo cannot answer (a documented choice, as in ade-progress): the send then fails
+    and the operator is pinged once, rather than the notice vanishing."""
     bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
-    _script(bin_dir / "paseo", "#!/bin/sh", 'case "$1" in',
-            '  send) echo "$*" >> ' + str(sent) + ";;",
-            "  agent) exit 4;;",
-            "esac")
-    pinged = tmp_path / "hermes.log"
-    _script(bin_dir / "hermes-ping", "#!/bin/sh", 'echo "$*" >> ' + str(pinged))
+    _script(bin_dir / "paseo", "#!/bin/sh",
+            'case "$1" in', '  send) echo "$*" >> ' + str(sent) + "; exit 2;;", "  *) exit 4;;", "esac")
     assert _run(bin_dir, home) == 0
-    assert _messages(sent) == []
-    assert len(pinged.read_text().splitlines()) == 1
+    assert len(_messages(sent)) == 1                                     # attempted, and it failed
+    assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
+    assert (state / ".lead-unreachable").exists()
 
 
 def test_a_failed_escalation_is_retried_next_run(tmp_path: Path) -> None:

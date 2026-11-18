@@ -74,45 +74,55 @@ if new:
     print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))
 ' "$NOTIFIED" "$pending" "$scan_rc" 2>>"$LOG")"
 
-send_failed=0
-if [ -n "$msg" ]; then
-    printf '%s %s\n' "$(now)" "$msg" >>"$LOG"
-    # Never message a lead we cannot prove is live: Paseo un-archives an agent it delivers to, so a failed or
-    # unreadable inspect must not turn into a send.
-    lead_state="$(paseo agent inspect "$LEAD" --json 2>>"$LOG" | python3 -c '
+# The send target is decided by the repo's own guard (bin/ade_send_guard.py, ls-02): it refuses an archived lead (a
+# delivery would un-archive it), reports a failed or unreadable inspect, and redirects to the recorded successor after a
+# lead self-handoff instead of leaving the operator to edit the file by hand.
+guard_json="$(python3 "$(cd "$(dirname "$0")" && pwd)/ade_send_guard.py" "$LEAD" 2>>"$LOG")"
+guard_rc=$?
+guard_target="$(printf '%s' "$guard_json" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print("unknown"); sys.exit(0)
-print("archived" if d.get("Archived") else "live")' 2>>"$LOG")"
-    case "${lead_state:-unknown}" in
-        live)
-            paseo send "$LEAD" --no-wait --json "$msg" >>"$LOG" 2>&1
-            rc=$?
-            # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
-            if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
-                send_failed=1
-                printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$LEAD" "$rc" >>"$LOG"
-            fi
-            ;;
-        archived)
-            send_failed=1
-            printf '%s ade-supervisor-scan: lead %s is archived; not sending (update %s/lead)\n' \
-                "$(now)" "$LEAD" "$STATE_DIR" >>"$LOG"
-            ;;
-        *)
-            send_failed=1
-            printf '%s ade-supervisor-scan: cannot verify lead %s is live (inspect failed); not sending\n' \
-                "$(now)" "$LEAD" >>"$LOG"
-            ;;
-    esac
+    sys.exit(0)
+print(d.get("target") or "")' 2>>"$LOG")"
+guard_reason="$(printf '%s' "$guard_json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get("reason") or "")' 2>>"$LOG")"
+
+send_failed=0
+case "$guard_rc" in
+    0) send_to="$LEAD" ;;
+    3)  # a completed self-handoff replaced the lead: the notice follows it
+        send_to="${guard_target:-$LEAD}"
+        printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
+            "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+        ;;
+    *)
+        send_to=""
+        send_failed=1
+        printf '%s ade-supervisor-scan: not sending to %s: %s\n' "$(now)" "$LEAD" "${guard_reason:-guard refused}" >>"$LOG"
+        ;;
+esac
+if [ -n "$msg" ] && [ -n "$send_to" ]; then
+    printf '%s %s\n' "$(now)" "$msg" >>"$LOG"
+    paseo send "$send_to" --no-wait --json "$msg" >>"$LOG" 2>&1
+    rc=$?
+    # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+        send_failed=1
+        printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
+    fi
 fi
+unreachable="$STATE_DIR/.lead-unreachable"
 if [ "$send_failed" -eq 1 ]; then
     # The scan cannot reach its own lead, so it has no in-band channel left: tell the operator once per outage.
-    unreachable="$STATE_DIR/.lead-unreachable"
     if [ ! -f "$unreachable" ]; then
-        if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot reach its lead $LEAD (archived, unverifiable or send failure); write the current lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
+        if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot reach its lead $LEAD (${guard_reason:-send failure}); write the current lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
             : >"$unreachable"           # marked only once the operator was actually reached
         else
             printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
@@ -121,6 +131,7 @@ if [ "$send_failed" -eq 1 ]; then
     rm -f "$pending"                     # keep the old state and retry next run
     exit 0
 fi
-rm -f "$STATE_DIR/.lead-unreachable"
+# The guard answered (pass or redirect): the lead is reachable again, so the escalation marker may go, even on a quiet run.
+rm -f "$unreachable"
 [ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
 exit 0
