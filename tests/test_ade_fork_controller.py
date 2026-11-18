@@ -485,3 +485,42 @@ def test_native_reservation_context_never_ends_implicitly(monkeypatch):
     facade.uncertain=True
     with pytest.raises(c.ContractError):facade.finish()
     assert len(calls)==1
+
+
+def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,monkeypatch):
+    row,receipt,payload,archive=fixture
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row)
+    old=c.evaluation(row)
+    old_value={'receipt_sha256':receipt.sha256,'evaluation':dict(asdict(old),jobs=list(old.jobs))}
+    # Find a valid later attempt whose filename sorts AFTER obsolete attempt1.
+    for artifact in range(61,500):
+        fresh=c.replace(old,run_attempt=2,artifact_id=artifact,artifact_name='qualification-40-2')
+        fresh_value={'receipt_sha256':receipt.sha256,'evaluation':dict(asdict(fresh),jobs=list(fresh.jobs))}
+        if digest(old_value)<digest(fresh_value):break
+    else:pytest.fail('fixture could not arrange obsolete-first digest order')
+    controller.attest(receipt.sha256,fresh)
+    calls=[]
+    class CurrentAttempt:
+        def verify(self,expected,path):
+            calls.append(expected)
+            if expected.run_attempt!=2:raise c.ContractError('obsolete/expired attempt')
+            return SimpleNamespace(authenticates=lambda actual:actual.sha256==receipt.sha256)
+    controller.evaluator=CurrentAttempt()
+    def selected():
+        controller.selection={'latest':row['master_commit'],'enrollment_sha256':digest(row),
+            'selected':{'identity':receipt.sha256,'commit':row['master_commit']}}
+        controller.fresh_attestations={receipt.sha256:fresh}
+        return {'selected_qualified':controller.selection['selected']}
+    monkeypatch.setattr(controller,'select_latest',selected)
+    monkeypatch.setattr(controller,'discover_master',lambda:{'discovered':row['master_commit']})
+    assert controller.selected_release(row)[0].sha256==receipt.sha256
+    assert calls==[fresh]
+    # A CURRENT authentication refusal still stops, without falling back to old evidence.
+    def revoked(expected,path):raise c.ContractError('current policy refused')
+    controller.evaluator.verify=revoked
+    with pytest.raises(c.ContractError,match='current policy refused'):controller.selected_release(row)
+    # Even when fresh provenance is available, retained corruption must remain fatal.
+    corrupt=controller.root/'attestations'/receipt.sha256/(digest(old_value)+'.json')
+    corrupt.chmod(0o600);corrupt.write_bytes(b'{}')
+    with pytest.raises(c.ContractError,match='corruption'):controller.selected_release(row)

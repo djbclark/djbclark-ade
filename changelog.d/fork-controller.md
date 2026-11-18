@@ -6,3 +6,6 @@
 
 ### Fixed
 - Separate stable release records from authenticated reattestations, hold malformed discovery metadata, and transact selected records under current qualified-latest consent. (#0)
+
+### Fixed
+- Carry fresh exact-attempt authentication into selected transactions so obsolete reattestations cannot obstruct deployment, while retaining corruption and current-policy refusal. (#0)

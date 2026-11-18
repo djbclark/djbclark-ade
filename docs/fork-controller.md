@@ -241,3 +241,13 @@ consent can call finish(); uncertainty retains owner token/hold and requires
 explicit reconciliation. A failed, unknown or unverified operation never invokes
 END/rollback/reconnect cleanup. Real native status and fresh successor barrier
 remain mandatory release predicates in the native endpoint.
+
+
+Selected transactions carry the exact newly authenticated attestation expectation
+from selection, then reauthenticate that exact run/attempt at transaction entry.
+Obsolete or expired prior attempts cannot obstruct a freshly valid same-receipt
+rerun merely because their digest filenames sort first. Retained-baseline fallback
+orders provenance by run/attempt rather than hash. All local attestation files
+are still validated before use, including obsolete files; corruption remains a
+hard refusal. A current attempt or current-policy authentication failure propagates
+without a catch-and-ignore fallback to older evidence.

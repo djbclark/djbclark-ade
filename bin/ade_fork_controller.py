@@ -406,6 +406,7 @@ class Controller:
         self.evaluator = evaluator or GitHubEvaluation()
         self.native = native or NativeFacade(reader, root)
         self.selection = None
+        self.fresh_attestations = {}
         self.root = Path(root) if root is not None else locations()[1]
 
     def plan(self):
@@ -435,6 +436,8 @@ class Controller:
     def select_latest(self):
         """Protected workflow output contract, ancestry order, no operation grants."""
         row = self.reader()
+        self.selection = None
+        self.fresh_attestations = {}
         if row['discovery']['enabled'] is not True:
             raise ContractError('protected evaluator discovery not enabled')
         ev = evaluation(row)
@@ -576,6 +579,7 @@ class Controller:
             immutable(self.root / 'payloads' / expected['artifact_sha256'], payload)
             immutable(self.root / 'records' / (receipt.sha256 + '.json'), canonical(record))
             self.attest(receipt.sha256, candidate_ev)
+            self.fresh_attestations[receipt.sha256] = candidate_ev
             if selected and selected['commit'] == commit and selected['identity'] != receipt.sha256:
                 raise ContractError('ambiguous qualification identity for source')
             selected = {'commit': commit, 'identity': receipt.sha256, 'retained': True}
@@ -721,15 +725,29 @@ class Controller:
         attestations = self.root / 'attestations' / identity
         names = sorted(attestations.iterdir())
         if not names or len(names) > 100: raise ContractError('attestation inventory unavailable')
+        candidates = []
+        trusted = evaluation(row)
+        static = ('repository', 'repository_id', 'workflow_id', 'workflow_path', 'evaluator_commit', 'actor_id', 'event', 'jobs', 'workflow_ref')
+        # Validate the complete local inventory BEFORE using any fresh attestation.
+        # Corruption is never masked as obsolete remote provenance.
         for name in names:
             value = parse(read_regular(name, 1024 * 1024).decode())
-            if digest(value) + '.json' != name.name or value.get('receipt_sha256') != identity:
+            if type(value) is not dict or digest(value) + '.json' != name.name or value.get('receipt_sha256') != identity:
                 raise ContractError('attestation identity corruption')
             ev = evaluation({'evaluation': value['evaluation']})
-            trusted = evaluation(row)
-            static = ('repository', 'repository_id', 'workflow_id', 'workflow_path', 'evaluator_commit', 'actor_id', 'event', 'jobs', 'workflow_ref')
-            if any(getattr(ev, key) != getattr(trusted, key) for key in static):
-                continue
+            if all(getattr(ev, key) == getattr(trusted, key) for key in static):
+                candidates.append(ev)
+        fresh = self.fresh_attestations.get(identity)
+        if fresh is not None:
+            if fresh not in candidates: raise ContractError('fresh attestation not retained')
+            candidates = [fresh]  # exact newly selected attempt, never obsolete digest order
+        else:
+            # Retained baseline fallback: deterministic newest run/attempt, not hash filename order.
+            candidates.sort(key=lambda ev: (ev.run_id, ev.run_attempt, ev.artifact_id), reverse=True)
+        if candidates:
+            ev = candidates[0]
+            # Re-authenticate at transaction boundary. Current-attempt/policy refusal
+            # propagates; do not turn every ContractError into try-an-older-attempt.
             verified = self.evaluator.verify(ev, self.root / 'archives')
             if verified.authenticates(receipt) is not True: raise ContractError('selected receipt authentication refused')
             if canonical(self.reader()) != canonical(row) or self.discover_master()['discovered'] != self.selection['latest']:
