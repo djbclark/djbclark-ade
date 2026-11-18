@@ -547,3 +547,127 @@ def test_fixed_cli_explicit_transaction_dispatch(monkeypatch,capsys,command,oper
     assert calls==[operation]
     assert c.parse(capsys.readouterr().out)['status']=='hold'
     with pytest.raises(SystemExit):c.main([command,'--policy','/candidate/grant'])
+
+
+@pytest.fixture
+def cohort_mapping_fixture(fixture,tmp_path):
+    """Synthetic wire facts for parser/retained-byte unit tests, NOT producer proof."""
+    row,_,payload,_=fixture
+    closure={'qualificationSha256':'1'*64,'runtimeClosureSha256':'2'*64,'helperClosureSha256':'3'*64}
+    profile=dict(version=1,contract='native-passive-contract-1',initialization='registration-only',**closure)
+    policy=dict(row['policy'],native_passive_profile=profile)
+    evidence=dict(row['evidence'],server_bundle_sha256='4'*64)
+    expected=dict(row['expected'],policy_digest=digest(policy),
+        toolchain=c.canonical({'plugin_snapshot_evidence':digest(evidence)}).decode())
+    receipt=make_receipt(expected,policy,{k:{'status':'passed','contract_digest':digest(v)} for k,v in policy['features'].items()})
+    archive=zip_bytes({'receipt.json':receipt.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(evidence)})
+    row.update(policy=policy,evidence=evidence,expected=expected)
+    row['evaluation'].update(receipt_sha256=receipt.sha256,archive_sha256=c.hashlib.sha256(archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=receipt.sha256
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row)
+    snapshot=snapshots.stage(payload,controller.root/'snapshots',snapshots.payload_tree_hash(payload))
+    config={'serverId':'fixture-server','daemonIncarnation':'fixture-daemon',
+            'distributionBuildId':'fixture-build','closure':closure}
+    enclosing={'serverId':config['serverId'],'incarnation':config['daemonIncarnation'],
+               'distributionBuildId':config['distributionBuildId'],'closure':closure}
+    entries=[]
+    for plugin in set(row['cohort'])-{'paseo'}:
+        root=str(snapshot) if plugin=='ade-yolo' else '/qualified/'+plugin
+        source=root+'/plugins/'+plugin
+        loaded={'pluginId':plugin,'sourcePath':source,'snapshotRoot':root,
+                'snapshotSha256':evidence['native_tree_sha256'],'serverBundleSha256':evidence['server_bundle_sha256'],
+                'activationGeneration':2,'pid':123,'processStartToken':'receipt-'+plugin,'startedAt':'2026-11-18T00:00:00Z'}
+        execution={'contract':'native-passive-contract-1','incarnation':'receipt-'+plugin,
+                   'distributionBuildId':'fixture-build','closure':closure}
+        registration={'source':'directory','path':source,'enabled':True}
+        entry={'pluginId':plugin,'registration':registration,'enabled':True,
+               'journal':{'generation':8,'phase':'held','currentReceipt':loaded},'loaded':loaded,'execution':execution}
+        entries.append(entry)
+        row['cohort'][plugin]={'enabled':True,'loaded':True,'registration':registration,
+            'receipt':{k:loaded[k] for k in ('sourcePath','snapshotRoot','snapshotSha256','serverBundleSha256')},
+            'execution':{k:execution[k] for k in ('contract','distributionBuildId','closure')}}
+    row['cohort']['paseo']={'role':'daemon','enabled':True,'loaded':True,'distributionBuildId':'fixture-build','closure':closure}
+    facts={'version':1,'consistency':'coherent','observationEpoch':9,'enclosing':enclosing,'entries':entries}
+    return row,receipt,controller,config,facts
+
+
+def test_cohort_parser_and_retained_receipt_map(cohort_mapping_fixture,monkeypatch):
+    row,receipt,controller,config,facts=cohort_mapping_fixture
+    assert c.cohort_observation(facts,config,row['cohort'],'ade-yolo') is facts
+    facade=c.NativeFacade(lambda:row,controller.root)
+    monkeypatch.setattr(facade,'cohort_status',lambda:c.cohort_observation(facts,config,row['cohort'],'ade-yolo'))
+    assert facade.observe(row['cohort'])==receipt.sha256
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    # Native CAS is8 while loaded generation2; identity matching does not rewrite either.
+    assert target['journal']['generation']==8 and target['loaded']['activationGeneration']==2
+    target['execution']['closure']=dict(config['closure'],qualificationSha256='f'*64)
+    with pytest.raises(c.ContractError,match='ambiguous'):facade.observe(row['cohort'])
+
+
+@pytest.mark.parametrize('change',['omitted','extra-active','enclosing','state','execution','journal'])
+def test_cohort_refusals(cohort_mapping_fixture,change):
+    row,_,_,config,facts=cohort_mapping_fixture
+    if change=='omitted':facts['entries'].pop()
+    elif change=='extra-active':
+        entry=dict(facts['entries'][0],pluginId='unexpected')
+        entry['loaded']=dict(entry['loaded'],pluginId='unexpected');entry['journal']=dict(entry['journal'],currentReceipt=entry['loaded'])
+        facts['entries'].append(entry)
+    elif change=='enclosing':facts['enclosing']['incarnation']='replaced-daemon'
+    elif change=='state':
+        entry=next(e for e in facts['entries'] if e['pluginId']!='ade-yolo');entry['enabled']=False
+    elif change=='execution':facts['entries'][0]['execution']=None
+    elif change=='journal':facts['entries'][0]['journal']['currentReceipt']={}
+    with pytest.raises(c.ContractError):c.cohort_observation(facts,config,row['cohort'],'ade-yolo')
+
+
+def test_real_facade_supported_requires_complete_proof(monkeypatch):
+    facade=c.NativeFacade()
+    monkeypatch.setattr(facade,'cohort_status',lambda:(_ for _ in ()).throw(c.ContractError('native private producer missing')))
+    assert facade.supported() is False
+
+
+def test_cohort_rejects_old_execution_incarnation(cohort_mapping_fixture):
+    row,_,_,config,facts=cohort_mapping_fixture
+    facts['entries'][0]['execution']['incarnation']='stale-owned-child'
+    with pytest.raises(c.ContractError,match='incarnation'):c.cohort_observation(facts,config,row['cohort'],'ade-yolo')
+
+
+def test_python_preexec_manifest_verifier_real_protected_inventory(tmp_path):
+    """CI-only root-owned disposable tree, no Node execution or runtime qualification."""
+    import uuid
+    if sys.platform!='linux':pytest.fail('finite adapter regression requires Linux CI')
+    root=Path('/opt')/('ade-controller-unit-'+uuid.uuid4().hex)
+    staging=tmp_path/'distribution';staging.mkdir()
+    paths=['runtime/node','runtime/esbuild','cli-entry.mjs','daemon.mjs','plugin-child-entry.mjs','compiler-entry.mjs','terminal-entry.mjs']
+    files=[]
+    for name in sorted(paths):
+        path=staging/name;path.parent.mkdir(exist_ok=True,parents=True);path.write_bytes(('unit '+name).encode())
+        mode=0o555 if name.startswith('runtime/') else 0o444;path.chmod(mode)
+        files.append({'path':name,'mode':mode,'size':path.stat().st_size,'sha256':c.hashlib.sha256(path.read_bytes()).hexdigest()})
+    helpers=sorted([item for item in files if item['path'].startswith('runtime/') or item['path'] in ('compiler-entry.mjs','terminal-entry.mjs')],key=lambda i:i['path'])
+    producer_json=lambda value:c.json.dumps(value,ensure_ascii=False,separators=(',',':')).encode()
+    helper_sha=c.hashlib.sha256(producer_json(helpers)).hexdigest()
+    manifest={'schemaVersion':2,'profile':'enclosing-daemon-v2','distributionBuildId':'unit-build','files':files,
+              'runtime':next(x for x in files if x['path']=='runtime/node'),
+              'esbuild':next(x for x in files if x['path']=='runtime/esbuild'),'externalLibraries':[],
+              'helperInventory':helpers,'helperClosureSha256':helper_sha,
+              'entries':{'daemon':'daemon.mjs','pluginChild':'plugin-child-entry.mjs','compiler':'compiler-entry.mjs','terminal':'terminal-entry.mjs'},
+              'bindingKeys':sorted(['@getpaseo/plugin/internal/activity','@getpaseo/plugin','@getpaseo/plugin/server',
+                '@getpaseo/plugin/server/provider','@getpaseo/plugin/server/acp','@getpaseo/plugin/server/usage',
+                '@getpaseo/client','@getpaseo/client/internal/daemon-client','@getpaseo/protocol/binary-frames/index','zod'])}
+    raw=producer_json(manifest);manifest_file=tmp_path/'manifest';manifest_file.write_bytes(raw);manifest_file.chmod(0o444)
+    def sudo(*args):subprocess.run(['sudo','-k','-n',*map(str,args)],check=True,timeout=30)
+    try:
+        sudo('cp','-a',staging,root);sudo('cp',manifest_file,str(root)+'.manifest.json')
+        sudo('chown','-R','0:0',root);sudo('chown','0:0',str(root)+'.manifest.json')
+        sudo('chmod','555',root,root/'runtime');sudo('chmod','444',str(root)+'.manifest.json')
+        sha=c.hashlib.sha256(raw).hexdigest()
+        config={'distributionRoot':str(root),'distributionSha256':sha,'distributionBuildId':'unit-build',
+                'closure':{'runtimeClosureSha256':sha,'helperClosureSha256':helper_sha,'qualificationSha256':'a'*64},
+                'node':{'path':str(root/'runtime/node')},'cli':{'path':str(root/'cli-entry.mjs')}}
+        assert c.verify_transport_distribution(config)['distributionBuildId']=='unit-build'
+        sudo('chmod','644',root/'cli-entry.mjs')
+        with pytest.raises(c.ContractError,match='mismatch'):c.verify_transport_distribution(config)
+    finally:
+        sudo('rm','-rf','--',root,str(root)+'.manifest.json')

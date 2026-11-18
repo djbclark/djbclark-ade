@@ -10,6 +10,7 @@ import base64
 from dataclasses import asdict, replace
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import pwd
@@ -18,6 +19,7 @@ import stat
 import selectors
 import time
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -40,7 +42,7 @@ def locations():
     return root / 'controller.json', root
 
 
-def read_regular(path: Path, limit=LIMIT) -> bytes:
+def read_regular(path: Path, limit=LIMIT, *, owner=None) -> bytes:
     """Descriptor traversal rejects links/specials before blocking or reading."""
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts:
@@ -53,7 +55,7 @@ def read_regular(path: Path, limit=LIMIT) -> bytes:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         try:
             before = os.fstat(fd)
-            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != (os.getuid() if owner is None else owner) or
                     before.st_mode & 0o022 or before.st_size > limit):
                 raise ContractError('unsafe local evidence file')
             chunks = bytearray()
@@ -62,7 +64,9 @@ def read_regular(path: Path, limit=LIMIT) -> bytes:
                 if not chunk: break
                 chunks.extend(chunk)
             after = os.fstat(fd)
-            if len(chunks) > limit or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            keys = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+            if len(chunks) > limit or any(getattr(before, key) != getattr(after, key) or getattr(before, key) != getattr(current, key) for key in keys):
                 raise ContractError('unstable or excessive local evidence')
             return bytes(chunks)
         finally: os.close(fd)
@@ -85,7 +89,7 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
             raise ContractError('invalid enrollment identity')
     cohort = row['cohort']
     required = {cid for item in registry if item['compatibility_group'] == 'paseo-runtime' for cid in item['catalog_ids']}
-    if type(cohort) is not dict or set(cohort) != required or not required or any(not isinstance(v, dict) or not v for v in cohort.values()):
+    if type(cohort) is not dict or not required <= set(cohort) or not required or any(not isinstance(v, dict) or not v for v in cohort.values()):
         raise ContractError('complete protected cohort required')
     policy = row['policy']
     features = {feature for item in registry if item['compatibility_group'] == 'paseo-runtime' for feature in item['required_features']}
@@ -95,7 +99,7 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
     expected = row['expected']
     if type(expected) is not dict or expected.get('component') != 'ade-yolo' or expected.get('fork_commit') != row['master_commit']:
         raise ContractError('wrong protected source')
-    if type(expected.get('dependencies')) is not dict or not required <= set(expected['dependencies']):
+    if type(expected.get('dependencies')) is not dict or not set(cohort) <= set(expected['dependencies']):
         raise ContractError('complete dependency closure required')
     if type(row['evidence']) is not dict or not row['evidence']:
         raise ContractError('protected evaluator evidence required')
@@ -104,7 +108,7 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
         raise ContractError('protected evaluator identity mismatch')
     native = row['native']
     if native is not None:
-        if type(native) is not dict or set(native) != {'node', 'cli', 'serverId', 'daemonIncarnation', 'distributionSha256'}:
+        if type(native) is not dict or set(native) != {'node', 'cli', 'serverId', 'daemonIncarnation', 'distributionSha256', 'distributionBuildId', 'distributionRoot', 'closure'}:
             raise ContractError('invalid retained native transport')
         for key in ('node', 'cli'):
             item = native[key]
@@ -112,8 +116,11 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
                     type(item['path']) is not str or not Path(item['path']).is_absolute() or
                     type(item['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', item['sha256'])):
                 raise ContractError('invalid retained transport identity')
-        for key in ('serverId', 'daemonIncarnation', 'distributionSha256'):
+        for key in ('serverId', 'daemonIncarnation', 'distributionBuildId', 'distributionRoot'):
             if type(native[key]) is not str or not native[key]: raise ContractError('missing native transport identity')
+        if type(native['distributionSha256']) is not str or not re.fullmatch('[a-f0-9]{64}', native['distributionSha256']):
+            raise ContractError('invalid protected distribution digest')
+        closure_identity(native['closure'])
     discovery = row['discovery']
     if (type(discovery) is not dict or set(discovery) != {'enabled', 'artifact_prefix', 'baseline_run_id'} or
             type(discovery['enabled']) is not bool or discovery['artifact_prefix'] != 'ade-yolo-qualified' or
@@ -226,6 +233,161 @@ def coherent_native_status(value, plugin_id):
     return value
 
 
+def closure_identity(value):
+    keys = {'runtimeClosureSha256', 'helperClosureSha256', 'qualificationSha256'}
+    if type(value) is not dict or set(value) != keys or any(type(v) is not str or not re.fullmatch('[a-f0-9]{64}', v) for v in value.values()):
+        raise ContractError('invalid qualified closure identity')
+    return value
+
+
+def protected_root_path(path):
+    path = Path(path)
+    if not path.is_absolute() or path.resolve(strict=True) != path: raise ContractError('noncanonical retained root path')
+    for current in (path, *path.parents):
+        st = current.lstat()
+        if st.st_uid != 0 or st.st_mode & 0o022 or stat.S_ISLNK(st.st_mode):
+            raise ContractError('retained ancestry not root-owned and protected')
+    return path
+
+
+def verify_transport_distribution(config):
+    """Python preexec mirror of producer daemon-verifier.ts finite v2 manifest."""
+    if sys.platform != 'linux' or os.getuid() == 0: raise ContractError('finite non-root Linux adapter required')
+    root = protected_root_path(config['distributionRoot'])
+    if not root.is_dir(): raise ContractError('retained distribution root missing')
+    manifest_path = protected_root_path(Path(str(root) + '.manifest.json'))
+    raw = read_regular(manifest_path, 4 * 1024 * 1024, owner=0)
+    manifest_digest = hashlib.sha256(raw).hexdigest()
+    if manifest_digest != config['distributionSha256'] or manifest_digest != config['closure']['runtimeClosureSha256']:
+        raise ContractError('protected raw distribution manifest mismatch')
+    raw_manifest = raw
+    manifest = parse(raw.decode())
+    if (type(manifest) is not dict or manifest.get('schemaVersion') != 2 or manifest.get('profile') != 'enclosing-daemon-v2' or
+            manifest.get('distributionBuildId') != config['distributionBuildId'] or
+            manifest.get('entries') != {'daemon':'daemon.mjs','pluginChild':'plugin-child-entry.mjs','compiler':'compiler-entry.mjs','terminal':'terminal-entry.mjs'}):
+        raise ContractError('unsupported enclosing distribution manifest')
+    binding_keys = sorted(['@getpaseo/plugin/internal/activity','@getpaseo/plugin','@getpaseo/plugin/server',
+        '@getpaseo/plugin/server/provider','@getpaseo/plugin/server/acp','@getpaseo/plugin/server/usage',
+        '@getpaseo/client','@getpaseo/client/internal/daemon-client','@getpaseo/protocol/binary-frames/index','zod'])
+    if manifest.get('bindingKeys') != binding_keys: raise ContractError('qualified namespace inventory mismatch')
+    files, external = manifest.get('files'), manifest.get('externalLibraries')
+    if type(files) is not list or not files or len(files) > 20000 or type(external) is not list or len(external) > 1000:
+        raise ContractError('invalid distribution inventory')
+    by_name = {}
+    def verify(item, absolute=False):
+        if (type(item) is not dict or set(item) != {'path','mode','size','sha256'} or type(item['path']) is not str or
+                type(item['size']) is not int or not 0 <= item['size'] <= 512 * 1024 * 1024 or
+                type(item['mode']) is not int or not 0 <= item['mode'] <= 0o777 or
+                type(item['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', item['sha256'])):
+            raise ContractError('invalid distribution file identity')
+        relative = item['path']
+        if not absolute and (Path(relative).is_absolute() or '\\' in relative or any(p in ('', '.', '..') for p in relative.split('/'))):
+            raise ContractError('unsafe distribution path')
+        if absolute and not Path(relative).is_absolute(): raise ContractError('external library not absolute')
+        path = protected_root_path(Path(relative) if absolute else root / relative)
+        raw = read_regular(path, item['size'], owner=0)
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size != item['size'] or st.st_mode & 0o777 != item['mode'] or hashlib.sha256(raw).hexdigest() != item['sha256']:
+            raise ContractError('distribution file mismatch')
+    for item in files:
+        verify(item)
+        if item['path'] in by_name: raise ContractError('duplicate distribution file')
+        by_name[item['path']] = item
+    names = set()
+    def visit(directory):
+        for path in directory.iterdir():
+            protected_root_path(path)
+            st = path.lstat()
+            if stat.S_ISDIR(st.st_mode): visit(path)
+            elif stat.S_ISREG(st.st_mode): names.add(path.relative_to(root).as_posix())
+            else: raise ContractError('special distribution entry')
+    visit(root)
+    if names != set(by_name): raise ContractError('incomplete distribution manifest inventory')
+    if (manifest.get('runtime') != by_name.get('runtime/node') or manifest.get('esbuild') != by_name.get('runtime/esbuild') or
+            config['node']['path'] != str(root / 'runtime/node') or config['cli']['path'] != str(root / 'cli-entry.mjs') or
+            'cli-entry.mjs' not in by_name):
+        raise ContractError('fixed transport entry mismatch')
+    external_names = set()
+    for item in external:
+        verify(item, True)
+        if item['path'] in external_names: raise ContractError('duplicate external library')
+        external_names.add(item['path'])
+    helpers = [item for item in files if item['path'].startswith('runtime/') or
+        re.search(r'(?:compiler|terminal)-(?:entry|code)\.mjs$', item['path']) or item['path'].endswith('.node') or
+        item['path'].endswith('spawn-helper') or item['path'].startswith('node_modules/esbuild/') or
+        item['path'] == 'node_modules/typescript/lib/typescript.js'] + external
+    helpers.sort(key=lambda item: item['path'].encode('utf-16-be'))
+    producer_json = lambda value: json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
+    helper_digest = hashlib.sha256(producer_json(helpers)).hexdigest()
+    if (producer_json(manifest.get('helperInventory')) != producer_json(helpers) or
+            manifest.get('helperClosureSha256') != helper_digest or helper_digest != config['closure']['helperClosureSha256']):
+        raise ContractError('explicit native/helper inventory mismatch')
+    if read_regular(manifest_path, 4 * 1024 * 1024, owner=0) != raw_manifest:
+        raise ContractError('distribution authority changed during verification')
+    return manifest
+
+
+def cohort_observation(value, config, expected, target):
+    """Strict proposed d174 v1 consumer. Native producer binds executing facts privately."""
+    if (type(value) is not dict or set(value) != {'version', 'consistency', 'observationEpoch', 'enclosing', 'entries'} or
+            type(value['version']) is not int or value['version'] != 1 or value['consistency'] != 'coherent' or
+            type(value['observationEpoch']) is not int or value['observationEpoch'] < 0):
+        raise ContractError('cohort observation uncertain')
+    enclosing = value['enclosing']
+    if (type(enclosing) is not dict or set(enclosing) != {'serverId', 'incarnation', 'distributionBuildId', 'closure'} or
+            enclosing['serverId'] != config['serverId'] or enclosing['incarnation'] != config['daemonIncarnation'] or
+            enclosing['distributionBuildId'] != config['distributionBuildId'] or
+            closure_identity(enclosing['closure']) != config['closure']):
+        raise ContractError('enclosing execution identity mismatch')
+    daemon = {'role': 'daemon', 'enabled': True, 'loaded': True,
+              'distributionBuildId': enclosing['distributionBuildId'], 'closure': enclosing['closure']}
+    if expected.get('paseo') != daemon: raise ContractError('protected daemon cohort mismatch')
+    entries = value['entries']
+    if type(entries) is not list or len(entries) > 1000: raise ContractError('invalid complete cohort inventory')
+    ids = set()
+    for entry in entries:
+        if type(entry) is not dict or set(entry) != {'pluginId', 'registration', 'enabled', 'journal', 'loaded', 'execution'}:
+            raise ContractError('invalid cohort entry')
+        plugin = entry['pluginId']
+        if type(plugin) is not str or not plugin or plugin in ids or plugin == 'paseo':
+            raise ContractError('duplicate or invalid cohort ID')
+        ids.add(plugin)
+        registration, loaded, execution = entry['registration'], entry['loaded'], entry['execution']
+        if registration is not None and type(registration) is not dict: raise ContractError('invalid cohort registration')
+        if entry['enabled'] is not None and type(entry['enabled']) is not bool: raise ContractError('invalid enabled observation')
+        if loaded is not None:
+            if (type(loaded) is not dict or loaded.get('pluginId') != plugin or
+                    type(loaded.get('activationGeneration')) is not int or loaded['activationGeneration'] < 1 or
+                    type(loaded.get('pid')) is not int or loaded['pid'] <= 0 or
+                    type(loaded.get('processStartToken')) is not str or not loaded['processStartToken'] or
+                    type(loaded.get('startedAt')) is not str or not loaded['startedAt']):
+                raise ContractError('invalid actual loaded receipt')
+            if (type(execution) is not dict or set(execution) != {'contract', 'incarnation', 'distributionBuildId', 'closure'} or
+                    execution['contract'] != 'native-passive-contract-1' or type(execution['incarnation']) is not str or
+                    not execution['incarnation'] or type(execution['distributionBuildId']) is not str or not execution['distributionBuildId']):
+                raise ContractError('loaded host execution proof absent')
+            closure_identity(execution['closure'])
+            if execution['incarnation'] != loaded['processStartToken']:
+                raise ContractError('execution and loaded incarnation mismatch')
+            journal = entry['journal']
+            if (type(journal) is not dict or type(journal.get('generation')) is not int or journal['generation'] < 0 or
+                    journal.get('currentReceipt') != loaded):
+                raise ContractError('loaded/native journal identity incoherent')
+        elif execution is not None: raise ContractError('execution without loaded host')
+        if plugin not in expected:
+            if loaded is not None or entry['enabled'] is True: raise ContractError('unexpected active cohort member')
+            continue
+        if plugin == target:
+            if loaded is None or entry['enabled'] is not True: raise ContractError('target not running')
+            continue
+        stable = {'enabled': entry['enabled'], 'loaded': loaded is not None, 'registration': registration,
+                  'receipt': None if loaded is None else {k: loaded.get(k) for k in ('sourcePath', 'snapshotRoot', 'snapshotSha256', 'serverBundleSha256')},
+                  'execution': None if execution is None else {k: execution[k] for k in ('contract', 'distributionBuildId', 'closure')}}
+        if expected[plugin] != stable: raise ContractError('protected non-target cohort mismatch')
+    if not (set(expected) - {'paseo'}) <= ids: raise ContractError('incomplete protected cohort')
+    return value
+
+
 class NativeFacade:
     """Actual bounded retained CLI transport; qualification/status coupling still absent.
 
@@ -244,7 +406,25 @@ class NativeFacade:
         self.bridge_binding = None
         self.operation = 'activate'
 
-    def supported(self): return False
+    def supported(self):
+        if self.uncertain: return False
+        try:
+            self.cohort_status()
+            authority = self._call(['daemon', 'maintenance', 'status']).get('authority')
+            config = self._transport()
+            if (type(authority) is not dict or authority.get('schemaVersion') != 1 or authority.get('qualified') is not True or
+                    authority.get('serverId') != config['serverId'] or authority.get('daemonIncarnation') != config['daemonIncarnation'] or
+                    type(authority.get('features')) is not dict or
+                    authority['features'].get('maintenanceReservationV1') is not True or
+                    authority['features'].get('maintenancePluginOperationV1') is not True):
+                raise ContractError('native enclosing operation authority unavailable')
+            return True
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return False
+
+    def cohort_status(self):
+        row = self.reader(); config = self._transport()
+        return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'])
 
     def prepare(self, row, identity, render):
         self.transaction_row = row
@@ -258,9 +438,10 @@ class NativeFacade:
         if self.bridge_binding is not None and self.bridge_binding != binding:
             self.uncertain = True
             raise ContractError('retained native bridge changed during transaction')
+        verify_transport_distribution(config)
         for key in ('node', 'cli'):
             item = config[key]; path = Path(item['path'])
-            data = read_regular(path, 256 * 1024 * 1024)
+            data = read_regular(path, 256 * 1024 * 1024, owner=0)
             if path.stat().st_mode & 0o222 or hashlib.sha256(data).hexdigest() != item['sha256']:
                 raise ContractError('retained native bridge identity mismatch')
         self.bridge_binding = binding
@@ -356,10 +537,35 @@ class NativeFacade:
         return self.supported() is True and self.token is not None and not self.uncertain
 
     def observe(self, cohort):
-        # Exact enclosing status + namespace/cohort/qualified identity metadata is not
-        # finalized by native owners. Never relabel loaded metadata as a receipt identity.
-        self.uncertain = True
-        raise ContractError('qualified enclosing cohort observation unavailable')
+        if self.uncertain: raise ContractError('native execution uncertain')
+        facts = self.cohort_status()
+        if canonical(self.reader()['cohort']) != canonical(cohort): raise ContractError('protected cohort changed')
+        target = self.reader()['component']
+        entry = next(item for item in facts['entries'] if item['pluginId'] == target)
+        loaded = entry['loaded']; execution = entry['execution']
+        paths = sorted((self.root / 'records').iterdir())
+        if not paths or len(paths) > 100: raise ContractError('retained release inventory unavailable')
+        matches = []
+        for path in paths:
+            identity = path.stem
+            if path.suffix != '.json' or not re.fullmatch('[a-f0-9]{64}', identity): raise ContractError('invalid retained release path')
+            record = parse(read_regular(path).decode())
+            receipt = Receipt(base64.b64decode(record['receipt'], validate=True))
+            if receipt.sha256 != identity: raise ContractError('retained release identity corruption')
+            profile = record['policy'].get('native_passive_profile')
+            if type(profile) is not dict: continue
+            root = self.root / 'snapshots' / record['payload_sha256']
+            if (record['expected']['component'] != target or loaded.get('sourcePath') != str(root / 'plugins' / target) or
+                    loaded.get('snapshotRoot') != str(root) or loaded.get('snapshotSha256') != record['evidence']['native_tree_sha256'] or
+                    loaded.get('serverBundleSha256') != record['evidence']['server_bundle_sha256'] or
+                    execution['closure'] != {k: profile.get(k) for k in ('runtimeClosureSha256', 'helperClosureSha256', 'qualificationSha256')}):
+                continue
+            payload = read_regular(self.root / 'payloads' / record['payload_sha256'])
+            validate(receipt, record['expected'], record['policy'], artifact=payload)
+            if tree_hash(root) != loaded['snapshotSha256']: raise ContractError('actual runtime snapshot drift')
+            matches.append(identity)
+        if len(matches) != 1: raise ContractError('runtime receipt mapping missing or ambiguous')
+        return matches[0]
 
     def _operation(self, kind, identity, record):
         if self.supported() is not True or self.render is None or identity != self.target:

@@ -12,3 +12,6 @@
 
 ### Added
 - Expose fixed protected apply/recover controller commands with structured refusal until genuine native support is available. (#796)
+
+### Added
+- Bind the finite Linux controller facade to the producer manifest and complete executing cohort, mapping retained receipts through exact runtime profile identities. (#796)
