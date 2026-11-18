@@ -254,3 +254,29 @@ def test_a_thin_account_is_reported_before_it_hits_zero(tmp_path: Path) -> None:
     assert len(messages) == 1 and "anthropic is thin (4.0% headroom)" in messages[0]
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 1                     # told once, not every 300 s
+
+
+def test_a_failed_quota_read_alerts_the_lead_once(tmp_path: Path) -> None:
+    """ade-pi-stuck still reports the known-empty agents; the unread rest is its own once-per-outage alert."""
+    extra = {"quota_error": "aiuse exited 1"}
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")], extra=extra)
+    for _ in range(2):
+        assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1
+    assert "quota unread" in messages[0] and "id=a1" in messages[0]
+    assert "scan|quota-unread" in json.loads((state / "notified").read_text())
+
+
+def test_a_guard_redirect_with_an_unusable_successor_is_refused(tmp_path: Path) -> None:
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "ade_send_guard.py").unlink()
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "--not-an-id", "reason": "replaced"}))',
+            "raise SystemExit(3)")
+    assert _run(bin_dir, home) == 0
+    assert _messages(sent) == []
+    log = (state / "supervisor.log").read_text()
+    assert 'successor id "--not-an-id" is unusable' in log        # %r would have cut the line short here
+    assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
+    assert not (state / "lead").exists()

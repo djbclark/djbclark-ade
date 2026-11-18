@@ -174,7 +174,8 @@ def main():
         # Fail closed, and say so: without the reading every account except the known-empty ones is unread, and a
         # caller (ade-supervisor-scan) must be able to tell "all healthy" from "I could not look".
         exhausted = set(KNOWN_EMPTY)
-        low = []
+        accounts = {}          # a partial reading is not used either: alt() and the per-agent headroom must not
+        low = []               # come from a pass that failed half-way
         quota_error = str(exc)[:200] or exc.__class__.__name__
     out = []
     for a in rows:
