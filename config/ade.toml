@@ -1515,9 +1515,10 @@ label = "com.djbclark.ade-supervisor-scan"
 plist = "config/launchd/com.djbclark.ade-supervisor-scan.plist"
 schedule = "StartInterval 300"
 command = "bin/ade-supervisor-scan"
-set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor", "__LEAD__=b0b47ad8-8801-4780-a8e0-08824cd5ce27"]
+set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor"]
 platforms = ["mac"]
-notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the agent in __LEAD__ per newly stuck Pi agent; a broken or quota-blind scan alerts once, and an archived/unreachable lead is escalated once with hermes-ping (the target is a machine default here: reinstall with --set __LEAD__ after a lead handoff). Chosen because it was installed 2026-11-18 to cover the /watch stuck mode of skills/watch/SKILL.md; logs and dedupe state in __STATE__. Setting chosen = false makes doctor quiet and makes reconcile unload it (docs/scheduling.md)."
+notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the agent in __LEAD__ per newly stuck Pi agent; a broken or quota-blind scan alerts once, and an archived/unreachable lead is escalated once with hermes-ping (__LEAD__ has no default on purpose: pass --set __LEAD__=<paseo agent id> at install, so a lead handoff cannot leave
+notices aimed at an archived session (docs/scheduling.md)). Chosen because it was installed 2026-11-18 to cover the /watch stuck mode of skills/watch/SKILL.md; logs and dedupe state in __STATE__. Setting chosen = false makes doctor quiet and makes reconcile unload it (docs/scheduling.md)."
 
 [[install.jobs]]
 name = "ade-helper-prune"

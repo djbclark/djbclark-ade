@@ -142,7 +142,7 @@ def test_non_json_output_alerts_the_lead_once(tmp_path: Path) -> None:
     for _ in range(2):
         assert _run(bin_dir, home) == 0
     messages = _messages(sent)
-    assert len(messages) == 1 and "non-JSON" in messages[0]
+    assert len(messages) == 1 and "no usable JSON" in messages[0]
 
 
 def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_path: Path) -> None:
@@ -160,3 +160,12 @@ def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_pa
     assert _messages(sent) == []
     assert len(pinged.read_text().splitlines()) == 1
     assert not (state / "notified").exists()          # nothing was told, so the notice is still pending
+
+
+def test_json_that_is_not_an_object_alerts_instead_of_vanishing(tmp_path: Path) -> None:
+    bin_dir, home, state, _, sent = _harness(tmp_path, [])
+    (bin_dir / "ade-pi-stuck").write_text("#!/bin/sh\\necho '[]'\\n")
+    (bin_dir / "ade-pi-stuck").chmod(0o755)
+    assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and "no usable JSON" in messages[0]

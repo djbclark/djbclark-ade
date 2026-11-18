@@ -58,8 +58,9 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 
 `config/launchd/com.djbclark.ade-supervisor-scan.plist` (2026-11-18) is the supervisor Pi-stuck scan: every 300 s it
 runs `bin/ade-pi-stuck` (read-only) and sends one `paseo send` per newly stuck Pi agent to the Paseo agent in
-`__LEAD__` (the ADE lead by default), deduped in its state dir, so one agent notices once rather than 288 times a day.
-Install over another checkout with the lead id you want told:
+`__LEAD__`, deduped in its state dir, so one agent notices once rather than 288 times a day. `__LEAD__` has **no
+default**: pass the lead's current Paseo id at install (as `ade-net-resume` does with `LEAD_UUID`), so a lead handoff
+cannot leave notices aimed at an archived session — a delivery to one would un-archive it. Install:
 
 ```sh
 bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ade ~/src/djbclark-ade \

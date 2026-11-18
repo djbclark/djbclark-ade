@@ -45,9 +45,11 @@ try:
     d = json.load(sys.stdin) if scan_rc == 0 else None
 except Exception:
     d = None
+if not isinstance(d, dict):          # a list or a bare value is no more usable than non-JSON
+    d = None
 if d is None:
     items.append(("scan|broken",
-                  "ade-pi-stuck failed or printed non-JSON (exit %d) — the Pi-stuck watch is blind" % scan_rc))
+                  "ade-pi-stuck failed or printed no usable JSON (exit %d) — the Pi-stuck watch is blind" % scan_rc))
 else:
     if d.get("quota_error"):
         items.append(("scan|quota-unread",

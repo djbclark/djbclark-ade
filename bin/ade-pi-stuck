@@ -91,7 +91,8 @@ def quota_by_account(avail):
 
 def _badness(rec):
     """Sort key: smaller is a worse pool for its account."""
-    return (0 if rec["usable"] is False else 1, 101.0 if rec["headroom"] is None else rec["headroom"])
+    # An unusable pool outranks a readable one, and an unread pool is the worst of all: nothing vouches for it.
+    return (0 if rec["usable"] is False else 1, -1.0 if rec["headroom"] is None else rec["headroom"])
 
 
 # A model's last path segment decides whether it is a low-effort tier. Matched as a token, not a substring: a
