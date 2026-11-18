@@ -5,7 +5,10 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { cli } from './retained-cli.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { inspect } from 'node:util';
+import { cli, collectCliResponse, requireOwnerToken } from './retained-cli.mjs';
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'coupled-cli-'));
@@ -46,7 +49,22 @@ test('real anonymous pipe carries synthetic bearer without argv/environment expo
 test('malformed bearer refuses before launching any process', async () => {
   const root = await fixture();
   try {
-    await assert.rejects(cli(root, '/tmp/home', ['owner'], {token: 'invalid'}));
+    for (const token of ['private-sentinel-invalid', 'S'.repeat(43) + '\n', {secret: 'object-private-sentinel'}]) {
+      const check = (error) => {
+        assert.equal(error.constructor, Error);
+        assert.equal(error.message, 'Invalid private owner token');
+        const diagnostics = [error.message, error.stack, inspect(error, {showHidden: true}),
+          JSON.stringify(error), JSON.stringify(Object.entries(error))].join('\n');
+        const sentinel = typeof token === 'string' ? token.trim() : token.secret;
+        assert.equal(diagnostics.includes(sentinel), false);
+        assert.equal('actual' in error, false);
+        assert.equal('expected' in error, false);
+        assert.equal('cause' in error, false);
+        return true;
+      };
+      assert.throws(() => requireOwnerToken(token), check);
+      await assert.rejects(cli(root, '/tmp/home', ['owner'], {token}), check);
+    }
     await assert.rejects(readFile(path.join(root, 'executed')), {code: 'ENOENT'});
   } finally { await rm(root, {recursive: true, force: true}); }
 });
@@ -68,3 +86,31 @@ for (const mode of ['wait', 'overflow']) {
     finally { await rm(root, {recursive: true, force: true}); }
   });
 }
+
+// Synthetic missing-close failure branch; this does not simulate successful
+// child settlement or establish that a daemon operation has stopped.
+test('missing actual close returns bounded disposal failure with cleanup handoff', {timeout: 1500}, async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let disposals = 0;
+  const cleanupError = Object.assign(new Error('Synthetic disposal deadline'), {cleanupPid: 424242});
+  const owner = {
+    closed: new Promise(() => {}),
+    dispose: async () => {
+      disposals += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      throw cleanupError;
+    },
+  };
+  const started = performance.now();
+  await assert.rejects(collectCliResponse(child, owner, {timeoutMs: 20}), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors[0].message, 'CLI timed out');
+    assert.equal(error.errors[1], cleanupError);
+    assert.equal(error.errors[1].cleanupPid, 424242);
+    return true;
+  });
+  assert.equal(disposals, 1);
+  assert.ok(performance.now() - started < 1000);
+});

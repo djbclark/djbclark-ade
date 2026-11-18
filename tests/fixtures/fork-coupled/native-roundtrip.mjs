@@ -3,7 +3,7 @@
 // This phase alone is not the evaluator or complete feature qualification.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { cli } from './retained-cli.mjs';
+import { cli, requireOwnerToken } from './retained-cli.mjs';
 import { validateRetainedDistribution } from './retained-daemon.mjs';
 import { verifyOwnedColdPair } from './compiler-observation.mjs';
 
@@ -80,7 +80,7 @@ export async function runNativeRoundTrip({root, home, manifestSha256, daemon, en
     '--expected-daemon-incarnation', enclosing.incarnation];
   let token = null, nativeGeneration, transactionId, pluginGeneration;
   const call = async (args, privateOwner = false) => {
-    if (privateOwner) assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+    if (privateOwner) requireOwnerToken(token);
     const response = await cli(root, home, args, {token: privateOwner ? token : null, timeoutMs: 30000});
     // Never include raw BEGIN/operation stdout in an assertion or diagnostic.
     assert.equal(response.code, 0, 'retained native CLI refused the requested phase');
@@ -131,13 +131,13 @@ export async function runNativeRoundTrip({root, home, manifestSha256, daemon, en
   transactionId = randomUUID();
   const reservation = ['--generation', String(nativeGeneration), '--transaction-id', transactionId, ...identity];
   const begin = await call(['daemon', 'maintenance', 'begin', ...reservation]);
+  token = begin.ownerToken;
+  delete begin.ownerToken;
+  requireOwnerToken(token);
   assert.equal(begin.state, 'held');
   assert.equal(begin.recoveryRequired, false);
   assert.equal(begin.generation, nativeGeneration);
   assert.equal(begin.transactionId, transactionId);
-  assert.match(begin.ownerToken, /^[A-Za-z0-9_-]{43}$/);
-  token = begin.ownerToken;
-  delete begin.ownerToken;
   const heldStatus = async () => {
     const value = await status();
     assert.equal(value.state, 'held');

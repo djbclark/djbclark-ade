@@ -6,19 +6,35 @@ import { userInfo } from 'node:os';
 import path from 'node:path';
 import { ownDisposableGroup } from './owned-cleanup.mjs';
 
+export function requireOwnerToken(value) {
+  if (typeof value !== 'string' || value.length !== 43 || /[^A-Za-z0-9_-]/u.test(value)) {
+    throw new Error('Invalid private owner token');
+  }
+}
+
 export async function cli(root, home, args, {token = null, timeoutMs = 15000} = {}) {
   assert.ok(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 120000);
-  if (token !== null) assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+  if (token !== null) requireOwnerToken(token);
   const child = spawn(path.join(root, 'runtime/node'),
     [path.join(root, 'cli-entry.mjs'), ...args, '--home', home, '--json'], {
       detached: true, stdio: [token === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       env: {PATH: '/usr/bin:/bin', PASEO_HOME: home, HOME: userInfo().homedir},
     });
   const owner = ownDisposableGroup(child, {gracefulMs: 1500, forcedMs: 3000, allowNonzeroExit: true});
+  return collectCliResponse(child, owner, {token, timeoutMs});
+}
+
+// Data transport only. The actual CLI path above always supplies its real child
+// and group owner; controlled tests of bounded failure confer no native authority.
+export async function collectCliResponse(child, owner, {token = null, timeoutMs}) {
   const output = [], errors = [];
   let stdoutBytes = 0, stderrBytes = 0;
   let failure;
-  const stop = (reason) => { failure ??= new Error(reason); void owner.dispose().catch(() => {}); };
+  let fail;
+  const failed = new Promise((resolve) => { fail = resolve; });
+  const stop = (reason) => {
+    if (!failure) { failure = new Error(reason); fail({failure}); }
+  };
   child.stdout.on('data', (chunk) => {
     stdoutBytes += chunk.length;
     if (stdoutBytes > 1024 * 1024) stop('CLI stdout overflow');
@@ -38,8 +54,10 @@ export async function cli(root, home, args, {token = null, timeoutMs = 15000} = 
       child.stdin.on('error', () => stop('CLI owner pipe failed'));
       child.stdin.end(token + '\n');
     }
-    const result = await owner.closed;
+    const settled = await Promise.race([owner.closed.then((result) => ({result})), failed]);
+    if (settled.failure) throw settled.failure;
     if (failure) throw failure;
+    const result = settled.result;
     assert.ok(performance.now() < deadline, 'CLI deadline exceeded');
     response = {code: result.code, stdout: Buffer.concat(output).toString('utf8'),
       stderr: Buffer.concat(errors).toString('utf8')};
