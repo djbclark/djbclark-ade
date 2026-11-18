@@ -80,12 +80,17 @@ fi
 # python library next to this script, through the shim's symlink
 lib_path() {
   local src="$self" t
-  case "$src" in */*) ;; *) src="./$src" ;; esac
+  case "$src" in /*) ;; *) src="$PWD/$src" ;; esac
   while [ -L "$src" ]; do
     t=$(readlink "$src")
     case "$t" in /*) src="$t" ;; *) src="${src%/*}/$t" ;; esac
   done
-  printf '%s/ade_claims.py' "${src%/*}"
+  # A sealed snapshot materializes agent-bin/git as a regular file. Keep
+  # ade_claims.py in root/bin, preserving its __file__-relative hook source.
+  case "$src" in
+    */libexec/agent-bin/git) printf '%s/bin/ade_claims.py' "${src%/libexec/agent-bin/git}" ;;
+    *) printf '%s/ade_claims.py' "${src%/*}" ;;
+  esac
 }
 
 # -I: isolated (no PYTHON* variables, no user site, no script dir on sys.path), -S: no site import (faster)

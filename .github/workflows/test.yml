@@ -46,7 +46,17 @@ jobs:
       - name: Install the GNU tools
         run: brew install coreutils findutils gnu-sed grep gawk
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+
+      - name: Prepare CI-only CJS fixture compiler
+        timeout-minutes: 10
+        run: npm install --prefix "$RUNNER_TEMP/ade-cjs-fixture" --no-audit --no-fund esbuild
+
       - name: Run the test suite
+        env:
+          ADE_CI_ESBUILD: ${{ runner.temp }}/ade-cjs-fixture/node_modules/.bin/esbuild
         run: uv run --with pytest --with pyyaml python -m pytest tests/ -q
 
   pytest-linux:
@@ -146,8 +156,15 @@ jobs:
         with:
           node-version: 24
 
+      - name: Prepare CI-only CJS fixture compiler
+        if: steps.suite.outputs.needed == 'true'
+        timeout-minutes: 10
+        run: npm install --prefix "$RUNNER_TEMP/ade-cjs-fixture" --no-audit --no-fund esbuild
+
       - name: Run the test suite
         if: steps.suite.outputs.needed == 'true'
+        env:
+          ADE_CI_ESBUILD: ${{ runner.temp }}/ade-cjs-fixture/node_modules/.bin/esbuild
         run: uv run --with pytest --with pyyaml python -m pytest tests/ -q
 
       - name: Skipped full suite (prose/docs-only)

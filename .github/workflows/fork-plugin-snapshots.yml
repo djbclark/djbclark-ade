@@ -1,0 +1,22 @@
+name: Fork plugin snapshots
+on:
+  push:
+    branches: [fork-maintenance-plugins]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot-and-behavior:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Prepare CI-only CJS fixture compiler
+        run: timeout 600 npm install --prefix "$RUNNER_TEMP/ade-cjs-fixture" --no-audit --no-fund esbuild
+      - run: uv run --with pytest python -m pytest tests/test_ade_fork_plugins.py -q
+        env:
+          ADE_CI_ESBUILD: ${{ runner.temp }}/ade-cjs-fixture/node_modules/.bin/esbuild
