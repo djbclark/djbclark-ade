@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Run the CI-distributed native NATS CLI with a minimal credential environment."""
+import os
+from pathlib import Path
+import platform
+import sys
+
+system = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+machine = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(platform.machine())
+binary = Path(__file__).resolve().parents[1] / "vendor" / "natscli" / f"{system}-{machine}" / "nats"
+if not binary.is_file():
+    print("native NATS CLI is not present in this runtime distribution", file=sys.stderr)
+    raise SystemExit(2)
+env = {key: os.environ[key] for key in ("PATH", "HOME", "SSH_AUTH_SOCK", "LANG", "LC_CTYPE") if key in os.environ}
+for source, target in (("ADE_NATS_URL", "NATS_URL"), ("ADE_NATS_TOKEN", "NATS_TOKEN")):
+    if source in os.environ:
+        env[target] = os.environ[source]
+os.execve(binary, [str(binary), *sys.argv[1:]], env)

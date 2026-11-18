@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Install an exact CI runtime artifact atomically; never enroll roles or restart agents."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import tarfile
+import tempfile
+
+
+def install(archive: Path, expected: str, root: Path):
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("exact archive SHA256 required")
+    with archive.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    if digest != expected:
+        raise ValueError("archive integrity mismatch")
+    root = root.expanduser()
+    if not root.is_absolute():
+        raise ValueError("absolute install root required")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    lock = os.open(root / ".install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    temporary = None
+    pointer = root / f".current-{os.getpid()}"
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        releases = root / "releases"
+        if releases.is_symlink():
+            raise ValueError("release directory cannot be a symlink")
+        releases.mkdir(exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".extract-", dir=releases))
+        with tarfile.open(archive, "r:gz") as source:
+            source.extractall(temporary, filter="data")
+        manifest = json.loads((temporary / "ade-runtime-build.json").read_text())
+        if not isinstance(manifest, dict):
+            raise ValueError("invalid runtime build provenance")
+        head = manifest.get("source_head", "")
+        if manifest.get("schema") != 1 or not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError("invalid runtime build provenance")
+        for required in ("bin/ade-coord", "lib/ade-coord/cli.js", "lib/ade-coord/node_modules", "plugins/ade-coord"):
+            if not (temporary / required).exists():
+                raise ValueError("incomplete runtime layout")
+        release = releases / f"{head[:12]}-{expected[:12]}"
+        if release.exists():
+            if release.is_symlink() or (release / ".archive-sha256").read_text() != expected:
+                raise ValueError("existing release provenance conflict")
+        else:
+            (temporary / ".archive-sha256").write_text(expected)
+            temporary.rename(release)
+            temporary = None
+        current = root / "current"
+        if current.exists() and not current.is_symlink():
+            raise ValueError("current install pointer is not a symlink")
+        pointer.symlink_to(release.relative_to(root), target_is_directory=True)
+        os.replace(pointer, current)
+        return {"source_head": head, "archive_sha256": expected, "current": str(current),
+                "roles_enrolled": False, "agents_restarted": False}
+    finally:
+        if temporary is not None:
+            shutil.rmtree(temporary)
+        pointer.unlink(missing_ok=True)
+        os.close(lock)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("archive", type=Path)
+    parser.add_argument("--sha256", required=True)
+    parser.add_argument("--root", type=Path, default=Path.home() / ".local/share/djbclark-ade/coord")
+    args = parser.parse_args()
+    try:
+        print(json.dumps({"ok": True, "result": install(args.archive, args.sha256, args.root)}))
+        return 0
+    except (OSError, ValueError, KeyError, tarfile.TarError):
+        print(json.dumps({"ok": False, "error": "runtime installation refused; verify artifact and destination"}))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
