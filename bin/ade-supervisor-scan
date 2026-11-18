@@ -122,8 +122,9 @@ case "$guard_rc" in
                 ;;
             *)
                 send_to="$guard_target"
-                printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
-                    "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+                printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s); next run reads %s/lead\n' \
+                    "$(now)" "$LEAD" "$send_to" "$guard_reason" "$STATE_DIR" >>"$LOG"
+                printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"
                 ;;
         esac
         ;;
@@ -135,7 +136,7 @@ case "$guard_rc" in
 esac
 if [ -n "$msg" ] && [ -n "$send_to" ]; then
     printf '%s %s\n' "$(now)" "$msg" >>"$LOG"
-    paseo send "$send_to" --no-wait --json "$msg" >>"$LOG" 2>&1
+    paseo send --json --no-wait -- "$send_to" "$msg" >>"$LOG" 2>&1
     rc=$?
     # 0 = delivered, 5 = accepted and queued by Paseo (the normal agent-to-agent case).
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
