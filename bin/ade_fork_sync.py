@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -176,17 +177,25 @@ class Sync:
             raise Held("wrong_publication_remote")
         workspace = Path(workspace).resolve()
         lock = workspace.parent / (workspace.name + ".fork-sync.lock")
+        # Keep one inode permanently: unlinking permits concurrent owners of
+        # different inodes at the same pathname. Kernel releases flock on death.
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            raise Held("workspace_locked") from exc
-        try:
-            os.close(fd)
-            return self._apply(plan, workspace)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Held("workspace_locked") from exc
+            return self._apply(plan, workspace, unattended=unattended)
         finally:
-            lock.unlink()
+            os.close(fd)
 
-    def _apply(self, p, w):
+    def mutation_authority(self, spec, operation, unattended):
+        if self.authority.permits(spec, operation) is not True:
+            raise Held("policy_authority_unavailable:" + operation)
+        if unattended and self.authority.permits(spec, "app-token-ci") is not True:
+            raise Held("github_app_token_required")
+
+    def _apply(self, p, w, *, unattended=False):
         s = p.spec
         if self.git(w, "status", "--porcelain", "--untracked-files=all"):
             raise Held("dirty_workspace")
@@ -242,18 +251,17 @@ class Sync:
                 if self.git(w, "show", "-s", "--format=%P", head).split() != [p.base, p.upstream_commit]:
                     raise Held("no_new_integration")
             self.unchanged(p)
-            if self.authority.permits(s, "publish") is not True:
-                raise Held("policy_authority_unavailable:publish")
+            self.mutation_authority(s, "publish", unattended)
             # Normal Git push only; no force or default-branch refspec.
-            self.git(w, "push", s.fork, head + ":refs/heads/" + p.branch)
+            self.git(w, "push", "--no-follow-tags", "--recurse-submodules=no",
+                     s.fork, head + ":refs/heads/" + p.branch)
         self.unchanged(p)
         if active:
             if active[0]["headRefOid"] != head:
                 raise Held("pr_head_changed")
             url = active[0]["url"]
         else:
-            if self.authority.permits(s, "pull-request") is not True:
-                raise Held("policy_authority_unavailable:pull-request")
+            self.mutation_authority(s, "pull-request", unattended)
             url = self.run(["gh", "pr", "create", "--repo", s.fork,
                 "--head", p.branch, "--base", s.base_ref.removeprefix("refs/heads/"),
                 "--title", "Integrate upstream for " + s.component,

@@ -22,12 +22,15 @@ accept candidate evidence as permission. Default provider denies all operations.
 For unattended use it additionally requires `app-token-ci` authority attesting a
 separately provisioned GitHub App token with access to the fork and CI trigger
 chain. This module neither obtains credentials nor treats GITHUB_TOKEN as that
-attestation. The CLI cannot reach this mutation API until policy support lands.
+attestation. Both ordinary operation authority and literal-True app-token-ci
+authority are re-read immediately before each unattended push or PR creation,
+including retry paths. The CLI cannot reach this mutation API until policy support lands.
 
 The caller owns a clean exclusive task workspace at the recorded base with
 complete ancestry (fresh isolated clone, or owned task worktree). No shared
-checkout is accepted by contract. An exclusive adjacent lock protects API retries
-in that workspace; policy adapter must supply the cross-workspace component lock.
+checkout is accepted by contract. An adjacent persistent flock inode protects API retries
+in that workspace and releases automatically on process death. The lock file is
+never unlinked, so retries cannot lock different inodes at the same pathname; policy adapter must supply the cross-workspace component lock.
 Commands are argv-only, shell=False, captured and bounded to 120 seconds. Runner
 injection returns subprocess.CompletedProcess with integer status and string
 stdout/stderr; malformed responses hold. No candidate hooks are run by merge.
@@ -45,6 +48,8 @@ remain separate. Upstream is fetch-only. There is no upstream mirror mutation;
 any future mirror adapter must prove ancestry and advance FF only, holding on
 rewinds or divergence. Default branches are never publication targets. Push is a
 normal non-force Git push to the configured fork URL and exact candidate ref.
+Explicit --no-follow-tags and --recurse-submodules=no suppress inherited push
+settings that could otherwise publish reachable tags or dependency commits.
 Conflicts retain MERGE_HEAD, index stages, worktree and adjacent diagnostic text;
 no reset, abort, overwrite or publication follows. Fork-base/upstream changes
 hold before publication; remote ref mutation cannot be made atomic across Git

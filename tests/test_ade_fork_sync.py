@@ -168,3 +168,86 @@ def test_unrelated_pr_and_malformed_api(setup):
     with pytest.raises(Held, match='malformed_pr'):
         sync.apply(plan, work, spec.fork)
     assert net.pushed == 0
+
+
+def test_publish_disables_inherited_extra_writes(setup):
+    sync, spec, _, fork, work, net = setup
+    dep = work.parent / 'dependency-source'
+    dep.mkdir()
+    git(dep, 'init', '-b', 'main')
+    git(dep, 'config', 'user.name', 'Fixture')
+    git(dep, 'config', 'user.email', 'fixture@example.invalid')
+    (dep / 'file').write_text('baseline')
+    git(dep, 'add', '.'); git(dep, 'commit', '-m', 'baseline')
+    remote = work.parent / 'dependency-remote'
+    git(work.parent, 'clone', '--bare', str(dep), str(remote))
+    git(work, '-c', 'protocol.file.allow=always', 'submodule', 'add', str(remote), 'dependency')
+    sub = work / 'dependency'
+    git(sub, 'config', 'user.name', 'Fixture')
+    git(sub, 'config', 'user.email', 'fixture@example.invalid')
+    (sub / 'file').write_text('unpublished dependency change')
+    git(sub, 'commit', '-am', 'unpublished dependency')
+    git(work, 'add', '.'); git(work, 'commit', '-m', 'dependency pointer')
+    git(work, 'push', 'origin', 'main')
+    git(work, 'tag', '-a', 'private-reachable-tag', '-m', 'must stay local')
+    git(work, 'config', 'push.followTags', 'true')
+    git(work, 'config', 'push.recurseSubmodules', 'on-demand')
+    fork_before = set(git(fork, 'show-ref').splitlines())
+    dep_before = git(remote, 'show-ref')
+    plan = sync.discover(spec)
+    result = sync.apply(plan, work, spec.fork)
+    assert set(git(fork, 'show-ref').splitlines()) - fork_before == {
+        result['head'] + ' refs/heads/' + plan.branch}
+    assert git(remote, 'show-ref') == dep_before
+    assert not git(fork, 'tag', '--list')
+    assert net.pushed == 1
+
+
+def test_process_death_releases_persistent_lock(setup):
+    sync, spec, _, _, work, _ = setup
+    plan = sync.discover(spec)
+    code = '''
+import os, signal, sys
+from types import SimpleNamespace
+from ade_fork_sync import Sync, SyncSpec
+class Permit:
+    def permits(self, *args): return True
+class Crash(Sync):
+    def _apply(self, *args, **kwargs):
+        os.kill(os.getpid(), signal.SIGKILL)
+spec = SyncSpec('test', 'https://github.com/fork/repo', 'https://github.com/up/repo')
+Crash(authority=Permit()).apply(SimpleNamespace(spec=spec), sys.argv[1], spec.fork)
+'''
+    import os
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / 'bin'))
+    child = subprocess.run([sys.executable, '-c', code, str(work)], env=env,
+                           capture_output=True, text=True, timeout=30)
+    assert child.returncode == -9, child.stderr
+    lock = work.parent / 'work.fork-sync.lock'
+    inode = lock.stat().st_ino
+    assert sync.apply(plan, work, spec.fork)['status'] == 'pr_pending'
+    assert lock.stat().st_ino == inode
+    assert sync.apply(plan, work, spec.fork)['status'] == 'pr_pending'
+    assert lock.stat().st_ino == inode
+
+
+@pytest.mark.parametrize('revoke_at', ['merge', 'push'])
+@pytest.mark.parametrize('revoked_value', [False, 1, 'true', None])
+def test_unattended_authority_rechecked_at_each_write(setup, revoke_at, revoked_value):
+    sync, spec, _, _, work, net = setup
+    class Revocable:
+        app = True
+        def permits(self, spec, operation):
+            return self.app if operation == 'app-token-ci' else True
+    authority = Revocable()
+    def runner(argv, cwd=None):
+        result = net(argv, cwd)
+        if revoke_at in argv:
+            authority.app = revoked_value
+        return result
+    sync = Sync(runner, authority)
+    plan = sync.discover(spec)
+    with pytest.raises(Held, match='github_app_token_required'):
+        sync.apply(plan, work, spec.fork, unattended=True)
+    assert net.created == 0
+    assert net.pushed == (1 if revoke_at == 'push' else 0)
