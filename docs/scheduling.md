@@ -61,7 +61,8 @@ runs `bin/ade-pi-stuck` (read-only) and sends at most one `paseo send` per run, 
 agent, a thin account, a blind scan), deduped in its state dir, so one agent notices once rather than 288 times a day. **The lead is a file, not a template placeholder**, so the job renders
 for `ade-sched diff`/`reconcile` and a lead handoff cannot leave notices aimed at an archived session (a delivery to one
 would un-archive it): one Paseo agent id, first line of `~/.local/state/djbclark-ade/supervisor/lead`, or
-`ADE_SUPERVISOR_LEAD` when run by hand. Install, then write the current lead's id (`paseo ls -g --json`):
+`ADE_SUPERVISOR_LEAD` when run by hand. Write that file first — the plist logs there and `RunAtLoad` fires at once —
+then install; `paseo ls -g --json` names the current lead:
 
 ```sh
 mkdir -p ~/.local/state/djbclark-ade/supervisor        # first: the plist logs there and RunAtLoad fires at once

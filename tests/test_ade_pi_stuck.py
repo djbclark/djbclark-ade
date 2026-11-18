@@ -216,3 +216,26 @@ def test_an_account_without_a_quota_mapping_is_reported(tmp_path: Path) -> None:
     report = _run(tmp_path, _pools(**{"opencode:go": (40.0, True, False)}), agents=agents)
     assert report["unmapped"] == ["opencode-go"]
     assert report["stuck"] == []
+
+
+def test_the_listing_asks_for_background_workspaces(tmp_path: Path) -> None:
+    """Without `--background` a Pi agent in a background workspace is invisible, and would never be flagged."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "paseo.args"
+    (bin_dir / "paseo").write_text(NL.join(["#!/bin/sh", 'echo "$*" >> ' + str(seen), "echo '[]'"]) + NL)
+    (bin_dir / "paseo").chmod(0o755)
+    (bin_dir / "aiuse").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "aiuse").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    r = subprocess.run([str(CLI), "--json"], env=env, capture_output=True, text=True)
+    assert r.returncode == 0
+    args = seen.read_text()
+    assert "-g" in args.split() and "--background" in args.split()
+
+
+def test_a_pool_with_no_usable_reading_is_fail_closed(tmp_path: Path) -> None:
+    pools = {"fresh": True, "available": [{"pool_id": "anthropic:subscription", "headroom_percent": 80.0,
+                                           "usable_now": None, "stale": False}]}
+    report = _run(tmp_path, pools)
+    assert "anthropic" in report["exhausted"]

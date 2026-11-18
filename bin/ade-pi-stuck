@@ -83,7 +83,7 @@ def quota_by_account(avail):
         if not acct:
             continue
         hr = p.get("headroom_percent")
-        usable = p.get("usable_now", True)
+        usable = p.get("usable_now")          # absent or null is not a "usable" reading: fail closed below
         stale = bool(p.get("stale"))
         rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
         prev = out.get(acct)
@@ -96,7 +96,7 @@ def quota_by_account(avail):
 def _badness(rec):
     """Sort key: smaller is a worse pool for its account."""
     # An unusable pool outranks a readable one, and an unread pool is the worst of all: nothing vouches for it.
-    return (0 if rec["usable"] is False else 1, -1.0 if rec["headroom"] is None else rec["headroom"])
+    return (0 if rec["usable"] is not True else 1, -1.0 if rec["headroom"] is None else rec["headroom"])
 
 
 # A model's last path segment decides whether it is a low-effort tier. Matched as a token, not a substring: a
@@ -131,7 +131,7 @@ def alt(model, acct, exhausted, accounts):
         rec = accounts.get(cand_acct) or {}
         headroom = rec.get("headroom")
         if rec.get("usable") is False:
-            continue
+            continue          # explicitly unusable; a record with no usable reading stays a last resort
         if headroom is not None and headroom <= LOW_HEADROOM_PERCENT:
             continue          # thin, empty or negative, stale or not: never a re-handoff target
         readable = not rec.get("stale") and headroom is not None and headroom > LOW_HEADROOM_PERCENT
@@ -157,7 +157,7 @@ def main():
         # reading is fresh" — that would clear a known-empty account on a stale balance.
         fresh = avail.get("fresh", False)
         for acct, rec in accounts.items():
-            bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
+            bad = rec["usable"] is not True or (rec["headroom"] is not None and rec["headroom"] <= 0)
             # Fail closed, deliberately: any pool reading zero or unusable marks its account exhausted, stale or not —
             # a false alarm is recoverable, a missed exhaustion leaves an agent wedged. Only a *fresh* positive reading
             # on a known-empty account can clear one (below).
