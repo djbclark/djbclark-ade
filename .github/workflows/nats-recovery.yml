@@ -1,9 +1,9 @@
 name: NATS backup recovery
 on:
   push:
-    paths: ['bin/ade-coord-backup', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+    paths: ['bin/ade-coord-backup', 'bin/ade-nats-cli', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
   pull_request:
-    paths: ['bin/ade-coord-backup', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+    paths: ['bin/ade-coord-backup', 'bin/ade-nats-cli', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -37,6 +37,10 @@ jobs:
               target = root / 'nats'
               target.write_bytes(source.read(member))
               target.chmod(0o755)
+              distributed = pathlib.Path('vendor/natscli/linux-amd64/nats')
+              distributed.parent.mkdir(parents=True)
+              distributed.write_bytes(source.read(member))
+              distributed.chmod(0o755)
           PYCODE
           "$RUNNER_TEMP/nats-server" --version
           "$RUNNER_TEMP/nats" --version
@@ -46,7 +50,7 @@ jobs:
       - name: Prove network snapshot and isolated restore
         env:
           NATS_SERVER: ${{ runner.temp }}/nats-server
-          ADE_NATS_CLI: ${{ runner.temp }}/nats
+          ADE_NATS_CLI: ${{ github.workspace }}/bin/ade-nats-cli
         run: timeout 240 node --test experiments/nats-recovery/proof.test.mjs
       - uses: actions/upload-artifact@v6
         if: always()

@@ -11,8 +11,12 @@ binary = Path(__file__).resolve().parents[1] / "vendor" / "natscli" / f"{system}
 if not binary.is_file():
     print("native NATS CLI is not present in this runtime distribution", file=sys.stderr)
     raise SystemExit(2)
-env = {key: os.environ[key] for key in ("PATH", "HOME", "SSH_AUTH_SOCK", "LANG", "LC_CTYPE") if key in os.environ}
+env = {key: os.environ[key] for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "SSH_AUTH_SOCK", "LANG", "LC_CTYPE", "NO_COLOR", "NATS_TIMEOUT") if key in os.environ}
 for source, target in (("ADE_NATS_URL", "NATS_URL"), ("ADE_NATS_TOKEN", "NATS_TOKEN")):
-    if source in os.environ:
+    # Explicit native consumer inputs (including isolated restore credentials)
+    # take precedence over an inherited ADE production environment.
+    if target in os.environ:
+        env[target] = os.environ[target]
+    elif source in os.environ:
         env[target] = os.environ[source]
 os.execve(binary, [str(binary), *sys.argv[1:]], env)
