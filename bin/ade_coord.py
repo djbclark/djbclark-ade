@@ -10,12 +10,33 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import sys
 import time
 
 class CoordinationError(ValueError):
     pass
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _sibling(name):
+    import importlib.util
+    import sys
+    if name not in {"ade_claims", "ade_coord_resources", "ade_coord_handoff", "ade_coord_wake"}:
+        raise CoordinationError("UNSUPPORTED_SIBLING")
+    path = Path(__file__).resolve().with_name(name + ".py")
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_sibling_" + str(path)
+    if key in sys.modules: return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key,path)
+    module = importlib.util.module_from_spec(spec);sys.modules[key]=module
+    try: spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key,None);raise
+    return module
+
 
 def config():
     path = os.environ.get("ADE_COORD_CONFIG")
@@ -65,23 +86,37 @@ def call(command, request, *, cfg=None, _retirement_proof=False):
         raise CoordinationError("EXPLICIT_ENROLLMENT_CONFIRMATION_REQUIRED")
     if not _retirement_proof and (command == "role transfer" or (command == "role transition" and request.get("state") != "draining")):
         raise CoordinationError("RESOURCE_RETIREMENT_PROOF_REQUIRED")
-    allowed = {"role get", "role create", "role transition", "role transfer", "report publish", "report status", "inbox list", "inbox read", "inbox intake", "inbox dispose", "outbox status", "outbox reconcile", "operation intent", "operation inspect", "operation reconcile", "shared-operation intent", "shared-operation inspect", "shared-operation list", "shared-operation reconcile", "artifact read", "artifact upload", "doctor check", "broker provision"}
+    allowed = {"role get", "role create", "role transition", "role transfer", "report publish", "report buffer", "report flush", "report status", "inbox list", "inbox read", "inbox intake", "inbox dispose", "outbox status", "outbox reconcile", "operation intent", "operation inspect", "operation reconcile", "shared-operation intent", "shared-operation inspect", "shared-operation list", "shared-operation reconcile", "artifact read", "artifact upload", "doctor check", "broker provision"}
     if command not in allowed:
         raise CoordinationError("INVALID_COMMAND")
-    payload = json.dumps({**request, "generation": cfg["generation"]}, allow_nan=False).encode()
-    argv = [os.environ.get("ADE_COORD_NODE", "node"), str(ROOT / "lib/ade-coord/cli.js"), *command.split(), "--state-dir", cfg["state_dir"]]
-    started = time.monotonic()
-    try:
-        result = subprocess.run(argv, input=payload, capture_output=True, timeout=30, check=False)
-        metric(command, time.monotonic() - started, len(payload), len(result.stdout))
-        data = json.loads(result.stdout)
-        if result.returncode or not data.get("ok"):
-            raise CoordinationError(data.get("error", {}).get("code", "UNKNOWN"))
-        return data.get("result")
-    except CoordinationError:
-        raise
-    except Exception:
-        raise CoordinationError("UNKNOWN_COORDINATION_OUTCOME") from None
+    offline={"report buffer","outbox status","operation intent","operation inspect","operation reconcile"}
+    def invoke(action,body,network):
+        payload=json.dumps({**body,"generation":cfg["generation"]},allow_nan=False).encode()
+        argv=[os.environ.get("ADE_COORD_NODE","node"),str(ROOT/"lib/ade-coord/cli.js"),*action.split(),"--state-dir",cfg["state_dir"]]
+        safe={key:value for key,value in os.environ.items() if key in {"PATH","HOME","XDG_CONFIG_HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","TMP","TEMP"}}
+        if cfg.get("broker_url") or os.environ.get("ADE_NATS_URL"):
+            safe["ADE_NATS_URL"]=cfg.get("broker_url") or os.environ["ADE_NATS_URL"]
+        if network:
+            boundary=cfg.get("credential_boundary") or shutil.which("sudo-secretspec")
+            if not boundary or not Path(boundary).is_absolute():raise CoordinationError("MANAGED_BOUNDARY_UNAVAILABLE")
+            argv=[boundary,"run","--reason","ADE coordination consumer","--",sys.executable,"-I",str(ROOT/"bin/ade_coord_consumer.py"),*argv]
+        started=time.monotonic()
+        try:
+            result=subprocess.run(argv,input=payload,env=safe,capture_output=True,timeout=30,check=False)
+            metric(action,time.monotonic()-started,len(payload),len(result.stdout))
+            data=json.loads(result.stdout)
+            if result.returncode or not data.get("ok"):
+                raise CoordinationError(data.get("error",{}).get("code","UNKNOWN"))
+            return data.get("result")
+        except CoordinationError:raise
+        except Exception:raise CoordinationError("UNKNOWN_COORDINATION_OUTCOME") from None
+    if command=="report publish":
+        # Canonical bytes are durable even when the current credential service is
+        # unavailable. No network/boundary execution precedes this transaction.
+        invoke("report buffer",request,False)
+        return invoke("report flush",{"role_id":request["report"]["role_id"],"message_id":request["report"]["message_id"]},True)
+    return invoke(command,request,command not in offline)
+
 
 def role_for(identifier, *, cfg=None):
     cfg = cfg or config()
@@ -211,7 +246,8 @@ def pump(role):
         validate_assignment(item["record"]["report"], cfg)
         call("inbox intake", {**request, "message_id": item["record"]["report"]["message_id"]}, cfg=cfg)
         count += 1
-    return {"role_id": role, "ADE_inbox_recorded": count, "processed": False}
+    notification = _sibling("ade_coord_wake").wake(cfg,role)
+    return {"role_id": role, "ADE_inbox_recorded": count, "processed": False, "wake": notification}
 
 
 def validate_assignment(report, cfg):
@@ -222,8 +258,9 @@ def validate_assignment(report, cfg):
 
 
 def run_managed(request):
-    from ade_claims import read_claim
-    from ade_coord_resources import Resources, run_job
+    read_claim = _sibling("ade_claims").read_claim
+    Resources = _sibling("ade_coord_resources").Resources
+    run_job = _sibling("ade_coord_resources").run_job
     cfg = config(); claim = read_claim(request["claim"])
     if not claim:
         raise CoordinationError("BOUND_CLAIM_REQUIRED")
@@ -231,26 +268,32 @@ def run_managed(request):
     if marker is None:
         raise CoordinationError("ENROLLED_CLAIM_REQUIRED")
     current = snapshot(marker["role_id"], cfg=cfg)
-    resources = Resources(Path(cfg["state_dir"]) / "jobs")
+    resources = Resources(Path(cfg["state_dir"]) / "jobs", admission_directory=Path(cfg["state_dir"]))
     try:
         import re
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request["job_id"]):
             raise CoordinationError("INVALID_JOB_ID")
         log = Path(cfg["state_dir"]) / "jobs" / (request["job_id"] + ".log")
         fd = os.open(log, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        def online_authorize(*_):
+            authorize_claim(claim, os.environ.get("PASEO_AGENT_ID"))
+            fresh = snapshot(marker["role_id"], cfg=cfg)
+            if authority(fresh) != authority(current):
+                raise CoordinationError("LAUNCH_AUTHORITY_CHANGED")
+        child_env = {**os.environ, "PATH": str(ROOT / "libexec/agent-bin") + os.pathsep + os.environ.get("PATH", ""), "ADE_CLAIM_ID": claim["id"], "ADE_COORD_ROLE": marker["role_id"]}
         with os.fdopen(fd, "wb") as output:
-            code = run_job(resources, job=request["job_id"], claim=claim["id"], authority=authority(current), argv=request["argv"], authorize=lambda *_: authorize_claim(claim, os.environ.get("PASEO_AGENT_ID")), output=output)
+            code = run_job(resources, job=request["job_id"], claim=claim["id"], authority=authority(current), argv=request["argv"], authorize=online_authorize, output=output, env=child_env)
         return {"job_id": request["job_id"], "exit_code": code, "output": str(log)}
     finally:
         resources.close()
 
 
 def job_status(request, command):
-    from ade_coord_resources import Resources
+    Resources = _sibling("ade_coord_resources").Resources
     cfg = config()
     if not cfg:
         raise CoordinationError("ENROLLMENT_REQUIRED")
-    resources = Resources(Path(cfg["state_dir"]) / "jobs")
+    resources = Resources(Path(cfg["state_dir"]) / "jobs", admission_directory=Path(cfg["state_dir"]))
     try:
         row = resources.get(request["job_id"])
         binding = cfg["claims"].get(row["claim"])

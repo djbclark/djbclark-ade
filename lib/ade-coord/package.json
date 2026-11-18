@@ -18,5 +18,8 @@
   },
   "bin": {
     "ade-coord": "./cli.js"
+  },
+  "devDependencies": {
+    "zod": "latest"
   }
 }
