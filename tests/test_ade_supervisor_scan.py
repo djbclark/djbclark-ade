@@ -219,3 +219,17 @@ def test_a_failed_escalation_is_retried_next_run(tmp_path: Path) -> None:
     assert _run(bin_dir, home) == 0
     assert len(calls.read_text().splitlines()) == 2          # retried, because it never reached the operator
     assert not (state / ".lead-unreachable").exists()
+
+
+def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -> None:
+    """After a lead self-handoff ade_send_guard answers "redirect" (exit 3): the notice follows the successor."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "ade_send_guard.py").unlink()          # stands in for the guard's redirect decision
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced by a handoff"}))',
+            "raise SystemExit(3)")
+    assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and messages[0].split()[1] == "SUCCESSOR-ID"
+    assert json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()

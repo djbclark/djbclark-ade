@@ -7,7 +7,8 @@
   relaunch, tell it to continue — stays a separate gated action). (#785)
 - `bin/ade-supervisor-scan` + `config/launchd/com.djbclark.ade-supervisor-scan.plist` (every 300 s, `ade-job-run`
   wrapped, inventoried in `config/ade.toml [install.jobs]`, install command in `docs/scheduling.md`): the scan notices
-  the lead in `ADE_SUPERVISOR_LEAD` once per newly stuck Pi agent and stays quiet while that agent stays stuck, its
+  the lead named in `ADE_SUPERVISOR_LEAD` or in `~/.local/state/djbclark-ade/supervisor/lead` (a file, so no agent id
+  sits in the plist or the inventory and a handoff rewrites one line) and stays quiet while that agent stays stuck, its
   dedupe set in `~/.local/state/djbclark-ade/supervisor/notified`. A scan that breaks or cannot read quota alerts the
   lead once rather than going quietly blind, never messages an archived lead (a delivery would un-archive it) and
   reports that to the operator once through `hermes-ping`. (#785)

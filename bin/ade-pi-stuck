@@ -136,7 +136,9 @@ def alt(model, acct, exhausted, accounts):
 
 def main():
     as_json = "--json" in sys.argv
-    agents = j(["paseo","ls","-g","--json"])
+    # --background: without it a Pi agent in a background workspace is left out and never flagged (ade-progress,
+    # context-watch and ade-update-auto all pass it for that reason).
+    agents = j(["paseo","ls","-g","--background","--json"])
     rows = agents if isinstance(agents, list) else agents.get("agents", [])
     # Operator-known baseline: OpenAI prepaid was at $0.  Treat it as suspect
     # only until a fresh aiuse reading says otherwise (a stale/absent reading
