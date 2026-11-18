@@ -1,9 +1,9 @@
 name: NATS coordination conformance
 on:
   push:
-    paths: ['lib/ade-coord/**', '.github/workflows/nats-coordination.yml']
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', '.github/workflows/nats-coordination.yml']
   pull_request:
-    paths: ['lib/ade-coord/**', '.github/workflows/nats-coordination.yml']
+    paths: ['lib/ade-coord/**', 'bin/ade_coord*.py', 'bin/ade-coord', 'bin/ade_claims.py', 'bin/completion-notice', 'bin/ade_self_session.py', 'bin/ade_lead_succession.py', 'bin/ade_send_guard.py', 'plugins/ade-coord/**', 'tests/test_ade_coord*.py', 'tests/coord_adapter_gate_probe.py', '.github/workflows/nats-coordination.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,6 +42,15 @@ jobs:
           node --version
           node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync(':memory:'); console.log(db.prepare('select sqlite_version() as sqlite_version').get()); db.close();"
           npm ls --all
+      - name: Install Linux process-user census tool
+        run: |
+          timeout 120 sudo apt-get update -qq
+          timeout 120 sudo apt-get install -y lsof
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Legacy seam compatibility
+        run: timeout 180 uv run --with pytest python -m pytest ../../tests/test_completion_notice.py ../../tests/test_ade_lead_succession.py ../../tests/test_archived_send_guard.py ../../tests/test_self_session.py ../../tests/test_ade_claims_bind_owner.py ../../tests/test_ade_claims_successor.py ../../tests/test_ade_claims_release.py -q
+      - name: Resource ledger conformance
+        run: python3 -m unittest discover -s ../../tests -p 'test_ade_coord*.py' -v
       - name: Real broker protocol proof
         env:
           NATS_SERVER: ${{ runner.temp }}/nats-server

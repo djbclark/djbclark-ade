@@ -426,3 +426,7 @@ path must produce failure even if its UI closes a compaction marker. Another
 manual or automatic compaction must not complete this request. This needs source
 and fixture validation for each provider plus installed-host acceptance before
 ADE can report verified completion. No such API is invented or deployed here.
+
+## Opt-in NATS coordination
+
+For explicitly enrolled NATS roles, `--quiesced` is insufficient and legacy handoff refuses. Use the external controlled-pilot retirement gate described in [NATS coordination](nats-coordination.md); unknown jobs, runtime retirement, remote access or operations block transfer.

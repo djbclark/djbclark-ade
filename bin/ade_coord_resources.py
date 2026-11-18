@@ -70,6 +70,11 @@ def group_members(pgid: int) -> list[int]:
         raise ResourceError("process group inspection unavailable") from exc
 
 
+def same_process(left, right):
+    """Scheduling state is mutable; PID, birth, boot and group bind identity."""
+    return bool(left and right and all(left.get(k) == right.get(k) for k in ("pid", "birth", "boot", "pgid")))
+
+
 class Resources:
     def __init__(self, directory: Path, *, inspect: Callable = process_identity,
                  members: Callable = group_members):
@@ -122,43 +127,62 @@ class Resources:
                 "process": json.loads(row[4]) if row[4] else None,
                 "result": json.loads(row[5]) if row[5] else None}
 
+    def _cas(self, row, *, state, process=None, result=None):
+        changed = self.db.execute(
+            "UPDATE jobs SET state=?,process=?,result=? WHERE id=? AND state=? AND process IS ? AND result IS ?",
+            (state, self.encode(process) if process is not None else None,
+             self.encode(result) if result is not None else None, row["id"], row["state"],
+             self.encode(row["process"]) if row["process"] is not None else None,
+             self.encode(row["result"]) if row["result"] is not None else None)).rowcount
+        if changed != 1:
+            raise ResourceError("job changed concurrently; reconcile current state")
+
     def spawned(self, job: str, pid: int):
         identity = self.inspect(pid)
         if identity is None or identity["pgid"] != pid:
             raise ResourceError("managed job must have its own observed process group")
         with self.db:
             row = self.get(job)
-            if row["state"] != "START_UNKNOWN":
-                raise ResourceError("job already launched; never retry an uncertain launch")
-            self.db.execute("UPDATE jobs SET state='RUNNING',process=? WHERE id=?",
-                            (self.encode(identity), job))
+            if row["state"] not in ("START_UNKNOWN", "SPAWN_UNKNOWN") or row["process"] is not None:
+                raise ResourceError("job already bound; never retry an uncertain launch")
+            self._cas(row, state="RUNNING", process=identity)
         return self.get(job)
 
     def complete(self, job: str, result: dict):
         row = self.get(job)
         identity = row["process"]
-        if not identity:
+        if not identity or row["state"] not in ("RUNNING", "QUIESCENT"):
             raise ResourceError("unknown launch requires independent reconciliation")
-        current = self.inspect(identity["pid"])
-        if current == identity or self.members(identity["pgid"]):
+        if same_process(self.inspect(identity["pid"]), identity) or self.members(identity["pgid"]):
             raise ResourceError("job process or group still exists")
         with self.db:
             if row["state"] == "QUIESCENT" and row["result"] != result:
                 raise ResourceError("immutable job result conflict")
-            self.db.execute("UPDATE jobs SET state='QUIESCENT',result=? WHERE id=?",
-                            (self.encode(result), job))
+            self._cas(row, state="QUIESCENT", process=identity, result=result)
         return self.get(job)
 
     def reconcile_not_started(self, job: str, evidence: dict):
-        """Explicit external reconciliation, never inference from absent PID."""
+        """Independent evidence is required; absent PID alone is insufficient.
+
+        Consumed spawn permission additionally requires verified no-child evidence
+        and a stopped bound launcher, or a recorded Popen OSError. Never re-spawn.
+        """
         if not evidence or not isinstance(evidence, dict):
             raise ResourceError("independent launch reconciliation evidence required")
         with self.db:
             row = self.get(job)
-            if row["state"] != "START_UNKNOWN" or row["process"] is not None:
+            if row["state"] not in ("START_UNKNOWN", "SPAWN_UNKNOWN") or row["process"] is not None:
                 raise ResourceError("only unknown unbound launch may be reconciled")
-            self.db.execute("UPDATE jobs SET state='NOT_STARTED',result=? WHERE id=?",
-                            (self.encode({"evidence": evidence}), job))
+            if row["state"] == "SPAWN_UNKNOWN":
+                launch = row["result"] or {}
+                launcher = launch.get("launcher")
+                if evidence.get("no_child_proven") is not True or not evidence.get("source"):
+                    raise ResourceError("consumed launch requires independent no-child proof")
+                if not launch.get("popen_failed"):
+                    if not launcher or evidence.get("launcher") != launcher or same_process(self.inspect(launcher["pid"]), launcher):
+                        raise ResourceError("launcher must be proven stopped before reconciliation")
+            self._cas(row, state="NOT_STARTED", result={"evidence": evidence, "launch": row["result"]})
+        return self.get(job)
 
     def quiescence(self, claim: str, authority: dict):
         rows = [self.get(r[0]) for r in self.db.execute("SELECT id FROM jobs WHERE claim=?", (claim,))]
@@ -168,14 +192,14 @@ class Resources:
                 blockers.append(row["id"])
                 continue
             identity = row["process"]
-            if identity and (self.inspect(identity["pid"]) == identity or self.members(identity["pgid"])):
+            if identity and (same_process(self.inspect(identity["pid"]), identity) or self.members(identity["pgid"])):
                 blockers.append(row["id"])
         return {"claim": claim, "authority": authority, "jobs_stopped": not blockers,
                 "blockers": blockers, "jobs": rows, "scope": "explicitly tracked jobs only"}
 
 
 def run_job(resources: Resources, *, job: str, claim: str, authority: dict, argv: list[str],
-            authorize: Callable):
+            authorize: Callable, output=None):
     """Caller supplies an ONLINE authority check. A launch is never auto-retried."""
     if not argv or not all(isinstance(x, str) for x in argv):
         raise ResourceError("command argv required")
@@ -187,17 +211,21 @@ def run_job(resources: Resources, *, job: str, claim: str, authority: dict, argv
     # Atomically consume launch permission BEFORE spawning. A death in this gap
     # remains unknown and blocks handoff; it must never cause a duplicate spawn.
     with resources.db:
-        changed = resources.db.execute("UPDATE jobs SET state='SPAWN_UNKNOWN' WHERE id=? AND state='START_UNKNOWN'",
-                                       (job,)).rowcount
+        changed = resources.db.execute("UPDATE jobs SET state='SPAWN_UNKNOWN',result=? WHERE id=? AND state='START_UNKNOWN' AND process IS NULL",
+                                       (resources.encode({"launcher": resources.inspect(os.getpid())}), job)).rowcount
     if changed != 1:
         raise ResourceError("job launch already attempted")
-    process = subprocess.Popen(argv, start_new_session=True)
-    identity = resources.inspect(process.pid)
-    if identity is None or identity["pgid"] != process.pid:
-        raise ResourceError("job birth could not be recorded; reconcile unknown launch")
-    with resources.db:
-        resources.db.execute("UPDATE jobs SET state='RUNNING',process=? WHERE id=?",
-                             (resources.encode(identity), job))
+    try:
+        process = subprocess.Popen(argv, start_new_session=True, stdout=output, stderr=output)
+    except OSError:
+        # Popen waits/reaps a failed exec before raising. Preserve consumed intent
+        # and its no-child evidence for explicit reconciliation; never retry it.
+        with resources.db:
+            row = resources.get(job)
+            if row["state"] == "SPAWN_UNKNOWN" and row["process"] is None:
+                resources._cas(row, state="SPAWN_UNKNOWN", result={**(row["result"] or {}), "popen_failed": True})
+        raise
+    resources.spawned(job, process.pid)
     code = process.wait()
     resources.complete(job, {"exit_code": code})
     return code

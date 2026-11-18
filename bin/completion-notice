@@ -49,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import time
 from typing import Any, Sequence
 import uuid
@@ -281,6 +282,16 @@ def lead_ack(
     (b) write <done>.ack on disk
     (a) wait for worker Status idle, then send ack <worker> <msg_id>
     """
+    from ade_coord import intake, CoordinationError
+    try:
+        durable = intake(worker, msg_id)
+    except CoordinationError as error:
+        return 4, {"status": "failed", "error": str(error), "processed": False}
+    if durable is not None:
+        if done:
+            durable["ack_file"] = write_ack_file(done, worker=worker, msg_id=msg_id)
+            durable["routes"].append("disk")
+        return 0, durable
     routes = []
     ack_file = None
     if done:
@@ -461,6 +472,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     msg_id = parsed.get("msg_id")
 
     requester = args.requester.strip()
+    if args.do_send:
+        from ade_coord import notice, CoordinationError
+        try:
+            enrolled = notice(requester, args.sender, title=args.title, detail=detail_s, report=args.report, msg_id=args.msg_id)
+        except CoordinationError as error:
+            print(json.dumps({"status": "failed", "error": str(error)}))
+            return 4
+        if enrolled is not None:
+            print(json.dumps(enrolled))
+            return 0 if enrolled["status"] == "broker-accepted" else 5
     if not args.do_print:  # ls-02: a lead replaced by a self-handoff gets its successor; an archived one gets nothing
         requester, blocked = guard_target(requester, args.paseo)
         if blocked:

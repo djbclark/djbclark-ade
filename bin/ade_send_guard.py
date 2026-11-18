@@ -189,6 +189,17 @@ def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = N
     """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND and ADE_ALLOW_REPLACED_SEND (a use of the latter
     is logged, see `log_override`)."""
     env = os.environ if env is None else env
+    from ade_coord import current_role, CoordinationError
+    try:
+        enrolled = current_role(target)
+        if enrolled is not None:
+            record = paseo_inspect(paseo)(enrolled)
+            if record.get("Archived") is not False:
+                return Decision(REFUSE, target, "enrolled owner is archived or unavailable")
+            return Decision(REDIRECT if enrolled != target else PASS, enrolled, "authoritative stable role owner")
+    except Exception:
+        # A configured enrollment or role read error must never become legacy pass.
+        return Decision(REFUSE, target, "enrolled authority unavailable; no local fallback")
     d = decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False,
                allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, **kw)
     if d.replaced_by:
