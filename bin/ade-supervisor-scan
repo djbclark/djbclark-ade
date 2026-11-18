@@ -15,13 +15,27 @@
 set -uo pipefail
 STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
 LEAD="${ADE_SUPERVISOR_LEAD:-}"
-[ -n "$LEAD" ] || LEAD="$(head -1 "$STATE_DIR/lead" 2>/dev/null || true)"
+lead_from_env=1
+if [ -z "$LEAD" ]; then
+    lead_from_env=0
+    LEAD="$(head -1 "$STATE_DIR/lead" 2>/dev/null || true)"
+fi
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+ping_operator_once() {   # once per outage, and only a success marks the outage as reported
+    local marker="$STATE_DIR/.lead-unreachable"
+    [ -f "$marker" ] && return 0
+    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($1); write the lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
+        : >"$marker"
+    else
+        printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
+    fi
+}
 if [ -z "$LEAD" ]; then
-    printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md, nothing to notify\n' \
+    printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
+    ping_operator_once "no lead is configured"
     exit 0
 fi
 case "$LEAD" in
@@ -31,6 +45,7 @@ esac
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: the lead value in ADE_SUPERVISOR_LEAD/%s/lead is not an agent id; nothing to notify\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
+    ping_operator_once "the configured lead is not an agent id"
     exit 0
 fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
@@ -58,7 +73,8 @@ except Exception:
 if not isinstance(d, dict):          # a list or a bare value is no more usable than non-JSON
     d = None
 try:
-    told = set(json.load(open(notified_path)))
+    raw_told = json.load(open(notified_path))
+    told = set(raw_told) if isinstance(raw_told, list) else set()      # a corrupt file is empty, never a set of its characters
 except Exception:
     told = set()
 items = []                                  # (key, text): every condition true now; text None = no notice
@@ -125,9 +141,14 @@ case "$guard_rc" in
                 ;;
             *)
                 send_to="$guard_target"
-                printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s); next run reads %s/lead\n' \
-                    "$(now)" "$LEAD" "$send_to" "$guard_reason" "$STATE_DIR" >>"$LOG"
-                printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"
+                printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
+                    "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
+                if [ "$lead_from_env" -eq 1 ]; then
+                    printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD still names %s; update it to %s\n' \
+                        "$(now)" "$LEAD" "$send_to" >>"$LOG"
+                else
+                    printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"
+                fi
                 ;;
         esac
         ;;

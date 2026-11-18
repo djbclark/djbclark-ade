@@ -228,13 +228,14 @@ def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -
     _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
             'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced by a handoff"}))',
             "raise SystemExit(3)")
-    assert _run(bin_dir, home) == 0
+    (state / "lead").write_text(LEAD + NL)               # the lead comes from the file, so the redirect rewrites it
+    assert _run(bin_dir, home, lead=None) == 0
     messages = _messages(sent)
-    assert len(messages) == 1 and "-- SUCCESSOR-ID " in messages[0]     # `--` before the id, as ade-net-resume`
+    assert len(messages) == 1 and "-- SUCCESSOR-ID " in messages[0]     # `--` before the id, as ade-net-resume does
     assert json.loads((state / "notified").read_text()) == ["a1|openai"]
     assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
     assert (state / "lead").read_text().strip() == "SUCCESSOR-ID"      # the handoff is followed, not logged forever
-    assert _run(bin_dir, home) == 0                                   # the next run reads the new lead ...
+    assert _run(bin_dir, home, lead=None) == 0                        # the next run reads the new lead ...
     assert len(_messages(sent)) == 1                                  # ... and has nothing new to say
 
 
