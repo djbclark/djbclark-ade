@@ -21,3 +21,5 @@
 
 ### Added
 - Parse explicit bounded versioned standing grants with separate recorded recovery selectors, exact resume/release scope, and matching-denial precedence. (#796)
+### Added
+- Bind repeated standing promotions, recorded rollback and exact resume/release reconciliation to the same Journal transaction API with separate native counters and gated same-bearer recovery. (#796)
