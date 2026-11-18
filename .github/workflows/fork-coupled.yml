@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: latest
-      - name: Descriptor and bounded IPC transport tests, not runtime qualification
+      - name: Descriptor and owned-process teardown tests, not runtime qualification
         run: node --test tests/fixtures/fork-coupled/retained-daemon.test.mjs
       # The actual retained daemon/evaluator/controller round trip requires the
       # completed authenticated native build plus protected recipe and cohort.
