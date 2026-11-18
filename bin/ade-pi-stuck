@@ -128,8 +128,8 @@ def alt(model, acct, exhausted, accounts):
         headroom = rec.get("headroom")
         if rec.get("usable") is False:
             continue
-        if headroom is not None and 0 < headroom <= LOW_HEADROOM_PERCENT:
-            continue          # thin or nearly dry, stale or not: never a re-handoff target
+        if headroom is not None and headroom <= LOW_HEADROOM_PERCENT:
+            continue          # thin, empty or negative, stale or not: never a re-handoff target
         readable = not rec.get("stale") and headroom is not None and headroom > LOW_HEADROOM_PERCENT
         (known_healthy if readable else unread).append("pi/" + cand)
     return (known_healthy or unread or [None])[0]

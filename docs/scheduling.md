@@ -57,15 +57,17 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 ```
 
 `config/launchd/com.djbclark.ade-supervisor-scan.plist` (2026-11-18) is the supervisor Pi-stuck scan: every 300 s it
-runs `bin/ade-pi-stuck` (read-only) and sends one `paseo send` per newly stuck Pi agent to the Paseo agent in
-`__LEAD__`, deduped in its state dir, so one agent notices once rather than 288 times a day. `__LEAD__` has **no
-default**: pass the lead's current Paseo id at install (as `ade-net-resume` does with `LEAD_UUID`), so a lead handoff
-cannot leave notices aimed at an archived session — a delivery to one would un-archive it. Install:
+runs `bin/ade-pi-stuck` (read-only) and sends one `paseo send` per newly stuck Pi agent, deduped in its state dir, so one
+agent notices once rather than 288 times a day. **The lead is a file, not a template placeholder**, so the job renders
+for `ade-sched diff`/`reconcile` and a lead handoff cannot leave notices aimed at an archived session (a delivery to one
+would un-archive it): one Paseo agent id, first line of `~/.local/state/djbclark-ade/supervisor/lead`, or
+`ADE_SUPERVISOR_LEAD` when run by hand. Install, then write the current lead's id (`paseo ls -g --json`):
 
 ```sh
 bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ade ~/src/djbclark-ade \
-  --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor \
-  --set __LEAD__=b0b47ad8-8801-4780-a8e0-08824cd5ce27
+  --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
+mkdir -p ~/.local/state/djbclark-ade/supervisor
+printf '%s\n' <lead-paseo-agent-id> > ~/.local/state/djbclark-ade/supervisor/lead
 ```
 
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan

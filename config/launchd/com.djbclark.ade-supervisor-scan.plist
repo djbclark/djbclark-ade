@@ -3,7 +3,8 @@
 <!-- Supervisor Pi-stuck scan, every 5 minutes: a zero-token host script (no model prompt), one `paseo ls` plus one
      `aiuse --available`, then at most ONE `paseo send` to the ADE lead per newly stuck agent (deduped in the state dir).
      Inventoried in config/ade.toml [install.jobs] as `ade-supervisor-scan`; install command in docs/scheduling.md.
-     Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__, __LEAD__ and __ADMISSION__. -->
+     Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__ and __ADMISSION__; the lead is not a placeholder (see the
+     script header: ADE_SUPERVISOR_LEAD or __STATE__/lead), so the job renders and reconciles without one. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.ade-supervisor-scan</string>
@@ -18,7 +19,6 @@
   <dict>
     <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>RELAY_SENDER_NAME</key><string>ade-supervisor-scan</string>
-    <key>ADE_SUPERVISOR_LEAD</key><string>__LEAD__</string>
     <key>ADE_SUPERVISOR_STATE_DIR</key><string>__STATE__</string>
   </dict>
   <key>StandardOutPath</key><string>__STATE__/scan.out</string>

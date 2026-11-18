@@ -14,12 +14,13 @@
 set -uo pipefail
 STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
 LEAD="${ADE_SUPERVISOR_LEAD:-}"
+[ -n "$LEAD" ] || LEAD="$(head -1 "$STATE_DIR/lead" 2>/dev/null || true)"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 if [ -z "$LEAD" ]; then
-    printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD is unset (the plist supplies it; see docs/scheduling.md), nothing to notify\n' \
-        "$(now)" >>"$LOG"
+    printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md, nothing to notify\n' \
+        "$(now)" "$STATE_DIR" >>"$LOG"
     exit 0
 fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
@@ -40,16 +41,22 @@ pending="$STATE_DIR/.notified.$$"
 msg="$(printf '%s' "$json" | python3 -c '
 import json, sys
 notified_path, pending_path, scan_rc = sys.argv[1], sys.argv[2], int(sys.argv[3])
-items = []                                  # (key, text) for every condition that is true now
 try:
     d = json.load(sys.stdin) if scan_rc == 0 else None
 except Exception:
     d = None
 if not isinstance(d, dict):          # a list or a bare value is no more usable than non-JSON
     d = None
+try:
+    told = set(json.load(open(notified_path)))
+except Exception:
+    told = set()
+items = []                                  # (key, text): every condition true now; text None = no notice
 if d is None:
     items.append(("scan|broken",
                   "ade-pi-stuck failed or printed no usable JSON (exit %d) — the Pi-stuck watch is blind" % scan_rc))
+    # A degraded run cannot observe agents, so it must not forget the ones already told: keep their keys.
+    items += [(key, None) for key in sorted(told)]
 else:
     if d.get("quota_error"):
         items.append(("scan|quota-unread",
@@ -60,13 +67,9 @@ else:
         items.append(("%s|%s" % (s.get("id"), s.get("account")),
                       "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
                                                            s.get("alternative") or "no healthy alternative")))
-try:
-    told = set(json.load(open(notified_path)))
-except Exception:
-    told = set()
 with open(pending_path, "w") as fh:
     json.dump([k for k, _ in items], fh)
-new = [text for key, text in items if key not in told]
+new = [text for key, text in items if text and key not in told]
 if new:
     print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))
 ' "$NOTIFIED" "$pending" "$scan_rc" 2>>"$LOG")"
