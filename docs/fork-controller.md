@@ -251,3 +251,16 @@ orders provenance by run/attempt rather than hash. All local attestation files
 are still validated before use, including obsolete files; corruption remains a
 hard refusal. A current attempt or current-policy authentication failure propagates
 without a catch-and-ignore fallback to older evidence.
+
+
+## Fixed explicit transaction commands
+
+`ade-fork-controller apply` invokes the existing Journal deployment path;
+`ade-fork-controller recover` invokes retained-baseline recovery. Both read only
+the fixed real-account protected enrollment and use the real NativeFacade.
+There are no port/path/grant override flags. They emit one canonical structured
+result; HOLD/recovery_required returns nonzero, runtime_verified returns zero.
+Default status/plan and discovery tick retain their existing roles. An approved
+scheduled promotion can invoke apply under current consent once genuine native
+support is available; selection is not a permanent planning-only substitute.
+The commands do not bypass unavailable execution/cohort qualification.

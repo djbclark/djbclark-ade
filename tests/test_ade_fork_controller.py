@@ -533,3 +533,17 @@ def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,m
     corrupt=controller.root/'attestations'/receipt.sha256/(digest(old_value)+'.json')
     corrupt.chmod(0o600);corrupt.write_bytes(b'{}')
     with pytest.raises(c.ContractError,match='corruption'):controller.selected_release(row)
+
+
+@pytest.mark.parametrize('command,operation', [('apply','deploy'),('recover','recover')])
+def test_fixed_cli_explicit_transaction_dispatch(monkeypatch,capsys,command,operation):
+    calls=[]
+    class Transaction:
+        def tick(self,value):
+            calls.append(value)
+            return {'status':'hold','reason':'native_execution_status_reservation_unsupported','authorized':False}
+    monkeypatch.setattr(c,'Controller',Transaction)
+    assert c.main([command])==1
+    assert calls==[operation]
+    assert c.parse(capsys.readouterr().out)['status']=='hold'
+    with pytest.raises(SystemExit):c.main([command,'--policy','/candidate/grant'])

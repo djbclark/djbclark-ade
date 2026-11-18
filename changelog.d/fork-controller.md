@@ -9,3 +9,6 @@
 
 ### Fixed
 - Carry fresh exact-attempt authentication into selected transactions so obsolete reattestations cannot obstruct deployment, while retaining corruption and current-policy refusal. (#796)
+
+### Added
+- Expose fixed protected apply/recover controller commands with structured refusal until genuine native support is available. (#796)

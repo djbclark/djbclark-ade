@@ -800,14 +800,18 @@ class Controller:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('status', 'plan', 'tick'))
+    parser.add_argument('command', choices=('status', 'plan', 'tick', 'apply', 'recover'))
     args = parser.parse_args(argv)
     try:
-        # Shipped tick is read-only planning. No CLI deploy/enroll/port override exists.
+        # No arbitrary path, grant, port or transport override is exposed.
         controller = Controller()
-        result = controller.select_latest() if args.command == 'tick' else controller.plan()
+        if args.command == 'apply': result = controller.tick('deploy')
+        elif args.command == 'recover': result = controller.tick('recover')
+        elif args.command == 'tick': result = controller.select_latest()
+        else: result = controller.plan()
         if args.command == 'status': result['status'] = 'hold'; result['reason'] = 'native_execution_status_reservation_unsupported'
-        print(canonical(result).decode()); return 0
+        print(canonical(result).decode())
+        return 1 if args.command in ('apply', 'recover') and result['status'] != 'runtime_verified' else 0
     except (OSError, ValueError, TypeError, KeyError) as error:
         print(canonical({'status': 'hold', 'reason': type(error).__name__, 'authorized': False}).decode()); return 1
 
