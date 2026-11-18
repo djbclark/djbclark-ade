@@ -1046,10 +1046,12 @@ class NativeFacade:
         observed=self.observe(cohort)
         maintenance=self._call(['daemon','maintenance','status'])
         authority=maintenance.get('authority') if type(maintenance) is dict else None
+        features=authority.get('features') if type(authority) is dict else None
         if (type(maintenance) is not dict or type(maintenance.get('schemaVersion')) is not int or maintenance['schemaVersion']!=1 or
                 maintenance.get('state')!='idle' or maintenance.get('recoveryRequired') is not False or maintenance.get('recoveryOnly') is not None or
                 type(maintenance.get('reservationGeneration')) is not int or not 0<=maintenance['reservationGeneration']<2**53 or
-                type(authority) is not dict or authority.get('schemaVersion')!=1 or authority.get('qualified') is not True or
+                type(authority) is not dict or type(authority.get('schemaVersion')) is not int or authority['schemaVersion']!=1 or authority.get('qualified') is not True or
+                type(features) is not dict or any(type(features.get(key)) is not bool for key in ('maintenanceReservationV1','maintenancePluginOperationV1')) or
                 authority.get('serverId')!=config['serverId'] or authority.get('daemonIncarnation')!=config['daemonIncarnation']):
             raise ContractError('native qualified idle observation unavailable')
         # Ordinary activity can make promotion unavailable without changing the
@@ -1371,10 +1373,13 @@ class Controller:
     def status(self):
         """Read existing Journal and actual native observations; creates nothing."""
         result={'status':'hold','authorized':False,'observation_only':True}
-        try:row=parse(canonical(self.reader()).decode())
+        try:
+            row=parse(canonical(self.reader()).decode())
+            result.update(component=row['component'],channel=row['channel'])
+            group=row['policy']['compatibility_group']
+            if type(group) is not str or not group:raise ContractError('protected group unavailable')
         except (OSError,ValueError,TypeError,KeyError):return dict(result,reason='protected_enrollment_unavailable')
-        result.update(component=row['component'],channel=row['channel'])
-        journal=Journal(self.root/'journal',row['policy']['compatibility_group'])
+        journal=Journal(self.root/'journal',group)
         try:
             original=read_regular(journal.path,1024*1024)
             current=journal.read()

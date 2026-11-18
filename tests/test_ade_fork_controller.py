@@ -1460,7 +1460,7 @@ def readonly_status_fixture(cohort_mapping_fixture,monkeypatch):
     monkeypatch.setattr(native,'_transport',lambda:config)
     maintenance={'schemaVersion':1,'state':'idle','reservationGeneration':12,'generation':None,'transactionId':None,
         'ready':False,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
-            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenancePluginOperationV1':False}}}
+            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':False}}}
     calls=[]
     def wire(args,token=None):
         assert token is None,'status must not send a private owner bearer'
@@ -1495,7 +1495,7 @@ def test_status_current_verified_is_truthful_readonly_observation(readonly_statu
 
 
 @pytest.mark.parametrize('mutation',['missing-journal','corrupt-journal','noncanonical-journal','missing-retained','raw-flag-only',
-    'missing-cohort','wrong-loaded','unqualified','wrong-incarnation','native-held','native-unknown','target-held','changed-epoch'])
+    'missing-cohort','wrong-loaded','unqualified','wrong-incarnation','native-held','native-unknown','target-held','changed-epoch','missing-features','bool-schema'])
 def test_status_missing_mismatched_unknown_facts_hold(readonly_status_fixture,monkeypatch,mutation):
     controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
     if mutation=='missing-journal':journal.path.unlink()
@@ -1510,6 +1510,8 @@ def test_status_missing_mismatched_unknown_facts_hold(readonly_status_fixture,mo
     elif mutation=='native-held':maintenance['state']='held'
     elif mutation=='native-unknown':maintenance['recoveryRequired']=True
     elif mutation=='target-held':next(item for item in facts['entries'] if item['pluginId']=='ade-yolo')['journal']['phase']='held'
+    elif mutation=='missing-features':maintenance['authority'].pop('features')
+    elif mutation=='bool-schema':maintenance['authority']['schemaVersion']=True
     else:
         original=controller.native.cohort_status
         def changed(**kwargs):
