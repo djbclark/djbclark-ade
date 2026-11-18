@@ -112,13 +112,22 @@ def low_effort(model):
     return bool(LOW_EFFORT_RE.search((model or "").rsplit("/", 1)[-1]))
 
 
-def alt(model, acct, exhausted):
-    """A comparable model under a *different*, not-exhausted account, or None when there is none."""
+def alt(model, acct, exhausted, accounts):
+    """A comparable model under a *different* account that is not exhausted, or None when there is none.
+
+    An account with a fresh reading above the thin line is preferred; one with no reading, or only a stale or thin
+    one, is offered only when nothing better exists (the switch is gated and re-checked, but a re-handoff must not be
+    aimed at an account that is probably dry)."""
+    known_healthy, unread = [], []
     for cand in ALT_CANDIDATES[low_effort(model)]:
         cand_acct = account_of(cand)
-        if cand_acct != acct and cand != model and cand_acct not in exhausted:
-            return "pi/" + cand
-    return None
+        if cand_acct == acct or cand == model or cand_acct in exhausted:
+            continue
+        rec = accounts.get(cand_acct) or {}
+        readable = (rec.get("usable") is not False and not rec.get("stale")
+                    and (rec.get("headroom") or 0) > LOW_HEADROOM_PERCENT)
+        (known_healthy if readable else unread).append("pi/" + cand)
+    return (known_healthy or unread or [None])[0]
 
 def main():
     as_json = "--json" in sys.argv
@@ -132,7 +141,9 @@ def main():
     try:
         avail = j(["aiuse","--available","--json"], ok=(0, 3))
         accounts = quota_by_account(avail)
-        fresh = avail.get("fresh", True)
+        # Default False: aiuse >= 1.6 always emits `fresh`, and an absent flag must not be read as "this
+        # reading is fresh" — that would clear a known-empty account on a stale balance.
+        fresh = avail.get("fresh", False)
         for acct, rec in accounts.items():
             bad = rec["usable"] is False or (rec["headroom"] is not None and rec["headroom"] <= 0)
             if bad and (fresh or not rec["stale"]):
@@ -171,7 +182,7 @@ def main():
                     "account": acct, "status": status, "stuck": stuck,
                     "headroom_percent": q.get("headroom"),
                     "quota_stale": q.get("stale"),
-                    "alternative": alt(model, acct, exhausted) if stuck else None})
+                    "alternative": alt(model, acct, exhausted, accounts) if stuck else None})
     stuck = [o for o in out if o["stuck"]]
     live = [o for o in out if o["status"] not in ("closed", "archived")]
     if as_json:

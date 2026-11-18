@@ -149,3 +149,21 @@ def test_no_healthy_candidate_means_no_alternative(tmp_path: Path) -> None:
     ]}
     report = _run(tmp_path, raw)
     assert [s["alternative"] for s in report["stuck"] if s["id"] == "a1"] == [None]
+
+
+def test_an_absent_fresh_flag_does_not_clear_a_known_empty_account(tmp_path: Path) -> None:
+    """aiuse >= 1.6 emits `fresh`; when it is missing the reading is not trusted to clear a known-empty account."""
+    pools = _pools(**{"openai:openai_api": (28.8, True, False)})
+    del pools["fresh"]
+    assert _stuck_ids(_run(tmp_path, pools)) == ["a1"]
+
+
+def test_a_readable_healthy_account_beats_an_unread_one(tmp_path: Path) -> None:
+    """The alternative prefers an account with a fresh reading above the thin line over one nothing is known about."""
+    raw = {"fresh": True, "available": [
+        {"pool_id": "openai:openai_api", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+        {"pool_id": "opencode:go", "account": "t-e", "headroom_percent": 0.0, "usable_now": True, "stale": False},
+        {"pool_id": "opencode:go", "account": "djbclark", "headroom_percent": 55.0, "usable_now": True, "stale": False},
+    ]}
+    stuck = [s for s in _run(tmp_path, raw)["stuck"] if s["id"] == "a1"]
+    assert stuck and stuck[0]["alternative"].startswith("pi/opencode-go-djbclark/")
