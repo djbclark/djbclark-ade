@@ -218,16 +218,17 @@ def immutable(path, content):
     finally: os.unlink(name)
 
 
-def coherent_native_status(value, plugin_id):
+def coherent_native_status(value, plugin_id, *, allow_target_absent=False):
     """Consumer for proposed ManagedPluginStatus v1; observations grant no support."""
     if (type(value) is not dict or value.get('version') != 1 or value.get('pluginId') != plugin_id or
             value.get('consistency') != 'coherent'):
         raise ContractError('native status uncertain')
     registration, journal, loaded = (value.get(key) for key in ('registration', 'journal', 'loaded'))
-    if (type(registration) is not dict or type(journal) is not dict or type(loaded) is not dict or
+    if (type(registration) is not dict or type(journal) is not dict or (type(loaded) is not dict and not (allow_target_absent and loaded is None)) or
             type(journal.get('generation')) is not int or journal['generation'] < 0 or
             journal.get('phase') not in ('ready', 'activating', 'replacing', 'held') or
-            type(journal.get('baseline')) is not dict or type(journal.get('currentReceipt')) is not dict):
+            type(journal.get('baseline')) is not dict or
+            (type(journal.get('currentReceipt')) is not dict and not (allow_target_absent and journal.get('currentReceipt') is None))):
         raise ContractError('native status incomplete')
     # Native CAS is exclusively journal.generation, never loaded.activationGeneration.
     return value
@@ -327,7 +328,7 @@ def verify_transport_distribution(config):
     return manifest
 
 
-def cohort_observation(value, config, expected, target):
+def cohort_observation(value, config, expected, target, *, allow_target_absent=False):
     """Strict proposed d174 v1 consumer. Native producer binds executing facts privately."""
     if (type(value) is not dict or set(value) != {'version', 'consistency', 'observationEpoch', 'enclosing', 'entries'} or
             type(value['version']) is not int or value['version'] != 1 or value['consistency'] != 'coherent' or
@@ -378,7 +379,8 @@ def cohort_observation(value, config, expected, target):
             if loaded is not None or entry['enabled'] is True: raise ContractError('unexpected active cohort member')
             continue
         if plugin == target:
-            if loaded is None or entry['enabled'] is not True: raise ContractError('target not running')
+            if not allow_target_absent and (loaded is None or entry['enabled'] is not True):
+                raise ContractError('target not running')
             continue
         stable = {'enabled': entry['enabled'], 'loaded': loaded is not None, 'registration': registration,
                   'receipt': None if loaded is None else {k: loaded.get(k) for k in ('sourcePath', 'snapshotRoot', 'snapshotSha256', 'serverBundleSha256')},
@@ -405,11 +407,12 @@ class NativeFacade:
         self.render = None
         self.bridge_binding = None
         self.operation = 'activate'
+        self.recovery_inspection = False
 
     def supported(self):
         if self.uncertain: return False
         try:
-            self.cohort_status()
+            self.cohort_status(allow_target_absent=True)
             authority = self._call(['daemon', 'maintenance', 'status']).get('authority')
             config = self._transport()
             if (type(authority) is not dict or authority.get('schemaVersion') != 1 or authority.get('qualified') is not True or
@@ -422,14 +425,16 @@ class NativeFacade:
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return False
 
-    def cohort_status(self):
+    def cohort_status(self, *, allow_target_absent=False):
         row = self.reader(); config = self._transport()
-        return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'])
+        return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'], allow_target_absent=allow_target_absent)
 
-    def prepare(self, row, identity, render):
+    def prepare(self, row, identity, render, *, recovery=False):
         self.transaction_row = row
         self.target = identity
         self.render = render
+        self.recovery_inspection = recovery
+        if recovery: self.operation = 'recover'
 
     def _transport(self):
         config = self.reader()['native']
@@ -488,8 +493,8 @@ class NativeFacade:
     def list_observations(self):
         return self._call(['plugin', 'ls'])
 
-    def managed_status(self, plugin_id):
-        return coherent_native_status(self._call(['plugin', 'managed-status', plugin_id]), plugin_id)
+    def managed_status(self, plugin_id, *, allow_target_absent=False):
+        return coherent_native_status(self._call(['plugin', 'managed-status', plugin_id]), plugin_id, allow_target_absent=allow_target_absent)
 
     def _identity_args(self):
         config = self._transport()
@@ -538,11 +543,17 @@ class NativeFacade:
 
     def observe(self, cohort):
         if self.uncertain: raise ContractError('native execution uncertain')
-        facts = self.cohort_status()
+        facts = self.cohort_status(allow_target_absent=self.recovery_inspection)
         if canonical(self.reader()['cohort']) != canonical(cohort): raise ContractError('protected cohort changed')
         target = self.reader()['component']
         entry = next(item for item in facts['entries'] if item['pluginId'] == target)
         loaded = entry['loaded']; execution = entry['execution']
+        if loaded is None or entry['enabled'] is not True:
+            if not self.recovery_inspection: raise ContractError('target runtime receipt unavailable')
+            # Independent absent-state identity, never a fabricated baseline receipt.
+            # Journal.recover inspects it; strict verification is restored after recovery.
+            return 'native-target-absent:v1:' + digest({'pluginId': target, 'registration': entry['registration'],
+                'enabled': entry['enabled'], 'journal': entry['journal']})
         paths = sorted((self.root / 'records').iterdir())
         if not paths or len(paths) > 100: raise ContractError('retained release inventory unavailable')
         matches = []
@@ -570,7 +581,7 @@ class NativeFacade:
     def _operation(self, kind, identity, record):
         if self.supported() is not True or self.render is None or identity != self.target:
             raise ContractError('native held operation unavailable')
-        status = self.managed_status(record['expected']['component'])
+        status = self.managed_status(record['expected']['component'], allow_target_absent=kind == 'recover' and self.recovery_inspection)
         rendered = self.render(identity, status, self.operation)
         grant = rendered['authorization']
         result = self._call(['daemon', 'maintenance', 'plugin-operation', '--operation', kind,
@@ -581,7 +592,9 @@ class NativeFacade:
         config = self._transport()
         if (type(result) is not dict or result.get('serverId') != config['serverId'] or
                 result.get('daemonIncarnation') != config['daemonIncarnation'] or
-                type(result.get('nativeGeneration')) is not int or type(result.get('plugin')) is not dict):
+                type(result.get('nativeGeneration')) is not int or type(result.get('plugin')) is not dict or
+                result['plugin'].get('id') != rendered['pluginId'] or result['plugin'].get('enabled') is not True or
+                result['plugin'].get('status') != 'running'):
             self.uncertain = True
             raise ContractError('native operation identity uncertain')
         loaded = result['plugin'].get('loaded')
@@ -599,6 +612,7 @@ class NativeFacade:
     def recover(self, identity, record):
         self.operation = 'recover'
         self._operation('recover', identity, record)
+        self.recovery_inspection = False  # subsequent receipt/cohort verification is strict
     def verify(self, identity, record):
         self._operation('verify', identity, record)
         self.verified = True
@@ -893,7 +907,7 @@ class Controller:
         if operation not in ('activate', 'recover') or not self.permits(row, operation, identity):
             raise ContractError('current concrete operation consent absent')
         if not self.retained(identity): raise ContractError('concrete grant artifact missing')
-        status = coherent_native_status(native_status, row['component'])
+        status = coherent_native_status(native_status, row['component'], allow_target_absent=operation == 'recover')
         record = parse(read_regular(self.root / 'records' / (identity + '.json')).decode())
         root = self.root / 'snapshots' / record['payload_sha256']
         expected_tree = record['evidence']['native_tree_sha256']
@@ -970,7 +984,8 @@ class Controller:
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}
         journal = Journal(self.root / 'journal', row['policy']['compatibility_group'])
         if isinstance(self.native, NativeFacade):
-            self.native.prepare(row, row['previous'], lambda identity, status, operation: self.concrete_grant(row, identity, status, operation))
+            self.native.prepare(row, row['previous'], lambda identity, status, operation: self.concrete_grant(row, identity, status, operation),
+                                recovery=operation == 'recover' and self.permits(row, 'recover', row['previous']) and self.permits(row, 'verify', row['previous']))
         if operation == 'recover':
             # Recovery never depends on candidate CI availability or current candidate retention consent.
             adapters = self.adapters(row, None)

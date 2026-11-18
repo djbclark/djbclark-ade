@@ -15,3 +15,6 @@
 
 ### Added
 - Bind the finite Linux controller facade to the producer manifest and complete executing cohort, mapping retained receipts through exact runtime profile identities. (#796)
+
+### Fixed
+- Permit authorized failed-target recovery inspection without inventing a loaded receipt, preserving complete non-target cohort and strict post-recovery verification. (#796)

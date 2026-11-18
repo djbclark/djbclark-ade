@@ -316,3 +316,17 @@ actual disposable root-owned /var/lib inventory bytes without executing its dumm
 Node. These do not qualify a production host. Root owns the real integrated
 producer/native/evaluator A-to-B-to-A proof, and the proposed wire must still be
 implemented/reviewed in that exact distribution before any real support can pass.
+
+
+Recovery capability and target liveness are separate. A coherent qualified daemon
+and unchanged complete non-target cohort can support recovery even when the named
+failed target is absent or disabled. Ordinary observation and deployment still
+require its actual loaded receipt. Only a currently recover+verify-authorized
+baseline transaction enables absent-target inspection, which returns an explicit
+native-target-absent observation identity, never a fake retained-baseline receipt.
+Native journal CAS/retained baseline/grants remain mandatory. Managed recovery
+inspection can carry loaded=null; uncertain/missing non-target state still refuses.
+After a successful recovery response, the inspection allowance is removed before
+verification: fresh actual running/enabled receipt and complete cohort mapping
+must pass. A lost child after apparent recovery keeps recovery_required/hold and
+never triggers END. This does not adopt an unmanaged or missing native baseline.

@@ -596,7 +596,7 @@ def test_cohort_parser_and_retained_receipt_map(cohort_mapping_fixture,monkeypat
     row,receipt,controller,config,facts=cohort_mapping_fixture
     assert c.cohort_observation(facts,config,row['cohort'],'ade-yolo') is facts
     facade=c.NativeFacade(lambda:row,controller.root)
-    monkeypatch.setattr(facade,'cohort_status',lambda:c.cohort_observation(facts,config,row['cohort'],'ade-yolo'))
+    monkeypatch.setattr(facade,'cohort_status',lambda **options:c.cohort_observation(facts,config,row['cohort'],'ade-yolo',**options))
     assert facade.observe(row['cohort'])==receipt.sha256
     target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
     # Native CAS is8 while loaded generation2; identity matching does not rewrite either.
@@ -671,3 +671,86 @@ def test_python_preexec_manifest_verifier_real_protected_inventory(tmp_path):
         with pytest.raises(c.ContractError,match='mismatch'):c.verify_transport_distribution(config)
     finally:
         sudo('rm','-rf','--',root,str(root)+'.manifest.json')
+
+
+@pytest.mark.parametrize('restores_child',[True,False])
+def test_real_facade_absent_target_recovery_keeps_postverify_strict(cohort_mapping_fixture,monkeypatch,restores_child):
+    """Actual facade+Journal, synthetic authenticated wire; no production qualification."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    row['previous']=receipt.sha256
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    original=c.parse(c.canonical(target['loaded']).decode())
+    target['journal']['baseline']={'source':target['registration'],'receipt':original}
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    calls=[]
+    def wire(args,token=None):
+        calls.append((args,token))
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:
+            return {'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
+                'daemonIncarnation':config['daemonIncarnation'],
+                'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':True}}}
+        if args==['plugin','managed-status','ade-yolo']:
+            return {'version':1,'pluginId':'ade-yolo','consistency':'coherent',
+                'registration':target['registration'],'journal':target['journal'],'loaded':target['loaded']}
+        if args[:3]==['daemon','maintenance','begin']:
+            return dict(native.reservation,state='held',recoveryRequired=False,ownerToken='s'*43)
+        if args[:3]==['daemon','maintenance','plugin-operation']:
+            assert token=='s'*43
+            operation=args[args.index('--operation')+1]
+            assert operation in ('recover','verify')
+            assert args[args.index('--expected-generation')+1]==str(target['journal']['generation'])
+            if operation=='recover':
+                loaded=dict(original,activationGeneration=9,processStartToken='recovered-owned-child')
+                target['loaded']=loaded;target['enabled']=True
+                target['execution']={'contract':'native-passive-contract-1','incarnation':loaded['processStartToken'],
+                    'distributionBuildId':'fixture-build','closure':config['closure']}
+                target['journal'].update(generation=9,currentReceipt=loaded)
+                facts['observationEpoch']+=1
+            result={'plugin':{'id':'ade-yolo','enabled':True,'status':'running','loaded':target['loaded']},
+                'nativeGeneration':target['journal']['generation'],'maintenance':{'state':'held'},
+                'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+            if operation=='recover' and not restores_child:
+                # An apparent successful response cannot substitute for later actual liveness.
+                target['loaded']=None;target['execution']=None
+            return result
+        if args[:3]==['daemon','maintenance','end']:
+            assert token=='s'*43
+            return {'state':'idle','recoveryRequired':False}
+        raise AssertionError(args)
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    journal.enroll(receipt.sha256,controller.adapters(row,None))
+    # Failed activation/crash: no child, no execution metadata; other cohort remains unchanged.
+    target['loaded']=None;target['execution']=None
+    assert native.supported() is True  # operation capability, not a fake loaded receipt
+    with pytest.raises(c.ContractError):native.observe(row['cohort'])  # ordinary observation strict
+    native.prepare(row,receipt.sha256,None,recovery=True)
+    inspected=native.observe(row['cohort'])
+    assert inspected.startswith('native-target-absent:v1:') and inspected!=receipt.sha256
+    result=controller.tick('recover')
+    operations=[args[args.index('--operation')+1] for args,_ in calls if args[:3]==['daemon','maintenance','plugin-operation']]
+    assert operations[0]=='recover'
+    if restores_child:
+        assert result['status']=='runtime_verified'
+        assert native.observe(row['cohort'])==receipt.sha256
+        assert operations==['recover','verify']
+        assert any(args[:3]==['daemon','maintenance','end'] for args,_ in calls)
+    else:
+        assert result['status']=='recovery_required'
+        assert not any(args[:3]==['daemon','maintenance','end'] for args,_ in calls)
+        assert native.recovery_inspection is False
+
+
+@pytest.mark.parametrize('enabled',[False,None])
+def test_failed_target_state_inspection_does_not_relax_other_cohort(cohort_mapping_fixture,enabled):
+    row,_,_,config,facts=cohort_mapping_fixture
+    target=next(e for e in facts['entries'] if e['pluginId']=='ade-yolo')
+    target.update(loaded=None,execution=None,enabled=enabled)
+    assert c.cohort_observation(facts,config,row['cohort'],'ade-yolo',allow_target_absent=True) is facts
+    with pytest.raises(c.ContractError):c.cohort_observation(facts,config,row['cohort'],'ade-yolo')
+    other=next(e for e in facts['entries'] if e['pluginId']!='ade-yolo')
+    other.update(loaded=None,execution=None)
+    with pytest.raises(c.ContractError,match='non-target'):c.cohort_observation(facts,config,row['cohort'],'ade-yolo',allow_target_absent=True)
