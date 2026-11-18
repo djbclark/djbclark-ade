@@ -31,7 +31,7 @@ MEMBERS = {'receipt.json', 'snapshot.json', 'evaluator-evidence.json'}
 OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain'}
 FIELDS = {'schema_version', 'component', 'channel', 'repository', 'repository_id',
           'cohort', 'policy', 'expected', 'evaluation', 'operations', 'previous',
-          'generation', 'master_commit', 'evidence', 'discovery'}
+          'generation', 'master_commit', 'evidence', 'discovery', 'native'}
 
 
 def locations():
@@ -102,6 +102,18 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
     ev = evaluation(row)
     if expected.get('authority') != 'protected-ci' or expected.get('evaluator') != ev.evaluator_commit:
         raise ContractError('protected evaluator identity mismatch')
+    native = row['native']
+    if native is not None:
+        if type(native) is not dict or set(native) != {'node', 'cli', 'serverId', 'daemonIncarnation', 'distributionSha256'}:
+            raise ContractError('invalid retained native transport')
+        for key in ('node', 'cli'):
+            item = native[key]
+            if (type(item) is not dict or set(item) != {'path', 'sha256'} or
+                    type(item['path']) is not str or not Path(item['path']).is_absolute() or
+                    type(item['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', item['sha256'])):
+                raise ContractError('invalid retained transport identity')
+        for key in ('serverId', 'daemonIncarnation', 'distributionSha256'):
+            if type(native[key]) is not str or not native[key]: raise ContractError('missing native transport identity')
     discovery = row['discovery']
     if (type(discovery) is not dict or set(discovery) != {'enabled', 'artifact_prefix', 'baseline_run_id'} or
             type(discovery['enabled']) is not bool or discovery['artifact_prefix'] != 'ade-yolo-qualified' or
@@ -215,35 +227,176 @@ def coherent_native_status(value, plugin_id):
 
 
 class NativeFacade:
-    """No mutating CLI fallback: incomplete native status cannot grant support."""
+    """Actual bounded retained CLI transport; qualification/status coupling still absent.
+
+    No source/dev/PATH fallback. supported remains false until native owners publish
+    and implement genuine qualified status/feature metadata for this exact bridge.
+    """
+    def __init__(self, reader=None, root=None):
+        self.reader = reader or read_enrollment
+        self.root = root or locations()[1]
+        self.token = None
+        self.reservation = None
+        self.uncertain = False
+        self.verified = False
+        self.target = None
+        self.render = None
+        self.bridge_binding = None
+        self.operation = 'activate'
+
     def supported(self): return False
 
-    def list_observations(self):
-        with subprocess.Popen(['paseo', 'plugin', 'ls', '--json'], stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL) as proc:
+    def prepare(self, row, identity, render):
+        self.transaction_row = row
+        self.target = identity
+        self.render = render
+
+    def _transport(self):
+        config = self.reader()['native']
+        if type(config) is not dict: raise ContractError('retained native bridge unavailable')
+        binding = digest(config)
+        if self.bridge_binding is not None and self.bridge_binding != binding:
+            self.uncertain = True
+            raise ContractError('retained native bridge changed during transaction')
+        for key in ('node', 'cli'):
+            item = config[key]; path = Path(item['path'])
+            data = read_regular(path, 256 * 1024 * 1024)
+            if path.stat().st_mode & 0o222 or hashlib.sha256(data).hexdigest() != item['sha256']:
+                raise ContractError('retained native bridge identity mismatch')
+        self.bridge_binding = binding
+        return config
+
+    def _call(self, arguments, token=None):
+        config = self._transport()
+        args = [config['node']['path'], config['cli']['path'], *arguments, '--json']
+        env = {'PATH': str(Path(config['node']['path']).parent) + ':/usr/bin:/bin',
+               'HOME': pwd.getpwuid(os.getuid()).pw_dir}
+        if token is not None and not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
+            raise ContractError('invalid private owner token')
+        with subprocess.Popen(args, stdin=subprocess.PIPE if token is not None else subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as proc:
             deadline = time.monotonic() + 30
             data = bytearray()
             try:
+                if token is not None:
+                    # Only <=44 bytes to a private anonymous pipe, never argv/env/file path.
+                    proc.stdin.write((token + '\n').encode('ascii')); proc.stdin.close()
                 with selectors.DefaultSelector() as selector:
                     selector.register(proc.stdout, selectors.EVENT_READ)
                     while True:
                         remaining = deadline - time.monotonic()
-                        if remaining <= 0 or not selector.select(remaining):
-                            raise ContractError('native observation timed out')
+                        if remaining <= 0 or not selector.select(remaining): raise ContractError('native transport timed out')
                         chunk = os.read(proc.stdout.fileno(), min(65536, 1024 * 1024 + 1 - len(data)))
                         if not chunk: break
                         data.extend(chunk)
-                        if len(data) > 1024 * 1024: raise ContractError('native observation too large')
+                        if len(data) > 1024 * 1024: raise ContractError('native transport output too large')
                 remaining = deadline - time.monotonic()
-                if remaining <= 0: raise ContractError('native observation timed out')
+                if remaining <= 0: raise ContractError('native transport timed out')
                 try: code = proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired as error: raise ContractError('native observation timed out') from error
-                if code: raise ContractError('native observation failed')
+                except subprocess.TimeoutExpired as error: raise ContractError('native transport timed out') from error
+                if code: raise ContractError('native transport refused')
+                # Native CLI --json contract is one BARE JSON result, not an RPC envelope.
                 return parse(data.decode())
+            except Exception:
+                if self.reservation is not None: self.uncertain = True
+                raise
             finally:
                 if proc.poll() is None: proc.kill()
                 proc.wait()
 
+    def list_observations(self):
+        return self._call(['plugin', 'ls'])
+
+    def managed_status(self, plugin_id):
+        return coherent_native_status(self._call(['plugin', 'managed-status', plugin_id]), plugin_id)
+
+    def _identity_args(self):
+        config = self._transport()
+        return ['--expected-server-id', config['serverId'], '--expected-daemon-incarnation', config['daemonIncarnation']]
+
+    def _reservation_args(self):
+        if not self.reservation or not self.token: raise ContractError('native private reservation absent')
+        return ['--generation', str(self.reservation['generation']), '--transaction-id', self.reservation['transactionId'], *self._identity_args()]
+
+    @__import__('contextlib').contextmanager
+    def reserve(self):
+        if self.supported() is not True or not self.target:
+            raise ContractError('native qualified reservation unavailable')
+        row = self.transaction_row
+        generation = row['generation'] + 1
+        tx = digest({'group': row['policy']['compatibility_group'], 'generation': generation, 'target': self.target})
+        self.reservation = {'generation': generation, 'transactionId': tx}
+        self.verified = False
+        try:
+            result = self._call(['daemon', 'maintenance', 'begin', '--generation', str(generation), '--transaction-id', tx, *self._identity_args()])
+            if (type(result) is not dict or result.get('state') != 'held' or result.get('recoveryRequired') is not False or
+                    result.get('generation') != generation or result.get('transactionId') != tx or
+                    type(result.get('ownerToken')) is not str or not re.fullmatch('[A-Za-z0-9_-]{43}', result['ownerToken'])):
+                raise ContractError('native begin uncertain')
+            self.token = result['ownerToken']
+            yield True
+        except BaseException:
+            self.uncertain = True
+            raise
+        finally:
+            # Journal can return recovery_required without raising. Therefore context
+            # exit NEVER sends END. Controller acknowledges only a committed verified result.
+            pass
+
+    def finish(self):
+        if not self.verified or self.uncertain or not self.token:
+            raise ContractError('native release not verified')
+        result = self._call(['daemon', 'maintenance', 'end', *self._reservation_args(), '--owner-token-fd', '0'], self.token)
+        if type(result) is not dict or result.get('state') != 'idle' or result.get('recoveryRequired') is not False:
+            self.uncertain = True
+            raise ContractError('native end uncertain')
+        self.token = None; self.reservation = None
+
+    def preflight(self, record):
+        return self.supported() is True and self.token is not None and not self.uncertain
+
+    def observe(self, cohort):
+        # Exact enclosing status + namespace/cohort/qualified identity metadata is not
+        # finalized by native owners. Never relabel loaded metadata as a receipt identity.
+        self.uncertain = True
+        raise ContractError('qualified enclosing cohort observation unavailable')
+
+    def _operation(self, kind, identity, record):
+        if self.supported() is not True or self.render is None or identity != self.target:
+            raise ContractError('native held operation unavailable')
+        status = self.managed_status(record['expected']['component'])
+        rendered = self.render(identity, status, self.operation)
+        grant = rendered['authorization']
+        result = self._call(['daemon', 'maintenance', 'plugin-operation', '--operation', kind,
+            *self._reservation_args(), '--plugin-id', rendered['pluginId'], '--path', grant['sourcePath'],
+            '--expected-path', rendered['expectedPath'], '--expected-generation', str(grant['expectedGeneration']),
+            '--snapshot-sha256', grant['snapshotSha256'], '--server-bundle-sha256', grant['serverBundleSha256'],
+            '--owner-token-fd', '0'], self.token)
+        config = self._transport()
+        if (type(result) is not dict or result.get('serverId') != config['serverId'] or
+                result.get('daemonIncarnation') != config['daemonIncarnation'] or
+                type(result.get('nativeGeneration')) is not int or type(result.get('plugin')) is not dict):
+            self.uncertain = True
+            raise ContractError('native operation identity uncertain')
+        loaded = result['plugin'].get('loaded')
+        if (type(loaded) is not dict or loaded.get('sourcePath') != grant['sourcePath'] or
+                loaded.get('snapshotRoot') != grant['snapshotRoot'] or loaded.get('snapshotSha256') != grant['snapshotSha256'] or
+                loaded.get('serverBundleSha256') != grant['serverBundleSha256'] or not loaded.get('processStartToken') or
+                type(loaded.get('pid')) is not int or not loaded.get('startedAt')):
+            self.uncertain = True
+            raise ContractError('native loaded receipt uncertain')
+        return result
+
+    def activate(self, identity, record):
+        self.operation = 'activate'
+        self._operation('replace', identity, record)
+    def recover(self, identity, record):
+        self.operation = 'recover'
+        self._operation('recover', identity, record)
+    def verify(self, identity, record):
+        self._operation('verify', identity, record)
+        self.verified = True
+        return True
 
 
 class Controller:
@@ -251,7 +404,7 @@ class Controller:
     def __init__(self, reader=read_enrollment, evaluator=None, native=None, root=None):
         self.reader = reader
         self.evaluator = evaluator or GitHubEvaluation()
-        self.native = native or NativeFacade()
+        self.native = native or NativeFacade(reader, root)
         self.selection = None
         self.root = Path(root) if root is not None else locations()[1]
 
@@ -537,7 +690,7 @@ class Controller:
         if tree_hash(root) != expected_tree: raise ContractError('concrete grant tree mismatch')
         profile = record['policy'].get('native_passive_profile')
         required = {'version', 'contract', 'qualificationSha256', 'runtimeClosureSha256', 'helperClosureSha256', 'initialization'}
-        if (type(profile) is not dict or set(profile) != required or profile['version'] != 1 or
+        if (type(profile) is not dict or set(profile) != required or type(profile['version']) is not int or profile['version'] != 1 or
                 profile['contract'] != 'native-passive-contract-1' or profile['initialization'] != 'registration-only' or
                 any(type(profile[key]) is not str or not re.fullmatch('[a-f0-9]{64}', profile[key])
                     for key in ('qualificationSha256', 'runtimeClosureSha256', 'helperClosureSha256'))):
@@ -592,23 +745,39 @@ class Controller:
         if self.native.supported() is not True:
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}
         journal = Journal(self.root / 'journal', row['policy']['compatibility_group'])
+        if isinstance(self.native, NativeFacade):
+            self.native.prepare(row, row['previous'], lambda identity, status, operation: self.concrete_grant(row, identity, status, operation))
         if operation == 'recover':
             # Recovery never depends on candidate CI availability or current candidate retention consent.
             adapters = self.adapters(row, None)
-            return asdict(journal.recover(adapters, generation=row['generation']))
+            result = asdict(journal.recover(adapters, generation=row['generation']))
+            if result['status'] == 'runtime_verified' and isinstance(self.native, NativeFacade):
+                if not self.permits(row, 'verify', row['previous']):
+                    self.native.uncertain = True
+                    raise ContractError('native recovery release consent revoked')
+                self.native.finish()
+            return result
         if operation == 'deploy' and row['operations'].get('activate', {}).get('identity') == 'qualified-latest':
             receipt, payload, verified, release = self.selected_release(row)
             expected = release['expected']
         else:
             receipt, payload, verified = self.acquire(row)
             expected = row['expected']
+        if isinstance(self.native, NativeFacade):
+            self.native.prepare(row, receipt.sha256, lambda identity, status, operation: self.concrete_grant(row, identity, status, operation))
         adapters = self.adapters(row, verified)
         if operation == 'enroll':
             journal.enroll(receipt.sha256, adapters)
             return {'status': 'enrolled', 'identity': receipt.sha256, 'authorized': False}
         if operation != 'deploy': raise ContractError('unsupported operation')
-        return asdict(journal.deploy(receipt, expected, row['policy'], payload, adapters,
+        result = asdict(journal.deploy(receipt, expected, row['policy'], payload, adapters,
                                     previous=row['previous'], generation=row['generation'], migration='binary_only'))
+        if result['status'] == 'runtime_verified' and isinstance(self.native, NativeFacade):
+            if not self.permits(row, 'verify', receipt.sha256):
+                self.native.uncertain = True
+                raise ContractError('native release consent revoked')
+            self.native.finish()
+        return result
 
 
 def main(argv=None):

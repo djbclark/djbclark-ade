@@ -56,7 +56,7 @@ def fixture(tmp_path):
                repository_id=10, cohort=cohort, policy=policy, expected=expected, evaluation=ev,
                operations={op:dict(allowed=True,identity=receipt.sha256,generation=0) for op in c.OPERATIONS},
                previous='0'*64, generation=0, master_commit=commit, evidence=evidence,
-               discovery={'enabled':True,'artifact_prefix':'ade-yolo-qualified','baseline_run_id':40})
+               discovery={'enabled':True,'artifact_prefix':'ade-yolo-qualified','baseline_run_id':40},native=None)
     row = c.enrollment(c.canonical(row), registry)
     return row, receipt, payload, archive
 
@@ -417,3 +417,71 @@ def test_qualified_latest_requires_selected_current_master(fixture,tmp_path):
                           'selected':{'identity':receipt.sha256,'commit':row['master_commit']}}
     controller.discover_master=lambda:{'discovered':'f'*40}
     assert not controller.permits(row,'activate',receipt.sha256)
+
+
+def test_concrete_grant_missing_protected_passive_profile_holds(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row)
+    snapshots.stage(payload,controller.root/'snapshots',snapshots.payload_tree_hash(payload))
+    status={'version':1,'pluginId':'ade-yolo','consistency':'coherent',
+            'registration':{'path':'/old/A'},'journal':{'generation':8,'phase':'ready',
+            'baseline':{'source':{}},'currentReceipt':{'fixture':True}},'loaded':{'activationGeneration':2}}
+    with pytest.raises(c.ContractError,match='passive'):controller.concrete_grant(row,receipt.sha256,status)
+
+
+def test_concrete_grant_binds_exact_tree_and_native_cas(fixture,tmp_path):
+    row,_,payload,_=fixture
+    policy=dict(row['policy'],native_passive_profile=dict(version=1,contract='native-passive-contract-1',
+        qualificationSha256='1'*64,runtimeClosureSha256='2'*64,helperClosureSha256='3'*64,initialization='registration-only'))
+    evidence=dict(row['evidence'],server_bundle_sha256='4'*64)
+    expected=dict(row['expected'],policy_digest=digest(policy),
+        toolchain=c.canonical({'plugin_snapshot_evidence':digest(evidence)}).decode())
+    receipt=make_receipt(expected,policy,{k:{'status':'passed','contract_digest':digest(v)} for k,v in policy['features'].items()})
+    archive=zip_bytes({'receipt.json':receipt.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(evidence)})
+    row.update(policy=policy,evidence=evidence,expected=expected)
+    row['evaluation'].update(receipt_sha256=receipt.sha256,archive_sha256=c.hashlib.sha256(archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=receipt.sha256
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row)
+    root=snapshots.stage(payload,controller.root/'snapshots',snapshots.payload_tree_hash(payload))
+    status={'version':1,'pluginId':'ade-yolo','consistency':'coherent',
+            'registration':{'path':'/old/A'},'journal':{'generation':8,'phase':'ready',
+            'baseline':{'source':{}},'currentReceipt':{'fixture':True}},'loaded':{'activationGeneration':2}}
+    grant=controller.concrete_grant(row,receipt.sha256,status)
+    assert grant['authorization']['expectedGeneration']==8
+    assert grant['authorization']['sourcePath']==str(root/'plugins/ade-yolo')
+    assert grant['expectedPath']=='/old/A'
+    assert 'ownerToken' not in c.canonical(grant).decode()
+
+
+def test_real_facade_private_fd_transport_and_nonzero_refusal(tmp_path,monkeypatch):
+    """Execute a disposable CLI fixture through production bounded pipe code in CI."""
+    script=tmp_path/'bridge.py'
+    script.write_text('import json,sys\nvalue=sys.stdin.read()\nassert "s"*43 not in sys.argv\nprint(json.dumps({"tokenBytes":len(value.strip()),"args":sys.argv[1:]}))\n')
+    facade=c.NativeFacade()
+    monkeypatch.setattr(facade,'_transport',lambda:{'node':{'path':sys.executable},'cli':{'path':str(script)}})
+    result=facade._call(['fixture','--owner-token-fd','0'],'s'*43)
+    assert result['tokenBytes']==43
+    assert result['args']==['fixture','--owner-token-fd','0','--json']
+    script.write_text('import sys\nprint("{\\"state\\":\\"idle\\"}")\nsys.exit(1)\n')
+    with pytest.raises(c.ContractError,match='refused'):facade._call(['fixture'])
+
+
+def test_native_reservation_context_never_ends_implicitly(monkeypatch):
+    facade=c.NativeFacade()
+    facade.prepare({'generation':1,'policy':{'compatibility_group':'fixture'}},'a'*64,None)
+    monkeypatch.setattr(facade,'supported',lambda:True)
+    monkeypatch.setattr(facade,'_identity_args',lambda:[])
+    calls=[]
+    def invoke(args,token=None):
+        calls.append(args)
+        return {'state':'held','recoveryRequired':False,'generation':2,
+                'transactionId':facade.reservation['transactionId'],'ownerToken':'s'*43}
+    monkeypatch.setattr(facade,'_call',invoke)
+    with facade.reserve():facade.verified=True
+    assert len(calls)==1 and 'begin' in calls[0]
+    assert facade.token=='s'*43
+    facade.uncertain=True
+    with pytest.raises(c.ContractError):facade.finish()
+    assert len(calls)==1

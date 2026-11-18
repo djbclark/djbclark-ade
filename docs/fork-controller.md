@@ -16,7 +16,7 @@ There is one existing Journal for that group, no second deployment journal.
 
 Strict version1 fields are `schema_version`, `component`, `channel`, `repository`,
 `repository_id`, `cohort`, `policy`, `expected`, `evaluation`, `operations`,
-`previous`, `generation`, `master_commit`, `evidence`, `discovery`. Unknown fields reject.
+`previous`, `generation`, `master_commit`, `evidence`, `discovery`, `native`. Unknown fields reject.
 `component` is ade-yolo; channel master; repository djbclark/djbclark-ade.
 `cohort` maps every catalog ID in enrolled paseo-runtime to a nonempty protected
 expected identity record. `expected.dependencies` includes the entire cohort.
@@ -207,3 +207,37 @@ Private held-operation transport is being specified by native owner049; no
 unpublished endpoint/FD protocol is guessed. Until that reviewed bridge and real
 producer are integrated, production NativeFacade remains unsupported, and there
 is no automatic END/reopen path on failed or uncertain operations.
+
+
+## Proposed native held-operation CLI transport
+
+The native owner published paseo-held-operation-api-v1.md as proposed/unqualified.
+The facade implements its exact commands: retained Node + retained CLI,
+plugin managed-status; daemon maintenance begin/end/plugin-operation; bare JSON
+one-document --json output. Nonzero exit ignores stdout. Reads enforce a 30s
+streaming deadline and 1MiB cap, kill/reap only the exact child, and never echo raw
+output. Private owner tokens are exactly43base64url bytes in memory and anonymous
+stdin pipe FD0 with a trailing newline, never argv/env/file paths/logs/journals.
+The bridge environment excludes caller loader/runtime overrides. Expected server
+ID and enclosing incarnation accompany native mutation requests. Native validates
+the bearer/CAS/current authority/private scope; controller metadata grants none.
+
+Protected enrollment native is null (unsupported) or an exact transport mapping:
+node and cli each contain path+sha256; serverId, daemonIncarnation,
+distributionSha256 bind the reviewed retained transport expectation. Source
+checks exact read-only regular bridge bytes/digests before use and pins the whole
+mapping through a transaction, refusing changed identity before writing any token.
+These on-disk checks DO NOT prove qualified executing namespace/incarnation.
+Native qualified status/cohort metadata is still being coordinated; supported()
+stays false and observe() refuses until its genuine owner-producer coupling is
+implemented. No speculative feature/status keys or brand constructors are added.
+Thus CLI deployment remains unavailable, even though the concrete transport methods
+are now real source, and none of these commands was executed on a live daemon.
+
+The private reserve context deliberately never sends END in finally. Journal may
+return recovery_required without an exception after a lost ACK or late validation
+failure. Only an explicit verified committed result and still-current verify
+consent can call finish(); uncertainty retains owner token/hold and requires
+explicit reconciliation. A failed, unknown or unverified operation never invokes
+END/rollback/reconnect cleanup. Real native status and fresh successor barrier
+remain mandatory release predicates in the native endpoint.
