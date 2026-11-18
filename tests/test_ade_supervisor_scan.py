@@ -74,6 +74,11 @@ def _messages(sent: Path) -> list[str]:
     return _calls(sent, "send")
 
 
+def _key(agent: str, account: str = "openai", lead: str = LEAD) -> str:
+    """A dedupe key is namespaced by the recipient it was told to."""
+    return f"{lead}|{agent}|{account}"
+
+
 def _agent(ident: str, account: str = "openai", status: str = "running") -> dict:
     return {"id": ident, "name": ident, "account": account, "model": f"{account}/gpt-6.1-sol", "status": status,
             "stuck": True, "headroom_percent": 0.0, "quota_stale": False,
@@ -101,7 +106,7 @@ def test_cleared_agent_leaves_the_state_and_is_noticed_again_later(tmp_path: Pat
     assert _run(bin_dir, home) == 0
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1")]}))            # b2 recovered
     assert _run(bin_dir, home) == 0
-    assert json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert json.loads((state / "notified").read_text()) == [_key("a1")]
     assert len(_messages(sent)) == 1                                     # the shrink alone says nothing
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1"), _agent("b2")]}))  # b2 stuck again
     assert _run(bin_dir, home) == 0
@@ -122,7 +127,7 @@ def test_an_undelivered_send_keeps_the_notice_for_the_next_run(tmp_path: Path) -
     assert not (state / "notified").exists() or json.loads((state / "notified").read_text()) == []
     _paseo(bin_dir, tmp_path, sent, rc=5)
     assert _run(bin_dir, home) == 0
-    assert len(_messages(sent)) == 2 and json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert len(_messages(sent)) == 2 and json.loads((state / "notified").read_text()) == [_key("a1")]
 
 
 def test_an_unset_lead_is_logged_and_sends_nothing(tmp_path: Path) -> None:
@@ -149,7 +154,7 @@ def test_a_broken_scan_alerts_the_lead_once(tmp_path: Path) -> None:
         assert _run(bin_dir, home) == 0
     messages = _messages(sent)
     assert len(messages) == 1 and "exit 7" in messages[0]
-    assert "scan|broken" in json.loads((state / "notified").read_text())
+    assert f"{LEAD}|scan|broken" in json.loads((state / "notified").read_text())
     _script(bin_dir / "ade-pi-stuck", "#!/bin/sh", "cat " + str(bin_dir / "feed.json"))
     assert _run(bin_dir, home) == 0
     assert "scan|broken" not in json.loads((state / "notified").read_text())
@@ -182,7 +187,7 @@ def test_a_transient_failure_does_not_reannounce_known_agents(tmp_path: Path) ->
     assert _run(bin_dir, home) == 0                                     # a1 is still stuck
     messages = _messages(sent)
     assert len(messages) == 2 and "id=a1" not in messages[1]
-    assert json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert json.loads((state / "notified").read_text()) == [_key("a1")]
 
 
 def test_an_archived_lead_is_not_messaged_and_the_operator_is_pinged_once(tmp_path: Path) -> None:
@@ -232,13 +237,11 @@ def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -
     assert _run(bin_dir, home, lead=None) == 0
     messages = _messages(sent)
     assert len(messages) == 1 and "-- SUCCESSOR-ID " in messages[0]     # `--` before the id, as ade-net-resume does
-    assert json.loads((state / "notified").read_text()) == []          # nothing told to the successor yet
-    assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
+    assert json.loads((state / "notified").read_text()) == [_key("a1", lead="SUCCESSOR-ID")]
+    assert "following the handoff to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
     assert (state / "lead").read_text().strip() == "SUCCESSOR-ID"      # the handoff is followed, not logged forever
-    assert json.loads((state / "notified").read_text()) == []          # the successor has heard none of it yet
     assert _run(bin_dir, home, lead=None) == 0                        # the next run reads the new lead ...
-    messages = _messages(sent)
-    assert len(messages) == 2 and "-- SUCCESSOR-ID " in messages[1]   # ... and tells it what is still true
+    assert len(_messages(sent)) == 1                                  # ... and it has already heard everything
 
 
 def test_a_lead_value_that_is_not_an_id_is_ignored(tmp_path: Path) -> None:
@@ -268,7 +271,7 @@ def test_a_failed_quota_read_alerts_the_lead_once(tmp_path: Path) -> None:
     messages = _messages(sent)
     assert len(messages) == 1
     assert "quota unread" in messages[0] and "id=a1" in messages[0]
-    assert "scan|quota-unread" in json.loads((state / "notified").read_text())
+    assert f"{LEAD}|scan|quota-unread" in json.loads((state / "notified").read_text())
 
 
 def test_a_guard_redirect_with_an_unusable_successor_is_refused(tmp_path: Path) -> None:
@@ -280,7 +283,7 @@ def test_a_guard_redirect_with_an_unusable_successor_is_refused(tmp_path: Path) 
     assert _run(bin_dir, home) == 0
     assert _messages(sent) == []
     log = (state / "supervisor.log").read_text()
-    assert 'successor id "--not-an-id" is unusable' in log        # %r would have cut the line short here
+    assert 'replacement lead id "--not-an-id" is unusable' in log   # %r would have cut the line short here
     assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
     assert not (state / "lead").exists()
 
@@ -343,4 +346,35 @@ def test_an_unreadable_stuck_list_does_not_reannounce_after_recovery(tmp_path: P
     assert _run(bin_dir, home) == 0
     messages = _messages(sent)
     assert len(messages) == 2 and "id=a1" not in messages[1]
-    assert json.loads((state / "notified").read_text()) == ["a1|openai"]
+    assert json.loads((state / "notified").read_text()) == [_key("a1")]
+
+
+def test_a_redirect_that_fails_is_retried_to_the_successor(tmp_path: Path) -> None:
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")], paseo_rc=2)   # the send fails
+    (bin_dir / "ade_send_guard.py").unlink()
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced"}))',
+            "raise SystemExit(3)")
+    assert _run(bin_dir, home) == 0
+    assert not (state / "notified").exists()                   # nothing was delivered, so nothing is deduped
+    _paseo(bin_dir, tmp_path, sent, rc=5)
+    assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 2 and "-- SUCCESSOR-ID " in messages[1]
+    assert json.loads((state / "notified").read_text()) == [_key("a1", lead="SUCCESSOR-ID")]
+
+
+def test_an_env_lead_that_keeps_naming_a_replaced_lead_is_told_once(tmp_path: Path) -> None:
+    """ADE_SUPERVISOR_LEAD still names the old lead: the notice follows the handoff, once, not every 300 s."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "ade_send_guard.py").unlink()
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced"}))',
+            "raise SystemExit(3)")
+    for _ in range(3):
+        assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and "-- SUCCESSOR-ID " in messages[0]
+    assert not (state / "lead").exists()                        # the environment owns the value: nothing rewritten
+    log = (state / "supervisor.log").read_text()
+    assert log.count("still names") == 1                        # the handoff is reported once, not 288 times a day
