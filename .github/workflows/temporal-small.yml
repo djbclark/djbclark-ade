@@ -1,0 +1,28 @@
+name: Optional local Temporal experiment
+on:
+  push:
+    paths: ['experiments/temporal-small/**', '.github/workflows/temporal-small.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bounded-experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: experiments/temporal-small
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - run: timeout 240 npm install
+      - run: npm ls --all
+      - name: Run local task/approval/restart/idempotency experiment
+        run: timeout 240 npm test
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: temporal-experiment-dependencies
+          path: experiments/temporal-small/package-lock.json
