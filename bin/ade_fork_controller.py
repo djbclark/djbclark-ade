@@ -606,7 +606,8 @@ def readonly_namespace_source(source,filename):
             ast.BinOp,ast.LShift,ast.RShift,ast.BitOr,ast.BitAnd,ast.Add,ast.Sub,ast.Mult)) for part in ast.walk(node))
     def definition(node):
         if isinstance(node,ast.FunctionDef):
-            if node.decorator_list:raise ContractError('readonly helper import decorator refused')
+            if any(not isinstance(item,ast.Name) or item.id!='property' for item in node.decorator_list):
+                raise ContractError('readonly helper import decorator refused')
             header=[*node.args.defaults,*[item for item in node.args.kw_defaults if item is not None]]
             header += [arg.annotation for arg in [*node.args.posonlyargs,*node.args.args,*node.args.kwonlyargs] if arg.annotation is not None]
             if node.args.vararg and node.args.vararg.annotation:header.append(node.args.vararg.annotation)

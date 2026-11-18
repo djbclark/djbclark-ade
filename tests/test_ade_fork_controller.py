@@ -1418,6 +1418,7 @@ def test_actual_committed_readonly_port_rejects_unprotected_fixture(tmp_path,mon
         if os.environ.get('ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE')=='1':pytest.fail('required exact native source absent')
         pytest.skip('exact native source is exercised in dedicated controller workflow')
     source=source_path.read_bytes()
+    assert isinstance(c.readonly_namespace_source(source,str(source_path)),c.ast.Module)
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     # Only outer byte reader is a unit double. The actual shared port enforces its
     # OWN root-owned ancestry, full manifest, namespace/mount/loader/inode checks.
