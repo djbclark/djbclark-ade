@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import io
 import os
@@ -31,7 +31,7 @@ MEMBERS = {'receipt.json', 'snapshot.json', 'evaluator-evidence.json'}
 OPERATIONS = {'enroll', 'preflight', 'stage', 'activate', 'verify', 'recover', 'retain'}
 FIELDS = {'schema_version', 'component', 'channel', 'repository', 'repository_id',
           'cohort', 'policy', 'expected', 'evaluation', 'operations', 'previous',
-          'generation', 'master_commit', 'evidence'}
+          'generation', 'master_commit', 'evidence', 'discovery'}
 
 
 def locations():
@@ -102,6 +102,11 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
     ev = evaluation(row)
     if expected.get('authority') != 'protected-ci' or expected.get('evaluator') != ev.evaluator_commit:
         raise ContractError('protected evaluator identity mismatch')
+    discovery = row['discovery']
+    if (type(discovery) is not dict or set(discovery) != {'enabled', 'artifact_prefix', 'baseline_run_id'} or
+            type(discovery['enabled']) is not bool or discovery['artifact_prefix'] != 'ade-yolo-qualified' or
+            type(discovery['baseline_run_id']) is not int or discovery['baseline_run_id'] <= 0):
+        raise ContractError('invalid protected discovery contract')
     ops = row['operations']
     if type(ops) is not dict or set(ops) - OPERATIONS:
         raise ContractError('invalid operation consent')
@@ -272,6 +277,144 @@ class Controller:
                 'reason': 'exact_candidate' if head == row['master_commit'] else 'new_head_requires_protected_evaluation',
                 'authorized': False}
 
+    def select_latest(self):
+        """Protected workflow output contract, ancestry order, no operation grants."""
+        row = self.reader()
+        if row['discovery']['enabled'] is not True:
+            raise ContractError('protected evaluator discovery not enabled')
+        ev = evaluation(row)
+        calls = 0
+        def api(endpoint):
+            nonlocal calls
+            calls += 1
+            if calls > 80: raise ContractError('discovery API budget exceeded')
+            return self.evaluator.api(endpoint)
+        quota = api('rate_limit')
+        if quota.get('resources', {}).get('core', {}).get('remaining', 0) < 500:
+            raise ContractError('discovery API quota held')
+        repo = api('repos/' + row['repository'])
+        if repo.get('id') != row['repository_id']: raise ContractError('source repository changed')
+        ref_path = 'repos/' + row['repository'] + '/git/ref/heads/master'
+        def master():
+            ref = api(ref_path)
+            obj = ref.get('object', {})
+            if (ref.get('ref') != 'refs/heads/master' or obj.get('type') != 'commit' or
+                    not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', obj.get('sha', ''))):
+                raise ContractError('invalid master identity')
+            return obj['sha']
+        latest = master()
+        comparisons = {}
+        def ancestor(older, newer):
+            if older == newer: return True
+            key = (older, newer)
+            if key not in comparisons:
+                result = api('repos/' + row['repository'] + '/compare/' + older + '...' + newer)
+                if (result.get('base_commit', {}).get('sha') != older or
+                        result.get('merge_base_commit', {}).get('sha') != older):
+                    comparisons[key] = False
+                else:
+                    comparisons[key] = result.get('status') in ('ahead', 'identical')
+            return comparisons[key]
+        baseline_commit = row['master_commit']
+        baseline_identity = row['previous']
+        if self.retained(baseline_identity):
+            baseline = parse(read_regular(self.root / 'records' / (baseline_identity + '.json')).decode())
+            baseline_commit = baseline['expected']['fork_commit']
+        if not ancestor(baseline_commit, latest):
+            raise ContractError('master rewind or incomparable baseline')
+        selected = None
+        if self.retained(baseline_identity):
+            selected = {'commit': baseline_commit, 'identity': baseline_identity, 'retained': True}
+        base = 'repos/' + ev.repository
+        runs = []
+        # Complete bounded history after the protected enrolled baseline run. No first-page guessing.
+        for page in range(1, 6):
+            response = api(f'{base}/actions/workflows/{ev.workflow_id}/runs?per_page=100&page={page}')
+            entries = response.get('workflow_runs')
+            if type(entries) is not list: raise ContractError('invalid evaluator run inventory')
+            runs.extend(r for r in entries if type(r.get('id')) is int and r['id'] > row['discovery']['baseline_run_id'])
+            if len(entries) < 100 or any(r.get('id', 0) <= row['discovery']['baseline_run_id'] for r in entries):
+                break
+        else: raise ContractError('evaluator history exceeds bounded window')
+        run_ids = set()
+        verified_candidates = 0
+        for run in runs:
+            if run['id'] in run_ids: raise ContractError('duplicate evaluator run')
+            run_ids.add(run['id'])
+            if (run.get('head_sha') != ev.evaluator_commit or run.get('status') != 'completed' or
+                    run.get('conclusion') != 'success' or run.get('event') != ev.event):
+                continue
+            attempt = run.get('run_attempt')
+            if type(attempt) is not int or attempt <= 0: raise ContractError('invalid evaluator attempt')
+            artifacts = api(f"{base}/actions/runs/{run['id']}/artifacts?per_page=100")
+            if type(artifacts.get('artifacts')) is not list or artifacts.get('total_count') != len(artifacts['artifacts']) or len(artifacts['artifacts']) >= 100:
+                raise ContractError('incomplete artifact inventory')
+            prefix = row['discovery']['artifact_prefix']
+            pattern = re.compile(re.escape(prefix) + r'-([a-f0-9]{40}|[a-f0-9]{64})-' + str(run['id']) + '-' + str(attempt))
+            matching = [(item, pattern.fullmatch(item.get('name', ''))) for item in artifacts['artifacts']]
+            matching = [(item, match) for item, match in matching if match]
+            if len(matching) > 1: raise ContractError('duplicate qualification output')
+            if not matching: continue  # protected workflow did not qualify this attempt
+            item, match = matching[0]; commit = match.group(1)
+            if not ancestor(baseline_commit, commit) or not ancestor(commit, latest):
+                raise ContractError('incomparable or stale source output')
+            if selected and not ancestor(selected['commit'], commit):
+                if ancestor(commit, selected['commit']): continue
+                raise ContractError('incomparable qualified outputs')
+            archive_digest = item.get('digest', '')
+            if not re.fullmatch(r'sha256:[a-f0-9]{64}', archive_digest): raise ContractError('artifact digest unavailable')
+            verified_candidates += 1
+            if verified_candidates > 4: raise ContractError('qualification discovery verification budget exceeded')
+            candidate_ev = replace(ev, run_id=run['id'], run_attempt=attempt, artifact_id=item['id'],
+                                   artifact_name=item['name'], archive_sha256=archive_digest[7:])
+            # First authenticate transport using protected evaluator constraints. Receipt digest
+            # discovery is allowed ONLY inside this authenticated exact reviewed workflow output.
+            private_directory(self.root); private_directory(self.root / 'archives')
+            verified_transport = self.evaluator.verify(candidate_ev, self.root / 'archives')
+            archive = read_regular(verified_transport.archive)
+            if hashlib.sha256(archive).hexdigest() != candidate_ev.archive_sha256:
+                raise ContractError('discovery archive substitution')
+            receipt, payload, evidence = unpack_archive(archive)
+            source = inspect(payload)
+            if source['commit'] != commit: raise ContractError('workflow source output mismatch')
+            # Only recipe-defined dynamic fields vary. Candidate JSON does not define policy,
+            # feature tests, dependencies, recipe/compiler identity, authority or evaluator.
+            expected = dict(row['expected'])
+            expected.update(fork_commit=commit, upstream_commit=commit,
+                            artifact_sha256=hashlib.sha256(payload).hexdigest())
+            protected_evidence = dict(row['evidence'])
+            protected_evidence.update(master_commit=commit, native_tree_sha256=payload_tree_hash(payload))
+            # Compiled result is a protected evaluator output; all compiler/tool identities remain fixed.
+            bundle = evidence.get('server_bundle_sha256')
+            if not isinstance(bundle, str) or not re.fullmatch('[a-f0-9]{64}', bundle):
+                raise ContractError('missing protected compiler output digest')
+            protected_evidence['server_bundle_sha256'] = bundle
+            expected['toolchain'] = canonical({'plugin_snapshot_evidence': digest(protected_evidence)}).decode()
+            if evidence != protected_evidence: raise ContractError('protected recipe evidence mismatch')
+            candidate_ev = replace(candidate_ev, receipt_sha256=receipt.sha256)
+            # Re-authenticate exact receipt after bounded protected-output discovery, with metadata
+            # rechecks at the exact attempt. No private verification seal is constructed here.
+            verified = self.evaluator.verify(candidate_ev, self.root / 'archives')
+            validate(receipt, expected, row['policy'], artifact=payload)
+            if qualify(payload, 'ade-yolo', receipt, expected, row['policy'], verified, evidence, protected_evidence) != 'QUALIFIED':
+                raise ContractError('protected candidate did not qualify')
+            record = {'receipt': base64.b64encode(receipt.encoded).decode(),
+                      'payload_sha256': expected['artifact_sha256'], 'expected': expected,
+                      'policy': row['policy'], 'cohort': row['cohort'], 'evaluation': dict(asdict(candidate_ev), jobs=list(candidate_ev.jobs)),
+                      'evidence': evidence}
+            if canonical(self.reader()) != canonical(row) or master() != latest:
+                raise ContractError('master or enrollment changed during selection')
+            immutable(self.root / 'payloads' / expected['artifact_sha256'], payload)
+            immutable(self.root / 'records' / (receipt.sha256 + '.json'), canonical(record))
+            if selected and selected['commit'] == commit and selected['identity'] != receipt.sha256:
+                raise ContractError('ambiguous qualification identity for source')
+            selected = {'commit': commit, 'identity': receipt.sha256, 'retained': True}
+        if canonical(self.reader()) != canonical(row) or master() != latest:
+            raise ContractError('master or enrollment changed before selection commit')
+        return {'status': 'qualified_available' if selected else 'hold', 'latest_discovered': latest,
+                'selected_qualified': selected, 'authorized': False,
+                'reason': 'no_qualified_ancestor' if not selected else 'protected_evaluator_ancestor'}
+
     def permits(self, row, operation, identity):
         current = self.reader()
         if canonical(current) != canonical(row): return False
@@ -345,6 +488,7 @@ class Controller:
     def tick(self, operation='plan'):
         row = self.reader()
         if operation == 'plan': return self.plan()
+        if operation == 'select': return self.select_latest()
         # No acquisition, staging, journal or native mutations on unsupported runtime.
         if self.native.supported() is not True:
             return {'status': 'hold', 'reason': 'native_execution_status_reservation_unsupported', 'authorized': False}
@@ -369,7 +513,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         # Shipped tick is read-only planning. No CLI deploy/enroll/port override exists.
-        result = Controller().plan()
+        controller = Controller()
+        result = controller.select_latest() if args.command == 'tick' else controller.plan()
         if args.command == 'status': result['status'] = 'hold'; result['reason'] = 'native_execution_status_reservation_unsupported'
         print(canonical(result).decode()); return 0
     except (OSError, ValueError, TypeError, KeyError) as error:

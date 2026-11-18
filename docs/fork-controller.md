@@ -3,7 +3,7 @@
 `bin/ade-fork-controller status|plan|tick` reads the real account's fixed
 `.local/state/djbclark-ade/forks/controller.json`. HOME, CLI flags and environment
 cannot substitute a grant path. No file is installed by this source change.
-All shipped CLI commands are read-only protected-candidate planning. Missing
+status/plan are deterministic protected-candidate planning; tick performs read-only GitHub discovery and private evidence retention, with no runtime mutations. Missing
 or unsupported enrollment returns HOLD. No runtime adapter is selected by JSON.
 
 `bin/ade_fork_controller.py` owns the pilot integration. Existing release,
@@ -16,7 +16,7 @@ There is one existing Journal for that group, no second deployment journal.
 
 Strict version1 fields are `schema_version`, `component`, `channel`, `repository`,
 `repository_id`, `cohort`, `policy`, `expected`, `evaluation`, `operations`,
-`previous`, `generation`, `master_commit`, `evidence`. Unknown fields reject.
+`previous`, `generation`, `master_commit`, `evidence`, `discovery`. Unknown fields reject.
 `component` is ade-yolo; channel master; repository djbclark/djbclark-ade.
 `cohort` maps every catalog ID in enrolled paseo-runtime to a nonempty protected
 expected identity record. `expected.dependencies` includes the entire cohort.
@@ -94,13 +94,52 @@ source does not claim an atomic status API or install the native producer.
 
 ## Scheduling and master discovery
 
-Controller.discover_master performs bounded GitHub API reads to verify repository
-ID and literal master ref. A newer observed head yields HOLD requiring protected
-new evaluation. It cannot promote an observed commit into trusted expectations.
-The shipped deterministic plan/tick consumes only the current protected candidate;
-automatic evaluator selection/ancestry ranking is not implemented. No permanent
-freeze is intended: an external trusted enrollment/evaluator authority advances
-that candidate after qualification, then the next tick sees it.
+Controller.select_latest (shipped tick) discovers reviewed evaluator workflow runs
+newer than protected discovery.baseline_run_id, with complete bounded pagination.
+The initial baseline run is enrollment history, not a new manual source selection
+for each master. discovery has exactly enabled (bool), artifact_prefix
+(ade-yolo-qualified), baseline_run_id (positive integer). Enabling this protected
+contract consents only to discovery/retention; selected outputs grant no runtime
+operation permission. Existing artifact-scoped activation consent remains separate.
+
+The required reviewed workflow-output contract is: fixed evaluator repository ID,
+workflow path/ID, evaluator head commit, actor, event and required jobs as enrolled;
+upload exactly one `ade-yolo-qualified-SOURCE_SHA-RUN_ID-ATTEMPT` artifact only after
+all protected assertions pass. Its bounded ZIP contains the same exact three
+members. Protected workflow, not candidate build code, chooses the artifact name,
+source SHA, receipt and feature results. GitHub artifact metadata must supply its
+SHA256 digest. The controller first authenticates transport against fixed reviewed
+evaluator constraints, reads that authenticated output's receipt digest, then
+reauthenticates exact receipt/attempt/archive through GitHubEvaluation again. It
+never constructs a verification seal or accepts an output allowed boolean.
+This workflow producer is a required external integration contract, not installed
+or executed by the controller source. Its absence yields no new eligible candidate.
+
+Expected receipt fields come from the protected recipe template: source fork and
+upstream commit and payload SHA256 are independently recomputed; master and native
+tree evidence are independently bound to payload. Exact compiled server digest is
+read only from authenticated protected evaluator output. Compiler/tool identities,
+helper binding/cold assertions, dependencies, recipe revision, policy/features and
+authority stay protected and must match. Changing protected recipe/toolchain needs
+reviewed enrollment changes, rather than a new expected source record each master.
+
+Selection checks actual GitHub compare commit and merge-base identities. Source
+must descend from enrolled/retained baseline and be an ancestor of latest master;
+rewinds, incomparable outputs, duplicate attempts/artifacts and incomplete history
+hold. Runs failing or missing qualification output do not erase a retained baseline.
+Candidates are ordered by commit ancestry, never timestamps or version strings.
+Result exposes latest_discovered separately from selected_qualified. Latest master
+may fail while an older newly qualified ancestor or retained verified baseline wins.
+Master and the entire protected policy are reread before retaining a selection and
+again before returning it; changed state holds rather than publishing stale success.
+Native mutation remains unsupported; later apply must recheck both under native
+reservation at its own commit boundary, not trust an earlier selection response.
+
+Discovery is bounded to five history pages, 80 metadata calls and four candidate
+transport/receipt verification pairs per tick; exceeded bounds hold, never truncate
+to a false newest claim. Shared GitHub quota is checked first (remaining <500 holds).
+No scheduled job or evaluator runs are launched by discovery. No locally constructed
+fixture receipt proves actual qualified producer/runtime execution.
 
 Do not route master-snapshot through Sync's merge strategy: ADE upstream/fork
 are identical, and that API rejects this strategy. Future scheduling can use the
