@@ -46,6 +46,7 @@ if str(BIN) not in sys.path:
 
 import ade_config as ac  # noqa: E402
 import ade_install_catalog as catalog_policy  # noqa: E402
+import ade_forks  # noqa: E402
 
 SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 1
@@ -2443,15 +2444,15 @@ def apply_updates(
         def doctor_fn(catalog: Catalog, **kwargs: Any) -> tuple[list[Observation], int]:  # noqa: F811
             return doctor(catalog, **kwargs)
 
-    candidates: dict[str, list[str]] = {}
-    for step in update_plan(catalog, prefix=prefix):
-        if step["action"] == "candidate":
-            candidates[str(step["id"])] = list(step["argv"])
+    planned = {
+        str(step["id"]): step for step in update_plan(catalog, prefix=prefix)
+        if step["action"] in ("candidate", "blocked")
+    }
     if ids is not None:
-        unknown = ids - set(candidates)
+        unknown = ids - set(planned)
         if unknown:
             raise InstallError("unknown update component id(s): " + ", ".join(sorted(unknown)))
-        candidates = {cid: argv for cid, argv in candidates.items() if cid in ids}
+        planned = {cid: step for cid, step in planned.items() if cid in ids}
 
     rows_by_id = {row["id"]: row for row in catalog.components}
     report: dict[str, Any] = {
@@ -2460,10 +2461,19 @@ def apply_updates(
         "components": [],
         "doctor": {"before_fail": [], "retried": [], "after_fail": []},
     }
-    for cid in sorted(candidates):
+    for cid in sorted(planned):
         entry: dict[str, Any] = {"id": cid}
-        argv = candidates[cid]
+        if planned[cid]["action"] == "blocked":
+            entry.update(action="blocked", reason=planned[cid]["reason"])
+            report["components"].append(entry)
+            continue
+        argv = list(planned[cid]["argv"])
         entry["argv"] = argv
+        hold = ade_forks.installer_hold(cid)
+        if hold:
+            entry.update(action="blocked", reason=hold)
+            report["components"].append(entry)
+            continue
         pre = observe_component(
             rows_by_id[cid], root=catalog.root, probe_timeout_s=probe_timeout_s,
         )
@@ -2484,7 +2494,7 @@ def apply_updates(
             report["doctor"]["before_fail"].append(cid)
 
     if dry_run:
-        return report, 0
+        return report, int(any(e["action"] == "blocked" for e in report["components"]))
 
     updated_ids = [e["id"] for e in report["components"] if e["action"] in ("updated", "update-failed")]
     if updated_ids:
@@ -2545,6 +2555,9 @@ def _run_update_argv(
     argv: list[str],
 ) -> dict[str, Any]:
     """Run one component's update argv once; outcome is evidence, never a rollback."""
+    hold = ade_forks.installer_hold(cid)
+    if hold:
+        return {"id": cid, "action": "blocked", "rc": None, "reason": hold}
     entry: dict[str, Any] = {"id": cid, "action": "updated"}
     try:
         proc = run(list(argv))
@@ -2596,6 +2609,8 @@ def update_plan(catalog: Catalog, *, prefix: Path | None = None) -> list[dict[st
             step.update(action="skip", reason=f"class={row['class']} chosen={row.get('chosen')}; not selected")
         elif row.get("paseo_plugin"):
             step.update(action="owner-managed", reason="Paseo plugin metadata is observe-only; use its owner's update path")
+        elif (hold := ade_forks.installer_hold(str(row["id"]))):
+            step.update(action="blocked", reason=hold)
         elif not row.get("update_argv"):
             step.update(action="unconfigured", reason="no update_argv recorded; update prose is not an executable recipe")
         else:
@@ -3431,6 +3446,10 @@ def build_apply_steps(
         if not expected_installed(row):
             steps.append(ApplyStep(cid, "skip", None, f"class={row['class']} chosen={row.get('chosen')}"))
             continue
+        hold = ade_forks.installer_hold(cid)
+        if hold:
+            steps.append(ApplyStep(cid, "blocked", None, hold))
+            continue
         obs = observe_component(row, root=catalog.root)
         if obs.status in ("ok", "warn") and not force:
             steps.append(ApplyStep(cid, "skip", None, f"already present ({obs.detail})"))
@@ -3527,6 +3546,10 @@ def _run_install_argv(
     completed_reason: str,
 ) -> bool:
     """Execute under the caller's install_ledger_lock; return True if failed."""
+    hold = ade_forks.installer_hold(step.id)
+    if hold:
+        row.update(action="blocked", ok=False, reason=hold)
+        return True
     assert step.argv is not None
     entries = ledger.setdefault("entries", {})
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
