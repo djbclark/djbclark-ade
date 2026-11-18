@@ -25,6 +25,21 @@ jobs:
           node-version: latest
       - name: Descriptor and owned-process teardown tests, not runtime qualification
         run: node --test tests/fixtures/fork-coupled/retained-daemon.test.mjs
+      - name: Archive boundary tests, synthetic bytes only
+        run: python3 -m unittest discover -s tests/fixtures/fork-coupled -p test_native_build.py -v
       # The actual retained daemon/evaluator/controller round trip requires the
       # completed authenticated native build plus protected recipe and cohort.
       # This job emits no qualified artifact or promotion approval.
+  completed-build-input:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Authenticate completed producer run and every archived byte; execute nothing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tests/fixtures/fork-coupled/acquire-native-build.py "$RUNNER_TEMP/native-build-input"
+      # The reviewed expectation is a build-only input. It is not a qualified
+      # snapshot, runtime result, promotion grant or approval of this workflow.

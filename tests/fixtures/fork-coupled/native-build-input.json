@@ -1,0 +1,19 @@
+{
+  "qualification": false,
+  "repository": "djbclark/paseo",
+  "repository_id": 1432178170,
+  "workflow_id": 422873369,
+  "workflow_path": ".github/workflows/fork-qualified-host.yml",
+  "evaluator_commit": "3dd86b9778eb8866d5b70d44c9030b7256be8220",
+  "run_id": 44385429243,
+  "run_attempt": 1,
+  "actor_id": 131936,
+  "event": "push",
+  "jobs": ["sealed-linux-host"],
+  "artifact_id": 14465292040,
+  "artifact_name": "qualified-daemon-build-3dd86b9778eb8866d5b70d44c9030b7256be8220-44385429243-1",
+  "archive_sha256": "66c0ecbf679dd21be6e60071b04d158a700da50495db64d652e0da83ed3a7982",
+  "tar_sha256": "5d8b448b1b8eaabb455531dce48eabe316ecab97f4a3265f57f77942f03cce64",
+  "manifest_sha256": "3b1ed71046d8975421d3ea074800dc2ed4aff5ee8258be97d12e0a0f7ed969b2",
+  "evidence_sha256": "e2a5e401e5a30a5e924a57e48308e0a76260df531fc0c9ff866a8ec2c393499c"
+}
