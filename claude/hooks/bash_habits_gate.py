@@ -63,6 +63,7 @@ import json
 import os
 import re
 import sys
+from functools import lru_cache
 
 FILTERS = frozenset({"tail", "head", "cut", "sort", "uniq", "column", "cat", "less", "more",
                      "tee", "tr", "gtr", "fold", "nl", "fmt", "wc", "gsed", "sed"})
@@ -175,15 +176,67 @@ def _blank_quotes(s: str) -> str:
     return "".join(out)
 
 
+def _heredoc_terminates(line: str, delimiter: str, strip_tabs: bool) -> bool:
+    """A delimiter is exact; only <<- removes leading tab characters."""
+    return (line.lstrip("\t") if strip_tabs else line) == delimiter
+
+
+def _heredoc_introducers(line: str, state, source: str, offset: int):
+    """Recognize unescaped shell redirects, not quoted/comment delimiter examples."""
+    quote, arithmetic = state or (None, 0)
+    matches, i = [], 0
+    while i < len(line):
+        ch = line[i]
+        if quote is not None:
+            if ch == "\\" and quote != "'":
+                i += 2
+                continue
+            if ch == quote[-1]:
+                quote = None
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "#" and (i == 0 or line[i - 1].isspace() or line[i - 1] in ";&|("):
+            break
+        elif ch in "'\"":
+            quote = "$'" if ch == "'" and i > 0 and line[i - 1] == "$" else ch
+        elif arithmetic:
+            arithmetic += (ch == "(") - (ch == ")")
+        elif line.startswith("((", i):
+            # `$((cmd); tail)` starts a subshell, so its redirects are real.
+            # Classify against the complete source: true arithmetic may span lines.
+            arithmetic = 2 if i == 0 or line[i - 1] != "$" or \
+                _is_arithmetic_expansion(source, offset + i - 1) else 0
+            i += 2
+            continue
+        elif ch == "<" and (i == 0 or line[i - 1] != "<") and not line.startswith("<<<", i):
+            match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", line[i:])
+            if match:
+                matches.append(match)
+                i += match.end()
+                continue
+        i += 1
+    return matches, (quote, arithmetic)
+
+
+def _line_offsets(lines: list[str]) -> list[int]:
+    offsets, offset = [], 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line) + 1
+    return offsets
+
+
 def strip_literals(c: str) -> str:
     """Drop heredoc bodies, quoted strings and comments; a quoted `$?` leaves a marker."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, quote = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[i])
-        if m:
+        matches, quote = _heredoc_introducers(lines[i], quote, c, offsets[i])
+        for m in matches:
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
         i += 1
     s = "\n".join(out)
@@ -193,6 +246,10 @@ def strip_literals(c: str) -> str:
     # `|&` is a pipe, and redirections are not control operators
     s = s.replace("|&", "|")
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
+
+
+def _arithmetic_close(text: str, close: int) -> bool:
+    return text[close + 1:close + 2] == ")"
 
 
 def command_views(plain: str) -> list[str]:
@@ -239,7 +296,7 @@ def command_views(plain: str) -> list[str]:
             if kind == "sub":
                 views.append(text)
                 stack[-1][1].append("X")
-            elif kind == "arith" and plain[i + 1:i + 2] != ")":
+            elif kind == "arith" and not _arithmetic_close(plain, i):
                 # `$((a); b)`: a subshell inside a substitution; the `(` was a group all along
                 stack.append(("sub", ["(" + text + ")"]))
             elif kind == "arith":
@@ -531,32 +588,89 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
     return False
 
 
-def _closing_paren(text: str, i: int) -> int:
+@lru_cache(maxsize=1024)
+def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
-    depth, j, n = 1, i, len(text)
-    while j < n:
+    n = len(text)
+    # Explicit call frames keep deeply nested substitutions off Python's call
+    # stack. Results are pure offsets, including the arithmetic trial parse.
+    results = {}
+    frames = [[i, arithmetic, i, 1, []]]
+    while frames:
+        frame = frames[-1]
+        start, mode, j, depth, pending = frame
+        key = (start, mode)
+        if j >= n:
+            results[key] = n
+            frames.pop()
+            continue
         c = text[j]
         if c == "\\":
-            j += 2
+            frame[2] = j + 2
             continue
         if c == "'":
             k = text.find("'", j + 1)
-            j = n if k < 0 else k + 1
+            frame[2] = n if k < 0 else k + 1
             continue
         if c == '"':
             j += 1
             while j < n and text[j] != '"':
                 j += 2 if text[j] == "\\" else 1
+            frame[2] = j + 1
+            continue
+        if c == "$" and text[j + 1:j + 2] == "(":
+            nested_arithmetic = False
+            if text.startswith("$((", j):
+                trial = (j + 3, True)
+                if trial not in results:
+                    frames.append([trial[0], trial[1], trial[0], 1, []])
+                    continue
+                inner = results[trial]
+                nested_arithmetic = inner < n and _arithmetic_close(text, inner)
+            nested = (j + 2, nested_arithmetic)
+            if nested not in results:
+                frames.append([nested[0], nested[1], nested[0], 1, []])
+                continue
+            frame[2] = results[nested] + 1
+            continue
+        if not mode and c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
+            match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", text[j:])
+            if match:
+                pending.append((match.group(3), match.group(1) == "-"))
+                frame[2] = j + match.end()
+                continue
+        if c == "\n" and pending:
             j += 1
+            for delimiter, strip_tabs in pending:
+                while j < n:
+                    end = text.find("\n", j)
+                    end = n if end < 0 else end
+                    line, j = text[j:end], end + 1
+                    if _heredoc_terminates(line, delimiter, strip_tabs):
+                        break
+                else:
+                    j = n
+                    break
+            pending.clear()
+            frame[2] = j
             continue
         if c == "(":
-            depth += 1
+            frame[3] = depth + 1
         elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    return n
+            frame[3] = depth - 1
+            if frame[3] == 0:
+                results[key] = j
+                frames.pop()
+                continue
+        frame[2] = j + 1
+    return results[(i, arithmetic)]
+
+
+def _is_arithmetic_expansion(text: str, opening: int) -> bool:
+    if not text.startswith("$((", opening):
+        return False
+    inner = _closing_paren(text, opening + 3, True)
+    return inner < len(text) and _arithmetic_close(text, inner)
 
 
 def live_bodies(text: str) -> list[str]:
@@ -588,8 +702,14 @@ def live_bodies(text: str) -> list[str]:
             out.append("".join(body))
             i = j + 1
         elif ch == "$" and text[i + 1:i + 2] == "(":
-            end = _closing_paren(text, i + 2)
-            out.append(text[i + 2:end])
+            arithmetic = _is_arithmetic_expansion(text, i)
+            end = _closing_paren(text, i + 2, arithmetic)
+            if arithmetic:
+                # Arithmetic operators are not shell redirections. Only nested
+                # command substitutions/backticks inside the expression execute.
+                out.extend(live_bodies(text[i + 3:max(i + 3, end - 1)]))
+            else:
+                out.append(text[i + 2:end])
             i = end + 1                               # its inside is scanned fresh, by the recursion
         else:
             i += 1
@@ -598,7 +718,8 @@ def live_bodies(text: str) -> list[str]:
 
 def _join_continuations(c: str) -> str:
     """Join backslash-newline pairs (an odd run of backslashes), outside heredoc bodies."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, state = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     pending: list[str] = []
     while i < len(lines):
         if i + 1 < len(lines) and re.search(r"(?<!\\)(?:\\\\)*\\$", lines[i]):
@@ -606,12 +727,15 @@ def _join_continuations(c: str) -> str:
             i += 1
             continue
         line = "".join(pending) + lines[i]
+        source, offset = (c, offsets[i])
+        if pending and "$((" in line:
+            source, offset = line + "\n" + "\n".join(lines[i + 1:]), 0
         pending = []
         out.append(line)
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
-        if m:                                         # copy the body untouched, delimiter included
+        matches, state = _heredoc_introducers(line, state, source, offset)
+        for m in matches:                              # copy data and its exact delimiter untouched
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 out.append(lines[i])
                 i += 1
             if i < len(lines):
@@ -624,14 +748,17 @@ def _join_continuations(c: str) -> str:
 
 def _drop_heredocs(c: str) -> str:
     """The command without heredoc bodies (their text is data, not commands)."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, state = [], c.split("\n"), 0, None
+    offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[i])
-        if m:
+        matches, state = _heredoc_introducers(lines[i], state, c, offsets[i])
+        for m in matches:
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
+            if i < len(lines):
+                out.append(lines[i])  # recursive substitutions still need their verified delimiter
         i += 1
     return "\n".join(out)
 
@@ -1074,7 +1201,7 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
-def unterminated_heredoc_reason(cmd: str) -> str | None:
+def unterminated_heredoc_reason(cmd: str, depth: int = 0) -> str | None:
     """An unterminated heredoc: bash writes the PARTIAL body and still exits 0.
 
     Probed on this Mac 2026-10-24: `cat > f <<'EOF'` with no `EOF` line creates `f` holding
@@ -1092,38 +1219,46 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
     escaped `<<` is a literal and does not introduce one. Fails open: any oddity that makes the
     scan uncertain returns None rather than denying a legitimate command.
     """
+    if depth > 16:
+        return None
     lines = cmd.split("\n")
-    i = 0
+    offsets = _line_offsets(lines)
+    headers = []
+    i, quote = 0, None
     while i < len(lines):
+        headers.append(lines[i])
         # An introducer INSIDE a quoted string is not a heredoc (`rg -n '<<EOF' file` must pass).
         # Do not blank quoted runs: the delimiter of `<<'EOF'` is itself quoted, so blanking would
         # hide the very introducer being sought. Instead compute the quoted spans and skip a match
         # whose start falls inside one.
-        quoted: list[tuple[int, int]] = []
-        for q in re.finditer(r"'[^']*'|\"[^\"]*\"", lines[i]):
-            quoted.append((q.start(), q.end()))
-        for m in re.finditer(r"(?<!\\)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", lines[i]):
-            if any(a <= m.start() < b for a, b in quoted):
-                continue  # this `<<` is inside a string, not an introducer
+        matches, quote = _heredoc_introducers(lines[i], quote, cmd, offsets[i])
+        introduced_at = i + 1
+        for m in matches:
             delim = m.group(3)
             strip_tabs = m.group(1) == "-"
             j = i + 1
             found = False
             while j < len(lines):
-                line = lines[j].lstrip("\t") if strip_tabs else lines[j]
-                if line.strip() == delim:
+                if _heredoc_terminates(lines[j], delim, strip_tabs):
                     found = True
                     break
                 j += 1
             if not found:
                 return (f"Unterminated heredoc: `<<{m.group(1)}{m.group(2)}{delim}{m.group(2)}` "
-                        f"on line {i + 1} has no `{delim}` line after it. bash does NOT fail on "
+                        f"on line {introduced_at} has no `{delim}` line after it. bash does NOT fail on "
                         f"this — it writes the PARTIAL body, warns on stderr and exits 0, so the "
                         f"file is silently truncated (2026-10-24: a peer message arrived cut off "
                         f"mid-sentence). Close the heredoc, or write the text to a file and pass "
                         f"the path (`--file`/`-f`) instead of inlining a long body.")
+            headers.append(lines[j])  # preserve the verified terminator for substitution scans
             i = j  # continue after the delimiter
         i += 1
+    # Double quotes still execute substitutions. Inspect their shell bodies afresh,
+    # after removing actual outer heredoc data, which may contain literal examples.
+    for body in live_bodies("\n".join(headers)):
+        reason = unterminated_heredoc_reason(body, depth + 1)
+        if reason:
+            return reason
     return None
 
 
@@ -1157,6 +1292,7 @@ def bg_operator(plain: str) -> bool:
 
 def check(cmd: str) -> tuple[str | None, str | None]:
     """(deny reason, warning) for a Bash command line."""
+    _closing_paren.cache_clear()
     # Raw-command check first: strip_literals skips heredoc bodies, so this cannot live in the
     # per-stage loop below (it must see the body to notice a missing terminator).
     hd = unterminated_heredoc_reason(cmd)
