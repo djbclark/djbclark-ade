@@ -67,7 +67,7 @@ export function validateDaemonObservation(raw, nonce, childPid, parentPid) {
 // This independent pre-exec check protects importing the retained launcher itself.
 // Its successful result is never an execution capability; the real producer still
 // checks protected enrollment and actual executing process/module ownership.
-export async function validateRetainedDistribution(root, expectedManifest) {
+export async function validateRetainedPayload(root, expectedManifest) {
   assert.equal(process.platform, 'linux', 'finite Linux acceptance only');
   assert.notEqual(process.getuid(), 0, 'runtime account must be unprivileged');
   assert.ok(path.isAbsolute(root) && root !== '/' && hex.test(expectedManifest));
@@ -77,7 +77,7 @@ export async function validateRetainedDistribution(root, expectedManifest) {
     if (current === '/') break;
   }
   await rootOwned(`${root}.manifest.json`, false);
-  const bytes = await readRegular(`${root}.manifest.json`, MAX_REPLY);
+  const bytes = await readRegular(`${root}.manifest.json`, 4 * 1024 * 1024);
   assert.equal(sha256(bytes), expectedManifest, 'protected final manifest mismatch');
   const manifest = JSON.parse(bytes);
   assert.equal(manifest.schemaVersion, 2);
@@ -101,8 +101,33 @@ export async function validateRetainedDistribution(root, expectedManifest) {
   for (const name of ['runtime/node', 'role.cjs', 'daemon-launcher.mjs', 'daemon.mjs', 'compiler-code.mjs']) {
     assert.ok(names.has(name), 'finite distribution entry absent');
   }
-  assert.ok(Array.isArray(manifest.externalLibraries) && manifest.externalLibraries.length <= 128);
+  assert.equal(manifest.systemClosure?.schemaVersion, 1, 'retained system closure required; old inputs cannot launch');
+  assert.equal(manifest.systemClosure.profile, 'linux-retained-system-closure-v1');
+  assert.equal(manifest.systemClosure.loaderResolution?.policy, 'glibc-pinned-cache-existing-layout-v1');
+  assert.ok(Array.isArray(manifest.externalLibraries) && manifest.externalLibraries.length > 0 &&
+    manifest.externalLibraries.length <= 128);
+  assert.equal(manifest.systemClosure?.schemaVersion, 1, 'retained system closure required');
+  assert.equal(manifest.systemClosure.profile, 'linux-retained-system-closure-v1');
   for (const member of manifest.externalLibraries) {
+    assert.ok(typeof member.path === 'string' && path.isAbsolute(member.path));
+    assert.equal(member.retainedPath, `system-closure/elf/${member.path.slice(1)}`);
+    assert.ok(member.mode === 0o444 || member.mode === 0o555);
+    const retained = manifest.files.find((row) => row.path === member.retainedPath);
+    assert.ok(retained && retained.mode === member.mode && retained.size === member.size &&
+      retained.sha256 === member.sha256, 'external payload must match the retained inventory');
+  }
+  assert.ok(names.has('system-closure/namespace-bootstrap.py'), 'packaged namespace bootstrap absent');
+  return manifest;
+}
+
+// Call this only INSIDE the private namespace. Host preparation checks retained
+// payload bytes independently; the host libraries are allowed to differ.
+export async function validateRetainedDistribution(root, expectedManifest) {
+  const manifest = await validateRetainedPayload(root, expectedManifest);
+  const cache = manifest.systemClosure.loaderResolution.cache;
+  assert.equal(cache.path, '/etc/ld.so.cache');
+  assert.equal(cache.retainedPath, 'system-closure/loader/ld.so.cache');
+  for (const member of [...manifest.externalLibraries, cache]) {
     assert.ok(path.isAbsolute(member.path) && hex.test(member.sha256));
     assert.equal(await realpath(member.path), member.path, 'canonical system library required');
     for (let current = path.dirname(member.path);; current = path.dirname(current)) {
@@ -110,7 +135,10 @@ export async function validateRetainedDistribution(root, expectedManifest) {
       if (current === '/') break;
     }
     const metadata = await lstat(member.path);
-    assert.ok(metadata.isFile() && metadata.uid === 0 && (metadata.mode & 0o022) === 0);
+    assert.ok(metadata.isFile() && metadata.uid === 0 && (metadata.mode & 0o222) === 0);
+    const retained = await lstat(path.join(root, member.retainedPath));
+    assert.ok(metadata.dev === retained.dev && metadata.ino === retained.ino,
+      'runtime external target must use the actual retained backing inode');
     assert.equal(metadata.size, member.size, `external library size mismatch: ${member.path}`);
     assert.equal(metadata.mode & 0o777, member.mode);
     assert.equal(sha256(await readRegular(member.path)), member.sha256,

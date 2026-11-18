@@ -31,8 +31,8 @@ jobs:
       # completed authenticated native build plus protected recipe and cohort.
       # This job emits no qualified artifact or promotion approval.
   completed-build-input:
-    # The finite producer artifact includes exact system-library identities from
-    # this target. A different OS profile correctly refuses before daemon entry.
+    # Retained system bytes are bound only inside a private disposable namespace.
+    # The reviewed existing-layout adapter refuses incompatible host layouts.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
