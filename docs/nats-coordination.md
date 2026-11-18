@@ -44,7 +44,7 @@ requires an already bound broker role/resource, exact local host/server and
 owner. Its persistent `coordination` marker prevents disappearing config from
 turning it into an ordinary local claim. It does not expire into unclaimed state
 and legacy release cannot discard it. Local projection is not another ownership
-store. Enrollment does not create arbitrary broker roles or new resource grants.
+store. A different legacy claim ID cannot reclaim the same enrolled resource or an overlapping scope. Existing enrolled projections cannot be superseded through legacy same-owner reclaim; use the controlled handoff path. Enrollment does not create arbitrary broker roles or new resource grants.
 
 Keep every historical agent alias and approved successor in the config. Stable
 role lookup reads the stream leader. `ade_lead_succession.effective_lead` retains
@@ -78,6 +78,13 @@ prompt ack and does not infer processed. Paths and legacy footer contracts stay
 intact. Explicit `inbox read` / `inbox dispose` with current snapshot/authority
 read or process retained reports. `artifact read` verifies and returns bytes as
 base64 for caller materialization; a local path alone is never an artifact ref.
+
+Use the whole `role get` response's `result` as the snapshot, preserving both
+`record` and `revision`. Authority contains `owner`, `ownership_epoch`, and
+`generation` from `snapshot.record`, plus `revision` from `snapshot.revision`.
+Pass `{snapshot,authority}` to `inbox list`; add `message_id` for read/dispose
+and `disposition` for dispose. Never flatten the snapshot. Serialize request
+objects with `json.dumps` into subprocess stdin instead of hand-escaped shell JSON.
 
 `python3 bin/ade_coord_controller.py --role ROLE` performs one bounded machine
 intake pass; it checks producer assignment and current local authority, verifies

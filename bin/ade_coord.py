@@ -157,6 +157,15 @@ def authorize_claim(claim, actor=None):
     marker = claim.get("coordination")
     binding = cfg["claims"].get(claim["id"]) if cfg else None
     if not marked and binding is None:
+        # Enrollment binds resources as well as claim IDs. A replacement ID
+        # must not turn the same workspace (or an overlapping scope) legacy.
+        if cfg and claim.get("path"):
+            path = Path(claim["path"]).resolve()
+            for enrolled in cfg["claims"].values():
+                for resource in enrolled["resources"]:
+                    bound = Path(resource).resolve()
+                    if path == bound or path in bound.parents or bound in path.parents:
+                        raise CoordinationError("ENROLLED_RESOURCE_REQUIRES_CONFIGURED_CLAIM")
         return None
     if not cfg or not binding or (marked and marker != {"role_id": binding["role_id"], "generation": cfg["generation"]}):
         raise CoordinationError("ENROLLED_CLAIM_CONFIG_MISSING_OR_CHANGED")

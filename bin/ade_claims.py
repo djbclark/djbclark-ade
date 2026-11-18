@@ -369,6 +369,8 @@ def create_claim(claim: dict[str, Any], pointer_for: Optional[str | os.PathLike[
         older: list[str] = []
         for c in list_claims("active"):
             if _same_path(c.get("path"), Path(str(claim.get("path") or ""))):
+                if "coordination" in c:
+                    raise _coord().CoordinationError("ENROLLED_PROJECTION_CANNOT_BE_RECLAIMED")
                 if mine and mine & _owner_keys(c):
                     older.append(str(c.get("id")))
                 else:

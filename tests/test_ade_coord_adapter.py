@@ -21,6 +21,38 @@ class AdapterTests(unittest.TestCase):
                 coord.authorize_claim({"id":"enrolled","coordination":None})
             self.assertFalse(ade_claims.is_expired({"coordination":{},"expires_at":"2000-01-01T00:00:00Z"}))
 
+    def test_reclaim_cannot_publish_legacy_record_over_enrolled_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); workspace = root / "workspace"; workspace.mkdir()
+            cfg = {"generation":"g", "claims":{"original":{"role_id":"r","resources":[str(workspace)]}},
+                   "identity":{"host":"h","server":"s"}}
+            current = {"record":{"owner":{"host":"h","server":"s","agent":"a"},"bindings":[str(workspace)]}}
+            def claim(cid):
+                return ade_claims.make_claim(id=cid,path=workspace,branch="pilot",base_sha="a"*40,owner_record="same-owner",owner_agent="a")
+            with patch.dict(os.environ,{"ADE_STATE_DIR":str(root/"registry")}), patch.object(coord,"config",return_value=cfg), patch.object(coord,"snapshot",return_value=current):
+                original = ade_claims.create_claim(claim("original"))
+                saved = original.read_bytes()
+                # No workspace pointer: this exercises the fallback registry path
+                # that previously selected the newly published unmarked claim.
+                for label, claims_config in [("configured",cfg["claims"]),("missing-binding",{})]:
+                    with self.subTest(label=label), patch.dict(cfg,{"claims":claims_config}):
+                        with self.assertRaises(coord.CoordinationError):
+                            ade_claims.create_claim(claim("replacement"))
+                        self.assertFalse(ade_claims.claim_file("replacement").exists())
+                        self.assertEqual(original.read_bytes(),saved)
+                        self.assertEqual([c["id"] for c in ade_claims.list_claims("active")],["original"])
+
+    def test_legacy_claim_cannot_overlap_enrolled_resource_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); bound=root/"resource"; bound.mkdir()
+            alias=root/"alias";alias.symlink_to(bound,target_is_directory=True)
+            cfg={"claims":{"bound":{"role_id":"r","resources":[str(bound)]}}}
+            with patch.object(coord,"config",return_value=cfg):
+                for path in [bound,alias,bound/"child",root]:
+                    with self.subTest(path=str(path)),self.assertRaises(coord.CoordinationError):
+                        coord.authorize_claim({"id":"legacy","path":str(path)})
+                self.assertIsNone(coord.authorize_claim({"id":"legacy","path":str(root/"unrelated")}))
+
     def test_generation_manifest_mismatch_is_closed_and_errors_do_not_echo_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);manifest=root/"generation";cfg=root/"cfg"
