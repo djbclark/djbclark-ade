@@ -192,7 +192,7 @@ def test_a_stale_thin_reading_is_never_offered_as_an_alternative(tmp_path: Path)
 
 
 def test_a_stale_zero_reading_is_never_offered_as_an_alternative(tmp_path: Path) -> None:
-    """A stale 0% is not in `exhausted` when the reading is not fresh, but it is still no re-handoff target."""
+    """A zero or unusable pool is fail-closed (the account is exhausted) and is never offered as a re-handoff target."""
     raw = {"fresh": False, "available": [
         {"pool_id": "openai:openai_api", "headroom_percent": 0.0, "usable_now": True, "stale": True},
         {"pool_id": "opencode:go", "account": "t-e", "headroom_percent": 0.0, "usable_now": True, "stale": True},

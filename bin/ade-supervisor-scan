@@ -75,6 +75,7 @@ guard_target="$(field target)"
 guard_reason="$(field reason)"
 send_to=""
 refused=""
+marker=""
 case "$guard_rc" in
     0) send_to="$LEAD" ;;
     3) case "$guard_target" in
@@ -82,7 +83,6 @@ case "$guard_rc" in
            *) send_to="$guard_target"
               marker="$STATE_DIR/.redirect-noted.$(printf '%s' "$LEAD---$send_to" | tr -c 'A-Za-z0-9._-' '_')"
               if [ ! -f "$marker" ]; then
-                  : >"$marker"
                   printf '%s ade-supervisor-scan: lead %s was replaced; following the handoff to %s (%s)\n' \
                       "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
                   if [ "$lead_from_env" -eq 1 ]; then
@@ -183,6 +183,7 @@ elif [ -n "$msg" ] && [ -n "$send_to" ]; then
         printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
     else
         delivered=1
+        [ -n "${marker:-}" ] && : >"$marker"      # the handoff is only reported once the notice reached it
     fi
 fi
 
