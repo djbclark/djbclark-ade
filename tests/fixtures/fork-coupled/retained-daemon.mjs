@@ -51,6 +51,19 @@ async function rootOwned(file, directory) {
   return metadata;
 }
 
+export function validateDaemonObservation(raw, nonce, childPid, parentPid) {
+  assert.equal(raw.type, 'qualified.measurement.response');
+  assert.equal(raw.nonce, nonce);
+  assert.ok(Buffer.byteLength(JSON.stringify(raw)) <= MAX_REPLY);
+  assert.equal(raw.schemaVersion, 1);
+  assert.equal(raw.parentPid, parentPid, 'observation must bind the actual parent');
+  assert.ok(raw.status === 'hold' || raw.status === 'observed');
+  if (raw.status === 'observed' || raw.daemon !== null) {
+    assert.equal(raw.daemon?.pid, childPid, 'observation must identify the owned child');
+  }
+  return raw;
+}
+
 // This independent pre-exec check protects importing the retained launcher itself.
 // Its successful result is never an execution capability; the real producer still
 // checks protected enrollment and actual executing process/module ownership.
@@ -127,10 +140,7 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
       const receive = (raw) => {
         if (raw?.type !== 'qualified.measurement.response' || raw.nonce !== nonce) return;
         try {
-          assert.ok(Buffer.byteLength(JSON.stringify(raw)) <= MAX_REPLY);
-          assert.equal(raw.schemaVersion, 1);
-          assert.equal(raw.daemon?.pid, child.pid, 'observation must identify the owned child');
-          finish(null, raw);
+          finish(null, validateDaemonObservation(raw, nonce, child.pid, process.pid));
         } catch (error) { finish(error); }
       };
       const timer = setTimeout(() => finish(new Error('owned observation timed out')), 30_000);

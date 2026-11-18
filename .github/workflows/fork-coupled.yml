@@ -41,5 +41,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 tests/fixtures/fork-coupled/acquire-native-build.py "$RUNNER_TEMP/native-build-input"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+      - name: Actual disposable daemon registrations and missing-profile refusal; not qualification
+        run: node tests/fixtures/fork-coupled/registration-smoke.mjs "$RUNNER_TEMP/native-build-input"
       # The reviewed expectation is a build-only input. It is not a qualified
       # snapshot, runtime result, promotion grant or approval of this workflow.

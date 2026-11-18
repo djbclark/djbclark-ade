@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "kind": "retained-builtin-registration-negative",
+  "qualification": false,
+  "expected": {
+    "allDefaultBuiltinsRunning": true,
+    "missingBuiltinProfilesRefusesMaintenanceBegin": true,
+    "measurementStatus": "hold"
+  },
+  "limits": "Disposable Linux CI only; no directory catalog, helper behavior, compiler proof or runtime qualification."
+}

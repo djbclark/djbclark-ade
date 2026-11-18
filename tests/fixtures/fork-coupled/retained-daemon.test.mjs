@@ -8,8 +8,20 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
-import { readRegular } from './retained-daemon.mjs';
+import { readRegular, validateDaemonObservation } from './retained-daemon.mjs';
 import { ownDisposableGroup } from './owned-cleanup.mjs';
+
+test('a bounded matching HOLD is data; observed replies must identify the owned process', () => {
+  const raw = {type: 'qualified.measurement.response', schemaVersion: 1,
+    nonce: 'fixed-test-nonce', parentPid: 1, status: 'hold', daemon: null, runtime: null, terminal: null};
+  assert.equal(validateDaemonObservation(raw, raw.nonce, 2, 1), raw);
+  assert.throws(() => validateDaemonObservation({...raw, parentPid: 3}, raw.nonce, 2, 1));
+  assert.throws(() => validateDaemonObservation({...raw, nonce: 'other'}, raw.nonce, 2, 1));
+  assert.throws(() => validateDaemonObservation({...raw, status: 'observed'}, raw.nonce, 2, 1));
+  assert.throws(() => validateDaemonObservation({...raw, daemon: {pid: 3}}, raw.nonce, 2, 1));
+  const observed = {...raw, status: 'observed', daemon: {pid: 2}};
+  assert.equal(validateDaemonObservation(observed, raw.nonce, 2, 1), observed);
+});
 
 test('bounded descriptor reader accepts exact data and refuses oversized and special leaves', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'fork-coupled-read-'));
@@ -60,6 +72,15 @@ test('owned fixture cleanup waits for actual graceful close and is idempotent', 
     assert.deepEqual(await first, { code: 0, signal: null });
     assert.equal(child.connected, false);
   } finally { await owner.dispose(); }
+});
+
+test('an explicit CLI refusal allows nonzero exit only after actual group settlement', { timeout: 5000 }, async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(7)'], {
+    detached: true, stdio: 'ignore',
+  });
+  const owner = ownDisposableGroup(child, {gracefulMs: 1000, forcedMs: 2000, allowNonzeroExit: true});
+  assert.deepEqual(await owner.closed, {code: 7, signal: null});
+  assert.deepEqual(await owner.dispose(), {code: 7, signal: null});
 });
 
 test('unresponsive owned fixture is killed and closed before original timeout is returned', { timeout: 5000 }, async () => {
