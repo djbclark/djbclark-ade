@@ -23,10 +23,10 @@ fi
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-ping_operator_once() {   # once per outage, and only a success marks the outage as reported
-    local marker="$STATE_DIR/.lead-unreachable"
+ping_operator_once() {   # once per cause per outage; only a successful ping marks it as reported
+    local cause="$1" slug="$2" marker="$STATE_DIR/.lead-unreachable.$2"
     [ -f "$marker" ] && return 0
-    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($1); write the lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
+    if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot notify anyone ($cause); write the lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
         : >"$marker"
     else
         printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
@@ -35,7 +35,7 @@ ping_operator_once() {   # once per outage, and only a success marks the outage 
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: no lead (neither ADE_SUPERVISOR_LEAD nor %s/lead); docs/scheduling.md\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
-    ping_operator_once "no lead is configured"
+    ping_operator_once "no lead is configured" no-lead
     exit 0
 fi
 case "$LEAD" in
@@ -45,7 +45,7 @@ esac
 if [ -z "$LEAD" ]; then
     printf '%s ade-supervisor-scan: the lead value in ADE_SUPERVISOR_LEAD/%s/lead is not an agent id; nothing to notify\n' \
         "$(now)" "$STATE_DIR" >>"$LOG"
-    ping_operator_once "the configured lead is not an agent id"
+    ping_operator_once "the configured lead is not an agent id" bad-lead
     exit 0
 fi
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"
@@ -87,8 +87,9 @@ else:
     if d.get("quota_error"):
         items.append(("scan|quota-unread",
                       "aiuse quota unread (%s) — every account except the known-empty ones is unread" % d["quota_error"]))
-        # Nothing could be read, so the thin-account keys cannot be re-checked: keep the ones already told.
-        items += [(key, None) for key in sorted(told) if key.startswith("thin|")]
+        # Nothing could be read, so no earlier key can be re-checked: keep them all (an agent that really cleared is
+        # dropped on the first healthy run).
+        items += [(key, None) for key in sorted(told) if key not in {k for k, _ in items}]
     for acct in d.get("low") or []:
         rec = (d.get("accounts") or {}).get(acct) or {}
         items.append(("thin|%s" % acct,
@@ -110,7 +111,9 @@ if new:
 # The send target is decided by the repo's own guard (bin/ade_send_guard.py, ls-02): it refuses an archived lead (a
 # delivery would un-archive it), reports a failed or unreadable inspect, and redirects to the recorded successor after a
 # lead self-handoff instead of leaving the operator to edit the file by hand.
-guard_json="$(python3 "$(cd "$(dirname "$0")" && pwd)/ade_send_guard.py" "$LEAD" 2>>"$LOG")"
+GUARD="$(cd "$(dirname "$0")" && pwd)/ade_send_guard.py"
+[ -f "$GUARD" ] || GUARD="$HOME/src/djbclark-ade/bin/ade_send_guard.py"
+guard_json="$(python3 "$GUARD" "$LEAD" 2>>"$LOG")"
 guard_rc=$?
 guard_target="$(printf '%s' "$guard_json" | python3 -c '
 import json, sys
@@ -170,16 +173,10 @@ if [ -n "$msg" ] && [ -n "$send_to" ]; then
         delivered=1
     fi
 fi
-unreachable="$STATE_DIR/.lead-unreachable"
+unreachable="$STATE_DIR/.lead-unreachable.unreachable"
 if [ "$send_failed" -eq 1 ]; then
     # The scan cannot reach its own lead, so it has no in-band channel left: tell the operator once per outage.
-    if [ ! -f "$unreachable" ]; then
-        if hermes-ping "djbclark-ade: supervisor Pi-stuck scan cannot reach its lead $LEAD (${guard_reason:-send failure}); write the current lead id to $STATE_DIR/lead (docs/scheduling.md)" >>"$LOG" 2>&1; then
-            : >"$unreachable"           # marked only once the operator was actually reached
-        else
-            printf '%s ade-supervisor-scan: hermes-ping failed; will retry the escalation next run\n' "$(now)" >>"$LOG"
-        fi
-    fi
+    ping_operator_once "${guard_reason:-send failed}" unreachable
     if [ -n "$msg" ]; then
         rm -f "$pending"                 # a notice is pending: keep the old state and retry next run
     else
@@ -189,6 +186,8 @@ if [ "$send_failed" -eq 1 ]; then
 fi
 # Only a delivery proves the lead is reachable again (the guard fails open on a Paseo outage), so only a delivery
 # clears the escalation marker; a quiet run leaves it for the next real send.
-[ "$delivered" -eq 1 ] && rm -f "$unreachable"
+if [ "$delivered" -eq 1 ]; then
+    rm -f "$STATE_DIR"/.lead-unreachable.*      # a delivery proves the lead is reachable for every cause
+fi
 [ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
 exit 0
