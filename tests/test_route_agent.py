@@ -1063,17 +1063,15 @@ class TestRoutingPolicyToml(unittest.TestCase):
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
-            "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds "
-                    "while quota is plentiful)"),
-            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20,
-                        "research": 13},
-            "billing": "subscription",
+            "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol for judgment/code/research "
+                    "on the OpenAI API prepaid credits)"),
+            "good_at": {"frontier": 1, "judgment": 3, "code": 15, "research": 13},
+            "billing": "prepaid",
             "judgment_tier": True,
             "models": {"frontier": "gpt-6-astra --effort high", "judgment": "gpt-6.1-sol --effort high",
-                       "code": "gpt-6.1-sol --effort medium",
-                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low",
-                       "research": "gpt-6.1-sol --effort high"},
-            "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
+                       "code": "gpt-6.1-sol --effort medium", "research": "gpt-6.1-sol --effort high"},
+            "pool": ("codex", "openai_api"), "max_parallel": 1,
+            "agent": "codex", "burn_first": False,
         },
         "cursor-auto": {
             "cli": "cursor (Auto pool)",
