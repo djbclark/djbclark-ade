@@ -1,6 +1,6 @@
 # NATS JetStream implementation plan — ADE issue 779
 
-Status: implementation published; rollout blocked pending primary activation approval. Research and GPT Astra plan review are complete. Track commits, CI, review and rollout in [the execution ledger](nats-jetstream-execution.md). Updated on 2026-11-18 to use the existing NixOS `vps-hub` host instead of Google Cloud.
+Status: implementation published; approved rollout resumed. Research and GPT Astra plan review are complete. Track commits, CI, review and rollout in [the execution ledger](nats-jetstream-execution.md). Updated on 2026-11-18 to use the existing NixOS `vps-hub` host instead of Google Cloud.
 
 Issue: [Rethink handoff: pub/sub and leadership-token registry](https://github.com/djbclark/djbclark-ade/issues/779).
 
