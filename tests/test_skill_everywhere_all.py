@@ -19,6 +19,8 @@ def catalog(tmp_path):
     private.mkdir()
     site = tmp_path / "site root"  # empty: a real OPS_ROOT must not leak the operator's site skills in
     site.mkdir()
+    chrome = tmp_path / "chrome skills"
+    chrome.mkdir()
     bindir = tmp_path / "bin"
     bindir.mkdir()
     codex = bindir / "codex"
@@ -27,6 +29,7 @@ def catalog(tmp_path):
     env = dict(os.environ, HOME=str(home), CODEX_HOME=str(home / ".codex"),
                BASH_ENV="/dev/null", SKILL_EVERYWHERE_ADE=str(public),
                SKILL_EVERYWHERE_PRIVATE=str(private), SKILL_EVERYWHERE_SITE=str(site),
+               SKILL_EVERYWHERE_CHROME=str(chrome),
                SKILL_EVERYWHERE_ONLY="codex",
                PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     env.pop("ENV", None)
@@ -89,6 +92,20 @@ def test_site_root_is_a_third_root_after_public_and_private(catalog, tmp_path):
     assert named.returncode == 0 and "linked" in named.stdout
     missing = run(catalog, "--check", "nowhere")
     assert missing.returncode == 1 and str(site / "nowhere") in missing.stderr
+
+
+def test_chrome_root_is_a_fourth_root_after_site(catalog):
+    home, public, _, env = catalog
+    chrome = Path(env["SKILL_EVERYWHERE_CHROME"])
+    moved = skill(chrome, "real-chrome")
+    source = skill(public, "real-chrome")
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stderr + applied.stdout
+    links = home / ".agents" / "skills"
+    assert (links / "real-chrome").readlink() == source
+    only = skill(chrome, "core")
+    assert run(catalog, "--all").returncode == 0
+    assert (links / "core").readlink() == only
 
 
 def test_site_root_defaults_to_the_site_public_checkout(catalog):
@@ -270,6 +287,7 @@ def _default_root_env(home: Path, tmp_path: Path) -> dict:
     env = dict(os.environ, HOME=str(home), BASH_ENV="/dev/null",
                SKILL_EVERYWHERE_PRIVATE=str(tmp_path / "none-private"),
                SKILL_EVERYWHERE_SITE=str(tmp_path / "none-site"),
+               SKILL_EVERYWHERE_CHROME=str(tmp_path / "none-chrome"),
                SKILL_EVERYWHERE_ONLY="nonesuch")
     env.pop("SKILL_EVERYWHERE_ADE", None)
     env.pop("ENV", None)
