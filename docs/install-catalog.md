@@ -8,6 +8,14 @@ default; `system_argv` only with explicit `--apply-system`). Doctor and keys
 do **not** repair or read secret values. Full ownership-aware reconciliation
 remains later work (`docs/setup-plan.md` S3).
 
+**Fork containment (2026-11-18):** enrolled IDs in `config/forks.toml` are held
+before generic install, forced repair, system install, update and retry execution.
+The installer reads policy beside its own module, not catalog `--root`; missing
+or invalid policy holds component commands. `ade-fork status/check` reports
+enrollment and unavailable qualification without probing or changing runtimes.
+See [fork maintenance](fork-maintenance.md) for the staged implementation and
+the external updater paths not yet covered by this foundation.
+
 ## A. Source
 
 | File | Role |

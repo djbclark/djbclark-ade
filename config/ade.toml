@@ -291,44 +291,54 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 
 [[service]]
 name = "codex"
-cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
+cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol for judgment/code/research on the OpenAI API prepaid credits)"
+# The Codex CLI's OpenAI API prepaid credits (its `credits` balance) gate the API-only models
+# gpt-6.1-sol and gpt-6-astra; they do NOT bill the ChatGPT subscription. aiuse surfaces that
+# balance as the codex provider's `openai_api` pool family, distinct from the subscription
+# windows (`default` family, the codex-subscription service below). A zero/negative balance reads
+# exhausted and an unmeasured one reads unknown, so this pool fails closed and the router passes
+# off instead of borrowing the subscription window's headroom (2026-11-17, operator).
 # frontier rank 1 is a COST ordering, not a model-quality claim: astra takes a frontier slice
 # before Fable because the astra family is the cheaper one. model-tiers still ranks Fable 5.2
 # above astra, so this inverts the tier order on purpose (2026-11-16). Per-repo exceptions:
 # [dispatch.repo_overrides.REPO].frontier_order.
-good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20, research = 13 }
-billing = "subscription"
-note = "frontier: only a slice that really needs astra to look it over; judgment/code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
+good_at = { frontier = 1, judgment = 3, code = 15, research = 13 }
+billing = "prepaid"
+pool = ["codex", "openai_api"]
+agent = "codex"
+note = "OpenAI API prepaid credits (pool family openai_api), independent of the Codex subscription windows; frontier astra one per wave, judgment/code/research on gpt-6.1-sol only while the prepaid balance is fresh and >= plenty_min"
 judgment_tier = true
 max_parallel = 1
 # Tolerated rather than committed: OpenAI neither permits nor
-# prohibits subscription use inside a non-OpenAI tool, and
+# prohibits API-key use inside a non-OpenAI tool, and
 # tolerated is fine. The real reason to keep it out of Hermes's
 # chain is capability, not licensing — these are among the
-# strongest coding models available here, so the weekly pool is
+# strongest coding models available here, so the API credits are
 # worth reserving for coding judgment rather than spending on
 # background agent turns.
 access = "cli-only"
-# Everyday kinds (operator 2026-10-25: "if we have lots of codex quota and it is the best of
-# available options we can use it for non-frontier"): `plenty_kinds` makes those kinds eligible
-# only while the pool's tightest window holds at least [routing].plenty_min percent; below it
-# (or with no fresh reading) codex is frontier-only again. They rank like any other pool
-# (code 15: behind claude, omp and Cursor Auto; opencode-go
-# has no code rank since 2026-10-30; mechanical 12, bulk 20: behind the free pools). judgment too (operator 2026-10-25:
-# a Codex adversary round was refused; rank 3 behind claude 1 and omp 2, so it is eligible, not
-# preferred, on gpt-6.1-sol at high). astra stays frontier-only (`[dispatch].frontier_models`),
-# and no research/github row: conservative.
-# Models: code on gpt-6.1-sol, the "latest workhorse model for coding and everyday work"
-# (the codex model list, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
-# affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
-# easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
-# 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. The
-# dispatcher (acp-dispatch, deleted 2026-11-14) also reserved in-flight estimates per service; nothing does now,
-# so re-plan before each launch (skills/model-routing D5). max_parallel = 1 keeps one codex slice per `plan`.
-# 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
-# and the lost in-flight rule await re-calibration from `route_agent.py calibrate`.
-plenty_kinds = ["judgment", "code", "bulk", "mechanical", "research"]
-models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low", research = "gpt-6.1-sol --effort high" }
+# Everyday kinds (operator 2026-10-25, updated 2026-11-17): `plenty_kinds` makes those kinds
+# eligible only while the prepaid credits pool has a fresh reading of at least [routing].plenty_min
+# percent; below it (or with no fresh reading, or with no % since the balance has no limit) codex
+# is frontier-only again. gpt-6-astra stays frontier-only (`[dispatch].frontier_models`).
+plenty_kinds = ["judgment", "code", "research"]
+models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", research = "gpt-6.1-sol --effort high" }
+
+# The Codex/ChatGPT subscription windows (the codex provider's `default` pool family) gate the
+# subscription models — gpt-6-luna for bulk and mechanical. These genuinely use the subscription,
+# not the OpenAI API prepaid credits above (operator 2026-11-17).
+[[service]]
+name = "codex-subscription"
+cli = "codex (gpt-6-luna for bulk/mechanical on the ChatGPT subscription)"
+good_at = { mechanical = 12, bulk = 20 }
+billing = "subscription"
+pool = ["codex", "default"]
+agent = "codex"
+note = "Codex/ChatGPT subscription windows (pool family default) gate gpt-6-luna bulk/mechanical; gpt-6.1-sol / gpt-6-astra are OpenAI-API prepaid models and live on the codex service"
+max_parallel = 1
+access = "cli-only"
+plenty_kinds = ["bulk", "mechanical"]
+models = { bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
 
 # opencode-zen-free is NOT a separate provider — it is the free subset of
 # opencode-zen's models. Kept as its own row because the free and paid

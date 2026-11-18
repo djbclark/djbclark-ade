@@ -72,6 +72,10 @@ class Native:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
+        if 'route_agent.py' in argv[1]:
+            data = {'stale': False, 'slices': [getattr(self, 'route_choice',
+                    {'service': 'go-account-a', 'agent': 'pi', 'model': 'opencode-go-account-a/test-model'})]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(data), '')
         if argv[0] == 'git' and 'merge-base' in argv:
             assert argv[-3] == '--is-ancestor' and re.fullmatch('[0-9a-f]{40}', argv[-2])
             if isinstance(self.ancestor_rc, BaseException):
@@ -102,7 +106,11 @@ class Native:
                 return subprocess.CompletedProcess(argv, *self.run_result)
             self.created += 1
             self.rows[SUCC] = {**self.rows[PRED], 'Id': SUCC, 'Status': 'running',
-                               'Mode': args[args.index('--mode') + 1]}
+                               'Mode': args[args.index('--mode') + 1] if '--mode' in args else 'default'}
+            provider, model = args[args.index('--provider') + 1].split('/', 1)
+            self.rows[SUCC].update(Provider=provider, Model=model)
+            if provider == 'pi':
+                self.rows[SUCC]['AvailableModes'] = []
             self.labelled = [{'id': SUCC}]
             title = next((a.split('=', 1)[1] for a in args if a.startswith('--title=')), None)
             if title is not None:
@@ -2139,3 +2147,265 @@ def test_rebound_claims_accumulate_across_finish_reruns(setup, tmp_path):
     assert service.finish(path)['rebound_claims'] == ['c-1']  # a no-op re-run keeps the earlier list
     _claim('c-2', PRED, tmp_path)
     assert service.finish(path)['rebound_claims'] == ['c-1', 'c-2']
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('Status', 'error'), ('Status', 'closed'), ('Status', None),
+    ('stopReason', 'error'), ('StopReason', 'error'),
+])
+def test_failed_successor_never_accepts_or_retires_predecessor(setup, field, value):
+    service, native, record, path = start(setup)
+    native.rows[SUCC][field] = value
+    native.rows[SUCC]['errorMessage'] = 'SECRET_SENTINEL_QUOTA_AUTH'
+    with pytest.raises(ss.SessionError) as error:
+        accept(service, record, path)
+    assert 'SECRET_SENTINEL' not in str(error.value)
+    assert native.archived == 0
+    assert json.loads(path.read_text())['status'] == 'awaiting-ack'
+
+
+@pytest.mark.parametrize(('field', 'value'), [('Status', 'error'), ('stopReason', 'error')])
+def test_failure_after_ack_keeps_predecessor_and_records_safe_failure(setup, field, value):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[SUCC][field] = value
+    native.rows[SUCC]['errorMessage'] = 'SECRET_SENTINEL_CREDENTIAL'
+    with pytest.raises(ss.SessionError):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert native.archived == 0
+    assert saved['status'] == 'acknowledged'
+    assert 'SECRET_SENTINEL' not in json.dumps(saved)
+
+
+def test_archive_named_recipient_never_caller_isolated_10118(setup):
+    # Regression contract for getpaseo/paseo#10118. All commands use Native:
+    # no daemon, real sessions, credentials, or lifecycle effects exist here.
+    service, native, path = finished_up_to_archive(setup)
+    assert service.actor() == SUCC
+    result = service.finish(path)
+    calls = [argv for argv, _ in native.calls if argv[4:6] == ['agent', 'archive']]
+    assert len(calls) == 1 and calls[0][4:] == ['agent', 'archive', PRED]
+    assert native.rows[PRED]['Archived'] is True
+    assert native.rows[SUCC]['Archived'] is False
+    assert result['predecessor'] == PRED and result['successor'] == SUCC
+
+
+def test_archive_receipt_naming_caller_is_not_success_10118(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (0, json.dumps({'agentId': SUCC, 'status': 'archived'}), '')
+    with pytest.raises(ss.SessionError, match='different agent'):
+        service.finish(path)
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'archive-unknown'
+    assert saved['native_error']['code'] == 'ARCHIVED_OTHER_AGENT'
+    assert native.archived == 1
+    assert not saved.get('rebound_claims')
+
+
+def routed_start(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    record = accept(service, record, path)
+    return service, native, record, path
+
+
+def test_routed_ack_is_not_acceptance_and_external_complete_turn_required(setup):
+    service, native, record, path = routed_start(setup)
+    assert record['status'] == 'ack-pending-turn'
+    with pytest.raises(ss.SessionError, match='FIRST-REAL-TURN'):
+        service.finish(path)
+    with pytest.raises(ss.SessionError, match='only recorded predecessor'):
+        service.verify_turn(path)
+    service.env['PASEO_AGENT_ID'] = PRED
+    service.evidence_reader = lambda *_: {'state': 'pending', 'cause': 'no-post-ack-turn'}
+    assert service.verify_turn(path)['status'] == 'ack-pending-turn'
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'adapter': 'fixture', 'entry_id': 'e1'}
+    native.rows[SUCC]['Status'] = 'idle'
+    accepted = service.verify_turn(path)
+    assert accepted['status'] == 'acknowledged' and accepted['first_real_turn']['entry_id'] == 'e1'
+    assert service.verify_turn(path) == accepted
+
+
+def test_failed_turn_has_visible_retry_and_excludes_failed_pool(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'error'
+    failed = service.verify_turn(path)
+    assert failed['status'] == 'first-turn-failed'
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    retried = service.retry(path)
+    assert retried['status'] == 'awaiting-ack' and retried['pool'] == 'go-account-b'
+    assert retried['attempts'][0]['pool'] == 'go-account-a'
+    assert retried['excluded_pools'] == ['go-account-a']
+    route_argv = [a for a, _ in native.calls if 'route_agent.py' in a[1]][-1]
+    assert route_argv[route_argv.index('--exclude') + 1] == 'go-account-a'
+    assert native.created == 2 and native.archived == 0
+    with pytest.raises(ss.SessionError):
+        service.retry(path)
+    assert native.created == 2
+
+
+def test_router_cannot_reselect_failed_pool(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'error'
+    service.verify_turn(path)
+    with pytest.raises(ss.SessionError, match='excluded pool'):
+        service.retry(path)
+    assert native.created == 1
+    assert json.loads(path.read_text())['status'] == 'retry-ready'
+
+
+def test_operator_appointment_reconciles_idle_successor_once(setup):
+    service, native, record, path = start(setup)
+    native.rows[SUCC]['Status'] = 'idle'
+    native.rows[OTHER] = {**native.rows[SUCC], 'Id': OTHER, 'Provider': 'pi',
+                          'Model': 'opencode-go-account-b/test-model', 'AvailableModes': []}
+    service.env['PASEO_AGENT_ID'] = OTHER
+    replaced = service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b')
+    assert replaced['successor'] == OTHER and replaced['custody_incumbent'] == SUCC
+    assert replaced['status'] == 'awaiting-ack' and replaced['ack'] is None
+    assert service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b') == replaced
+    assert native.created == 1 and native.archived == 0
+    service.env['PASEO_AGENT_ID'] = SUCC
+    with pytest.raises(ss.SessionError, match='exact recorded successor'):
+        service.accept(path, Path('/must-not-read'))
+
+
+def test_appointment_refuses_running_incumbent_before_any_change(setup):
+    service, native, record, path = start(setup)
+    before = path.read_bytes()
+    service.env['PASEO_AGENT_ID'] = OTHER
+    with pytest.raises(ss.SessionError, match='incumbent must be idle'):
+        service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b')
+    assert path.read_bytes() == before and native.created == 1
+
+
+def test_router_real_profile_translates_effort_without_losing_namespace(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Thinking'] = 'low'
+    native.route_choice = {'service': 'go-account-a', 'agent': 'pi',
+                          'model': 'opencode-go-account-a/test-model --effort high'}
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    argv = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+    assert argv[argv.index('--provider') + 1] == 'pi/opencode-go-account-a/test-model'
+    assert argv[argv.index('--thinking') + 1] == 'high'
+    assert record['model'] == 'opencode-go-account-a/test-model'
+    assert record['thinking'] == 'high'
+
+
+def test_later_idle_native_error_preserves_predecessor_and_allows_retry(setup):
+    service, native, record, path = routed_start(setup)
+    native.rows[SUCC]['Status'] = 'idle'
+    service.env['PASEO_AGENT_ID'] = PRED
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    service.verify_turn(path)
+    native.rows[PRED]['Status'] = 'idle'
+    service.env['PASEO_AGENT_ID'] = SUCC
+    service.evidence_reader = lambda *_, **kw: {'state': 'failed', 'cause': 'provider-error'}
+    with pytest.raises(ss.SessionError, match='failed after acceptance'):
+        service.finish(path)
+    assert native.archived == 0
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'first-turn-failed'
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['pool'] == 'go-account-b'
+
+
+def test_auth_failure_before_ack_can_be_retried_without_fabricated_ack(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'error'
+    failed = service.verify_turn(path)
+    assert failed['status'] == 'first-turn-failed' and failed['ack'] is None
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['status'] == 'awaiting-ack'
+    assert native.archived == 0
+
+
+def test_wrong_provider_error_is_not_valid_retry_evidence(setup):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    native.rows[SUCC].update(Status='error', Provider='other-provider')
+    with pytest.raises(ss.SessionError, match='identity'):
+        service.verify_turn(Path(record['record']))
+    assert service.status(Path(record['record']))['status'] == 'awaiting-ack'
+
+
+def test_completed_custody_continues_chain_and_rebinds_claim_once(setup, tmp_path):
+    import ade_claims
+    service, native, original_path = finished_up_to_archive(setup)
+    original = service.finish(original_path)
+    _claim('c-incumbent', SUCC, tmp_path)
+    native.rows[SUCC]['Status'] = 'idle'
+    native.rows[OTHER] = {**native.rows[SUCC], 'Id': OTHER, 'Provider': 'pi',
+                          'Model': 'opencode-go-account-b/test-model', 'AvailableModes': []}
+    service.env['PASEO_AGENT_ID'] = OTHER
+    appointed = service.appoint(original_path, appointed=OTHER, operator_appointed=True,
+                                 quiesced=True, pool='go-account-b')
+    path = Path(appointed['record'])
+    assert path != original_path and appointed['predecessor'] == SUCC
+    assert appointed['identity']['labels']['ade.predecessor'] == SUCC
+    assert json.loads(original_path.read_text())['successor'] == SUCC
+    assert ade_claims.read_claim('c-incumbent')['owner']['agent'] == SUCC
+    # Recover a kill after continuation save but before parent appointment marker.
+    old = json.loads(original_path.read_text()); old.pop('appointment')
+    original_path.write_text(json.dumps(old))
+    assert service.appoint(original_path, appointed=OTHER, operator_appointed=True,
+                           quiesced=True, pool='go-account-b')['token'] == appointed['token']
+    ack = {k: appointed[k] for k in ('token', 'checkpoint_sha256', 'head')}
+    ack['next_action'] = 'read checkpoint, then run assigned work'
+    ack_path = service.state / 'appointed-ack.json'; ack_path.write_text(json.dumps(ack))
+    assert service.accept(path, ack_path)['status'] == 'ack-pending-turn'
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    service.env['PASEO_AGENT_ID'] = SUCC
+    assert service.verify_turn(path)['status'] == 'acknowledged'
+    assert ade_claims.read_claim('c-incumbent')['owner']['agent'] == SUCC
+    service.env['PASEO_AGENT_ID'] = OTHER
+    archive_calls = []
+    def runner(argv, **kwargs):
+        if argv[4:6] == ['agent', 'archive']:
+            assert argv[6:] == [SUCC]
+            archive_calls.append(SUCC)
+            native.rows[SUCC]['Archived'] = True
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'agentId': SUCC}), '')
+        return native(argv, **kwargs)
+    service.runner = runner
+    finished = service.finish(path)
+    assert finished['rebound_claims'] == ['c-incumbent']
+    moved = ade_claims.read_claim('c-incumbent')
+    assert moved['owner']['agent'] == OTHER
+    service.finish(path)
+    assert ade_claims.read_claim('c-incumbent')['history'] == moved['history']
+    assert archive_calls == [SUCC]
+    assert native.rows[OTHER]['Archived'] is False
+
+
+def test_predecessor_can_classify_failure_after_accept_without_successor_action(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'idle'
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    assert service.verify_turn(path)['status'] == 'acknowledged'
+    native.rows[SUCC]['Status'] = 'error'
+    assert service.verify_turn(path)['status'] == 'first-turn-failed'
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['pool'] == 'go-account-b'
+    assert native.archived == 0
+
+
+@pytest.mark.parametrize('enrolled', [PRED, SUCC, OTHER])
+def test_legacy_appointment_cannot_bypass_enrolled_retirement_gate(setup, monkeypatch, enrolled):
+    from types import SimpleNamespace
+    service, native, record, path = start(setup)
+    service.env['PASEO_AGENT_ID'] = OTHER
+    before, calls = path.read_bytes(), len(native.calls)
+    monkeypatch.setattr(ss, '_coord', lambda: SimpleNamespace(role_for=lambda agent: 'pilot' if agent == enrolled else None))
+    with pytest.raises(ss.SessionError, match='enrolled appointment blocked'):
+        service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b')
+    assert path.read_bytes() == before
+    assert len(native.calls) == calls
+    assert native.created == 1 and native.archived == 0

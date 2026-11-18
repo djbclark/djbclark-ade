@@ -429,4 +429,62 @@ ADE can report verified completion. No such API is invented or deployed here.
 
 ## Opt-in NATS coordination
 
-For explicitly enrolled NATS roles, `--quiesced` is insufficient and legacy handoff refuses. Use the external controlled-pilot retirement gate described in [NATS coordination](nats-coordination.md); unknown jobs, runtime retirement, remote access or operations block transfer.
+For explicitly enrolled NATS roles, `--quiesced` is insufficient and legacy handoff refuses. Legacy operator appointment also refuses if any custody participant is enrolled. Use the external controlled-pilot retirement gate described in [NATS coordination](nats-coordination.md); unknown jobs, runtime retirement, remote access or operations block transfer.
+
+
+## F. Routed first-turn gate and operator appointments (Carried 73)
+
+`handoff --route-kind judgment --checkpoint FILE --quiesced` explicitly asks the
+fresh router for a replacement. Currently only a Pi destination is supported by
+the durable evidence adapter; an unsupported destination refuses before launch.
+The physical router service, full model and excluded pools are persisted. Pi has
+no selectable mode; this path verifies its empty native mode catalog, no pending
+permissions and first real turn instead of claiming a selectable YOLO mode.
+
+For this path, `accept` only writes `ack-pending-turn`. The successor must perform
+read-only checkpoint work after its ack, produce a substantive final response,
+and end the turn. The predecessor then runs `verify-turn --record FILE`. Only a
+successful post-ack terminal Pi assistant message, generated output, matching
+session identity and a fresh idle runtime readback produces `acknowledged`.
+`finish` refuses before that proof. No peer redirect or claim transfer occurs
+from the provisional ack. Legacy same-provider handoffs retain their existing
+contract; they do not acquire a first-turn guarantee by this change.
+
+The adapter reads the exact owned canonical transcript named by the matching
+Paseo persistence record. It supports unbranched Pi v3 JSONL sessions only.
+Unknown schemas, branches, partial files and providers fail closed. Raw content,
+credential-bearing errors and provider messages are never put into evidence.
+The receipt contains only session/entry IDs, completion time and a fixed class.
+This is durable provider terminal evidence plus a settled runtime, not the CLI's
+projected logs (which omit turn-completion events).
+
+`retry --record FILE` handles a recorded failed first turn. It checks that the
+failed candidate is idle/error/closed without permission waits, saves visible
+attempt history and excludes its physical router service before requesting a
+fresh plan. It never changes credentials or tries another account inside a
+provider. If planning fails, `retry-ready` is preserved; `handoff --checkpoint
+FILE --quiesced` resumes that intent. Ambiguous creation remains unreplayed.
+Failed candidates are not archived automatically and have no project authority.
+
+An operator-appointed lead invokes `appoint --record FILE --appointed ID
+--pool PHYSICAL_ROUTER_SERVICE --operator-appointed --quiesced`. The explicit
+pool binding must name that appointed lead's actual account pool. The incumbent
+must be idle and have no permission wait. An uncompleted transaction replaces
+its candidate atomically; a completed transaction gets an incumbent-to-appointed
+continuation, preserving the old custody chain. Identical appointments are
+idempotent and competing appointments are refused. A fresh ack and first-turn
+proof are still required; claims move through normal verified `finish` exactly
+once. Appointment attestation is an internal trusted-operator contract, not an
+authentication boundary. It never launches or archives an agent itself.
+
+Prior art / docs checked: shared Firecrawl search for Paseo archive issue 10118
+returned no relevant result; GitHub API fetched the issue and upstream CLI
+logs/timeline and protocol source. Local Paseo Pi provider source and upstream
+Pi session-manager v3 schema establish the terminal and persistence contracts.
+The isolated named-recipient fixture exercises only the fake native runner;
+[upstream issue 10118](https://github.com/getpaseo/paseo/issues/10118) remains open.
+
+For a completed chain, the incumbent becomes the continuation predecessor and
+must run `verify-turn` externally after the appointed lead ends its first turn.
+This is coordinated takeover, not autonomous recovery of an unavailable or dead
+incumbent; such a case remains blocked without a separate verified observer.

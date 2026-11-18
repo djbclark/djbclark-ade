@@ -9,6 +9,12 @@ sandbox_mode = "danger-full-access"
 approval_policy = "never"
 personality = "pragmatic"
 service_tier = "default"
+# Global + project instruction docs share one byte budget (project_doc_max_bytes, default 32768). The
+# rendered global ~/.codex/AGENTS.md (~24.7 KB: home instructions + collie-appended skill docs) plus a
+# project AGENTS.md (cfengine-all is ~24.2 KB) exceed the default, so Codex truncated the project doc at
+# startup ("project doc exceeds remaining budget"). Raise the budget rather than trim either file; the
+# canonical home instruction source stays within the <=200-line / <=14000-byte policy.
+project_doc_max_bytes = 65536
 notify = [
     "{{ .home }}/ops/site-private/.codex-runtime/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
     "turn-ended",
@@ -23,6 +29,15 @@ source = "{{ .home }}/.codex/.tmp/bundled-marketplaces/openai-bundled"
 source_type = "local"
 source = "{{ .home }}/.cache/codex-runtimes/codex-primary-runtime/plugins/openai-primary-runtime"
 
+# Six third-party git marketplaces remain (composio, adhd, claude-plugins-official, mattpocock,
+# typesafe-ai, anthropic-agent-skills). claude-code-mods is removed: its only plugin (context-bar) is a
+# Claude Code UI mod, not a Codex plugin; anthropic-agent-skills is a captured live-drift addition.
+# The startup error "trusted Git repository root escapes Codex home" is raised by git_policy.rs when the
+# canonical ~/.codex/.tmp resolves outside the canonical Codex home: ~/.codex/.tmp is a symlink into
+# ~/ops/site-private/.codex-runtime/.tmp (outside ~/.codex), so Codex refuses every git marketplace before
+# git discovery. Fix that symlink (make ~/.codex/.tmp a real directory inside ~/.codex); do NOT convert
+# these to local, because a local marketplace root needs a marketplace manifest, which the plugin cache
+# dirs do not have.
 [marketplaces.composio]
 last_updated = "2026-07-30T14:40:37Z"
 source_type = "git"
@@ -48,13 +63,13 @@ source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/claude-cowor
 source_type = "local"
 source = "{{ .home }}/ops/site-djbclark/claude/local-marketplace"
 
-[marketplaces.claude-code-mods]
-source_type = "git"
-source = "https://github.com/hamzafer/claude-code-mods.git"
-
 [marketplaces.typesafe-ai]
 source_type = "git"
 source = "https://github.com/typesafe-ai/skills.git"
+
+[marketplaces.anthropic-agent-skills]
+source_type = "git"
+source = "https://github.com/anthropics/skills.git"
 
 [plugins."documents@openai-primary-runtime"]
 enabled = true
@@ -95,6 +110,9 @@ enabled = true
 [plugins."rust-analyzer-lsp@claude-plugins-official"]
 enabled = true
 
+[plugins."typescript-lsp@claude-plugins-official"]
+enabled = true
+
 [plugins."mattpocock-skills@mattpocock"]
 enabled = true
 
@@ -107,10 +125,13 @@ enabled = true
 [plugins."local-lsp@local"]
 enabled = true
 
-[plugins."context-bar@claude-code-mods"]
+[plugins."typesafe@typesafe-ai"]
 enabled = true
 
-[plugins."typesafe@typesafe-ai"]
+[plugins."document-skills@anthropic-agent-skills"]
+enabled = true
+
+[plugins."example-skills@anthropic-agent-skills"]
 enabled = true
 
 [projects."{{ .home }}/Documents/Maestro"]

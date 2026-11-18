@@ -17,6 +17,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -298,13 +299,14 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 class Service:
     def __init__(self, state: Path, home: Path, *, env=None, runner=None,
-                 planner=None, verifier=None, clock=None, sleep=None, progress=None):
+                 planner=None, verifier=None, clock=None, sleep=None, progress=None, evidence_reader=None):
         self.state = state.resolve()
         self.home = home.resolve()
         self.env = dict(os.environ if env is None else env)
         self.runner = runner or subprocess.run
         self.planner = planner
         self.verifier = verifier
+        self.evidence_reader = evidence_reader
         self.clock = clock or time.monotonic  # injected in tests so a wait never sleeps for real
         self.sleep = sleep or time.sleep
         self.progress = progress or (lambda message: None)
@@ -461,23 +463,33 @@ class Service:
             raise SessionError('supported unattended successor mode unavailable')
         return plan
 
-    def verify_successor(self, record):
+    def verify_successor(self, record, *, allow_failed=False):
         verifier = self.verifier
         if verifier is None:
             from paseo_yolo import verify_unattended_snapshot
             verifier = verify_unattended_snapshot
         row = self.inspect(record['successor'])
+        # A correctly placed successor can still have failed its provider turn.
+        # Only classify native fields: error text may contain credentials.
+        if row.get('Status') not in ('idle', 'running') and not (allow_failed and row.get('Status') == 'error'):
+            raise SessionError('successor runtime is not healthy; preserve predecessor')
+        if not allow_failed and (row.get('stopReason') == 'error' or row.get('StopReason') == 'error'):
+            raise SessionError('successor provider turn failed; preserve predecessor')
         if (row.get('Archived') is not False or row.get('Cwd') != record['cwd']
                 or row.get('Provider') != record['provider'] or row.get('Model') != record['model']
                 or row.get('ParentAgentId') is not None or row.get('PendingPermissions') != []):
             raise SessionError('successor identity, placement, parent or permission readback mismatch')
+        if record.get('requires_first_turn') and record['provider'] == 'pi':
+            if row.get('AvailableModes') != []:
+                raise SessionError('Pi modeless catalog changed; preserve predecessor')
+            return row
         checked = verifier(record['mode_plan'], row)
         if not checked.get('ok'):
             raise SessionError('successor unattended mode not verified')
         return row
 
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
-                requested_title=None, requested_role=None):
+                requested_title=None, requested_role=None, route_kind=None):
         predecessor = self.actor()
         role_for = _coord().role_for
         CoordinationError = _coord().CoordinationError
@@ -501,6 +513,15 @@ class Service:
                         'something other than a list' if not isinstance(rows, list)
                         else 'an agent carrying its token label') + '; reconcile, no create replayed')
                 refused_before = existing['native_error']
+                existing = None
+            retry_history = []
+            excluded = []
+            if isinstance(existing, dict) and existing.get('status') == 'retry-ready':
+                if existing.get('home') != str(self.home) or existing.get('predecessor') != predecessor:
+                    raise SessionError('retry identity mismatch')
+                retry_history = existing.get('attempts', [])
+                excluded = existing.get('excluded_pools', [])
+                route_kind = existing['route_kind']
                 existing = None
             if existing:
                 if (not isinstance(existing, dict) or existing.get('home') != str(self.home)
@@ -534,8 +555,17 @@ class Service:
             # answered WORKSPACE_NOT_FOUND and the helper hid it. Decided: a successor is a new
             # lead in its own placement, so a vanished workspace is replaced, not a reason to refuse.
             placement = 'existing' if self.workspace_exists(workspace) else 'new-local'
-            plan = self.mode_plan(source, requested_mode)
-            thinking = explicit_thinking
+            route = self.route_successor(route_kind, excluded, cwd) if route_kind else None
+            launch_source = source
+            if route:
+                if requested_mode is not None:
+                    raise SessionError('routed Pi handoff cannot preserve a restrictive mode')
+                launch_source = {**source, 'Provider': 'pi', 'Model': route['model']}
+                plan = {'status': 'ready', 'provider': 'pi', 'mode_id': None,
+                        'mechanism': 'first-real-turn', 'evidence': 'source-modeless', 'provider_options': {}}
+            else:
+                plan = self.mode_plan(source, requested_mode)
+            thinking = explicit_thinking or (route.get('thinking') if route else None)
             if thinking is None:
                 # Inherit the predecessor's own level (2026-11-14: a lead at `high` handed off to
                 # a successor at `auto`). Unknown, unusable or `auto` source: launch as before.
@@ -549,10 +579,13 @@ class Service:
             record = {'schema_version': 1, 'kind': 'handoff', 'token': token, 'identity': identity,
                       'predecessor': predecessor, 'successor': None, 'home': str(self.home),
                       'cwd': cwd, 'workspace': workspace, 'workspace_placement': placement,
-                      'provider': source['Provider'],
-                      'model': source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
+                      'provider': launch_source['Provider'],
+                      'model': launch_source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
+            if route:
+                record.update(requires_first_turn=True, route_kind=route_kind, pool=route['service'],
+                              route=route, attempts=retry_history, excluded_pools=excluded)
             if refused_before is not None:
                 record['refused_before'] = refused_before
             self.save(path, record)  # survives crash before/after unknown native effect
@@ -583,12 +616,18 @@ class Service:
                 'and you have reconciled exclusive workspace ownership under the repository rules. '
                 'If any check fails, preserve both sessions and report it.'
             )
+            if route:
+                prompt += (' This handoff requires FIRST-REAL-TURN evidence. accept only records your ack; '
+                           'after it, use a read-only tool to inspect the checkpoint, then end this turn with '
+                           'a substantive next-action summary. Do not run finish yet or write project files. '
+                           'The predecessor must run verify-turn after you become idle; only then may it '
+                           'ask you to finish. A failed verification retains the predecessor.')
             try:
                 thinking_args = ('--thinking', thinking) if thinking else ()
                 where = ('--workspace', workspace) if placement == 'existing' else ('--new-workspace', 'local')
                 result = self.native('agent', 'run', *where, '--cwd', cwd,
-                                     '--provider', source['Provider'] + '/' + source['Model'],
-                                     '--mode', plan['mode_id'], *thinking_args, '--no-wait', '--label',
+                                     '--provider', launch_source['Provider'] + '/' + launch_source['Model'],
+                                     *(('--mode', plan['mode_id']) if plan['mode_id'] else ()), *thinking_args, '--no-wait', '--label',
                                      'ade.handoff=' + token, '--title=' + identity['title'],
                                      *(a for k, v in identity['labels'].items() for a in ('--label', f'{k}={v}')),
                                      '--', prompt, detached=True)
@@ -725,8 +764,12 @@ class Service:
             if not isinstance(rows, list) or len(rows) != 1:
                 raise SessionError('need exactly one token-labelled successor; no create replayed')
             record['successor'] = ident(rows[0].get('id', ''))
-            self.verify_successor(record)
+            row = self.verify_successor(record, allow_failed=bool(record.get('requires_first_turn')))
             record['status'] = 'awaiting-ack'
+            if record.get('requires_first_turn') and (row.get('Status') == 'error'
+                    or row.get('stopReason') == 'error' or row.get('StopReason') == 'error'):
+                record['status'] = 'first-turn-failed'
+                record['first_turn_failure'] = {'state': 'failed', 'cause': 'runtime-error-before-ack'}
             self.resolve_native_error(record)
             self.save(target, record)
             return record
@@ -751,16 +794,195 @@ class Service:
             safe_ack['agent_id'] = record['successor']
             if record.get('ack') and record['ack'] != safe_ack:
                 raise SessionError('conflicting acknowledgement; preserve existing receipt')
-            if record['status'] not in ('awaiting-ack', 'acknowledged'):
+            if record['status'] not in ('awaiting-ack', 'acknowledged', 'ack-pending-turn'):
                 raise SessionError('transaction is not awaiting acknowledgement')
+            if record.get('first_real_turn') and record['status'] == 'acknowledged':
+                return record
             record['ack'] = safe_ack
-            record['status'] = 'acknowledged'
+            record['status'] = 'ack-pending-turn' if record.get('requires_first_turn') else 'acknowledged'
             # when the successor attested: ade_lead_succession redirects peers to it only while this is recent (rq-38); a
             # repeated accept keeps the first stamp, so a stuck handoff cannot be kept "fresh" by re-running it
-            record.setdefault('acknowledged_at', datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
-            self.reassert_identity(record, 'accept')
+            acknowledged = datetime.datetime.now(datetime.timezone.utc)
+            record.setdefault('acknowledged_at', acknowledged.strftime('%Y-%m-%dT%H:%M:%SZ'))
+            record.setdefault('ack_observed_at', acknowledged.isoformat())
+            if not record.get('requires_first_turn'):
+                self.reassert_identity(record, 'accept')
             self.save(target, record)
             return record
+
+    def appoint(self, path, *, appointed, operator_appointed, quiesced, pool):
+        """Enroll an explicitly appointed lead, without launching another writer.
+
+        A completed chain gets an incumbent->appointed continuation. An unfinished
+        chain replaces its candidate. Both are compare-and-swap under record locks.
+        Ownership still moves only through verified finish and the claim registry.
+        """
+        appointed = ident(appointed)
+        if not operator_appointed or not quiesced or self.actor() != appointed:
+            raise SessionError('appointed caller must attest operator appointment and quiescence')
+        if not isinstance(pool, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]+', pool):
+            raise SessionError('explicit physical pool binding required')
+        with self.transaction(self.load_record(path)) as (target, old):
+            if not old or old.get('home') != str(self.home):
+                raise SessionError('custody record unavailable on this daemon')
+            # Published legacy appointment must not bypass the enrolled-role
+            # retirement/resource gate retained by the NATS adapter merge.
+            role_for = _coord().role_for
+            if any(role_for(agent) is not None for agent in
+                   (old.get('predecessor'), old.get('successor'), appointed) if agent):
+                raise SessionError('enrolled appointment blocked: use the controlled NATS retirement/resource gate')
+            appointment = old.get('appointment')
+            if appointment:
+                if appointment.get('appointed') != appointed:
+                    raise SessionError('another appointment already owns this custody transition')
+                return self.status(Path(appointment['record']))
+            incumbent = old.get('successor')
+            if incumbent == appointed:
+                return old
+            if incumbent == old.get('predecessor') or appointed == old.get('predecessor'):
+                raise SessionError('custody transition would form a cycle')
+            prior = self.inspect(incumbent)
+            if prior.get('Status') != 'idle' or prior.get('Archived') is not False or prior.get('PendingPermissions') != []:
+                raise SessionError('incumbent must be idle without permission waits before appointment')
+            row = self.inspect(appointed)
+            if (row.get('Provider') != 'pi' or row.get('AvailableModes') != [] or row.get('Archived') is not False
+                    or row.get('Cwd') != old['cwd'] or row.get('ParentAgentId') is not None
+                    or row.get('PendingPermissions') != [] or row.get('Status') not in ('running', 'idle')):
+                raise SessionError('appointed lead identity or supported first-turn adapter unavailable')
+            if old.get('status') not in ('archived', 'awaiting-ack', 'ack-pending-turn', 'acknowledged', 'first-turn-failed'):
+                raise SessionError('ambiguous native lifecycle outcome must be reconciled before appointment')
+            completed = old['status'] == 'archived'
+            key = 'handoff-' + incumbent if completed else self.load_record(path)
+            # For completed custody, a separate record preserves the old chain and
+            # rebinds incumbent-owned claims once. Never rewrite completed ownership.
+            if completed:
+                with self.transaction(key) as (new_path, existing):
+                    if existing:
+                        if existing.get('appointed_from') != old['token'] or existing.get('successor') != appointed:
+                            raise SessionError('incumbent already has another custody transition')
+                        record = existing
+                    else:
+                        record = self.appointed_record(old, prior, row, new_path, pool, incumbent)
+                        self.save(new_path, record)
+                    old['appointment'] = {'appointed': appointed, 'record': str(new_path)}
+                    self.save(target, old)
+                    return record
+            record = self.appointed_record(old, prior, row, target, pool, old['predecessor'])
+            record['appointment'] = {'appointed': appointed, 'record': str(target)}
+            self.save(target, record)
+            return record
+
+    def appointed_record(self, old, incumbent, row, target, pool, predecessor):
+        token = str(uuid.uuid4())
+        checkpoint, sha = self.checkpoint(Path(old['checkpoint']), token=token)
+        return {'schema_version': 1, 'kind': 'handoff', 'token': token,
+                'predecessor': predecessor, 'successor': row['Id'], 'home': str(self.home),
+                'cwd': old['cwd'], 'workspace': old['workspace'], 'workspace_placement': old['workspace_placement'],
+                'provider': 'pi', 'model': row['Model'], 'thinking': row.get('Thinking'),
+                'mode_plan': {'status': 'ready', 'provider': 'pi', 'mode_id': None,
+                              'mechanism': 'first-real-turn', 'provider_options': {}},
+                'identity': {**old['identity'], 'labels': {**old['identity']['labels'],
+                              'ade.predecessor': predecessor}}, 'head': self.git_head(old['cwd']),
+                'checkpoint': checkpoint, 'checkpoint_sha256': sha,
+                'status': 'awaiting-ack', 'ack': None, 'record': str(target),
+                'requires_first_turn': True, 'route_kind': 'judgment', 'pool': pool,
+                'appointed_from': old['token'], 'custody_incumbent': incumbent['Id'],
+                'operator_appointed': True, 'attempts': old.get('attempts', []),
+                'excluded_pools': old.get('excluded_pools', [])}
+
+    def route_successor(self, kind, excluded, cwd):
+        """Fresh explicit router plan; never execute its shell dispatch string."""
+        if kind not in ('code', 'judgment', 'research', 'bulk', 'mechanical'):
+            raise SessionError('unsupported handoff route kind')
+        argv = [sys.executable, str(Path(__file__).with_name('route_agent.py')), 'plan',
+                '--kinds', kind, '--json', '--lead', self.actor(), '--slice', 'self-handoff', '--cwd', cwd]
+        for pool in excluded:
+            if not isinstance(pool, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]+', pool):
+                raise SessionError('invalid excluded pool')
+            argv.extend(('--exclude', pool))
+        try:
+            result = self.runner(argv, env=self.env, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                raise SessionError('handoff router failed; no successor launched')
+            data = json.loads(result.stdout)
+            row = data['slices'][0]
+            if data.get('stale') is not False or len(data['slices']) != 1:
+                raise SessionError('handoff requires fresh unambiguous routing evidence')
+            if (row.get('agent') != 'pi' or not isinstance(row.get('model'), str)
+                    or not row['model'] or not isinstance(row.get('service'), str)
+                    or row['service'] in excluded):
+                raise SessionError('router selected unsupported first-turn adapter or excluded pool; no launch')
+            spec = shlex.split(row['model'])
+            if not spec or len(spec) not in (1, 3) or (len(spec) == 3 and spec[1] != '--effort'):
+                raise SessionError('invalid Pi router profile; no launch')
+            if '/' not in spec[0] or any(c.isspace() for c in spec[0]) or spec[0].startswith('-'):
+                raise SessionError('physical Pi model namespace required')
+            return {'service': row['service'], 'agent': 'pi', 'model': spec[0],
+                    'thinking': thinking_ident(spec[2]) if len(spec) == 3 else None}
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, IndexError):
+            raise SessionError('handoff router evidence unavailable; no successor launched') from None
+
+    def verify_turn(self, path):
+        """External verification: a successor cannot prove idle inside its own turn."""
+        with self.transaction(self.load_record(path)) as (target, record):
+            if not record or record.get('home') != str(self.home) or self.actor() != record['predecessor']:
+                raise SessionError('only recorded predecessor verifies the first real turn')
+            if record.get('status') not in ('awaiting-ack', 'ack-pending-turn', 'acknowledged') or not record.get('requires_first_turn'):
+                raise SessionError('routed successor required before first-turn verification')
+            if record['status'] == 'ack-pending-turn' and not record.get('ack'):
+                raise SessionError('successor acknowledgement required before first-turn verification')
+            row = self.verify_successor(record, allow_failed=True)
+            from ade_first_turn import pi_first_turn, EvidenceError
+            try:
+                if row.get('Status') == 'error' or row.get('stopReason') == 'error' or row.get('StopReason') == 'error':
+                    evidence = {'state': 'failed', 'cause': 'runtime-error'}
+                elif not record.get('ack'):
+                    return record  # known identity, but never accept output before acknowledgement
+                else:
+                    self.verify_successor(record)
+                    if record.get('first_real_turn'):
+                        evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, proof=record['first_real_turn'])
+                    else:
+                        evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row)
+                if evidence.get('state') == 'complete':
+                    # Re-read runtime after file I/O. A new running turn cannot inherit proof.
+                    settled = self.verify_successor(record)
+                    if settled.get('Status') != 'idle':
+                        raise SessionError('successor no longer idle; first-turn verification pending')
+                    record['first_real_turn'] = evidence
+                    record['status'] = 'acknowledged'
+                    self.reassert_identity(record, 'first-real-turn')
+                elif evidence.get('state') == 'failed':
+                    record['status'] = 'first-turn-failed'
+                    record['first_turn_failure'] = evidence
+                elif evidence.get('state') != 'pending':
+                    raise SessionError('invalid first-turn evidence result')
+                else:
+                    record['first_turn_pending'] = evidence['cause']
+            except EvidenceError as error:
+                record['first_turn_pending'] = str(error)
+            self.save(target, record)
+            return record
+
+    def retry(self, path):
+        """Failed candidates retain a visible history; unknown creation is never replayed."""
+        with self.transaction(self.load_record(path)) as (target, record):
+            if not record or record.get('home') != str(self.home) or self.actor() != record['predecessor']:
+                raise SessionError('only predecessor retries a failed first turn')
+            if record.get('status') != 'first-turn-failed' or not record.get('route_kind') or not record.get('pool'):
+                raise SessionError('only a routed failed first turn may be retried')
+            failed = self.inspect(record['successor'])
+            if failed.get('Status') not in ('idle', 'error', 'closed') or failed.get('PendingPermissions') != []:
+                raise SessionError('failed successor is not quiescent; no replacement launched')
+            excluded = sorted(set(record.get('excluded_pools', []) + [record['pool']]))
+            # Record intent before releasing the lock or calling the router/launcher.
+            record.setdefault('attempts', []).append({k: record[k] for k in
+                ('token', 'successor', 'provider', 'model', 'pool', 'first_turn_failure')})
+            record['excluded_pools'] = excluded
+            record['status'] = 'retry-ready'
+            self.save(target, record)
+            checkpoint = Path(record['checkpoint'])
+        return self.handoff(checkpoint, quiesced=True)
 
     def head_drift(self, record):
         """None while HEAD is the recorded head; {'to', 'commits', 'more'} when it moved forward; else SessionError.
@@ -803,7 +1025,32 @@ class Service:
 
         HEAD may have moved forward (head_drift); that is recorded as `head_advanced` so the successor sees what landed.
         """
-        self.verify_successor(record)
+        if record.get('requires_first_turn'):
+            current = self.inspect(record['successor'])
+            if (current.get('Status') == 'error' or current.get('stopReason') == 'error'
+                    or current.get('StopReason') == 'error'):
+                record['status'] = 'first-turn-failed'
+                record['first_turn_failure'] = {'state': 'failed', 'cause': 'runtime-error-after-accept'}
+                if target is not None:
+                    self.save(target, record)
+                raise SessionError('successor failed after acceptance; preserve predecessor and re-handoff')
+        row = self.verify_successor(record)
+        if record.get('requires_first_turn'):
+            from ade_first_turn import pi_first_turn, EvidenceError
+            try:
+                proof = record.get('first_real_turn')
+                if not proof:
+                    raise SessionError('FIRST-REAL-TURN evidence required before retirement')
+                evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, proof=proof)
+                if evidence.get('state') == 'failed':
+                    record['status'] = 'first-turn-failed'
+                    record['first_turn_failure'] = evidence
+                    if target is not None:
+                        self.save(target, record)
+                if evidence.get('state') != 'complete':
+                    raise SessionError('successor terminal evidence failed after acceptance; preserve predecessor')
+            except EvidenceError as error:
+                raise SessionError(str(error)) from None
         if digest(read_regular(Path(record['checkpoint']), 1024 * 1024)) != record['checkpoint_sha256']:
             raise SessionError('checkpoint or HEAD changed; preserve predecessor')
         drift = self.head_drift(record)
@@ -857,6 +1104,8 @@ class Service:
         with self.transaction(self.load_record(path)) as (target, record):
             if not record or record.get('home') != str(self.home):
                 raise SessionError('transaction unavailable on this daemon home')
+            if record.get('requires_first_turn') and not record.get('first_real_turn'):
+                raise SessionError('FIRST-REAL-TURN evidence required before retirement')
             if self.actor() != record.get('successor') or not record.get('ack'):
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
