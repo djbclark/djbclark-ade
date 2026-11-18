@@ -185,7 +185,8 @@ fi
 if [ "$send_failed" -eq 1 ]; then
     if [ -n "$msg" ]; then
         # Something wanted saying and it could not be said: tell the operator once per cause per outage.
-        ping_operator_once "${refused:-send failed}" unreachable
+        if [ -n "$refused" ]; then cause_slug=refused; else cause_slug=send-failed; fi
+        ping_operator_once "${refused:-send failed}" "$cause_slug"
     else
         printf '%s ade-supervisor-scan: quiet run, nothing lost (%s)\n' "$(now)" "${refused:-send failed}" >>"$LOG"
     fi

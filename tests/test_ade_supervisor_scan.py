@@ -212,7 +212,7 @@ def test_a_paseo_outage_escalates_after_the_guard_fails_open(tmp_path: Path) -> 
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 1                                     # attempted, and it failed
     assert len((tmp_path / "hermes.log").read_text().splitlines()) == 1
-    assert (state / ".lead-unreachable.unreachable").exists()
+    assert (state / ".lead-unreachable.send-failed").exists()
 
 
 def test_a_failed_escalation_is_retried_next_run(tmp_path: Path) -> None:
@@ -224,7 +224,7 @@ def test_a_failed_escalation_is_retried_next_run(tmp_path: Path) -> None:
     assert _run(bin_dir, home) == 0
     assert _run(bin_dir, home) == 0
     assert len(calls.read_text().splitlines()) == 2          # retried, because it never reached the operator
-    assert not (state / ".lead-unreachable.unreachable").exists()
+    assert not (state / ".lead-unreachable.refused").exists()
 
 
 def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -> None:
@@ -308,11 +308,11 @@ def test_only_a_delivery_clears_the_escalation_marker(tmp_path: Path) -> None:
     bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
     _paseo(bin_dir, tmp_path, sent, rc=2)                                # the send fails
     assert _run(bin_dir, home) == 0
-    assert (state / ".lead-unreachable.unreachable").exists()
+    assert (state / ".lead-unreachable.send-failed").exists()
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": []}))        # nothing to send: no proof either
     _paseo(bin_dir, tmp_path, sent, rc=5)
     assert _run(bin_dir, home) == 0
-    assert (state / ".lead-unreachable.unreachable").exists()
+    assert (state / ".lead-unreachable.send-failed").exists()
 
 
 def test_each_cause_gets_its_own_escalation(tmp_path: Path) -> None:
@@ -379,3 +379,15 @@ def test_an_env_lead_that_keeps_naming_a_replaced_lead_is_told_once(tmp_path: Pa
     assert not (state / "lead").exists()                        # the environment owns the value: nothing rewritten
     log = (state / "supervisor.log").read_text()
     assert log.count("still names") == 1                        # the handoff is reported once, not 288 times a day
+
+
+def test_a_refused_lead_and_a_failed_send_are_separate_causes(tmp_path: Path) -> None:
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    _paseo(bin_dir, tmp_path, sent, archived=True)                  # the guard refuses
+    assert _run(bin_dir, home) == 0
+    _paseo(bin_dir, tmp_path, sent, rc=2)                           # now the send itself fails
+    assert _run(bin_dir, home) == 0
+    pings = (tmp_path / "hermes.log").read_text().splitlines()
+    assert len(pings) == 2                                          # one per cause, same outage
+    assert (state / ".lead-unreachable.refused").exists()
+    assert (state / ".lead-unreachable.send-failed").exists()
