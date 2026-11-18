@@ -122,7 +122,7 @@ E6. Optional Temporal experiment: at most half an engineering day, outside the N
 
 E7. Do not enroll in Temporal Cloud's standard trial: its credits can expire into billable usage. Its managed trial becomes eligible only if a separately verified arrangement guarantees no charges and is separately approved. The small OSS experiment provides the useful learning without that billing exposure. <sup>[7](#S8)</sup>
 
-E8. Complete the future implementation goal only after implementation, pilot, activation, documentation, and recovery evidence are verified. This is separate from the current goal to finish and deliver this plan. Genuine approval or infrastructure blockers remain explicit; they are not treated as completed work.
+E8. Complete the future implementation goal only after implementation, pilot, activation, documentation, and recovery evidence are verified. The active operator goal is to achieve all goals in this plan, including implementation and the approved rollout, not merely to deliver this document. Genuine approval or infrastructure blockers remain explicit; they are not treated as completed work.
 
 ## F. Sources
 
