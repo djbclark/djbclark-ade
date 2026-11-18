@@ -2333,3 +2333,52 @@ def test_wrong_provider_error_is_not_valid_retry_evidence(setup):
     with pytest.raises(ss.SessionError, match='identity'):
         service.verify_turn(Path(record['record']))
     assert service.status(Path(record['record']))['status'] == 'awaiting-ack'
+
+
+def test_completed_custody_continues_chain_and_rebinds_claim_once(setup, tmp_path):
+    import ade_claims
+    service, native, original_path = finished_up_to_archive(setup)
+    original = service.finish(original_path)
+    _claim('c-incumbent', SUCC, tmp_path)
+    native.rows[SUCC]['Status'] = 'idle'
+    native.rows[OTHER] = {**native.rows[SUCC], 'Id': OTHER, 'Provider': 'pi',
+                          'Model': 'opencode-go-account-b/test-model', 'AvailableModes': []}
+    service.env['PASEO_AGENT_ID'] = OTHER
+    appointed = service.appoint(original_path, appointed=OTHER, operator_appointed=True,
+                                 quiesced=True, pool='go-account-b')
+    path = Path(appointed['record'])
+    assert path != original_path and appointed['predecessor'] == SUCC
+    assert appointed['identity']['labels']['ade.predecessor'] == SUCC
+    assert json.loads(original_path.read_text())['successor'] == SUCC
+    assert ade_claims.read_claim('c-incumbent')['owner']['agent'] == SUCC
+    # Recover a kill after continuation save but before parent appointment marker.
+    old = json.loads(original_path.read_text()); old.pop('appointment')
+    original_path.write_text(json.dumps(old))
+    assert service.appoint(original_path, appointed=OTHER, operator_appointed=True,
+                           quiesced=True, pool='go-account-b')['token'] == appointed['token']
+    ack = {k: appointed[k] for k in ('token', 'checkpoint_sha256', 'head')}
+    ack['next_action'] = 'read checkpoint, then run assigned work'
+    ack_path = service.state / 'appointed-ack.json'; ack_path.write_text(json.dumps(ack))
+    assert service.accept(path, ack_path)['status'] == 'ack-pending-turn'
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    service.env['PASEO_AGENT_ID'] = SUCC
+    assert service.verify_turn(path)['status'] == 'acknowledged'
+    assert ade_claims.read_claim('c-incumbent')['owner']['agent'] == SUCC
+    service.env['PASEO_AGENT_ID'] = OTHER
+    archive_calls = []
+    def runner(argv, **kwargs):
+        if argv[4:6] == ['agent', 'archive']:
+            assert argv[6:] == [SUCC]
+            archive_calls.append(SUCC)
+            native.rows[SUCC]['Archived'] = True
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'agentId': SUCC}), '')
+        return native(argv, **kwargs)
+    service.runner = runner
+    finished = service.finish(path)
+    assert finished['rebound_claims'] == ['c-incumbent']
+    moved = ade_claims.read_claim('c-incumbent')
+    assert moved['owner']['agent'] == OTHER
+    service.finish(path)
+    assert ade_claims.read_claim('c-incumbent')['history'] == moved['history']
+    assert archive_calls == [SUCC]
+    assert native.rows[OTHER]['Archived'] is False
