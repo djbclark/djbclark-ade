@@ -178,7 +178,9 @@ def enrollment(encoded: bytes, registry: list[dict]) -> dict:
         raise ContractError('protected evaluator identity mismatch')
     native = row['native']
     if native is not None:
-        if type(native) is not dict or set(native) != {'node', 'cli', 'serverId', 'daemonIncarnation', 'distributionSha256', 'distributionBuildId', 'distributionRoot', 'closure'}:
+        if (type(native) is not dict or set(native) not in ({'node','cli','serverId','daemonIncarnation','distributionSha256','distributionBuildId','distributionRoot','closure'},
+                    {'node','cli','serverId','daemonIncarnation','distributionSha256','distributionBuildId','distributionRoot','closure','cohortVersion'}) or
+                    ('cohortVersion' in native and (type(native['cohortVersion']) is not int or native['cohortVersion'] != 2))):
             raise ContractError('invalid retained native transport')
         for key in ('node', 'cli'):
             item = native[key]
@@ -450,6 +452,86 @@ def cohort_observation(value, config, expected, target, *, allow_target_absent=F
     if not (set(expected) - {'paseo'}) <= ids: raise ContractError('incomplete protected cohort')
     return value
 
+def cohort_v2_observation(value, config, expected, target, manifest_identities, *, allow_target_absent=False):
+    """Pure V2 qualification parser, NOT a producer or transport authority factory.
+
+    manifest_identities must be independently extracted from verified actual manifest
+    bytes by the trusted producer adapter. That production mapping is not available
+    yet; callers must HOLD rather than copying identities from wire or enrollment.
+    Returns original tagged V2 data; directory unwrapping is private validation only.
+    """
+    if type(config.get('cohortVersion')) is not int or config['cohortVersion'] != 2:
+        raise ContractError('protected cohort V2 opt-in required')
+    if (type(value) is not dict or set(value) != {'version','consistency','observationEpoch','enclosing','entries'} or
+            type(value['version']) is not int or value['version'] != 2 or value['consistency'] != 'coherent' or
+            type(value['observationEpoch']) is not int or not 0 <= value['observationEpoch'] < 2**53 or
+            type(value['entries']) is not list or len(value['entries']) > 1000):
+        raise ContractError('cohort V2 observation uncertain')
+    builtin_expected = {key:record for key,record in expected.items()
+                        if type(record) is dict and record.get('kind') == 'builtin-in-process'}
+    if (len(builtin_expected) != 14 or target in builtin_expected or 'paseo' in builtin_expected or
+            type(manifest_identities) is not dict or set(manifest_identities) != set(builtin_expected)):
+        raise ContractError('complete independently verified builtin inventory required')
+    loaded_keys = {'kind','pluginId','instanceId','enclosingIncarnation','sourcePath','sourceSha256',
+                   'serverBundleSha256','moduleTableSha256','profileSha256','closure'}
+    stable_keys = (loaded_keys - {'pluginId','instanceId','enclosingIncarnation'}) | {'contract','distributionBuildId'}
+    seen=set(); builtin_seen=set(); instances=set(); directories=[]
+    for entry in value['entries']:
+        if type(entry) is not dict or type(entry.get('pluginId')) is not str or not entry['pluginId']:
+            raise ContractError('invalid V2 cohort ID')
+        plugin=entry['pluginId']
+        if plugin in seen or plugin == 'paseo': raise ContractError('duplicate V2 cohort ID')
+        seen.add(plugin)
+        if entry.get('kind') == 'directory':
+            if (set(entry) != {'kind','pluginId','registration','enabled','journal','loaded','execution'} or plugin in builtin_expected):
+                raise ContractError('invalid V2 directory tag')
+            loaded=entry['loaded']; execution=entry['execution']
+            if loaded is not None and (type(loaded) is not dict or set(loaded) != {'kind','receipt'} or loaded['kind'] != 'plugin-child'):
+                raise ContractError('invalid V2 child loaded tag')
+            if execution is not None and (type(execution) is not dict or
+                    set(execution) != {'kind','contract','incarnation','distributionBuildId','closure'} or execution['kind'] != 'plugin-child'):
+                raise ContractError('invalid V2 child execution tag')
+            directories.append(dict(pluginId=plugin,registration=entry['registration'],enabled=entry['enabled'],journal=entry['journal'],
+                loaded=None if loaded is None else loaded['receipt'],
+                execution=None if execution is None else {key:item for key,item in execution.items() if key != 'kind'}))
+        elif entry.get('kind') == 'builtin-in-process':
+            if (set(entry) != {'kind','pluginId','registration','enabled','loaded','execution'} or plugin not in builtin_expected or
+                    entry['enabled'] is not True):
+                raise ContractError('unexpected or disabled builtin cohort member')
+            builtin_seen.add(plugin)
+            loaded=entry['loaded']; execution=entry['execution']
+            if (type(loaded) is not dict or set(loaded) != loaded_keys or type(execution) is not dict or
+                    set(execution) != loaded_keys | {'contract','distributionBuildId'} or
+                    any(loaded.get(key) != execution.get(key) for key in loaded_keys) or
+                    loaded['kind'] != 'builtin-in-process' or loaded['pluginId'] != plugin or
+                    execution['contract'] != 'builtin-in-process-v1' or execution['distributionBuildId'] != config['distributionBuildId'] or
+                    loaded['enclosingIncarnation'] != config['daemonIncarnation'] or
+                    type(loaded['instanceId']) is not str or not loaded['instanceId'] or loaded['instanceId'] in instances):
+                raise ContractError('actual builtin instance/execution mismatch')
+            instances.add(loaded['instanceId'])
+            if any(type(loaded[key]) is not str or not re.fullmatch('[a-f0-9]{64}',loaded[key])
+                   for key in ('sourceSha256','serverBundleSha256','moduleTableSha256','profileSha256')):
+                raise ContractError('qualified builtin nonnull profile/digests required')
+            if closure_identity(loaded['closure']) != config['closure']:
+                raise ContractError('builtin enclosing closure mismatch')
+            source=str(Path(config['distributionRoot'])/'builtin-plugins'/plugin)
+            if (plugin in ('.','..') or '/' in plugin or '\\' in plugin or
+                    entry['registration'] != {'path':source} or loaded['sourcePath'] != source):
+                raise ContractError('builtin SAME distribution source path required')
+            stable={key:execution[key] for key in stable_keys}
+            protected={'kind':'builtin-in-process','enabled':True,'loaded':True,
+                       'registration':{'path':source},'execution':stable}
+            if builtin_expected[plugin] != protected or manifest_identities[plugin] != stable:
+                raise ContractError('builtin protected/manifest identity mismatch')
+        else:
+            raise ContractError('unsupported V2 cohort kind')
+    if builtin_seen != set(builtin_expected): raise ContractError('incomplete V2 builtin cohort')
+    # Reuse unchanged directory validation/CAS rules; no fake builtin child/journal.
+    directory_expected={key:record for key,record in expected.items() if key not in builtin_expected}
+    cohort_observation(dict(value,version=1,entries=directories),config,directory_expected,target,allow_target_absent=allow_target_absent)
+    return value
+
+
 
 def native_reservation_plan(status, config, plugin):
     """Read-only exact native counter snapshot. Null/old generation is never zero."""
@@ -515,6 +597,8 @@ class NativeFacade:
 
     def cohort_status(self, *, allow_target_absent=False):
         row = self.reader(); config = self._transport()
+        if config.get('cohortVersion') == 2:
+            raise ContractError('native V2 capability/manifest adapter not yet integrated')
         return cohort_observation(self._call(['plugin', 'cohort-status']), config, row['cohort'], row['component'], allow_target_absent=allow_target_absent)
 
     def bind(self, row, context, render, *, recovery=False, origin=None):

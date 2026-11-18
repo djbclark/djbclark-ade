@@ -423,3 +423,37 @@ and a fresh Journal context/plugin CAS through the explicit reuse hook, without
 another BEGIN, bearer reconnect or fallback reservation. Missing API or producer
 facts HOLD. Synthetic CI ports demonstrate orchestration only; actual coupled
 producer/native proof is a separate acceptance gate.
+
+### Explicit cohort V2 parser boundary
+
+Protected `native.cohortVersion: 2` opts in to the separate committed native V2
+schema (`22285d1f1`, `ManagedPluginCohortV2StatusSchema`). Absence keeps the exact
+V1 path. No malformed/uncertain/unsupported V2 response falls back to V1.
+
+The pure `cohort_v2_observation` parser accepts tagged `directory` entries with
+`plugin-child` receipt/execution wrappers and separately tagged
+`builtin-in-process` entries. Directory validation reuses the unchanged V1
+receipt/CAS checks after validating the wrappers. It never constructs a child
+receipt, PID, activation ordinal or journal for an in-process builtin.
+
+All fourteen protected builtin records are required. Each stable record is
+`{kind:"builtin-in-process",enabled:true,loaded:true,registration:{path},execution}`.
+Its execution binds kind, contract `builtin-in-process-v1`, distributionBuildId,
+sourcePath/sourceSha256/serverBundleSha256/moduleTableSha256/profileSha256 and
+closure. Source paths must equal the SAME protected
+`distributionRoot/builtin-plugins/ID`. The complete stable identity must match
+both the protected record and the independently verified manifest mapping.
+Fresh actual instance IDs must be nonempty and unique; enclosing incarnation
+must match the same protected daemon. Loaded/execution observations must agree.
+A null profile is provenance only and cannot qualify any maintenance operation,
+even if both host and manifest describe null. Missing builtin, wrong tags,
+extra builtin, mixed identities and non-target absence all HOLD.
+
+The manifest mapping argument is an internal pure-parser dependency, not a CLI,
+configuration override, authority factory or extractor invented by this adapter.
+Its actual producer mapping and native capability/CLI binding remain pending.
+Production V2 `supported` currently returns false before any V1 transport call.
+Parser fixtures use explicitly synthetic independent wire/host/manifest values;
+they do not establish executing-instance qualification. Wiring production V2
+requires the committed native transport and actual canonical manifest/profile
+mapping, plus a separate exact-source review and coupled proof.
