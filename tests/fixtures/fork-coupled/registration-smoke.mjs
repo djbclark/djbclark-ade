@@ -14,7 +14,7 @@ import { ownDisposableGroup } from './owned-cleanup.mjs';
 const execute = promisify(execFile);
 const fixtureDirectory = fileURLToPath(new URL('.', import.meta.url));
 const sourceRoot = path.resolve(fixtureDirectory, '../../..');
-const members = ['registration-probe.mjs', 'retained-daemon.mjs', 'owned-cleanup.mjs',
+const members = ['registration-probe.mjs', 'retained-daemon.mjs', 'retained-cli.mjs', 'owned-cleanup.mjs',
   'registration-smoke-contract.json', 'namespace-bootstrap-input.json'];
 
 async function sudo(arguments_) {

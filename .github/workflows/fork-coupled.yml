@@ -24,7 +24,9 @@ jobs:
         with:
           node-version: latest
       - name: Descriptor and owned-process teardown tests, not runtime qualification
-        run: node --test tests/fixtures/fork-coupled/retained-daemon.test.mjs tests/fixtures/fork-coupled/compiler-observation.test.mjs
+        run: |
+          node --check tests/fixtures/fork-coupled/native-roundtrip.mjs
+          node --test tests/fixtures/fork-coupled/retained-daemon.test.mjs tests/fixtures/fork-coupled/compiler-observation.test.mjs tests/fixtures/fork-coupled/retained-cli.test.mjs
       - name: Archive boundary tests, synthetic bytes only
         run: python3 -m unittest discover -s tests/fixtures/fork-coupled -p test_native_build.py -v
       # The actual retained daemon/evaluator/controller round trip requires the

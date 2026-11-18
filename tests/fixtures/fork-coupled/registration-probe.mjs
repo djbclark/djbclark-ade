@@ -2,13 +2,12 @@
 // dropped to the actual original caller, and freshly execed the retained Node.
 // This checks registration and refusal only; it cannot qualify any snapshot.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, readlink, stat } from 'node:fs/promises';
 import { setTimeout as pause } from 'node:timers/promises';
 import path from 'node:path';
 import { launchObservedDaemon } from './retained-daemon.mjs';
-import { ownDisposableGroup } from './owned-cleanup.mjs';
+import { cli } from './retained-cli.mjs';
 
 const builtins = [
   'antigravity-provider', 'claude-usage-source', 'codex-usage-source',
@@ -18,39 +17,6 @@ const builtins = [
   'worktree-include', 'zai-usage-source',
 ];
 
-async function cli(root, home, args) {
-  const child = spawn(path.join(root, 'runtime/node'),
-    [path.join(root, 'cli-entry.mjs'), ...args, '--home', home, '--json'], {
-      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: {PATH: '/usr/bin:/bin', PASEO_HOME: home},
-    });
-  const owner = ownDisposableGroup(child, {gracefulMs: 1500, forcedMs: 3000, allowNonzeroExit: true});
-  const output = [], errors = [];
-  let stdoutBytes = 0, stderrBytes = 0;
-  let failure;
-  const stop = (reason) => { failure ??= new Error(reason); void owner.dispose().catch(() => {}); };
-  child.stdout.on('data', (chunk) => {
-    stdoutBytes += chunk.length;
-    if (stdoutBytes > 1024 * 1024) stop('CLI stdout overflow');
-    else output.push(chunk);
-  });
-  child.stderr.on('data', (chunk) => {
-    stderrBytes += chunk.length;
-    if (stderrBytes > 16384) stop('CLI stderr overflow');
-    else errors.push(chunk);
-  });
-  child.once('error', () => stop('CLI failed to launch'));
-  const timer = setTimeout(() => stop('CLI timed out'), 15_000);
-  try {
-    const result = await owner.closed;
-    if (failure) throw failure;
-    return {code: result.code, stdout: Buffer.concat(output).toString('utf8'),
-      stderr: Buffer.concat(errors).toString('utf8')};
-  } finally {
-    clearTimeout(timer);
-    await owner.dispose();
-  }
-}
 
 
 assert.equal(process.platform, 'linux');

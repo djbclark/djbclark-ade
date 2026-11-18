@@ -22,3 +22,8 @@
 - Pin the exact source-reviewed namespace bootstrap repair; preserve refusal of older blocked script bytes and the separate actual Linux proof gate. (#0)
 
 - Pin the separately source-reviewed read-only namespace verifier without treating its successful filesystem check as execution authority. (#0)
+- Add the real native-FD A/B/A transaction phase with unchanged verify CAS,
+  full protected cohort checks and selected actual cold compiler bytes. Keep
+  private bearer transport on stdin and reject timeouts/uncertain cleanup; no
+  automatic recovery or END follows a failed operation. Actual native execution,
+  feature assertions and controller/evaluator qualification remain separate. (#0)
