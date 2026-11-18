@@ -220,7 +220,7 @@ def private_directory(path):
 
 def read_snapshot(path):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
     except OSError as error:

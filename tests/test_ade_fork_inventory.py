@@ -175,3 +175,25 @@ def test_failed_final_write_preserves_previous_snapshot(tmp_path, monkeypatch):
         inv.refresh(path, curated(), discover_owner=lambda owner: [])
     assert path.read_bytes() == before
     assert not list(path.parent.glob(".registry-*"))
+
+
+def test_fifo_registry_is_rejected_without_waiting_for_a_writer(tmp_path):
+    # Execute in a bounded child: the old O_RDONLY open hung before fstat.
+    import subprocess
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    path = directory / "registry.json"
+    os.mkfifo(path, 0o600)
+    code = """import sys
+sys.path.insert(0, sys.argv[1])
+import ade_fork_inventory as inventory
+from pathlib import Path
+try:
+    inventory.read_snapshot(Path(sys.argv[2]))
+except inventory.InventoryError:
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+    result = subprocess.run([sys.executable, "-B", "-c", code,
+                             str(Path(inv.__file__).parent), str(path)], timeout=3)
+    assert result.returncode == 0
