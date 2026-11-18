@@ -180,6 +180,13 @@ class BeginResult:
     status: str
 
 
+@dataclass(frozen=True)
+class KnownFailedHeld:
+    """Descriptive trusted-adapter observation, never a native execution brand."""
+    reason: str
+    plugin_generation: int
+
+
 @dataclass
 class Adapters:
     """Trusted orchestration callbacks, never serialized grants/execution brands.
@@ -192,9 +199,9 @@ class Adapters:
     observe: Callable[[], str]
     preflight: Callable[[str], bool]
     stage: Callable[[str, bytes], None]
-    activate: Callable[[str], None]
+    activate: Callable[[str], KnownFailedHeld | None]
     verify: Callable[[str], bool]
-    recover: Callable[[str], None]
+    recover: Callable[[str], KnownFailedHeld | None]
     retained: Callable[[str], bool]
     authority: Callable[[str, str], bool] = lambda operation, identity: False
     authenticate: Callable[[Receipt], bool] = lambda receipt: False
@@ -203,6 +210,7 @@ class Adapters:
     prepare: Callable | None = None
     finish: Callable | None = None
     released: Callable | None = None
+    reuse: Callable | None = None
 
 
 def _identity(value):
@@ -242,7 +250,7 @@ class Journal:
     """One versioned atomic record per compatibility group; never a token ledger."""
     RELEASE_STATES = {'verified_held', 'release_intent', 'release_uncertain'}
     STATES = RELEASE_STATES | {'runtime_verified', 'reservation_intent', 'reservation_unknown',
-                              'preflight', 'stage', 'activate', 'verify', 'recover', 'recovery_required'}
+                              'preflight', 'stage', 'activate', 'verify', 'recover', 'recovery_required', 'known_failed_held'}
 
     def __init__(self, directory: Path, group: str):
         self.directory = Path(directory)
@@ -282,9 +290,26 @@ class Journal:
             if tx is not None or row['candidate'] is not None:
                 raise ContractError('unexpected settled transaction')
         else:
-            if type(tx) is not dict or set(tx) != {'context', 'reservation'}:
+            if type(tx) is not dict or set(tx) not in ({'context', 'reservation'}, {'context', 'reservation', 'origin'}):
                 raise ContractError('missing transaction intent')
             c, r = _context(tx['context']), _reservation(tx['reservation'])
+            if 'origin' in tx:
+                origin = tx['origin']
+                if type(origin) is not dict or set(origin) != {'context', 'reservation'}:
+                    raise ContractError('invalid reservation origin')
+                oc, ore = _context(origin['context']), _reservation(origin['reservation'])
+                if (oc.group != c.group or oc.generation > c.generation or
+                        oc.kind not in {'deploy', 'reconcile', 'verified-rollback'} or
+                        oc.verified != c.verified or oc.baseline != c.baseline or
+                        ore.native_generation != r.native_generation or ore.server_id != r.server_id or
+                        ore.daemon_incarnation != r.daemon_incarnation or ore.plugin_generation > r.plugin_generation):
+                    raise ContractError('inconsistent reservation origin')
+                if oc.generation == c.generation:
+                    if oc != c: raise ContractError('changed original transaction')
+                elif c.kind != ('reconcile' if oc.kind == 'deploy' else oc.kind) or c.target != (oc.verified if oc.kind == 'deploy' else oc.target):
+                    raise ContractError('changed original recovery direction')
+            elif row['state'] == 'known_failed_held':
+                raise ContractError('missing confirmed reservation origin')
             if c.group != self.group or c.generation != row['generation'] or row['candidate'] != c.target:
                 raise ContractError('inconsistent transaction intent')
             if type(c.kind) is not str or c.kind not in {'deploy', 'reconcile', 'verified-rollback'}:
@@ -378,6 +403,53 @@ class Journal:
             return False
         return True
 
+    def _known_failed(self, row, observation):
+        """Only a normal exact typed adapter return can describe confirmed failure."""
+        if (type(observation) is not KnownFailedHeld or type(observation.reason) is not str or
+                observation.reason not in {'compiler_error', 'initialization_rejected'} or
+                type(observation.plugin_generation) is not int or
+                not 0 <= observation.plugin_generation <= 2**53 - 1):
+            raise ContractError('unconfirmed native outcome')
+        tx = row['transaction']
+        original = tx.get('origin', {'context': tx['context'], 'reservation': tx['reservation']})
+        current = _reservation(tx['reservation'])
+        if observation.plugin_generation < current.plugin_generation:
+            raise ContractError('stale known failure CAS')
+        # Preserve the BEGIN context/intent before rotating only the plugin CAS.
+        row['transaction'] = dict(tx, origin=original, reservation=asdict(ReservationIntent(
+            current.native_generation, observation.plugin_generation, current.server_id, current.daemon_incarnation)))
+        row['state'] = 'known_failed_held'
+        self.write(row)
+        return Result('known_failed_held', observation.reason, row['generation'])
+
+    def _reuse(self, row, adapters, context):
+        """No BEGIN, token reconstruction or fallback on any same-held failure."""
+        if not callable(adapters.reuse): raise ContractError('same_held_reuse_required')
+        origin = row['transaction']['origin']
+        original_context = _context(origin['context'])
+        original_intent = _reservation(origin['reservation'])
+        current = _reservation(row['transaction']['reservation'])
+        intent = adapters.prepare(context)
+        if type(intent) is not ReservationIntent: raise ContractError('reservation plan required')
+        _reservation(asdict(intent))
+        if (intent != current or intent.native_generation != original_intent.native_generation or
+                intent.server_id != original_intent.server_id or intent.daemon_incarnation != original_intent.daemon_incarnation):
+            raise ContractError('same_held_identity_or_CAS_changed')
+        if any(adapters.authority(op, context.target) is not True for op in ('recover', 'verify')) or adapters.retained(context.target) is not True:
+            raise ContractError('same_held_recovery_not_authorized')
+        row.update(generation=context.generation, candidate=context.target, state='reservation_intent',
+                   transaction={'context': asdict(context), 'reservation': asdict(intent), 'origin': origin})
+        self.write(row)
+        try:
+            outcome = adapters.reuse(context, intent, original_context, original_intent)
+            if type(outcome) is not BeginResult or outcome.status != 'held':
+                raise ContractError('same held owner unconfirmed')
+        except Exception:
+            row['state'] = 'reservation_unknown'
+            self.write(row)
+            return None
+        return True
+
     def _release(self, row, adapters, context):
         intent = _reservation(row['transaction']['reservation'])
         # No unauthorized release after verification waits; this state never rolls back.
@@ -441,6 +513,7 @@ class Journal:
                 return result('hold' if row['state'] == 'runtime_verified' else 'recovery_required', str(error) if isinstance(error, ContractError) else 'reservation_prepare_failed')
             if started is None: return result('recovery_required', 'reservation_unknown')
             if started is False: return result('hold', 'busy')
+            native_started = False
             try:
                 for operation in ('preflight', 'stage', 'activate', 'verify'):
                     if adapters.authority(operation, target) is not True:
@@ -452,7 +525,11 @@ class Journal:
                     row['state'] = operation
                     self.write(row)
                     if operation == 'stage': adapters.stage(target, artifact)
-                    elif operation == 'activate': adapters.activate(target)
+                    elif operation == 'activate':
+                        native_started = True
+                        outcome = adapters.activate(target)
+                        if type(outcome) is KnownFailedHeld: return self._known_failed(row, outcome)
+                        if outcome is not None: raise ContractError('unconfirmed native outcome')
                     elif getattr(adapters, operation)(target) is not True:
                         raise ContractError(operation + ' refused')
                 if adapters.authority('verify', target) is not True or adapters.observe() != target or adapters.retained(target) is not True:
@@ -460,7 +537,7 @@ class Journal:
                 committed = dict(row, state='verified_held', verified=target, baseline=previous)
                 self.write(committed)
             except Exception as error:
-                row['state'] = 'recovery_required'
+                row['state'] = 'reservation_unknown' if native_started else 'recovery_required'
                 self.write(row)
                 return result('recovery_required', str(error) if isinstance(error, ContractError) else 'callback_or_journal_failure')
             return self._release(committed, adapters, context)
@@ -472,7 +549,7 @@ class Journal:
             def result(status, reason): return Result(status, reason, row['generation'])
             if type(generation) is not int or generation < 0 or row['generation'] != generation: return result('hold', 'stale_job')
             if row['state'] in self.RELEASE_STATES: return result('hold', 'release_reconciliation_required')
-            if row['state'] in {'reservation_intent', 'reservation_unknown'}: return result('hold', 'reservation_unknown')
+            if row['state'] in {'reservation_intent', 'reservation_unknown', 'activate', 'verify', 'recover'}: return result('hold', 'reservation_unknown')
             if row['state'] == 'runtime_verified':
                 if rollback_target is None: return result('hold', 'no_unfinished_transaction')
                 if row['baseline'] is None or rollback_target != row['baseline']:
@@ -486,8 +563,11 @@ class Journal:
                     return result('hold', 'recovery_direction_conflict')
             if not self._hooks(adapters, rule_digest): return result('hold', 'recovery_not_authorized_or_available')
             context = self._new_context(row, kind, target, rule_digest)
+            same_held = row['state'] == 'known_failed_held'
+            if 'origin' in (row['transaction'] or {}) and not same_held:
+                return result('hold', 'same_held_outcome_not_confirmed')
             try:
-                started = self._begin(row, adapters, context)
+                started = self._reuse(row, adapters, context) if same_held else self._begin(row, adapters, context)
             except Exception as error:
                 return result('hold', str(error) if isinstance(error, ContractError) else 'reservation_prepare_failed')
             if started is None: return result('recovery_required', 'reservation_unknown')
@@ -498,7 +578,9 @@ class Journal:
                     raise ContractError('recovery_not_authorized_or_available')
                 row['state'] = 'recover'
                 self.write(row)
-                adapters.recover(target)
+                outcome = adapters.recover(target)
+                if type(outcome) is KnownFailedHeld: return self._known_failed(row, outcome)
+                if outcome is not None: raise ContractError('unconfirmed native outcome')
                 if adapters.authority('verify', target) is not True or adapters.authority('recover', target) is not True or adapters.observe() != target or adapters.retained(target) is not True or adapters.verify(target) is not True:
                     raise ContractError('recovery verification failed')
                 committed = dict(row, state='verified_held', verified=target,
@@ -506,7 +588,7 @@ class Journal:
                                  promotion_hold=row['promotion_hold'] or kind == 'verified-rollback')
                 self.write(committed)
             except Exception:
-                row['state'] = 'recovery_required'
+                row['state'] = 'reservation_unknown'
                 self.write(row)
                 return result('recovery_required', 'recovery_failed')
             return self._release(committed, adapters, context)

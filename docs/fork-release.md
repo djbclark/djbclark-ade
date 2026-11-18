@@ -24,8 +24,9 @@ baseline of a healthy deployment. Current recover AND verify authority, retained
 evidence, compatibility and qualified native agreement are still required.
 
 Before recovery callbacks the Journal records exact kind, target, from-verified,
-transaction ID and generation. Default recovery after an interrupted explicit
-rollback continues that baseline target, even if the old verified pointer differs.
+transaction ID and generation. The durable recovery direction retains that baseline target even if the old
+verified pointer differs. Unknown callback/process outcomes hold without replay;
+only a confirmed eligible same-held result can retry through the reuse lane.
 Successful explicit rollback consumes the baseline and sets a durable promotion
 hold. Qualification of the former target remains valid, but automation cannot
 repromote it until a separately current explicit resume grant clears the hold.
@@ -84,9 +85,63 @@ An interrupted/unknown BEGIN cannot be guessed away. Runtime callback failures k
 an exact recovery intent. Write/response uncertainty after release intent stays in
 `release_intent`/`release_uncertain`, bars new deployment and binary recovery, and
 can only be resolved through separately authorized independent release observation.
-A process crash in `verified_held` likewise requires release reconciliation, not
+A process crash in `activate`, `verify` or `recover` holds as unknown and cannot
+acquire another reservation. A process crash in `verified_held` requires release reconciliation, not
 an inferred successful END. No blind replay or automatic rollback after possible
 release is allowed.
+
+
+## Confirmed known failure under the original reservation
+
+`KnownFailedHeld(reason, plugin_generation)` is a frozen descriptive adapter
+observation. Only the exact type returned normally by trusted `activate` OR
+`recover` is recognized; reasons are limited to `compiler_error` and
+`initialization_rejected`, plugin CAS is a safe nonnegative integer. The controller
+may construct it only from the actual authenticated capability-gated native
+`known_failed_held` alternative and the SAME live in-process bearer. This Python
+object never mints a native private brand, supplies consent, or proves settlement.
+Native must privately certify actual compiler/helper/child settlement, original
+scope/lease/owner, current authority and full held cohort before returning it.
+
+Successful callbacks normalize to None. Dicts/tags, malformed typed observations,
+throws/timeouts/lost replies, and unknown outcomes during activation or recovery
+become sticky `reservation_unknown`, with no fallback BEGIN, verification-as-success
+or END. A normal accepted known failure writes `known_failed_held`, preserves the
+verified/baseline pointers and returns that status without verifying/releasing.
+It introduces no automatic baseline restart.
+
+The SAME schema-2 transaction allows exactly one optional `origin` object with
+exact keys `context` and `reservation`. On confirmed failure it retains the exact
+original BEGIN context/intent, then updates only current plugin CAS in the current
+reservation description. Missing origin for known-failure state is invalid; no
+legacy reconstruction. Origin's maintenance generation/server/incarnation stay
+fixed, original Journal transaction and fresh recovery transaction remain distinct,
+and its original recovery kind/target cannot change across retries.
+
+An explicit separately authorized recovery calls `prepare` for a fresh Journal
+context/CAS. The fresh plan must match the recorded current plugin CAS and original
+maintenance generation/server/incarnation exactly. After durably writing fresh
+context/intent plus unchanged origin, Journal invokes:
+`reuse(context, new_intent, original_context, original_intent) -> BeginResult('held')`.
+This optional four-argument trusted callback must prove the private same-process
+bearer, confirmed eligibility, fresh native ownership/restriction, current recover
+AND verify authority and full cohort. Missing hook, restart/lost token, changed
+identity/CAS or any uncertainty holds. There is NEVER fallback to `reserve`/BEGIN.
+Non-held/throw from reuse becomes sticky unknown; another explicit confirmed normal
+failure from recover may retain the same origin and advance only current plugin CAS.
+
+Recovery then separately verifies the actual baseline/full cohort under current
+verify consent. Native's durable recovery-only restriction must independently refuse
+replace/END until actual recover and separate verify clear it. Journal success alone
+cannot clear a native latch. Existing `finish`/`released` signatures remain unchanged:
+trusted `prepare` can snapshot validated SAME Journal origin under its existing
+lock to match original native transaction identity; current release context target
+remains the recovered target, never the original failed candidate. No bearer is
+persisted, logged, regenerated, reconnected or exposed to child processes here.
+
+These tests exercise synthetic callbacks only. Native private result validation,
+actual settlement, durable restriction and authenticated controller mapping require
+separate exact-head review and the genuine root-owned coupled fixture.
 
 ## Protected selector responsibilities
 
