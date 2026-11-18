@@ -1,0 +1,15 @@
+name: Fork controller
+on:
+  push:
+    branches: [fork-maintenance-controller]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest python -m pytest tests/test_ade_fork_controller.py tests/test_ade_fork_release.py tests/test_ade_fork_ci.py -q

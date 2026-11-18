@@ -1,0 +1,132 @@
+# Fork controller pilot v1
+
+`bin/ade-fork-controller status|plan|tick` reads the real account's fixed
+`.local/state/djbclark-ade/forks/controller.json`. HOME, CLI flags and environment
+cannot substitute a grant path. No file is installed by this source change.
+All shipped CLI commands are read-only protected-candidate planning. Missing
+or unsupported enrollment returns HOLD. No runtime adapter is selected by JSON.
+
+`bin/ade_fork_controller.py` owns the pilot integration. Existing release,
+GitHub CI, snapshot and updater containment libraries remain unchanged. The
+pilot component is ade-yolo on master, in the full paseo-runtime compatibility
+group; preserving the cohort does not mean the other components are qualified.
+There is one existing Journal for that group, no second deployment journal.
+
+## Protected enrollment
+
+Strict version1 fields are `schema_version`, `component`, `channel`, `repository`,
+`repository_id`, `cohort`, `policy`, `expected`, `evaluation`, `operations`,
+`previous`, `generation`, `master_commit`, `evidence`. Unknown fields reject.
+`component` is ade-yolo; channel master; repository djbclark/djbclark-ade.
+`cohort` maps every catalog ID in enrolled paseo-runtime to a nonempty protected
+expected identity record. `expected.dependencies` includes the entire cohort.
+`policy` preserves every enrolled group feature and its protected assertion.
+The executing native port must verify those exact identity records; nonempty
+records alone do not prove compatibility or executing closure.
+
+`evaluation` is the exact Evaluation constructor schema (jobs serialized as an
+array). It identifies the protected evaluator workflow/repository/run/attempt,
+archive and receipt, independently of candidate metadata. `expected` is the
+complete release-core bindings dictionary; `evaluator` binds its reviewed commit,
+`authority` is protected-ci, and toolchain is the canonical JSON string binding
+protected evaluator evidence. `evidence` is the protected snapshot qualification
+mapping. Passing locally constructed fixtures is not authentication.
+
+`operations` allows only enroll/preflight/stage/activate/verify/recover/retain.
+Each present consent has exactly `allowed` (literal bool), `identity` (receipt
+SHA256), and `generation` (current outer deployment generation). Missing grants
+deny. Reader rechecks the complete protected record before every permission
+boundary. The controller does not create its own consent or install a policy.
+`previous` is the retained baseline receipt identity; `generation` is outer
+Journal generation. Native CAS comes separately from native journal status.
+Protected policy writers and execution need a real serialized reservation before
+production activation; no local flock is presented as runtime quiescence.
+
+## Safe archive and retention
+
+GitHubEvaluation.verify authenticates exact metadata and retains the ZIP.
+The controller independently rehashes the retained no-follow regular file.
+The ZIP has exactly receipt.json, snapshot.json, evaluator-evidence.json. Duplicate
+or extra names, traversal aliases, directories, symlink/special modes, encrypted
+entries and unsupported compression reject before payload consumption. Counts,
+compressed/uncompressed size and aggregate expansion are bounded at 96MiB;
+CRC/entry length are checked without extracting any archive-selected path.
+A receipt must be canonical and separately authenticated, and core validation
+binds exact payload bytes. Snapshot inspect/qualify enforce the trusted recipe.
+
+Immutable payloads and release records are retained through file fsync,
+no-overwrite hardlink publication and directory fsync in private owned paths.
+Existing matching files are reused; corruption refuses overwrites. Release records
+map receipt to expected policy/cohort/evaluation/evidence and payload identity.
+They are retained evidence, not a new mutable deployment journal. `retained`
+revalidates stored receipt and payload; failed retention is never activation.
+Local readers traverse descriptors with no-follow/nonblocking opens, refuse
+specials/unsafe ownership/writable modes, and enforce size/stability bounds.
+Administrator-controlled private filesystem semantics remain required.
+
+## Controller ports and transactions
+
+Trusted in-process callers may invoke Controller.acquire, adapters and
+tick('enroll'|'deploy'|'recover') with actual native ports. CLI exposes none of
+those mutation modes or dependency injection. Default NativeFacade.supported is
+False, so production tick mutations HOLD before acquisition/staging/journal work.
+Its bounded read-only list_observations helper is not called by shipped CLI and
+does not establish support. No guessed mutating CLI fallback exists.
+
+A native port must implement supported/observe/preflight/activate/verify/recover/
+reserve with genuine qualified-host capability and serialized complete cohort
+identity evidence. observe returns an independently matched retained ADE receipt
+identity, never the requested target. activate/recover consume exact native CAS,
+current native authorization and explicit source/snapshot/bundle identities.
+Journal owns outer generation/durable intent/retry behavior. Recovery consumes
+retained baseline and current recover/verify consent without downloading candidate
+CI artifacts again. Lost acknowledgement remains recovery_required.
+
+Native worker coordinates getManagedPluginStatus(pluginId), wire
+plugins.managed.status.request/response and proposed CLI plugin managed-status.
+The coherent v1 result separates registration, journal phase/generation/baseline/
+currentReceipt, and loaded receipt. coherent_native_status is an observation
+consumer; uncertain/missing/incomplete data HOLD. Native journal generation can
+advance while loaded.activationGeneration stays old. No default generation zero,
+no deriving current state from a process version. Final native transport schema,
+qualified producer and reservation are still integration prerequisites. This
+source does not claim an atomic status API or install the native producer.
+
+## Scheduling and master discovery
+
+Controller.discover_master performs bounded GitHub API reads to verify repository
+ID and literal master ref. A newer observed head yields HOLD requiring protected
+new evaluation. It cannot promote an observed commit into trusted expectations.
+The shipped deterministic plan/tick consumes only the current protected candidate;
+automatic evaluator selection/ancestry ranking is not implemented. No permanent
+freeze is intended: an external trusted enrollment/evaluator authority advances
+that candidate after qualification, then the next tick sees it.
+
+Do not route master-snapshot through Sync's merge strategy: ADE upstream/fork
+are identical, and that API rejects this strategy. Future scheduling can use the
+existing ade-sched source mechanism. A read-only source example, deliberately
+not installed, is:
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.djbclark.ade-fork-controller-check</string>
+  <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/ade-fork-controller</string><string>tick</string>
+  </array>
+  <key>StartInterval</key><integer>3600</integer>
+</dict></plist>
+```
+
+No schedule, operational enrollment, native policy, secrets or live plugin calls
+were installed/executed. Installing schedules needs separate consent.
+
+## Validation limits
+
+CI creates real temporary Git snapshots and ZIP/filesystem fixtures, plus clearly
+fake native/evaluator ports for receipt/Journal integration, retention corruption,
+consent refusal, stale jobs, lost acknowledgement and recovery. No local tests or
+builds were run. Fake ports are not a JSON-to-capability path and cannot qualify
+production. Genuine executing SDK/client/protocol/zod/Node/compiler/supervisor/
+daemon proof, native phase/status/lease integration and separately authorized
+baseline adoption/cutover remain HOLD. Python/Git helper closure for claim and
+window-name remains separate; no macOS/Electron qualification is claimed.
