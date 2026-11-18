@@ -721,7 +721,8 @@ def test_codex_native_envelope_denies_upstream(command, repo, request):
     root = HOOK.parents[2]
     template = (root / "agents/codex/config.toml.tmpl").read_text()
     # Only this hook group is needed; other template values include secret references.
-    groups = tomllib.loads(template[template.index("[[hooks.PreToolUse]]"):])
+    hooks_section = template.split("[[hooks.PreToolUse]]", 1)[1].split("[mcp_servers.", 1)[0]
+    groups = tomllib.loads("[[hooks.PreToolUse]]" + hooks_section)
     matches = [group for group in groups["hooks"]["PreToolUse"]
                if any("upstream_review_gate.py" in h["command"] for h in group["hooks"])]
     assert len(matches) == 1
