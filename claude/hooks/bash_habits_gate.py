@@ -579,31 +579,53 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
 @lru_cache(maxsize=1024)
 def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
-    depth, j, n = 1, i, len(text)
-    pending = []
-    while j < n:
+    n = len(text)
+    # Explicit call frames keep deeply nested substitutions off Python's call
+    # stack. Results are pure offsets, including the arithmetic trial parse.
+    results = {}
+    frames = [[i, arithmetic, i, 1, []]]
+    while frames:
+        frame = frames[-1]
+        start, mode, j, depth, pending = frame
+        key = (start, mode)
+        if j >= n:
+            results[key] = n
+            frames.pop()
+            continue
         c = text[j]
         if c == "\\":
-            j += 2
+            frame[2] = j + 2
             continue
         if c == "'":
             k = text.find("'", j + 1)
-            j = n if k < 0 else k + 1
+            frame[2] = n if k < 0 else k + 1
             continue
         if c == '"':
             j += 1
             while j < n and text[j] != '"':
                 j += 2 if text[j] == "\\" else 1
-            j += 1
+            frame[2] = j + 1
             continue
         if c == "$" and text[j + 1:j + 2] == "(":
-            j = _closing_paren(text, j + 2, _is_arithmetic_expansion(text, j)) + 1
+            nested_arithmetic = False
+            if text.startswith("$((", j):
+                trial = (j + 3, True)
+                if trial not in results:
+                    frames.append([trial[0], trial[1], trial[0], 1, []])
+                    continue
+                inner = results[trial]
+                nested_arithmetic = inner < n and _arithmetic_close(text, inner)
+            nested = (j + 2, nested_arithmetic)
+            if nested not in results:
+                frames.append([nested[0], nested[1], nested[0], 1, []])
+                continue
+            frame[2] = results[nested] + 1
             continue
-        if not arithmetic and c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
+        if not mode and c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
             match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", text[j:])
             if match:
                 pending.append((match.group(3), match.group(1) == "-"))
-                j += match.end()
+                frame[2] = j + match.end()
                 continue
         if c == "\n" and pending:
             j += 1
@@ -615,17 +637,21 @@ def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
                     if _heredoc_terminates(line, delimiter, strip_tabs):
                         break
                 else:
-                    return n
+                    j = n
+                    break
             pending.clear()
+            frame[2] = j
             continue
         if c == "(":
-            depth += 1
+            frame[3] = depth + 1
         elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    return n
+            frame[3] = depth - 1
+            if frame[3] == 0:
+                results[key] = j
+                frames.pop()
+                continue
+        frame[2] = j + 1
+    return results[(i, arithmetic)]
 
 
 def _is_arithmetic_expansion(text: str, opening: int) -> bool:
@@ -680,7 +706,7 @@ def live_bodies(text: str) -> list[str]:
 
 def _join_continuations(c: str) -> str:
     """Join backslash-newline pairs (an odd run of backslashes), outside heredoc bodies."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, state = [], c.split("\n"), 0, None
     pending: list[str] = []
     while i < len(lines):
         if i + 1 < len(lines) and re.search(r"(?<!\\)(?:\\\\)*\\$", lines[i]):
@@ -690,10 +716,10 @@ def _join_continuations(c: str) -> str:
         line = "".join(pending) + lines[i]
         pending = []
         out.append(line)
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
-        if m:                                         # copy the body untouched, delimiter included
+        matches, state = _heredoc_introducers(line, state)
+        for m in matches:                              # copy data and its exact delimiter untouched
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 out.append(lines[i])
                 i += 1
             if i < len(lines):
@@ -706,14 +732,16 @@ def _join_continuations(c: str) -> str:
 
 def _drop_heredocs(c: str) -> str:
     """The command without heredoc bodies (their text is data, not commands)."""
-    out, lines, i = [], c.split("\n"), 0
+    out, lines, i, state = [], c.split("\n"), 0, None
     while i < len(lines):
         out.append(lines[i])
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[i])
-        if m:
+        matches, state = _heredoc_introducers(lines[i], state)
+        for m in matches:
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
+            if i < len(lines):
+                out.append(lines[i])  # recursive substitutions still need their verified delimiter
         i += 1
     return "\n".join(out)
 

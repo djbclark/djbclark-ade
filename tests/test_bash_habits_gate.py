@@ -392,6 +392,24 @@ def test_subshell_form_substitutions_preserve_live_watcher_checks(command):
     assert denied(command)
 
 
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("tail,blocked", [
+    ("gh run watch 123", True),
+    ("gh run view 123", False),
+    ("gh run watch 123 --interval 60", False),
+])
+def test_subshell_heredoc_watcher_decision_uses_live_tail(quoted, tail, blocked):
+    body = f"$((cat <<'EOF'\ntext )\nEOF\n); {tail})"
+    command = f'echo "{body}"' if quoted else f"echo {body}"
+    out = run(command)
+    if blocked:
+        assert out and out.get("permissionDecision") == "deny"
+        assert "watch" in out["permissionDecisionReason"]
+        assert "unterminated" not in out["permissionDecisionReason"].lower()
+    else:
+        assert not out or out.get("permissionDecision") != "deny"
+
+
 @pytest.mark.parametrize("operator,inner", [
     ("<<", "  PY"),
     ("<<", "\tPY"),
@@ -789,6 +807,7 @@ def test_gw02_prose_and_one_shots_pass(command):
     "x=\"$(echo \"" * 50 + ")\"" * 50,               # deep nesting: bodies must not overlap
     "$(" * 100000,
     "echo \"" + "$(" * 100000,
+    "echo \"" + "$(" * 4000 + "true" + ")" * 4000 + '"',
     "`" * 100001,
     "echo foo \\\n" * 20000 + "x",                                                  # F3
     "a\\\n" * 100000,
