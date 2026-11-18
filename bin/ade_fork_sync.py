@@ -229,7 +229,15 @@ class Sync:
             if active:
                 raise Held("missing_candidate_branch")
             current = self.sha(self.git(w, "rev-parse", "HEAD"))
-            local_branch = self.git(w, "symbolic-ref", "--short", "HEAD")
+            branch_result = self.run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                                     w, allowed=(0, 1))
+            local_branch = branch_result.stdout.strip()
+            if branch_result.returncode == 1:
+                if local_branch or branch_result.stderr.strip():
+                    raise Held("unexpected_symbolic_ref_result")
+                local_branch = None  # clean exact-commit CI/task checkout
+            elif not local_branch:
+                raise Held("unexpected_symbolic_ref_result")
             if local_branch == p.branch:
                 if self.git(w, "show", "-s", "--format=%P", current).split() != [p.base, p.upstream_commit]:
                     raise Held("candidate_identity_mismatch")

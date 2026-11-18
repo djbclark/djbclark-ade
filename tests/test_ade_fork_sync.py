@@ -92,6 +92,36 @@ def test_merge_and_retry(setup):
     assert net.created == net.pushed == 1
 
 
+def test_detached_recorded_base_stages_without_moving_default_branch(setup):
+    sync, spec, up, fork, work, net = setup
+    plan = sync.discover(spec)
+    git(work, 'checkout', '--detach', plan.base)
+    result = sync.apply(plan, work, spec.fork)
+    assert result['status'] == 'pr_pending'
+    assert git(work, 'symbolic-ref', '--short', 'HEAD') == plan.branch
+    assert (work / 'patch').read_text() == 'local patch'
+    assert (work / 'new').read_text() == 'upstream'
+    assert git(fork, 'rev-parse', 'main') == plan.base
+    assert git(work, 'show', '-s', '--format=%P', result['head']).split() == [plan.base, plan.upstream_commit]
+    assert sync.apply(plan, work, spec.fork) == result
+    assert net.created == net.pushed == 1
+
+
+def test_fatal_branch_lookup_is_not_treated_as_detached(setup):
+    sync, spec, up, fork, work, net = setup
+    plan = sync.discover(spec)
+    original = sync.runner
+    def fail_lookup(argv, cwd=None):
+        if argv[1:3] == ['symbolic-ref', '--quiet']:
+            return subprocess.CompletedProcess(argv, 128, '', 'fatal fixture error')
+        return original(argv, cwd)
+    sync.runner = fail_lookup
+    with pytest.raises(Held, match='command_failed:git'):
+        sync.apply(plan, work, spec.fork)
+    assert net.created == net.pushed == 0
+    assert git(fork, 'rev-parse', 'main') == plan.base
+
+
 def test_conflict_retains_diagnostics(setup):
     sync, spec, up, fork, work, net = setup
     (work / 'shared').write_text('fork\n')
