@@ -60,6 +60,8 @@ def hash_id(value):
 def read_file(path, limit=LIMIT, *, tool=False):
     """Owned regular no-follow, bounded stable read; private session paths only."""
     path = Path(path)
+    if not path.is_absolute() or '..' in path.parts:
+        raise ContractError('unsafe measured path')
     parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.absolute().parts[1:-1]:
@@ -81,8 +83,12 @@ def read_file(path, limit=LIMIT, *, tool=False):
         os.close(parent)
 
 
-def file_hash(path):
-    return hashlib.sha256(read_file(Path(path).resolve(strict=True), 256 * 1024 * 1024, tool=True)).hexdigest()
+def file_hash(path, *, system_tool=False):
+    path = Path(path).absolute()
+    real = path.resolve(strict=True)
+    if not system_tool and (real != path or real.stat().st_mode & 0o222):
+        raise ContractError('native execution artifact must be sealed/canonical')
+    return hashlib.sha256(read_file(real, 256 * 1024 * 1024, tool=True)).hexdigest()
 
 
 def command(argv, cwd, env, timeout=600, limit=REPORT_LIMIT):
@@ -311,7 +317,7 @@ def evaluate(source_sha, evaluator_sha, run_id, attempt, *, root=ROOT):
     recipe['bindings']['evaluator'] = evaluator_sha
     recipe_validate(recipe, evaluator_sha)
     for name, executable in (('python', sys.executable), ('git', git_path)):
-        if file_hash(executable) != recipe['evidence'][name]: raise ContractError('protected tool substituted')
+        if file_hash(executable, system_tool=True) != recipe['evidence'][name]: raise ContractError('protected tool substituted')
     # Source staging is pure Git object work; no npm scripts from the candidate.
     source_program = ('import sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);'
                       'from ade_fork_plugins import produce;'

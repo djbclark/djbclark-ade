@@ -173,9 +173,27 @@ def test_real_node_junit_positive_and_independent_count_corruption(tmp_path):
     probe = tmp_path / 'snapshot.test.mjs'
     probe.write_text("import {test} from 'node:test';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';test('real-byte-hash',()=>assert.equal(createHash('sha256').update('abc').digest('hex'),'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'));\n")
     result = subprocess.run(['node', '--test', '--test-reporter=junit', str(probe)], capture_output=True, check=True)
-    assert e.junit_complete(result.stdout, ['real-byte-hash']) == 1
+    # Node's current raw reporter emits count-free testsuites + comments. The
+    # production gate correctly refuses that incomplete header. This protected
+    # TEST adapter reads actual runner totals before building concrete JUnit.
+    import re
+    import xml.etree.ElementTree as ET
+    with pytest.raises(e.ContractError): e.junit_complete(result.stdout, ['real-byte-hash'])
+    def count(name):
+        match = re.search(rb'<!-- ' + name.encode() + rb' ([0-9]+) -->', result.stdout)
+        assert match is not None
+        return int(match.group(1))
+    assert count('cancelled') == 0 and count('todo') == 0
+    assert count('pass') == count('tests')
+    root = ET.Element('testsuite', tests=str(count('tests')), failures=str(count('fail')),
+                      errors=str(count('cancelled')), skipped=str(count('skipped')))
+    for case in ET.fromstring(result.stdout).iter('testcase'):
+        root.append(case)
+    checked = ET.tostring(root)
+    assert e.junit_complete(checked, ['real-byte-hash']) == 1
     with pytest.raises(e.ContractError):
-        e.junit_complete(result.stdout.replace(b'tests="1"', b'tests="99"'), ['real-byte-hash'])
+        e.junit_complete(checked.replace(b'tests="1"', b'tests="99"'), ['real-byte-hash'])
+
 
 
 @pytest.mark.parametrize('kind', ['symlink', 'fifo', 'public', 'directory'])
