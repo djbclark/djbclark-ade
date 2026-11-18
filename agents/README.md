@@ -131,10 +131,10 @@ Declared in [`secrets/secretspec.toml`](../secrets/secretspec.toml) (Phase 1, 20
 4. `timezone: America/New_York` in the Hermes template and `/Applications/ExtraBar.app` in the Codex one.
 5. Codex's plugin cache path and `BROWSER_USE_CODEX_APP_VERSION` (`26.915.31945`): Codex-managed, they change on
    its upgrade.
-6. Plugin marketplace sources are local paths into the operator-pinned cache under
-   `{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/` (the third-party git marketplaces were converted to
-   local 2026-11-18: see the marketplace comment in `codex/config.toml.tmpl`), and the `[projects.*]` trust list
-   under `{{ .home }}`.
+6. Public GitHub marketplace and plugin sources (six third-party git marketplaces: composio, adhd,
+   claude-plugins-official, mattpocock, typesafe-ai, anthropic-agent-skills; claude-code-mods removed —
+   context-bar is Claude-only), and the `[projects.*]` trust list under `{{ .home }}`. git marketplaces
+   need `~/.codex/.tmp` to stay inside `~/.codex` (see the marketplace comment in `codex/config.toml.tmpl`).
 
 ## Codex hooks (2026-11-09)
 

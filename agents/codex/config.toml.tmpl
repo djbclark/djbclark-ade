@@ -29,28 +29,31 @@ source = "{{ .home }}/.codex/.tmp/bundled-marketplaces/openai-bundled"
 source_type = "local"
 source = "{{ .home }}/.cache/codex-runtimes/codex-primary-runtime/plugins/openai-primary-runtime"
 
-# The seven third-party Git marketplaces (composio, adhd, claude-plugins-official, mattpocock,
-# claude-code-mods, typesafe-ai, anthropic-agent-skills) are local here, not git: ~/.codex/plugins is a
-# symlink into ~/ops/site-private/.codex-runtime/plugins, and the operator-materialised cache has no
-# .git, so `git rev-parse --show-toplevel` walks up to the site-private repo root and Codex rejects a
-# git marketplace ("trusted Git repository root escapes Codex home"). Local sources also pin each
-# plugin to the operator-reviewed cache instead of an unpinned git pull (docs/security/argon-injection-review).
-# claude-code-mods is dropped: its only plugin (context-bar) is a Claude Code UI mod, not a Codex plugin.
+# Six third-party git marketplaces remain (composio, adhd, claude-plugins-official, mattpocock,
+# typesafe-ai, anthropic-agent-skills). claude-code-mods is removed: its only plugin (context-bar) is a
+# Claude Code UI mod, not a Codex plugin; anthropic-agent-skills is a captured live-drift addition.
+# The startup error "trusted Git repository root escapes Codex home" is raised by git_policy.rs when the
+# canonical ~/.codex/.tmp resolves outside the canonical Codex home: ~/.codex/.tmp is a symlink into
+# ~/ops/site-private/.codex-runtime/.tmp (outside ~/.codex), so Codex refuses every git marketplace before
+# git discovery. Fix that symlink (make ~/.codex/.tmp a real directory inside ~/.codex); do NOT convert
+# these to local, because a local marketplace root needs a marketplace manifest, which the plugin cache
+# dirs do not have.
 [marketplaces.composio]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/composio"
+last_updated = "2026-07-30T14:40:37Z"
+source_type = "git"
+source = "https://github.com/ComposioHQ/composio-plugin-openai.git"
 
 [marketplaces.adhd]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/adhd"
+source_type = "git"
+source = "https://github.com/UditAkhourii/adhd.git"
 
 [marketplaces.claude-plugins-official]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/claude-plugins-official"
+source_type = "git"
+source = "https://github.com/anthropics/claude-plugins-official.git"
 
 [marketplaces.mattpocock]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/mattpocock"
+source_type = "git"
+source = "https://github.com/mattpocock/skills.git"
 
 [marketplaces.claude-cowork]
 source_type = "local"
@@ -61,12 +64,12 @@ source_type = "local"
 source = "{{ .home }}/ops/site-djbclark/claude/local-marketplace"
 
 [marketplaces.typesafe-ai]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/typesafe-ai"
+source_type = "git"
+source = "https://github.com/typesafe-ai/skills.git"
 
 [marketplaces.anthropic-agent-skills]
-source_type = "local"
-source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/anthropic-agent-skills"
+source_type = "git"
+source = "https://github.com/anthropics/skills.git"
 
 [plugins."documents@openai-primary-runtime"]
 enabled = true
