@@ -12,11 +12,15 @@ Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
 others are cross-checked against aiuse pools when a clean mapping exists. The
 supervisor refines this as it learns account->quota mappings.
 """
-import json, subprocess, sys
+import json, re, subprocess, sys
 
-def j(cmd, timeout=30):
+def j(cmd, timeout=30, ok=(0,)):
+    """Run a JSON-producing command. `ok` lists accepted exit codes: aiuse exits 3 when every pool is unusable but
+    still prints its JSON, and refusing that read would report every exhausted account except the known-empty ones
+    as healthy (fail open)."""
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    r.check_returncode()
+    if r.returncode not in ok:
+        raise RuntimeError(f"{cmd[0]} exited {r.returncode}: {r.stderr.strip()[:200]}")
     return json.loads(r.stdout)
 
 def account_of(model):
@@ -79,17 +83,42 @@ def quota_by_account(avail):
         stale = bool(p.get("stale"))
         rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
         prev = out.get(acct)
-        if prev is None or (hr is not None and (prev["headroom"] is None or hr < prev["headroom"])):
+        # The worst pool wins: an unusable pool first, then the lowest headroom (an unread one counts as worst).
+        if prev is None or _badness(rec) < _badness(prev):
             out[acct] = rec
     return out
 
 
-def low_effort(model):
-    return any(k in (model or "") for k in ("luna","flash","haiku","mini","lite","4o-mini"))
+def _badness(rec):
+    """Sort key: smaller is a worse pool for its account."""
+    return (0 if rec["usable"] is False else 1, 101.0 if rec["headroom"] is None else rec["headroom"])
 
-def alt(model):
-    return ("pi/opencode-go-t-e/deepseek-v4.1-flash" if low_effort(model)
-            else "pi/opencode-go-t-e/deepseek-v4-pro")
+
+# A model's last path segment decides whether it is a low-effort tier. Matched as a token, not a substring: a
+# substring "mini" would also match every "gemini" model.
+LOW_EFFORT_RE = re.compile(r"(?:^|[-_/])(luna|flash|haiku|mini|lite)(?:[-_.]|$)", re.I)
+
+# Candidate alternatives in preference order, by effort tier. `alt()` skips the agent's own account and any
+# exhausted one, so a re-handoff never lands on the account that just ran dry.
+ALT_CANDIDATES = {
+    True: ("opencode-go-t-e/deepseek-v4.1-flash", "opencode-go-djbclark/deepseek-v4.1-flash",
+           "opencode-go-t-e/deepseek-v4-pro", "opencode-go-djbclark/deepseek-v4-pro"),
+    False: ("opencode-go-t-e/deepseek-v4-pro", "opencode-go-djbclark/deepseek-v4-pro",
+            "opencode-go-t-e/deepseek-v4.1-flash", "opencode-go-djbclark/deepseek-v4.1-flash"),
+}
+
+
+def low_effort(model):
+    return bool(LOW_EFFORT_RE.search((model or "").rsplit("/", 1)[-1]))
+
+
+def alt(model, acct, exhausted):
+    """A comparable model under a *different*, not-exhausted account, or None when there is none."""
+    for cand in ALT_CANDIDATES[low_effort(model)]:
+        cand_acct = account_of(cand)
+        if cand_acct != acct and cand != model and cand_acct not in exhausted:
+            return "pi/" + cand
+    return None
 
 def main():
     as_json = "--json" in sys.argv
@@ -101,7 +130,7 @@ def main():
     exhausted = set()
     accounts = {}
     try:
-        avail = j(["aiuse","--available","--json"])
+        avail = j(["aiuse","--available","--json"], ok=(0, 3))
         accounts = quota_by_account(avail)
         fresh = avail.get("fresh", True)
         for acct, rec in accounts.items():
@@ -142,7 +171,7 @@ def main():
                     "account": acct, "status": status, "stuck": stuck,
                     "headroom_percent": q.get("headroom"),
                     "quota_stale": q.get("stale"),
-                    "alternative": alt(model) if stuck else None})
+                    "alternative": alt(model, acct, exhausted) if stuck else None})
     stuck = [o for o in out if o["stuck"]]
     live = [o for o in out if o["status"] not in ("closed", "archived")]
     if as_json:
@@ -153,7 +182,8 @@ def main():
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
             print(f"{'STUCK' if o['stuck'] else 'ok   '}  {o['account']:22} {o['status']:9} {hr}% {o['model']:38} {o['id']}")
             if o["stuck"]:
-                print(f"        -> switch to {o['alternative']}")
+                print(f"        -> switch to {o['alternative']}" if o["alternative"]
+                      else "        -> no healthy alternative found")
         print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")
     return 0
 

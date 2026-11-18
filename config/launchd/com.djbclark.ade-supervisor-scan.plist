@@ -19,6 +19,7 @@
     <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>RELAY_SENDER_NAME</key><string>ade-supervisor-scan</string>
     <key>ADE_SUPERVISOR_LEAD</key><string>__LEAD__</string>
+    <key>ADE_SUPERVISOR_STATE_DIR</key><string>__STATE__</string>
   </dict>
   <key>StandardOutPath</key><string>__STATE__/scan.out</string>
   <key>StandardErrorPath</key><string>__STATE__/scan.err</string>

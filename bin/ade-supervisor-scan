@@ -6,7 +6,7 @@
 # one stuck agent is 288 notices a day). Never a model prompt; always exits 0 so
 # launchd stays quiet.
 set -uo pipefail
-STATE_DIR="${HOME}/.local/state/djbclark-ade/supervisor"
+STATE_DIR="${ADE_SUPERVISOR_STATE_DIR:-${HOME}/.local/state/djbclark-ade/supervisor}"
 LEAD="${ADE_SUPERVISOR_LEAD:-b0b47ad8-8801-4780-a8e0-08824cd5ce27}"
 mkdir -p "$STATE_DIR"
 SCAN="$(cd "$(dirname "$0")" && pwd)/ade-pi-stuck"

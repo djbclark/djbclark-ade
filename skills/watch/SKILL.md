@@ -128,7 +128,10 @@ resumes it, and `bin/gui-hog thaw --all --stopped-apps` is the last resort for a
 `/watch stuck` runs `bin/ade-pi-stuck` (read-only): it lists every live Pi agent,
 maps each to its billing account (from the `pi/<account>/<model>` provider), and
 flags any agent whose account is quota-exhausted (no headroom). For each stuck
-agent it prints a comparable healthy alternative model under a different account.
+agent it prints a comparable healthy alternative model under a different, not-exhausted
+account (or `no healthy alternative found`) — never the account that just ran dry.
+`aiuse` exits 3 when every pool is unusable and still prints its JSON, so that read is
+accepted: a failed quota read keeps the known-empty accounts stuck instead of clearing them.
 
 ```sh
 ~/src/djbclark-ade/bin/ade-pi-stuck          # human table
