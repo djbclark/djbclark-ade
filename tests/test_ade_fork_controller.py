@@ -55,7 +55,8 @@ def fixture(tmp_path):
     row = dict(schema_version=1, component='ade-yolo', channel='master', repository='djbclark/djbclark-ade',
                repository_id=10, cohort=cohort, policy=policy, expected=expected, evaluation=ev,
                operations={op:dict(allowed=True,identity=receipt.sha256,generation=0) for op in c.OPERATIONS},
-               previous='0'*64, generation=0, master_commit=commit, evidence=evidence)
+               previous='0'*64, generation=0, master_commit=commit, evidence=evidence,
+               discovery={'enabled':True,'artifact_prefix':'ade-yolo-qualified','baseline_run_id':40})
     row = c.enrollment(c.canonical(row), registry)
     return row, receipt, payload, archive
 
@@ -222,3 +223,116 @@ def test_archive_substitution_holds_before_records(fixture,tmp_path):
     controller=c.Controller(lambda:row,evaluator,FakeNative(receipt.sha256),tmp_path/'private')
     with pytest.raises(c.ContractError,match='substituted'): controller.acquire(row)
     assert not (controller.root/'records').exists()
+
+
+def test_automatic_protected_discovery_and_failed_newer_master(fixture,tmp_path):
+    """Authenticated fake workflow output plus real source bytes, not live CI qualification."""
+    row,receipt,payload,archive=fixture
+    # Protected output digest must be a real SHA256 even in a synthetic evaluator fixture.
+    evidence=dict(row['evidence'],server_bundle_sha256='e'*64)
+    expected=dict(row['expected'],toolchain=c.canonical({'plugin_snapshot_evidence':digest(evidence)}).decode())
+    policy=row['policy']
+    candidate_receipt=make_receipt(expected,policy,{k:{'status':'passed','contract_digest':digest(v)} for k,v in policy['features'].items()})
+    candidate_archive=zip_bytes({'receipt.json':candidate_receipt.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(evidence)})
+    candidate_digest=c.hashlib.sha256(candidate_archive).hexdigest()
+    source=row['master_commit']; latest='f'*40
+    class Discovery(FakeEvaluator):
+        def __init__(self): super().__init__(candidate_archive,candidate_receipt); self.changed=False
+        def api(self,endpoint):
+            if endpoint=='rate_limit': return {'resources':{'core':{'remaining':4000}}}
+            if endpoint=='repos/'+row['repository']: return {'id':row['repository_id']}
+            if endpoint.endswith('/git/ref/heads/master'):
+                return {'ref':'refs/heads/master','object':{'type':'commit','sha':latest}}
+            if '/compare/' in endpoint:
+                older,newer=endpoint.split('/compare/')[1].split('...')
+                return {'base_commit':{'sha':older},'merge_base_commit':{'sha':older},'status':'ahead'}
+            if '/actions/workflows/' in endpoint:
+                return {'workflow_runs':[
+                    {'id':42,'head_sha':'b'*40,'status':'completed','conclusion':'failure','event':'workflow_dispatch','run_attempt':1},
+                    {'id':41,'head_sha':'b'*40,'status':'completed','conclusion':'success','event':'workflow_dispatch','run_attempt':2}]}
+            if '/actions/runs/41/artifacts' in endpoint:
+                return {'total_count':1,'artifacts':[{'id':61,'name':f'ade-yolo-qualified-{source}-41-2','digest':'sha256:'+candidate_digest}]}
+            raise AssertionError(endpoint)
+    evaluator=Discovery()
+    controller=c.Controller(lambda:row,evaluator,root=tmp_path/'private')
+    result=controller.select_latest()
+    assert result['latest_discovered']==latest
+    assert result['selected_qualified']['commit']==source
+    assert result['selected_qualified']['identity']==candidate_receipt.sha256
+    assert result['authorized'] is False
+    assert controller.retained(candidate_receipt.sha256)
+    assert evaluator.calls==2  # transport authentication then exact discovered receipt authentication
+
+
+def test_discovery_retained_baseline_and_rewind_hold(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row); row['previous']=receipt.sha256
+    source=row['master_commit']
+    class EmptyDiscovery:
+        def __init__(self): self.rewind=False
+        def api(self,endpoint):
+            if endpoint=='rate_limit':return {'resources':{'core':{'remaining':4000}}}
+            if endpoint=='repos/'+row['repository']:return {'id':row['repository_id']}
+            if endpoint.endswith('/git/ref/heads/master'):
+                return {'ref':'refs/heads/master','object':{'type':'commit','sha':'d'*40}}
+            if '/compare/' in endpoint:
+                return {'base_commit':{'sha':source},'merge_base_commit':{'sha':'0'*40 if self.rewind else source},'status':'ahead'}
+            if '/actions/workflows/' in endpoint:return {'workflow_runs':[]}
+            raise AssertionError(endpoint)
+    discovery=EmptyDiscovery();controller.evaluator=discovery
+    assert controller.select_latest()['selected_qualified']['identity']==receipt.sha256
+    discovery.rewind=True
+    with pytest.raises(c.ContractError,match='rewind'):controller.select_latest()
+
+
+def test_discovery_rechecks_policy_before_commit(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    current=[row]
+    class Changed:
+        def api(self,endpoint):
+            if endpoint=='rate_limit':return {'resources':{'core':{'remaining':4000}}}
+            if endpoint=='repos/'+row['repository']:return {'id':row['repository_id']}
+            if endpoint.endswith('/git/ref/heads/master'):
+                return {'ref':'refs/heads/master','object':{'type':'commit','sha':row['master_commit']}}
+            if '/actions/workflows/' in endpoint:
+                current[0]=dict(row,discovery=dict(row['discovery'],enabled=False))
+                return {'workflow_runs':[]}
+            raise AssertionError(endpoint)
+    controller=c.Controller(lambda:current[0],Changed(),root=tmp_path/'never')
+    with pytest.raises(c.ContractError,match='enrollment changed'):controller.select_latest()
+    assert not controller.root.exists()
+
+
+def test_discovery_ancestry_with_real_git_objects(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    repo=tmp_path/'source'; baseline=git(repo,'rev-parse','HEAD')
+    (repo/'next').write_text('next');git(repo,'add','.');git(repo,'commit','-qm','descendant')
+    descendant=git(repo,'rev-parse','HEAD')
+    git(repo,'checkout','-q','--detach',baseline)
+    (repo/'other').write_text('other');git(repo,'add','.');git(repo,'commit','-qm','incomparable')
+    other=git(repo,'rev-parse','HEAD')
+    class RealGitComparisons:
+        def __init__(self):self.head=descendant
+        def api(self,endpoint):
+            if endpoint=='rate_limit':return {'resources':{'core':{'remaining':4000}}}
+            if endpoint=='repos/'+row['repository']:return {'id':row['repository_id']}
+            if endpoint.endswith('/git/ref/heads/master'):
+                return {'ref':'refs/heads/master','object':{'type':'commit','sha':self.head}}
+            if '/compare/' in endpoint:
+                older,newer=endpoint.split('/compare/')[1].split('...')
+                common=git(repo,'merge-base',older,newer)
+                return {'base_commit':{'sha':older},'merge_base_commit':{'sha':common},'status':'ahead' if common==older else 'diverged'}
+            if '/actions/workflows/' in endpoint:return {'workflow_runs':[]}
+            raise AssertionError(endpoint)
+    controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
+    controller.acquire(row);row['previous']=receipt.sha256
+    observations=RealGitComparisons();controller.evaluator=observations
+    assert controller.select_latest()['selected_qualified']['commit']==baseline
+    # A later enrolled baseline cannot be falsely relabelled as an unrelated branch.
+    record_path=controller.root/'records'/(receipt.sha256+'.json')
+    record=c.parse(c.read_regular(record_path).decode());record['expected']['fork_commit']=descendant
+    record_path.chmod(0o600);record_path.write_bytes(c.canonical(record))
+    # Corrupting retained identity invalidates it; use trusted enrollment baseline for the graph check.
+    row['master_commit']=descendant;observations.head=other
+    with pytest.raises(c.ContractError,match='incomparable'):controller.select_latest()
