@@ -1506,6 +1506,20 @@ platforms = ["mac", "linux"]
 notes = "Slice 1b (2026-11-12) of docs/persistent-progress-reminder-design.md: zero-token reminder scan, no model prompt. Chosen 2026-11-13 (operator): doctor expects the label, so install it (docs/scheduling.md). Setting chosen = false later makes doctor quiet and makes reconcile unload a ledger-owned install. Logs: ~/.local/state/djbclark-ade/progress/scan.log."
 
 [[install.jobs]]
+name = "ade-supervisor-scan"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "optional"
+chosen = true
+label = "com.djbclark.ade-supervisor-scan"
+plist = "config/launchd/com.djbclark.ade-supervisor-scan.plist"
+schedule = "StartInterval 300"
+command = "bin/ade-supervisor-scan"
+set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor"]
+platforms = ["mac"]
+notes = "Supervisor Pi-stuck scan (2026-11-18): zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; one deduped `paseo send` to the ADE lead per newly stuck Pi agent. Chosen because it was installed 2026-11-18 to cover the /watch stuck mode of skills/watch/SKILL.md; logs and dedupe state in __STATE__. Setting chosen = false makes doctor quiet and makes reconcile unload it (docs/scheduling.md)."
+
+[[install.jobs]]
 name = "ade-helper-prune"
 kind = "ade-sched"
 owner = "djbclark-ade"

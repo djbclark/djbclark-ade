@@ -54,6 +54,17 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 `ade-update --check` only; not installed until an operator runs
 `ade-sched install … --set __STATE__=$HOME/.local/state/ade`).
 `launchd/com.djbclark.load-watch.plist` is also inventoried (S4b).
+
+`config/launchd/com.djbclark.ade-supervisor-scan.plist` (2026-11-18) is the
+supervisor Pi-stuck scan: every 300 s it runs `bin/ade-pi-stuck` (read-only) and
+sends the ADE lead one `paseo send` per newly stuck Pi agent, deduped in its state
+dir, so one agent notices once rather than 288 times a day. Install over another
+checkout with the lead id you want told:
+
+```sh
+bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist \
+  --ade ~/src/djbclark-ade --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
+```
 ```
 
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan
