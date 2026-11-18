@@ -330,3 +330,15 @@ def test_an_unreadable_stuck_list_alerts_instead_of_dying(tmp_path: Path) -> Non
     (bin_dir / "feed.json").write_text(json.dumps({"stuck": ["not-a-dict"]}))
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 1                     # the same alert key: told once
+
+
+def test_an_unreadable_stuck_list_does_not_reannounce_after_recovery(tmp_path: Path) -> None:
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0                                      # a1 told
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": None}))      # unreadable run
+    assert _run(bin_dir, home) == 0
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1")]}))   # a1 is still stuck
+    assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 2 and "id=a1" not in messages[1]
+    assert json.loads((state / "notified").read_text()) == ["a1|openai"]

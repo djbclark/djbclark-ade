@@ -99,7 +99,9 @@ else:
                       (acct, rec.get("headroom"), ", stale reading" if rec.get("stale") else "")))
     stuck = d.get("stuck")
     if not isinstance(stuck, list) or not all(isinstance(s, dict) for s in stuck):
-        items = [("scan|broken", "ade-pi-stuck printed a stuck list this scan cannot read — the watch is blind")]
+        # Unreadable: alert, and keep everything already told and not re-observed (same rule as a quota outage).
+        items.append(("scan|broken", "ade-pi-stuck printed a stuck list this scan cannot read — the watch is blind"))
+        items += [(key, None) for key in sorted(told) if key not in {k for k, _ in items}]
     else:
         for s in stuck:
             if s.get("status") in ("closed", "archived"):
@@ -108,7 +110,7 @@ else:
                           "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
                                                                s.get("alternative") or "no healthy alternative")))
 with open(pending_path, "w") as fh:
-    json.dump([k for k, _ in items], fh)
+    json.dump(list(dict.fromkeys(k for k, _ in items)), fh)      # one entry per key, in order
 new = [text for key, text in items if text and key not in told]
 if new:
     print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))

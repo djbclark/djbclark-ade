@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Supervisor Pi-stuck scan, every 5 minutes: a zero-token host script (no model prompt), one `paseo ls` plus one
-     `aiuse --available`, then at most ONE `paseo send` per run, naming every new finding (deduped in the state dir).
+<!-- Supervisor Pi-stuck scan, every 5 minutes: a zero-token host script (no model prompt), one `paseo ls`, one
+     `aiuse --available` and one `paseo agent inspect` (through bin/ade_send_guard.py), then at most ONE `paseo send`
+     per run, naming every new finding (deduped in the state dir).
      Inventoried in config/ade.toml [install.jobs] as `ade-supervisor-scan`; install command in docs/scheduling.md.
      Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__ and __ADMISSION__; the lead is not a placeholder (see the
      script header: ADE_SUPERVISOR_LEAD or __STATE__/lead), so the job renders and reconciles without one. -->
