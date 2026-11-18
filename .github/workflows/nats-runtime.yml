@@ -116,3 +116,35 @@ jobs:
             ${{ runner.temp }}/ade-coord-runtime.tar.gz
             ${{ runner.temp }}/ade-coord-runtime.sha256
           retention-days: 14
+  deployment-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: djbclark/site-djbclark
+          ref: master
+          path: deployment-source
+      - uses: cachix/install-nix-action@master
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Build the published hub broker package and record provenance
+        run: |
+          git -C deployment-source rev-parse HEAD
+          nix build --print-build-logs './deployment-source/nixos#nixosConfigurations.vps-hub.pkgs.nats-server' --out-link "$RUNNER_TEMP/hub-nats-package"
+          "$RUNNER_TEMP/hub-nats-package/bin/nats-server" --version
+          timeout 120 sudo apt-get update -qq
+          timeout 120 sudo apt-get install -y lsof
+      - name: Verify this coordination source against the deployment broker package
+        working-directory: lib/ade-coord
+        env:
+          NATS_SERVER: ${{ runner.temp }}/hub-nats-package/bin/nats-server
+        run: |
+          timeout 180 npm install --ignore-scripts
+          npm ls --all
+          timeout 240 npm test
