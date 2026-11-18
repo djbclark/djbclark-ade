@@ -60,6 +60,25 @@ owner cannot be inspected. Durable cross-host completion uses NATS instead.
 result/error. It invokes the maintained Node package CLI through argv/stdin with
 a 30-second bound and sanitized errors. See `lib/ade-coord/DELIVERY.md` for core
 commands. Generation always comes from verified config, never a request override.
+
+Every command needs a JSON object on stdin, including `role get`. For example:
+
+```python
+import json, os, subprocess
+from pathlib import Path
+runtime = Path.home() / ".local/share/djbclark-ade/coord/current"
+request = {"role_id": "your_enrolled_role"}
+response = subprocess.run(
+    [str(runtime / "bin/ade-coord"), "role", "get"],
+    input=json.dumps(request), text=True, capture_output=True, check=True,
+    env={**os.environ, "ADE_COORD_CONFIG": "/private/your-config.json"},
+)
+snapshot = json.loads(response.stdout)["result"]
+```
+
+Empty or malformed stdin fails as `INVALID_JSON_REQUEST` before any network
+operation. A flattened inbox snapshot fails as
+`SNAPSHOT_RECORD_AND_REVISION_REQUIRED`; preserve its `record` and `revision`.
 Outbox status and explicit reconciliation remain available offline. Operation
 journals never invoke/retry external effects.
 

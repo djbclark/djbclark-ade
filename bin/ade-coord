@@ -34,8 +34,21 @@ CoordinationError = _coord().CoordinationError
 try:
     if len(sys.argv) != 3:
         raise CoordinationError("COMMAND_PAIR_REQUIRED")
-    request = json.load(sys.stdin)
+    try:
+        request = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        raise CoordinationError("INVALID_JSON_REQUEST") from None
+    if not isinstance(request, dict):
+        raise CoordinationError("JSON_OBJECT_REQUIRED")
     command = " ".join(sys.argv[1:])
+    if command == "role get" and not isinstance(request.get("role_id"), str):
+        raise CoordinationError("ROLE_ID_REQUIRED")
+    if command in ("inbox list", "inbox read", "inbox intake", "inbox dispose"):
+        current = request.get("snapshot")
+        if not isinstance(current, dict) or not isinstance(current.get("record"), dict) or type(current.get("revision")) is not int:
+            raise CoordinationError("SNAPSHOT_RECORD_AND_REVISION_REQUIRED")
+        if not isinstance(request.get("authority"), dict):
+            raise CoordinationError("AUTHORITY_REQUIRED")
     if command == "handoff transfer":
         transfer = _coord()._sibling("ade_coord_handoff").transfer
         result = transfer(request)

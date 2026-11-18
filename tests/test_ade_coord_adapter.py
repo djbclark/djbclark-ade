@@ -53,6 +53,19 @@ class AdapterTests(unittest.TestCase):
                         coord.authorize_claim({"id":"legacy","path":str(path)})
                 self.assertIsNone(coord.authorize_claim({"id":"legacy","path":str(root/"unrelated")}))
 
+    def test_cli_request_errors_are_actionable_without_network_or_config(self):
+        driver = Path(__file__).resolve().parents[1]/"bin/ade-coord"
+        cases = [("role", "get", "", "INVALID_JSON_REQUEST"),
+                 ("role", "get", "[]", "JSON_OBJECT_REQUIRED"),
+                 ("role", "get", "{}", "ROLE_ID_REQUIRED"),
+                 ("inbox", "list", '{"snapshot":{"role_id":"r","revision":1},"authority":{}}', "SNAPSHOT_RECORD_AND_REVISION_REQUIRED"),
+                 ("inbox", "list", '{"snapshot":{"record":{},"revision":1}}', "AUTHORITY_REQUIRED")]
+        for group,command,payload,code in cases:
+            with self.subTest(code=code):
+                result = subprocess.run([sys.executable,"-I",str(driver),group,command],input=payload,capture_output=True,text=True)
+                self.assertEqual(result.returncode,1)
+                self.assertEqual(json.loads(result.stdout),{"ok":False,"error":{"code":code}})
+
     def test_generation_manifest_mismatch_is_closed_and_errors_do_not_echo_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);manifest=root/"generation";cfg=root/"cfg"
