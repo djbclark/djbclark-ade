@@ -84,13 +84,17 @@ CI also runs `tests/test_ade_claim_plugin.py` (node `--test` wrapper). No live P
 
 ## Immutable snapshot source binding
 
-With native `PluginServerContext.sourceDirectory`, the entry binds helpers to
-that exact candidate `plugins/ID` directory before registering hooks, even while
-registration still names the previous source. The snapshot root, directories and
-required helper files must be canonical, symlink-free and read-only. No managed
+Native `PluginServerContext.sourceDirectory` binds helpers to that exact source
+before hooks register, including ordinary writable checkout installations. Only
+literal `context.managedSource === true` enables sealed snapshot checks; the
+native manager derives this informational field from its protected enrollment
+and activation state. It grants no execution permission. The managed snapshot
+root, directories and helper files must be canonical, symlink-free and read-only. No managed
 ancestor search, config lookup, mutable checkout fallback or caller helper/tool
 overrides are accepted. External Python/Git/Node/shell identities still require
 protected evaluator evidence; this path check alone is not qualification.
 
 Legacy hosts without sourceDirectory retain lazy registration/ESM/home resolution
-for unmanaged compatibility. That path is never qualified managed fallback.
+for unmanaged compatibility. Hosts without managedSource also remain unmanaged;
+that compatibility path never qualifies a managed snapshot. Malformed classification
+or a managed classification without its source directory is refused.

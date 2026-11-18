@@ -8,6 +8,17 @@ import { registerAdeClaimHooks } from "./server/hook.mjs";
  * - W3: export ADE_CLAIM_ID on agent.open.before; bind owner on agent.create.after
  * - W4: prepend libexec/agent-bin to PATH on agent.open.before
  */
-export default function contribute(server: PluginServerContext) {
-  return registerAdeClaimHooks(server, server.sourceDirectory === undefined ? {} : { pluginRoot: server.sourceDirectory, managed: true });
+type SourceContext = PluginServerContext & {
+  readonly sourceDirectory?: string;
+  readonly managedSource?: boolean;
+};
+
+export default function contribute(server: SourceContext) {
+  if (server.managedSource !== undefined && typeof server.managedSource !== "boolean") {
+    throw new Error("Invalid native managedSource classification");
+  }
+  if (server.managedSource === true && server.sourceDirectory === undefined) {
+    throw new Error("Managed source directory is required");
+  }
+  return registerAdeClaimHooks(server, server.sourceDirectory === undefined ? {} : { pluginRoot: server.sourceDirectory, managed: server.managedSource === true });
 }

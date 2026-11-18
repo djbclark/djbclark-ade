@@ -9,3 +9,6 @@
 
 ### Fixed
 - Supply the explicit cold CJS fixture compiler in both existing full-suite CI jobs without skipping candidate binding assertions. (#793)
+
+### Fixed
+- Keep ordinary checkout plugins working when hosts expose source directories, and use explicit native managed-source classification for sealed helpers. (#793)

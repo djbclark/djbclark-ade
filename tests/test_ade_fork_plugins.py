@@ -234,18 +234,31 @@ fs.readFileSync = function(file, ...args) {
 };
 const plugin = require(process.argv[1]);
 const handlers = new Map();
-const server = {sourceDirectory: process.argv[2], addHook(name, fn) {handlers.set(name,fn); return ()=>handlers.delete(name);}};
+const server = {sourceDirectory: process.argv[2], managedSource: true, addHook(name, fn) {handlers.set(name,fn); return ()=>handlers.delete(name);}};
 const off = plugin.default(server);
 assert.equal(typeof off, 'function'); assert.ok(handlers.size > 0);
 assert.equal(configReads, 0);
 off(); assert.equal(handlers.size, 0);
+assert.throws(()=>plugin.default({...server,managedSource:"true"}), /Invalid native managedSource/);
+assert.throws(()=>plugin.default({...server,sourceDirectory:undefined}), /Managed source directory is required/);
+assert.notEqual(fs.statSync(process.argv[4]).mode & 0o222, 0, "fixture checkout is writable");
+for (const managedSource of [false, undefined]) {
+  const ordinary = {...server, sourceDirectory: process.argv[4], managedSource};
+  const stop = plugin.default(ordinary);
+  assert.equal(typeof stop, "function");
+  assert.ok(handlers.size > 0);
+  assert.equal(configReads, 0, "provided unmanaged source binds helpers without stale registration");
+  stop(); assert.equal(handlers.size, 0);
+}
+assert.throws(()=>plugin.default({...server,sourceDirectory:process.argv[4]}));
+
 assert.throws(()=>plugin.default({...server,sourceDirectory:'/missing/B/plugins/'+process.argv[3]}));
 process.env.ADE_PYTHON = '/unbound/python';
 assert.throws(()=>plugin.default(server), /Unbound managed helper override/);
 assert.equal(configReads, 0);
 '''
         env = {k: v for k, v in os.environ.items() if k not in ('ADE_CLAIMS_PY', 'ADE_GIT_GUARD', 'ADE_AGENT_BIN', 'ADE_WS_AUTONAME_PY', 'ADE_PYTHON', 'ADE_REAL_GIT')}
-        subprocess.run(['node', '-e', script, str(output), str(snapshot / 'plugins' / plugin), plugin], env=env, check=True)
+        subprocess.run(['node', '-e', script, str(output), str(snapshot / 'plugins' / plugin), plugin, str(repo / 'plugins' / plugin)], env=env, check=True)
 
 
 def test_managed_helper_argv_bound_to_snapshot(tmp_path):

@@ -87,10 +87,14 @@ authorization separation; matching locally constructed receipts grant nothing.
 ## Explicit candidate helper binding
 
 ADE claim/window-name entry points consume native `context.sourceDirectory` via
-the existing `deps.pluginRoot` injection, with managed validation enabled. It is
-supplied from initialize.pluginDirectory before the registration patch; candidate
-B never derives its helpers from registration A. Missing context preserves legacy
-unmanaged behavior only. Claim no longer captures registration at module evaluation.
+the existing `deps.pluginRoot` injection in both ordinary and managed modes.
+Only native `context.managedSource === true` enables managed validation; source
+path presence alone never classifies an ordinary writable checkout as sealed.
+Native enrollment/history and verified activation determine this informational
+classification; uncertainty must hold before context creation, not downgrade it.
+The source comes from initialize.pluginDirectory before the registration patch;
+candidate B never derives its helpers from registration A. Missing legacy context
+preserves unmanaged compatibility only and cannot qualify a managed snapshot. Claim no longer captures registration at module evaluation.
 The managed path validates the exact `plugins/ID` layout and sealed helper paths,
 rejects caller helper/tool overrides, and constructs internal exact root bindings
 rather than walking ancestors. Dependency identity remains a separate HOLD gate.
