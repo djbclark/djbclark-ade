@@ -1336,3 +1336,13 @@ def test_scoped_availability_cannot_create_same_live_capability(missing):
     assert not native.can_attempt_same_held_recovery()
     assert native._scoped_recovery_supported('recover') is False
     assert native._scoped_recovery_supported('replace') is False
+
+
+def test_same_held_prepare_uncertainty_discards_private_reuse(monkeypatch):
+    native=c.NativeFacade()
+    native.known_held={'baseline':{}};native.token='s'*43
+    native.reservation={'generation':12,'transactionId':'original'};native.original_native=('context','intent')
+    def unavailable(context):raise c.ContractError('fresh native observation uncertain')
+    monkeypatch.setattr(native,'_prepare_bound',unavailable)
+    with pytest.raises(c.ContractError):native.prepare(SimpleNamespace(kind='reconcile'))
+    assert native.uncertain and native.known_held is None and not native.can_attempt_same_held_recovery()

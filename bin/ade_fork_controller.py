@@ -835,6 +835,13 @@ class NativeFacade:
         self.operation = 'recover' if context.kind in ('reconcile','verified-rollback') else 'activate'
 
     def prepare(self, context):
+        try:return self._prepare_bound(context)
+        except Exception:
+            if self.known_held is not None and context.kind in ('reconcile','verified-rollback'):
+                self.uncertain=True;self.known_held=None
+            raise
+
+    def _prepare_bound(self, context):
         """Read-only native plan; Journal persists this exact intent BEFORE reserve."""
         if context != self.context or digest(self.reader()) != context.rule_digest:
             raise ContractError('protected rule/context changed before native planning')
