@@ -306,6 +306,16 @@ command = "{{ .home }}/.claude/hooks/secret_read_gate.py"
 timeout = 15
 statusMessage = "Checking secret-file reads"
 
+# Native Codex shell envelope; append groups to preserve existing trust indexes.
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 {{ .home }}/src/djbclark-ade/claude/hooks/upstream_review_gate.py"
+timeout = 15
+statusMessage = "Checking CFEngine upstream writes"
+
 [[hooks.PostToolUse]]
 matcher = "Edit|Write|apply_patch"
 
