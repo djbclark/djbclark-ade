@@ -63,6 +63,7 @@ import json
 import os
 import re
 import sys
+from functools import lru_cache
 
 FILTERS = frozenset({"tail", "head", "cut", "sort", "uniq", "column", "cat", "less", "more",
                      "tee", "tr", "gtr", "fold", "nl", "fmt", "wc", "gsed", "sed"})
@@ -235,6 +236,10 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
+def _arithmetic_close(text: str, close: int) -> bool:
+    return text[close + 1:close + 2] == ")"
+
+
 def command_views(plain: str) -> list[str]:
     """The command line as separate commands: the outer one with each `$(...)`, `<(...)` and
     `>(...)` replaced by a placeholder word, then the body of every substitution (nested ones
@@ -279,7 +284,7 @@ def command_views(plain: str) -> list[str]:
             if kind == "sub":
                 views.append(text)
                 stack[-1][1].append("X")
-            elif kind == "arith" and plain[i + 1:i + 2] != ")":
+            elif kind == "arith" and not _arithmetic_close(plain, i):
                 # `$((a); b)`: a subshell inside a substitution; the `(` was a group all along
                 stack.append(("sub", ["(" + text + ")"]))
             elif kind == "arith":
@@ -571,10 +576,10 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
     return False
 
 
-def _closing_paren(text: str, i: int) -> int:
+@lru_cache(maxsize=1024)
+def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
     depth, j, n = 1, i, len(text)
-    arithmetic = text[i:i + 1] == "("
     pending = []
     while j < n:
         c = text[j]
@@ -592,7 +597,7 @@ def _closing_paren(text: str, i: int) -> int:
             j += 1
             continue
         if c == "$" and text[j + 1:j + 2] == "(":
-            j = _closing_paren(text, j + 2) + 1
+            j = _closing_paren(text, j + 2, _is_arithmetic_expansion(text, j)) + 1
             continue
         if not arithmetic and c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
             match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", text[j:])
@@ -621,6 +626,13 @@ def _closing_paren(text: str, i: int) -> int:
                 return j
         j += 1
     return n
+
+
+def _is_arithmetic_expansion(text: str, opening: int) -> bool:
+    if not text.startswith("$((", opening):
+        return False
+    inner = _closing_paren(text, opening + 3, True)
+    return inner < len(text) and _arithmetic_close(text, inner)
 
 
 def live_bodies(text: str) -> list[str]:
@@ -652,8 +664,9 @@ def live_bodies(text: str) -> list[str]:
             out.append("".join(body))
             i = j + 1
         elif ch == "$" and text[i + 1:i + 2] == "(":
-            end = _closing_paren(text, i + 2)
-            if text.startswith("$((", i):
+            arithmetic = _is_arithmetic_expansion(text, i)
+            end = _closing_paren(text, i + 2, arithmetic)
+            if arithmetic:
                 # Arithmetic operators are not shell redirections. Only nested
                 # command substitutions/backticks inside the expression execute.
                 out.extend(live_bodies(text[i + 3:max(i + 3, end - 1)]))
@@ -1233,6 +1246,7 @@ def bg_operator(plain: str) -> bool:
 
 def check(cmd: str) -> tuple[str | None, str | None]:
     """(deny reason, warning) for a Bash command line."""
+    _closing_paren.cache_clear()
     # Raw-command check first: strip_literals skips heredoc bodies, so this cannot live in the
     # per-stage loop below (it must see the body to notice a missing terminator).
     hd = unterminated_heredoc_reason(cmd)

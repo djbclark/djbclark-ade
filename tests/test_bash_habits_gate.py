@@ -382,6 +382,16 @@ def test_arithmetic_still_checks_live_command_substitutions(command):
     assert denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    'echo "$((true); gh run watch 123)"',
+    'echo $((true); gh run watch 123)',
+    'echo "$((cat <<\'EOF\'\ntext )\nEOF\n); gh run watch 123)"',
+    'echo $((cat <<\'EOF\'\ntext )\nEOF\n); gh run watch 123)',
+])
+def test_subshell_form_substitutions_preserve_live_watcher_checks(command):
+    assert denied(command)
+
+
 @pytest.mark.parametrize("operator,inner", [
     ("<<", "  PY"),
     ("<<", "\tPY"),
