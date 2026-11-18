@@ -423,7 +423,7 @@ def test_rotation_failed_c_preserves_b_and_a(deployment, evidence):
     assert (j.read()['verified'], j.read()['baseline']) == (b, 'old')
     assert f.contexts[-1].kind == 'reconcile'
     assert f.contexts[-1].target == b
-    assert set(f.artifacts) >= {'old', b, receipt(next_evidence(evidence, b'C')).sha256}
+    assert set(f.artifacts) == {'old', b}  # Refused before staging C.
 
 
 def test_explicit_rollback_consumes_baseline_requires_distinct_resume(deployment, evidence):
@@ -782,6 +782,7 @@ def test_known_failure_failed_c_preserves_b_baseline_a(deployment, evidence):
     assert (j.read()['verified'], j.read()['baseline']) == (b, 'old')
     assert f.contexts[-1].target == b
     assert f.native_counter == 42 and f.calls.count('begin') == 2
+    assert set(f.artifacts) >= {'old', b, receipt(next_evidence(evidence, b'C')).sha256}
 
 
 def test_repeated_confirmed_recovery_failure_preserves_origin_target_and_kind(deployment, evidence):
