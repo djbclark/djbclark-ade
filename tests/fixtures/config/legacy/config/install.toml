@@ -926,6 +926,20 @@ platforms = ["mac", "linux"]
 notes = "Slice 1b (2026-11-12) of docs/persistent-progress-reminder-design.md: zero-token reminder scan, no model prompt. Chosen 2026-11-13 (operator): doctor expects the label, so install it (docs/scheduling.md). Setting chosen = false later makes doctor quiet and makes reconcile unload a ledger-owned install. Logs: ~/.local/state/djbclark-ade/progress/scan.log."
 
 [[install.jobs]]
+name = "ade-supervisor-scan"
+kind = "ade-sched"
+owner = "djbclark-ade"
+class = "optional"
+chosen = true
+label = "com.djbclark.ade-supervisor-scan"
+plist = "config/launchd/com.djbclark.ade-supervisor-scan.plist"
+schedule = "StartInterval 300"
+command = "bin/ade-supervisor-scan"
+set = ["__STATE__={home}/.local/state/djbclark-ade/supervisor"]
+platforms = ["mac"]
+notes = "Supervisor Pi-stuck scan (2026-11-18), chosen the same day when the ADE lead installed it on the operator's instruction to make /watch stuck work: a host that has not installed it will report the job missing in `just doctor`. Zero-token host script (bin/ade-pi-stuck + one aiuse read), no model prompt; at most one deduped `paseo send` per run to the lead named in ADE_SUPERVISOR_LEAD or __STATE__/lead, naming every newly stuck Pi agent; a broken or quota-blind scan alerts once, an archived or unverifiable lead is never messaged (a delivery would un-archive it) and is escalated once with hermes-ping; the lead id is a file, not a placeholder, so the job renders for `ade-sched diff`/`reconcile` and a lead handoff cannot leave a stale id (docs/scheduling.md)."
+
+[[install.jobs]]
 name = "ade-helper-prune"
 kind = "ade-sched"
 owner = "djbclark-ade"
