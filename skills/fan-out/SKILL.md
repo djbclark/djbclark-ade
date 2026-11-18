@@ -17,6 +17,10 @@ workspaces, report and review requirements below. For another computer, select i
 transfer any needed files before launch; a local brief/report path is not shared storage.
 See [old way versus new way](../../docs/old-way-new-way.md), including plugin advice and the
 cross-host acceptance checks. Keep `{serverId, agentId}` together and prove receipt with an ack.
+For native MCP directory results, prefer `structuredContent` and filter to the relevant IDs/fields before emitting output;
+`content` often duplicates the same roster. Do not print an entire workspace/agent directory to select one entry.
+CLI schemas differ: `paseo ls --json` uses lowercase `id/provider/status`; `agent inspect --json` uses `Id/Provider/Status`.
+Do not reuse inspect-field casing to conclude that a list contains no running model/agent.
 Recipe detail: [docs/orchestration-practices.md](../../docs/orchestration-practices.md).
 
 ## 1. Slice first
@@ -55,7 +59,7 @@ A slice that edits code gets its own linked worktree (AGENTS.md order 9:
 the brief) while its Paseo session sits in the lead's WORKER box (below).
 Before **each** `paseo run`, and again before each wave, the launcher runs `~/src/djbclark-ade/bin/load-watch admit --wait N --max-agents --json`
 (N in 300-600; machine capacity, not service quota; full path: `load-watch` is not on PATH, and a bare call fails with 127 so the check silently never runs;
-exit 0 = go, **any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report; exit 2 is also what a `load-watch` from before 2026-11-14 answers to a flag it does not know, such as `--refused-since EPOCH` ("unrecognized arguments"): a launcher that hands its hold start over with that flag must drop it and retry without it, or report, never treat the exit as a refusal to wait out). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
+a wait that may exceed 10–15 seconds runs in the background with durable stdout, stderr, PID and terminal status; its outer/subprocess timeout must exceed `--wait` by at least 60 seconds. Never wrap a 420-second admission wait in an 8-second timeout. A timeout is UNKNOWN, not refusal or admission: inspect any reservation before retrying and never launch from a partial result. Detached router preflights also need a terminal exit artifact before reading their output; write live progress to a separate `.progress.json` and atomically publish `.result.json` only at termination, not as an in-flight status file. Never assume the default `plan` output is JSON merely because its filename ends in `.json` (use the documented `--json` flag). Then **exit 0 = go, any other exit** (75 = refused, 2 usage, 127 missing) = launch nothing and report; exit 2 is also what a `load-watch` from before 2026-11-14 answers to a flag it does not know, such as `--refused-since EPOCH` ("unrecognized arguments"): a launcher that hands its hold start over with that flag must drop it and retry without it, or report, never treat the exit as a refusal to wait out). `--max-agents` is the live-agent cap, 20 by default (`LW_MAX_AGENTS`),
 and it records a reservation: once the agent has spawned, or the launch failed, run `~/src/djbclark-ade/bin/load-watch release <reservation>` (the `reservation` field of the JSON; exit 66 for an unknown id (released over 30 s ago, or expired) is harmless, exit 1 is a lock or write failure (the slot is held until `LW_RESERVE_S`); a launcher that is the only dispatcher on the machine
 may pass `--no-reserve`), or the slot is counted twice for 20 minutes (after a failed launch, held as a phantom). The cap is a soft gate: after 300 s of refusal the starvation valve lets one launch through
 (one per 120 s machine-wide; docs/orchestration-practices.md rule 4); `--wait 0` gives a strict check. Then take a fresh `route_agent.py plan --kinds KIND` per slice (model-routing D5)
