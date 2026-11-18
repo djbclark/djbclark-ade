@@ -53,7 +53,7 @@ def load_policy(path: Path | None = None) -> list[dict[str, Any]]:
         if row["id"] in ids:
             raise PolicyError(f"duplicate fork id: {row['id']}")
         ids.add(row["id"])
-        if row.get("strategy") not in STRATEGIES:
+        if not isinstance(row.get("strategy"), str) or row["strategy"] not in STRATEGIES:
             raise PolicyError(f"invalid strategy for {row['id']}")
         for key in ("upstream", "fork"):
             value = row.get(key)

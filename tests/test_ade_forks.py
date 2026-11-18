@@ -57,6 +57,8 @@ def test_repo_policy_and_observation_do_not_claim_qualification():
     lambda s: s.replace("schema_version = 1", "schema_version = 2"),
     lambda s: s.replace("schema_version = 1", "schema_version = true"),
     lambda s: s.replace('strategy = "merge"', 'strategy = "reset"'),
+    lambda s: s.replace('strategy = "merge"', 'strategy = ["merge"]'),
+    lambda s: s.replace('strategy = "merge"', 'strategy = { name = "merge" }'),
     lambda s: s.replace('strategy = "merge"', 'strategy = "patch-queue"'),
     lambda s: s.replace('required_features = ["retains-feature"]', 'required_features = []'),
     lambda s: s.replace('catalog_ids = ["pilot"]', 'catalog_ids = ["pilot", "pilot"]'),
