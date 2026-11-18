@@ -180,8 +180,9 @@ def _heredoc_terminates(line: str, delimiter: str, strip_tabs: bool) -> bool:
     return (line.lstrip("\t") if strip_tabs else line) == delimiter
 
 
-def _heredoc_introducers(line: str, quote: str | None):
+def _heredoc_introducers(line: str, state):
     """Recognize unescaped shell redirects, not quoted/comment delimiter examples."""
+    quote, arithmetic = state or (None, 0)
     matches, i = [], 0
     while i < len(line):
         ch = line[i]
@@ -198,6 +199,12 @@ def _heredoc_introducers(line: str, quote: str | None):
             break
         elif ch in "'\"":
             quote = "$'" if ch == "'" and i > 0 and line[i - 1] == "$" else ch
+        elif arithmetic:
+            arithmetic += (ch == "(") - (ch == ")")
+        elif line.startswith("((", i):
+            arithmetic = 2
+            i += 2
+            continue
         elif ch == "<" and (i == 0 or line[i - 1] != "<") and not line.startswith("<<<", i):
             match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", line[i:])
             if match:
@@ -205,7 +212,7 @@ def _heredoc_introducers(line: str, quote: str | None):
                 i += match.end()
                 continue
         i += 1
-    return matches, quote
+    return matches, (quote, arithmetic)
 
 
 def strip_literals(c: str) -> str:
@@ -567,6 +574,7 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
 def _closing_paren(text: str, i: int) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
     depth, j, n = 1, i, len(text)
+    arithmetic = text[i:i + 1] == "("
     pending = []
     while j < n:
         c = text[j]
@@ -583,7 +591,10 @@ def _closing_paren(text: str, i: int) -> int:
                 j += 2 if text[j] == "\\" else 1
             j += 1
             continue
-        if c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
+        if c == "$" and text[j + 1:j + 2] == "(":
+            j = _closing_paren(text, j + 2) + 1
+            continue
+        if not arithmetic and c == "<" and (j == 0 or text[j - 1] != "<") and not text.startswith("<<<", j):
             match = re.match(r"<<(-?)\s*(['\"]?)(\w+)\2", text[j:])
             if match:
                 pending.append((match.group(3), match.group(1) == "-"))
@@ -642,7 +653,12 @@ def live_bodies(text: str) -> list[str]:
             i = j + 1
         elif ch == "$" and text[i + 1:i + 2] == "(":
             end = _closing_paren(text, i + 2)
-            out.append(text[i + 2:end])
+            if text.startswith("$((", i):
+                # Arithmetic operators are not shell redirections. Only nested
+                # command substitutions/backticks inside the expression execute.
+                out.extend(live_bodies(text[i + 3:max(i + 3, end - 1)]))
+            else:
+                out.append(text[i + 2:end])
             i = end + 1                               # its inside is scanned fresh, by the recursion
         else:
             i += 1

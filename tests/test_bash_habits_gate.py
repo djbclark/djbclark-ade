@@ -359,6 +359,29 @@ def test_parentheses_inside_substitution_heredoc_are_data(command):
     assert not denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    "echo $((1 << 2))",
+    "((mask = 1 << 3))",
+    'echo "$((1 << 2))"',
+    "echo $((mask << bits))",
+    "((mask = mask << bits))",
+    "echo $((1 <<\n2))",
+    'echo "$((1 <<\n2))"',
+])
+def test_arithmetic_shifts_are_not_heredoc_redirections(command):
+    assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $((1 + $(cat <<EOF\nbody\n)))",
+    'echo "$((1 + $(cat <<EOF\nbody\n)))"',
+    "echo $((1 + $(sed -n 1p file)))",
+    "echo $((1 + `sed -n 1p file`))",
+])
+def test_arithmetic_still_checks_live_command_substitutions(command):
+    assert denied(command)
+
+
 @pytest.mark.parametrize("operator,inner", [
     ("<<", "  PY"),
     ("<<", "\tPY"),
