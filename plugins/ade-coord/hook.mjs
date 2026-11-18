@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, delimiter } from "node:path";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -63,7 +63,7 @@ export function contribute(server,deps={}) {
     if(current?.record?.state!=="active"||current.record.owner.agent!==request.agentId) throw new Error("Current active enrolled role authority required");
     // beta.2's real strict schema permits env/tools/mcpServers only. The
     // enrolled role brief is supplied explicitly at creation, never here.
-    return {...request,env:{...request.env,ADE_COORD_ROLE:role,ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
+    return {...request,env:{...request.env,ADE_COORD_ROLE:role,PATH:fileURLToPath(new URL("../../libexec/agent-bin",import.meta.url))+delimiter+(request.env.PATH??process.env.PATH??""),ADE_COORD_INSTRUCTIONS:fileURLToPath(new URL("../../docs/nats-coordination.md",import.meta.url))}};
   });
   const timer=schedule(pump,30000); pump();
   return async()=>{stopped=true;cancel(timer);remove();abort.abort();await Promise.allSettled([...inflight.values()]);};

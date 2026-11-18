@@ -15,8 +15,11 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import time
-from ade_coord import config, call, snapshot, metric, CoordinationError
-from ade_coord_resources import Resources, process_identity, same_process
+from ade_coord import config, call, snapshot, metric, CoordinationError, _sibling
+Resources = _sibling("ade_coord_resources").Resources
+process_identity = _sibling("ade_coord_resources").process_identity
+same_process = _sibling("ade_coord_resources").same_process
+admission = _sibling("ade_coord_resources").admission
 
 def native(*args):
     started = time.monotonic()
@@ -49,8 +52,13 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
     # One machine writer per role. Never hold a SQLite transaction across network.
     lock_fd = os.open(root / "handoff.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     db = None
+    barrier = None
+    barrier_entered = False
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        barrier = admission(root)
+        barrier.__enter__()
+        barrier_entered = True
         file = root / "handoff.sqlite"
         fd = os.open(file, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600); os.close(fd)
         db = sqlite3.connect(file, timeout=10)
@@ -119,7 +127,7 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
             if evidence.get("draining_revision",current["revision"]) != current["revision"]:
                 raise CoordinationError("DRAINING_REVISION_CHANGED")
             evidence["draining_revision"] = current["revision"]; save()
-            from ade_claims import read_claim
+            read_claim = _sibling("ade_claims").read_claim
             bindings = {claim:binding for claim,binding in cfg["claims"].items() if binding["role_id"] == role}
             resources = sorted({path for binding in bindings.values() for path in binding["resources"]})
             if resources != intent["resources"] or not bindings:
@@ -203,10 +211,12 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
         raise CoordinationError("LIFECYCLE_RECONCILIATION_REQUIRED")
     finally:
         if db is not None: db.close()
+        if barrier_entered: barrier.__exit__(None,None,None)
         os.close(lock_fd)
 
 def project(current,cfg):
-    from ade_claims import read_claim, update_claim
+    read_claim = _sibling("ade_claims").read_claim
+    update_claim = _sibling("ade_claims").update_claim
     role=current["record"]["role_id"]
     for claim_id,binding in cfg["claims"].items():
         if binding["role_id"]!=role: continue

@@ -222,3 +222,34 @@ This is an explicit enrollment prerequisite, not automatic injection through an
 unsupported field. Executor shutdown sends SIGTERM to its owned group, escalates
 to SIGKILL after a bounded grace, and rejects by a final deadline. A remaining
 unreaped/uninterruptible process is an unknown failure, never successful intake.
+
+## Admission barrier, shipped guards and exact offline policy
+
+Managed job admission holds the common state-directory admission.lock before its
+fresh online authority check, through durable launch reservation and observed
+process birth binding. It releases before waiting for the job lifetime. Handoff
+takes the same barrier before draining, including resumed quiescent/checkpointed
+attempts, and keeps it through certification/transfer. An earlier preflight read
+is not a grant; the under-barrier check must match exact owner/epoch/revision.
+Unknown/running admitted jobs remain transfer blockers.
+
+Only opted-in interactive agent opens prepend the shipped
+`<bundle-root>/libexec/agent-bin` to PATH. Managed jobs explicitly prepend the same
+path and carry their claim/role context. These checks do not depend on the dirty
+shared reference checkout, change global PATH, or switch global plugin enforcement.
+Sibling modules load from trusted absolute __file__ paths, including Python -I
+callbacks after temporary path restoration; no cwd/PYTHONPATH dependency is added.
+
+Offline allowed: inspect local outbox/evidence and already materialized artifacts;
+persist report intent/artifact bytes and completion reports as local-buffered;
+read local history with no new role grant; an already admitted process can finish
+its existing computation and record observed process/group exit locally. Local
+operation notes remain UNKNOWN and cannot authorize an external retry.
+
+Deferred until online: new claims/jobs or expanded resource scope, guarded Git
+mutations, broker publication/acceptance, new artifact retrieval, inbox intake or
+disposition, shared operation resolution, wakes, ownership/lifecycle transitions
+and projection grants. Existing application computation does not imply an offline
+Git-write grant. No cached role/claim or local journal substitutes for a fresh
+online authority check. Disconnected work must not expand its previously granted
+scope; unknown operations still block later handoff.

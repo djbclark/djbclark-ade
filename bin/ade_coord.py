@@ -17,6 +17,25 @@ class CoordinationError(ValueError):
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def _sibling(name):
+    import importlib.util
+    import sys
+    if name not in {"ade_claims", "ade_coord_resources", "ade_coord_handoff"}:
+        raise CoordinationError("UNSUPPORTED_SIBLING")
+    path = Path(__file__).resolve().with_name(name + ".py")
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_sibling_" + str(path)
+    if key in sys.modules: return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key,path)
+    module = importlib.util.module_from_spec(spec);sys.modules[key]=module
+    try: spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key,None);raise
+    return module
+
+
 def config():
     path = os.environ.get("ADE_COORD_CONFIG")
     marker = Path(os.environ.get("ADE_COORD_ENROLLMENT_MARKER", str(Path.home() / ".local/state/ade-coord/enrollment.json")))
@@ -222,8 +241,9 @@ def validate_assignment(report, cfg):
 
 
 def run_managed(request):
-    from ade_claims import read_claim
-    from ade_coord_resources import Resources, run_job
+    read_claim = _sibling("ade_claims").read_claim
+    Resources = _sibling("ade_coord_resources").Resources
+    run_job = _sibling("ade_coord_resources").run_job
     cfg = config(); claim = read_claim(request["claim"])
     if not claim:
         raise CoordinationError("BOUND_CLAIM_REQUIRED")
@@ -231,26 +251,32 @@ def run_managed(request):
     if marker is None:
         raise CoordinationError("ENROLLED_CLAIM_REQUIRED")
     current = snapshot(marker["role_id"], cfg=cfg)
-    resources = Resources(Path(cfg["state_dir"]) / "jobs")
+    resources = Resources(Path(cfg["state_dir"]) / "jobs", admission_directory=Path(cfg["state_dir"]))
     try:
         import re
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request["job_id"]):
             raise CoordinationError("INVALID_JOB_ID")
         log = Path(cfg["state_dir"]) / "jobs" / (request["job_id"] + ".log")
         fd = os.open(log, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        def online_authorize(*_):
+            authorize_claim(claim, os.environ.get("PASEO_AGENT_ID"))
+            fresh = snapshot(marker["role_id"], cfg=cfg)
+            if authority(fresh) != authority(current):
+                raise CoordinationError("LAUNCH_AUTHORITY_CHANGED")
+        child_env = {**os.environ, "PATH": str(ROOT / "libexec/agent-bin") + os.pathsep + os.environ.get("PATH", ""), "ADE_CLAIM_ID": claim["id"], "ADE_COORD_ROLE": marker["role_id"]}
         with os.fdopen(fd, "wb") as output:
-            code = run_job(resources, job=request["job_id"], claim=claim["id"], authority=authority(current), argv=request["argv"], authorize=lambda *_: authorize_claim(claim, os.environ.get("PASEO_AGENT_ID")), output=output)
+            code = run_job(resources, job=request["job_id"], claim=claim["id"], authority=authority(current), argv=request["argv"], authorize=online_authorize, output=output, env=child_env)
         return {"job_id": request["job_id"], "exit_code": code, "output": str(log)}
     finally:
         resources.close()
 
 
 def job_status(request, command):
-    from ade_coord_resources import Resources
+    Resources = _sibling("ade_coord_resources").Resources
     cfg = config()
     if not cfg:
         raise CoordinationError("ENROLLMENT_REQUIRED")
-    resources = Resources(Path(cfg["state_dir"]) / "jobs")
+    resources = Resources(Path(cfg["state_dir"]) / "jobs", admission_directory=Path(cfg["state_dir"]))
     try:
         row = resources.get(request["job_id"])
         binding = cfg["claims"].get(row["claim"])

@@ -204,6 +204,30 @@ OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the del
 # paths and atomic IO
 # --------------------------------------------------------------------------------------------
 
+
+def _coord():
+    """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().with_name("ade_coord.py")
+    name = "ade_coord"
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_coord_" + str(path)
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        raise
+    return module
+
+
 def state_dir() -> Path:
     return Path(os.environ.get("ADE_STATE_DIR") or (Path.home() / ".local/state/ade"))
 
@@ -311,7 +335,8 @@ def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: 
 
 def write_claim(claim: dict[str, Any]) -> Path:
     """Atomically OVERWRITE `claim`'s registry file (no exclusivity: use create_claim to make a new claim)."""
-    from ade_coord import authorize_claim, CoordinationError
+    authorize_claim = _coord().authorize_claim
+    CoordinationError = _coord().CoordinationError
     authorize_claim(claim)
     if "coordination" in claim and claim.get("state") != "active":
         raise CoordinationError("ENROLLED_PROJECTION_CANNOT_BE_LEGACY_RELEASED")
@@ -332,7 +357,7 @@ def create_claim(claim: dict[str, Any], pointer_for: Optional[str | os.PathLike[
     A re-claim by the SAME owner (shared owner.record/session) releases the owner's older active record(s) of that
     path inside the same lock, so one path never carries two active records. `pointer_for` (a directory of the
     workspace) also publishes `<git-dir>/ade-claim` under the lock, so the pointer and the registry change together."""
-    from ade_coord import authorize_claim
+    authorize_claim = _coord().authorize_claim
     marker = authorize_claim(claim)
     if marker is not None:
         claim = {**claim, "coordination": marker, "expires_at": None}
@@ -1628,7 +1653,8 @@ BANG_ALT = {"shell alias": "a `!` alias runs a shell that reaches the real git p
 def _ws_decision(call: GitCall, ws: Optional[Workspace], ident: Optional[str], bang: str) -> Optional[Decision]:
     claim = find_claim(ws) if ws else None
     if claim is not None and not is_readonly(call):
-        from ade_coord import authorize_claim, CoordinationError
+        authorize_claim = _coord().authorize_claim
+        CoordinationError = _coord().CoordinationError
         try:
             authorize_claim(claim, os.environ.get("PASEO_AGENT_ID") or ident)
         except CoordinationError:
@@ -2558,7 +2584,8 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
     call also installs the ref hooks into its repository when they are missing (lazy install; never fails the call)."""
     env = os.environ if env is None else env
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
-        from ade_coord import authorize_claim, CoordinationError
+        authorize_claim = _coord().authorize_claim
+        CoordinationError = _coord().CoordinationError
         try:
             check = parse_git_argv(argv, cwd or os.getcwd(), env)
             if not is_readonly(check):

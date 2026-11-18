@@ -59,6 +59,30 @@ class Decision:
         return {"action": self.action, "target": self.target, "reason": self.reason}
 
 
+
+def _coord():
+    """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().with_name("ade_coord.py")
+    name = "ade_coord"
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_coord_" + str(path)
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        raise
+    return module
+
+
 def _record(inspect, ident: str) -> dict | None:
     """The inspect record for `ident`, None when Paseo does not know it. Other failures propagate (caller fails open)."""
     try:
@@ -189,7 +213,8 @@ def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = N
     """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND and ADE_ALLOW_REPLACED_SEND (a use of the latter
     is logged, see `log_override`)."""
     env = os.environ if env is None else env
-    from ade_coord import current_role, CoordinationError
+    current_role = _coord().current_role
+    CoordinationError = _coord().CoordinationError
     try:
         enrolled = current_role(target)
         if enrolled is not None:

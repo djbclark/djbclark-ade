@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"bin"))
@@ -90,5 +91,18 @@ class AdapterTests(unittest.TestCase):
                 request["archive_reconciliation"]={"agent":"old","draining_revision":2,"completed":True,"endpoint_evidence":"verified endpoint exit event"}
                 result=transfer(request,cfg=cfg,native_call=native,protocol=protocol,users=lambda _:[])
                 self.assertEqual(result["status"],"transferred")
+
+    def test_isolated_sibling_callbacks_survive_temporary_path_restoration(self):
+        bin_dir=Path(__file__).resolve().parents[1]/"bin"
+        with tempfile.TemporaryDirectory() as tmp:
+            env={**os.environ,"ADE_COORD_CONFIG":"","ADE_COORD_ENROLLMENT_MARKER":str(Path(tmp)/"absent")}
+            for name in ("ade_claims.py","ade_lead_succession.py","ade_send_guard.py","ade_self_session.py","completion-notice"):
+                code="import sys,importlib.util,importlib.machinery;from pathlib import Path;folder=Path(sys.argv[1]);original=list(sys.path);sys.path.insert(0,str(folder));loader=importlib.machinery.SourceFileLoader('probe',str(folder/sys.argv[2]));spec=importlib.util.spec_from_loader('probe',loader);module=importlib.util.module_from_spec(spec);sys.modules['probe']=module;loader.exec_module(module);sys.path[:]=original;coord=module._coord();assert coord.config() is None;coord._sibling('ade_coord_resources');assert sys.path==original"
+                result=subprocess.run([sys.executable,"-I","-c",code,str(bin_dir),name],env=env,capture_output=True,text=True,timeout=20)
+                self.assertEqual(result.returncode,0,result.stderr)
+            for name,args in (("ade-coord",["outbox","status"]),("ade_coord_controller.py",["--role","unenrolled"])):
+                result=subprocess.run([sys.executable,"-I",str(bin_dir/name),*args],input="{}",env=env,capture_output=True,text=True,timeout=20)
+                self.assertNotIn("ModuleNotFoundError",result.stderr)
+                self.assertFalse(json.loads(result.stdout)["ok"])
 
 if __name__=="__main__":unittest.main()

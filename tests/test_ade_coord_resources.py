@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -159,6 +160,32 @@ class ResourceTests(unittest.TestCase):
             state.spawned("j", 100)
             self.assertEqual(state.get("j")["process"], child)
             state.close()
+
+    def test_admission_barrier_closes_post_authorize_pre_intent_launch_gap(self):
+        from ade_coord_resources import admission
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);authorized=threading.Event();resume=threading.Event();drained=threading.Event();outcomes=[];errors=[]
+            finish=root/"finish"
+            def launcher():
+                state=Resources(root/"jobs",admission_directory=root)
+                def authorize(*_):
+                    authorized.set()
+                    if not resume.wait(5):raise AssertionError("fixture deadline")
+                try:
+                    run_job(state,job="late",claim="c",authority=AUTH,authorize=authorize,
+                            argv=[sys.executable,"-c","import pathlib,sys,time;p=pathlib.Path(sys.argv[1]);\nwhile not p.exists():time.sleep(.02)",str(finish)])
+                except Exception as error:errors.append(error)
+                finally:state.close()
+            def drainer():
+                with admission(root):
+                    state=Resources(root/"jobs",admission_directory=root)
+                    outcomes.append(state.quiescence("c",AUTH));state.close();drained.set()
+            first=threading.Thread(target=launcher);first.start();self.assertTrue(authorized.wait(5))
+            second=threading.Thread(target=drainer);second.start()
+            self.assertFalse(drained.wait(.1),"drain cannot pass a reserved in-flight authorization")
+            resume.set();self.assertTrue(drained.wait(5));self.assertFalse(outcomes[0]["jobs_stopped"])
+            finish.write_text("finish");first.join(10);second.join(10)
+            self.assertFalse(first.is_alive());self.assertEqual(errors,[])
 
 
 if __name__ == "__main__":

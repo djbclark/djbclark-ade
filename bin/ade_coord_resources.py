@@ -6,6 +6,8 @@ quiescence certificate. Neither a PID nor this ledger fences arbitrary writes.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -75,9 +77,23 @@ def same_process(left, right):
     return bool(left and right and all(left.get(k) == right.get(k) for k in ("pid", "birth", "boot", "pgid")))
 
 
+@contextmanager
+def admission(directory):
+    """One barrier for fresh online admission/birth bind and every drain phase."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    fd = os.open(directory / "admission.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 class Resources:
     def __init__(self, directory: Path, *, inspect: Callable = process_identity,
-                 members: Callable = group_members):
+                 members: Callable = group_members, admission_directory: Path | None = None):
+        self.admission_directory = Path(admission_directory or directory)
         directory = Path(directory)
         if not directory.is_absolute() or directory.is_symlink():
             raise ResourceError("state directory must be an absolute real directory")
@@ -199,33 +215,34 @@ class Resources:
 
 
 def run_job(resources: Resources, *, job: str, claim: str, authority: dict, argv: list[str],
-            authorize: Callable, output=None):
+            authorize: Callable, output=None, env=None):
     """Caller supplies an ONLINE authority check. A launch is never auto-retried."""
     if not argv or not all(isinstance(x, str) for x in argv):
         raise ResourceError("command argv required")
-    authorize(claim, authority)
-    prior = resources.intent(job, claim, authority)
-    # A repeated intent is ambiguous even when its PID has not been recorded.
-    if prior["state"] != "START_UNKNOWN":
-        raise ResourceError("job identity already used")
-    # Atomically consume launch permission BEFORE spawning. A death in this gap
-    # remains unknown and blocks handoff; it must never cause a duplicate spawn.
-    with resources.db:
-        changed = resources.db.execute("UPDATE jobs SET state='SPAWN_UNKNOWN',result=? WHERE id=? AND state='START_UNKNOWN' AND process IS NULL",
-                                       (resources.encode({"launcher": resources.inspect(os.getpid())}), job)).rowcount
-    if changed != 1:
-        raise ResourceError("job launch already attempted")
-    try:
-        process = subprocess.Popen(argv, start_new_session=True, stdout=output, stderr=output)
-    except OSError:
-        # Popen waits/reaps a failed exec before raising. Preserve consumed intent
-        # and its no-child evidence for explicit reconciliation; never retry it.
+    with admission(resources.admission_directory):
+        authorize(claim, authority)
+        prior = resources.intent(job, claim, authority)
+        # A repeated intent is ambiguous even when its PID has not been recorded.
+        if prior["state"] != "START_UNKNOWN":
+            raise ResourceError("job identity already used")
+        # Atomically consume launch permission BEFORE spawning. A death in this gap
+        # remains unknown and blocks handoff; it must never cause a duplicate spawn.
         with resources.db:
-            row = resources.get(job)
-            if row["state"] == "SPAWN_UNKNOWN" and row["process"] is None:
-                resources._cas(row, state="SPAWN_UNKNOWN", result={**(row["result"] or {}), "popen_failed": True})
-        raise
-    resources.spawned(job, process.pid)
+            changed = resources.db.execute("UPDATE jobs SET state='SPAWN_UNKNOWN',result=? WHERE id=? AND state='START_UNKNOWN' AND process IS NULL",
+                                           (resources.encode({"launcher": resources.inspect(os.getpid())}), job)).rowcount
+        if changed != 1:
+            raise ResourceError("job launch already attempted")
+        try:
+            process = subprocess.Popen(argv, start_new_session=True, stdout=output, stderr=output, env=env)
+        except OSError:
+            # Popen waits/reaps a failed exec before raising. Preserve consumed intent
+            # and its no-child evidence for explicit reconciliation; never retry it.
+            with resources.db:
+                row = resources.get(job)
+                if row["state"] == "SPAWN_UNKNOWN" and row["process"] is None:
+                    resources._cas(row, state="SPAWN_UNKNOWN", result={**(row["result"] or {}), "popen_failed": True})
+            raise
+        resources.spawned(job, process.pid)
     code = process.wait()
     resources.complete(job, {"exit_code": code})
     return code
