@@ -5,6 +5,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ownDisposableGroup } from './owned-cleanup.mjs';
 
 const MAX_FILE = 512 * 1024 * 1024;
 const MAX_REPLY = 16 * 1024 * 1024;
@@ -90,16 +91,6 @@ export async function validateRetainedDistribution(root, expectedManifest) {
   return manifest;
 }
 
-function onceClosed(child, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('owned daemon did not close')), timeoutMs);
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal });
-    });
-  });
-}
-
 export async function launchObservedDaemon(root, home, expectedManifest) {
   await validateRetainedDistribution(root, expectedManifest);
   const launcher = await import(pathToFileURL(path.join(root, 'daemon-launcher.mjs')).href);
@@ -108,15 +99,13 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
   assert.deepEqual(invocation.args, [path.join(root, 'role.cjs')]);
   assert.equal(invocation.closure.runtimeClosureSha256, expectedManifest);
   const child = spawn(invocation.command, invocation.args, {
-    env: invocation.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    env: invocation.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true,
   });
-  const closed = onceClosed(child, 1_180_000);
-  // Always observe rejection, including when startup fails before disposal.
-  closed.catch(() => {});
-  let outputBytes = 0;
-  let overflow = false;
   let childError = null;
   child.on('error', (error) => { childError = error; });
+  const { dispose } = ownDisposableGroup(child);
+  let outputBytes = 0;
+  let overflow = false;
   for (const stream of [child.stdout, child.stderr]) {
     stream.on('data', (chunk) => {
       outputBytes += chunk.length;
@@ -153,23 +142,6 @@ export async function launchObservedDaemon(root, home, expectedManifest) {
     });
     assert.ok(!overflow && !childError && child.exitCode === null && child.connected);
     return reply;
-  };
-  const dispose = async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-    let timer;
-    let result;
-    try {
-      result = await Promise.race([
-        closed,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('owned daemon stop timed out')), 30_000);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
-    assert.equal(result.code, 0, 'owned daemon must stop successfully');
-    return result;
   };
   return Object.freeze({ child, observation, dispose });
 }
