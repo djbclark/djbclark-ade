@@ -321,7 +321,12 @@ def malformed_production_handoff(synthetic, tmp_path, monkeypatch):
         if argv[:2] == [str(native / 'runtime/node'), str(harness)]:
             state['launches'] += 1
             assert 'GITHUB_TOKEN' not in env and 'ACTIONS_RUNTIME_TOKEN' not in env
-            return canonical(state['stdout'])
+            row = copy.deepcopy(state['stdout'])
+            if type(row) is dict and {'launch_id', 'evaluator_commit', 'source_commit'} <= set(row):
+                # Bind the otherwise valid baseline to this actual owned launch.
+                request = e.parse(actual_read(Path(argv[2])).decode())
+                row['launch_id'] = request['launch_id']
+            return canonical(row)
         return actual_command(argv, cwd, env, **options)
     def read(path, *args, **kwargs):
         if Path(path).name in {domain + '.xml' for domain in e.DOMAINS} or Path(path).name.startswith('compiled-server-'):
@@ -338,6 +343,17 @@ def malformed_production_handoff(synthetic, tmp_path, monkeypatch):
     monkeypatch.setattr(e, 'evaluate', evaluate)
     # Metadata is valid so a denial cannot be masked by unrelated identity errors.
     observations.update(evaluator_commit=evaluator_sha, native=copy.deepcopy(protected['native']))
+    observations['compiler']['entry_sha256'] = protected['native']['compiler_sha256']
+    for key in ('distribution_sha256', 'node_sha256', 'entry_sha256', 'sdk_sha256', 'activity_sha256'):
+        observations['runtime'][key] = protected['native'][key]
+    bound_recipe = copy.deepcopy(protected)
+    bound_recipe['evaluator_commit'] = evaluator_sha; bound_recipe['bindings']['evaluator'] = evaluator_sha
+    # Establish a complete SYNTHETIC consistency baseline before corrupting one
+    # handoff container. This is not a real native runtime or production archive.
+    baseline = e.finish(bound_recipe, payload, observations, reports, evaluator_sha=evaluator_sha,
+                        source_sha=e.inspect(payload)['commit'], run_id=654, attempt=1,
+                        launch_id='synthetic-owned-launch')
+    assert set(baseline.members()) == {'receipt.json', 'snapshot.json', 'evaluator-evidence.json'}
     return state, observations, e.inspect(payload)['commit'], tmp_path
 
 
