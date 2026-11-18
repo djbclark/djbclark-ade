@@ -2280,3 +2280,35 @@ def test_appointment_refuses_running_incumbent_before_any_change(setup):
     with pytest.raises(ss.SessionError, match='incumbent must be idle'):
         service.appoint(path, appointed=OTHER, operator_appointed=True, quiesced=True, pool='go-account-b')
     assert path.read_bytes() == before and native.created == 1
+
+
+def test_router_real_profile_translates_effort_without_losing_namespace(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Thinking'] = 'low'
+    native.route_choice = {'service': 'go-account-a', 'agent': 'pi',
+                          'model': 'opencode-go-account-a/test-model --effort high'}
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    argv = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+    assert argv[argv.index('--provider') + 1] == 'pi/opencode-go-account-a/test-model'
+    assert argv[argv.index('--thinking') + 1] == 'high'
+    assert record['model'] == 'opencode-go-account-a/test-model'
+    assert record['thinking'] == 'high'
+
+
+def test_later_idle_native_error_preserves_predecessor_and_allows_retry(setup):
+    service, native, record, path = routed_start(setup)
+    native.rows[SUCC]['Status'] = 'idle'
+    service.env['PASEO_AGENT_ID'] = PRED
+    service.evidence_reader = lambda *_, **kw: {'state': 'complete', 'entry_id': 'e1'}
+    service.verify_turn(path)
+    native.rows[PRED]['Status'] = 'idle'
+    service.env['PASEO_AGENT_ID'] = SUCC
+    service.evidence_reader = lambda *_, **kw: {'state': 'failed', 'cause': 'provider-error'}
+    with pytest.raises(ss.SessionError, match='failed after acceptance'):
+        service.finish(path)
+    assert native.archived == 0
+    saved = json.loads(path.read_text())
+    assert saved['status'] == 'first-turn-failed'
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    assert service.retry(path)['pool'] == 'go-account-b'

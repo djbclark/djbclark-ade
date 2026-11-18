@@ -537,7 +537,7 @@ class Service:
                         'mechanism': 'first-real-turn', 'evidence': 'source-modeless', 'provider_options': {}}
             else:
                 plan = self.mode_plan(source, requested_mode)
-            thinking = explicit_thinking
+            thinking = explicit_thinking or (route.get('thinking') if route else None)
             if thinking is None:
                 # Inherit the predecessor's own level (2026-11-14: a lead at `high` handed off to
                 # a successor at `auto`). Unknown, unusable or `auto` source: launch as before.
@@ -873,7 +873,13 @@ class Service:
                     or not row['model'] or not isinstance(row.get('service'), str)
                     or row['service'] in excluded):
                 raise SessionError('router selected unsupported first-turn adapter or excluded pool; no launch')
-            return {k: row[k] for k in ('service', 'agent', 'model')}
+            spec = shlex.split(row['model'])
+            if not spec or len(spec) not in (1, 3) or (len(spec) == 3 and spec[1] != '--effort'):
+                raise SessionError('invalid Pi router profile; no launch')
+            if '/' not in spec[0] or any(c.isspace() for c in spec[0]) or spec[0].startswith('-'):
+                raise SessionError('physical Pi model namespace required')
+            return {'service': row['service'], 'agent': 'pi', 'model': spec[0],
+                    'thinking': thinking_ident(spec[2]) if len(spec) == 3 else None}
         except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, IndexError):
             raise SessionError('handoff router evidence unavailable; no successor launched') from None
 
@@ -975,6 +981,15 @@ class Service:
 
         HEAD may have moved forward (head_drift); that is recorded as `head_advanced` so the successor sees what landed.
         """
+        if record.get('requires_first_turn'):
+            current = self.inspect(record['successor'])
+            if (current.get('Status') == 'error' or current.get('stopReason') == 'error'
+                    or current.get('StopReason') == 'error'):
+                record['status'] = 'first-turn-failed'
+                record['first_turn_failure'] = {'state': 'failed', 'cause': 'runtime-error-after-accept'}
+                if target is not None:
+                    self.save(target, record)
+                raise SessionError('successor failed after acceptance; preserve predecessor and re-handoff')
         row = self.verify_successor(record)
         if record.get('requires_first_turn'):
             from ade_first_turn import pi_first_turn, EvidenceError
@@ -983,6 +998,11 @@ class Service:
                 if not proof:
                     raise SessionError('FIRST-REAL-TURN evidence required before retirement')
                 evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, proof=proof)
+                if evidence.get('state') == 'failed':
+                    record['status'] = 'first-turn-failed'
+                    record['first_turn_failure'] = evidence
+                    if target is not None:
+                        self.save(target, record)
                 if evidence.get('state') != 'complete':
                     raise SessionError('successor terminal evidence failed after acceptance; preserve predecessor')
             except EvidenceError as error:
