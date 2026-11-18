@@ -14,3 +14,7 @@
 ### Changed
 
 - Request the complete-cohort V2 observation explicitly in the registration probe; reject a V1 reply to that request without changing default V1 consumers. (#0)
+- Bind both observed cold compiler outputs to the independently selected source,
+  tree, byte hashes and original held operation/CAS; reject an unrelated latest
+  pair, unsettled work or reused Worker identities. Synthetic parser tests grant
+  no native ownership or runtime qualification. (#0)
