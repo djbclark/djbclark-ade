@@ -52,8 +52,8 @@ connection (the MCP server holds one, so one prompt per MCP start; a second raw 
 upstream says auto-connect reaches the default profile (as Chrome determines it) and all open windows of that profile only
 (`docs/advanced-usage.md` in ChromeDevTools/chrome-devtools-mcp). A window opened in "Profile 1" by command line did not show up
 as a target. Treat coverage as the default profile only. Raw-CDP closing (`Target.closeTarget`) remains untested here.
-Freeze/resume and discard/recovery were subsequently verified as attended checks below; all lifecycle actions still require
-the operator's yes for the named tab.
+Freeze/resume and discard/recovery were subsequently verified as attended checks below. Lifecycle actions on operator-owned
+tabs still require the operator's yes for the named tab.
 
 **Security.**
 
