@@ -9,6 +9,8 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import selectors
+import time
 import subprocess
 import tempfile
 
@@ -16,6 +18,7 @@ from ade_fork_release import ContractError, canonical, parse, validate
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_FILES = 20000
+GIT_TIMEOUT = 30.0
 PLUGINS = ('ade-yolo', 'ade-window-name', 'ade-claim')
 # Protected recipe, NEVER taken from candidate metadata.
 LINKS = {'CLAUDE.md': 'AGENTS.md', 'libexec/agent-bin/git': 'bin/ade-git-guard'}
@@ -42,19 +45,39 @@ def safe_path(value: str) -> str:
 
 
 def git(repo: Path, *args: str) -> bytes:
-    # No archive filters, export-subst, smudge filters, replace refs or build hooks.
+    # Stream with a deadline AND byte cap. Never block in buffered read before wait.
+    env = dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0')
     with subprocess.Popen(['git', '--no-replace-objects', '-C', str(repo), *args],
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as proc:
+        deadline = time.monotonic() + GIT_TIMEOUT
+        data = bytearray()
         try:
-            data = proc.stdout.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
-                raise ContractError('git object exceeds bound')
-            if proc.wait(timeout=30):
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise ContractError('git object read timed out')
+                    chunk = os.read(proc.stdout.fileno(), min(65536, MAX_BYTES + 1 - len(data)))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > MAX_BYTES:
+                        raise ContractError('git object exceeds bound')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ContractError('git object read timed out')
+            try:
+                status = proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired as error:
+                raise ContractError('git object read timed out') from error
+            if status:
                 raise ContractError('git object read failed')
-            return data
+            return bytes(data)
         finally:
             if proc.poll() is None:
                 proc.kill()
+            proc.wait()
 
 
 def produce(repo: Path, master_commit: str) -> bytes:
@@ -253,7 +276,7 @@ def qualify(payload, plugin, receipt, expected, policy, authenticated, evidence,
             evidence != trusted_evidence or trusted_evidence['master_commit'] != data['commit'] or
             any(not trusted_evidence[k] for k in keys)):
         return 'HOLD'
-    if (expected['toolchain'].get('plugin_snapshot_evidence') != sha(canonical(trusted_evidence)) or
+    if (expected['toolchain'] != canonical({'plugin_snapshot_evidence': sha(canonical(trusted_evidence))}).decode('utf-8') or
             trusted_evidence['native_tree_sha256'] != payload_tree_hash(payload)):
         return 'HOLD'
     validate(receipt, expected, policy, artifact=payload)
