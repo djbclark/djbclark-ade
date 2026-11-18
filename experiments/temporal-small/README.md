@@ -26,3 +26,5 @@ lock file. No local installation or server on the Mac is needed. Official
 [test environment API](https://typescript.temporal.io/api/classes/testing.TestWorkflowEnvironment)
 documents the local disposable server and the distinction from its time-skipping
 test server. Use actual CI results before recording successful behavior.
+
+A6. Verified 2026-11-18: [Linux CI](https://github.com/djbclark/djbclark-ade/actions/runs/44325110076) passed on source d5f3bf06356e2434e4d2f1a99ebdefe184dcb80b with Temporal TypeScript SDK1.26.0. It recorded two activity attempts, one committed fake effect, worker restart and approval signal. No Cloud account was enrolled. This is the bounded experiment result; no further cloud trial is needed to answer that question.

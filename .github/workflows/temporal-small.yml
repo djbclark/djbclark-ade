@@ -1,7 +1,7 @@
 name: Optional local Temporal experiment
 on:
   push:
-    paths: ['experiments/temporal-small/**', '.github/workflows/temporal-small.yml']
+    paths: ['experiments/temporal-small/*.cjs', 'experiments/temporal-small/package.json', '.github/workflows/temporal-small.yml']
   workflow_dispatch:
 permissions:
   contents: read
