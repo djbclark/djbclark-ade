@@ -741,12 +741,12 @@ test("resolvePluginRoot prefers Paseo's install record, then the shared checkout
 test("hook.mjs loads when import.meta is empty, as in Paseo's CJS bundle (esbuild turns it into {})", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ade-claim-cjs-"));
   const src = new URL(".", import.meta.url);
-  for (const name of ["hook.mjs", "claim-lib.mjs"]) {
+  for (const name of ["hook.mjs", "claim-lib.mjs", "snapshot-binding.mjs"]) {
     const text = readFileSync(new URL(name, src), "utf8").replaceAll("import.meta", "({})");
     assert.ok(text.length > 0);
     writeFileSync(join(dir, name), text);
   }
   const mod = await import(join(dir, "hook.mjs"));
-  assert.ok(["paseo-install-record", "home-fallback"].includes(mod.PLUGIN_ROOT_RESOLVED.source));
+  assert.equal(mod.PLUGIN_ROOT_RESOLVED, undefined);
   assert.equal(typeof mod.registerAdeClaimHooks, "function");
 });

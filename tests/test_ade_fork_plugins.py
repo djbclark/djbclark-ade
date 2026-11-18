@@ -175,3 +175,106 @@ def test_git_output_bound(monkeypatch, tmp_path):
     with pytest.raises(p.ContractError, match='exceeds bound'):
         p.git(tmp_path, 'cat-file', 'blob', 'a' * 40)
     assert children[0].returncode is not None
+
+
+def test_sealed_materialized_guard_refuses_foreign_claim(tmp_path, monkeypatch):
+    from test_ade_git_guard import base_env, claim, mk_repo
+    repo = Path(__file__).resolve().parents[1]
+    payload = p.produce(repo, command(repo, 'rev-parse', 'HEAD'))
+    snapshot = p.stage(payload, tmp_path / 'store', p.payload_tree_hash(payload))
+    state = tmp_path / 'registry'
+    monkeypatch.setenv('ADE_STATE_DIR', str(state))
+    foreign = mk_repo(tmp_path, state, 'foreign')
+    claim(foreign, 'foreign-owner', agent='other-agent')
+    env = base_env(state, who='different-claim', ADE_REAL_GIT=__import__('shutil').which('git'), ADE_PYTHON=sys.executable)
+    shim = snapshot / 'libexec/agent-bin/git'
+    assert not shim.is_symlink()
+    before = (foreign / 'f').read_bytes()
+    run = subprocess.run([str(shim), 'reset', '--hard', 'HEAD'], cwd=foreign, env=env,
+                         text=True, capture_output=True, timeout=20)
+    assert run.returncode == 77, run.stderr
+    assert 'REFUSED' in run.stderr
+    assert 'guard unavailable' not in run.stderr
+    assert (foreign / 'f').read_bytes() == before
+    # Actual hook install still derives root/libexec/git-hooks from root/bin/__file__.
+    clean = tmp_path / 'clean'; clean.mkdir()
+    command(clean, 'init', '-q')
+    install = subprocess.run([str(snapshot / 'bin/ade-git-guard'), 'install', str(clean)],
+                             env=base_env(state, ADE_PYTHON=sys.executable), text=True,
+                             capture_output=True, timeout=20)
+    assert install.returncode == 0, install.stderr
+    assert (clean / '.git/hooks/reference-transaction').is_file()
+
+
+def test_cold_cjs_entry_context_b_over_old_registration(tmp_path):
+    """Actual esbuild CJS fixture, not native compiler/daemon qualification."""
+    import os
+    esbuild = os.environ.get('ADE_CI_ESBUILD')
+    if not esbuild:
+        pytest.fail('CI must supply its explicit esbuild binary')
+    repo = Path(__file__).resolve().parents[1]
+    payload = p.produce(repo, command(repo, 'rev-parse', 'HEAD'))
+    snapshot = p.stage(payload, tmp_path / 'store', p.payload_tree_hash(payload))
+    for plugin in ('ade-claim', 'ade-window-name'):
+        output = tmp_path / (plugin + '.cjs')
+        subprocess.run([esbuild, str(snapshot / 'plugins' / plugin / 'index.server.ts'),
+                        '--bundle', '--platform=node', '--target=node20', '--format=cjs',
+                        '--external:@getpaseo/plugin/server', '--outfile=' + str(output)], check=True, timeout=120)
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const original = fs.readFileSync;
+let configReads = 0;
+fs.readFileSync = function(file, ...args) {
+  if (String(file).endsWith('/.paseo/config.json')) {
+    configReads++;
+    return JSON.stringify({plugins:{[process.argv[3]]:{path:'/old/A/plugins/'+process.argv[3]}}});
+  }
+  return original.call(this, file, ...args);
+};
+const plugin = require(process.argv[1]);
+const handlers = new Map();
+const server = {sourceDirectory: process.argv[2], addHook(name, fn) {handlers.set(name,fn); return ()=>handlers.delete(name);}};
+const off = plugin.default(server);
+assert.equal(typeof off, 'function'); assert.ok(handlers.size > 0);
+assert.equal(configReads, 0);
+off(); assert.equal(handlers.size, 0);
+assert.throws(()=>plugin.default({...server,sourceDirectory:'/missing/B/plugins/'+process.argv[3]}));
+process.env.ADE_PYTHON = '/unbound/python';
+assert.throws(()=>plugin.default(server), /Unbound managed helper override/);
+assert.equal(configReads, 0);
+'''
+        env = {k: v for k, v in os.environ.items() if k not in ('ADE_CLAIMS_PY', 'ADE_GIT_GUARD', 'ADE_AGENT_BIN', 'ADE_WS_AUTONAME_PY', 'ADE_PYTHON', 'ADE_REAL_GIT')}
+        subprocess.run(['node', '-e', script, str(output), str(snapshot / 'plugins' / plugin), plugin], env=env, check=True)
+
+
+def test_managed_helper_argv_bound_to_snapshot(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    payload = p.produce(repo, command(repo, 'rev-parse', 'HEAD'))
+    snapshot = p.stage(payload, tmp_path / 'store', p.payload_tree_hash(payload))
+    state = tmp_path / 'mode'; state.mkdir(mode=0o700)
+    script = r'''
+import assert from 'node:assert/strict';
+import {pathToFileURL} from 'node:url';
+const [root, state] = process.argv.slice(1);
+const claim = await import(pathToFileURL(root+'/plugins/ade-claim/server/hook.mjs'));
+const naming = await import(pathToFileURL(root+'/plugins/ade-window-name/server/name-lib.mjs'));
+const hooks = new Map(); const logs=[];
+const server = {addHook(n,f){hooks.set(n,f);return ()=>{};}};
+claim.registerAdeClaimHooks(server, {managed:true,pluginRoot:root+'/plugins/ade-claim',
+  env:{ADE_CLAIM_DRY_RUN:'1'},stateDir:state,log:s=>logs.push(s),
+  spawn:(cmd,args)=>({status:0,stdout:cmd==='git'?'a'.repeat(40):'[]',stderr:''})});
+await hooks.get('worktree.create.after')({worktree:{path:state,branch:'fixture',sourceCheckout:'/old/A'}});
+assert.ok(logs.some(s=>s.includes(root+'/bin/ade_claims.py')), logs.join('\n'));
+assert.ok(logs.some(s=>s.includes(root+'/bin/ade-git-guard')));
+let observed;
+naming.registerAdeWindowNameHooks(server,{managed:true,pluginRoot:root+'/plugins/ade-window-name',env:{},
+  log:()=>{},run:async args=>{observed=args;return {action:'skip'};}});
+const agent={id:'fixture-agent',workspaceId:'window',cwd:state,title:'Fix fixture'};
+const context={paseo:{workspaces:{ref:()=>({refresh:async()=>({title:null})})},agents:{
+ ref:()=>({refresh:async()=>({agent})}),list:async()=>({agents:[agent]})}}};
+await hooks.get('agent.create.after')({agent},context);
+assert.equal(observed?.script,root+'/bin/ade_ws_autoname.py');
+assert.equal(observed?.python,'python3'); // external identity deliberately still HOLD
+'''
+    subprocess.run(['node', '--input-type=module', '-e', script, str(snapshot), str(state)], check=True)

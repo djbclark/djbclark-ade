@@ -80,3 +80,17 @@ bin/pytest -q tests/test_ade_claim_plugin.py tests/test_ade_claims_release.py
 ```
 
 CI also runs `tests/test_ade_claim_plugin.py` (node `--test` wrapper). No live Paseo daemon or Mac plugin install is required.
+
+
+## Immutable snapshot source binding
+
+With native `PluginServerContext.sourceDirectory`, the entry binds helpers to
+that exact candidate `plugins/ID` directory before registering hooks, even while
+registration still names the previous source. The snapshot root, directories and
+required helper files must be canonical, symlink-free and read-only. No managed
+ancestor search, config lookup, mutable checkout fallback or caller helper/tool
+overrides are accepted. External Python/Git/Node/shell identities still require
+protected evaluator evidence; this path check alone is not qualification.
+
+Legacy hosts without sourceDirectory retain lazy registration/ESM/home resolution
+for unmanaged compatibility. That path is never qualified managed fallback.

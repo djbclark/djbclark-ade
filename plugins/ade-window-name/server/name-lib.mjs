@@ -1,3 +1,4 @@
+import { bindSnapshot } from "./snapshot-binding.mjs";
 import { execFile } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -237,9 +238,14 @@ function withTimeout(promise, ms, controller) {
  * (`context.signal`): the python child is killed and the run writes nothing more, so the slot it frees is really free.
  *
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
- * @param {Parameters<typeof handleAgentEvent>[2] & { timeoutMs?: number }} [deps]
+ * @param {Parameters<typeof handleAgentEvent>[2] & { timeoutMs?: number, managed?: boolean }} [deps]
  */
 export function registerAdeWindowNameHooks(server, deps = {}) {
+  if (deps.managed) {
+    const { root } = bindSnapshot(deps.pluginRoot, "ade-window-name",
+      ["bin/ade_ws_autoname.py", "bin/ade_ws_names.py"], deps.env ?? process.env);
+    deps = { ...deps, env: { ...(deps.env ?? process.env), ADE_WS_AUTONAME_PY: join(root, "bin/ade_ws_autoname.py") } };
+  }
   const settled = deps.settled ?? new Set();
   const pluginRoot = deps.pluginRoot ?? resolvePluginRoot({ metaUrl: import.meta?.url });
   const log = deps.log ?? ((line) => console.error(line));

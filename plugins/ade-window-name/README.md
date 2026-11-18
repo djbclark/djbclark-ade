@@ -67,3 +67,17 @@ Logs: `paseo plugin logs ade-window-name`, one line per event with `outcome` `re
 ## Tests
 
 `node --test server/name-lib.test.mjs` (also run by `tests/test_ade_ws_autoname.py`, with the decision script's own tests).
+
+
+## Immutable snapshot source binding
+
+With native `PluginServerContext.sourceDirectory`, the entry binds helpers to
+that exact candidate `plugins/ID` directory before registering hooks, even while
+registration still names the previous source. The snapshot root, directories and
+required helper files must be canonical, symlink-free and read-only. No managed
+ancestor search, config lookup, mutable checkout fallback or caller helper/tool
+overrides are accepted. External Python/Git/Node/shell identities still require
+protected evaluator evidence; this path check alone is not qualification.
+
+Legacy hosts without sourceDirectory retain lazy registration/ESM/home resolution
+for unmanaged compatibility. That path is never qualified managed fallback.

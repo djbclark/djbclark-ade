@@ -1,3 +1,4 @@
+import { bindSnapshot } from "./snapshot-binding.mjs";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -58,8 +59,7 @@ export function resolvePluginRoot({ metaUrl, home = userInfo().homedir } = {}) {
   return { root: join(home, "src", "djbclark-ade", "plugins", "ade-claim"), source: "home-fallback" };
 }
 
-export const PLUGIN_ROOT_RESOLVED = resolvePluginRoot({ metaUrl: import.meta?.url });
-export const PLUGIN_ROOT = PLUGIN_ROOT_RESOLVED.root;
+// Legacy resolution is lazy; module evaluation never reads registration.
 
 /** Install soft-fail codes (do not abort worktree.create.after). */
 const INSTALL_SOFT_FAIL = new Set([73, 78]);
@@ -69,6 +69,7 @@ const INSTALL_SOFT_FAIL = new Set([73, 78]);
  * dir (mode flag + observe JSONL), the process spawner and the clock. Production uses the defaults.
  *
  * @typedef {{
+ *   managed?: boolean,
  *   env?: NodeJS.ProcessEnv | Record<string, string | undefined>,
  *   stateDir?: string,
  *   spawn?: typeof spawnSync,
@@ -80,12 +81,23 @@ const INSTALL_SOFT_FAIL = new Set([73, 78]);
 
 /** @param {HookDeps} [deps] */
 function hookContext(deps = {}) {
+  let env = deps.env ?? process.env;
+  let pluginRoot = deps.pluginRoot;
+  if (deps.managed) {
+    const { root } = bindSnapshot(pluginRoot, "ade-claim", [
+      "bin/ade_claims.py", "bin/ade-git-guard", "libexec/agent-bin/git",
+      "libexec/git-hooks/pre-push", "libexec/git-hooks/reference-transaction",
+    ], env);
+    // Internal exact bindings, constructed only after rejecting caller overrides.
+    env = { ...env, ADE_CLAIMS_PY: join(root, "bin/ade_claims.py"),
+      ADE_GIT_GUARD: join(root, "bin/ade-git-guard"), ADE_AGENT_BIN: join(root, "libexec/agent-bin") };
+  } else pluginRoot ??= resolvePluginRoot({ metaUrl: import.meta?.url }).root;
   return {
-    env: deps.env ?? process.env,
+    env,
     stateDir: deps.stateDir,
     spawn: deps.spawn ?? spawnSync,
     now: deps.now ?? (() => new Date()),
-    pluginRoot: deps.pluginRoot ?? PLUGIN_ROOT,
+    pluginRoot,
     log: deps.log ?? ((line) => console.error(line)),
   };
 }
@@ -448,12 +460,8 @@ export function registerAgentClaimOwnerHook(server, deps = {}) {
  * @param {HookDeps} [deps]
  */
 export function registerAdeClaimHooks(server, deps = {}) {
-  if (!deps.pluginRoot) {
-    // One line at load so the soak shows which root the trusted helpers are looked up from (#638 D2 review F4).
-    (deps.log ?? ((line) => console.error(line)))(
-      `[ade-claim] plugin root ${PLUGIN_ROOT_RESOLVED.root} (${PLUGIN_ROOT_RESOLVED.source})`,
-    );
-  }
+  // Validate explicit context before registering even notification/observe hooks.
+  hookContext(deps);
   const removeWt = registerWorktreeClaimHook(server, deps);
   const removeArchive = registerWorkspaceArchiveReleaseHook(server, deps);
   const removeEnv = registerAgentClaimEnvHook(server, deps);

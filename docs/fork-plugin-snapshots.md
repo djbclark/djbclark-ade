@@ -82,3 +82,30 @@ complete external dependency evidence, native lifecycle fixes, controller
 reservation/enrollment and separately authorized cutover remain integration gates.
 See fork-release-contract.md and fork-ci-evidence.md for the authentication and
 authorization separation; matching locally constructed receipts grant nothing.
+
+
+## Explicit candidate helper binding
+
+ADE claim/window-name entry points consume native `context.sourceDirectory` via
+the existing `deps.pluginRoot` injection, with managed validation enabled. It is
+supplied from initialize.pluginDirectory before the registration patch; candidate
+B never derives its helpers from registration A. Missing context preserves legacy
+unmanaged behavior only. Claim no longer captures registration at module evaluation.
+The managed path validates the exact `plugins/ID` layout and sealed helper paths,
+rejects caller helper/tool overrides, and constructs internal exact root bindings
+rather than walking ancestors. Dependency identity remains a separate HOLD gate.
+
+Regular materialized `libexec/agent-bin/git` now selects root/bin/ade_claims.py;
+the original bin/ade-git-guard and symlink layouts remain supported. The Python
+module stays in bin so its __file__ locates root/libexec/git-hooks. The guard's
+existing policy and fail-open behavior are unchanged; CI specifically requires
+exit77 on a temporary foreign-owner claim through the sealed regular shim.
+
+CI adds actual esbuild CJS entry fixtures with stale registration A versus explicit
+snapshot B, forbidden overrides, exact helper argv and cold sealed guard execution.
+This fixture is not Paseo's complete native compiler/host module/runtime identity;
+its latest esbuild install is CI-only and cannot qualify a production bundle.
+The native sourceDirectory runtime/SDK revision and exact shipped compiler closure
+must be independently reviewed/authenticated before compiling qualified bundles.
+The default-export fix at f46601dc1d94d0563b2d36eaff3c3ba3c34380c8 is required in
+that subsequent reviewed compiler lineage. No macOS/Electron qualification claimed.
