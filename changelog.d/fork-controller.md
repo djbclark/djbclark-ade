@@ -27,3 +27,11 @@
 - Parse explicitly opted-in tagged V2 directory and fourteen in-process builtin observations against independent protected/manifest identities; retain production HOLD until the genuine native bridge exists. (#796)
 ### Added
 - Bind committed V2 observations to the producer's adapted builtin factories, canonical module table and current fixed protected host profiles, keeping unintegrated system namespaces on preexecution HOLD. (#796)
+### Added
+- Validate committed retained system-closure metadata and module-table binding while holding unproved namespace execution; consume native scoped same-bearer recovery with separate verification and no retry of unknown failures. (#796)
+### Added
+- Invoke the authenticated shared read-only namespace verifier immediately before retained CLI execution, with controlled import and refusal before subprocess start on missing or changed proof. (#796)
+### Fixed
+- Report truthful read-only Journal/native/cohort status instead of a universal unsupported placeholder, and show a separately authorized standing apply schedule source for automatic promotion. (#796)
+### Fixed
+- Require the independently reviewed exact packaged namespace-helper bytes before import; remove the generic AST safety predicate and refuse matching-manifest rebinding/subscription variants before compilation. (#796)

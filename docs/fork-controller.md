@@ -3,8 +3,11 @@
 `bin/ade-fork-controller status|plan|tick` reads the real account's fixed
 `.local/state/djbclark-ade/forks/controller.json`. HOME, CLI flags and environment
 cannot substitute a grant path. No file is installed by this source change.
-status/plan are deterministic protected-candidate planning; tick performs read-only GitHub discovery and private evidence retention, with no runtime mutations. Missing
-or unsupported enrollment returns HOLD. No runtime adapter is selected by JSON.
+`status` reads the existing Journal, retained verified payload and actual stable
+qualified native/cohort identity without writing state or obtaining transaction
+adapters. `plan` reports the protected candidate; `tick` performs GitHub discovery
+and private evidence retention without runtime mutations. Missing, unknown or
+mismatched facts return HOLD. No runtime adapter is selected by JSON.
 
 `bin/ade_fork_controller.py` owns the pilot integration. Existing release,
 GitHub CI, snapshot and updater containment libraries remain unchanged. The
@@ -132,8 +135,9 @@ Result exposes latest_discovered separately from selected_qualified. Latest mast
 may fail while an older newly qualified ancestor or retained verified baseline wins.
 Master and the entire protected policy are reread before retaining a selection and
 again before returning it; changed state holds rather than publishing stale success.
-Native mutation remains unsupported; later apply must recheck both under native
-reservation at its own commit boundary, not trust an earlier selection response.
+`apply` rechecks current master and protected policy under the actual native
+reservation at its commit boundary. Earlier selection/status responses grant no
+permission. Missing qualified execution or current authority still HOLDs.
 
 Discovery is bounded to five history pages, 80 metadata calls and four candidate
 transport/receipt verification pairs per tick; exceeded bounds hold, never truncate
@@ -142,9 +146,9 @@ No scheduled job or evaluator runs are launched by discovery. No locally constru
 fixture receipt proves actual qualified producer/runtime execution.
 
 Do not route master-snapshot through Sync's merge strategy: ADE upstream/fork
-are identical, and that API rejects this strategy. Future scheduling can use the
-existing ade-sched source mechanism. A read-only source example, deliberately
-not installed, is:
+are identical, and that API rejects this strategy. The existing ade-sched source
+mechanism can run separate discovery and authorized promotion jobs. This discovery
+source example is deliberately not installed and does not promote anything:
 
 ```xml
 <plist version="1.0"><dict>
@@ -156,8 +160,29 @@ not installed, is:
 </dict></plist>
 ```
 
-No schedule, operational enrollment, native policy, secrets or live plugin calls
-were installed/executed. Installing schedules needs separate consent.
+Automatic standing promotion is a separate authorized `apply` job, not discovery
+`tick`. Under an explicitly installed current schema2 standing qualified-latest
+rule, each apply selects/authenticates the latest eligible retained master ancestor,
+reads actual Journal CAS and executes the bounded native transaction only when all
+producer/cohort/namespace/authority checks pass. A source-only example is:
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.djbclark.ade-fork-controller-promote</string>
+  <key>ProgramArguments</key><array>
+    <string>__ADE__/bin/ade-fork-controller</string><string>apply</string>
+  </array>
+  <key>StartInterval</key><integer>3600</integer>
+</dict></plist>
+```
+
+This example creates no consent and is not installed. Required current retain,
+preflight, stage, activate and verify grants must match qualified-latest; matching
+denial wins. A rollback promotion HOLD, uncertain reservation or revoked rule
+prevents automatic promotion. Neither schedule performs enrollment, automatic
+resume, bearer recovery or an evaluator run. Installing schedules, operational
+enrollment or native policy requires separately authorized deployment. No schedule,
+config or live plugin call was installed/executed by this source change.
 
 ## Validation limits
 
@@ -203,13 +228,13 @@ execution/runtime/helper digests; absence holds, and no profile is synthesized.
 The result carries no token and grants no support by itself. It is not a newly
 invented held-operation wire ABI: final native endpoint must validate and consume
 it under its genuine private owner lease/current policy and exact CAS.
-Private held-operation transport is being specified by native owner049; no
-unpublished endpoint/FD protocol is guessed. Until that reviewed bridge and real
-producer are integrated, production NativeFacade remains unsupported, and there
-is no automatic END/reopen path on failed or uncertain operations.
+The committed private held-operation transport is bound below to retained bytes,
+actual native identity and current authorization. NativeFacade remains unavailable
+when those genuine facts are missing. There is no automatic END/reopen path on
+failed or uncertain operations; feature availability alone grants no support.
 
 
-## Proposed native held-operation CLI transport
+## Bound native held-operation CLI transport
 
 The native owner published paseo-held-operation-api-v1.md as proposed/unqualified.
 The facade implements its exact commands: retained Node + retained CLI,
@@ -260,9 +285,9 @@ without a catch-and-ignore fallback to older evidence.
 the fixed real-account protected enrollment and use the real NativeFacade.
 There are no port/path/grant override flags. They emit one canonical structured
 result; HOLD/recovery_required returns nonzero, runtime_verified returns zero.
-Default status/plan and discovery tick retain their existing roles. An approved
-scheduled promotion can invoke apply under current consent once genuine native
-support is available; selection is not a permanent planning-only substitute.
+Read-only status, protected-candidate plan and discovery tick have separate roles.
+The standing apply schedule source above promotes automatically only under current
+consent and genuine native support; discovery alone does not complete promotion.
 The commands do not bypass unavailable execution/cohort qualification.
 
 
@@ -451,9 +476,9 @@ extra builtin, mixed identities and non-target absence all HOLD.
 
 The manifest mapping argument is an internal pure-parser dependency, not a CLI,
 configuration override, authority factory or extractor invented by this adapter.
-The committed mapping and observation CLI binding are described below; retained
-system-library namespace verification and the scoped recovery successor remain
-separate pending gates. Unsupported V2 never calls the V1 transport. Parser
+The committed mapping, observation CLI and shared namespace-port binding are
+described below; actual retained-system/private-runtime qualification remains a
+separate pending gate. Unsupported V2 never calls the V1 transport. Parser
 fixtures use explicitly synthetic independent wire/host/manifest values and do
 not establish executing-instance qualification. Production acceptance requires a
 separate exact-source review and actual native/producer coupled proof.
@@ -492,3 +517,110 @@ changed external policy, unsupported current native readiness or incomplete runt
 facts still HOLD. New `systemClosure` manifests explicitly HOLD before Node until
 the producer's exact retained-library/private-namespace verifier contract is
 integrated; old host-library or missing mount facts are not substituted.
+
+### Committed retained system-closure metadata and scoped held recovery
+
+Producer `cf96bec96825162457f9adca514faea71bae4093` adds
+`systemClosure` / `systemClosureSha256`. The controller mirrors its strict finite
+metadata schema and canonical digest, bounds, duplicate/path checks, retained
+ELF/interpreter/alias/search/cache/preload declarations and retained-file
+cross references. External rows now bind absolute loader paths to
+`system-closure/elf/...` backing members; the pinned cache binds its retained
+loader member. Preexec verifies the sealed backing inventory rather than reading
+host libraries as a substitute. The builtin canonical module table additionally
+binds systemClosureSha256. This structural validation cannot establish namespace,
+ELF resolver or kernel-map identity. The shared read-only port below now supplies
+that verification boundary; execution HOLDs unless its actual current-namespace
+checks pass. Superseded blocked helper revisions are never imported or executed.
+
+Native `2410a2c4a050c7568d506e6bfbe0c2158d908356` supplies the actual scoped
+recovery guard and installed-only `maintenanceHeldRecoveryV1`. The existing SAME
+live facade can pass the global operation-capability refusal only for explicit
+recover/verify of its already confirmed failure, with original bearer, private
+origin, unlatched uncertainty and a fresh current context. Journal prepare/reuse
+still checks its persisted original context/intent, current recover+verify consent,
+coherent complete non-target cohort, original reservation/server/incarnation and
+fresh plugin CAS. No new BEGIN, reconnect, generic-error fallback, ordinary replace,
+END shortcut or public readiness flag is introduced. Native private eligibility
+and real fresh barriers remain the final gate.
+
+The committed CLI's confirmed alternative has nonidle maintenance state and
+`recoveryRequired:true`; older synthetic `false` assumptions are rejected.
+Installed known-failure or held-recovery API flags only permit parsing the
+separately authenticated exact normal result. Same-held recovery requires the
+new installed held-recovery API plus actual restriction, not availability alone.
+The private confirmed cache persists through `recover-required` to
+`verify-required` and clears only after the separately authorized verify response
+and fresh same-tuple status prove durable restriction removal. Generic throws,
+malformed results or lost acknowledgements latch UNKNOWN and discard reuse
+eligibility. All tests with synthetic wire remain source orchestration evidence;
+actual coupled native qualification and exact-source review remain required.
+
+### Shared read-only namespace port
+
+Reviewed native source `389bb84ea48c8c800a3c528b23e1d192be052959` provides
+`verify_existing_namespace(root, expected_manifest_sha256) -> None` in the SAME
+packaged `ROOT/system-closure/namespace-bootstrap.py`, mode 0444. Controller
+preexec now consumes this real port instead of unconditional systemClosure HOLD.
+It first independently authenticates the raw manifest and full sealed inventory,
+then measures that exact member AND requires the independently reviewed source
+identity encoded in controller source: SHA256
+`605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7`, exactly
+52756 bytes. The manifest cannot choose an accepted import implementation. This
+known389 source was independently reviewed to import definitions only; no generic
+AST predicate or Python sandbox is claimed. Unknown/modified future helper bytes
+HOLD until a separately reviewed controller adapter source update. There is no
+JSON flag, path override, approval key or runtime acceptance bypass. Controlled
+import uses the actual fixed `__file__` and a temporary private module name, never
+the `__main__`/Admin launch path. No arbitrary module,
+PID, command, recipe or policy path is exposed. Every exception, missing port,
+changed source or non-None return is HOLD.
+
+Immediately before the retained Node/CLI subprocess starts, the shared port
+rechecks the CURRENT process namespace with its existing finite Distribution
+resolver, ELF/cache/alias/hwcaps/absence/path authority, retained/current same inode,
+actual readonly/nosuid/nodev target mounts, private propagation and stable final
+snapshots. This code does not copy those checks, enter/create a namespace, invoke
+Admin, mount, unshare, change identity or execute a privileged helper. A caller
+outside the proved namespace refuses. Successful read-only verification is not an
+execution-owner or qualification brand; genuine native private daemon/child/cohort
+facts and current transaction authority remain mandatory.
+
+Dedicated controller CI checks out the exact shared-source revision for a real
+import/refusal case and module cleanup. Unreviewed synthetic helpers, even with
+matching manifest records and the accepted byte length, refuse before compile/exec;
+production acceptance is never relaxed to make a synthetic positive pass. Tests
+cover module/class decorator rebinding and eager defaults/annotations without
+claiming arbitrary Python import safety. These source tests never establish
+actual namespace qualification. Root's disposable actual Linux
+namespace proof and exact source review of this adapter delta remain separate gates.
+
+
+### Truthful read-only status
+
+`status` never acquires a Journal lock, writes/repairs/enrolls state, obtains
+transaction adapters, retains/downloads candidates, compiles a candidate, reserves,
+reconnects a bearer or performs recovery. It reads a canonical existing SAME
+Journal twice around native observation, requires settled runtime_verified state
+and retained validated verified bytes, then checks actual full qualified cohort,
+ready target native journal/current loaded identity, bound enclosing authority and
+stable idle/no-recovery native status. The full cohort/epoch and maintenance read
+must remain equal across the bounded observation. Protected enrollment and Journal
+bytes/retention are rechecked before reporting success; this is a stable read
+observation, not a claim that independent APIs form an atomic transaction.
+
+Success reports runtime_verified with matching verified/observed receipt, actual
+Journal CAS/state and promotion_hold; authorized is always false and
+observation_only true. A promotion HOLD remains visible even when running identity
+is verified. Ordinary activity may block promotion while leaving the currently
+executing qualified identity unchanged; status does not use an operation-readiness
+flag as qualification or predict apply admission. Native mutable/unknown/held state,
+missing/unqualified/fullcohort mismatch or identity drift HOLDs. Injected synthetic
+ports cannot provide the shipped status path; tests with real facade/parser and
+synthetic wire demonstrate source behavior only.
+
+Finite refusal reasons include protected_enrollment_unavailable,
+journal_unavailable, journal_unsettled, verified_artifact_unavailable,
+native_observer_unavailable, native_observation_unavailable,
+native_identity_mismatch and state_changed_during_status. Status provides no
+operation grant; apply rechecks current authority and all actual native boundaries.

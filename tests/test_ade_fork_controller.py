@@ -969,7 +969,7 @@ def test_known_held_wire_requires_feature_live_bearer_and_exact_baseline(cohort_
     target['journal']['generation']=9
     restriction={'pluginId':'ade-yolo','baseline':baseline,'nativeGeneration':9,'phase':'recover-required'}
     status={'state':'held','reservationGeneration':12,'generation':12,'transactionId':context.transaction_id,
-        'recoveryRequired':False,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
+        'recoveryRequired':True,'recoveryOnly':restriction,'authority':{'qualified':True,'serverId':config['serverId'],
             'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceKnownFailedHeldV1':True}}}
     result={'outcome':'known_failed_held','reason':'compiler_error','pluginId':'ade-yolo','nativeGeneration':9,
         'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
@@ -1173,3 +1173,397 @@ def test_native_host_policy_fixed_account_path_and_safe_ancestry(tmp_path,monkey
     with pytest.raises(c.ContractError,match='row'):c.read_native_host_policy()
     path.unlink();path.symlink_to(home/'other-policy.json')
     with pytest.raises(c.ContractError):c.read_native_host_policy()
+
+
+@pytest.fixture
+def retained_system_fixture():
+    """Exact cf96 metadata with synthetic payload identities, no namespace assertion."""
+    external={'path':'/usr/lib/ld-fixture.so','retainedPath':'system-closure/elf/usr/lib/ld-fixture.so',
+              'mode':0o555,'size':7,'sha256':digest('retained-loader')}
+    cache={'path':'/etc/ld.so.cache','retainedPath':'system-closure/loader/ld.so.cache','mode':0o444,
+           'size':3,'sha256':digest('cache'),'entries':[]}
+    closure={'schemaVersion':1,'profile':'linux-retained-system-closure-v1','loaderResolution':{
+        'schemaVersion':1,'policy':'glibc-pinned-cache-existing-layout-v1',
+        'elf':[{'member':'runtime/node','machine':62,'interpreter':'/lib/ld-fixture.so','needed':['lib-fixture.so'],
+                'rpath':[],'runpath':[],'soname':None}],
+        'interpreters':[{'request':'/lib/ld-fixture.so','target':external['path']}],
+        'aliases':[{'path':'/lib/ld-fixture.so','target':external['path'],'linkText':external['path']}],
+        'searchDirectories':[{'kind':'system','path':'/usr/lib'}],
+        'hwcaps':{'policy':'no-relevant-hwcaps-v1'},'cache':cache,
+        'preload':{'path':'/etc/ld.so.preload','state':'absent'}}}
+    files=[{'path':row['retainedPath'],**{key:row[key] for key in ('mode','size','sha256')}} for row in (external,cache)]
+    files.append({'path':'runtime/node','mode':0o555,'size':9,'sha256':digest('node')})
+    return {'files':files,'externalLibraries':[external],'systemClosure':closure,'systemClosureSha256':digest(closure)}
+
+
+def test_cf96_retained_system_metadata_and_module_table_binding(retained_system_fixture,builtin_manifest_fixture):
+    retained=retained_system_fixture
+    assert c.system_closure_metadata(retained) is retained['systemClosure']
+    manifest,config,policy=builtin_manifest_fixture
+    manifest['externalLibraries']=retained['externalLibraries']
+    manifest['files']+=retained['files'][:2]
+    manifest['systemClosure']=retained['systemClosure'];manifest['systemClosureSha256']=retained['systemClosureSha256']
+    table=dict(manifest['builtinModuleTable'],externalLibraries=manifest['externalLibraries'],systemClosureSha256=manifest['systemClosureSha256'])
+    table_sha=c.hashlib.sha256(c.builtin_json(table)).hexdigest()
+    manifest.update(builtinModuleTable=table,moduleTableSha256=table_sha)
+    for row in [*manifest['builtinArtifacts'],*policy['qualifications'][0]['builtinProfiles']]:row['moduleTableSha256']=table_sha
+    assert len(c.builtin_manifest_identities(manifest,config,policy))==14
+    manifest['builtinModuleTable'].pop('systemClosureSha256')
+    with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)
+
+
+@pytest.mark.parametrize('mutation',['digest','wrong-backing','host-only','duplicate-target','missing-cache','special-mode',
+    'path-escape','alias-unbound','null-layout','hwcap','preload','too-many-elf','missing-elf-member'])
+def test_retained_system_metadata_refusals(retained_system_fixture,mutation):
+    manifest=retained_system_fixture;layout=manifest['systemClosure']['loaderResolution']
+    if mutation=='digest':manifest['systemClosureSha256']='f'*64
+    elif mutation=='wrong-backing':manifest['externalLibraries'][0]['sha256']='f'*64
+    elif mutation=='host-only':manifest['externalLibraries'][0].pop('retainedPath')
+    elif mutation=='duplicate-target':manifest['externalLibraries'].append(manifest['externalLibraries'][0])
+    elif mutation=='missing-cache':manifest['files']=manifest['files'][::2]
+    elif mutation=='special-mode':manifest['externalLibraries'][0]['mode']=0o777
+    elif mutation=='path-escape':manifest['externalLibraries'][0]['retainedPath']='system-closure/../escape'
+    elif mutation=='alias-unbound':layout['aliases'][0]['target']='/unbound/loader'
+    elif mutation=='null-layout':manifest['systemClosure']['loaderResolution']=None
+    elif mutation=='hwcap':layout['cache']['entries']=[{'soname':'libfixture','path':'/usr/lib/libfixture','target':'/usr/lib/libfixture','flags':1,'hwcap':'1'}]
+    elif mutation=='preload':layout['preload']['state']='present'
+    elif mutation=='too-many-elf':layout['elf']*=513
+    elif mutation=='missing-elf-member':layout['elf'][0]['member']='missing/member'
+    if mutation!='digest':manifest['systemClosureSha256']=digest(manifest['systemClosure'])
+    with pytest.raises(c.ContractError):c.system_closure_metadata(manifest)
+
+
+def test_same_live_facade_scoped_recovery_uses_one_begin_and_original_tuple(cohort_mapping_fixture,tmp_path,monkeypatch):
+    """Actual facade+Journal with synthetic authenticated2410 wire, NOT native proof."""
+    row,baseline,stored,config,facts=cohort_mapping_fixture
+    target=next(entry for entry in facts['entries'] if entry['pluginId']=='ade-yolo')
+    baseline_loaded=c.parse(c.canonical(target['loaded']).decode())
+    baseline_source=dict(target['registration'])
+    target['journal']['baseline']={'source':baseline_source,'receipt':baseline_loaded}
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    trace=[];state={'failed':False,'restriction':None,'begins':0,'ends':0}
+    def status():
+        reservation=native.reservation
+        return {'schemaVersion':1,'state':'recovery-required' if state['restriction'] else ('held' if reservation else 'idle'),
+            'generation':reservation['generation'] if reservation else None,'reservationGeneration':12 if reservation else 11,
+            'transactionId':reservation['transactionId'] if reservation else None,'ready':not state['failed'],
+            'recoveryRequired':bool(state['restriction']),'recoveryOnly':state['restriction'],
+            'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation'],
+                'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':not state['failed'],
+                            'maintenanceKnownFailedHeldV1':False,'maintenanceHeldRecoveryV1':True}}}
+    def wire(args,token=None):
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:return status()
+        if args==['plugin','managed-status','ade-yolo']:
+            return {'version':1,'pluginId':'ade-yolo','consistency':'coherent','registration':target['registration'],
+                    'journal':target['journal'],'loaded':target['loaded']}
+        if args[:3]==['daemon','maintenance','begin']:
+            state['begins']+=1
+            return dict(native.reservation,state='held',recoveryRequired=False,ownerToken='s'*43)
+        if args[:3]==['daemon','maintenance','end']:
+            assert token=='s'*43 and state['restriction'] is None
+            state['ends']+=1
+            return dict(native.reservation,state='idle',reservationGeneration=12,recoveryRequired=False)
+        assert args[:3]==['daemon','maintenance','plugin-operation'] and token=='s'*43
+        kind=args[args.index('--operation')+1]
+        trace.append((kind,args[args.index('--generation')+1],args[args.index('--transaction-id')+1],args[args.index('--expected-generation')+1]))
+        if kind=='replace':
+            target.update(registration={'source':'directory','path':args[args.index('--path')+1],'enabled':True},loaded=None,execution=None)
+            target['journal'].update(generation=9,currentReceipt=None)
+            state['failed']=True
+            baseline_binding={'path':baseline_loaded['sourcePath'],'snapshotSha256':baseline_loaded['snapshotSha256'],
+                              'serverBundleSha256':baseline_loaded['serverBundleSha256']}
+            state['restriction']={'pluginId':'ade-yolo','baseline':baseline_binding,'nativeGeneration':9,'phase':'recover-required'}
+            return {'outcome':'known_failed_held','reason':'initialization_rejected','pluginId':'ade-yolo','nativeGeneration':9,
+                'current':{'registration':{'path':target['registration']['path'],'enabled':True},'loaded':None},
+                'baseline':baseline_binding,'maintenance':status(),'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+        if kind=='recover':
+            assert state['restriction']['phase']=='recover-required'
+            loaded=dict(baseline_loaded,activationGeneration=77,processStartToken='recovered-real-child-fixture')
+            target.update(registration=baseline_source,enabled=True,loaded=loaded,
+                execution={'contract':'native-passive-contract-1','incarnation':loaded['processStartToken'],
+                           'distributionBuildId':config['distributionBuildId'],'closure':config['closure']})
+            target['journal'].update(generation=10,currentReceipt=loaded)
+            state['restriction']=dict(state['restriction'],nativeGeneration=10,phase='verify-required')
+        else:
+            assert kind=='verify'
+            state['restriction']=None;state['failed']=False
+        return {'plugin':{'id':'ade-yolo','enabled':True,'status':'running','loaded':target['loaded']},'nativeGeneration':target['journal']['generation'],
+            'maintenance':status(),'serverId':config['serverId'],'daemonIncarnation':config['daemonIncarnation']}
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    journal.enroll(baseline.sha256,controller.adapters(row,None))
+    repo=tmp_path/'source'
+    (repo/'plugins/ade-yolo/index.server.ts').write_text('export default ()=>{throw Error("synthetic initialized failure")}')
+    git(repo,'add','.');git(repo,'commit','-qm','candidate fixture')
+    commit=git(repo,'rev-parse','HEAD');payload=snapshots.produce(repo,commit)
+    evidence=dict(row['evidence'],master_commit=commit,native_tree_sha256=snapshots.payload_tree_hash(payload))
+    expected=dict(row['expected'],fork_commit=commit,upstream_commit=commit,artifact_sha256=c.hashlib.sha256(payload).hexdigest(),
+                  toolchain=c.canonical({'plugin_snapshot_evidence':digest(evidence)}).decode())
+    candidate=make_receipt(expected,row['policy'],{key:{'status':'passed','contract_digest':digest(value)} for key,value in row['policy']['features'].items()})
+    archive=zip_bytes({'receipt.json':candidate.encoded,'snapshot.json':payload,'evaluator-evidence.json':c.canonical(evidence)})
+    row.update(expected=expected,evidence=evidence,master_commit=commit)
+    row['evaluation'].update(receipt_sha256=candidate.sha256,archive_sha256=c.hashlib.sha256(archive).hexdigest())
+    for grant in row['operations'].values():grant['identity']=candidate.sha256
+    controller.evaluator=FakeEvaluator(archive,candidate)
+    assert controller.tick('deploy')['status']=='known_failed_held'
+    original=journal.read()['transaction']['origin']
+    assert native.supported() is False and native.can_attempt_same_held_recovery()
+    row['generation']=1
+    for grant in row['operations'].values():grant.update(identity=baseline.sha256,generation=1)
+    result=controller.tick('recover')
+    assert result['status']=='runtime_verified',result
+    assert result['generation']==2 and journal.read()['verified']==baseline.sha256
+    assert state['begins']==1 and state['ends']==1
+    assert [entry[0] for entry in trace]==['replace','recover','verify','verify']
+    assert {entry[1] for entry in trace}=={'12'}
+    assert {entry[2] for entry in trace}=={original['context']['transaction_id']}
+    assert [entry[3] for entry in trace]==['8','9','10','10']
+    assert native.known_held is None and native.token is None
+
+
+@pytest.mark.parametrize('missing',['token','known','origin','uncertain'])
+def test_scoped_availability_cannot_create_same_live_capability(missing):
+    native=c.NativeFacade()
+    native.token='s'*43;native.known_held={'baseline':{}};native.original_native=('context','intent')
+    native.reservation={'generation':12,'transactionId':'original'}
+    if missing=='token':native.token=None
+    elif missing=='known':native.known_held=None
+    elif missing=='origin':native.original_native=None
+    else:native.uncertain=True
+    assert not native.can_attempt_same_held_recovery()
+    assert native._scoped_recovery_supported('recover') is False
+    assert native._scoped_recovery_supported('replace') is False
+
+
+def test_same_held_prepare_uncertainty_discards_private_reuse(monkeypatch):
+    native=c.NativeFacade()
+    native.known_held={'baseline':{}};native.token='s'*43
+    native.reservation={'generation':12,'transactionId':'original'};native.original_native=('context','intent')
+    def unavailable(context):raise c.ContractError('fresh native observation uncertain')
+    monkeypatch.setattr(native,'_prepare_bound',unavailable)
+    with pytest.raises(c.ContractError):native.prepare(SimpleNamespace(kind='reconcile'))
+    assert native.uncertain and native.known_held is None and not native.can_attempt_same_held_recovery()
+
+
+def readonly_port_fixture(tmp_path,source):
+    """Synthetic measured protocol helper; never production namespace qualification."""
+    root=tmp_path/'retained';path=root/'system-closure/namespace-bootstrap.py'
+    path.parent.mkdir(parents=True);path.write_bytes(source);path.chmod(0o444)
+    config={'distributionRoot':str(root),'distributionSha256':'a'*64,'cohortVersion':2}
+    manifest={'systemClosure':{},'files':[{'path':'system-closure/namespace-bootstrap.py','mode':0o444,
+        'size':len(source),'sha256':c.hashlib.sha256(source).hexdigest()}]}
+    return config,manifest,path
+
+
+def allow_synthetic_readonly_bytes(monkeypatch):
+    original=c.read_regular
+    monkeypatch.setattr(c,'protected_root_path',lambda path:Path(path))
+    monkeypatch.setattr(c,'read_regular',lambda path,limit=c.LIMIT,**kwargs:original(path,limit,owner=os.getuid()))
+
+
+def committed_readonly_source():
+    source_path=Path(__file__).resolve().parents[1]/'native-readonly-source/packages/server/scripts/qualified-system-namespace.py'
+    if not source_path.is_file():
+        if os.environ.get('ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE')=='1':pytest.fail('required exact native source absent')
+        pytest.skip('exact native source is exercised in dedicated controller workflow')
+    source=source_path.read_bytes()
+    assert len(source)==52756
+    assert c.hashlib.sha256(source).hexdigest()=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+    assert c.READONLY_NAMESPACE_SIZE==52756
+    assert c.READONLY_NAMESPACE_SHA256=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+    return source
+
+
+def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,monkeypatch):
+    source=committed_readonly_source()
+    config,manifest,path=readonly_port_fixture(tmp_path,source)
+    allow_synthetic_readonly_bytes(monkeypatch)
+    name='_ade_retained_namespace_'+c.READONLY_NAMESPACE_SHA256
+    previous=c.types.ModuleType(name)
+    monkeypatch.setitem(sys.modules,name,previous)
+    with pytest.raises(c.ContractError) as caught:c.verify_readonly_namespace(config,manifest)
+    # The accepted real function is entered, with the actual packaged __file__;
+    # this fixture lacks its real manifest/root-owned/private mount proof.
+    cause=caught.value.__cause__
+    assert type(cause).__name__=='Hold' and type(cause).__module__==name
+    assert str(cause)=='unprotected-ancestor'
+    assert sys.modules[name] is previous
+
+
+@pytest.mark.parametrize('source',[
+    b'import os\ndef dataclass(cls):\n    os.chdir("/")\n    return cls\n@dataclass\nclass Probe:\n    """review module rebinding"""\ndef verify_existing_namespace(root,digest):return None\n',
+    b'import os\ndef property(fn):\n    os.chdir("/")\n    return fn\nclass Probe:\n    @property\n    def value(self):return None\n',
+    b'import os\nclass Probe:\n    def property(fn):\n        os.chdir("/")\n        return fn\n    @property\n    def value(self):return None\n',
+    b'import os\nclass Probe:\n    def __class_getitem__(cls,key):\n        os.chdir("/")\n        return None\ndef eager(value=Probe[0]):pass\n',
+    b'import os\nclass Probe:\n    def __class_getitem__(cls,key):\n        os.chdir("/")\n        return None\ndef eager(value:Probe[0]):pass\n',
+    b'def verify_existing_namespace(root,digest):return {"ready":True}\n',
+    b'def verify_existing_namespace(root,digest):return True\n',
+    b'def verify_existing_namespace(root,digest):return None\n',
+])
+def test_manifest_matching_unreviewed_helper_refuses_before_compile_or_effect(tmp_path,monkeypatch,source):
+    source=source+b'\n'+b' '*(52756-len(source)-1)
+    assert len(source)==52756
+    config,manifest,path=readonly_port_fixture(tmp_path,source)
+    assert manifest['files'][0]['sha256']==c.hashlib.sha256(path.read_bytes()).hexdigest()
+    allow_synthetic_readonly_bytes(monkeypatch)
+    compiled=[];executed=[]
+    def compile_spy(*args,**kwargs):compiled.append(True);raise RuntimeError('compile must not be reached')
+    def exec_spy(*args,**kwargs):executed.append(True);raise RuntimeError('exec must not be reached')
+    monkeypatch.setattr(c,'compile',compile_spy,raising=False)
+    monkeypatch.setattr(c,'exec',exec_spy,raising=False)
+    with pytest.raises(c.ContractError,match='independently reviewed'):c.verify_readonly_namespace(config,manifest)
+    assert compiled==[] and executed==[]
+
+
+@pytest.mark.parametrize('change',['substitute','mode','member','v2-no-manifest'])
+def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,change):
+    config,manifest,path=readonly_port_fixture(tmp_path,b'raise AssertionError("unverified source must not execute")\n')
+    allow_synthetic_readonly_bytes(monkeypatch)
+    if change=='substitute':manifest['files'][0]['sha256']='f'*64
+    elif change=='mode':manifest['files'][0]['mode']=0o555
+    elif change=='member':manifest['files'][0]['path']='other.py'
+    else:manifest=None
+    with pytest.raises(c.ContractError):c.verify_readonly_namespace(config,manifest)
+
+
+@pytest.mark.parametrize('change',['bytes','mode'])
+def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch,change):
+    source=committed_readonly_source()
+    config,manifest,path=readonly_port_fixture(tmp_path,source)
+    allow_synthetic_readonly_bytes(monkeypatch)
+    path.chmod(0o600)
+    if change=='bytes':path.write_bytes(source[:-1]+bytes([source[-1]^1]));path.chmod(0o444)
+    compiled=[]
+    def compile_spy(*args,**kwargs):compiled.append(True);raise RuntimeError('must not compile substituted source')
+    monkeypatch.setattr(c,'compile',compile_spy,raising=False)
+    with pytest.raises(c.ContractError,match='mismatch'):c.verify_readonly_namespace(config,manifest)
+    assert compiled==[]
+
+
+def test_readonly_port_last_check_refusal_never_starts_cli(monkeypatch):
+    facade=c.NativeFacade()
+    config={'node':{'path':'/retained/runtime/node'},'cli':{'path':'/retained/cli-entry.mjs'}}
+    monkeypatch.setattr(facade,'_transport',lambda:config)
+    calls=[]
+    def refuse(config,manifest):calls.append('readonly-final');raise c.ContractError('namespace changed')
+    monkeypatch.setattr(c,'verify_readonly_namespace',refuse)
+    monkeypatch.setattr(c.subprocess,'Popen',lambda *args,**kwargs:pytest.fail('CLI cannot start after namespace refusal'))
+    with pytest.raises(c.ContractError):facade._call(['daemon','maintenance','status'])
+    assert calls==['readonly-final']
+
+
+@pytest.fixture
+def readonly_status_fixture(cohort_mapping_fixture,monkeypatch):
+    """Real retained bytes + existing Journal + facade, synthetic read wire ONLY."""
+    row,receipt,stored,config,facts=cohort_mapping_fixture
+    target=next(entry for entry in facts['entries'] if entry['pluginId']=='ade-yolo')
+    target['journal']['phase']='ready'
+    native=c.NativeFacade(lambda:row,stored.root)
+    monkeypatch.setattr(native,'_transport',lambda:config)
+    maintenance={'schemaVersion':1,'state':'idle','reservationGeneration':12,'generation':None,'transactionId':None,
+        'ready':False,'recoveryRequired':False,'authority':{'schemaVersion':1,'qualified':True,'serverId':config['serverId'],
+            'daemonIncarnation':config['daemonIncarnation'],'features':{'maintenanceReservationV1':True,'maintenancePluginOperationV1':False}}}
+    calls=[]
+    def wire(args,token=None):
+        assert token is None,'status must not send a private owner bearer'
+        calls.append(args)
+        if args==['plugin','cohort-status']:return c.parse(c.canonical(facts).decode())
+        if args==['daemon','maintenance','status']:return c.parse(c.canonical(maintenance).decode())
+        pytest.fail('status attempted non-read native command')
+    monkeypatch.setattr(native,'_call',wire)
+    controller=c.Controller(lambda:row,native=native,root=stored.root)
+    journal=c.Journal(stored.root/'journal',row['policy']['compatibility_group'])
+    # Unit fixture enrollment only; status below never invokes enrollment/adapters.
+    journal.enroll(receipt.sha256,c.Adapters(observe=lambda:receipt.sha256,preflight=lambda identity:False,
+        stage=lambda *args:None,activate=lambda *args:None,verify=lambda identity:False,recover=lambda *args:None,
+        retained=controller.retained,authority=lambda operation,identity:operation=='enroll'))
+    return controller,journal,row,receipt,facts,maintenance,calls
+
+
+def test_status_current_verified_is_truthful_readonly_observation(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    before={path.relative_to(controller.root):path.read_bytes() for path in controller.root.rglob('*') if path.is_file()}
+    monkeypatch.setattr(c.Journal,'write',lambda *args:pytest.fail('status cannot write Journal'))
+    monkeypatch.setattr(c.Journal,'locked',lambda *args:pytest.fail('status cannot create/acquire transaction lock'))
+    monkeypatch.setattr(controller,'adapters',lambda *args,**kwargs:pytest.fail('status cannot obtain transaction adapters'))
+    monkeypatch.setattr(controller,'acquire',lambda *args:pytest.fail('status cannot acquire/evaluate candidates'))
+    result=controller.status()
+    assert result['status']=='runtime_verified' and result['verified']==result['observed']==receipt.sha256
+    assert result['authorized'] is False and result['observation_only'] is True
+    # Current executing identity can be verified while ordinary work blocks apply.
+    assert maintenance['ready'] is False and maintenance['authority']['features']['maintenancePluginOperationV1'] is False
+    assert {tuple(args) for args in calls}=={('plugin','cohort-status'),('daemon','maintenance','status')}
+    assert {path.relative_to(controller.root):path.read_bytes() for path in controller.root.rglob('*') if path.is_file()}==before
+
+
+@pytest.mark.parametrize('mutation',['missing-journal','corrupt-journal','noncanonical-journal','missing-retained','raw-flag-only',
+    'missing-cohort','wrong-loaded','unqualified','wrong-incarnation','native-held','native-unknown','target-held','changed-epoch','missing-features','bool-schema'])
+def test_status_missing_mismatched_unknown_facts_hold(readonly_status_fixture,monkeypatch,mutation):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    if mutation=='missing-journal':journal.path.unlink()
+    elif mutation=='corrupt-journal':journal.path.write_bytes(b'{}')
+    elif mutation=='noncanonical-journal':journal.path.write_bytes(journal.path.read_bytes()+b'\n')
+    elif mutation=='missing-retained':(controller.root/'records'/(receipt.sha256+'.json')).unlink()
+    elif mutation=='raw-flag-only':facts.clear();facts.update(qualified=True)
+    elif mutation=='missing-cohort':facts['entries'].pop()
+    elif mutation=='wrong-loaded':next(item for item in facts['entries'] if item['pluginId']=='ade-yolo')['loaded']['snapshotSha256']='f'*64
+    elif mutation=='unqualified':maintenance['authority']['qualified']=False
+    elif mutation=='wrong-incarnation':maintenance['authority']['daemonIncarnation']='other'
+    elif mutation=='native-held':maintenance['state']='held'
+    elif mutation=='native-unknown':maintenance['recoveryRequired']=True
+    elif mutation=='target-held':next(item for item in facts['entries'] if item['pluginId']=='ade-yolo')['journal']['phase']='held'
+    elif mutation=='missing-features':maintenance['authority'].pop('features')
+    elif mutation=='bool-schema':maintenance['authority']['schemaVersion']=True
+    else:
+        original=controller.native.cohort_status
+        def changed(**kwargs):
+            facts['observationEpoch']+=1
+            return original(**kwargs)
+        monkeypatch.setattr(controller.native,'cohort_status',changed)
+    assert controller.status()['status']=='hold'
+
+
+def test_status_identity_and_policy_changes_refuse(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    # This tests controller comparison independently of the strict native parser.
+    monkeypatch.setattr(controller.native,'status_observation',lambda cohort:'f'*64)
+    assert controller.status()['reason']=='native_identity_mismatch'
+    def revoked(cohort):
+        row['operations']['activate']['allowed']=False
+        return receipt.sha256
+    monkeypatch.setattr(controller.native,'status_observation',revoked)
+    assert controller.status()['reason']=='state_changed_during_status'
+
+
+def test_status_absent_store_creates_nothing(fixture,tmp_path):
+    row,receipt,payload,archive=fixture
+    root=tmp_path/'absent'
+    controller=c.Controller(lambda:row,native=FakeNative(receipt.sha256),root=root)
+    assert controller.status()['reason']=='journal_unavailable'
+    assert not root.exists()
+
+
+def test_cli_status_dispatch_does_not_overwrite_verified_observation(monkeypatch,capsys):
+    class Observation:
+        def status(self):return {'status':'runtime_verified','reason':'retained_verified_matches_current_native','authorized':False}
+        def plan(self):pytest.fail('status cannot use candidate planning')
+    monkeypatch.setattr(c,'Controller',Observation)
+    assert c.main(['status'])==0
+    assert c.parse(capsys.readouterr().out)['status']=='runtime_verified'
+
+
+def test_status_unsettled_journal_never_observes_or_recovers(readonly_status_fixture,monkeypatch):
+    controller,journal,row,receipt,facts,maintenance,calls=readonly_status_fixture
+    current=journal.read()
+    context=c.release.TransactionContext(1,journal.group,'deploy',0,1,'b'*32,receipt.sha256,None,'c'*64,digest(row))
+    intent=c.release.ReservationIntent(12,8,'fixture-server','fixture-daemon')
+    current.update(generation=1,state='reservation_unknown',candidate=context.target,
+                   transaction={'context':asdict(context),'reservation':asdict(intent)})
+    journal.write(current)
+    monkeypatch.setattr(controller.native,'status_observation',lambda *args:pytest.fail('unsettled Journal cannot become verified from metadata'))
+    result=controller.status()
+    assert result['status']=='hold' and result['reason']=='journal_unsettled'
+    assert calls==[] and journal.read()==current
