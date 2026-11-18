@@ -13,12 +13,14 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import selectors
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -100,6 +102,46 @@ def load_expected():
 def file_digest(file):
     with open(file, 'rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def download(artifact_path, output, *, timeout=90):
+    """Enforce both stream budgets before retaining bytes, then reap our child."""
+    arguments = ['gh', 'api', '--hostname', 'github.com', '--method', 'GET',
+                 artifact_path + '/zip']
+    proc = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ, [0, MAX_ZIP, True])
+            selector.register(proc.stderr, selectors.EVENT_READ, [0, 16384, False])
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, 'native build download timed out')
+                events = selector.select(remaining)
+                require(events, 'native build download timed out')
+                for key, _ in events:
+                    budget = key.data
+                    chunk = os.read(key.fileobj.fileno(), min(65536, budget[1] + 1 - budget[0]))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    budget[0] += len(chunk)
+                    require(budget[0] <= budget[1], 'native build download stream exceeded bound')
+                    if budget[2]:
+                        output.write(chunk)
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, 'native build download timed out')
+        try:
+            code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            raise ContractError('native build download timed out') from error
+        require(code == 0, 'native build download failed')
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()  # Actual child settlement, never a dropped timeout handle.
+        proc.stdout.close()
+        proc.stderr.close()
 
 
 def copy_bounded(source, destination, limit):
@@ -266,10 +308,7 @@ def acquire(destination):
         temporary = Path(name)
         archive = temporary / 'build.zip'
         with archive.open('xb') as output:
-            result = subprocess.run(['gh', 'api', '--hostname', 'github.com', '--method', 'GET',
-                                     artifact_path + '/zip'], stdout=output, stderr=subprocess.PIPE,
-                                    timeout=90, check=False)
-        require(result.returncode == 0, 'native build download failed')
+            download(artifact_path, output)
         tar_path, manifest, evidence = inspect_archive(archive, temporary, expected)
         validate_metadata(expected, api(run_path), jobs, api(artifact_path))
         materialize(tar_path, destination)

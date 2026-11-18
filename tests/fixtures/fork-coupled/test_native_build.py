@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -153,6 +154,51 @@ class ArchiveBoundaries(unittest.TestCase):
                     build.inspect_archive(archive, trial, expected)
             finally:
                 setattr(build, name, original)
+
+
+class DownloadBoundaries(unittest.TestCase):
+    """Actual controlled children exercise transport bounds, never a native daemon."""
+    def transfer(self, source, limit=64, timeout=2):
+        original = build.subprocess.Popen
+        children = []
+
+        def child(_arguments, **options):
+            proc = original([sys.executable, '-I', '-c', source], **options)
+            children.append(proc)
+            return proc
+
+        output = io.BytesIO()
+        with patch.object(build, 'MAX_ZIP', limit), patch.object(build.subprocess, 'Popen', child):
+            try:
+                build.download('repos/fixed/actions/artifacts/1', output, timeout=timeout)
+                result = None
+            except build.ContractError as error:
+                result = error
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll(), 'owned child must actually settle')
+        self.assertLessEqual(len(output.getvalue()), limit, 'excess bytes cannot reach output')
+        return result, output.getvalue()
+
+    def test_stdout_overflow_before_child_exit(self):
+        error, _ = self.transfer('import os,time;os.write(1,b"x"*65);time.sleep(30)')
+        self.assertRegex(str(error), 'exceeded bound')
+
+    def test_stderr_overflow_before_child_exit(self):
+        error, _ = self.transfer('import os,time;os.write(2,b"x"*20000);time.sleep(30)')
+        self.assertRegex(str(error), 'exceeded bound')
+
+    def test_total_deadline_reaps_silent_child(self):
+        error, _ = self.transfer('import time;time.sleep(30)', timeout=0.2)
+        self.assertRegex(str(error), 'timed out')
+
+    def test_closed_streams_do_not_hide_nonzero_exit(self):
+        error, _ = self.transfer('raise SystemExit(7)')
+        self.assertRegex(str(error), 'download failed')
+
+    def test_exact_bound_success_keeps_all_bytes(self):
+        error, value = self.transfer('import os;os.write(1,b"x"*64)')
+        self.assertIsNone(error)
+        self.assertEqual(value, b'x' * 64)
 
 
 if __name__ == '__main__':
