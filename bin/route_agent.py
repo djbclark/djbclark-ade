@@ -786,7 +786,15 @@ def reported_pool_family(provider: str, row: dict[str, Any], parent: dict[str, A
     family = row.get("pool_family")
     if provider != "codex":
         return family
-    source = parent if family is None and "pool_id" not in row and parent is not None else row
+    if "provider" in row and row["provider"] != provider:
+        return None
+    source = row
+    if family is None and "pool_id" not in row and parent is not None:
+        if parent.get("pool_family") not in (None, "default"):
+            return None
+        if "vendor" in row and row["vendor"] != parent.get("vendor"):
+            return None
+        source = parent
     pool_id, vendor = source.get("pool_id"), source.get("vendor")
     if pool_id == "openai:codex":
         return "default" if vendor == "openai" and family in (None, "default") else None

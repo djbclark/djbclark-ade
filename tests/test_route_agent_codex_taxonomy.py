@@ -81,3 +81,30 @@ def test_subscription_can_route_mechanical_but_cannot_fund_api_code_or_frontier(
         assert choice.model.startswith("gpt-6-luna")
         assert r.route("code", quota=pools) is None
         assert r.route("frontier", quota=pools) is None
+
+
+@pytest.mark.parametrize("parent_change,child_change", [
+    ({"pool_family": "openai_api"}, {}),
+    ({"vendor": "other"}, {}),
+    ({}, {"vendor": "other"}),
+    ({}, {"vendor": None}),
+    ({}, {"provider": "other"}),
+    ({}, {"provider": None}),
+    ({}, {"provider": "other", "vendor": "openai", "pool_id": "openai:codex"}),
+])
+def test_direct_snapshot_windows_cannot_inherit_contradictory_identity(parent_change, child_change):
+    row = subscription()
+    row.update(parent_change)
+    row["windows"][0].update(child_change)
+    pools = r._providers_from_accounts([row], 0)
+    assert pools.get("codex-subscription", {}).get("remaining") is None
+    assert pools.get("codex", {}).get("remaining") in (None, 0.0)
+
+
+def test_conflicting_parent_family_is_closed_in_available_and_snapshot_paths():
+    row = subscription()
+    row["pool_family"] = "openai_api"
+    for parse in (r._providers_from_available, r._providers_from_accounts):
+        pools = parse([row], 0)
+        assert pools.get("codex-subscription", {}).get("remaining") is None
+        assert pools.get("codex", {}).get("remaining") in (None, 0.0)
