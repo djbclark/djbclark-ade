@@ -1,9 +1,9 @@
 name: NATS backup recovery
 on:
   push:
-    paths: ['bin/ade-coord-backup', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+    paths: ['bin/ade-coord-backup', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
   pull_request:
-    paths: ['bin/ade-coord-backup', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+    paths: ['bin/ade-coord-backup', 'lib/ade-coord/**', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
   workflow_dispatch:
 permissions:
   contents: read
