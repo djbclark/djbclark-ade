@@ -46,8 +46,6 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
     if settings.get("controlled_pilot") is not True:
         raise CoordinationError("CONTROLLED_PILOT_REQUIRED")
     next_owner = request["next_owner"]
-    if next_owner not in settings.get("successors", []):
-        raise CoordinationError("SUCCESSOR_NOT_EXPLICITLY_ENROLLED")
     root = Path(cfg["state_dir"]); root.mkdir(parents=True, mode=0o700, exist_ok=True)
     # One machine writer per role. Never hold a SQLite transaction across network.
     lock_fd = os.open(root / "handoff.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -62,27 +60,60 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
         file = root / "handoff.sqlite"
         fd = os.open(file, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600); os.close(fd)
         db = sqlite3.connect(file, timeout=10)
-        db.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS handoffs(role TEXT PRIMARY KEY, intent TEXT NOT NULL, checkpoint BLOB NOT NULL, evidence TEXT);")
-        old = db.execute("SELECT intent,checkpoint,evidence FROM handoffs WHERE role=?", (role,)).fetchone()
+        db.executescript("""PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+          CREATE TABLE IF NOT EXISTS handoffs(role TEXT PRIMARY KEY, intent TEXT NOT NULL, checkpoint BLOB NOT NULL, evidence TEXT);
+          CREATE TABLE IF NOT EXISTS handoff_attempts(role TEXT,attempt TEXT,prior_epoch INTEGER NOT NULL,intent TEXT NOT NULL,checkpoint BLOB NOT NULL,evidence TEXT,status TEXT NOT NULL,result TEXT,PRIMARY KEY(role,attempt));
+          CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_handoff ON handoff_attempts(role) WHERE status!='complete';""")
+        # Preserve the old journal intact and migrate each attempt conservatively;
+        # authoritative transfer/projection is reconciled before marking complete.
+        with db:
+            for legacy_role,packed,blob,proof in db.execute("SELECT role,intent,checkpoint,evidence FROM handoffs").fetchall():
+                legacy=json.loads(packed)
+                db.execute("INSERT OR IGNORE INTO handoff_attempts VALUES (?,?,?,?,?,?,'pending',NULL)",(legacy_role,legacy["attempt_id"],legacy["initial"]["record"]["ownership_epoch"],packed,blob,proof))
+        attempt=request["attempt_id"]
+        old=db.execute("SELECT intent,checkpoint,evidence,status,result FROM handoff_attempts WHERE role=? AND attempt=?",(role,attempt)).fetchone()
         if old:
-            intent = json.loads(old[0]); checkpoint = bytes(old[1]); evidence = json.loads(old[2]) if old[2] else {}
-            if intent["next_owner"] != next_owner or intent["attempt_id"] != request["attempt_id"]:
+            intent=json.loads(old[0]);checkpoint=bytes(old[1]);evidence=json.loads(old[2]) if old[2] else {}
+            if intent["next_owner"] != next_owner:
                 raise CoordinationError("EXISTING_HANDOFF_REQUIRES_SAME_ATTEMPT")
+            if old[3]=="complete":
+                # Historical retry may observe a later epoch. Never re-project its
+                # old target or re-run native retirement/ownership changes.
+                live=protocol("role get",{"role_id":role},cfg=cfg)
+                return {"status":"already-complete","role":live,"attempt_result":json.loads(old[4]),"historical":True}
         else:
-            initial = protocol("role get", {"role_id": role}, cfg=cfg)
-            if initial["record"]["state"] != "active":
+            if db.execute("SELECT attempt FROM handoff_attempts WHERE role=? AND status!='complete'",(role,)).fetchone():
+                raise CoordinationError("UNFINISHED_HANDOFF_MUST_RECONCILE_FIRST")
+            if next_owner not in settings.get("successors",[]):
+                raise CoordinationError("SUCCESSOR_NOT_EXPLICITLY_ENROLLED")
+            initial=protocol("role get",{"role_id":role},cfg=cfg)
+            if initial["record"]["state"]!="active":
                 raise CoordinationError("UNJOURNALED_LIFECYCLE_UNKNOWN")
             with Path(request["checkpoint_path"]).open("rb") as stream:
-                checkpoint = stream.read(12 * 1024 * 1024 + 1); os.fsync(stream.fileno())
-            if len(checkpoint) > 12 * 1024 * 1024:
-                raise CoordinationError("CHECKPOINT_TOO_LARGE")
-            intent = {"initial": initial, "next_owner": next_owner, "attempt_id": request["attempt_id"], "checkpoint_digest": hashlib.sha256(checkpoint).hexdigest(), "runtime": settings.get("runtime"), "resources": sorted(initial["record"]["bindings"])}
-            evidence = {}
+                checkpoint=stream.read(12*1024*1024+1);os.fsync(stream.fileno())
+            if len(checkpoint)>12*1024*1024:raise CoordinationError("CHECKPOINT_TOO_LARGE")
+            intent={"initial":initial,"next_owner":next_owner,"attempt_id":attempt,"checkpoint_digest":hashlib.sha256(checkpoint).hexdigest(),"runtime":settings.get("runtime"),"resources":sorted(initial["record"]["bindings"])}
+            evidence={}
             with db:
-                db.execute("INSERT INTO handoffs VALUES (?,?,?,NULL)", (role, json.dumps(intent,sort_keys=True), checkpoint))
+                db.execute("INSERT INTO handoff_attempts VALUES (?,?,?,?,?,NULL,'pending',NULL)",(role,attempt,initial["record"]["ownership_epoch"],json.dumps(intent,sort_keys=True),checkpoint))
+        def finish(current):
+            with db:
+                db.execute("UPDATE handoff_attempts SET status='transferred',result=? WHERE role=? AND attempt=?",(json.dumps(current,sort_keys=True),role,attempt))
+            result=project(current,cfg)
+            with db:
+                db.execute("UPDATE handoff_attempts SET status='complete' WHERE role=? AND attempt=?",(role,attempt))
+            return result
         initial = intent["initial"]; prior = initial["record"]
         if prior["generation"] != cfg["generation"] or prior["owner"]["host"] != cfg["identity"]["host"] or prior["owner"]["server"] != cfg["identity"]["server"]:
             raise CoordinationError("REMOTE_OR_STALE_GENERATION_RETIREMENT_BLOCKED")
+        def save():
+            with db:
+                db.execute("UPDATE handoff_attempts SET evidence=? WHERE role=? AND attempt=?", (json.dumps(evidence,sort_keys=True), role, attempt))
+        current = protocol("role get", {"role_id": role}, cfg=cfg)
+        if current["record"]["owner"] == next_owner and current["record"]["ownership_epoch"] == prior["ownership_epoch"] + 1:
+            if current["record"].get("handoff",{}).get("checkpoint_digest") != intent["checkpoint_digest"]:
+                raise CoordinationError("UNKNOWN_TRANSFER_PROVENANCE")
+            return finish(current)
         runtime = intent["runtime"]
         if not runtime or runtime.get("owner") != prior["owner"] or runtime.get("ownership_epoch") != prior["ownership_epoch"]:
             raise CoordinationError("BOUND_PROVIDER_RETIREMENT_CONTRACT_REQUIRED")
@@ -104,14 +135,8 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
         # Alias/enrollment mapping must already retain both old and new agent IDs.
         if any(cfg["aliases"].get(agent) != role for agent in (prior["owner"]["agent"],next_owner["agent"])):
             raise CoordinationError("PERSISTED_ROLE_ALIASES_REQUIRED")
-        def save():
-            with db:
-                db.execute("UPDATE handoffs SET evidence=? WHERE role=?", (json.dumps(evidence,sort_keys=True), role))
-        current = protocol("role get", {"role_id": role}, cfg=cfg)
-        if current["record"]["owner"] == next_owner and current["record"]["ownership_epoch"] == prior["ownership_epoch"] + 1:
-            if current["record"].get("handoff",{}).get("checkpoint_digest") != intent["checkpoint_digest"]:
-                raise CoordinationError("UNKNOWN_TRANSFER_PROVENANCE")
-            return project(current, cfg)
+        if next_owner not in settings.get("successors",[]):
+            raise CoordinationError("SUCCESSOR_NO_LONGER_ENROLLED")
         if current["record"]["owner"] != prior["owner"] or current["record"]["ownership_epoch"] != prior["ownership_epoch"]:
             raise CoordinationError("HANDOFF_AUTHORITY_CHANGED")
         if current["record"]["state"] == "active":
@@ -207,7 +232,7 @@ def transfer(request, *, cfg=None, native_call=native, inspect=process_identity,
                 current = protocol("role get", {"role_id":role},cfg=cfg)
                 if current["record"]["owner"] != next_owner or current["record"]["ownership_epoch"] != prior["ownership_epoch"] + 1 or current["record"].get("handoff",{}).get("checkpoint_digest") != intent["checkpoint_digest"]:
                     raise
-            return project(current,cfg)
+            return finish(current)
         raise CoordinationError("LIFECYCLE_RECONCILIATION_REQUIRED")
     finally:
         if db is not None: db.close()

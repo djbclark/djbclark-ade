@@ -10,8 +10,8 @@ from ade_coord import config, call, CoordinationError
 from ade_coord_handoff import transfer
 from ade_coord_resources import process_identity, same_process
 cfg=config(); request=json.load(sys.stdin)
-marker=Path(cfg["state_dir"])/"native-closed"
 runtime=cfg["roles"][request["role_id"]]["runtime"]
+marker=Path(cfg["state_dir"])/("native-closed-"+str(runtime["ownership_epoch"]))
 
 def native(*args):
     if args[0]=="inspect":
@@ -32,11 +32,22 @@ def protocol(command,body,**kwargs):
     value=call(command,body,**kwargs)
     # A real committed state change whose client response is lost.
     if command in ("role transition","role transfer"):
-        lost=Path(cfg["state_dir"])/("lost-"+command.replace(" ","-"))
+        lost=Path(cfg["state_dir"])/("lost-"+command.replace(" ","-")+"-"+request["attempt_id"])
         if not lost.exists():
             lost.write_text("injected after actual commit")
             raise CoordinationError("UNKNOWN")
     return value
+
+if os.environ.get("ADE_TEST_PROJECTION_CRASH") == request["attempt_id"]:
+    import ade_coord_handoff as module
+    original_project=module.project
+    def crash_project(current,config):
+        marker=Path(config["state_dir"])/("projection-crash-"+request["attempt_id"])
+        if not marker.exists():
+            marker.write_text("injected after authoritative transfer before projection")
+            raise CoordinationError("INJECTED_PROJECTION_CRASH")
+        return original_project(current,config)
+    module.project=crash_project
 
 try:
     result=transfer(request,cfg=cfg,native_call=native,protocol=protocol)

@@ -253,3 +253,14 @@ and projection grants. Existing application computation does not imply an offlin
 Git-write grant. No cached role/claim or local journal substitutes for a fresh
 online authority check. Disconnected work must not expand its previously granted
 scope; unknown operations still block later handoff.
+
+## Retained handoff attempt history
+
+Handoff attempts are keyed by role plus immutable attempt ID and record the prior
+epoch. At most one unfinished attempt per role exists in a host state directory.
+The old role-only journal is retained and migrated without deleting evidence.
+Transfer is recorded before projection; an interrupted projection is reconciled
+before a new attempt starts. After completion, a new request takes a fresh active
+snapshot/runtime proof and may advance the next epoch. Repeating an old completed
+request returns the current broker role plus its historical result; it never
+re-runs retirement, rolls a claim projection back or increments ownership again.
