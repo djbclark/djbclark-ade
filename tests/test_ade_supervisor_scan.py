@@ -115,7 +115,8 @@ def test_cleared_agent_leaves_the_state_and_is_noticed_again_later(tmp_path: Pat
 
 
 def test_closed_and_archived_agents_are_ignored(tmp_path: Path) -> None:
-    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived")])
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived"),
+                                                    _agent("c3", status="error")])
     assert _run(bin_dir, home) == 0
     assert _messages(sent) == [] and json.loads((state / "notified").read_text()) == []
 

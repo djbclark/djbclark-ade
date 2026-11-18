@@ -126,9 +126,9 @@ resumes it, and `bin/gui-hog thaw --all --stopped-apps` is the last resort for a
 ## 5. `/watch stuck` — Pi agents out of tokens
 
 `/watch stuck` runs `bin/ade-pi-stuck` (read-only): it lists the Pi agents Paseo
-knows (closed and archived ones are shown and marked), maps each to its billing
-account (from the `pi/<account>/<model>` provider), and flags the live agents whose
-account is quota-exhausted (no headroom). For each stuck
+reports (closed ones carry their status; Paseo does not list archived ones at all), maps
+each to its billing account (from the `pi/<account>/<model>` provider), and flags the
+live ones — not closed, archived or in `error` — whose account is quota-exhausted. For each stuck
 agent it prints a comparable healthy alternative model under a different, not-exhausted
 account (or `no healthy alternative found`) — never the account that just ran dry.
 `aiuse` exits 3 when every pool is unusable and still prints its JSON, so that read is

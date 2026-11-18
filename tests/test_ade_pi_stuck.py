@@ -194,3 +194,12 @@ def test_a_stale_zero_reading_is_never_offered_as_an_alternative(tmp_path: Path)
     ]}
     stuck = [s for s in _run(tmp_path, raw)["stuck"] if s["id"] == "a1"]
     assert stuck and not (stuck[0]["alternative"] or "").startswith("pi/opencode-go-t-e/")
+
+
+def test_closed_archived_and_errored_agents_are_not_flagged(tmp_path: Path) -> None:
+    """`error` is dead for ade-progress, so it is not "stuck on an exhausted account" either."""
+    agents = [{"id": "x1", "provider": "pi/openai/gpt-6.1-sol", "status": "error"},
+              {"id": "x2", "provider": "pi/openai/gpt-6.1-sol", "status": "archived"},
+              {"id": "x3", "provider": "pi/openai/gpt-6.1-sol", "status": "closed"}]
+    report = _run(tmp_path, _pools(**{"openai:openai_api": (0.0, True, False)}), agents=agents)
+    assert report["stuck"] == []

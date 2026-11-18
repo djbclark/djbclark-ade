@@ -55,6 +55,10 @@ KNOWN_EMPTY = {"openai"}
 # Below this, an account is thin enough to flag before it hits zero.
 LOW_HEADROOM_PERCENT = 10.0
 
+# Statuses that mean the agent is not running and cannot be re-handoff-ed as it stands: `error` is what
+# bin/ade-progress treats as dead, so flagging one "stuck on an exhausted account" would be noise.
+NOT_LIVE = ("closed", "archived", "error")
+
 
 def quota_by_account(avail):
     """Return {account: {"headroom": %, "usable": bool, "stale": bool, "pool": id}}.
@@ -188,7 +192,7 @@ def main():
         model = rest
         acct = account_of(rest)
         status = a.get("status") or ""
-        stuck = acct in exhausted and status not in ("closed", "archived")
+        stuck = acct in exhausted and status not in NOT_LIVE
         q = accounts.get(acct) or {}
         out.append({"id": a.get("id"), "name": a.get("name"), "model": model,
                     "account": acct, "status": status, "stuck": stuck,
@@ -196,7 +200,7 @@ def main():
                     "quota_stale": q.get("stale"),
                     "alternative": alt(model, acct, exhausted, accounts) if stuck else None})
     stuck = [o for o in out if o["stuck"]]
-    live = [o for o in out if o["status"] not in ("closed", "archived")]
+    live = [o for o in out if o["status"] not in NOT_LIVE]
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
                           "exhausted": sorted(exhausted), "low": low, "quota_error": quota_error}, indent=1))

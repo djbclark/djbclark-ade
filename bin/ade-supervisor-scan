@@ -150,7 +150,7 @@ else:
         carry = sorted(told)
     else:
         for s in stuck:
-            if s.get("status") in ("closed", "archived"):
+            if s.get("status") in ("closed", "archived", "error"):      # ade-pi-stuck already filters these
                 continue
             items.append((recipient + "|%s|%s" % (s.get("id"), s.get("account")),
                           "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
