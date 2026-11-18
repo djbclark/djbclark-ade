@@ -150,6 +150,26 @@ class AdapterTests(unittest.TestCase):
                 self.assertNotIn("ModuleNotFoundError",result.stderr)
                 self.assertFalse(json.loads(result.stdout)["ok"])
 
+    def test_public_broker_target_survives_fresh_managed_default_url(self):
+        consumer=Path(__file__).resolve().parents[1]/"bin/ade_coord_consumer.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);marker=root/"enrolled";marker.write_text("{}")
+            cfg={"generation":"g","state_dir":str(root/"state"),"broker_url":"nats://127.0.0.1:1","credential_boundary":str(root/"boundary")}
+            response=subprocess.CompletedProcess([],0,b'{"ok":true,"result":{}}',b'')
+            with patch.dict(os.environ,{"ADE_COORD_ENROLLMENT_MARKER":str(marker)}),patch.object(coord.subprocess,"run",return_value=response) as invoke:
+                coord.call("role get",{"role_id":"r"},cfg=cfg)
+                self.assertEqual(invoke.call_args.kwargs["env"]["ADE_COORD_TARGET_URL"],cfg["broker_url"])
+            boundary=root/"boundary"
+            boundary.write_text("#!/usr/bin/env python3\nimport os,sys\na=sys.argv[sys.argv.index('--')+1:]\nenv={**os.environ,'ADE_NATS_URL':'nats://managed-default.invalid:4222','ADE_NATS_TOKEN':'fresh-fixture','UNRELATED_MANAGED_SECRET':'do-not-propagate'}\nos.execvpe(a[0],a,env)\n");boundary.chmod(0o700)
+            for target in (None,"nats://127.0.0.1:1"):
+                expected=target or "nats://managed-default.invalid:4222"
+                code="import os,json;print(json.dumps({'target_matches':os.environ.get('ADE_NATS_URL')=="+repr(expected)+",'fresh':os.environ.get('ADE_NATS_TOKEN')=='fresh-fixture','override_internal_absent':'ADE_COORD_TARGET_URL' not in os.environ,'unrelated_absent':'UNRELATED_MANAGED_SECRET' not in os.environ}))"
+                env={**os.environ};env.pop("ADE_COORD_TARGET_URL",None)
+                if target:env["ADE_COORD_TARGET_URL"]=target
+                result=subprocess.run([str(boundary),"run","--reason","fixture","--",sys.executable,"-I",str(consumer),sys.executable,"-I","-c",code],env=env,capture_output=True,text=True,timeout=20,check=True)
+                self.assertEqual(json.loads(result.stdout),{'target_matches':True,'fresh':True,'override_internal_absent':True,'unrelated_absent':True})
+                self.assertNotIn('fresh-fixture',result.stdout)
+
     def test_managed_boundary_real_child_receives_only_selected_fresh_credential(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);boundary=root/"boundary"

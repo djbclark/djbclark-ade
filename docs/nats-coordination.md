@@ -11,7 +11,10 @@ The protocol proof does not claim arbitrary filesystem hard fencing.
 
 Set `ADE_COORD_CONFIG` to a private JSON configuration. Credentials come only
 from the existing sudo-secretspec-injected `ADE_NATS_URL`/`ADE_NATS_TOKEN`
-environment. Config contains no credentials. Example structure (dummy IDs):
+environment. Optional `broker_url` selects a public endpoint after managed
+credential injection; the fresh token still comes from sudo-secretspec. With no
+override, its managed URL is used. Credentials/userinfo in a URL remain refused.
+Config contains no credentials. Example structure (dummy IDs):
 
 ```json
 {

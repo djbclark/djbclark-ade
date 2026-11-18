@@ -96,6 +96,10 @@ def call(command, request, *, cfg=None, _retirement_proof=False):
         safe={key:value for key,value in os.environ.items() if key in {"PATH","HOME","XDG_CONFIG_HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","TMP","TEMP"}}
         if cfg.get("broker_url") or os.environ.get("ADE_NATS_URL"):
             safe["ADE_NATS_URL"]=cfg.get("broker_url") or os.environ["ADE_NATS_URL"]
+        if cfg.get("broker_url"):
+            # The managed boundary injects its default URL afresh. Preserve this
+            # explicitly selected public target through the consumer hop too.
+            safe["ADE_COORD_TARGET_URL"]=cfg["broker_url"]
         if network:
             boundary=cfg.get("credential_boundary") or shutil.which("sudo-secretspec")
             if not boundary or not Path(boundary).is_absolute():raise CoordinationError("MANAGED_BOUNDARY_UNAVAILABLE")
