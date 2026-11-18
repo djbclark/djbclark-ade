@@ -13,6 +13,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCAN = REPO / "bin" / "ade-supervisor-scan"
+LEAD = "11111111-2222-3333-4444-555555555555"      # the test's own lead id, never a real session
 
 
 def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
@@ -34,8 +35,16 @@ def _harness(tmp_path: Path, feed: list[dict], paseo_rc: int = 5):
     return bin_dir, home, state, fixture, sent
 
 
-def _run(bin_dir: Path, home: Path) -> int:
-    env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}")
+def _run(bin_dir: Path, home: Path, lead: str | None = LEAD) -> int:
+    """Run the copy under the test's own HOME and state dir: the caller's ADE_SUPERVISOR_* never leak in."""
+    state = home / ".local" / "state" / "djbclark-ade" / "supervisor"
+    env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}",
+               ADE_SUPERVISOR_STATE_DIR=str(state))
+    for key in ("ADE_SUPERVISOR_LEAD", "ADE_SUPERVISOR_STATE_DIR"):
+        env.pop(key, None)
+    env["ADE_SUPERVISOR_STATE_DIR"] = str(state)
+    if lead is not None:
+        env["ADE_SUPERVISOR_LEAD"] = lead
     return subprocess.run([str(bin_dir / "ade-supervisor-scan")], env=env, capture_output=True, text=True).returncode
 
 
@@ -54,7 +63,7 @@ def test_one_message_names_every_newly_stuck_agent(tmp_path: Path) -> None:
     assert _run(bin_dir, home) == 0
     messages = _messages(sent)
     assert len(messages) == 1
-    assert "b0b47ad8-8801-4780-a8e0-08824cd5ce27" in messages[0]      # the ADE lead
+    assert f"{LEAD}" in messages[0]
     assert "2 newly stuck" in messages[0] and "id=a1" in messages[0] and "id=b2" in messages[0]
 
 
@@ -94,3 +103,38 @@ def test_an_undelivered_send_keeps_the_notice_for_the_next_run(tmp_path: Path) -
     (bin_dir / "paseo").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {sent}\nexit 5\n")  # now delivered
     assert _run(bin_dir, home) == 0
     assert len(_messages(sent)) == 2 and json.loads((state / "notified").read_text()) == ["a1|openai"]
+
+
+def test_an_unset_lead_is_logged_and_sends_nothing(tmp_path: Path) -> None:
+    """The lead id is supplied by the plist / inventory row, never baked into the script."""
+    bin_dir, home, state, _, sent = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home, lead=None) == 0
+    assert _messages(sent) == []
+    assert "ADE_SUPERVISOR_LEAD is unset" in (state / "supervisor.log").read_text()
+
+
+def test_a_broken_scan_alerts_the_lead_once(tmp_path: Path) -> None:
+    bin_dir, home, state, _, sent = _harness(tmp_path, [])
+    (bin_dir / "ade-pi-stuck").write_text("#!/bin/sh\nexit 7\n")
+    (bin_dir / "ade-pi-stuck").chmod(0o755)
+    for _ in range(3):
+        assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and "exit 7" in messages[0]
+    assert "scan|broken" in json.loads((state / "notified").read_text())
+    # A working scan clears the alert key, so a later outage is announced again.
+    (bin_dir / "ade-pi-stuck").write_text(
+        '#!/usr/bin/env python3\nimport pathlib, sys\n'
+        'sys.stdout.write(pathlib.Path(sys.argv[0]).with_name("feed.json").read_text())\n')
+    assert _run(bin_dir, home) == 0
+    assert "scan|broken" not in json.loads((state / "notified").read_text())
+
+
+def test_non_json_output_alerts_the_lead_once(tmp_path: Path) -> None:
+    bin_dir, home, state, _, sent = _harness(tmp_path, [])
+    (bin_dir / "ade-pi-stuck").write_text("#!/bin/sh\necho 'not json at all'\n")
+    (bin_dir / "ade-pi-stuck").chmod(0o755)
+    for _ in range(2):
+        assert _run(bin_dir, home) == 0
+    messages = _messages(sent)
+    assert len(messages) == 1 and "non-JSON" in messages[0]
