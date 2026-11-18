@@ -614,6 +614,7 @@ def verify_readonly_namespace(config, manifest):
             rows[0]['size']!=READONLY_NAMESPACE_SIZE or rows[0].get('sha256')!=READONLY_NAMESPACE_SHA256):
         raise ContractError('independently reviewed namespace verifier identity required')
     path=protected_root_path(root/member)
+    if stat.S_IMODE(path.lstat().st_mode)!=0o444:raise ContractError('namespace verifier actual mode mismatch')
     source=read_regular(path,rows[0]['size'],owner=0)
     if len(source)!=READONLY_NAMESPACE_SIZE or hashlib.sha256(source).hexdigest()!=READONLY_NAMESPACE_SHA256:
         raise ContractError('namespace verifier member identity mismatch')
@@ -628,7 +629,7 @@ def verify_readonly_namespace(config, manifest):
         verify=getattr(module,'verify_existing_namespace',None)
         if not callable(verify) or verify(str(root),config['distributionSha256']) is not None:
             raise ContractError('readonly namespace verification refused')
-        if read_regular(path,rows[0]['size'],owner=0)!=source:
+        if read_regular(path,rows[0]['size'],owner=0)!=source or stat.S_IMODE(path.lstat().st_mode)!=0o444:
             raise ContractError('namespace verifier source changed during check')
     except BaseException as error:
         # Every helper refusal/exception is HOLD, never an authority/result object.

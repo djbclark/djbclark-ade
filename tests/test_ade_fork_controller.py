@@ -1427,15 +1427,17 @@ def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,chang
     with pytest.raises(c.ContractError):c.verify_readonly_namespace(config,manifest)
 
 
-def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch):
+@pytest.mark.parametrize('change',['bytes','mode'])
+def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch,change):
     source=committed_readonly_source()
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     allow_synthetic_readonly_bytes(monkeypatch)
-    path.chmod(0o600);path.write_bytes(source[:-1]+bytes([source[-1]^1]));path.chmod(0o444)
+    path.chmod(0o600)
+    if change=='bytes':path.write_bytes(source[:-1]+bytes([source[-1]^1]));path.chmod(0o444)
     compiled=[]
     def compile_spy(*args,**kwargs):compiled.append(True);raise RuntimeError('must not compile substituted source')
     monkeypatch.setattr(c,'compile',compile_spy,raising=False)
-    with pytest.raises(c.ContractError,match='identity mismatch'):c.verify_readonly_namespace(config,manifest)
+    with pytest.raises(c.ContractError,match='mismatch'):c.verify_readonly_namespace(config,manifest)
     assert compiled==[]
 
 
