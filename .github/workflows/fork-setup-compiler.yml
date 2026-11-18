@@ -1,0 +1,57 @@
+name: Retained compiler setup expected bytes
+on:
+  push:
+    branches: [fork-setup-compiler]
+  pull_request:
+    paths:
+      - 'tests/fixtures/fork-coupled/setup-compiler.mjs'
+      - 'tests/fixtures/fork-coupled/setup-compiler.test.mjs'
+      - '.github/workflows/fork-setup-compiler.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: fork-setup-compiler-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  synthetic-boundaries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+      - name: Synthetic lifecycle and refusal checks, not native qualification
+        run: node --test tests/fixtures/fork-coupled/setup-compiler.test.mjs
+  actual-setup-input:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: latest
+      - name: Acquire fixed completed BASE60a build input; no candidate build scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: timeout 300 python3 tests/fixtures/fork-coupled/acquire-native-build.py "$RUNNER_TEMP/setup-native-input"
+      - name: Actual retained Worker compiles checkout ade-yolo twice; expected bytes only
+        env:
+          SETUP_COMPILER_NATIVE_ROOT: ${{ runner.temp }}/setup-native-input/qualified-daemon
+          SETUP_COMPILER_OUTPUT_ROOT: ${{ runner.temp }}/setup-expected-output
+        run: node --test --test-name-pattern='actual retained' tests/fixtures/fork-coupled/setup-compiler.test.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-expected-bytes-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/setup-expected-output
+          if-no-files-found: error
+          retention-days: 14
+      # Setup output is explicitly qualification:false. These two disposable
+      # Workers never become native compiler.runs, owned leases or cohort proof.
+      # Later genuine native owned cold workers must independently reproduce it.
