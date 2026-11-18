@@ -1,0 +1,55 @@
+name: NATS backup recovery
+on:
+  push:
+    paths: ['bin/ade-coord-backup', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+  pull_request:
+    paths: ['bin/ade-coord-backup', 'experiments/nats-recovery/**', '.github/workflows/nats-recovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Download current released server and CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          timeout 120 gh release download --repo nats-io/nats-server --pattern 'nats-server-*-linux-amd64.tar.gz' --dir "$RUNNER_TEMP/server-download"
+          timeout 120 gh release download --repo nats-io/natscli --pattern 'nats-*-linux-amd64.zip' --dir "$RUNNER_TEMP/cli-download"
+          python3 - <<'PYCODE'
+          import os, pathlib, tarfile, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive, = (root / 'server-download').glob('*.tar.gz')
+          with tarfile.open(archive) as source:
+              member, = [m for m in source.getmembers() if m.name.endswith('/nats-server')]
+              target = root / 'nats-server'
+              target.write_bytes(source.extractfile(member).read())
+              target.chmod(0o755)
+          archive, = (root / 'cli-download').glob('*.zip')
+          with zipfile.ZipFile(archive) as source:
+              member, = [n for n in source.namelist() if n.endswith('/nats') or n == 'nats']
+              target = root / 'nats'
+              target.write_bytes(source.read(member))
+              target.chmod(0o755)
+          PYCODE
+          "$RUNNER_TEMP/nats-server" --version
+          "$RUNNER_TEMP/nats" --version
+      - name: Resolve maintained clients
+        working-directory: lib/ade-coord
+        run: timeout 180 npm install --ignore-scripts
+      - name: Prove network snapshot and isolated restore
+        env:
+          NATS_SERVER: ${{ runner.temp }}/nats-server
+          ADE_NATS_CLI: ${{ runner.temp }}/nats
+        run: timeout 240 node --test experiments/nats-recovery/proof.test.mjs
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: recovery-dependency-resolution
+          path: lib/ade-coord/package-lock.json
