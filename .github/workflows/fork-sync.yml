@@ -1,0 +1,26 @@
+name: Fork sync focused tests
+on:
+  push:
+    branches: [fork-maintenance-sync]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest
+      - name: Synthetic sync and foundation tests (no live synchronization)
+        shell: python
+        run: |
+          import pathlib, subprocess, sys
+          tests = ['tests/test_ade_fork_sync.py']
+          if pathlib.Path('tests/test_ade_forks.py').exists():
+              tests.append('tests/test_ade_forks.py')
+          subprocess.run([sys.executable, '-m', 'pytest', '-q', *tests], check=True)
+# No schedule or mutation job. App installation/token and trusted component
+# operation enrollment must be provisioned and reviewed before adding either.
