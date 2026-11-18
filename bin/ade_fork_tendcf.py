@@ -146,6 +146,8 @@ def assess(*, contract: dict | None, bindings: dict, policy: dict,
         for name, suite in suites.items():
             result = observed.get(name)
             if (not isinstance(suite, dict) or not isinstance(result, dict)
+                    or not isinstance(suite.get("job"), str) or not suite["job"]
+                    or not isinstance(suite.get("platform"), str) or not suite["platform"]
                     or suite.get("scope") not in {"full-fork", "overlay", "static", "platform-inapplicable"}
                     or result.get("definition_digest") != digest(suite)
                     or result.get("attempt") != attempt

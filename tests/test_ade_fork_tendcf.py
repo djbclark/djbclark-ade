@@ -15,7 +15,8 @@ def fixture():
               "libntech_commit": "c" * 40, "libntech_gitlink_mode": "160000",
               "overlay_digest": "d" * 64, "workflow_digest": "e" * 64,
               "recipe_digest": "f" * 64, "platform": "linux-x86_64"}
-    features = {"strict-json": {"disposition": "required", "evidence_ids": ["json-unit"]}}
+    features = {"strict-json": {"disposition": "required", "evidence_ids": ["json-unit"],
+                                "requirement": "Reject duplicate members and trailing input through the opt-in strict API"}}
     evidence = {"json-unit": {"scope": "full-fork", "job": "debian-13",
                               "platform": inputs["platform"], "test": "json_test"}}
     policy = {"features": features, "compatibility_group": "cfengine-libntech"}
@@ -113,3 +114,12 @@ def test_overlay_suite_never_proves_required_full_fork_feature():
     args = fixture()
     args["contract"]["evidence"]["json-unit"]["scope"] = "overlay"
     assert "overlay-evidence-is-not-full-fork-proof" in assess(**args).holds
+
+
+@pytest.mark.parametrize("field", ["job", "platform"])
+def test_missing_pair_cannot_pass_by_none_equality(field):
+    args = fixture()
+    args["contract"]["evidence"]["json-unit"].pop(field)
+    args["proof"]["evidence"]["json-unit"].pop(field)
+    args["proof"]["evidence"]["json-unit"]["definition_digest"] = digest(args["contract"]["evidence"]["json-unit"])
+    assert "suite-not-qualified" in assess(**args).holds

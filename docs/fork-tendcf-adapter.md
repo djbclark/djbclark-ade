@@ -45,3 +45,8 @@ Source references owned by tendcf: `overlay/fork.json`, `overlay/overlay.json`,
 `docs/architecture/upstream-register.md`. Read them at the consumer receipt's
 exact commit; dated reports are historical candidate mappings. No macOS run or
 upstream CFEngine/NorthernTech/Jira/email submission is authorized here.
+
+When reporting CI, select the exact workflow file **and** head SHA. A successful
+latest branch run can belong to the inherited fork-core workflow while this
+adapter's dedicated workflow failed. Check its actual jobs and test summary;
+the branch name alone is insufficient evidence.
