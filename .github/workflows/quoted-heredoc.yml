@@ -1,0 +1,18 @@
+name: Quoted heredoc boundary tests
+on:
+  push:
+    branches: [fix-quoted-heredoc]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quoted-heredoc-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  shell-boundaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run --with pytest python -m pytest tests/test_bash_habits_gate.py -q

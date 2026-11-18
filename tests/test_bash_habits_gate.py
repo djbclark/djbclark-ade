@@ -323,6 +323,47 @@ def test_closed_or_non_heredocs_pass(command):
     assert not denied(command)
 
 
+@pytest.mark.parametrize("operator,inner", [
+    ("<<", "  PY"),
+    ("<<", "\tPY"),
+    ("<<", "PY "),
+    ("<<-", "  PY"),
+    ("<<-", "\t PY"),
+    ("<<-", "PY\t"),
+])
+def test_delimiter_looking_python_data_does_not_escape_heredoc(operator, inner):
+    command = (
+        f"python3 - {operator}'PY'\n"
+        'yaml = """\n'
+        f"{inner}\n"
+        "if: steps.assessment.outcome == 'success'\n"
+        '"""\n'
+        "PY\n"
+    )
+    assert not denied(command)
+    # Blanking data must not hide a real zsh word after the exact terminator.
+    assert denied(command + "echo ==\n")
+
+
+@pytest.mark.parametrize("operator,terminator", [
+    ("<<", "  PY"),
+    ("<<", "\tPY"),
+    ("<<", "PY "),
+    ("<<-", "  PY"),
+    ("<<-", "\t PY"),
+    ("<<-", "PY\t"),
+])
+def test_indented_or_suffixed_data_is_not_a_heredoc_terminator(operator, terminator):
+    out = run(f"cat {operator}'PY'\nbody\n{terminator}\n")
+    assert out["permissionDecision"] == "deny"
+    assert "Unterminated heredoc" in out["permissionDecisionReason"]
+
+
+def test_tab_stripping_heredoc_ends_only_at_its_tab_stripped_delimiter():
+    assert not denied("cat <<-'PY'\nbody\n\tPY\n")
+    assert denied("cat <<-'PY'\nbody\n\tPY\necho ==\n")
+
+
 @pytest.mark.parametrize("command", [
     "open -a Quicksilver",                                  # the 2026-11-02 leak
     "open https://example.com",

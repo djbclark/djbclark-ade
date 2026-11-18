@@ -175,15 +175,20 @@ def _blank_quotes(s: str) -> str:
     return "".join(out)
 
 
+def _heredoc_terminates(line: str, delimiter: str, strip_tabs: bool) -> bool:
+    """A delimiter is exact; only <<- removes leading tab characters."""
+    return (line.lstrip("\t") if strip_tabs else line) == delimiter
+
+
 def strip_literals(c: str) -> str:
     """Drop heredoc bodies, quoted strings and comments; a quoted `$?` leaves a marker."""
     out, lines, i = [], c.split("\n"), 0
     while i < len(lines):
         out.append(lines[i])
-        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", lines[i])
+        m = re.search(r"<<(-?)\s*['\"]?(\w+)['\"]?", lines[i])
         if m:
             i += 1
-            while i < len(lines) and lines[i].strip() != m.group(1):
+            while i < len(lines) and not _heredoc_terminates(lines[i], m.group(2), m.group(1) == "-"):
                 i += 1
         i += 1
     s = "\n".join(out)
@@ -1110,8 +1115,7 @@ def unterminated_heredoc_reason(cmd: str) -> str | None:
             j = i + 1
             found = False
             while j < len(lines):
-                line = lines[j].lstrip("\t") if strip_tabs else lines[j]
-                if line.strip() == delim:
+                if _heredoc_terminates(lines[j], delim, strip_tabs):
                     found = True
                     break
                 j += 1
