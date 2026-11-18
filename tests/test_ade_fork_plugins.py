@@ -90,3 +90,24 @@ def test_cold_plugin_behavior_from_sealed_source(tmp_path):
     assert (root / 'plugins/ade-window-name/../../bin/ade_ws_names.py').is_file()
     assert (root / 'libexec/agent-bin/git').is_file()
     assert not (root / 'libexec/agent-bin/git').is_symlink()
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'toolchain', 'cold', 'binding'])
+def test_evidence_mismatch_holds(source, mutation):
+    root, _ = source
+    plugin = root / 'plugins/ade-yolo'; plugin.mkdir(parents=True)
+    (plugin / 'index.server.ts').write_text('export {}')
+    (plugin / 'paseo-plugin.json').write_text('{}')
+    command(root, 'add', 'plugins'); command(root, 'commit', '-qm', 'plugin')
+    commit = command(root, 'rev-parse', 'HEAD'); payload = p.produce(root, commit)
+    protected = dict.fromkeys((*p.TOOLS, 'helper_bindings', 'cold_compatibility',
+                             'native_tree_sha256', 'server_bundle_sha256', 'master_commit'), 'identity')
+    protected['master_commit'] = commit
+    protected['native_tree_sha256'] = p.payload_tree_hash(payload)
+    evidence = dict(protected)
+    expected = {'fork_commit': commit, 'toolchain': {'plugin_snapshot_evidence': p.sha(p.canonical(protected))}}
+    if mutation == 'missing': del evidence['python']
+    if mutation == 'toolchain': evidence['node'] = 'other-node'
+    if mutation == 'cold': evidence['cold_compatibility'] = False
+    if mutation == 'binding': expected['toolchain']['plugin_snapshot_evidence'] = '0' * 64
+    assert p.qualify(payload, 'ade-yolo', None, expected, {}, None, evidence, protected) == 'HOLD'
