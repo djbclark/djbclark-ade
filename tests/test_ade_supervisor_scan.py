@@ -235,8 +235,10 @@ def test_a_replaced_lead_redirects_the_notice_to_its_successor(tmp_path: Path) -
     assert json.loads((state / "notified").read_text()) == ["a1|openai"]
     assert "was replaced; sending to SUCCESSOR-ID" in (state / "supervisor.log").read_text()
     assert (state / "lead").read_text().strip() == "SUCCESSOR-ID"      # the handoff is followed, not logged forever
+    assert json.loads((state / "notified").read_text()) == []          # the successor has heard none of it yet
     assert _run(bin_dir, home, lead=None) == 0                        # the next run reads the new lead ...
-    assert len(_messages(sent)) == 1                                  # ... and has nothing new to say
+    messages = _messages(sent)
+    assert len(messages) == 2 and "-- SUCCESSOR-ID " in messages[1]   # ... and tells it what is still true
 
 
 def test_a_lead_value_that_is_not_an_id_is_ignored(tmp_path: Path) -> None:

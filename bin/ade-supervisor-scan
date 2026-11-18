@@ -140,6 +140,7 @@ print(d.get("reason") or "")' 2>>"$LOG")"
 
 send_failed=0
 delivered=0
+reset_dedupe=0
 case "$guard_rc" in
     0) send_to="$LEAD" ;;
     3)  # a completed self-handoff replaced the lead: the notice follows it, under the same id check
@@ -152,6 +153,7 @@ case "$guard_rc" in
                 ;;
             *)
                 send_to="$guard_target"
+                reset_dedupe=1          # the successor has heard none of what the old lead was told
                 printf '%s ade-supervisor-scan: lead %s was replaced; sending to %s (%s)\n' \
                     "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
                 if [ "$lead_from_env" -eq 1 ]; then
@@ -183,8 +185,13 @@ if [ -n "$msg" ] && [ -n "$send_to" ]; then
 fi
 unreachable="$STATE_DIR/.lead-unreachable.unreachable"
 if [ "$send_failed" -eq 1 ]; then
-    # The scan cannot reach its own lead, so it has no in-band channel left: tell the operator once per outage.
-    ping_operator_once "${guard_reason:-send failed}" unreachable
+    # The scan cannot reach its own lead, so it has no in-band channel left: tell the operator once per outage —
+    # but a refused guard on a quiet run has lost nothing, so that only goes to the log.
+    if [ -n "$msg" ]; then
+        ping_operator_once "${guard_reason:-send failed}" unreachable
+    else
+        printf '%s ade-supervisor-scan: quiet run, nothing lost (guard refused: %s)\n' "$(now)" "${guard_reason:-refused}" >>"$LOG"
+    fi
     if [ -n "$msg" ]; then
         rm -f "$pending"                 # a notice is pending: keep the old state and retry next run
     else
@@ -197,5 +204,9 @@ fi
 if [ "$delivered" -eq 1 ]; then
     rm -f "$STATE_DIR"/.lead-unreachable.*      # a delivery proves the lead is reachable for every cause
 fi
-[ -f "$pending" ] && mv -f "$pending" "$NOTIFIED"
+if [ "$reset_dedupe" -eq 1 ]; then
+    printf '[]\n' >"$NOTIFIED"          # the next run tells the new lead everything that is still true
+elif [ -f "$pending" ]; then
+    mv -f "$pending" "$NOTIFIED"
+fi
 exit 0
