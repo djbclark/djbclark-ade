@@ -24,10 +24,15 @@ if ! git remote get-url "$remote" >/dev/null 2>&1; then
 fi
 
 base_ref=
-if git show-ref --verify --quiet refs/heads/ci/base; then
-  base_ref=refs/heads/ci/base
-elif git show-ref --verify --quiet refs/remotes/"$remote"/ci/base; then
+if git show-ref --verify --quiet refs/remotes/"$remote"/ci/base; then
   base_ref=refs/remotes/"$remote"/ci/base
+  if git show-ref --verify --quiet refs/heads/ci/base &&
+     ! git merge-base --is-ancestor "$base_ref" refs/heads/ci/base &&
+     git merge-base --is-ancestor refs/heads/ci/base "$base_ref"; then
+    echo "github-ci-run: local ci/base is behind $remote/ci/base; using $remote/ci/base" >&2
+  fi
+elif git show-ref --verify --quiet refs/heads/ci/base; then
+  base_ref=refs/heads/ci/base
 else
   echo "github-ci-run: ci/base not found locally or on $remote" >&2
   exit 2
