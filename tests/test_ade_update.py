@@ -1655,7 +1655,7 @@ def test_graft_helper_replacement_ref_cannot_authorize_other_bytes(env, monkeypa
         assert helper_snapshot(live.parent) == saved
 
 
-@pytest.mark.parametrize("code", [124, 127, 128, 2])
+@pytest.mark.parametrize("code", [1, 124, 127, 128, 2])
 @pytest.mark.parametrize("working_source", [False, True])
 def test_graft_helper_git_probe_failure_is_error(env, code, working_source):
     rel = ".claude/helpers/graft-hooks.cjs"
@@ -1672,7 +1672,7 @@ def test_graft_helper_git_probe_failure_is_error(env, code, working_source):
     fake.write_text(f"""#!{sys.executable}
 import os, sys
 if 'cat-file' in sys.argv and any(a.endswith(':{rel}') for a in sys.argv):
-    print('injected object read failure', file=sys.stderr)
+    print("injected object read failure: path does not exist in revision", file=sys.stderr)
     sys.exit({code})
 os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
 """)
@@ -1683,7 +1683,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
     assert helper_snapshot(live.parent) == saved
 
 
-@pytest.mark.parametrize("failure", ["signal", "unexpected"])
+@pytest.mark.parametrize("failure", ["signal", "unexpected", "exit-one", "empty-exit-one"])
 def test_graft_helper_node_tool_failure_is_error(env, failure):
     rel = ".claude/helpers/graft-hooks.cjs"
     env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
@@ -1692,10 +1692,85 @@ def test_graft_helper_node_tool_failure_is_error(env, failure):
     live.write_text("good live helper\n")
     saved = seed_helper_backup(live)
     fake = env.bin / "node"
-    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(2)"
-    fake.write_text(f"#!{sys.executable}\nimport os, signal, sys\nprint('injected node failure', file=sys.stderr, flush=True)\n{action}\n")
+    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(2)" if failure == "unexpected" else "sys.exit(1)"
+    diagnostic = "" if failure == "empty-exit-one" else "injected node failure"
+    fake.write_text(f"#!{sys.executable}\nimport os, signal, sys\nif {bool(diagnostic)!r}: print({diagnostic!r}, file=sys.stderr, flush=True)\n{action}\n")
     fake.chmod(0o755)
     r = env.run("--json")
     assert r.returncode == 4, r.stdout + r.stderr
-    assert "injected node failure" in json.loads(r.stdout)["error"]
+    assert "Node validation failed" in json.loads(r.stdout)["error"]
+    assert diagnostic in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("canonical", [True, False])
+def test_graft_helper_committed_directory_is_error(env, canonical):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel + "/child": "not a helper\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    repo = env.machine if canonical else clone(env, "other")
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json", repo=repo)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "not one regular-file blob" in json.loads(r.stdout)["error"]
+        assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("entry", ["160000 commit", "120000 blob", "100644 tree", "100644 blob"])
+def test_graft_helper_invalid_object_entry_is_error(env, entry):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    # Even a blob-labelled row must fail its typed object read if that OID is a tree.
+    oid = sh("git", "rev-parse", "HEAD^{tree}", cwd=env.seed)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    output = f"{entry} {oid}\t{rel}\0"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys
+if 'ls-tree' in sys.argv and sys.argv[-1] == {rel!r}:
+    sys.stdout.write({output!r})
+    sys.exit(0)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("failure", ["ls-tree", "blob-read", "signal"])
+def test_graft_helper_git_listing_and_blob_read_failures(env, failure):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    conditions = {
+        "ls-tree": f"'ls-tree' in sys.argv and sys.argv[-1] == {rel!r}",
+        "blob-read": "'cat-file' in sys.argv and 'blob' in sys.argv",
+        "signal": f"'cat-file' in sys.argv and any(a.endswith(':{rel}') for a in sys.argv)",
+    }
+    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(127)"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys, signal
+if {conditions[failure]}:
+    print('injected Git operational failure', file=sys.stderr, flush=True)
+    {action}
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "injected Git operational failure" in json.loads(r.stdout)["error"]
     assert helper_snapshot(live.parent) == saved

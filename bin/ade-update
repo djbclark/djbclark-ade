@@ -55,7 +55,9 @@ Steps, in order:
    as `*.bak-<UTC stamp>` and atomically replaces it with a regular file, mode 0755. Bytes come from
    the committed target revision, never the working tree. Installation requires master at fetched origin/master,
    an identical regular working-tree source, a nonempty Node entrypoint and passing Node syntax validation.
-   Git replacement refs are ignored. The revision is a snapshot; this step does not serialize concurrent branch changes.
+   Git replacement refs are ignored; regular-file blobs only (symlinks, gitlinks and trees are errors), read by
+   object ID from the captured SHA. This does not authenticate the remote or secure a compromised object store.
+   Branch/upstream checks are snapshots, not locks against concurrent checkout changes.
    Refused sources count as unresolved (exit 10); validation-tool/I/O failures are exit 4. Other --repo paths
    report only, without a fix or a counted problem. A checkout without the source helper skips this step.
 3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
@@ -485,23 +487,26 @@ def install_graft_helper(repo, check, can_install, revision, authorized):
     rel = ".claude/helpers/graft-hooks.cjs"
     # ls-tree distinguishes a genuinely absent path (success, no rows) from object/tool errors.
     # Git cat-file -e commonly returns 128 for absence, the same code as corrupt-object errors.
-    rc, listing, err = git(repo, "ls-tree", revision, "--", rel)
+    rc, listing, err = git(repo, "ls-tree", "-z", revision, "--", rel)
     if rc:
         raise Stop(EXIT_ERROR, f"graft helper ls-tree failed (rc={rc}): {(err or listing).strip()}")
-    absent = not listing.strip()
-    if not absent:
-        rc, out, err = git(repo, "cat-file", "-e", f"{revision}:{rel}")
-        absent = rc == 1 and ("does not exist in" in err or ("path " in err and "does not exist" in err))
-        if rc and not absent:
-            raise Stop(EXIT_ERROR, f"graft helper cat-file failed (rc={rc}): {(err or out).strip()}")
-    if absent:
+    if not listing:
         if not source.exists():
             return row
         row.update(state="refused", detail="helper is not in the authorized revision")
         return row
+    # Only regular-file blobs are helper sources. Trees, gitlinks and symlink blobs are errors,
+    # even in report-only mode; none may be interpreted as executable helper contents.
+    entry = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t" + re.escape(rel) + r"\x00", listing)
+    if entry is None:
+        raise Stop(EXIT_ERROR, "graft helper ls-tree entry is not one regular-file blob: " + repr(listing))
+    oid = entry.group(2)
+    rc, out, err = git(repo, "cat-file", "-e", f"{revision}:{rel}")
+    if rc:
+        raise Stop(EXIT_ERROR, f"graft helper cat-file failed (rc={rc}): {(err or out).strip()}")
     tmp = None
     try:
-        blob = subprocess.run(["git", "-C", str(repo), "show", f"{revision}:{rel}"],
+        blob = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", oid],
                               capture_output=True, timeout=LOCAL_TIMEOUT, env=git_env())
         if blob.returncode:
             raise OSError(f"cannot read committed helper (rc={blob.returncode}): "
@@ -521,11 +526,12 @@ def install_graft_helper(repo, check, can_install, revision, authorized):
                 node_env = {k: v for k, v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_PATH", "NODE_V8_COVERAGE")}
                 parsed = subprocess.run(["node", "--check", "--input-type=commonjs"], input=wanted,
                                         capture_output=True, timeout=LOCAL_TIMEOUT, env=node_env)
-                if parsed.returncode == 1:
-                    reason = "committed helper fails Node syntax validation"
+                diagnostic = parsed.stderr.decode("utf-8", errors="replace").strip()
+                if parsed.returncode == 1 and re.search(r"(?m)^SyntaxError: .+", diagnostic):
+                    reason = "committed helper fails Node syntax validation: " + diagnostic
                 elif parsed.returncode:
                     raise OSError(f"Node validation failed (rc={parsed.returncode}): "
-                                  + parsed.stderr.decode("utf-8", errors="replace").strip())
+                                  + diagnostic)
             if reason:
                 row.update(state="refused", detail=reason)
                 return row
