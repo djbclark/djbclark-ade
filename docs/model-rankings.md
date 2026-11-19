@@ -35,6 +35,11 @@ vendor's top/flagship model**, i.e. the model its vendor puts out as the apex, n
 1. **Claude Fable 5.2** — frontier-1 (claude). Intelligence #1, coding tied #1-2.
 2. **GPT-6 Astra family (6 → 6.1 → 6.2)** — frontier-2 (codex). Intelligence #2, coding 53.
 3. **Gemini 4 Neon** — *new* frontier on antigravity. Coding-agent #1, near-top Intelligence, near-half Fable's cost.
+   Wired 2026-11-19 (`antigravity-neon` in `config/ade.toml`): `good_at frontier = 5`, the same rank as Argon and
+   ordered after it, plus `fallback_after = ["codex", "claude"]`, so Argon always wins the tie and Neon is the
+   last antigravity resort. Rationale: a Neon probe on 2026-11-19 returned `Resource has been exhausted` while the
+   shared Gemini 5-hour window read 4.8 % used, so Neon appears to be quota-walled per model — a route may fail on
+   quota, never on rank. Re-check the tie once Neon serves reliably.
 4. **Gemini 4 Carbon** — *new* frontier on antigravity. Top Gemini tier (leads some indices).
 
 **Near-frontier** = the band right below: strong, cheaper, the everyday high-effort picks. Not gated;
