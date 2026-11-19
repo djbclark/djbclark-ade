@@ -6,8 +6,29 @@ import { realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { cli } from './retained-cli.mjs';
 import { validateRetainedDistribution } from './retained-daemon.mjs';
+
+// Data checks only: neither function creates an owner or qualifies a runtime.
+export function requireMetadataClientEntry(manifest) {
+  assert.ok(manifest.files.some((member) => member.path === 'client-code.mjs'),
+    'Verified client entry absent');
+}
+
+export async function observeMetadataAuthority(client, enclosing) {
+  const payload = await client.maintenanceStatus();
+  if (payload.error || !payload.result) throw new Error('Metadata authority request refused');
+  const status = payload.result;
+  assert.equal(status.authority?.qualified, true);
+  assert.equal(status.authority.serverId, enclosing.serverId);
+  assert.equal(status.authority.daemonIncarnation, enclosing.incarnation);
+  assert.equal(status.ready, true);
+  assert.equal(status.authority.features?.maintenanceReservationV1, true);
+  assert.equal(status.authority.features?.maintenancePluginOperationV1, true);
+  assert.equal(status.state, 'idle');
+  assert.equal(status.recoveryRequired, false);
+  assert.ok(Number.isSafeInteger(status.reservationGeneration) && status.reservationGeneration >= 0);
+  return status;
+}
 
 export async function runNativeAgentMetadata({root, home, manifestSha256, enclosing,
   workspaceId, cwd, agentTitle, expectedWindowName}) {
@@ -18,7 +39,8 @@ export async function runNativeAgentMetadata({root, home, manifestSha256, enclos
   for (const value of [workspaceId, agentTitle, expectedWindowName]) {
     assert.ok(typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 1024);
   }
-  await validateRetainedDistribution(root, manifestSha256);
+  const manifest = await validateRetainedDistribution(root, manifestSha256);
+  requireMetadataClientEntry(manifest);
   // Full sealed inventory and current namespace checks precede any import.
   const transport = await import(pathToFileURL(path.join(root, 'client-code.mjs')).href);
   assert.deepEqual(Object.keys(transport), ['connectToDaemon']);
@@ -33,23 +55,6 @@ export async function runNativeAgentMetadata({root, home, manifestSha256, enclos
       })]);
     } finally { clearTimeout(timer); }
   };
-  const observeAuthority = async () => {
-    const result = await cli(root, home, ['daemon', 'maintenance', 'status'], {timeoutMs: 15000});
-    assert.equal(result.code, 0);
-    let status;
-    try { status = JSON.parse(result.stdout); }
-    catch { throw new Error('Native metadata authority response is invalid'); }
-    assert.equal(status.authority?.qualified, true);
-    assert.equal(status.authority.serverId, enclosing.serverId);
-    assert.equal(status.authority.daemonIncarnation, enclosing.incarnation);
-    assert.equal(status.ready, true);
-    assert.equal(status.authority.features?.maintenanceReservationV1, true);
-    assert.equal(status.authority.features?.maintenancePluginOperationV1, true);
-    assert.equal(status.state, 'idle');
-    assert.equal(status.recoveryRequired, false);
-    return status;
-  };
-  const before = await observeAuthority();
   // Use the actual client's own connect timeout/cleanup, rather than racing
   // away and losing a connection handle that might be returned later.
   assert.equal(Object.hasOwn(process.env, 'PASEO_PASSWORD'), false);
@@ -59,6 +64,8 @@ export async function runNativeAgentMetadata({root, home, manifestSha256, enclos
   let failed;
   let result;
   try {
+    // This is the SAME reconnect:false public connection used for mutations.
+    const before = await bounded(() => observeMetadataAuthority(client, enclosing), 'Authority read timed out');
     const workspace = await bounded(() => client.findWorkspace(workspaceId), 'Workspace read timed out');
     assert.equal(workspace?.id, workspaceId);
     assert.equal(workspace.workspaceDirectory, cwd);
@@ -96,7 +103,7 @@ export async function runNativeAgentMetadata({root, home, manifestSha256, enclos
     const archived = await bounded(() => client.fetchAgent({agentId: created.id}), 'Archive readback timed out');
     assert.equal(archived.agent?.id, created.id);
     assert.ok(typeof archived.agent.archivedAt === 'string' && archived.agent.archivedAt.length > 0);
-    const after = await observeAuthority();
+    const after = await bounded(() => observeMetadataAuthority(client, enclosing), 'Authority readback timed out');
     assert.equal(after.reservationGeneration, before.reservationGeneration);
     result = {qualification: false, phase: 'native-agent-metadata-passed',
       agentId: created.id, workspaceId, mode: fetched.agent.currentModeId,

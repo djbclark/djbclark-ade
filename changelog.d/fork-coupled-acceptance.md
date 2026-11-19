@@ -13,3 +13,5 @@
 - Prepare a genuine retained public-client metadata component for actual lazy
   Claude creation, plugin mode/stamp, native title readback and archive. It does
   not qualify discovery, resume, claims, helpers or the complete runtime. (#0)
+- Require the public client entry in the verified payload inventory and check
+  maintenance authority on the same connection used for metadata mutations. (#0)
