@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "qualification": false,
   "repository": "djbclark/paseo",
-  "sourceCommit": "8033d78d7246ca99c1aefd8933db28cf67c18aab",
+  "sourceCommit": "06bc61dcecd645faccf61ca33fa830e0778fea53",
   "sourcePath": "packages/server/scripts/qualified-system-namespace.py",
-  "sha256": "ef061bcb2de359516a37279d394f19befae0ea351d816f2d2c520032b7f03fd7",
-  "size": 56756
+  "sha256": "25ea64e7a238c27931565d5d10faaef927cc85755e69811ee9dc492376178617",
+  "size": 57926
 }
