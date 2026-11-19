@@ -282,6 +282,10 @@ class PathClaimed(Exception):
     """create_claim: the path already has another owner's active claim (CLI exit 4)."""
 
 
+class ClaimRefused(ValueError):
+    """An explicit pre-mutation business refusal; legacy CLI ValueError handling still applies."""
+
+
 def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: str, repo_origin: str = "",
                owner_record: Optional[str] = None, owner_session: Optional[str] = None,
                owner_agent: str = "", owner_model: str = "", lead: Optional[str] = None,
@@ -289,15 +293,15 @@ def make_claim(*, id: str, path: str | os.PathLike[str], branch: str, base_sha: 
                inherited_dirt_patch: Optional[str] = None, ttl_hours: Optional[float] = DEFAULT_TTL_H) -> dict[str, Any]:
     """A complete, schema-v1 claim dict (state active). Does not write it. `ttl_hours` (None or 0: never) sets expires_at."""
     if not valid_id(id):
-        raise ValueError(f"invalid claim id {id!r}")
+        raise ClaimRefused(f"invalid claim id {id!r}")
     if role not in ROLES:
-        raise ValueError(f"invalid role {role!r}; one of {', '.join(ROLES)}")
+        raise ClaimRefused(f"invalid role {role!r}; one of {', '.join(ROLES)}")
     if ttl_hours is not None and (ttl_hours != ttl_hours or ttl_hours < 0 or ttl_hours > 24 * 366):
-        raise ValueError(f"invalid ttl {ttl_hours!r} hours (0 = never, at most a year)")
+        raise ClaimRefused(f"invalid ttl {ttl_hours!r} hours (0 = never, at most a year)")
     allow_ids = [a for a in allow]
     for a in allow_ids:
         if not valid_id(a):
-            raise ValueError(f"invalid id {a!r} in allow")
+            raise ClaimRefused(f"invalid id {a!r} in allow")
     return {
         "v": SCHEMA_VERSION, "id": id, "path": str(Path(path).resolve()), "repo_origin": repo_origin,
         "branch": branch, "base_sha": base_sha,
@@ -421,6 +425,80 @@ def list_claims(state: Optional[str] = None) -> list[dict[str, Any]]:
     return out
 
 
+def read_claim_registry_strict(*, max_records: int, max_bytes: int) -> list[dict[str, Any]]:
+    """Read every actual registry record without omissions or active filtering.
+
+    Selected bounded callers validate each returned v1 record before filtering.
+    Only an absent registry is empty; enumeration/open/read/JSON failures escape.
+    Counts and bytes apply to the records/data actually consumed, not a stat-size
+    estimate. Ordinary read_claim/list_claims deliberately remain tolerant.
+    """
+    if type(max_records) is not int or type(max_bytes) is not int or min(max_records, max_bytes) < 0:
+        raise ValueError("invalid strict registry limits")
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate claim field")
+            result[key] = value
+        return result
+
+    def constant(_value: str) -> None:
+        raise ValueError("nonfinite claim number")
+
+    def finite_float(value: str) -> float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("nonfinite claim number")
+        return number
+
+    try:
+        directory = os.open(claims_dir(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return []
+    try:
+        filenames: list[str] = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.endswith(".json") and not name.startswith("."):
+                    if not valid_id(name[:-5]):
+                        raise ValueError("invalid registry filename")
+                    filenames.append(name)
+                    if len(filenames) > max_records:
+                        raise RuntimeError("registry overflow")
+        records: list[dict[str, Any]] = []
+        consumed = 0
+        for name in sorted(filenames):
+            handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                if not stat.S_ISREG(os.fstat(handle).st_mode):
+                    raise ValueError("unsupported registry entry")
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(handle, min(65536, max_bytes - consumed + 1))
+                    if not chunk:
+                        break
+                    consumed += len(chunk)
+                    if consumed > max_bytes:
+                        raise RuntimeError("registry overflow")
+                    chunks.append(chunk)
+            finally:
+                os.close(handle)
+            data = json.loads(b"".join(chunks).decode("utf-8"), object_pairs_hook=unique,
+                              parse_constant=constant, parse_float=finite_float)
+            if not isinstance(data, dict) or data.get("id") != name[:-5]:
+                raise ValueError("invalid registry record identity")
+            # The original v1 format predates expiry. Preserve that documented
+            # absent-field default, but never repair malformed values/types here.
+            data.setdefault("expires_at", None)
+            records.append(data)
+        return records
+    finally:
+        os.close(directory)
+
+
 def _update_unlocked(claim_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     c = read_claim(claim_id)
     if c is None:
@@ -449,15 +527,15 @@ def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
     with _claims_lock():
         c = read_claim(claim_id)
         if c is None:
-            raise ValueError(f"no claim {claim_id!r}")
+            raise ClaimRefused(f"no claim {claim_id!r}")
         if expected_path is not None and not _same_path(c.get("path"), expected_path):
-            raise ValueError("claim path changed before binding owner")
+            raise ClaimRefused("claim path changed before binding owner")
         if not claim_state_active(c):
-            raise ValueError(f"claim {claim_id!r} is not active ({shown_state(c)})")
+            raise ClaimRefused(f"claim {claim_id!r} is not active ({shown_state(c)})")
         owner = dict(c.get("owner") if isinstance(c.get("owner"), dict) else {})
         existing_agent = owner.get("agent") if isinstance(owner.get("agent"), str) else ""
         if owner_agent is not None and existing_agent and existing_agent != owner_agent:
-            raise ValueError(
+            raise ClaimRefused(
                 f"claim {claim_id!r} already owned by {existing_agent!r}; "
                 f"refusing bind to {owner_agent!r}"
             )
@@ -545,13 +623,13 @@ def set_state(claim_id: str, state: str, *,
     PathClaimed; the same owner's older active record of that path is released.
     Optional expected_path checks the current association under this same lock."""
     if state not in STATES:
-        raise ValueError(f"invalid state {state!r}; one of {', '.join(STATES)}")
+        raise ClaimRefused(f"invalid state {state!r}; one of {', '.join(STATES)}")
     with _claims_lock():
         c = read_claim(claim_id)
         if c is None:
             return None
         if expected_path is not None and not _same_path(c.get("path"), expected_path):
-            raise ValueError("claim path changed before setting state")
+            raise ClaimRefused("claim path changed before setting state")
         if state == "active":
             mine = _owner_keys(c)
             older: list[str] = []

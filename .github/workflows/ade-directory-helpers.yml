@@ -23,7 +23,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.2
-      - name: Actual isolated Python and temporary filesystem operations (not native qualification)
+      - name: Actual isolated Python, strict registry reads and publication faults (not native qualification)
         run: >-
           uv run --with pytest python -m pytest
           tests/test_ade_directory_operations.py tests/test_ade_claims_bind_owner.py

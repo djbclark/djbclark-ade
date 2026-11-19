@@ -12,7 +12,6 @@ import json
 import math
 from pathlib import Path
 import re
-import stat
 import sys
 
 # -I omits the script directory; only this fixed retained sibling directory is
@@ -240,23 +239,13 @@ def _record(record: dict) -> None:
 
 
 def _active_claims() -> list:
-    # Bound the actual fixed registry before invoking its shared complete scan.
-    directory = claims.claims_dir()
-    total = count = 0
-    if directory.exists():
-        for path in directory.iterdir():
-            if path.suffix == ".json" and not path.name.startswith("."):
-                count += 1
-                entry = path.lstat()
-                if not stat.S_ISREG(entry.st_mode):
-                    raise RuntimeError("unsupported registry entry")
-                total += entry.st_size
-                if count > MAX_CLAIMS or total > MAX_OUTPUT:
-                    raise RuntimeError("registry overflow")
-    result = [{**c, "shown_state": claims.shown_state(c)} for c in claims.list_claims("active")]
+    records = claims.read_claim_registry_strict(max_records=MAX_CLAIMS, max_bytes=MAX_OUTPUT)
+    result = [{**c, "shown_state": claims.shown_state(c)} for c in records]
+    # Validate ALL actual records before selecting active ones. Unsupported or
+    # unreadable inactive history must not masquerade as a complete empty list.
     for record in result:
         _record(record)
-    return result
+    return [record for record in result if record["shown_state"] == "active"]
 
 
 def _result(status: int, output: object) -> dict:
@@ -291,7 +280,7 @@ def dispatch(envelope: object) -> dict:
             return _result(0, {"claimId": request["claimId"]})
         if op == "claim-release":
             if claims.set_state(request["claimId"], "released", expected_path=cwd) is None:
-                raise ValueError("missing claim")
+                raise claims.ClaimRefused("missing claim")
             return _result(0, {"claimId": request["claimId"]})
         if op == "claim-list":
             return _result(0, _active_claims())
@@ -309,9 +298,7 @@ def dispatch(envelope: object) -> dict:
         return _result(3, {"kind": "claim-exists", "diagnostic": "Claim id already exists."})
     except claims.PathClaimed:
         return _result(4, {"kind": "path-claimed", "diagnostic": "Workspace already claimed."})
-    except ValueError:
-        if op not in ("claim-new", "claim-bind-owner", "claim-release"):
-            raise
+    except claims.ClaimRefused:
         return _result(2, {"kind": "claim-refused", "diagnostic": "Claim operation refused."})
 
 

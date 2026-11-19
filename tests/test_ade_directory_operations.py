@@ -63,6 +63,22 @@ def run_process(world, data, *, raw=False, args=()):
                           capture_output=True, timeout=10, env=env)
 
 
+def run_fault_process(world, data, patch):
+    """CI-only fault injection around real shared phases; no production switch."""
+    script = ("import sys\nfrom pathlib import Path\n"
+              f"sys.path.insert(0, {str(ENTRY.parent)!r})\n"
+              "import ade_directory_operations as ops\n" + patch + "\nsys.exit(ops.main())\n")
+    return subprocess.run([sys.executable, "-I", "-S", "-c", script],
+                          input=json.dumps(data).encode(), capture_output=True, timeout=10,
+                          env={**os.environ, "ADE_STATE_DIR": str(world[2])})
+
+
+def assert_unknown_failure(process):
+    assert process.returncode == 1, process.stderr
+    assert process.stdout == b""
+    assert process.stderr == b"Directory operation failed.\n"
+
+
 def outcome(result, status=0):
     assert result["version"] == 1
     assert result["status"] == status
@@ -338,3 +354,170 @@ def test_isolated_process_status_matches_each_known_failure(world):
         process = run_process(world, request)
         assert process.returncode == code
         assert json.loads(process.stdout)["status"] == code
+
+
+@pytest.mark.parametrize("contents", [b"{", b"null", b"[]", b"\xff", b'{"x":NaN}',
+                                       b'{"x":1e999}', b'{"v":1,"v":1}'])
+def test_strict_list_actual_corrupt_record_never_becomes_empty(world, contents):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    path = claims.claim_file("claim-1")
+    path.write_bytes(contents)
+    assert_unknown_failure(run_process(world, envelope(world, "claim-list")))
+    # Preserve the deliberately tolerant ordinary CLI reader/list defaults.
+    if contents in (b"{", b"null", b"[]", b"\xff"):
+        assert claims.read_claim("claim-1") is None
+        assert claims.list_claims("active") == []
+    assert path.read_bytes() == contents
+
+
+def test_strict_list_actual_unreadable_record_is_not_absence(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    path = claims.claim_file("claim-1")
+    path.chmod(0)
+    try:
+        assert_unknown_failure(run_process(world, envelope(world, "claim-list")))
+    finally:
+        path.chmod(0o600)
+
+
+def test_strict_list_unreadable_directory_is_not_absent_registry(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    directory = claims.claims_dir()
+    directory.chmod(0)
+    try:
+        assert_unknown_failure(run_process(world, envelope(world, "claim-list")))
+    finally:
+        directory.chmod(0o700)
+
+
+@pytest.mark.parametrize("directory_exists", [False, True])
+def test_strict_list_genuine_absent_and_empty_registry_controls(world, directory_exists):
+    if directory_exists:
+        claims.claims_dir().mkdir(parents=True)
+    process = run_process(world, envelope(world, "claim-list"))
+    assert process.returncode == 0, process.stderr
+    assert outcome(json.loads(process.stdout)) == []
+
+
+def test_strict_list_valid_inactive_and_legacy_no_expiry_controls(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    claims.set_state("claim-1", "released")
+    record = claims.read_claim("claim-1")
+    del record["expires_at"]  # Actual pre-expiry schema-v1 history.
+    claims.write_claim(record)
+    process = run_process(world, envelope(world, "claim-list"))
+    assert process.returncode == 0, process.stderr
+    assert outcome(json.loads(process.stdout)) == []
+    strict = claims.read_claim_registry_strict(max_records=4096, max_bytes=ops.MAX_OUTPUT)
+    assert len(strict) == 1 and strict[0]["expires_at"] is None
+
+
+@pytest.mark.parametrize("field,value", [("futureAuthority", True), ("v", 2),
+                                        ("owner", {"record": None}), ("expires_at", 7)])
+def test_strict_list_validates_actual_inactive_records_before_filter(world, field, value):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    claims.set_state("claim-1", "released")
+    record = claims.read_claim("claim-1")
+    record[field] = value
+    claims.write_claim(record)
+    assert_unknown_failure(run_process(world, envelope(world, "claim-list")))
+    assert claims.list_claims("active") == []  # Ordinary behavior unchanged.
+
+
+def test_strict_shared_scan_actual_consumed_bytes_not_earlier_stat_size(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    patch = '''original = ops.claims.os.fstat
+changed = False
+def after_stat(fd):
+    global changed
+    result = original(fd)
+    if not changed:
+        changed = True
+        ops.claims.claim_file("claim-1").write_bytes(b" " * (ops.MAX_OUTPUT + 1))
+    return result
+ops.claims.os.fstat = after_stat
+'''
+    assert_unknown_failure(run_fault_process(world, envelope(world, "claim-list"), patch))
+    assert claims.claim_file("claim-1").stat().st_size == ops.MAX_OUTPUT + 1
+
+
+def test_strict_shared_scan_read_failure_after_real_fstat(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    patch = '''original_stat = ops.claims.os.fstat
+original_read = ops.claims.os.read
+seen = set()
+def after_stat(fd):
+    result = original_stat(fd)
+    seen.add(fd)
+    return result
+def denied_read(fd, count):
+    if fd in seen:
+        raise PermissionError("controlled post-stat read failure")
+    return original_read(fd, count)
+ops.claims.os.fstat = after_stat
+ops.claims.os.read = denied_read
+'''
+    assert_unknown_failure(run_fault_process(world, envelope(world, "claim-list"), patch))
+    assert claims.read_claim("claim-1")["state"] == "active"
+
+
+def test_strict_shared_scan_enumeration_failure_after_real_entry(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    patch = '''original = ops.claims.os.scandir
+class BrokenScan:
+    def __init__(self, directory): self.scan = original(directory)
+    def __enter__(self): return self
+    def __exit__(self, *args): self.scan.close()
+    def __iter__(self):
+        for entry in self.scan:
+            yield entry
+            raise OSError("controlled enumeration failure")
+ops.claims.os.scandir = BrokenScan
+'''
+    assert_unknown_failure(run_fault_process(world, envelope(world, "claim-list"), patch))
+
+
+def test_strict_shared_scan_record_disappears_after_enumeration_is_not_empty(world):
+    outcome(ops.dispatch(envelope(world, "claim-new")))
+    patch = '''original = ops.claims.os.open
+def disappeared(path, flags, *args, **kwargs):
+    if path == "claim-1.json":
+        ops.claims.claim_file("claim-1").unlink()
+    return original(path, flags, *args, **kwargs)
+ops.claims.os.open = disappeared
+'''
+    assert_unknown_failure(run_fault_process(world, envelope(world, "claim-list"), patch))
+
+
+@pytest.mark.parametrize("same_owner_predecessor", [False, True])
+def test_real_create_pointer_valueerror_after_publication_remains_unknown(world, same_owner_predecessor):
+    if same_owner_predecessor:
+        outcome(ops.dispatch(envelope(world, "claim-new", ownerRecord="same-owner")))
+    request = envelope(world, "claim-new", claimId="published", ownerRecord="same-owner")
+    patch = f'''original = ops.claims.write_pointer
+def after_publication(workdir, claim_id):
+    assert ops.claims.read_claim(claim_id)["state"] == "active"
+    if {same_owner_predecessor!r}:
+        assert ops.claims.read_claim("claim-1")["state"] == "released"
+    Path(workdir, ".git").rename(Path(workdir, ".git.retired"))
+    return original(workdir, claim_id)
+ops.claims.write_pointer = after_publication
+'''
+    assert_unknown_failure(run_fault_process(world, request, patch))
+    assert claims.read_claim("published")["state"] == "active"
+    assert not (world[0] / ".git").exists()
+    if same_owner_predecessor:
+        assert claims.read_claim("claim-1")["state"] == "released"
+        assert (world[0] / ".git.retired/ade-claim").read_text() == "claim-1\n"
+    else:
+        assert not (world[0] / ".git.retired/ade-claim").exists()
+
+
+def test_only_shared_explicit_pre_mutation_refusal_is_a_business_outcome(world, monkeypatch):
+    assert issubclass(claims.ClaimRefused, ValueError)
+    for exception in [ValueError("post-publication"), OSError("write failure")]:
+        def fail(*args, **kwargs):
+            raise exception
+        monkeypatch.setattr(claims, "create_claim", fail)
+        with pytest.raises(type(exception)):
+            ops.dispatch(envelope(world, "claim-new"))
