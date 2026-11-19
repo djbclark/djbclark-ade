@@ -267,7 +267,7 @@ class Custody:
         self._validate(s, p)
         return p, now, store, obs, s
 
-    def _validate(self, s, p):
+    def _validate(self, s, p, *, current=True):
         require(type(s) is dict and set(s) == set(genesis(p, 0)), "CTRL schema")
         require(type(s["schema"]) is int and s["schema"] == 1 and s["identity"] == p.identity
                 and type(s["generation"]) is int and s["generation"] == p.generation and s["policy"] == p.policy_digest
@@ -275,8 +275,9 @@ class Custody:
         for k in ("sequence", "mutations", "lifetime", "control_horizon"):
             natural(s[k], k)
         require(s["control_horizon"] <= p.maximum_horizon, "control term liability bound")
-        require(s["sequence"] >= p.minimum_sequence and s["mutations"] <= p.max_mutations,
-                "rollback floor/control pool")
+        if current:
+            require(s["sequence"] >= p.minimum_sequence, "current rollback floor")
+        require(s["mutations"] <= p.max_mutations, "control pool")
         require(type(s["ledger"]) is dict and len(s["ledger"]) <= p.max_members * p.max_cycles,
                 "bounded issuance ledger")
         require(type(s["controls"]) is list and len(s["controls"]) <= p.max_mutations, "control census cap")
@@ -357,16 +358,23 @@ class Custody:
             for observed in job["progress"].values():
                 natural(observed, "progress clock")
 
-    def _stable(self, p, store, obs, purpose, closure=None):
+    def _authorized(self, p, purpose, closure):
         require(self.authority.current() == p and self.authority.permits(purpose, closure) is True,
                 "authority/revocation changed")
+        if closure is not None and purpose in {"intake", "upload", "accept", "revalidate"}:
+            require(self.authority.permits("screened", closure) is True,
+                    "exact-closure screening revoked")
+
+    def _stable(self, p, store, obs, purpose, closure=None):
+        self._authorized(p, purpose, closure)
         latest = store.current()
         latest.protected(p, obs.until, p.max_control_bytes)
         require(latest.ref == obs.ref and latest.etag == obs.etag, "current CTRL changed")
-        require(self.authority.current() == p and self.authority.permits(purpose, closure) is True,
-                "authority/revocation changed during final read")
+        self._validate(decode(latest.body), p)
+        self._authorized(p, purpose, closure)
 
-    def _commit(self, p, now, store, obs, s, purpose, operation, closure=None, final_check=None):
+    def _commit(self, p, now, store, obs, s, purpose, operation, closure=None,
+                final_check=None, before_serialize=None):
         self._stable(p, store, obs, purpose, closure)
         require(s["mutations"] < p.max_mutations, "control preservation pool exhausted")
         s["sequence"] += 1
@@ -379,13 +387,22 @@ class Custody:
             if record is not None:
                 horizons.append(record["cycles"][-1]["horizon"])
         s["control_horizon"] = max(horizons)
+        if before_serialize is not None:
+            before_serialize()
         self._validate(s, p)
         data = canonical(s)
         require(len(data) <= p.max_control_bytes, "bounded catalogue/control shard full; intake HOLD")
         # A lost reply has no refund/retry path. Refetch current CTRL on next invocation.
         if final_check is not None:
             final_check()
+        self._authorized(p, purpose, closure)
         store.cas(obs, data, s["control_horizon"])
+
+    def _cycle_boundary(self, p, cycle, started, horizon=None):
+        actual = natural(self.clock(), "operation final clock")
+        require(started <= actual <= cycle["deadline"], "cycle expired during final read")
+        require((cycle["horizon"] if horizon is None else horizon) >= actual + p.floor_seconds,
+                "operation final protection floor")
 
     def reserve(self, ticket, members, horizon):
         """PRE-upload screened exact-byte allowlist from protected caller, not paths.
@@ -419,7 +436,8 @@ class Custody:
             s["annual"][str(year)] = s["annual"].get(str(year), 0) + charge
         s["proposal"] = dict(closure=closure, members=[x[0] for x in members], phase="RESERVED",
                 cycles=[dict(id=ticket, t0=now, horizon=horizon, deadline=now + p.cycle_seconds)], origin=None)
-        self._commit(p, now, st, ob, s, "intake", ticket, closure)
+        self._commit(p, now, st, ob, s, "intake", ticket, closure,
+                     final_check=lambda: self._cycle_boundary(p, s["proposal"]["cycles"][-1], now))
         return closure
 
     def upload(self, atom, body):
@@ -433,6 +451,8 @@ class Custody:
         require(type(body) is bytes and len(body) == a["size"] and digest(body) == a["sha256"], "exact screened bytes")
         require(self.authority.permits("screened", q["closure"]) is True, "screening revoked")
         self._stable(p, st, ob, "upload", q["closure"])
+        self._cycle_boundary(p, q["cycles"][-1], now, a["horizon"])
+        self._authorized(p, "upload", q["closure"])
         # Key is uniquely durably issued; IfNoneMatch suppresses duplicate writes.
         st.put(a["key"], body, a["horizon"])
         # Even a successful PUT response is not acceptance or a ledger refund.
@@ -454,7 +474,8 @@ class Custody:
         require(all(s["ledger"][a]["ref"] is not None for a in q["members"]), "unresolved issuance")
         require(now <= q["cycles"][-1]["deadline"], "expired cycle")
         q["phase"] = "READY"
-        self._commit(p, now, st, ob, s, "intake", "ready", q["closure"])
+        self._commit(p, now, st, ob, s, "intake", "ready", q["closure"],
+                     final_check=lambda: self._cycle_boundary(p, q["cycles"][-1], now))
 
     def _verify_record(self, p, now, st, s, q, baseline=False):
         require(q is not None and q["phase"] == ("ACCEPTED" if baseline else "READY"), "phase pending/held")
@@ -469,7 +490,7 @@ class Custody:
             origin = st.read(Ref.parse(q["origin"]["frontier"], p))
             untils.append(origin.protected(p, horizon, p.max_control_bytes).until)
             prior = decode(origin.body)
-            self._validate(prior, p)
+            self._validate(prior, p, current=False)
             expected = copy.deepcopy(q)
             expected["phase"], expected["origin"] = "READY", None
             require(prior["proposal"] == expected and c["t0"] <= q["origin"]["observed_at"] <= min(c["deadline"], now),
@@ -563,7 +584,8 @@ class Custody:
         horizon = max(q["cycles"][-1]["horizon"], now + p.floor_seconds)
         q["cycles"].append(dict(id=cycle, t0=now, horizon=horizon, deadline=now + p.cycle_seconds))
         # Immutable old cycle and all liabilities retained; renewal supplies missing dates.
-        self._commit(p, now, st, ob, s, "revalidate", cycle, q["closure"])
+        self._commit(p, now, st, ob, s, "revalidate", cycle, q["closure"],
+                     final_check=lambda: self._cycle_boundary(p, q["cycles"][-1], now))
 
     def incident(self, identifier):
         p, now, st, ob, s = self._open("preserve")
@@ -591,12 +613,13 @@ class Custody:
         source_ref = Ref.parse(job["source"], p)
         source = st.read(source_ref).protected(p, now, p.max_control_bytes)
         prior = decode(source.body)
-        self._validate(prior, p)
+        self._validate(prior, p, current=False)
         expected = {"atom:" + a: dict(atom=a, ref=None) for a in prior["ledger"]}
         for r in prior["controls"] + [source_ref.wire()]:
             expected["ctrl:" + digest(canonical(r))] = dict(atom=None, ref=r)
         require(job["cutoff"] == prior["sequence"] and job["census"] == expected,
                 "fixed census does not cover its exact protected source frontier")
+        return source.until
 
     def _renew_ref(self, member, s, p):
         if member["atom"] is None:
@@ -624,20 +647,43 @@ class Custody:
         p, now, st, ob, s = self._open("preserve")
         j = s["renewals"].get(renewal)
         require(j is not None and not j["done"] and now < j["due"], "renewal finish/date")
-        self._verify_census(j, s, p, st, now)
+        source_until = self._verify_census(j, s, p, st, now)
         require(set(j["progress"]) == set(j["census"]), "incomplete fixed census")
         cap = max(p.max_object_bytes, p.max_control_bytes)
+        untils = [source_until, ob.until]
         for item, member in j["census"].items():
             require(0 <= now - j["progress"][item] <= p.proof_seconds, "expired census observation")
-            st.read(self._renew_ref(member, s, p)).protected(p, j["target"], cap)
+            untils.append(st.read(self._renew_ref(member, s, p)).protected(p, j["target"], cap).until)
         # Latest CTRL carries complete issuance delta through this closing watermark.
         # Post-cutoff/newborn atoms retain their own immutable horizon and liability.
         for atom, a in s["ledger"].items():
             if "atom:" + atom not in j["census"]:
                 require(a["horizon"] >= a["issued"] + p.floor_seconds, "newborn floor")
+        last_clock = [now]
+
+        def check_finish_time():
+            actual = natural(self.clock(), "renewal final clock")
+            require(last_clock[0] <= actual, "renewal clock moved backwards")
+            last_clock[0] = actual
+            require(actual < j["due"], "original renewal deadline missed during verification")
+            require(actual - now <= p.proof_seconds, "expired renewal verification")
+            require(all(0 <= actual - t <= p.proof_seconds for t in j["progress"].values()),
+                    "expired census observation")
+            require(min(untils) >= actual + p.floor_seconds
+                    and j["target"] >= actual + p.floor_seconds, "renewal final protection floor")
+            return actual
+
+        # Transport may cross the original due, proof age or protection floor.
+        # Sample after member reads, after final-current transport, and at CAS.
+        check_finish_time()
         j["done"] = True
-        j["completed_at"] = now
-        self._commit(p, now, st, ob, s, "preserve", "renew-finish")
+
+        def record_completion():
+            # This is the actual pre-CAS proof observation, not terminal commit time.
+            j["completed_at"] = check_finish_time()
+
+        self._commit(p, now, st, ob, s, "preserve", "renew-finish",
+                     before_serialize=record_completion, final_check=check_finish_time)
 
 
 class S3Store:

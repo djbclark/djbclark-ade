@@ -717,3 +717,237 @@ def test_real_sdk_custom_endpoint_and_unbounded_timeout_refused():
     slow.close()
     writer.close()
     reader.close()
+
+
+# Exact366d adversary repairs: independent mutable purposes, fresh renewal time,
+# and historical dependencies versus current anti-rollback authority.
+def read_phase(store, phase, change):
+    original, calls = store.current, [0]
+    def current():
+        result = original()
+        calls[0] += 1
+        if calls[0] == phase:
+            change()
+        return result
+    store.current = current
+    return calls
+
+
+def staged_operation(env, operation):
+    c, a, st, clock = env
+    if operation == "reserve":
+        members = packet()
+        closure = m.closure_id([dict(atom=atom, kind=kind, sha256=m.digest(body), size=len(body))
+                               for atom, kind, body in members])
+        return closure, lambda: c.reserve("t", members, 5000)
+    if operation == "upload":
+        c.reserve("t", packet(), 5000)
+        return st.state()["proposal"]["closure"], lambda: c.upload("data", packet()[0][2])
+    if operation == "ready":
+        c.reserve("t", packet(), 5000)
+        for atom, _, data in packet():
+            c.upload(atom, data)
+            c.reconcile(atom)
+        return st.state()["proposal"]["closure"], c.ready
+    closure = prepared(env)
+    if operation == "revalidate":
+        clock[0] += 25
+        return closure, lambda: c.revalidate("new-cycle")
+    assert operation == "accept"
+    return closure, c.accept
+
+
+@pytest.mark.parametrize("operation,phase", [("reserve", 2), ("upload", 2), ("ready", 2),
+    ("accept", 3), ("accept", 4), ("revalidate", 2)])
+def test_screened_only_revocation_at_exact_final_read_no_new_write(env, operation, phase):
+    c, a, st, clock = env
+    closure, perform = staged_operation(env, operation)
+    # Only this closure's SCREENED purpose changes. Ordinary write authority and
+    # Policy stay valid, unlike the older whole-closure revocation regression.
+    allowed = a.permits
+    revoked = [False]
+    a.permits = lambda purpose, target: allowed(purpose, target) and not (
+        revoked[0] and purpose == "screened" and target == closure)
+    before, version = st.state(), st.current().ref
+    puts, cases = st.calls.count("put"), st.calls.count("cas")
+    reads = read_phase(st, phase, lambda: revoked.__setitem__(0, True))
+    with pytest.raises(m.Hold, match="screening"):
+        perform()
+    assert reads[0] == phase and a.current() == policy()
+    assert a.permits("upload", closure) and a.permits("accept", closure)
+    assert st.calls.count("put") == puts and st.calls.count("cas") == cases
+    assert st.state() == before and st.current().ref == version
+
+
+def test_unrelated_screening_revocation_does_not_block_exact_authorized_packet(env):
+    c, a, st, clock = env
+    closure, perform = staged_operation(env, "upload")
+    allowed = a.permits
+    revoked = [False]
+    a.permits = lambda purpose, target: allowed(purpose, target) and not (
+        revoked[0] and purpose == "screened" and target == "c" * 64)
+    read_phase(st, 2, lambda: revoked.__setitem__(0, True))
+    puts = st.calls.count("put")
+    perform()
+    assert st.calls.count("put") == puts + 1 and a.permits("screened", closure)
+
+
+@pytest.mark.parametrize("operation", ["reserve", "upload", "ready"])
+def test_cycle_expires_during_final_read_without_new_write(env, operation):
+    c, a, st, clock = env
+    _, perform = staged_operation(env, operation)
+    before = st.state()
+    puts, cases = st.calls.count("put"), st.calls.count("cas")
+    read_phase(st, 2, lambda: clock.__setitem__(0, clock[0] + 25))
+    with pytest.raises(m.Hold, match="cycle expired"):
+        perform()
+    assert st.state() == before
+    assert st.calls.count("put") == puts and st.calls.count("cas") == cases
+
+
+def progressed_renewal(env, at=1000, target=6000):
+    c, a, st, clock = env
+    prepared(env)
+    c.accept()
+    c.renew_begin("r", target, 1050)
+    clock[0] = at
+    for item in st.state()["renewals"]["r"]["census"]:
+        c.renew_item("r", item)
+    return copy.deepcopy(st.state()["renewals"]["r"])
+
+
+@pytest.mark.parametrize("phase", ["member", "final-current", "commit"])
+@pytest.mark.parametrize("boundary", ["due", "progress-age", "floor", "backward"])
+def test_renew_finish_resamples_all_temporal_predicates_no_progress_or_q_loss(env, monkeypatch, phase, boundary):
+    c, a, st, clock = env
+    start, late, target = {
+        "due": (1049, 1051, 6000),
+        "progress-age": (1000, 1011, 6000),
+        "floor": (1009, 1011, 1110),
+        "backward": (1000, 999, 6000),
+    }[boundary]
+    progressed_renewal(env, start, target)
+    before, version = st.state(), st.current().ref
+    cases = st.calls.count("cas")
+    if phase == "member":
+        original, reads = st.read, [0]
+        def read(ref):
+            result = original(ref)
+            reads[0] += 1
+            if reads[0] == 2:  # fixed source first, then a genuine census member
+                clock[0] = late
+            return result
+        st.read = read
+    elif phase == "final-current":
+        read_phase(st, 2, lambda: clock.__setitem__(0, late))
+    else:
+        original = m.canonical
+        def serialize(value):
+            result = original(value)
+            if type(value) is dict and value.get("renewals", {}).get("r", {}).get("done") is True:
+                clock[0] = late
+            return result
+        monkeypatch.setattr(m, "canonical", serialize)
+    with pytest.raises(m.Hold):
+        c.renew_finish("r")
+    assert st.state() == before and st.current().ref == version
+    assert st.calls.count("cas") == cases
+    assert not st.state()["renewals"]["r"]["done"]
+    assert st.state()["renewals"]["r"]["due"] == 1050
+
+
+@pytest.mark.parametrize("phase", ["member", "final-current"])
+def test_timely_renewal_records_actual_post_transport_completion(env, phase):
+    c, a, st, clock = env
+    original_job = progressed_renewal(env)
+    if phase == "member":
+        original, reads = st.read, [0]
+        def read(ref):
+            result = original(ref)
+            reads[0] += 1
+            if reads[0] == 2:
+                clock[0] = 1001
+            return result
+        st.read = read
+    else:
+        read_phase(st, 2, lambda: clock.__setitem__(0, 1001))
+    c.renew_finish("r")
+    job = st.state()["renewals"]["r"]
+    assert job["done"] and job["completed_at"] == 1001
+    assert (job["root"], job["cutoff"], job["due"], job["progress"]) == (
+        original_job["root"], original_job["cutoff"], original_job["due"], original_job["progress"])
+    assert c.resolve_current().baseline == "ACCEPTED"
+
+
+def test_advanced_current_floor_preserves_exact_historical_ready_origin(env):
+    c, a, st, clock = env
+    prepared(env)
+    c.accept()
+    before = st.state()
+    origin = m.Ref.parse(before["baseline"]["origin"]["frontier"], a.p)
+    assert m.decode(st.read(origin).body)["sequence"] < before["sequence"]
+    a.p = replace(a.p, minimum_sequence=before["sequence"])
+    assert c.resolve_current().baseline == "ACCEPTED"
+    assert st.state() == before
+    # The same historical object is still NOT an acceptable CURRENT frontier.
+    st.heads[a.p.ctrl_key] = st.read(origin)
+    assert c.resolve_current().baseline == "HOLD"
+    with pytest.raises(m.Hold, match="current rollback floor"):
+        c.incident("stale-current")
+
+
+def test_advanced_current_floor_allows_existing_fixed_census_completion(env):
+    c, a, st, clock = env
+    prepared(env)
+    c.accept()
+    c.renew_begin("r", 6000, 1050)
+    before = copy.deepcopy(st.state()["renewals"]["r"])
+    a.p = replace(a.p, minimum_sequence=st.state()["sequence"])
+    assert before["cutoff"] < a.p.minimum_sequence
+    for item in before["census"]:
+        c.renew_item("r", item)
+    c.renew_finish("r")
+    job = st.state()["renewals"]["r"]
+    assert job["done"] and (job["source"], job["root"], job["cutoff"]) == (
+        before["source"], before["root"], before["cutoff"])
+    assert c.resolve_current().baseline == "ACCEPTED"
+
+
+@pytest.mark.parametrize("historical", ["origin", "census"])
+@pytest.mark.parametrize("field,value", [("identity", "wrong-enrollment"), ("generation", 2),
+    ("contract", "e" * 64), ("policy", "f" * 64)])
+def test_floor_exception_keeps_historical_enrollment_generation_and_contract_strict(env, historical, field, value):
+    c, a, st, clock = env
+    prepared(env)
+    c.accept()
+    if historical == "census":
+        c.renew_begin("r", 6000, 1050)
+    state = st.state()
+    pinned = state["baseline"]["origin"]["frontier"] if historical == "origin" else state["renewals"]["r"]["source"]
+    prior = m.decode(st.read(m.Ref.parse(pinned, a.p)).body)
+    prior[field] = value
+    # Create independently exact/protected bytes; shape/binding must still reject.
+    wrong = st._new(a.p.ctrl_key, m.canonical(prior), 10000).ref.wire()
+    if historical == "origin":
+        state["baseline"]["origin"]["frontier"] = wrong
+    else:
+        state["renewals"]["r"]["source"] = wrong
+    st._new(a.p.ctrl_key, m.canonical(state), 10000)
+    a.p = replace(a.p, minimum_sequence=state["sequence"])
+    if historical == "origin":
+        assert c.resolve_current().baseline == "HOLD"
+    else:
+        with pytest.raises(m.Hold, match="enrollment binding"):
+            c.renew_finish("r")
+
+
+def test_floor_exception_never_substitutes_wrong_exact_history_bytes(env):
+    c, a, st, clock = env
+    progressed_renewal(env)
+    a.p = replace(a.p, minimum_sequence=st.state()["sequence"])
+    source = m.Ref.parse(st.state()["renewals"]["r"]["source"], a.p)
+    st.change_observation(source, body=b"different bytes")
+    before = st.state()
+    with pytest.raises(m.Hold, match="exact bytes"):
+        c.renew_finish("r")
+    assert st.state() == before

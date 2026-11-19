@@ -48,7 +48,11 @@ profile is accepted by a shipped facade.
 
 The current CTRL has separate baseline A, proposal P, issuance/liability ledger,
 control ancestry catalogue, immutable renewal censuses and incident history.
-One unresolved proposal is the durable intake lease. Every transition reads the
+One unresolved proposal is the durable intake lease. Final operation authorization
+rechecks the separate exact-closure screened purpose after the current-CTRL read
+and immediately before a new upload/CAS. An unchanged Policy or ordinary upload/
+accept permission does not preserve a revoked screening grant. Current cycle and
+protection-floor predicates are resampled at the write boundary too. Every transition reads the
 current protected CTRL and authority, validates/recomputes liability, rereads
 current CTRL/authority, and uses IfMatch on its exact ETag. A CAS conflict or an
 unknown response requires reconciliation from current CTRL. There is no blind
@@ -86,7 +90,12 @@ clock/floor/cycle/proof window are checked after transport, so a slow read canno
 backdate acceptance or turn a final-read revocation into a successful result. SDK/transport/malformed failures return
 HOLD. Baseline and proposal are independently reported; a failed latest proposal
 cannot erase an otherwise valid retained baseline. A baseline is reverified and
-must name its exact protected READY origin. Its prior 24-hour proposal window is
+must name its exact protected READY origin. The protected minimum-sequence floor
+applies to CURRENT discovery/reconciliation, not to an exact immutable historical
+origin or fixed-census source. Historical bodies still require all schema,
+identity/generation/policy/contract, exact-byte/protection and origin/census link
+checks. Advancing the current floor cannot manufacture a replacement historical
+origin, and an old exact body cannot substitute for CURRENT. Its prior 24-hour proposal window is
 not reapplied to long-term baseline use. The enrolled ongoing floor and current
 revocation/protection rules still apply.
 
@@ -132,6 +141,13 @@ already in the original issuance census stays in that census. The final CAS
 uses the latest complete ledger as its explicit delta watermark, preserves all
 newborn atoms and unrelated reservations, and closes only if every original
 member has fresh actual protection and the original due has not passed.
+Finish resamples monotone trusted time after census/member transport, after the
+final current read and at commit. Original due, progress/proof age and applicable
+protection floors must still hold. `completed_at` is the actual completed pre-CAS
+proof observation, not the entry clock and not a provider terminal-commit-time
+certificate. The final current reader must still verify the actual terminal
+version; an in-flight CAS response cannot fabricate a timely terminal observation.
+A refused finish preserves all progress, due, census and liability.
 An expired observation may be refreshed by the same progress operation; the
 original deadline never moves. Missing the original due holds admission and
 requires an independently authorized incident/repair policy; the library cannot
