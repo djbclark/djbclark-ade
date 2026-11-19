@@ -530,8 +530,8 @@ def forgejo_remote(top):
     return next((ln.split()[1] for ln in r.stdout.splitlines() if "forgejo" in ln), "")
 
 
-BG_REAL = os.path.realpath(HOME / "ops/site-djbclark/bin/bg")
-BG_PATH = re.compile(r"(^|/)site-[^/]+/bin/bg$")
+BG_REAL = os.path.realpath(HOME / "ops/site-djbclark/bin/bgrun")
+BG_PATH = re.compile(r"(^|/)site-[^/]+/bin/bg(?:run)?$")
 SHELLS = {"bash", "sh", "zsh", "env"}
 
 
@@ -570,18 +570,18 @@ def proc_cwds(pids):
 
 
 def bg_args(cmd):
-    """The words after `bg` when `cmd` is a run of ops/site-*/bin/bg (the script or the interpreter running it),
+    """The words after `bgrun` (or transitional `bg`) when `cmd` is a run of ops/site-*/bin/bgrun (the script or the interpreter running it),
     else None."""
     words = cmd.split()
     for i, w in enumerate(words[:4]):
-        if w.endswith("/bin/bg") and (BG_PATH.search(w) or os.path.realpath(w) == BG_REAL) and (
+        if w.endswith(("/bin/bgrun", "/bin/bg")) and (BG_PATH.search(w) or os.path.realpath(w) == BG_REAL) and (
                 i == 0 or os.path.basename(words[i - 1]) in SHELLS or words[i - 1].startswith("-")):
             return words[i + 1:]
     return None
 
 
 def bg_rule(args):
-    """Which of bg's `ci`-mode exceptions (`ci_release`, `ci_targeted` in site-djbclark/bin/bg) these arguments
+    """Which of bg's `ci`-mode exceptions (`ci_release`, `ci_targeted` in site-djbclark/bin/bgrun) these arguments
     match; '' when neither. A cheap re-reading of those rules, so a hint, not a verdict."""
     if "--local-tests" not in args:
         for i, a in enumerate(args):
@@ -824,7 +824,7 @@ Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {l
    wrapper that pushes `ci/run/<slug>` to free GitHub runners; Forgejo/Hyades only for MIT/SIPB work).
 3. Pushing branches to a repo djbclark does not own, or creating a Forgejo repo, is outward-facing: ask
    djbclark first (one AskUserQuestion, or hermes-ping if no one is watching your session). Light work that
-   cannot move (a single small test file) goes through `~/ops/site-private/bin/bg` instead.
+   cannot move (a single small test file) goes through `~/ops/site-private/bin/bgrun` instead.
 {step4}
 5. If you are a fresh agent dispatched on this brief, the session that ran the work is gone: djbclark
    dispatched you after agreeing to a CI copy, so steps 2-4 are yours.

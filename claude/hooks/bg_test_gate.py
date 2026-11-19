@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """PreToolUse (Bash): deny a pytest / tox / nox / run_tests*.py / swift build|test|run /
-xcodebuild command that is not run through ~/ops/site-private/bin/bg.
+xcodebuild command that is not run through ~/ops/site-private/bin/bgrun.
 
 2026-10-13: a bare `swift test --filter X` ran one swift-frontend per core (8 on 8 cores, up to
 3.5 GB each) and took the load to 180 with swap full; bg now slots and caps swift/xcodebuild.
 
 Why (2026-10-08): one session ran a project's full pytest suite directly, with a runner
 sized by os.cpu_count() (8 workers, each spawning children). The load average went from
-17 to 220 and every other session starved. bg caps parallelism (PYTHON_CPU_COUNT and
+17 to 220 and every other session starved. bgrun caps parallelism (PYTHON_CPU_COUNT and
 friends), runs at utility QoS and takes one of two machine-wide test slots.
 
 Allowed without bg: --version/--help/--collect-only, anything already starting with bg,
@@ -20,7 +20,7 @@ import os
 import re
 import sys
 
-BG = "~/ops/site-private/bin/bg"
+BG = "~/ops/site-private/bin/bgrun"
 
 try:
     data = json.load(sys.stdin)
@@ -61,7 +61,7 @@ SEGMENT = re.compile(
     r"(?:\S*python[\d.]*\s+(?:-\S+\s+)*(?:-m\s+)?)?"
     r"(?:\S*/)?" + TEST_WORD + r"(?=\s|$)"
 )
-BG_PREFIX = re.compile(r"(?:^|[;&|(]\s*|\s)(?:\S*/)?bgb?\s")
+BG_PREFIX = re.compile(r"(?:^|[;&|(]\s*|\s)(?:\S*/)?(?:bg(?:run)?|bgb)\s")
 SAFE = re.compile(r"(?:^|\s)(?:--version|-V|--help|-h|--collect-only|--co)(?:\s|$)")
 
 try:
@@ -76,8 +76,8 @@ try:
         ):
             continue
         reason = (
-            f"Tests run through bg, not bare: {BG} <your command> (bare `bg` is the shell "
-            "job-control builtin, so use the full path). bg caps parallelism, runs at utility "
+            f"Tests run through bgrun, not bare: {BG} <your command> (bare `bg` is the shell "
+            "job-control builtin, so use the full path). bgrun caps parallelism, runs at utility "
             "QoS and takes one of two machine-wide test slots; a bare run of a full suite sent "
             "the load average to 220 on 2026-10-08. Run the changed files first (--lf -x); run "
             "the full suite only when asked."

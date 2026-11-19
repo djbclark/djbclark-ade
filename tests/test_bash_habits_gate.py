@@ -587,6 +587,7 @@ def test_garbage_input_fails_open():
     "env GH_PAGER= gh pr checks 5 --watch",
     "nohup gh run watch 9 > w.log 2>&1 &",
     "/opt/homebrew/bin/gh run watch 9",
+    "~/ops/site-private-djbclark/bin/bgrun gh run watch 9",
     "~/ops/site-private-djbclark/bin/bg gh run watch 9",
     "rtk gh run watch 9",
     "if true; then gh run watch 9; fi",

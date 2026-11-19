@@ -47,11 +47,13 @@ export default {
         await check("rtk test cargo test",false);
         await check("rtk bypass cargo build --release",false);
         await check("rtk run -c 'cargo build --release'",false);
-        await check("$HOME/ops/site-private/bin/bg cargo build --release",true);
-        await check("~/ops/site-private/bin/bg cargo test",true);
+        await check("$HOME/ops/site-private/bin/bgrun cargo build --release",true);
+        await check("~/ops/site-private/bin/bgrun cargo test",true);
         await check("cargo --version",true);
         await check("echo 'cargo build'",true);
-        const blocked="~/ops/site-private/bin/bg cargo test";
+        await check("~/ops/site-private/bin/bg cargo test",true);
+        await check("~/ops/site-private-djbclark/bin/bgrun cargo test",true);
+        const blocked="~/ops/site-private/bin/bgrun cargo test";
         await ctx.session.update({sessionID:session.id,permissions:[{action:"shell",resource:"*",effect:"allow"},{action:"shell",resource:blocked,effect:"deny"}]});
         await check(blocked,false);
         return {ok:checks.every(c=>c.allowed===c.expected),checks};

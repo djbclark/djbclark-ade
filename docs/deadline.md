@@ -119,7 +119,7 @@ Shipped (kept here so the Known gaps history is searchable): `bin/gh-pr-checks -
 
 ## `bg` records and the holder (2026-11-02)
 
-`bg` (site-djbclark's `bin/bg`, `~/ops/site-public-djbclark/bin/bg`; the site-private path is a symlink to it; alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
+`bg` (site-djbclark's `bin/bgrun`, `~/ops/site-public-djbclark/bin/bgrun`; the site-private path is a symlink to it; alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
 wait (holder: `bg` itself, which beats it) and `bg-run-PID-T` for the run (holder: the detached watcher, which beats it). The run record is registered
 only once the run has started: `bg` writes a private marker file just before it execs the command, and the watcher registers when it sees it; if `bg` is
 gone first, nothing is registered. Before the holder existed, a watcher killed with its process group (or a `bg` SIGKILLed, so its EXIT trap never ran)

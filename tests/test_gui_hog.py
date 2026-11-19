@@ -156,7 +156,7 @@ def test_pty_attached_child_and_agent_cli_child_stop_the_walk():
 
 def test_an_app_started_under_a_held_caller_or_an_agent_cli_is_excluded():
     """Playwright's Chrome for Testing: the app's ancestry reaches the agent (or the held `bg`)."""
-    exe = {"500": "/Applications/Evil.app/Contents/MacOS/evil", "50": "/usr/local/bin/claude", "51": "/bin/bg", "40": "/usr/bin/node"}
+    exe = {"500": "/Applications/Evil.app/Contents/MacOS/evil", "50": "/usr/local/bin/claude", "51": "/bin/bgrun", "40": "/usr/bin/node"}
     under_agent = tbl((50, 1, ME, 0.1, "claude"), (40, 50, ME, 0.1, "node"), (500, 40, ME, 2.0, "evil"))
     assert group(under_agent, exe)["500"]["excluded"] == "agent-ancestor"
     under_bg = tbl((51, 1, ME, 0.1, "bg"), (500, 51, ME, 2.0, "evil"))

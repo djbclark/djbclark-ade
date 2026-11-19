@@ -93,7 +93,7 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    followed by deleting the head branch closes the PR (PR 172, 2026-10-31).
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
-   operator's `bg` wrapper (site-public-djbclark `bin/bg`) and `bin/pytest`
+   operator's `bg` wrapper (site-public-djbclark `bin/bgrun`) and `bin/pytest`
    (`bg bin/pytest -q tests/test_x.py`: the bare `python3` has no pytest); CI runs `pytest` directly.
 3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
    log, a tracked file or a test fixture. The one place a key is written is a

@@ -26,7 +26,7 @@ const deny = [
   "cargo --manifest-path Cargo.toml build", "cargo --config build.jobs=1 build",
   "cargo run -- --help", "bg cargo build", "bgb cargo build",
   "echo --help; cargo build", "bash -lc 'cargo build --release'",
-  "~/ops/site-private/bin/bg cargo check; cargo build",
+  "~/ops/site-private/bin/bgrun cargo check; cargo build",
   "timeout 1800 cargo build --release", "gtimeout -k 5 600 cargo test",
   "sudo cargo build", "sudo -k -n cargo build", "sudo -u root cargo build",
   "caffeinate -i cargo build --release", "rustup run stable cargo build", "rustup run stable -- cargo build",
@@ -52,21 +52,28 @@ const deny = [
   "rtk test --shell bash 'cargo test'",
 ];
 const allow = [
-  "~/ops/site-private/bin/bg cargo build -p sudo-secretspec-cli --release",
-  "/Users/me/ops/site-private/bin/bg cargo build --release",
-  "cd repo && /Users/me/ops/site-private/bin/bg cargo test",
+  "~/ops/site-private/bin/bgrun cargo build -p sudo-secretspec-cli --release",
+  "/Users/me/ops/site-private/bin/bgrun cargo build --release",
+  "cd repo && /Users/me/ops/site-private/bin/bgrun cargo test",
   "cargo --version", "cargo build --help", "cargo metadata", "cargo fmt",
   "cargo install --list", "echo 'cargo build --release'", 'printf "%s" "cargo build"',
   "cat <<'EOF'\ncargo build\nEOF", "# cargo build\necho done",
   "ssh builder cargo build --release", "command -v cargo",
-  "$HOME/ops/site-private/bin/bg cargo build --release",
-  '"$HOME/ops/site-private/bin/bg" cargo test', "${HOME}/ops/site-private/bin/bg cargo build",
-  "timeout 600 ~/ops/site-private/bin/bg cargo build", "cat <<EOF\ncargo build\nEOF",
-  "rtk cargo --version", "rtk test ~/ops/site-private/bin/bg cargo test",
+  "$HOME/ops/site-private/bin/bgrun cargo build --release",
+  '"$HOME/ops/site-private/bin/bgrun" cargo test', "${HOME}/ops/site-private/bin/bgrun cargo build",
+  "timeout 600 ~/ops/site-private/bin/bgrun cargo build", "cat <<EOF\ncargo build\nEOF",
+  "rtk cargo --version", "rtk test ~/ops/site-private/bin/bgrun cargo test",
   "cargo clippy --version", "cargo nextest --version", "cargo llvm-cov --version",
-  "rtk run -c '~/ops/site-private/bin/bg cargo build'", "cat <<\\EOF\ncargo build\nEOF",
-  "rtk summary --shell bash '~/ops/site-private/bin/bg cargo check'",
+  "rtk run -c '~/ops/site-private/bin/bgrun cargo build'", "cat <<\\EOF\ncargo build\nEOF",
+  "rtk summary --shell bash '~/ops/site-private/bin/bgrun cargo check'",
 ];
+for (const name of ["bg", "bgrun"]) {
+  for (const site of ["site-private", "site-private-djbclark", "site-public-djbclark", "site-djbclark"]) {
+    allow.push(`~/ops/${site}/bin/${name} cargo test`);
+    deny.push(`~/ops/${site}/bin/${name} cargo test; cargo build`);
+  }
+}
+deny.push("bgrun cargo build", "/tmp/bgrun cargo build");
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);
 const hooks = []; let disposed = 0;

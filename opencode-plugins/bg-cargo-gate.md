@@ -7,7 +7,7 @@ does not waive admission, QoS or concurrency limits.
 `bg-cargo-gate.js` uses OpenCode V2's native `permission.evaluate` hook to deny
 direct Cargo compile/test commands, including release builds, aliases, toolchain
 selection, the wrappers covered by its regression cases, and quoted executable paths. Its denial tells the
-agent to use the full `~/ops/site-private/bin/bg` path. If bg refuses or waits,
+agent to use the full `~/ops/site-private/bin/bgrun` path. If bgrun refuses or waits,
 use the repository's CI route or resolve that refusal; never retry the build bare.
 In a CI-designated repo, bg intentionally refuses bare Cargo compilation, including
 `cargo build --release`. Its local release carve-out covers release orchestrators
