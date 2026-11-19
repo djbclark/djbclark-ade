@@ -154,7 +154,9 @@ def plan_unattended_config(
         return result
     if pid == "pi" and not ids:
         result["reason"] = ("Pi exposes no selectable modes; extension UI requests can still block; "
-                            "no permission-control verification is available")
+                            "no permission-control verification is available. Standing roles that need "
+                            "unattended self-handoff must run on a provider with a verified unattended "
+                            "mode (Codex full-access, Claude bypassPermissions, Antigravity full-access)")
         result["evidence"] = "source-modeless"
         return result
     result["reason"] = "no source-backed/catalog-marked unattended mode or supported control"
