@@ -156,3 +156,17 @@ def test_a_broken_installed_upstream_is_a_no_op(tmp_path: Path) -> None:
     done = subprocess.run([shutil.which("node"), str(CURSOR_HOOK), "cursor-session-start"], env=env,
                           capture_output=True, text=True, timeout=60)
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+
+
+def test_output_written_after_the_promise_settles_is_still_reshaped(tmp_path: Path) -> None:
+    """An upstream that answers from a later callback, without returning that promise, is still captured."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main(event) {\n"
+        "  setTimeout(() => process.stdout.write(JSON.stringify({ hookSpecificOutput: {\n"
+        "    additionalContext: 'LATE ' + event } })), 30);\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload == {"additional_context": "LATE session-start"}

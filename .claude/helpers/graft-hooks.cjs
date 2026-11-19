@@ -130,12 +130,13 @@ function reshaped(run) {
     else if (typeof callback === 'function') process.nextTick(callback);
     return true;
   };
-  const restore = () => { process.stdout.write = write; return Buffer.concat(chunks).toString('utf8'); };
-  Promise.resolve().then(run).then(() => {
-    const text = restore();
+  // Capture until the process exits, not until main() resolves: an upstream that answers in a later async callback
+  // would otherwise print Claude's shape after the reshape had already gone out.
+  process.once('exit', () => {
+    process.stdout.write = write;
     let shape = null;
     try {
-      const parsed = JSON.parse(text);
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const inner = parsed.hookSpecificOutput || {};
       // Cursor has one field for both, so upstream's notice and its context are joined rather than one being lost.
       const context = [inner.systemMessage, inner.additionalContext].filter(Boolean).join('\n\n');
@@ -143,7 +144,8 @@ function reshaped(run) {
       else if (parsed.additional_context) shape = parsed;
     } catch { shape = null; }        // nothing printed, or not JSON: say nothing
     if (shape) write(JSON.stringify(shape));
-  }).catch(() => { restore(); /* trail unavailable — no-op */ });
+  });
+  Promise.resolve().then(run).catch(() => { /* trail unavailable — no-op; whatever it printed is still reshaped */ });
 }
 
 // PreToolUse (pre-bash) runs before every shell command: its own small module,
