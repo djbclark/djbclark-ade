@@ -1367,7 +1367,7 @@ def test_shipped_acceptance_warns_checklist_quiet_on_cursor_zai():
     before = path.read_bytes()
     o = ai.observe_pi_pools(root=REPO, acceptance_path=path)
     assert o is not None and o.status == "warn"
-    for name in ("grok", "antigravity", "sipb", "go"):
+    for name in ("grok", "sipb", "go"):  # antigravity accepted 2026-11-19
         assert name in o.detail
     assert "cursor" not in o.detail.lower()
     assert "zai" not in o.detail.lower()
