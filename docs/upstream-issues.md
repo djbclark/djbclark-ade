@@ -1535,3 +1535,42 @@ on `getpaseo/paseo`: no move command or field. Related third-party work: bigforc
 *host*), issue #2641 (importing a session into a provisional workspace), the 0.16 note that Remote Control sessions keep
 their folder. No duplicate issue was found: four web searches and three `gh search issues --repo getpaseo/paseo` queries ("move agent workspace", "change workspace of agent", "reassign tab workspace", "move tab to another workspace") returned nothing relevant.
 
+
+## 21. paseo — `provider models` serves a stale cached catalog until a diagnostic or restart
+
+**Status: `ready-to-file`** (drafted 2026-11-19; not filed — djbclark decides). Target: `getpaseo/paseo`.
+
+### Observed
+
+Installed 0.16.1 CLI, daemon started 2026-11-12T12:28:22Z (a 0.16.0-beta.2 process). On 2026-11-19, `agy` 1.5.12
+listed 23 Antigravity models including the new `gemini-4-neon-{high,xhigh,medium,low}`, and
+`paseo provider models antigravity` served an 18-model snapshot with no Neon. Running
+`paseo provider diagnostic antigravity --json` (reported `Models: 23`) and re-reading `provider models`
+returned all 23, including Neon. Hours later the same class reproduced on `pi`: `paseo provider models pi` lacked
+`antigravity/gemini-4-neon` until `paseo provider diagnostic pi` was run.
+
+### Why it matters
+
+A model that the vendor CLI already serves is invisible to every consumer of `provider models` (routing scripts,
+`ade-install` model checks, the operator) until someone happens to run a diagnostic or restart the daemon. It reads as
+"provider does not support model X" and silently pins work to older models.
+
+### Likely cause (read, not proven)
+
+`plugins/antigravity-provider/server/provider.ts` registers `getCatalogCacheKey` over the *launch* only
+(`command`, `args`, `env`), not over the probed CLI's version or a TTL, so an `agy` self-update does not invalidate the
+daemon's cached catalog. 0.16.2 fixed a related stale-daemon case ("Desktop updates leaving an older daemon running"),
+which also re-probes catalogs on restart.
+
+### Suggested fix
+
+Include the probed CLI's version (or a short TTL) in the catalog cache key, and/or add `paseo provider models
+<provider> --refresh`.
+
+### Searched first (2026-11-19)
+
+`gh search issues --repo getpaseo/paseo` for "provider models stale catalog" (0 hits), "provider catalog cache" (0),
+"model list refresh" (3 unrelated: #9551 Cursor Auto, #9061 Claude custom model thinking levels, #2548 OMP /compact),
+"antigravity models" (#9718 closed thinking-levels, #6052 open slow-Windows timeouts, #9476 closed older model names,
+#9939 closed getCatalog `isDefault`). No duplicate for catalog staleness was found. The workaround is now the documented
+habit: run `paseo provider diagnostic <provider>` after any provider CLI update.
