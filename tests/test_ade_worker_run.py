@@ -31,7 +31,9 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({"argv": a, "env": {k: os.environ.get(k) for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_WORKSPACE_ID")}}) + "\\n")
 def save():
     data_path.write_text(json.dumps(d))
-if a[:3] == ["workspace", "ls", "--json"]:
+if a[:3] == ["provider", "ls", "--json"]:
+    print(json.dumps(d.get("providers", [])))
+elif a[:3] == ["workspace", "ls", "--json"]:
     print(json.dumps(d["workspaces"]))
 elif a[:2] == ["workspace", "rename"]:
     for w in d["workspaces"]:
@@ -39,7 +41,7 @@ elif a[:2] == ["workspace", "rename"]:
             w["name"] = a[3]
     save()
 elif a[:2] == ["workspace", "archive"]:
-    pass
+    sys.exit(d.get("archive_rc", 0))
 elif a[:2] == ["agent", "update"]:
     pass
 elif a[:2] == ["agent", "stop"]:
@@ -139,7 +141,7 @@ def test_first_launch_creates_and_renames(env):
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert run[run.index("--cwd") + 1] == os.path.realpath("/repo")
     assert run[-1] == f"BRIEF TEXT\n\n{FOOTER_LINE}" and "--provider" in run
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
     update = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["agent", "update"])
@@ -934,8 +936,9 @@ def test_footer_refuses_a_trailing_value_flag_instead_of_corrupting_it(env, rest
 
 
 @pytest.mark.parametrize("rest", [["--provider", "x", "--no-wait", "BRIEF"], ["--no-wait", "--provider", "x", "BRIEF"],
-                                  ["--no-wait", "--mode=full-access", "BRIEF"], ["--json", "--no-wait", "BRIEF"]])
+                                  ["--no-wait", "--provider=x", "--mode=full-access", "BRIEF"], ["--json", "--no-wait", "BRIEF"]])
 def test_footer_accepts_the_brief_after_flags_and_their_values(env, rest):
+    env.data["providers"] = [{"provider": "x", "enabled": "Enabled", "status": "available", "modes": [{"id": "full-access"}]}]
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", *rest)
     assert r.returncode == 0, r.stderr
     assert run_argv(env)[-1] == f"BRIEF\n\n{FOOTER_LINE}"
@@ -2454,3 +2457,66 @@ def test_an_undecodable_cwd_argument_is_refused_before_the_launch(env):
                         b"--cwd", b"/x\xffy", b"--", b"--no-wait", b"B"], capture_output=True, cwd=env.tmp)
     err = r.stderr.decode(errors="replace")
     assert r.returncode == 1 and "Traceback" not in err and "not a usable path" in err and not placed(env)
+
+
+@pytest.mark.parametrize("provider", ["pi", "clinepass", "custom"])
+@pytest.mark.parametrize("mode", ["full-access", "default"])
+@pytest.mark.parametrize("equals", [False, True])
+def test_modeless_provider_drops_mode_before_run(env, provider, mode, equals):
+    env.data["providers"] = [{"provider": provider, "status": "available", "enabled": "Enabled", "modes": ""}]
+    flags = [f"--provider={provider}/model", f"--mode={mode}"] if equals else ["--provider", provider + "/model", "--mode", mode]
+    r = env.run("--lead", LEAD, "--slice", "mode", "--cwd", "/repo", "--", *flags, "--no-wait", "BRIEF TEXT")
+    assert r.returncode == 0, r.stderr
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert not any(a == "--mode" or a.startswith("--mode=") for a in run)
+    assert "dropping --mode" in r.stderr
+
+
+@pytest.mark.parametrize("catalog,mode,ok", [
+    ([{"id": "full-access"}], "full-access", True),
+    ([{"id": "full-access"}], "default", False),
+    ("Full Access", "full-access", True),
+    (None, "default", False),
+])
+def test_explicit_mode_requires_catalog_id_before_mutation(env, catalog, mode, ok):
+    env.data["providers"] = [{"provider": "codex", "status": "available", "enabled": "Enabled", "modes": catalog}]
+    r = env.run("--lead", LEAD, "--slice", "mode", "--cwd", "/repo", "--", "--provider", "codex/model", "--mode", mode, "--no-wait", "BRIEF")
+    assert (r.returncode == 0) == ok, r.stderr
+    if not ok:
+        assert env.verbs() == [["provider"]]
+
+
+def test_create_failure_archives_minted_orphan(env):
+    env.data.update(run_rc=1, run_out={"code": "AGENT_CREATE_FAILED"})
+    r = launch(env)
+    assert r.returncode == 1
+    assert ["workspace", "archive", "wks_abc123"] in [c["argv"] for c in env.calls()]
+    assert "archived failed-create workspace wks_abc123" in r.stderr
+
+
+@pytest.mark.parametrize("unsafe", ["preexisting", "occupied", "unplaced", "ambiguous", "malformed_placement", "unrelated_failure"])
+def test_failed_create_cleanup_does_not_archive_uncertain_workspace(env, unsafe):
+    env.data.update(run_rc=1, run_out={"code": "AGENT_CREATE_FAILED"})
+    if unsafe == "preexisting":
+        env.data["workspaces"] = [{"workspaceId": "wks_abc123", "name": "unowned", "cwd": "/elsewhere"}]
+    elif unsafe in ("occupied", "unplaced", "malformed_placement"):
+        env.data["agents"] = [{"id": AGENT, "status": "running"}]
+        if unsafe == "occupied":
+            env.state(AGENT, "wks_abc123")
+        elif unsafe == "malformed_placement":
+            env.state(AGENT, "not-a-workspace")
+    elif unsafe == "ambiguous":
+        env.data["run_err"] += "Created workspace wks_other - main\n"
+    else:
+        env.data["run_out"] = {"code": "OTHER_FAILURE"}
+    r = launch(env)
+    assert r.returncode == 1
+    assert ["workspace", "archive"] not in env.verbs()
+
+
+def test_cleanup_error_preserves_launch_failure(env):
+    env.data.update(run_rc=1, run_out={"code": "AGENT_CREATE_FAILED"}, archive_rc=1)
+    r = launch(env)
+    assert r.returncode == 1
+    assert "cleanup of wks_abc123 failed" in r.stderr
+    assert "paseo run failed" in r.stderr

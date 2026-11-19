@@ -670,6 +670,81 @@ def names_path(brief: str, paths: list[str]) -> bool:
     return any(re.search(r"(?<![\w/.-])" + re.escape(p.rstrip("/")) + r"(?![\w-]|\.[\w-])", brief) for p in paths if p)
 
 
+def preflight_mode(args: list[str]) -> list[str]:
+    """Validate explicit modes before any workspace mutation; labels are not IDs."""
+    options = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--" or not token.startswith("-"):
+            break  # prompt text is never an option
+        flag, sep, value = token.partition("=")
+        end = i + 1
+        if flag in VALUE_FLAGS and not sep:
+            if end >= len(args):
+                raise Refused(f"{flag} needs a value")
+            value = args[end]
+            end += 1
+        options.append((flag, value, i, end))
+        i = end
+    modes = [o for o in options if o[0] == "--mode"]
+    if not modes:
+        return args
+    providers = [o[1] for o in options if o[0] == "--provider"]
+    if len(providers) != 1 or len(modes) != 1:
+        raise Refused("explicit --mode requires exactly one --provider and one --mode")
+    provider = providers[0].split("/", 1)[0]
+    rows = paseo_json(["provider", "ls", "--json"])
+    matches = [r for r in rows if isinstance(r, dict) and r.get("provider") == provider] if isinstance(rows, list) else []
+    if len(matches) != 1:
+        raise Refused(f"provider catalog missing or ambiguous for {provider!r}")
+    row = matches[0]
+    if row.get("enabled") not in (True, "Enabled") or row.get("status") not in ("ready", "available") or row.get("error"):
+        raise Refused(f"provider {provider!r} catalog is not ready and enabled")
+    catalog = row.get("modes")
+    _, requested, start, end = modes[0]
+    if catalog == [] or catalog == "":
+        sys.stderr.write(f"ade-worker-run: provider {provider!r} has no modes; dropping --mode {requested!r}\n")
+        return args[:start] + args[end:]
+    if isinstance(catalog, str) and catalog.strip():
+        # Current CLI flattens IDs to display labels. Do not invent IDs or break
+        # existing valid launches: Paseo remains authoritative for nonempty modes.
+        sys.stderr.write(f"ade-worker-run: provider {provider!r} catalog exposes mode labels only; "
+                         "Paseo will validate the requested mode ID\n")
+        return args
+    if not isinstance(catalog, list) or any(not isinstance(m, dict) or not isinstance(m.get("id"), str) for m in catalog):
+        raise Refused(f"provider {provider!r} mode catalog is malformed")
+    if requested not in [m["id"] for m in catalog]:
+        raise Refused(f"invalid --mode {requested!r} for provider {provider!r}")
+    return args
+
+
+def cleanup_failed_workspace(err: str, before: set[str]) -> None:
+    """Archive only a uniquely identified, freshly minted, demonstrably empty box."""
+    minted = set(CREATED_RE.findall(err))
+    if len(minted) != 1:
+        sys.stderr.write("ade-worker-run: failed-create cleanup: no unique created workspace; inspect manually\n")
+        return
+    wks = minted.pop()
+    try:
+        if wks in before:
+            raise Refused("workspace existed before launch")
+        rows = paseo_json(["ls", "-g", "--json"])
+        if not isinstance(rows, list):
+            raise Refused("live agent inventory unavailable")
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                raise Refused("live agent inventory malformed")
+            state = state_file(row["id"])
+            workspace = row.get("workspaceId") or (state or {}).get("workspaceId")
+            if not isinstance(workspace, str) or not WKS_RE.fullmatch(workspace) or workspace == wks:
+                raise Refused("workspace is occupied or a live agent cannot be placed")
+        run_ok(["workspace", "archive", wks])
+        sys.stderr.write(f"ade-worker-run: archived failed-create workspace {wks}\n")
+    except (Refused, OSError) as exc:
+        sys.stderr.write(f"ade-worker-run: cleanup of {wks} failed: {exc}; inspect manually\n")
+
+
 def launch(opts, rest: list[str]) -> int:
     lead, name = opts.lead, opts.slice
     check_names(lead, name)
@@ -678,6 +753,7 @@ def launch(opts, rest: list[str]) -> int:
     brief = rest[-1] if rest else ""  # before the footer line: the footer names paths of its own
     if not opts.no_footer:
         rest = add_footer(rest)
+    rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
     box = "OTHER" if opts.placement == "other" else "WORKER"  # the box the window is looked up or opened in (not the lead's own)
     if main_place and opts.window_middle is not None:
@@ -773,10 +849,13 @@ def launch(opts, rest: list[str]) -> int:
             args += ["--label", "ade.placement=other"]
         if "--json" not in rest:
             args.append("--json")
+        before = {row_wks(r) for r in list_windows()} if win is None else set()
         rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
             sys.stderr.write(err)
         if rc != 0:
+            if win is None and "AGENT_CREATE_FAILED" in out + err:
+                cleanup_failed_workspace(err, before)
             raise Refused(f"paseo run failed (rc {rc}): {out.strip()[:300]}")
         try:
             result = json.loads(out)
