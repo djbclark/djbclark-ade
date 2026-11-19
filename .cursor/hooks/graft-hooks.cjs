@@ -125,9 +125,10 @@ function reshaped(run) {
   // Keep stdout's own contract: an upstream that passes an encoding or waits on the callback must still work, so the
   // callback is called (next turn, as the real stream does) and the write always reports success.
   process.stdout.write = (chunk, encoding, callback) => {
-    chunks.push(Buffer.from(chunk));
-    if (typeof encoding === 'function') encoding();
-    else if (typeof callback === 'function') process.nextTick(callback);
+    const enc = typeof encoding === 'string' ? encoding : 'utf8';
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), enc));
+    const done = typeof encoding === 'function' ? encoding : callback;      // both positions are legal for a stream
+    if (typeof done === 'function') process.nextTick(done);                 // the real stream calls back next turn
     return true;
   };
   // Capture until the process exits, not until main() resolves: an upstream that answers in a later async callback
@@ -138,8 +139,10 @@ function reshaped(run) {
     try {
       const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const inner = parsed.hookSpecificOutput || {};
-      // Cursor has one field for both, so upstream's notice and its context are joined rather than one being lost.
-      const context = [inner.systemMessage, inner.additionalContext].filter(Boolean).join('\n\n');
+      // Claude's hook output carries its notice at the top level and its context inside hookSpecificOutput; Cursor has
+      // one field for both, so the two are joined rather than one being lost.
+      const context = [parsed.systemMessage, inner.systemMessage, inner.additionalContext]
+        .filter(Boolean).join('\n\n');
       if (context) shape = { additional_context: context };
       else if (parsed.additional_context) shape = parsed;
     } catch { shape = null; }        // nothing printed, or not JSON: say nothing

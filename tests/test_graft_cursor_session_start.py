@@ -115,18 +115,30 @@ def test_an_installed_trail_keeps_claudes_own_event_shape(tmp_path: Path) -> Non
     assert "additional_context" not in payload
 
 
-def test_upstreams_system_message_is_kept_for_cursor(tmp_path: Path) -> None:
-    """Cursor has one field for both, so upstream's notice and its context are joined, never silently dropped."""
+def test_upstreams_top_level_notice_is_kept_for_cursor(tmp_path: Path) -> None:
+    """Claude's hook output puts `systemMessage` at the top level; Cursor has one field for both, so they are joined."""
     project = _project(tmp_path)
     dist = project / "dist" / "claude"
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "hooks.js").write_text(
         "export function main(event) {\n"
-        "  process.stdout.write(JSON.stringify({ hookSpecificOutput: {\n"
-        "    hookEventName: 'SessionStart', systemMessage: 'NOTICE', additionalContext: 'CONTEXT ' + event } }));\n"
+        "  process.stdout.write(JSON.stringify({ systemMessage: 'NOTICE', hookSpecificOutput: {\n"
+        "    hookEventName: 'SessionStart', additionalContext: 'CONTEXT ' + event } }));\n"
         "}\n")
     payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
     assert payload == {"additional_context": "NOTICE\n\nCONTEXT session-start"}
+
+
+def test_a_notice_with_no_context_still_reaches_cursor(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main() {\n"
+        "  process.stdout.write(JSON.stringify({ systemMessage: 'ONLY A NOTICE' }));\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload == {"additional_context": "ONLY A NOTICE"}
 
 
 def test_a_stdout_callback_upstream_is_not_lost(tmp_path: Path) -> None:
