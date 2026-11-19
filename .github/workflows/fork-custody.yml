@@ -1,0 +1,32 @@
+name: Fork custody
+on:
+  push:
+    branches: [fork-evidence-custody]
+    paths:
+      - bin/ade_fork_custody.py
+      - tests/test_ade_fork_custody.py
+      - .github/workflows/fork-custody.yml
+  pull_request:
+    paths:
+      - bin/ade_fork_custody.py
+      - tests/test_ade_fork_custody.py
+      - .github/workflows/fork-custody.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_ACCESS_KEY_ID: offline-dummy
+      AWS_SECRET_ACCESS_KEY: offline-dummy
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - name: Offline authoritative model and S3 SDK parameter contracts
+        run: uv run --no-project --with pytest --with boto3 python -m pytest -q tests/test_ade_fork_custody.py
+      - name: Changelog syntax
+        run: python3 bin/changelog-fold --repo . --check
