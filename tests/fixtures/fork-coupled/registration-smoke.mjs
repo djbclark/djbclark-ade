@@ -10,12 +10,13 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { readRegular, sha256, validateRetainedPayload } from './retained-daemon.mjs';
 import { ownDisposableGroup } from './owned-cleanup.mjs';
+import { diagnosticFiles } from './registration-diagnostics.mjs';
 
 const execute = promisify(execFile);
 const fixtureDirectory = fileURLToPath(new URL('.', import.meta.url));
 const sourceRoot = path.resolve(fixtureDirectory, '../../..');
 const members = ['registration-probe.mjs', 'retained-daemon.mjs', 'retained-cli.mjs', 'owned-cleanup.mjs',
-  'registration-smoke-contract.json', 'namespace-bootstrap-input.json'];
+  'registration-smoke-contract.json', 'namespace-bootstrap-input.json', 'registration-diagnostics.mjs'];
 
 async function sudo(arguments_) {
   await execute('/usr/bin/sudo', ['-k', '-n', ...arguments_], {
@@ -45,6 +46,27 @@ async function sourceClosure() {
     files.push({name, file, bytes});
   }
   return {sourceSha, files};
+}
+
+// Copy only fixed original-caller-owned regular evidence leaves. Neither their
+// presence nor their contents can authorize cleanup or change the probe result.
+async function retainDiagnostics(home, staging) {
+  const source = path.join(home, 'registration-diagnostics');
+  let directory;
+  try { directory = await lstat(source); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  assert.ok(directory.isDirectory() && !directory.isSymbolicLink() &&
+    directory.uid === process.getuid() && (directory.mode & 0o777) === 0o700);
+  const destination = path.join(staging, 'registration-diagnostics');
+  await mkdir(destination, {mode: 0o700});
+  for (const name of diagnosticFiles) {
+    const sourceFile = path.join(source, name);
+    const metadata = await lstat(sourceFile);
+    assert.ok(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 &&
+      metadata.uid === process.getuid() && (metadata.mode & 0o777) === 0o600);
+    const bytes = await readRegular(sourceFile, name.endsWith('.jsonl') ? 1024 * 1024 : 16 * 1024 * 1024);
+    await writeFile(path.join(destination, name), bytes, {mode: 0o600, flag: 'wx'});
+  }
 }
 
 async function hostLibraryView(manifest) {
@@ -188,6 +210,8 @@ try {
   settled = true;
 } catch (error) { failure = error; }
 finally {
+  try { if (launchAttempted) await retainDiagnostics(home, path.resolve(process.argv[2])); }
+  catch (error) { failure = failure ? new AggregateError([failure, error], 'probe and diagnostic retention failed') : error; }
   try { if (before) assert.deepEqual(await hostLibraryView(manifest), before, 'host library view changed'); }
   catch (error) { failure = failure ? new AggregateError([failure, error], 'probe and host invariance failed') : error; }
   if (!launchAttempted || settled) {

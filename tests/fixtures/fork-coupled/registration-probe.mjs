@@ -8,6 +8,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import path from 'node:path';
 import { launchObservedDaemon } from './retained-daemon.mjs';
 import { cli } from './retained-cli.mjs';
+import { createRegistrationDiagnostics } from './registration-diagnostics.mjs';
 
 const builtins = [
   'antigravity-provider', 'claude-usage-source', 'codex-usage-source',
@@ -38,15 +39,34 @@ const actualNode = await stat('/proc/self/exe');
 const retainedNode = await stat(path.join(root, 'runtime/node'));
 assert.ok(actualNode.dev === retainedNode.dev && actualNode.ino === retainedNode.ino,
   'probe must freshly execute the retained Node');
+const diagnostics = await createRegistrationDiagnostics(home);
+let attempt = 0;
+const observedCli = async (phase, args) => {
+  diagnostics.assertWithinBounds();
+  const ordinal = ++attempt;
+  diagnostics.record('cli-start', {command: phase, ordinal});
+  try {
+    const reply = await cli(root, home, args);
+    // Never retain stdout: BEGIN may carry a bearer on an invalid success.
+    // Only observational commands have diagnostic stderr retained.
+    diagnostics.record('cli-end', {command: phase, ordinal, code: reply.code,
+      ...(phase === 'plugin-list' || phase === 'maintenance-status' ? {stderr: reply.stderr} : {})});
+    diagnostics.assertWithinBounds();
+    return reply;
+  } catch (error) {
+    diagnostics.record('cli-failed', {command: phase, ordinal, name: error.name, message: error.message});
+    throw error;
+  }
+};
 let daemon, failure, result;
 try {
-  daemon = await launchObservedDaemon(root, home, expectedManifest, 2);
+  daemon = await launchObservedDaemon(root, home, expectedManifest, 2, diagnostics);
   let plugins;
   const deadline = performance.now() + 180_000;
   while (performance.now() < deadline) {
     assert.equal(daemon.child.exitCode, null, 'owned daemon exited during startup');
     assert.equal(daemon.child.signalCode, null, 'owned daemon stopped during startup');
-    const reply = await cli(root, home, ['plugin', 'ls']);
+    const reply = await observedCli('plugin-list', ['plugin', 'ls']);
     if (reply.code === 0) { plugins = JSON.parse(reply.stdout); break; }
     await pause(500);
   }
@@ -55,13 +75,13 @@ try {
     'default builtin inventory changed');
   assert.ok(plugins.every((plugin) => plugin.enabled === true && plugin.status === 'running'),
     'all actual default registrations must initialize');
-  const status = await cli(root, home, ['daemon', 'maintenance', 'status']);
+  const status = await observedCli('maintenance-status', ['daemon', 'maintenance', 'status']);
   assert.equal(status.code, 0, 'actual maintenance status unavailable');
   const reservation = JSON.parse(status.stdout);
   assert.equal(reservation.authority?.features?.maintenanceReservationV1, false,
     'missing builtin profiles cannot enable maintenance');
   assert.ok(Number.isSafeInteger(reservation.reservationGeneration));
-  const begin = await cli(root, home, ['daemon', 'maintenance', 'begin',
+  const begin = await observedCli('maintenance-begin', ['daemon', 'maintenance', 'begin',
     '--generation', String(reservation.reservationGeneration + 1), '--transaction-id', randomUUID()]);
   assert.ok(begin.code !== 0 && begin.stdout.trim() === '', 'unqualified BEGIN must refuse without token');
   const observed = await daemon.observation();
@@ -71,10 +91,12 @@ try {
     daemonPid: daemon.child.pid, probePid: process.pid, hostNamespace, namespace};
 } catch (error) {
   failure = error;
-  if (daemon) process.stderr.write(`Disposable daemon diagnostics:\n${daemon.diagnostics()}\n`);
+  diagnostics.record('probe-failed', {name: error.name, message: error.message});
 } finally {
   try { if (daemon) await daemon.dispose(); }
   catch (error) { failure = failure ? new AggregateError([failure, error], 'probe and teardown failed') : error; }
+  try { await diagnostics.finish(); }
+  catch (error) { failure = failure ? new AggregateError([failure, error], 'probe and diagnostics failed') : error; }
 }
 if (failure) throw failure;
 // Publication follows actual daemon/CLI group disposal, never a timer or signal.

@@ -148,11 +148,15 @@ export async function validateRetainedDistribution(root, expectedManifest) {
   return manifest;
 }
 
-export async function launchObservedDaemon(root, home, expectedManifest, measurementVersion = 1) {
+export async function launchObservedDaemon(root, home, expectedManifest, measurementVersion = 1, diagnostics = null) {
   assert.ok(measurementVersion === 1 || measurementVersion === 2);
+  diagnostics?.record('distribution-validation-start');
   await validateRetainedDistribution(root, expectedManifest);
+  diagnostics?.record('distribution-validation-end');
   const launcher = await import(pathToFileURL(path.join(root, 'daemon-launcher.mjs')).href);
+  diagnostics?.record('qualified-invocation-start');
   const invocation = await launcher.createQualifiedDaemonInvocation(root, home);
+  diagnostics?.record('qualified-invocation-end');
   assert.equal(invocation.command, path.join(root, 'runtime/node'));
   assert.deepEqual(invocation.args, [path.join(root, 'role.cjs')]);
   assert.equal(invocation.closure.runtimeClosureSha256, expectedManifest);
@@ -160,13 +164,29 @@ export async function launchObservedDaemon(root, home, expectedManifest, measure
     env: invocation.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true,
   });
   let childError = null;
-  child.on('error', (error) => { childError = error; });
-  const { dispose } = ownDisposableGroup(child);
+  child.on('error', (error) => { childError = error; diagnostics?.record('daemon-error', {name: error.name, code: error.code}); });
+  diagnostics?.record('daemon-spawned', {pid: child.pid});
+  child.once('exit', (code, signal) => diagnostics?.record('daemon-exit', {code, signal}));
+  child.once('close', (code, signal) => diagnostics?.record('daemon-close', {code, signal}));
+  const owner = ownDisposableGroup(child);
+  const dispose = async () => {
+    diagnostics?.record('daemon-disposal-start', {exitCode: child.exitCode, signalCode: child.signalCode});
+    try {
+      const result = await owner.dispose();
+      diagnostics?.record('daemon-disposal-end', result);
+      return result;
+    } catch (error) {
+      diagnostics?.record('daemon-disposal-failed', {name: error.name, message: error.message,
+        exitCode: child.exitCode, signalCode: child.signalCode});
+      throw error;
+    }
+  };
   let outputBytes = 0;
   let overflow = false;
   let outputTail = '';
-  for (const stream of [child.stdout, child.stderr]) {
+  for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
     stream.on('data', (chunk) => {
+      diagnostics?.capture(name, chunk);
       outputBytes += chunk.length;
       if (outputBytes > MAX_REPLY) overflow = true;
       outputTail = (outputTail + chunk.toString('utf8')).slice(-8192);
