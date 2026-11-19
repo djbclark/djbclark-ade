@@ -56,7 +56,8 @@ def write_fake_gh(tmp: Path, script: str) -> Path:
 
 def run(gh: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # The marker self-heal state file must never land in the real home directory.
-    env = {**os.environ, "ADE_MERGE_READY_STATE": str(gh.parent / "marker-state.json")}
+    env = {**os.environ, "ADE_MERGE_READY_STATE": str(gh.parent / "marker-state.json"),
+           "ADE_STATE_DIR": str(gh.parent / "claims-state")}
     return subprocess.run(
         [sys.executable, "-I", str(SCRIPT), "--gh", str(gh), *args],
         capture_output=True,
@@ -2391,3 +2392,52 @@ def test_dialog_cost_counts_non_ascii_as_octal_escapes() -> None:
     mod = _load_module()
     assert mod._dialog_cost("abc") == 3 and mod._dialog_cost("a b") == 4
     assert mod._dialog_cost("é") == 8  # two UTF-8 bytes, four characters each in the worst case
+
+
+@pytest.mark.parametrize("failure", [None, "add", "rebase", "push", "remove", "claim"])
+def test_stack_rebase_temp_claim_lifetime(tmp_path, monkeypatch, failure):
+    import runpy
+    import types
+
+    module = types.SimpleNamespace(**runpy.run_path(str(SCRIPT)))
+    claims = module.ade_claims
+    monkeypatch.setenv("ADE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("PASEO_AGENT_ID", "test-restack-owner")
+    monkeypatch.delenv("ADE_CLAIM_ID", raising=False)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    plan = dict(number=77, branch="child", head="a" * 40, onto="master",
+                action="rebase", need_base_edit=False)
+    events = []
+    def git(_git, args, **kwargs):
+        events.append(args)
+        if args[0] != "fetch":
+            active = claims.list_claims("active")
+            assert len(active) == 1
+            assert claims.is_mine(active[0], claims.caller_ident())
+            assert active[0]["base_sha"] == plan["head"]
+            if args[:2] == ["worktree", "add"]:
+                assert active[0]["path"] == str(Path(args[3]).resolve())
+        fail = (failure == args[0] or
+                (args[0] == "worktree" and failure == args[1]))
+        if fail and failure == "remove":
+            raise RuntimeError("remove failure")
+        return subprocess.CompletedProcess(args, int(fail), "", "failed" if fail else "")
+    globals_ = module.stack_rebase_prs.__globals__
+    monkeypatch.setitem(globals_, "plan_stack_rebase", lambda *a, **kw: [plan])
+    monkeypatch.setitem(globals_, "_run_git", git)
+    if failure == "claim":
+        def refuse(*a, **kw):
+            raise RuntimeError("claim failure")
+        monkeypatch.setattr(claims, "create_claim", refuse)
+    if failure in {"add", "push", "remove", "claim"}:
+        with pytest.raises(RuntimeError):
+            module.stack_rebase_prs("gh", "owner/repo", [], {77}, dry_run=False, repo_dir=str(repo))
+    else:
+        result = module.stack_rebase_prs("gh", "owner/repo", [], {77}, dry_run=False, repo_dir=str(repo))
+        assert result[0]["status"] == ("conflict" if failure == "rebase" else "rebased")
+    assert claims.list_claims("active") == []
+    if failure == "claim":
+        assert [a[0] for a in events] == ["fetch"]
+    else:
+        assert len(claims.list_claims("released")) == 1

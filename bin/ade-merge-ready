@@ -129,13 +129,14 @@ try:
     # "The owner" is the operator's user login, the gate's one list, not whoever owns the repository (which becomes the
     # frdminc org, an account that authors no PR; 2026-11-14).
     from adversary_marker import is_trusted_owner_login
+    import ade_claims
     import review_bots   # the listed-reviewer-bot must-triage gate (rb-01, 2026-11-14)
 finally:
     sys.path.pop(0)
 
 GUARD_REFUSED = 77   # ade-git-guard's refusal exit (docs/git-guard.md)
 # rule tags of the refusals that mean "leave this directory": a live process uses it, or another agent claims it
-# (the routine `--force`-on-an-unclaimed-tree refusal is not one: this tool's temporary worktree is never claimed)
+# (a successfully created temporary worktree remains claimed until removal completes)
 GUARD_KEEP_RULES = ("[worktree remove: live process]", "[worktree remove of a claimed workspace]")
 
 
@@ -1580,6 +1581,19 @@ def stack_rebase_prs(
         branch = plan["branch"]
         target = plan["onto"]
         wt = tempfile.mkdtemp(prefix=f"ade-stack-rebase-{n}-")
+        # Reserve the path before worktree creation; registry lookup works without
+        # a .git pointer. Keep the caller's identity so the guard permits this writer.
+        claim_id = Path(wt).name
+        claim = ade_claims.make_claim(
+            id=claim_id, path=wt, branch=branch, base_sha=plan["head"],
+            repo_origin=repo, owner_session=ade_claims.caller_ident(),
+            created_by="ade-merge-ready stack-rebase", purpose=f"restack PR {n}",
+        )
+        try:
+            ade_claims.create_claim(claim)
+        except Exception:
+            os.rmdir(wt)  # still empty: no worktree write has occurred
+            raise
         try:
             add = _run_git(
                 git,
@@ -1661,15 +1675,18 @@ def stack_rebase_prs(
             row["status"] = "rebased"
             results.append(row)
         finally:
-            rm = _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
-            if _guard_keeps_directory(rm):
-                # ade-git-guard refused for a live process or another agent's claim: leave the directory and say so
-                # (deleting it behind the refusal is what the guard prevents); any other failure still cleans up
-                print(f"ade-merge-ready: git worktree remove refused by the git guard; leaving {wt} in place: "
-                      f"{(rm.stderr or '').strip()[:300]}", file=sys.stderr)
-                row["worktree_left"] = wt
-            elif os.path.isdir(wt):
-                shutil.rmtree(wt, ignore_errors=True)
+            try:
+                rm = _run_git(git, ["worktree", "remove", "--force", wt], cwd=repo_path)
+                if _guard_keeps_directory(rm):
+                    # ade-git-guard refused for a live process or another agent's claim: leave the directory and say so
+                    # (deleting it behind the refusal is what the guard prevents); any other failure still cleans up
+                    print(f"ade-merge-ready: git worktree remove refused by the git guard; leaving {wt} in place: "
+                          f"{(rm.stderr or '').strip()[:300]}", file=sys.stderr)
+                    row["worktree_left"] = wt
+                elif os.path.isdir(wt):
+                    shutil.rmtree(wt, ignore_errors=True)
+            finally:
+                ade_claims.set_state(claim_id, "released")
     return results
 
 
