@@ -18,3 +18,6 @@
 
 - Bind the completed retained-system-library build archive by exact run and
   payload digests for disposable CI namespace and registration checks. (#0)
+
+- Add a read-only, separately reviewed sudo ancestry diagnostic with bounded
+  kernel observations; it cannot mount, launch a daemon or grant admission. (#0)
