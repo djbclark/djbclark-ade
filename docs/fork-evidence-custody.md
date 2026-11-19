@@ -266,3 +266,14 @@ on the Mac. Only source/static checks and offline Linux CI belong to this unit.
 Primary new API references: [boto3 Session](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html),
 [GetCallerIdentity](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sts/client/get_caller_identity.html),
 and [IAM principal values](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_variables.html#principaltable).
+
+
+Authority ingestion is bound to the Runtime's metered store and verified actual
+current read; a caller's internally consistent Observation is refused. Private
+anchor/current memory copies must still match their protected bytes. A missing
+or relocated journal is never rebuilt from a backup counter; directory identity
+is checked again before consumption. Authentic current bytes with expired
+COMPLIANCE retention but legal hold ON may establish preservation context;
+the existing reader still refuses eligibility until current protection is
+repaired under separate authority. Actual SDK errors retain their primary
+exception even if secondary outcome journaling fails; the slot stays spent.

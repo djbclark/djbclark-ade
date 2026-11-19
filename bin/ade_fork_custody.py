@@ -944,7 +944,8 @@ class Enrollment:
     def live(self, now):
         require(natural(now, "trusted clock") < self.data["expires"], "enrollment expired")
         raw = private_bytes(self.path, self.owner, 131072)
-        require(os.getuid() == self.owner and digest(raw) == self.sha256, "anchor/owner changed")
+        require(os.getuid() == self.owner and digest(raw) == self.sha256 and decode(raw) == self.data
+                and Policy(**self.data["policy"]) == self.policy, "anchor/owner/in-memory binding changed")
 
     def wallet(self, wid, w):
         token(wid, "wallet ID")
@@ -1006,14 +1007,18 @@ class AttemptJournal:
     def __init__(self, anchor):
         self.anchor = anchor
         self.path = Path(anchor.journal["path"])
-        parent = self.path.parent
-        info = parent.stat()
-        require(parent.resolve(strict=True) == parent and info.st_uid == anchor.owner
-                and stat.S_IMODE(info.st_mode) == 0o700 and info.st_dev == anchor.journal["device"]
-                and info.st_ino == anchor.journal["inode"], "protected journal directory/device/inode")
+        self._directory()
         self._read()  # Never create a missing journal from a copied anchor.
 
+    def _directory(self):
+        parent = self.path.parent
+        info = parent.stat()
+        require(parent.resolve(strict=True) == parent and info.st_uid == self.anchor.owner
+                and stat.S_IMODE(info.st_mode) == 0o700 and info.st_dev == self.anchor.journal["device"]
+                and info.st_ino == self.anchor.journal["inode"], "protected journal directory/device/inode")
+
     def _read(self):
+        self._directory()
         d = decode(private_bytes(self.path, self.anchor.owner, self.anchor.journal["max_bytes"]))
         shape(d, "schema enrollment executor journal wallets attempts", "journal schema")
         require(type(d["schema"]) is int and d["schema"] == 1 and d["enrollment"] == self.anchor.sha256
@@ -1035,6 +1040,7 @@ class AttemptJournal:
         return d
 
     def _locked(self, action):
+        self._directory()
         lock = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             info = os.fstat(lock)
@@ -1067,6 +1073,7 @@ class AttemptJournal:
 
     def register(self, authority, wid):
         # A wallet can only be learned from a verified CURRENT CTRL, not caller JSON.
+        require(type(authority) is EnrollmentAuthority and authority.current() is not None, "bound current wallet authority")
         pending, parent = {}, wid
         while parent is not None:
             w = copy.deepcopy(authority.wallet(parent))
@@ -1110,6 +1117,7 @@ class EnrollmentAuthority:
         self.observation, self.state = None, None
         self.local = threading.local()
         self.last_time = 0
+        self._store = None
 
     def now(self):
         t = natural(self.clock(), "trusted integration clock")
@@ -1127,7 +1135,10 @@ class EnrollmentAuthority:
     def current(self):
         try:
             now = self.now()
-            require(self.state is not None and now < self.state["integration"]["expires"], "current authority absent/expired")
+            require(self.state is not None and self.observation is not None
+                    and decode(self.observation.body) == self.state
+                    and digest(self.observation.body) == self.observation.ref.sha256
+                    and now < self.state["integration"]["expires"], "current authority absent/expired/unbound")
             return replace(self.anchor.policy, minimum_sequence=max(self.anchor.policy.minimum_sequence,
                            self.state["integration"]["floor"]))
         except (Hold, OSError):
@@ -1177,9 +1188,14 @@ class EnrollmentAuthority:
                 require(h["fence"] >= self.state["integration"]["fence"] and h["floor"] >= self.state["integration"]["floor"],
                         "observed fence/floor rollback")
 
-    def ingest(self, observation):
+    def ingest(self, observation, *, transport=None):
+        require(transport is not None and transport is self._store and transport.observed is observation,
+                "CURRENT requires bound metered transport, not receipt consistency")
         p, now = self.anchor.policy, self.now()
-        observation.protected(p, now + p.floor_seconds, p.max_control_bytes)
+        # Authentication of the fixed protected current body is distinct from
+        # intake eligibility. Expired retention with legal hold ON still permits
+        # separately authorized preservation; the common reader applies its floor.
+        observation.protected(p, 0, p.max_control_bytes)
         require(observation.ref.key == p.ctrl_key, "fixed CURRENT locator")
         s = decode(observation.body)
         require(s.get("schema") == 2 and type(s.get("schema")) is int, "explicit schema1 migration required")
@@ -1365,9 +1381,13 @@ class AttemptGate:
                     if "Body" in result:
                         result["Body"].close()
                     raise Hold("wallet response cap")
-        except BaseException:
+        except BaseException as primary:
             # Even KeyboardInterrupt/SystemExit after durable issue cannot refund.
-            self.journal.finish(wid, index, "UNKNOWN")
+            # A secondary outcome-journal failure cannot hide the primary error.
+            try:
+                self.journal.finish(wid, index, "UNKNOWN")
+            except BaseException as secondary:
+                primary.add_note("attempt remains spent; outcome journal failed: " + type(secondary).__name__)
             raise
         finally:
             if method in WRITE_METHODS:
@@ -1444,10 +1464,20 @@ class CredentialBinder:
 class IntegratedStore:
     def __init__(self, authority, gate, raw):
         self.authority, self.gate, self.raw = authority, gate, raw
+        require(authority._store is None, "one bound store per authority")
+        authority._store = self
+        self.observed = None
+
+    def _bound(self):
+        require(type(self.raw) is S3Store and type(self.raw.reader) is MeteredClient
+                and self.raw.reader.gate is self.gate and self.raw.reader.role == "reader"
+                and self.gate.authority is self.authority, "bound metered reader transport")
 
     def current(self):
+        self._bound()
         observation = self.raw.current()
-        self.authority.ingest(observation)
+        self.observed = observation
+        self.authority.ingest(observation, transport=self)
         return observation
 
     def read(self, ref):

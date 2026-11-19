@@ -1058,6 +1058,7 @@ def integration_fixture(tmp_path, *, schema2=True, change=None, baseline=False):
         migration=dict(source=model.current().ref.wire(), authority_digest=m.digest(m.canonical(template))))
     if change:
         change(d, template)
+    d["migration"]["authority_digest"] = m.digest(m.canonical(template))
     path = tmp_path / "enrollment.json"
     raw = m.canonical(d)
     path.write_bytes(raw)
@@ -1091,7 +1092,10 @@ def external_authority_update(e, runtime, change):
     s["sequence"] += 1
     s["mutations"] += 1
     e.model._new(e.anchor.policy.ctrl_key, m.canonical(s), 7000)
-    runtime.authority.ingest(e.model.current())
+    purpose, closure = runtime.authority.context()
+    runtime.authority.begin("discover")
+    runtime.store.current()  # actual metered API model readback, not a receipt brand
+    runtime.authority.begin(purpose, closure)
 
 
 def integrated_packet(e, r):
@@ -1363,3 +1367,113 @@ def test_unknown_sdk_parameters_never_enter_journal_or_wire(tmp_path):
             ExpectedBucketOwner=e.anchor.policy.account, SSECustomerKey="must-never-be-journaled")
     assert e.journal._read() == before and len(e.factory.wires) == wires
     r.close()
+
+
+
+def test_anchor_and_current_memory_copies_cannot_self_authorize(tmp_path):
+    e = integration_fixture(tmp_path)
+    e.anchor.data["grants"]["extra-unselected-purpose"] = ["*"]
+    with pytest.raises(m.Hold, match="in-memory binding"):
+        runtime(e)
+    assert not e.factory.created
+
+
+def test_current_authority_memory_mutation_requires_actual_observation(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    r.authority.state["integration"]["screened"]["d" * 64] = dict(policy=e.anchor.data["screening"], expires=7000)
+    before = len(e.factory.wires)
+    assert r.custody.resolve_current().candidate == "HOLD"
+    assert len(e.factory.wires) == before
+    r.close()
+
+
+def test_expired_control_protection_allows_only_authorized_preservation(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    e.model.change_observation(e.model.current().ref, until=999)
+    assert r.cold_recover().candidate == "HOLD"
+    r.enable_writer(e.bundles["writer"])
+    r.custody.incident("expired-protection")
+    assert e.model.current().until >= e.clock[0] + e.anchor.policy.floor_seconds
+    assert e.model.state()["incidents"] == ["expired-protection"]
+    r.close()
+
+
+def test_two_callers_cannot_reuse_one_durable_slot(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    def one_slot(d, template):
+        w = d["seeds"]["seed-reader"]
+        w["attempts"] = 1
+        w["charge"] = 1 + w["response_bytes"]
+    e = integration_fixture(tmp_path, change=one_slot)
+    w = e.anchor.data["seeds"]["seed-reader"]
+    second = m.AttemptJournal(e.anchor)
+    def claim(journal):
+        try:
+            return journal.claim("seed-reader", w, "a" * 64)
+        except m.Hold:
+            return "HOLD"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim, [e.journal, second]))
+    assert results.count(0) == 1 and results.count("HOLD") == 1
+    assert len(e.journal._read()["attempts"]["seed-reader"]) == 1
+    assert not e.factory.wires
+
+
+def test_surviving_independent_executor_recovers_without_reusing_lost_wallet(tmp_path):
+    second_dir = tmp_path / "independent"
+    second_dir.mkdir(mode=0o700)
+    def extra_executor(d, template):
+        info = second_dir.stat()
+        d["executors"]["executor-two"] = dict(owner=os.getuid(), journal=dict(path=str(second_dir / "attempts.json"),
+            id="independent-journal", max_bytes=2000000, device=info.st_dev, inode=info.st_ino))
+        w = copy.deepcopy(d["seeds"]["seed-reader"])
+        w["executor"] = "executor-two"
+        d["seeds"]["recovery-reader"] = w
+    e = integration_fixture(tmp_path, change=extra_executor)
+    other = m.Enrollment.load(e.anchor.path, expected_digest=e.anchor.sha256, expected_owner=os.getuid(),
+                               expected_executor="executor-two")
+    # Both pre-funded journals already exist before simulated loss of the Mac.
+    other_path = Path(other.journal["path"])
+    other_path.write_bytes(m.journal_genesis(other))
+    other_path.chmod(0o600)
+    other_journal = m.AttemptJournal(other)
+    r = runtime(e)
+    r.cold_recover()
+    old_cash = sum(w["charge"] for w in e.model.state()["integration"]["wallets"].values())
+    r.close()
+    Path(e.anchor.journal["path"]).unlink()
+    with pytest.raises(FileNotFoundError):
+        m.AttemptJournal(e.anchor)
+    recovered = m.CustodyRuntime(other, other_journal, lambda: e.clock[0], dict(reader="recovery-reader"),
+        dict(reader=e.bundles["reader"]), client_factory=e.factory)
+    assert recovered.cold_recover().version == e.model.current().ref.version
+    assert sum(w["charge"] for w in e.model.state()["integration"]["wallets"].values()) == old_cash
+    assert "seed-reader" not in other_journal._read()["attempts"]
+    recovered.close()
+    other_path.unlink()
+    with pytest.raises(FileNotFoundError):
+        m.AttemptJournal(other)
+
+
+
+def test_raw_consistent_current_receipt_is_not_transport_authentication(tmp_path):
+    e = integration_fixture(tmp_path)
+    authority = m.EnrollmentAuthority(e.anchor, lambda: e.clock[0])
+    with pytest.raises(m.Hold, match="bound metered transport"):
+        authority.ingest(e.model.current())
+    assert authority.current() is None and not e.factory.wires
+
+
+def test_journal_directory_binding_is_checked_again_before_send(tmp_path):
+    e = integration_fixture(tmp_path)
+    original = e.anchor.journal["inode"]
+    # A relocated executor directory must not reuse copied counters, even if a
+    # journal object was made before the relocation was observed.
+    e.anchor.data["executors"][e.anchor.executor]["journal"]["inode"] = original + 1
+    with pytest.raises(m.Hold, match="directory/device/inode"):
+        e.journal.available("seed-reader", e.anchor.data["seeds"]["seed-reader"])
+    assert not e.factory.wires
