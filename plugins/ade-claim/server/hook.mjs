@@ -219,9 +219,9 @@ export function runTrustedAdeGitGuardInstall(worktreePath, deps = {}) {
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  * @param {HookDeps} [deps]
  */
-export function registerWorktreeClaimHook(server, deps = {}) {
+export function createWorktreeClaimHandler(deps = {}) {
   const ctx = hookContext(deps);
-  return server.addHook("worktree.create.after", async ({ worktree }) => {
+  return async ({ worktree }) => {
     const m = callMode(ctx);
     const observing = m.mode === "observe";
     /** @type {Record<string, unknown>} */
@@ -263,7 +263,11 @@ export function registerWorktreeClaimHook(server, deps = {}) {
       if (observing) return;
       throw err;
     }
-  });
+  };
+}
+
+export function registerWorktreeClaimHook(server, deps = {}) {
+  return server.addHook("worktree.create.after", createWorktreeClaimHandler(deps));
 }
 
 /**
@@ -273,10 +277,10 @@ export function registerWorktreeClaimHook(server, deps = {}) {
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  * @param {HookDeps} [deps]
  */
-export function registerWorkspaceArchiveReleaseHook(server, deps = {}) {
+export function createWorkspaceArchiveReleaseHandler(deps = {}) {
   const ctx = hookContext(deps);
   const hook = "workspace.archive.after";
-  return server.addHook(hook, async ({ workspace }) => {
+  return async ({ workspace }) => {
     const m = callMode(ctx);
     /** @type {Record<string, unknown>} */
     let ids = {};
@@ -321,7 +325,11 @@ export function registerWorkspaceArchiveReleaseHook(server, deps = {}) {
       return;
     }
     record(ctx, m, hook, planned, ids);
-  });
+  };
+}
+
+export function registerWorkspaceArchiveReleaseHook(server, deps = {}) {
+  return server.addHook("workspace.archive.after", createWorkspaceArchiveReleaseHandler(deps));
 }
 
 /**
@@ -335,10 +343,10 @@ export function registerWorkspaceArchiveReleaseHook(server, deps = {}) {
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  * @param {HookDeps} [deps]
  */
-export function registerAgentClaimEnvHook(server, deps = {}) {
+export function createAgentClaimEnvHandler(deps = {}) {
   const ctx = hookContext(deps);
   const hook = "agent.open.before";
-  return server.addHook(hook, async ({ request }) => {
+  return async ({ request }) => {
     const m = callMode(ctx);
     const observing = m.mode === "observe";
     /** @type {Record<string, unknown>} */
@@ -384,7 +392,11 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
     record(ctx, m, hook, planned, claimId ? { ...ids, claim: claimId } : ids);
     if (observing || !env) return undefined;
     return { ...request, env };
-  });
+  };
+}
+
+export function registerAgentClaimEnvHook(server, deps = {}) {
+  return server.addHook("agent.open.before", createAgentClaimEnvHandler(deps));
 }
 
 /**
@@ -394,10 +406,10 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
  * @param {{ addHook: (name: string, handler: Function) => () => void }} server
  * @param {HookDeps} [deps]
  */
-export function registerAgentClaimOwnerHook(server, deps = {}) {
+export function createAgentClaimOwnerHandler(deps = {}) {
   const ctx = hookContext(deps);
   const hook = "agent.create.after";
-  return server.addHook(hook, async ({ agent }) => {
+  return async ({ agent }) => {
     const m = callMode(ctx);
     /** @type {Record<string, unknown>} */
     let ids = {};
@@ -450,7 +462,11 @@ export function registerAgentClaimOwnerHook(server, deps = {}) {
       return;
     }
     record(ctx, m, hook, planned, ids);
-  });
+  };
+}
+
+export function registerAgentClaimOwnerHook(server, deps = {}) {
+  return server.addHook("agent.create.after", createAgentClaimOwnerHandler(deps));
 }
 
 /**
@@ -471,5 +487,16 @@ export function registerAdeClaimHooks(server, deps = {}) {
     removeArchive();
     removeEnv();
     removeOwner();
+  };
+}
+
+
+/** Deferred ordinary route: actual callbacks, no replacement native context. */
+export function createLegacyClaimHandlers(deps = {}) {
+  return {
+    "worktree.create.after": createWorktreeClaimHandler(deps),
+    "workspace.archive.after": createWorkspaceArchiveReleaseHandler(deps),
+    "agent.open.before": createAgentClaimEnvHandler(deps),
+    "agent.create.after": createAgentClaimOwnerHandler(deps),
   };
 }
