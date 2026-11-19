@@ -20,6 +20,8 @@ A1. `config/ade.toml` (kinds, each pool's ranks per kind and suggested `--model 
 plenty gate, burn-first and pace knobs, the never-route list and aliases, dispatch gates and estimate floors, the lead's
 model) and `config/ade.toml [gates.frontier]` (the frontier allowance, `docs/gates.md`). Print both with
 `bin/route_agent.py policy --md` (or `policy` for JSON); no other file restates them.
+Model frontier vs near-frontier classification and the current standings snapshot live in
+[`docs/model-rankings.md`](model-rankings.md) (the ranking page; linked from `[dispatch].frontier_models`).
 Since **2026-11-10**, runtime routing reads these values through
 `ade_config.load_effective`: a valid `config/ade.toml` replaces the legacy base
 when present, and `~/.config/djbclark-ade/local.toml` overlays it per leaf
