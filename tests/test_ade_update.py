@@ -1456,3 +1456,321 @@ def test_settings_step_skipped_without_the_template_or_live_file(env):
     log = _settings_env(env)
     env.run(extra_env={"FAKE_SA_LOG": str(log)})  # the fixture repo carries no agents/claude/settings.json.tmpl
     assert log.read_text() == ""
+
+
+@pytest.mark.parametrize("old", [None, "old helper\n"])
+def test_graft_helper_check_reports_drift_without_writes(env, old):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('new helper');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+    before = sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*"))
+    r = env.run("--check", "--json")
+    row = json.loads(r.stdout)["graft_helper"]
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert row["state"] == ("missing" if old is None else "differs")
+    assert row["fix"] == f"ade-update --repo {env.machine}"
+    assert sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*")) == before
+    assert (live.read_text() if live.exists() else None) == old
+    assert not env.state.exists()
+
+
+@pytest.mark.parametrize("old", [None, "old helper\n"])
+def test_graft_helper_apply_copies_with_backup_and_is_then_silent(env, old):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('new helper');\n"})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+        live.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "installed"
+    assert live.read_text() == "#!/usr/bin/env node\nconsole.log('new helper');\n" and not live.is_symlink()
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    backups = list(live.parent.glob("graft-hooks.cjs.bak-*"))
+    assert len(backups) == int(old is not None)
+    if old is not None:
+        import re
+        assert re.fullmatch(r"graft-hooks.cjs.bak-\d{8}T\d{6}Z", backups[0].name)
+        assert backups[0].read_text() == old
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o755
+    before = live.stat().st_mtime_ns
+    for flags in [("--check",), ()]:
+        r = env.run(*flags)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "graft helper" not in r.stdout
+        assert live.stat().st_mtime_ns == before
+    assert list(live.parent.glob("graft-hooks.cjs.bak-*")) == backups
+
+
+@pytest.mark.parametrize("flags", [("--check",), ()])
+def test_graft_helper_noncanonical_repo_is_report_only(env, flags):
+    env.publish({".claude/helpers/graft-hooks.cjs": "feature helper\n"})
+    other = env.tmp / "other"
+    sh("git", "clone", "-q", str(env.origin), str(other))
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("live helper\n")
+    r = env.run(*flags, "--json", repo=other)
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "differs" and row["mode"] == "report-only"
+    assert "fix" not in row
+    assert live.read_text() == "live helper\n"
+    assert list(live.parent.iterdir()) == [live]
+
+
+@pytest.mark.parametrize("edit", ["local edit\n", "", "#!/usr/bin/env node\nfunction broken("])
+def test_graft_helper_local_edit_cannot_deploy(env, edit):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('committed');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    (env.machine / ".claude/helpers/graft-hooks.cjs").write_text(edit)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json")
+        assert r.returncode == 10, r.stdout + r.stderr
+        row = json.loads(r.stdout)["graft_helper"]
+        assert row["state"] == "refused" and "working-tree" in row["detail"]
+        assert live.read_text() == "good live helper\n"
+        assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("source", ["", "#!/usr/bin/env node\n", "garbage", "#!/usr/bin/env node\nfunction broken("])
+def test_graft_helper_invalid_committed_source_cannot_deploy(env, source):
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    r = env.run("--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert json.loads(r.stdout)["graft_helper"]["state"] == "refused"
+    assert live.read_text() == "good live helper\n"
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("branch", ["feature", "ahead-master"])
+def test_graft_helper_requires_authorized_branch_and_revision(env, branch):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('committed');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    if branch == "feature":
+        sh("git", "checkout", "-q", "-b", "feature", "--track", "origin/master", cwd=env.machine)
+    else:
+        commit(env.machine, "unpublished", {".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('unpublished');\n"})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    r = env.run("--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "refused" and "master" in row["detail"]
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("mode", [0o4755, 0o2755, 0o1755])
+def test_graft_helper_special_mode_bits_are_drift(env, mode):
+    source = "#!/usr/bin/env node\nconsole.log('committed');\n"
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text(source)
+    live.chmod(mode)
+    assert stat.S_IMODE(live.stat().st_mode) == mode
+    r = env.run("--check", "--json")
+    assert r.returncode == 10 and json.loads(r.stdout)["graft_helper"]["state"] == "differs"
+    assert stat.S_IMODE(live.stat().st_mode) == mode
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_graft_helper_destination_symlink_becomes_copy(env, dangling):
+    source = "#!/usr/bin/env node\nconsole.log('committed');\n"
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    target = env.tmp / "symlink-target"
+    if not dangling:
+        target.write_text(source)
+        target.chmod(0o755)
+    live.symlink_to(target)
+    assert env.run("--check").returncode == 10
+    assert live.is_symlink()
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not live.is_symlink() and live.read_text() == source
+    backups = list(live.parent.glob("*.bak-*"))
+    assert len(backups) == int(not dangling)  # absent content cannot be backed up
+    assert target.exists() == (not dangling)
+    if not dangling:
+        assert target.read_text() == source and backups[0].read_text() == source
+
+
+def helper_snapshot(directory):
+    return {p.name: (p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) for p in directory.iterdir()}
+
+
+def seed_helper_backup(live):
+    live.chmod(0o755)
+    backup = live.with_name(live.name + ".bak-20260101T000000Z")
+    backup.write_bytes(b"existing backup\n")
+    backup.chmod(0o640)
+    return helper_snapshot(live.parent)
+
+
+def test_graft_helper_replacement_ref_cannot_authorize_other_bytes(env, monkeypatch):
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    authorized = env.head(env.machine)
+    # B is a real local commit, but master and origin/master still name A.
+    sh("git", "checkout", "-q", "-b", "replacement", cwd=env.machine)
+    replacement = "#!/usr/bin/env node\nconsole.log('replacement');\n"
+    commit(env.machine, "replacement bytes", {rel: replacement})
+    other = env.head(env.machine)
+    sh("git", "checkout", "-q", "master", cwd=env.machine)
+    sh("git", "replace", authorized, other, cwd=env.machine)
+    (env.machine / rel).write_text(replacement)
+    assert sh("git", "show", f"{authorized}:{rel}", cwd=env.machine) == replacement.strip()
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json")
+        assert r.returncode == 10, r.stdout + r.stderr
+        assert json.loads(r.stdout)["graft_helper"]["state"] == "refused"
+        assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("code", [1, 124, 127, 128, 2])
+@pytest.mark.parametrize("working_source", [False, True])
+def test_graft_helper_git_probe_failure_is_error(env, code, working_source):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    if not working_source:
+        (env.machine / rel).unlink()
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys
+if 'cat-file' in sys.argv and any(a.endswith(':{rel}') for a in sys.argv):
+    print("injected object read failure: path does not exist in revision", file=sys.stderr)
+    sys.exit({code})
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "injected object read failure" in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("failure", ["signal", "unexpected", "exit-one", "empty-exit-one"])
+def test_graft_helper_node_tool_failure_is_error(env, failure):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    fake = env.bin / "node"
+    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(2)" if failure == "unexpected" else "sys.exit(1)"
+    diagnostic = "" if failure == "empty-exit-one" else "injected node failure"
+    fake.write_text(f"#!{sys.executable}\nimport os, signal, sys\nif {bool(diagnostic)!r}: print({diagnostic!r}, file=sys.stderr, flush=True)\n{action}\n")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "Node validation failed" in json.loads(r.stdout)["error"]
+    assert diagnostic in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("canonical", [True, False])
+def test_graft_helper_committed_directory_is_error(env, canonical):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel + "/child": "not a helper\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    repo = env.machine if canonical else clone(env, "other")
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json", repo=repo)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "not one regular-file blob" in json.loads(r.stdout)["error"]
+        assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("entry", ["160000 commit", "120000 blob", "100644 tree", "100644 blob"])
+def test_graft_helper_invalid_object_entry_is_error(env, entry):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    # Even a blob-labelled row must fail its typed object read if that OID is a tree.
+    oid = sh("git", "rev-parse", "HEAD^{tree}", cwd=env.seed)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    output = f"{entry} {oid}\t{rel}\0"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys
+if 'ls-tree' in sys.argv and sys.argv[-1] == {rel!r}:
+    sys.stdout.write({output!r})
+    sys.exit(0)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("failure", ["ls-tree", "blob-read", "signal"])
+def test_graft_helper_git_listing_and_blob_read_failures(env, failure):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    conditions = {
+        "ls-tree": f"'ls-tree' in sys.argv and sys.argv[-1] == {rel!r}",
+        "blob-read": "'cat-file' in sys.argv and 'blob' in sys.argv",
+        "signal": f"'cat-file' in sys.argv and any(a.endswith(':{rel}') for a in sys.argv)",
+    }
+    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(127)"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys, signal
+if {conditions[failure]}:
+    print('injected Git operational failure', file=sys.stderr, flush=True)
+    {action}
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "injected Git operational failure" in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved
