@@ -1456,3 +1456,69 @@ def test_settings_step_skipped_without_the_template_or_live_file(env):
     log = _settings_env(env)
     env.run(extra_env={"FAKE_SA_LOG": str(log)})  # the fixture repo carries no agents/claude/settings.json.tmpl
     assert log.read_text() == ""
+
+
+@pytest.mark.parametrize("old", [None, "old helper\n"])
+def test_graft_helper_check_reports_drift_without_writes(env, old):
+    env.publish({".claude/helpers/graft-hooks.cjs": "new helper\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+    before = sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*"))
+    r = env.run("--check", "--json")
+    row = json.loads(r.stdout)["graft_helper"]
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert row["state"] == ("missing" if old is None else "differs")
+    assert row["fix"] == f"ade-update --repo {env.machine}"
+    assert sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*")) == before
+    assert (live.read_text() if live.exists() else None) == old
+    assert not env.state.exists()
+
+
+@pytest.mark.parametrize("old", [None, "old helper\n"])
+def test_graft_helper_apply_copies_with_backup_and_is_then_silent(env, old):
+    env.publish({".claude/helpers/graft-hooks.cjs": "new helper\n"})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+        live.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "installed"
+    assert live.read_text() == "new helper\n" and not live.is_symlink()
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    backups = list(live.parent.glob("graft-hooks.cjs.bak-*"))
+    assert len(backups) == int(old is not None)
+    if old is not None:
+        import re
+        assert re.fullmatch(r"graft-hooks.cjs.bak-\d{8}T\d{6}Z", backups[0].name)
+        assert backups[0].read_text() == old
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o755
+    before = live.stat().st_mtime_ns
+    for flags in [("--check",), ()]:
+        r = env.run(*flags)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "graft helper" not in r.stdout
+        assert live.stat().st_mtime_ns == before
+    assert list(live.parent.glob("graft-hooks.cjs.bak-*")) == backups
+
+
+@pytest.mark.parametrize("flags", [("--check",), ()])
+def test_graft_helper_noncanonical_repo_is_report_only(env, flags):
+    env.publish({".claude/helpers/graft-hooks.cjs": "feature helper\n"})
+    other = env.tmp / "other"
+    sh("git", "clone", "-q", str(env.origin), str(other))
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("live helper\n")
+    r = env.run(*flags, "--json", repo=other)
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "differs" and row["mode"] == "report-only"
+    assert "fix" not in row
+    assert live.read_text() == "live helper\n"
+    assert list(live.parent.iterdir()) == [live]

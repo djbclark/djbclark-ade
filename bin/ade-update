@@ -50,6 +50,10 @@ Steps, in order:
    "new upstream" links (JSON `claude_links.new_upstream`; not counted as problems, no fix yet), the same as
    upstream-only skills; apply pulls first, so it reports them with their fix. `CLAUDE.md` is a property of the
    checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
+3a. Compare `.claude/helpers/graft-hooks.cjs` with `~/.claude/helpers/graft-hooks.cjs`. In the canonical
+   checkout, --check reports missing/differing copies with the fix command; apply backs up the old copy
+   as `*.bak-<UTC stamp>` and atomically replaces it with a regular file, mode 0755. Other --repo paths
+   report only, without a fix or a counted problem. A checkout without the source helper skips this step.
 3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
    `macos/gui-hog` (`--check` only says it would). Fails open: no swiftc, a failed or slow build is a note, never a problem or an exit code (the sampler shows no dialog without
    a fresh bundle). `ADE_GUI_BUILD=0` skips it.
@@ -68,9 +72,9 @@ Steps, in order:
    state file (temp file beside, `os.replace`), unless a skill link stayed unresolved.
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
-~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
+~/.claude link or graft helper copy is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
-or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch or merge error
+or the graft helper install/check or state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch or merge error
 or timeout, any other `git merge --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
 result for a skill, the state file cannot be written).
 """
@@ -85,6 +89,7 @@ import sys
 import tempfile
 import textwrap
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 EXIT_OK, EXIT_DIRTY, EXIT_NON_FF, EXIT_ERROR, EXIT_BEHIND = 0, 2, 3, 4, 10
@@ -461,6 +466,59 @@ def stuck_rows_hint(script, repo, names):
     return "; not in place: " + ", ".join(bad) if bad else ""
 
 
+def install_graft_helper(repo, check, can_install):
+    """Report copy drift; only canonical apply can replace the live helper (never link it)."""
+    source = Path(repo) / ".claude/helpers/graft-hooks.cjs"
+    live = Path.home() / ".claude/helpers/graft-hooks.cjs"
+    row = {"path": str(live), "state": "skipped", "mode": "apply" if can_install and not check else "report-only"}
+    if not source.is_file():
+        return row
+    tmp = None
+    try:
+        wanted = source.read_bytes()
+        previous = live.read_bytes() if live.exists() else None
+        row["state"] = "missing" if previous is None else "differs"
+        if previous == wanted and not live.is_symlink() and live.stat().st_mode & 0o777 == 0o755:
+            row["state"] = "ok"
+            return row
+        if not can_install:
+            return row
+        row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
+        if check:
+            return row
+        live.parent.mkdir(parents=True, exist_ok=True)
+        if previous is not None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = live.with_name(live.name + ".bak-" + stamp)
+            for n in range(100):
+                candidate = backup if n == 0 else backup.with_name(backup.name + f".{n}")
+                try:
+                    with candidate.open("xb") as f:
+                        f.write(previous)
+                    candidate.chmod(live.stat().st_mode & 0o777)
+                    row["backup"] = str(candidate)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise OSError("no free backup name")
+        fd, tmp = tempfile.mkstemp(prefix=live.name + ".", dir=live.parent)
+        with os.fdopen(fd, "wb") as f:
+            f.write(wanted)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, live)  # temp beside + atomic rename, equivalent to mv -f; no live symlink
+        tmp = None
+        row["state"] = "installed"
+        return row
+    except OSError as e:
+        raise Stop(EXIT_ERROR, f"graft helper install/check failed: {e}") from e
+    finally:
+        if tmp is not None:
+            os.unlink(tmp)
+
+
 # --- symlinks -----------------------------------------------------------------------------
 
 def check_claude_md(repo):
@@ -776,6 +834,17 @@ def update(rep, args, repo):
             p.pop("fix", None)
         rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
 
+    # 3a. installed graft hook copy, separate from the report-only symlink inventory.
+    helper = install_graft_helper(repo, check, can_link)
+    d["graft_helper"] = helper
+    if helper["state"] not in ("ok", "skipped"):
+        if can_link:
+            rep.say(f"graft helper: {helper['state']}; fix: {helper['fix']}")
+            if helper["state"] != "installed":
+                problems.append("graft helper")
+        else:
+            rep.say(f"graft helper: {helper['state']}; report-only: not the canonical checkout")
+
     # 3b. the GUI-hog dialog bundle (docs/gui-hog-dialog.md D2). FAIL OPEN: a missing swiftc, a failed build or a timeout is a note, never a problem; the
     # sampler shows no dialog for a missing or stale bundle. Only the canonical checkout builds (it is the one whose sources the live sampler matches), only on
     # macOS, and ADE_GUI_BUILD=0 skips it. The script beside this ade-update is run, never one inside a non-canonical checkout.
@@ -891,12 +960,12 @@ def update(rep, args, repo):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current.",
-                                 epilog="Exit: 0 current, 10 behind/missing links (--check) or unresolved, 2 dirty tree, "
+    ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current; install the canonical graft helper copy.",
+                                 epilog="Exit: 0 current, 10 behind/missing links/helper drift (--check) or unresolved, 2 dirty tree, "
                                         "3 diverged (git's explicit non-fast-forward refusal), 4 git, network, "
-                                        "skill-everywhere (not found, failed or incomplete) or state-file error.")
+                                        "skill-everywhere (not found, failed or incomplete), graft helper or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
-    ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
+    ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind, links missing or graft helper differs")
     ap.add_argument("--auto", action="store_true",
                     help="S4: observe-only (--check + keys) then exit 5 unless --apply-checkout "
                          "(or ADE_UPDATE_AUTO_APPLY=1) ff-only updates this checkout, or --apply "
