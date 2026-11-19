@@ -42,6 +42,15 @@ Marked. The closeout workspace is additionally retained. All13 acceptance
 files, four backup files and three pilot proof files still match their hashes
 or preserved copies. Original Codex config/temp backups remain intact.
 
+## Final publication update
+
+PR804 subsequently merged through the normal guarded path as `a333644189eb71880ae4ba52e307fa3c973e6356`.
+All four published documentation blobs match the reviewed head. The approved
+closeout work is complete; retained worktrees are deliberate safety exclusions,
+not newly authorized cleanup. The operator still explicitly selected an
+acknowledged successor. After accept/finish, verify this final state once and
+report completion; do not start a new campaign or recurring watcher.
+
 ## What We Tried
 
 Normal quota routing admitted no judgment/frontier reviewer. The operator
@@ -100,7 +109,8 @@ agents within those bounds; preserve unrelated dirty shared-checkout files.
 2. Read the owned Tier1 pointer and its private independent-review/cleanup
    results. Inspect `gh pr view 804 --repo djbclark/djbclark-ade --json
    state,headRefOid,statusCheckRollup`.
-3. Triage actual findings, then use `ade-merge-ready merge-now --prs 804 --yes`
+3. If PR804 is already merged, verify the merged documents and skip another
+   merge attempt. Otherwise triage actual findings, then use `ade-merge-ready merge-now --prs 804 --yes`
    only when its normal approval/check/bot gates pass. Do not forge a live marker
    or bypass a real approval blocker. Keep the published branches.
 4. Verify merged documentation and preserved workspace/evidence state; report
