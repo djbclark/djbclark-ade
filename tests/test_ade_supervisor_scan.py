@@ -391,3 +391,34 @@ def test_a_refused_lead_and_a_failed_send_are_separate_causes(tmp_path: Path) ->
     assert len(pings) == 2                                          # one per cause, same outage
     assert (state / ".lead-unreachable.refused").exists()
     assert (state / ".lead-unreachable.send-failed").exists()
+
+
+def _plan_lines(state: Path) -> list[str]:
+    return [line for line in (state / "supervisor.log").read_text().splitlines() if "re-handoff plan" in line]
+
+
+def test_a_stuck_agent_is_planned_for_rehandoff_but_not_moved_by_default(tmp_path: Path) -> None:
+    """The default scan logs the re-handoff it would do and never archives or relaunches (Carried 70, dry run)."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0
+    plan = _plan_lines(state)
+    assert len(plan) == 1 and "dry-run" in plan[0]
+    assert "would-rehandoff" in plan[0] and "a1" in plan[0]
+    assert not any("agent archive" in line for line in sent.read_text().splitlines())
+
+
+def test_live_mode_refuses_to_move_anyone_until_the_executor_is_built(tmp_path: Path) -> None:
+    """ADE_SUPERVISOR_REHANDOFF=live calls the executor, which is not built yet and must move nothing."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "ade-supervisor-rehandoff").write_text(
+        "#!/bin/sh\necho \"ade-supervisor-rehandoff: live re-handoff is not built; left where they are\"\nexit 1\n")
+    (bin_dir / "ade-supervisor-rehandoff").chmod(0o755)
+    env_home = home
+    import os, subprocess
+    env = dict(os.environ, HOME=str(env_home), PATH=f"{bin_dir}:{os.environ['PATH']}",
+               ADE_SUPERVISOR_STATE_DIR=str(state), ADE_SUPERVISOR_LEAD=LEAD,
+               ADE_SUPERVISOR_REHANDOFF="live")
+    assert subprocess.run([str(bin_dir / "ade-supervisor-scan")], env=env, capture_output=True, text=True).returncode == 0
+    log = (state / "supervisor.log").read_text()
+    assert "re-handoff executor failed" in log
+    assert not any("agent archive" in line for line in sent.read_text().splitlines())

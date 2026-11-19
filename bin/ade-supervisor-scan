@@ -152,20 +152,49 @@ else:
                       "ade-pi-stuck printed a stuck list this scan cannot read — the watch is blind"))
         carry = sorted(told)
     else:
+        plan = []                               # the re-handoff this run WOULD do; nothing here performs one (Carried 70)
         for s in stuck:
             if s.get("status") in ("closed", "archived", "error"):      # ade-pi-stuck already filters these
                 continue
             items.append((recipient + "|%s|%s" % (s.get("id"), s.get("account")),
                           "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
                                                                s.get("alternative") or "no healthy alternative")))
+            alt = s.get("alternative")
+            if alt:
+                plan.append({"id": s.get("id"), "account": s.get("account"), "model": s.get("model"),
+                             "alternative": alt, "action": "would-rehandoff"})
+            else:
+                plan.append({"id": s.get("id"), "account": s.get("account"), "action": "no-healthy-alternative"})
+        plan_path = pending_path + ".plan"
+        with open(plan_path, "w") as fh:
+            json.dump({"mode": "dry-run", "acts": False, "plan": plan}, fh)
 seen = {key for key, _ in items}
 items += [(key, None) for key in carry if key not in seen]
 with open(pending_path, "w") as fh:
     json.dump(list(dict.fromkeys(k for k, _ in items)), fh)              # one entry per key, in order
 new = [text for key, text in items if text and key not in told]
 if new:
-    print("supervisor scan: %d new finding(s) — %s" % (len(new), "; ".join(new)))
+    print("supervisor scan: %d new finding(s) - %s" % (len(new), "; ".join(new)))
 ' "$NOTIFIED" "$pending" "$scan_rc" "${send_to:--}" 2>>"$LOG")"
+
+# Re-handoff stays a dry run (operator, 2026-11-19, Carried 70): log what this scan would move and where, and do
+# not archive or relaunch anything. ADE_SUPERVISOR_REHANDOFF=live is recognized but refused until a reviewed
+# live path exists, so a scan can never act on its own.
+# Re-handoff (Carried 70). The default is a dry run: the plan is logged and nothing moves. ADE_SUPERVISOR_REHANDOFF=live
+# hands the plan to ade-supervisor-rehandoff, which performs one re-handoff per stuck agent through ade-self-session and
+# never acts on an agent the plan did not name. The scan itself never archives anything; the executor owns that.
+if [ -f "$pending.plan" ]; then
+    printf '%s ade-supervisor-scan: re-handoff plan (%s) %s\n' "$(now)" "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" "$(cat "$pending.plan")" >>"$LOG"
+    if [ "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" = "live" ]; then
+        rehandoff="$(cd "$(dirname "$0")" && pwd)/ade-supervisor-rehandoff"
+        if [ -x "$rehandoff" ]; then
+            "$rehandoff" "$pending.plan" >>"$LOG" 2>&1 || printf '%s ade-supervisor-scan: re-handoff executor failed\n' "$(now)" >>"$LOG"
+        else
+            printf '%s ade-supervisor-scan: live re-handoff requested but %s is missing; nothing moved\n' "$(now)" "$rehandoff" >>"$LOG"
+        fi
+    fi
+    rm -f "$pending.plan"
+fi
 
 send_failed=0
 delivered=0
