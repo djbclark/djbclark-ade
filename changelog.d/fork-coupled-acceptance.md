@@ -21,3 +21,6 @@
 
 - Add a read-only, separately reviewed sudo ancestry diagnostic with bounded
   kernel observations; it cannot mount, launch a daemon or grant admission. (#0)
+
+- Capture reviewed read-only sudo ancestry facts in disposable Linux CI before
+  the unchanged namespace admission check. No credential predicate is relaxed. (#0)
