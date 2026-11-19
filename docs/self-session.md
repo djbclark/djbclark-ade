@@ -455,9 +455,10 @@ from the provisional ack. Legacy same-provider handoffs retain their existing
 contract; they do not acquire a first-turn guarantee by this change.
 
 Before acknowledgement, the predecessor may also run `verify-turn` to inspect
-failure-only evidence. An idle Pi transcript error records `first-turn-failed`
-and permits retry; successful output never substitutes for the real ack and
-never retires the predecessor.
+failure-only evidence. After validating the entire transcript, an error in the
+latest applicable Pi message records `first-turn-failed` and permits retry.
+Recovered output stays pending acknowledgement; malformed tails fail closed.
+Successful output never substitutes for the real ack or retires the predecessor.
 
 The adapter reads the exact owned canonical transcript named by the matching
 Paseo persistence record. It supports unbranched Pi v3 JSONL sessions only.

@@ -2528,3 +2528,42 @@ def test_retry_creation_refusal_preserves_history_on_next_handoff(setup):
     assert route_argv[route_argv.index('--exclude') + 1] == 'go-account-a'
     assert route_argv[route_argv.index('--kinds') + 1] == 'judgment'
     assert native.created == 2 and native.archived == 0
+
+
+@pytest.mark.parametrize('tail_kind', ['recovered', 'parent', 'timestamp', 'message', 'entry'])
+def test_pre_ack_historical_error_does_not_authorize_retry(setup, tail_kind):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'idle'
+    transcript = write_routed_transcript(service, record, 'error')
+    rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+    tail = copy.deepcopy(rows[-1])
+    tail.update(id='e2', parentId='e1', timestamp='2026-11-19T12:00:02Z')
+    tail['message']['stopReason'] = 'stop'
+    expected = 'acknowledgement-required'
+    if tail_kind == 'parent':
+        tail['parentId'] = 'unrelated'
+        expected = 'branched or malformed native transcript unsupported'
+    elif tail_kind == 'timestamp':
+        tail['timestamp'] = 'not-a-time'
+        expected = 'invalid native timestamp'
+    elif tail_kind == 'message':
+        tail['message'] = []
+        expected = 'malformed native message'
+    elif tail_kind == 'entry':
+        tail = []
+        expected = 'malformed native entry'
+    transcript.write_text('\n'.join(json.dumps(x) for x in [*rows, tail]) + '\n')
+    pending = service.verify_turn(path)
+    assert pending['status'] == 'awaiting-ack' and pending['ack'] is None
+    assert pending['first_turn_pending'] == expected
+    assert 'first_turn_failure' not in pending and 'first_real_turn' not in pending
+    before = path.read_bytes()
+    calls_before = len(native.calls)
+    with pytest.raises(ss.SessionError, match='only a routed failed first turn'):
+        service.retry(path)
+    assert path.read_bytes() == before
+    assert len(native.calls) == calls_before
+    assert pending['excluded_pools'] == [] and pending['attempts'] == []
+    assert native.created == 1 and native.archived == 0

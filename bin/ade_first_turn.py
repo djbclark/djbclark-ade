@@ -74,6 +74,8 @@ def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
         final_time = None
         proven = None
         for entry in rows[1:]:
+            if not isinstance(entry, dict):
+                raise EvidenceError('malformed native entry')
             eid = entry.get('id')
             if not isinstance(eid, str) or eid in seen or entry.get('parentId') != parent:
                 raise EvidenceError('branched or malformed native transcript unsupported')
@@ -87,11 +89,15 @@ def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
                 raise EvidenceError('malformed native message')
             if after is not None and when <= after:
                 continue
-            if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
-                return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
             if proof and entry['id'] == proof.get('entry_id'):
                 proven = (entry, when)
             final, final_time = (entry, when)
+        # Validate every entry before deciding. A historical error can recover,
+        # and an invalid tail must not turn that error into retry permission.
+        if final is not None:
+            msg = final['message']
+            if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
+                return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
         if failure_only:
             return {'state': 'pending', 'cause': 'acknowledgement-required'}
         if proof:
