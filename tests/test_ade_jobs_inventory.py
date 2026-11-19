@@ -246,7 +246,9 @@ def test_doctor_includes_job_drift(tmp_path):
         (S.LiveJob("com.djbclark.deadline-sweep", "launchd", "generated", True),),
         ("paseo not on PATH; paseo schedules not probed",),
     )
-    obs, rc = ai.doctor(catalog, jobs_live=live)
+    # skip_credential_bak: the vault residue probe reads this machine's ~/.local/state/ade/credential-bak, and its
+    # delete-after date has passed, which would fail `rc` for a reason this test is not about (see test_ade_install.py).
+    obs, rc = ai.doctor(catalog, jobs_live=live, skip_credential_bak=True)
     kinds = {(o.kind, o.id, o.status) for o in obs}
     assert ("job", "deadline-sweep", "ok") in kinds
     assert ("job", "planned-job", "planned") in kinds
@@ -265,7 +267,7 @@ def test_doctor_fails_on_retired_present(tmp_path):
             S.LiveJob("com.djbclark.skillopt-sleep", "cron", "crontab", True),
         ),
     )
-    obs, rc = ai.doctor(catalog, jobs_live=live)
+    obs, rc = ai.doctor(catalog, jobs_live=live, skip_credential_bak=True)   # machine state must not decide this
     assert rc == 1
     retired = [o for o in obs if o.kind == "retired-job" and o.id == "skillopt-sleep"]
     assert retired and retired[0].status == "present"
