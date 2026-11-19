@@ -13,6 +13,9 @@ test('retains early output, split secrets, UTF-8 and actual teardown chronology 
     const bytes = Buffer.from('\nBearer abcdefghijklmnop\n{"token":"private-value","message":"UTF-8 café"}\n');
     for (const byte of bytes) diagnostic.capture('stderr', Buffer.from([byte]));
     diagnostic.record('cli-end', {ordinal: 1, code: 1, stderr: 'authorization: Bearer private-cli-token'});
+    diagnostic.record('cli-failed', {ordinal: 2, name: 'AggregateError', message: 'CLI and cleanup failed',
+      stderr: 'partial startup marker secret=private-failed-cli-token',
+      stderrBytes: 57, stderrTruncated: false});
     diagnostic.record('daemon-disposal-start');
     diagnostic.record('daemon-exit', {code: 0, signal: null});
     diagnostic.record('daemon-close', {code: 0, signal: null});
@@ -24,9 +27,11 @@ test('retains early output, split secrets, UTF-8 and actual teardown chronology 
     const events = (await readFile(path.join(directory, 'registration-events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
     assert.ok(stdout.startsWith('FIRST PHASE\n'));
     assert.match(stderr, /UTF-8 café/);
-    for (const secret of ['abcdefghijklmnop', 'private-value', 'private-cli-token']) {
+    for (const secret of ['abcdefghijklmnop', 'private-value', 'private-cli-token', 'private-failed-cli-token']) {
       assert.ok(!(stdout + stderr + JSON.stringify(events)).includes(secret));
     }
+    assert.ok(events.some((entry) => entry.phase === 'cli-failed' &&
+      entry.stderr.startsWith('partial startup marker') && entry.stderr.includes('[REDACTED]')));
     assert.deepEqual(events.slice(-4).map((entry) => entry.phase),
       ['daemon-disposal-start', 'daemon-exit', 'daemon-close', 'diagnostics-finished']);
     assert.ok(events.every((entry, index) => !index || entry.elapsedMs >= events[index - 1].elapsedMs));

@@ -8,7 +8,7 @@ import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { inspect } from 'node:util';
-import { cli, collectCliResponse, requireOwnerToken } from './retained-cli.mjs';
+import { cli, collectCliResponse, getCliFailureStderr, requireOwnerToken } from './retained-cli.mjs';
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'coupled-cli-'));
@@ -25,8 +25,14 @@ async function fixture() {
       console.log(JSON.stringify({bytes:bearer.length,home:process.env.HOME,
         daemonHome:process.env.PASEO_HOME,args:process.argv.slice(3)}));
     }else if(mode==='refuse') {process.stderr.write('refused');process.exitCode=7;}
+    else if(mode==='partial') {
+      process.stdout.write('private-stdout-sentinel');
+      process.stderr.write('partial startup marker');
+      setInterval(()=>{},1000);
+    }
     else if(mode==='wait') setInterval(()=>{},1000);
     else if(mode==='overflow') {process.stdout.write(Buffer.alloc(2*1024*1024));setInterval(()=>{},1000);}
+    else if(mode==='stderr-overflow') {process.stderr.write(Buffer.alloc(32768,120));setInterval(()=>{},1000);}
     else console.log('{}');
   `);
   return root;
@@ -114,3 +120,45 @@ test('missing actual close returns bounded disposal failure with cleanup handoff
   assert.equal(disposals, 1);
   assert.ok(performance.now() - started < 1000);
 });
+
+// Actual disposable processes retain failed observational stderr, never stdout
+// or owner-bearing call evidence, without accepting forced disposal as success.
+for (const token of [null, 'a'.repeat(43)]) {
+  test('partial stderr on timeout is ' + (token === null ? 'retained' : 'suppressed for owner calls'),
+    {timeout: 10000}, async () => {
+      const root = await fixture();
+      try {
+        await assert.rejects(cli(root, '/tmp/home', ['partial'], {token, timeoutMs: 1000}), (error) => {
+          assert.ok(error instanceof AggregateError);
+          assert.equal(error.errors[0].message, 'CLI timed out');
+          assert.match(error.errors[1].message, /signal=SIGTERM/);
+          const evidence = getCliFailureStderr(error);
+          if (token !== null) assert.equal(evidence, null);
+          else {
+            assert.deepEqual(evidence, {stderr: 'partial startup marker',
+              stderrBytes: Buffer.byteLength('partial startup marker'), stderrTruncated: false});
+            assert.ok(Object.isFrozen(evidence));
+            assert.ok(!JSON.stringify(evidence).includes('private-stdout-sentinel'));
+          }
+          assert.equal(getCliFailureStderr(new Error('same message')), null);
+          return true;
+        });
+      } finally { await rm(root, {recursive: true, force: true}); }
+    });
+}
+
+test('stderr overflow evidence stays within original cap and preserves the failed outcome',
+  {timeout: 10000}, async () => {
+    const root = await fixture();
+    try {
+      await assert.rejects(cli(root, '/tmp/home', ['stderr-overflow']), (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors[0].message, 'CLI stderr overflow');
+        const evidence = getCliFailureStderr(error);
+        assert.ok(evidence.stderrBytes > 16384);
+        assert.equal(evidence.stderrTruncated, true);
+        assert.ok(Buffer.byteLength(evidence.stderr) <= 16384);
+        return true;
+      });
+    } finally { await rm(root, {recursive: true, force: true}); }
+  });

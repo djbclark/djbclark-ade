@@ -7,7 +7,7 @@ import { readFile, readlink, stat } from 'node:fs/promises';
 import { setTimeout as pause } from 'node:timers/promises';
 import path from 'node:path';
 import { launchObservedDaemon } from './retained-daemon.mjs';
-import { cli } from './retained-cli.mjs';
+import { cli, getCliFailureStderr } from './retained-cli.mjs';
 import { createRegistrationDiagnostics } from './registration-diagnostics.mjs';
 
 const builtins = [
@@ -54,7 +54,8 @@ const observedCli = async (phase, args) => {
     diagnostics.assertWithinBounds();
     return reply;
   } catch (error) {
-    diagnostics.record('cli-failed', {command: phase, ordinal, name: error.name, message: error.message});
+    diagnostics.record('cli-failed', {command: phase, ordinal, name: error.name, message: error.message,
+      ...(phase === 'plugin-list' || phase === 'maintenance-status' ? getCliFailureStderr(error) ?? {} : {})});
     throw error;
   }
 };

@@ -6,6 +6,12 @@ import { userInfo } from 'node:os';
 import path from 'node:path';
 import { ownDisposableGroup } from './owned-cleanup.mjs';
 
+// Failure evidence is bounded stderr DATA, never stdout, a bearer or settlement.
+const failureStderr = new WeakMap();
+export function getCliFailureStderr(error) {
+  return failureStderr.get(error) ?? null;
+}
+
 export function requireOwnerToken(value) {
   if (typeof value !== 'string' || value.length !== 43 || /[^A-Za-z0-9_-]/u.test(value)) {
     throw new Error('Invalid private owner token');
@@ -68,7 +74,15 @@ export async function collectCliResponse(child, owner, {token = null, timeoutMs}
     try { await owner.dispose(); }
     catch (error) { failure = failure ? new AggregateError([failure, error], 'CLI and cleanup failed') : error; }
   }
-  if (failure) throw failure;
+  if (failure) {
+    if (token === null && typeof failure === 'object' && failure !== null) {
+      failureStderr.set(failure, Object.freeze({
+        stderr: Buffer.concat(errors).toString('utf8'),
+        stderrBytes, stderrTruncated: stderrBytes > 16384,
+      }));
+    }
+    throw failure;
+  }
   assert.ok(performance.now() < deadline, 'CLI deadline exceeded after actual disposal');
   return response;
 }
