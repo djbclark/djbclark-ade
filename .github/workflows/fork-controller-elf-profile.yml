@@ -1,7 +1,7 @@
 name: Fork controller ELF profile data
 on:
   push:
-    branches: [fork-controller-elf-profile]
+    branches: [fork-controller-elf-profile, fork-maintenance-coupled]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +23,12 @@ jobs:
           repository: djbclark/paseo
           ref: d8f983b964214ea13abf21648d905a50fa5aab40
           path: native-readonly-d8-source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: djbclark/paseo
+          ref: a3f19ed7bdf56cc5d72f53fc60014960e8ebcf9a
+          path: native-readonly-a3f-source
           persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Fetch exact build-only producer evidence as data
