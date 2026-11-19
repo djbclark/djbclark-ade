@@ -39,7 +39,9 @@ def write_acceptance(tmp_path, text: str) -> Path:
 def test_shipped_file_accepts_only_the_live_cursor_and_zai_shortlist():
     rows = pools.load_acceptance(REPO / "config" / "pi-pool-acceptance.toml")
     assert rows["cursor"]["accepted"] is True and rows["zai"]["accepted"] is True
-    for name in ("grok", "antigravity", "sipb", "go", "clinepass"):
+    # antigravity accepted 2026-11-19 (docs/pi-services.md records the evidence and the pending continuation)
+    assert rows["antigravity"]["accepted"] is True
+    for name in ("grok", "sipb", "go", "clinepass"):
         assert rows[name]["accepted"] is False
     # clinepass dispatches through Pi for manual use (agent = "pi") but stays
     # unaccepted, so the fail-closed gate reports it and never auto-routes it.
