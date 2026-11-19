@@ -493,3 +493,7 @@ Checklist for a later live run (copy into the pilot PR or a run log; do not flip
 4. [ ] Confirm expired claims free the path (`claim ls` shows `expired`; another owner may claim).
 5. [ ] Operator sign-off that S4 passed → only then schedule hard-refusal enablement (separate change; not this scaffold).
 6. [ ] Until that sign-off: keep teaching agents the rule (order 9) without PATH hard refuse.
+
+## Opt-in NATS coordination
+
+Enrolled NATS claims are broker-checked projections. Missing config, stale authority and unavailable broker fail closed, including private-index writes. See [NATS coordination](nats-coordination.md). Legacy unenrolled checks are unchanged.

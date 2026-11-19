@@ -37,3 +37,7 @@ interactively in the lead's own `LEAD <repo> (<work>)` window (`skills/fan-out` 
 **successor is a new lead, not a worker**: it starts top-level in its own placement (not in the predecessor's WORKER box;
 it names its own window `LEAD …` with `ade-worker-run rename-lead`), then **reuses the predecessor chain's WORKER and OTHER boxes**
 when it dispatches (operator ruling 2026-11-14: at most three windows per lead and repo; window names carry no lead id).
+
+## Opt-in NATS coordination
+
+Explicitly enrolled NATS roles use the [durable coordination contract](../../docs/nats-coordination.md). A queued wake or ADE-inbox-recorded receipt never means processed. Use the controlled retirement gate; do not substitute --quiesced or archive status for process/resource evidence. Unenrolled roles retain this skill's existing behavior.

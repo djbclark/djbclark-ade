@@ -95,6 +95,30 @@ _BARE_TOKEN = re.compile(r'(?<![A-Za-z0-9_-])(?:gh[pousr]_|github_pat_|sk-|xox[b
                          r'|\bAKIA[0-9A-Z]{16}\b')
 
 
+
+def _coord():
+    """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
+    import importlib.util
+    import sys
+    path = Path(__file__).resolve().with_name("ade_coord.py")
+    name = "ade_coord"
+    found = sys.modules.get(name)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    key = name if found is None else "_ade_coord_" + str(path)
+    if key in sys.modules:
+        return sys.modules[key]
+    spec = importlib.util.spec_from_file_location(key, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        raise
+    return module
+
+
 def bounded(text, limit):
     """Printable, secret-scrubbed tail of text, at most `limit` characters."""
     text = ''.join(c if c.isprintable() or c in '\n\t' else '?' for c in str(text or '')[-STDERR_CAP:])
@@ -467,6 +491,10 @@ class Service:
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
                 requested_title=None, requested_role=None, route_kind=None):
         predecessor = self.actor()
+        role_for = _coord().role_for
+        CoordinationError = _coord().CoordinationError
+        if role_for(predecessor) is not None:
+            raise SessionError("enrolled handoff blocked: runtime/resource census and shared operation reconciliation required; --quiesced is insufficient")
         explicit_thinking = None if requested_thinking is None else thinking_ident(requested_thinking)
         explicit_title = None if requested_title is None else title_ident(requested_title)
         explicit_role = None if requested_role is None else role_ident(requested_role)
@@ -797,6 +825,12 @@ class Service:
         with self.transaction(self.load_record(path)) as (target, old):
             if not old or old.get('home') != str(self.home):
                 raise SessionError('custody record unavailable on this daemon')
+            # Published legacy appointment must not bypass the enrolled-role
+            # retirement/resource gate retained by the NATS adapter merge.
+            role_for = _coord().role_for
+            if any(role_for(agent) is not None for agent in
+                   (old.get('predecessor'), old.get('successor'), appointed) if agent):
+                raise SessionError('enrolled appointment blocked: use the controlled NATS retirement/resource gate')
             appointment = old.get('appointment')
             if appointment:
                 if appointment.get('appointed') != appointed:

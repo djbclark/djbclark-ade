@@ -21,6 +21,19 @@ For native MCP directory results, prefer `structuredContent` and filter to the r
 `content` often duplicates the same roster. Do not print an entire workspace/agent directory to select one entry.
 CLI schemas differ: `paseo ls --json` uses lowercase `id/provider/status`; `agent inspect --json` uses `Id/Provider/Status`.
 Do not reuse inspect-field casing to conclude that a list contains no running model/agent.
+
+For Codex tool orchestration, preserve the **whole command result**:
+`const r = await tools.exec_command(args); text(r);`. Printing only `r.output`
+and `r.exit_code` drops a yielded `session_id`. A yielded command is still
+running; resume that exact session with `write_stdin`, forwarding its full
+result too. Undefined `exit_code` is not completion or failure. Put this rule
+in mechanical/probe briefs even when a deliberate READY-only task uses
+`--no-footer`. If a caller already lost the handle, inspect the named owned
+PID or durable result/exit artifact; never restart a possibly live operation
+or replace its stable ID merely to recover visible output.
+For CI, copy workflow IDs/paths from `gh api repos/OWNER/REPO/actions/workflows`
+or the workflow/run listing. Do not guess a filename such as `tests.yaml` from
+the display name; use a discovered run ID for status and logs.
 Recipe detail: [docs/orchestration-practices.md](../../docs/orchestration-practices.md).
 
 ## 1. Slice first
@@ -274,3 +287,7 @@ preapproved tools. Inspect those when a graft card persists; this helper does no
 edit `site-private`'s `codex/config.toml` or broaden MCP tool policies.
 
 Before committing or pushing a changelog fragment, run `python3 bin/changelog-fold --repo . --check` and inspect its exit status. A failed check stops the dependent commit/push; fix the fragment first. Fragments require a valid section heading as well as a trailing PR reference on every bullet.
+
+## Opt-in NATS coordination
+
+For explicitly enrolled NATS roles, completion-notice persists stable-ID reports and artifacts; --lead-ack records durable ADE intake plus disk projection and suppresses routine model prompt ack. Processed requires explicit inbox disposition under current authority. See [coordination contract](../../docs/nats-coordination.md); unenrolled paths retain the existing receipt policy.

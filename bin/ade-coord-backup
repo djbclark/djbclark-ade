@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Snapshot ADE streams off-host; verify hashes; restore only to isolated loopback.
+
+Credentials come from sudo-secretspec's injected ADE_NATS_TOKEN environment.
+The generation is independent operator/recovery evidence, never inferred from a
+restored broker. This tool cannot activate restored production authority.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import urlsplit
+
+STREAMS = ("ADE_COORD_V1", "OBJ_ADE_ARTIFACTS_V1")
+
+
+class BackupError(RuntimeError):
+    pass
+
+
+def server_url(value, *, isolated=False):
+    try:
+        url = urlsplit(value)
+        if (url.scheme not in ("nats", "tls") or not url.hostname or not url.port
+                or url.username is not None or url.password is not None
+                or url.query or url.fragment or url.path not in ("", "/")):
+            raise ValueError()
+        if isolated and url.hostname not in ("127.0.0.1", "::1"):
+            raise ValueError()
+    except ValueError as exc:
+        raise BackupError("explicit credential-free server URL required; recovery must use loopback") from exc
+    return value
+
+
+def nats(argv, *, url, token, home):
+    # Empty private HOME/config prevents an unrelated selected NATS context or
+    # credential file from supplying different account/endpoint settings.
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
+           "XDG_CONFIG_HOME": str(home / "config"), "NATS_URL": url,
+           "NATS_TOKEN": token, "NATS_TIMEOUT": "10s", "NO_COLOR": "1"}
+    try:
+        result = subprocess.run([os.environ.get("ADE_NATS_CLI", "nats"), *argv],
+                                env=env, capture_output=True, timeout=600, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BackupError("NATS backup command unavailable or timed out") from exc
+    if result.returncode:
+        # Raw CLI output can contain connection/credential details.
+        raise BackupError("NATS backup command failed; backup remains unconfirmed")
+    return result.stdout
+
+
+def files_in(directory):
+    result = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise BackupError("backup contains a symlink")
+        if path.is_file() and path.name != "ade-manifest.json":
+            os.chmod(path, 0o600)
+            result[str(path.relative_to(directory))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+def create(directory, *, generation, url, token):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", generation):
+        raise BackupError("independent generation token required")
+    directory = Path(directory)
+    if not directory.is_absolute() or directory.exists():
+        raise BackupError("new absolute backup directory required")
+    url = server_url(url)
+    directory.mkdir(mode=0o700, parents=True)
+    with tempfile.TemporaryDirectory(prefix="ade-nats-context-") as temp:
+        home = Path(temp)
+        # Reports are snapshotted first; every referenced object was uploaded
+        # before its report, and the later object snapshot includes those bytes.
+        # Immutable/no-expiry object policy and restore verification are required.
+        info = {}
+        for stream in STREAMS:
+            value = json.loads(nats(["stream", "info", stream, "--json"], url=url, token=token, home=home))
+            info[stream] = {"last_seq": value["state"]["last_seq"], "messages": value["state"]["messages"]}
+            nats(["backup", "stream", stream, str(directory / stream), "--no-progress"],
+                 url=url, token=token, home=home)
+    hashes = files_in(directory)
+    if not hashes or not all(any(name.startswith(stream + "/") for name in hashes) for stream in STREAMS):
+        raise BackupError("incomplete stream snapshot set")
+    manifest = {"schema": 1, "generation": generation, "created": time.time(),
+                "streams": info, "files": hashes,
+                "authority": "backup only; production activation requires independent high-water reconciliation"}
+    path = directory / "ade-manifest.json"
+    with path.open("x") as output:
+        json.dump(manifest, output, sort_keys=True)
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(path, 0o600)
+    return manifest
+
+
+def verify(directory, *, generation):
+    directory = Path(directory)
+    if not directory.is_absolute() or directory.is_symlink():
+        raise BackupError("absolute real backup directory required")
+    path = directory / "ade-manifest.json"
+    if path.is_symlink():
+        raise BackupError("manifest cannot be a symlink")
+    manifest = json.loads(path.read_text())
+    if (manifest.get("schema") != 1 or manifest.get("generation") != generation
+            or set(manifest.get("streams", {})) != set(STREAMS)
+            or not manifest.get("files") or manifest["files"] != files_in(directory)):
+        raise BackupError("backup manifest, generation or file integrity mismatch")
+    return manifest
+
+
+def restore_isolated(directory, *, generation, url, token):
+    url = server_url(url, isolated=True)
+    manifest = verify(directory, generation=generation)
+    with tempfile.TemporaryDirectory(prefix="ade-nats-context-") as temp:
+        home = Path(temp)
+        existing = json.loads(nats(["stream", "ls", "--names", "--json"], url=url, token=token, home=home))
+        if existing:
+            raise BackupError("recovery broker must be empty and isolated")
+        for stream in STREAMS:
+            nats(["backup", "restore", "stream", str(Path(directory) / stream), "--no-progress"],
+                 url=url, token=token, home=home)
+            info = json.loads(nats(["stream", "info", stream, "--json"], url=url, token=token, home=home))
+            if info["state"]["last_seq"] < manifest["streams"][stream]["last_seq"]:
+                raise BackupError("restored stream is behind snapshot high-water evidence")
+    return {"restored": list(STREAMS), "generation": generation, "production_authority": False}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("create", "verify", "restore-isolated"))
+    parser.add_argument("directory")
+    parser.add_argument("--generation", required=True)
+    parser.add_argument("--isolated-url")
+    args = parser.parse_args()
+    try:
+        if args.command == "create":
+            result = create(args.directory, generation=args.generation,
+                            url=os.environ.get("ADE_NATS_URL", ""), token=os.environ.get("ADE_NATS_TOKEN", ""))
+            result = {"generation": result["generation"], "streams": result["streams"], "files": len(result["files"])}
+        elif args.command == "verify":
+            result = verify(args.directory, generation=args.generation)
+            result = {"verified": True, "generation": result["generation"], "files": len(result["files"])}
+        else:
+            if not args.isolated_url:
+                raise BackupError("explicit isolated recovery URL required")
+            result = restore_isolated(args.directory, generation=args.generation, url=args.isolated_url,
+                                      token=os.environ.get("ADE_NATS_RECOVERY_TOKEN", ""))
+        print(json.dumps({"ok": True, "result": result}))
+        return 0
+    except (BackupError, OSError, ValueError, KeyError, TypeError):
+        print(json.dumps({"ok": False, "error": "backup or recovery verification failed"}))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

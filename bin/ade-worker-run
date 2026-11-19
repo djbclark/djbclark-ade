@@ -71,7 +71,7 @@ FOOTER = ROOT / "docs/dispatch-footer.md"
 # `paseo run` flags that take a value, and boolean ones: the brief is the last argument only when what precedes it shows so.
 VALUE_FLAGS = ("--provider", "--model", "-m", "--mode", "--title", "--thinking", "--label", "--image", "--wait-timeout", "--base",
                "--branch", "--new-branch", "--worktree-mode", "--worktree-slug", "--pr-number", "--forge", "--env", "-e",
-               "--name", "--effort", "--system-prompt", "--prompt-file", "--timeout", "--output-schema")
+               "--name", "--effort", "--system-prompt", "--timeout", "--output-schema")
 BOOL_FLAGS = ("--no-wait", "--json")  # `paseo run` has no -d/--detach/--background of its own
 STRIP = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "PASEO_WORKSPACE_ID")
 LEAD_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -553,6 +553,8 @@ def passthrough_check(args: list[str]) -> None:
         raise Refused("pass --no-wait: a foreground paseo run would hold this lead's launch lock until the worker ends")
     for i, a in enumerate(args):
         flag = a.split("=", 1)[0]
+        if flag == "--prompt-file":
+            raise Refused("paseo run has no --prompt-file: read the brief file and pass its text as one final positional argument")
         if re.fullmatch(r"-[A-Za-z][^\s]+", flag):  # a bundled short option (-oyaml, -qd) would hide an owned one
             raise Refused(f"{flag}: pass short options separately (-d, -m x), never bundled")
         if flag in OWNED_FLAGS:

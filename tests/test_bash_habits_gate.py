@@ -324,6 +324,153 @@ def test_closed_or_non_heredocs_pass(command):
 
 
 @pytest.mark.parametrize("command", [
+    'echo "$(cat <<EOF\nbody\n)"',
+    'echo "$(echo \"$(cat <<EOF\nbody\n)\")"',
+    'echo "`cat <<EOF\nbody\n`"',
+])
+def test_unterminated_substitution_heredocs_still_deny(command):
+    assert denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    'echo "$(cat <<EOF\nbody\nEOF\n)"',
+    "cat <<'OUTER'\nexample \"$(cat <<INNER\nbody\n)\"\nOUTER\n",
+])
+def test_closed_substitution_and_outer_heredoc_examples_pass(command):
+    assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $(cat <<EOF\nbody\nEOF\n)",
+    "echo $(cat <<'EOF'\nbody\nEOF\n)",
+    "echo `cat <<EOF\nbody\nEOF\n`",
+])
+def test_verified_substitution_heredoc_terminators_survive_rescan(command):
+    assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo \"$(cat <<'EOF'\ntext )\nEOF\n)\"",
+    "echo \"$(cat <<'EOF'\ntext ( )\nEOF\n)\"",
+    "echo \"$(echo $(cat <<'EOF'\ntext )\nEOF\n))\"",
+    "echo \"$(cat <<'A' <<'B'\n)\nA\n( )\nB\n)\"",
+])
+def test_parentheses_inside_substitution_heredoc_are_data(command):
+    assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $((1 << 2))",
+    "((mask = 1 << 3))",
+    'echo "$((1 << 2))"',
+    "echo $((mask << bits))",
+    "((mask = mask << bits))",
+    "echo $((1 <<\n2))",
+    'echo "$((1 <<\n2))"',
+])
+def test_arithmetic_shifts_are_not_heredoc_redirections(command):
+    assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $((1 + $(cat <<EOF\nbody\n)))",
+    'echo "$((1 + $(cat <<EOF\nbody\n)))"',
+    "echo $((1 + $(sed -n 1p file)))",
+    "echo $((1 + `sed -n 1p file`))",
+])
+def test_arithmetic_still_checks_live_command_substitutions(command):
+    assert denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    'echo "$((true); gh run watch 123)"',
+    'echo $((true); gh run watch 123)',
+    'echo "$((cat <<\'EOF\'\ntext )\nEOF\n); gh run watch 123)"',
+    'echo $((cat <<\'EOF\'\ntext )\nEOF\n); gh run watch 123)',
+])
+def test_subshell_form_substitutions_preserve_live_watcher_checks(command):
+    assert denied(command)
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("tail,blocked", [
+    ("gh run watch 123", True),
+    ("gh run view 123", False),
+    ("gh run watch 123 --interval 60", False),
+])
+def test_subshell_heredoc_watcher_decision_uses_live_tail(quoted, tail, blocked):
+    body = f"$((cat <<'EOF'\ntext )\nEOF\n); {tail})"
+    command = f'echo "{body}"' if quoted else f"echo {body}"
+    out = run(command)
+    if blocked:
+        assert out and out.get("permissionDecision") == "deny"
+        assert "watch" in out["permissionDecisionReason"]
+        assert "unterminated" not in out["permissionDecisionReason"].lower()
+    else:
+        assert not out or out.get("permissionDecision") != "deny"
+
+
+@pytest.mark.parametrize("operator,inner", [
+    ("<<", "  PY"),
+    ("<<", "\tPY"),
+    ("<<", "PY "),
+    ("<<-", "  PY"),
+    ("<<-", "\t PY"),
+    ("<<-", "PY\t"),
+])
+def test_delimiter_looking_python_data_does_not_escape_heredoc(operator, inner):
+    command = (
+        f"python3 - {operator}'PY'\n"
+        'yaml = """\n'
+        f"{inner}\n"
+        "if: steps.assessment.outcome == 'success'\n"
+        '"""\n'
+        "PY\n"
+    )
+    assert not denied(command)
+    # Blanking data must not hide a real zsh word after the exact terminator.
+    assert denied(command + "echo ==\n")
+
+
+@pytest.mark.parametrize("operator,terminator", [
+    ("<<", "  PY"),
+    ("<<", "\tPY"),
+    ("<<", "PY "),
+    ("<<-", "  PY"),
+    ("<<-", "\t PY"),
+    ("<<-", "PY\t"),
+])
+def test_indented_or_suffixed_data_is_not_a_heredoc_terminator(operator, terminator):
+    out = run(f"cat {operator}'PY'\nbody\n{terminator}\n")
+    assert out["permissionDecision"] == "deny"
+    assert "Unterminated heredoc" in out["permissionDecisionReason"]
+
+
+def test_tab_stripping_heredoc_ends_only_at_its_tab_stripped_delimiter():
+    assert not denied("cat <<-'PY'\nbody\n\tPY\n")
+    assert denied("cat <<-'PY'\nbody\n\tPY\necho ==\n")
+
+
+@pytest.mark.parametrize("prefix", [
+    "echo '<<true'",
+    'echo "<<true"',
+    r'echo "escaped \" <<true"',
+    r"echo \<\<true",
+    "echo text # <<true",
+    "echo 'multiline\n<<true\ntext'",
+])
+@pytest.mark.parametrize("live", ["sed -n 1p f", "echo =="])
+def test_quoted_or_escaped_heredoc_examples_do_not_hide_live_commands(prefix, live):
+    assert denied(prefix + "\n  true\n" + live + "\n")
+
+
+def test_two_heredocs_on_one_header_preserve_the_following_shell_command():
+    command = "cat <<'A' <<'B'\n== data\nA\n== more data\nB\n"
+    assert not denied(command)
+    assert denied(command + "sed -n 1p f\n")
+
+
+@pytest.mark.parametrize("command", [
     "open -a Quicksilver",                                  # the 2026-11-02 leak
     "open https://example.com",
     "/usr/bin/open -a 'Default Folder X'",
@@ -660,6 +807,7 @@ def test_gw02_prose_and_one_shots_pass(command):
     "x=\"$(echo \"" * 50 + ")\"" * 50,               # deep nesting: bodies must not overlap
     "$(" * 100000,
     "echo \"" + "$(" * 100000,
+    "echo \"" + "$(" * 4000 + "true" + ")" * 4000 + '"',
     "`" * 100001,
     "echo foo \\\n" * 20000 + "x",                                                  # F3
     "a\\\n" * 100000,
