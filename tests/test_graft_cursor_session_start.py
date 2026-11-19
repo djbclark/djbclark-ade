@@ -113,3 +113,46 @@ def test_an_installed_trail_keeps_claudes_own_event_shape(tmp_path: Path) -> Non
     payload = json.loads(_run(CLAUDE_HOOK, "session-start", project, tmp_path))
     assert payload["hookSpecificOutput"]["additionalContext"] == "upstream saw session-start"
     assert "additional_context" not in payload
+
+
+def test_upstreams_system_message_is_kept_for_cursor(tmp_path: Path) -> None:
+    """Cursor has one field for both, so upstream's notice and its context are joined, never silently dropped."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main(event) {\n"
+        "  process.stdout.write(JSON.stringify({ hookSpecificOutput: {\n"
+        "    hookEventName: 'SessionStart', systemMessage: 'NOTICE', additionalContext: 'CONTEXT ' + event } }));\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload == {"additional_context": "NOTICE\n\nCONTEXT session-start"}
+
+
+def test_a_stdout_callback_upstream_is_not_lost(tmp_path: Path) -> None:
+    """An upstream that waits on the write callback must still finish and still be re-shaped."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main(event) {\n"
+        "  return new Promise((resolve) => process.stdout.write(JSON.stringify({ hookSpecificOutput: {\n"
+        "    additionalContext: 'CALLBACK ' + event } }), () => resolve()));\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload == {"additional_context": "CALLBACK session-start"}
+
+
+def test_a_broken_installed_upstream_is_a_no_op(tmp_path: Path) -> None:
+    """A partial trail install must not print a stack trace or exit non-zero, exactly as the Claude branch does not."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text("export function main() { throw new Error('broken install'); }\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "node").symlink_to(shutil.which("node"))
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project), TRAIL_HOME=str(tmp_path / "trail-home"), PATH=str(bin_dir))
+    done = subprocess.run([shutil.which("node"), str(CURSOR_HOOK), "cursor-session-start"], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")

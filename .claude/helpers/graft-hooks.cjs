@@ -122,15 +122,24 @@ function entry(name, cheapOnly) {
 function reshaped(run) {
   const write = process.stdout.write.bind(process.stdout);
   const chunks = [];
-  process.stdout.write = (chunk) => { chunks.push(Buffer.from(chunk)); return true; };
+  // Keep stdout's own contract: an upstream that passes an encoding or waits on the callback must still work, so the
+  // callback is called (next turn, as the real stream does) and the write always reports success.
+  process.stdout.write = (chunk, encoding, callback) => {
+    chunks.push(Buffer.from(chunk));
+    if (typeof encoding === 'function') encoding();
+    else if (typeof callback === 'function') process.nextTick(callback);
+    return true;
+  };
   const restore = () => { process.stdout.write = write; return Buffer.concat(chunks).toString('utf8'); };
   Promise.resolve().then(run).then(() => {
     const text = restore();
     let shape = null;
     try {
       const parsed = JSON.parse(text);
-      const inner = parsed.hookSpecificOutput && parsed.hookSpecificOutput.additionalContext;
-      if (inner) shape = { additional_context: inner };
+      const inner = parsed.hookSpecificOutput || {};
+      // Cursor has one field for both, so upstream's notice and its context are joined rather than one being lost.
+      const context = [inner.systemMessage, inner.additionalContext].filter(Boolean).join('\n\n');
+      if (context) shape = { additional_context: context };
       else if (parsed.additional_context) shape = parsed;
     } catch { shape = null; }        // nothing printed, or not JSON: say nothing
     if (shape) write(JSON.stringify(shape));
@@ -142,7 +151,7 @@ function reshaped(run) {
 const FAST = process.argv[2] === 'pre-bash';
 const CURSOR_START = process.argv[2] === 'cursor-session-start';
 const target = entry(FAST ? 'pre-bash.js' : "hooks.js", FAST);
-if (fs.existsSync(target) && CURSOR_START) import(pathToFileURL(target).href).then((m) => reshaped(() => m.main('session-start')));
+if (fs.existsSync(target) && CURSOR_START) import(pathToFileURL(target).href).then((m) => reshaped(() => m.main('session-start'))).catch(() => { /* trail unavailable — no-op */ });
 else if (fs.existsSync(target)) import(pathToFileURL(target).href).then((m) => m.main(process.argv[2])).catch(() => { /* trail unavailable — no-op */ });
 else if (['session-start', 'cursor-session-start'].includes(process.argv[2])) offerTrail(CURSOR_START);
 
