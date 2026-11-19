@@ -1477,3 +1477,281 @@ def test_journal_directory_binding_is_checked_again_before_send(tmp_path):
     with pytest.raises(m.Hold, match="directory/device/inode"):
         e.journal.available("seed-reader", e.anchor.data["seeds"]["seed-reader"])
     assert not e.factory.wires
+
+
+# Stage3 adversary: authenticated CURRENT completion order is not publication
+# order; retention's nested datetime must be journaled without changing the SDK.
+def integrated_baseline(e):
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("retained-packet", members, 5000)
+    for atom, _, body in members:
+        r.custody.upload(atom, body)
+        r.custody.reconcile(atom)
+    r.custody.ready()
+    r.custody.accept()
+    return r, closure
+
+
+def test_delayed_actual_current_after_new_screened_revocation_cannot_publish_or_upload(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("pending-packet", members, 5000)
+    before = copy.deepcopy(e.model.state())
+    writes = e.factory.wires.count(("writer", "put_object"))
+    reader_spend = len(e.journal._read()["attempts"]["seed-reader"])
+    selected, release = threading.Event(), threading.Event()
+    original, reads = r.reader.client.get_object, [0]
+    class DelayedBody:
+        def __init__(self, body):
+            self.body, self.waited = body, False
+        def read(self, amount):
+            if not self.waited:
+                self.waited = True
+                selected.set()
+                assert release.wait(10), "test failed to release the older CURRENT body"
+            return self.body.read(amount)
+        def close(self):
+            self.body.close()
+    def get_object(**params):
+        result = original(**params)
+        if threading.current_thread().name.startswith("old-upload") and params["Key"] == e.anchor.policy.ctrl_key and "VersionId" not in params:
+            reads[0] += 1
+            if reads[0] == 2:  # actual _stable CURRENT GET selected old V
+                result["Body"] = DelayedBody(result["Body"])
+        return result
+    monkeypatch.setattr(r.reader.client, "get_object", get_object)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-upload") as pool:
+        older = pool.submit(r.custody.upload, "data", members[0][2])
+        try:
+            assert selected.wait(10), "upload did not reach the intended CURRENT transport phase"
+            external_authority_update(e, r, lambda h: h["revoked"].append(dict(purpose="screened", closure=closure)))
+            newer = r.authority.observation
+            assert r.authority.state["sequence"] == before["sequence"] + 1
+            assert not r.authority.permits("screened", closure)
+        finally:
+            release.set()
+        with pytest.raises(m.StaleCurrent, match="high-water"):
+            older.result(timeout=15)
+    assert r.authority.observation == newer and r.authority.current() is not None
+    assert not r.authority.permits("screened", closure)
+    assert e.factory.wires.count(("writer", "put_object")) == writes
+    assert e.model.state()["ledger"] == before["ledger"] and e.model.state()["lifetime"] == before["lifetime"]
+    assert len(e.journal._read()["attempts"]["seed-reader"]) > reader_spend
+    r.close()
+
+
+@pytest.mark.parametrize("kind", ["new-ref", "etag", "body"])
+def test_same_sequence_identity_conflict_holds_without_cached_grant_fallback(tmp_path, kind):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    old = r.authority.observation
+    if kind == "etag":
+        e.model.change_observation(old.ref, etag='"conflicting-etag"')
+    else:
+        state = e.model.state()
+        if kind == "body":
+            state["incidents"].append("conflicting-body")
+        e.model._new(e.anchor.policy.ctrl_key, m.canonical(state), old.until)
+    with pytest.raises(m.Conflict, match="same sequence"):
+        r.store.current()
+    assert r.authority.observation == old and r.authority.current() is None
+    assert not r.authority.permits("upload", None)
+    # Replaying even the formerly valid identity cannot silently clear a fork.
+    e.model.heads[e.anchor.policy.ctrl_key] = old
+    r.authority.begin("discover")
+    with pytest.raises(m.Hold, match="newer sequence"):
+        r.store.current()
+    assert r.authority.current() is None
+    # A genuinely newer protected CURRENT can establish authority again.
+    state = m.decode(old.body)
+    state["sequence"] += 1
+    state["mutations"] += 1
+    e.model._new(e.anchor.policy.ctrl_key, m.canonical(state), old.until)
+    r.store.current()
+    assert r.authority.current() is not None
+    r.close()
+
+
+def test_current_denial_never_falls_back_to_cached_upload_grant(tmp_path, monkeypatch):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    _, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("pending", members, 5000)
+    original = r.reader.client.get_object
+    def denied(**params):
+        raise PermissionError("synthetic CURRENT denial")
+    monkeypatch.setattr(r.reader.client, "get_object", denied)
+    with pytest.raises(PermissionError):
+        r.store.current()
+    assert r.authority.current() is None
+    writes = e.factory.wires.count(("writer", "put_object"))
+    with pytest.raises(m.Hold):
+        r.custody.upload("data", members[0][2])
+    assert e.factory.wires.count(("writer", "put_object")) == writes
+    # Only a new actual fixed-CURRENT discovery may clear a transient read failure.
+    monkeypatch.setattr(r.reader.client, "get_object", original)
+    r.cold_recover()
+    assert r.authority.current() is not None
+    r.close()
+
+
+def test_composed_retention_extension_journals_exact_datetime_before_wire_and_progresses(tmp_path, monkeypatch):
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    original, captured = r.writer.client.put_object_retention, []
+    def extend(**params):
+        record = e.journal._read()["attempts"]["seed-writer"][-1]
+        assert record["state"] == "ATTEMPTING"
+        actual_date = params["Retention"]["RetainUntilDate"]
+        assert type(actual_date) is datetime and actual_date == datetime.fromtimestamp(6000, timezone.utc)
+        assert record["details"]["params"]["Retention"] == dict(Mode="COMPLIANCE", RetainUntilDate=actual_date.isoformat())
+        m.canonical(record)  # durable exact JSON projection, no default=str
+        captured.append(params)
+        return original(**params)
+    monkeypatch.setattr(r.writer.client, "put_object_retention", extend)
+    r.custody.renew_item("renew", "atom:data")
+    ref = m.Ref.parse(e.model.state()["ledger"]["data"]["ref"], e.anchor.policy)
+    assert e.model.read(ref).until == 6000 and len(captured) == 1
+    assert e.model.state()["renewals"]["renew"]["progress"]["atom:data"] == e.clock[0]
+    r.custody.renew_item("renew", "atom:data")
+    assert len(captured) == 1  # actual readback prevents an unneeded duplicate extension
+    r.close()
+
+
+@pytest.mark.parametrize("fault", ["revoked", "late", "unknown"])
+def test_composed_retention_faults_keep_escrow_and_never_send_on_bad_guard(tmp_path, monkeypatch, fault):
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    before = e.model.state()
+    cash = copy.deepcopy(before["integration"]["wallets"])
+    spent = len(e.journal._read()["attempts"]["seed-writer"])
+    calls = e.factory.wires.count(("writer", "put_object_retention"))
+    original = e.journal.claim
+    def claim(wid, wallet, request):
+        index = original(wid, wallet, request)
+        if type(request) is dict and request["method"] == "put_object_retention":
+            if fault == "revoked":
+                external_authority_update(e, r, lambda h: h["revoked"].append(dict(purpose="preserve", closure=None)))
+            elif fault == "late":
+                e.clock[0] = 1051
+        return index
+    monkeypatch.setattr(e.journal, "claim", claim)
+    if fault == "unknown":
+        e.model.fault = "extend-after"
+        error = TimeoutError
+    else:
+        error = m.Hold
+    with pytest.raises(error):
+        r.custody.renew_item("renew", "atom:data")
+    expected_calls = calls + (fault == "unknown")
+    assert e.factory.wires.count(("writer", "put_object_retention")) == expected_calls
+    assert e.model.state()["integration"]["wallets"] == cash and e.model.state()["lifetime"] == before["lifetime"]
+    assert not e.model.state()["renewals"]["renew"]["progress"]
+    records = e.journal._read()["attempts"]["seed-writer"]
+    assert len(records) > spent and records[-1]["state"] == "UNKNOWN"
+    if fault == "unknown":
+        r.custody.renew_item("renew", "atom:data")
+        assert e.factory.wires.count(("writer", "put_object_retention")) == expected_calls
+        assert "atom:data" in e.model.state()["renewals"]["renew"]["progress"]
+    r.close()
+
+
+@pytest.mark.parametrize("value", [datetime(2020, 1, 1), "2020-01-01", object(),
+    {"Mode": "COMPLIANCE", "RetainUntilDate": datetime(2020, 1, 1, tzinfo=timezone.utc), "extra": 1}])
+def test_nested_journal_projection_is_finite_and_type_strict(value):
+    retention = value if type(value) is dict else dict(Mode="COMPLIANCE", RetainUntilDate=value)
+    with pytest.raises(m.Hold):
+        m.journal_request_projection(dict(Retention=retention))
+
+
+
+def test_metered_retention_keeps_actual_sdk_datetime_with_stubber(tmp_path, monkeypatch):
+    from botocore.stub import Stubber
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    ref = m.Ref.parse(e.model.state()["ledger"]["data"]["ref"], e.anchor.policy)
+    bundle = e.bundles["writer"]
+    sdk = m.boto_client("s3", bundle, e.anchor.policy)
+    expected = dict(**request(e.anchor.policy, ref.key, ref.version),
+        Retention=dict(Mode="COMPLIANCE", RetainUntilDate=datetime.fromtimestamp(6000, timezone.utc)))
+    with Stubber(sdk) as stub:
+        stub.add_response("put_object_retention", {}, expected)
+        original, seen = sdk.put_object_retention, []
+        def call(**params):
+            record = e.journal._read()["attempts"]["seed-writer"][-1]
+            assert record["state"] == "ATTEMPTING"
+            assert type(params["Retention"]["RetainUntilDate"]) is datetime
+            assert record["details"]["params"]["Retention"]["RetainUntilDate"] == "1970-01-01T01:40:00+00:00"
+            seen.append(True)
+            return original(**params)  # actual SDK parameter validation; no network
+        monkeypatch.setattr(sdk, "put_object_retention", call)
+        metered = m.MeteredClient("writer", sdk, bundle, r.gate)
+        raw = m.S3Store(e.anchor.policy, metered, r.reader,
+            writer_identity=e.anchor.policy.writer, reader_identity=e.anchor.policy.reader)
+        r.gate.arm_write(lambda: r.custody._authorized(r.authority.current(), "preserve", None))
+        raw.extend(ref, 6000)
+        assert seen == [True]
+        stub.assert_no_pending_responses()
+    sdk.close()
+    r.close()
+
+
+def test_current_response_started_before_denial_cannot_restore_cached_authority(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    selected, release = threading.Event(), threading.Event()
+    original = r.reader.client.get_object
+    class DelayedBody:
+        def __init__(self, body):
+            self.body, self.waited = body, False
+        def read(self, amount):
+            if not self.waited:
+                self.waited = True
+                selected.set()
+                assert release.wait(10)
+            return self.body.read(amount)
+        def close(self):
+            self.body.close()
+    def get_object(**params):
+        if threading.current_thread().name.startswith("old-current"):
+            result = original(**params)
+            result["Body"] = DelayedBody(result["Body"])
+            return result
+        raise PermissionError("new current request denied")
+    monkeypatch.setattr(r.reader.client, "get_object", get_object)
+    def older_read():
+        r.authority.begin("discover")
+        return r.store.current()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-current") as pool:
+        older = pool.submit(older_read)
+        try:
+            assert selected.wait(10)
+            r.authority.begin("discover")
+            with pytest.raises(PermissionError):
+                r.store.current()
+            assert r.authority.current() is None
+        finally:
+            release.set()
+        with pytest.raises(m.Hold):
+            older.result(timeout=15)
+    assert r.authority.current() is None and not r.authority.permits("upload", None)
+    monkeypatch.setattr(r.reader.client, "get_object", original)
+    assert r.cold_recover().version == e.model.current().ref.version
+    r.close()

@@ -277,3 +277,25 @@ COMPLIANCE retention but legal hold ON may establish preservation context;
 the existing reader still refuses eligibility until current protection is
 repaired under separate authority. Actual SDK errors retain their primary
 exception even if secondary outcome journaling fails; the slot stays spent.
+
+
+CURRENT publication is atomic under one per-authority reentrant lock. Wire reads
+may overlap, but validation/high-water comparison and state/reference publication
+cannot. A response below the observed sequence is refused without overwriting the
+newer authority. At equal sequence, exact Ref, bytes and ETag must agree; a fork
+holds authority until a genuinely newer actual sequence is observed. Denial or
+malformed/conflicting CURRENT holds cached permissions, and outstanding reads
+started before that failure cannot clear it. Only a subsequent funded fixed-root
+discovery can reestablish a valid current observation; it is never permission to
+read arbitrary payloads or issue a write from an older cached grant. Schema1 and
+schema2 historical current=False validation keep their existing separate rules.
+
+Journal projection is a finite allowlisted SDK schema: nested
+Retention.RetainUntilDate and the top-level retention date use strict aware,
+whole-second UTC journal strings. SDK request objects remain native datetime.
+Unexpected fields/types and naive dates refuse; there is no recursive default=str
+or dispatch on a serialization error. The projection is checked again after
+fsync, so a changed nested target cannot be sent under a different recorded hash.
+Composed Runtime/Store/meter/journal tests perform real extension/readback/progress
+through the offline API model, and an actual SDK Stubber checks the metered
+retention datetime parameter separately. They are not live retention evidence.

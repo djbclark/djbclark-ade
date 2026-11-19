@@ -32,6 +32,10 @@ class Conflict(Hold):
     """Caller must restart from the authoritative current CTRL."""
 
 
+class StaleCurrent(Hold):
+    """A bound CURRENT response completed behind a newer observed frontier."""
+
+
 def require(ok, reason):
     if not ok:
         raise Hold(reason)
@@ -1118,13 +1122,21 @@ class EnrollmentAuthority:
         self.local = threading.local()
         self.last_time = 0
         self._store = None
+        self._publication_lock = threading.RLock()
+        self._read_serial = 0
+        self._blocked_through = 0
+        self._high_sequence = -1
+        self._high_identity = None
+        self._conflict_sequence = -1
+        self.available = False
 
     def now(self):
-        t = natural(self.clock(), "trusted integration clock")
-        require(t >= self.last_time, "integration clock rollback")
-        self.last_time = t
-        self.anchor.live(t)
-        return t
+        with self._publication_lock:
+            t = natural(self.clock(), "trusted integration clock")
+            require(t >= self.last_time, "integration clock rollback")
+            self.last_time = t
+            self.anchor.live(t)
+            return t
 
     def begin(self, purpose, closure=None):
         self.local.purpose, self.local.closure = purpose, closure
@@ -1133,74 +1145,103 @@ class EnrollmentAuthority:
         return getattr(self.local, "purpose", "discover"), getattr(self.local, "closure", None)
 
     def current(self):
-        try:
-            now = self.now()
-            require(self.state is not None and self.observation is not None
-                    and decode(self.observation.body) == self.state
-                    and digest(self.observation.body) == self.observation.ref.sha256
-                    and now < self.state["integration"]["expires"], "current authority absent/expired/unbound")
-            return replace(self.anchor.policy, minimum_sequence=max(self.anchor.policy.minimum_sequence,
-                           self.state["integration"]["floor"]))
-        except (Hold, OSError):
-            return None
+        with self._publication_lock:
+            try:
+                now = self.now()
+                require(self.available and self.state is not None and self.observation is not None
+                        and decode(self.observation.body) == self.state
+                        and digest(self.observation.body) == self.observation.ref.sha256
+                        and now < self.state["integration"]["expires"], "current authority absent/expired/unbound")
+                return replace(self.anchor.policy, minimum_sequence=max(self.anchor.policy.minimum_sequence,
+                               self.state["integration"]["floor"]))
+            except (Hold, OSError):
+                return None
 
     def permits(self, purpose, closure):
-        if self.current() is None:
-            return False
-        h = self.state["integration"]
-        scope = self.anchor.data["grants"].get(purpose, [])
-        if closure not in scope and "*" not in scope:
-            return False
-        if any(r["purpose"] in {purpose, "*"} and r["closure"] in {closure, "*"} for r in h["revoked"]):
-            return False
-        if purpose == "screened":
-            proof = h["screened"].get(closure)
-            return proof is not None and proof["policy"] == self.anchor.data["screening"] and self.now() < proof["expires"]
-        return True
+        with self._publication_lock:
+            if self.current() is None:
+                return False
+            h = self.state["integration"]
+            scope = self.anchor.data["grants"].get(purpose, [])
+            if closure not in scope and "*" not in scope:
+                return False
+            if any(r["purpose"] in {purpose, "*"} and r["closure"] in {closure, "*"} for r in h["revoked"]):
+                return False
+            if purpose == "screened":
+                proof = h["screened"].get(closure)
+                return proof is not None and proof["policy"] == self.anchor.data["screening"] and self.now() < proof["expires"]
+            return True
 
     def validate_integration(self, s, *, current=True):
-        h = s["integration"]
-        shape(h, "enrollment fence expires floor revoked screened wallets", "integration schema")
-        require(h["enrollment"] == self.anchor.sha256, "protected enrollment root")
-        for name in ("fence", "expires", "floor"):
-            natural(h[name], "authority " + name, name != "floor")
-        require(h["expires"] <= self.anchor.data["expires"] and h["floor"] <= s["sequence"], "authority limits")
-        require(type(h["revoked"]) is list and len(h["revoked"]) <= self.anchor.policy.max_mutations,
-                "bounded revocation list")
-        for item in h["revoked"]:
-            shape(item, "purpose closure", "revocation shape")
-            token(item["purpose"], "revocation purpose")
-            if item["closure"] not in (None, "*"):
-                sha(item["closure"])
-        require(type(h["screened"]) is dict and len(h["screened"]) <= self.anchor.policy.max_members * self.anchor.policy.max_cycles,
-                "bounded exact screening")
-        for closure, proof in h["screened"].items():
-            sha(closure)
-            shape(proof, "policy expires", "screening proof")
-            require(proof["policy"] == self.anchor.data["screening"], "selected privacy policy")
-            natural(proof["expires"], "screening expiry", True)
-        self.anchor.cash(h["wallets"], s["lifetime"], s["annual"])
-        for wid, w in self.anchor.data["seeds"].items():
-            require(h["wallets"].get(wid) == w, "seed escrow cannot disappear/change")
-        if current:
-            require(s["sequence"] >= max(self.anchor.policy.minimum_sequence, h["floor"]), "CURRENT authority rollback")
-            if self.state is not None:
-                require(h["fence"] >= self.state["integration"]["fence"] and h["floor"] >= self.state["integration"]["floor"],
-                        "observed fence/floor rollback")
+        with self._publication_lock:
+            h = s["integration"]
+            shape(h, "enrollment fence expires floor revoked screened wallets", "integration schema")
+            require(h["enrollment"] == self.anchor.sha256, "protected enrollment root")
+            for name in ("fence", "expires", "floor"):
+                natural(h[name], "authority " + name, name != "floor")
+            require(h["expires"] <= self.anchor.data["expires"] and h["floor"] <= s["sequence"], "authority limits")
+            require(type(h["revoked"]) is list and len(h["revoked"]) <= self.anchor.policy.max_mutations,
+                    "bounded revocation list")
+            for item in h["revoked"]:
+                shape(item, "purpose closure", "revocation shape")
+                token(item["purpose"], "revocation purpose")
+                if item["closure"] not in (None, "*"):
+                    sha(item["closure"])
+            require(type(h["screened"]) is dict and len(h["screened"]) <= self.anchor.policy.max_members * self.anchor.policy.max_cycles,
+                    "bounded exact screening")
+            for closure, proof in h["screened"].items():
+                sha(closure)
+                shape(proof, "policy expires", "screening proof")
+                require(proof["policy"] == self.anchor.data["screening"], "selected privacy policy")
+                natural(proof["expires"], "screening expiry", True)
+            self.anchor.cash(h["wallets"], s["lifetime"], s["annual"])
+            for wid, w in self.anchor.data["seeds"].items():
+                require(h["wallets"].get(wid) == w, "seed escrow cannot disappear/change")
+            if current:
+                require(s["sequence"] >= max(self.anchor.policy.minimum_sequence, h["floor"]), "CURRENT authority rollback")
+                if self.state is not None:
+                    require(h["fence"] >= self.state["integration"]["fence"] and h["floor"] >= self.state["integration"]["floor"],
+                            "observed fence/floor rollback")
 
-    def ingest(self, observation, *, transport=None):
-        require(transport is not None and transport is self._store and transport.observed is observation,
-                "CURRENT requires bound metered transport, not receipt consistency")
-        p, now = self.anchor.policy, self.now()
-        # Authentication of the fixed protected current body is distinct from
-        # intake eligibility. Expired retention with legal hold ON still permits
-        # separately authorized preservation; the common reader applies its floor.
-        observation.protected(p, 0, p.max_control_bytes)
-        require(observation.ref.key == p.ctrl_key, "fixed CURRENT locator")
-        s = decode(observation.body)
-        require(s.get("schema") == 2 and type(s.get("schema")) is int, "explicit schema1 migration required")
-        Custody(self, lambda _: None, self.clock)._validate(s, p)
-        self.observation, self.state = observation, s
+    def start_current_read(self):
+        with self._publication_lock:
+            self._read_serial += 1
+            return self._read_serial
+
+    def deny_current(self):
+        with self._publication_lock:
+            # Outstanding responses cannot clear a denial observed after they began.
+            self._blocked_through = self._read_serial
+            self.available = False
+
+    def ingest(self, observation, *, transport=None, read_serial=None):
+        with self._publication_lock:
+            require(transport is not None and transport is self._store
+                    and transport._pending is not None and transport._pending[0] == read_serial
+                    and transport._pending[1] is observation,
+                    "CURRENT requires bound metered transport, not receipt consistency")
+            require(type(read_serial) is int and read_serial > self._blocked_through,
+                    "CURRENT response predates denial/conflict")
+            p, now = self.anchor.policy, self.now()
+            # Protection authentication and intake's future floor are separate.
+            observation.protected(p, 0, p.max_control_bytes)
+            require(observation.ref.key == p.ctrl_key, "fixed CURRENT locator")
+            state = decode(observation.body)
+            require(state.get("schema") == 2 and type(state.get("schema")) is int,
+                    "explicit schema1 migration required")
+            sequence = natural(state.get("sequence"), "CURRENT sequence")
+            if sequence < self._high_sequence:
+                raise StaleCurrent("CURRENT completed behind observed high-water sequence")
+            identity = (observation.ref, observation.body, observation.etag)
+            if sequence == self._high_sequence and identity != self._high_identity:
+                self._conflict_sequence = max(self._conflict_sequence, sequence)
+                raise Conflict("conflicting CURRENT identity at same sequence")
+            require(sequence > self._conflict_sequence, "CURRENT conflict needs a newer sequence")
+            Custody(self, lambda _: None, self.clock)._validate(state, p)
+            # The comparison, validation and BOTH assignments are one critical section.
+            self._high_sequence, self._high_identity = sequence, identity
+            self.observation, self.state = observation, state
+            self.available = True
 
     def wallet(self, wid):
         require(self.state is not None and wid in self.state["integration"]["wallets"], "unverified wallet")
@@ -1233,6 +1274,36 @@ def boto_client(service, bundle, policy):
                 connect_timeout=policy.transport_seconds, read_timeout=policy.transport_seconds,
                 retries={"mode": "standard", "total_max_attempts": 1}, ignore_configured_endpoint_urls=True,
                 proxies={}))
+
+
+
+def journal_timestamp(value):
+    require(type(value) is datetime and value.tzinfo is not None and value.utcoffset() is not None
+            and value.microsecond == 0, "aware whole-second SDK timestamp required")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def journal_request_projection(params):
+    """Finite allowed SDK schema, never arbitrary recursive default=str.
+
+    The actual request is untouched: SDK datetime objects remain datetime.
+    """
+    require(type(params) is dict and len(params) <= 16, "finite SDK journal parameters")
+    out = {}
+    for key, value in params.items():
+        if key == "Body":
+            require(type(value) is bytes, "journal exact bytes")
+            out[key] = dict(sha256=digest(value), size=len(value))
+        elif key == "Retention":
+            shape(value, "Mode RetainUntilDate", "journal retention shape")
+            require(value["Mode"] == "COMPLIANCE", "journal COMPLIANCE retention")
+            out[key] = dict(Mode="COMPLIANCE", RetainUntilDate=journal_timestamp(value["RetainUntilDate"]))
+        elif key == "ObjectLockRetainUntilDate":
+            out[key] = journal_timestamp(value)
+        else:
+            require(type(value) in (str, int), "unsupported SDK journal value")
+            out[key] = value
+    return out
 
 
 class AttemptGate:
@@ -1291,13 +1362,15 @@ class AttemptGate:
         if method == "put_object_retention":
             shape(params["Retention"], "Mode RetainUntilDate", "renewal parameter allowlist")
             require(params["Retention"]["Mode"] == "COMPLIANCE", "COMPLIANCE renewal")
+            journal_timestamp(params["Retention"]["RetainUntilDate"])
         require(role in self.bindings and self.bindings[role] is bundle, "unbound/replaced credential material")
         require(params.get("Bucket") == p.bucket and params.get("ExpectedBucketOwner") == p.account,
                 "fixed destination/owner")
         key = params.get("Key")
         Ref(key, params.get("VersionId", "pending"), "0" * 64, 0).validate(p)
         migration_write = a.state is None and method == "put_object" and purpose == "migrate"
-        if a.state is None:
+        unavailable_discovery = not a.available and purpose == "discover"
+        if a.state is None or unavailable_discovery:
             require(None in a.anchor.data["grants"].get(purpose, []) or "*" in a.anchor.data["grants"].get(purpose, []),
                     "selected bootstrap purpose grant")
             if migration_write:
@@ -1362,8 +1435,7 @@ class AttemptGate:
     def call(self, role, client, method, params, bundle):
         require(method in RPC_METHODS, "SDK operation not enrolled")
         wid, w = self._guard(role, method, params, bundle)
-        safe = {k: (dict(sha256=digest(v), size=len(v)) if k == "Body" and type(v) is bytes
-                else v.isoformat() if isinstance(v, datetime) else v) for k, v in params.items()}
+        safe = journal_request_projection(params)
         purpose, closure = ("identity", None) if method == "get_caller_identity" else self.authority.context()
         intended = {}
         if method == "put_object" and purpose == "fund-wallet":
@@ -1374,6 +1446,7 @@ class AttemptGate:
         index = self.journal.claim(wid, w, request)  # fsync BEFORE wire, including identity/discovery
         try:
             self._guard(role, method, params, bundle)  # revocation/time/refence during fsync
+            require(journal_request_projection(params) == safe, "request changed during journal fsync")
             result = getattr(client, method)(**params)
             if method == "get_object":
                 size = result.get("ContentLength")
@@ -1467,6 +1540,7 @@ class IntegratedStore:
         require(authority._store is None, "one bound store per authority")
         authority._store = self
         self.observed = None
+        self._pending = None
 
     def _bound(self):
         require(type(self.raw) is S3Store and type(self.raw.reader) is MeteredClient
@@ -1474,11 +1548,24 @@ class IntegratedStore:
                 and self.gate.authority is self.authority, "bound metered reader transport")
 
     def current(self):
-        self._bound()
-        observation = self.raw.current()
-        self.observed = observation
-        self.authority.ingest(observation, transport=self)
-        return observation
+        serial = self.authority.start_current_read()
+        try:
+            self._bound()
+            observation = self.raw.current()
+            with self.authority._publication_lock:
+                self._pending = (serial, observation)
+                try:
+                    self.authority.ingest(observation, transport=self, read_serial=serial)
+                    self.observed = observation
+                finally:
+                    self._pending = None
+            return observation
+        except StaleCurrent:
+            # Keep the newer known authority, but refuse this affected operation.
+            raise
+        except BaseException:
+            self.authority.deny_current()
+            raise
 
     def read(self, ref):
         return self.raw.read(ref)
