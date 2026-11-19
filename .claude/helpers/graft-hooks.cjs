@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { pathToFileURL } = require('url');
+// Imports use installed helpers only by default. ADE_GRAFT_ALLOW_PROJECT_HOOKS=1
+// explicitly trusts project node_modules packages and the bare dist/claude fallback
+// to execute code as the current user; enable only for a trusted development repo.
 // `dir` is the project, so running this by hand inside a repo with trail installed lets graft wire THAT repo
 // (it rewrites .claude/, .cursor/ and AGENTS.md). Drive it from a temp project — as
 // tests/test_graft_cursor_session_start.py does.
@@ -110,13 +113,14 @@ function best(dirs, name) {
 
 function entry(name, cheapOnly) {
   // Cheap candidates first, and only shell out to npm when every one of them misses.
-  const cheap = [remembered(), ...fromPkg(dir), ...fromPkg(path.join(path.dirname(process.execPath), '..', 'lib')), ...onPath()];
+  const allowProject = process.env.ADE_GRAFT_ALLOW_PROJECT_HOOKS === '1';
+  const cheap = [remembered(), ...(allowProject ? fromPkg(dir) : []), ...fromPkg(path.join(path.dirname(process.execPath), '..', 'lib')), ...onPath()];
   const hit = best(cheap, name);
   if (hit) return path.join(hit, name);
   const gr = cheapOnly ? null : globalRoot();
   const global = gr && best(PKGS.map((p) => path.join(gr, ...p.split('/'), 'dist', 'claude')), name);
   if (global) return path.join(global, name);
-  return path.join(dir, 'dist', 'claude', name); // last-ditch; import will no-op if absent
+  return allowProject ? path.join(dir, 'dist', 'claude', name) : null;
 }
 
 // Cursor's sessionStart reads a top-level additional_context, Claude Code's SessionStart hook reads
@@ -165,8 +169,8 @@ function reshaped(run) {
 const FAST = process.argv[2] === 'pre-bash';
 const CURSOR_START = process.argv[2] === 'cursor-session-start';
 const target = entry(FAST ? 'pre-bash.js' : "hooks.js", FAST);
-if (fs.existsSync(target) && CURSOR_START) import(pathToFileURL(target).href).then((m) => reshaped(() => m.main('session-start'))).catch(() => { /* trail unavailable — no-op */ });
-else if (fs.existsSync(target)) import(pathToFileURL(target).href).then((m) => m.main(process.argv[2])).catch(() => { /* trail unavailable — no-op */ });
+if (target && fs.existsSync(target) && CURSOR_START) import(pathToFileURL(target).href).then((m) => reshaped(() => m.main('session-start'))).catch(() => { /* trail unavailable — no-op */ });
+else if (target && fs.existsSync(target)) import(pathToFileURL(target).href).then((m) => m.main(process.argv[2])).catch(() => { /* trail unavailable — no-op */ });
 else if (['session-start', 'cursor-session-start'].includes(process.argv[2])) offerTrail(CURSOR_START);
 
 function offerTrail(cursor) {
