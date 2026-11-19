@@ -454,6 +454,11 @@ session identity and a fresh idle runtime readback produces `acknowledged`.
 from the provisional ack. Legacy same-provider handoffs retain their existing
 contract; they do not acquire a first-turn guarantee by this change.
 
+Before acknowledgement, the predecessor may also run `verify-turn` to inspect
+failure-only evidence. An idle Pi transcript error records `first-turn-failed`
+and permits retry; successful output never substitutes for the real ack and
+never retires the predecessor.
+
 The adapter reads the exact owned canonical transcript named by the matching
 Paseo persistence record. It supports unbranched Pi v3 JSONL sessions only.
 Unknown schemas, branches, partial files and providers fail closed. Raw content,
@@ -467,7 +472,9 @@ failed candidate is idle/error/closed without permission waits, saves visible
 attempt history and excludes its physical router service before requesting a
 fresh plan. It never changes credentials or tries another account inside a
 provider. If planning fails, `retry-ready` is preserved; `handoff --checkpoint
-FILE --quiesced` resumes that intent. Ambiguous creation remains unreplayed.
+FILE --quiesced` resumes that intent. A definite creation refusal also preserves
+attempt history, excluded pools and route kind for the next handoff, which still
+requires the old token-label probe to list no agent. Ambiguous creation remains unreplayed.
 Failed candidates are not archived automatically and have no project authority.
 
 An operator-appointed lead invokes `appoint --record FILE --appointed ID

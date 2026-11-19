@@ -502,6 +502,8 @@ class Service:
             # A `creation-refused` record proves nothing was created (Paseo's own refusal, no agent id): a new handoff
             # replaces it, keeping the earlier reason as `refused_before`. Every other record is never replayed.
             refused_before = None
+            retry_history = []
+            excluded = []
             if (isinstance(existing, dict) and existing.get('status') == 'creation-refused'
                     and existing.get('home') == str(self.home) and existing.get('kind') == 'handoff'
                     and existing.get('predecessor') == predecessor and existing.get('successor') is None
@@ -513,9 +515,10 @@ class Service:
                         'something other than a list' if not isinstance(rows, list)
                         else 'an agent carrying its token label') + '; reconcile, no create replayed')
                 refused_before = existing['native_error']
+                retry_history = existing.get('attempts', [])
+                excluded = existing.get('excluded_pools', [])
+                route_kind = existing.get('route_kind', route_kind)
                 existing = None
-            retry_history = []
-            excluded = []
             if isinstance(existing, dict) and existing.get('status') == 'retry-ready':
                 if existing.get('home') != str(self.home) or existing.get('predecessor') != predecessor:
                     raise SessionError('retry identity mismatch')
@@ -937,7 +940,7 @@ class Service:
                 if row.get('Status') == 'error' or row.get('stopReason') == 'error' or row.get('StopReason') == 'error':
                     evidence = {'state': 'failed', 'cause': 'runtime-error'}
                 elif not record.get('ack'):
-                    return record  # known identity, but never accept output before acknowledgement
+                    evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row, failure_only=True)
                 else:
                     self.verify_successor(record)
                     if record.get('first_real_turn'):
@@ -945,6 +948,8 @@ class Service:
                     else:
                         evidence = (self.evidence_reader or pi_first_turn)(self.home, record, row)
                 if evidence.get('state') == 'complete':
+                    if not record.get('ack'):
+                        return record  # failure-only inspection can never acknowledge a successor
                     # Re-read runtime after file I/O. A new running turn cannot inherit proof.
                     settled = self.verify_successor(record)
                     if settled.get('Status') != 'idle':

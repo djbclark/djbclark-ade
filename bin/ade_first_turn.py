@@ -36,11 +36,12 @@ def owned_read(path, limit):
     finally:
         os.close(fd)
 
-def pi_first_turn(home, record, snapshot, *, proof=None):
+def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
     """No credentials or transcript content leave this function, even on failure.
 
     Conservative subset: new, unbranched Pi v3 session. Native terminal stop,
     generated output, post-ack append timestamp and settled runtime are all required.
+    Failure-only inspection needs no ack and can never return completion.
     Unknown providers, branch navigation, schema changes and partial writes fail closed.
     """
     try:
@@ -66,7 +67,7 @@ def pi_first_turn(home, record, snapshot, *, proof=None):
         if (header.get('type') != 'session' or header.get('version') != 3 or
                 header.get('id') != handle.get('sessionId') or header.get('cwd') != cwd):
             raise EvidenceError('native session header mismatch')
-        after = stamp(record['ack_observed_at'])
+        after = None if failure_only else stamp(record['ack_observed_at'])
         parent = None
         seen = set()
         final = None
@@ -84,13 +85,15 @@ def pi_first_turn(home, record, snapshot, *, proof=None):
             msg = entry.get('message')
             if not isinstance(msg, dict):
                 raise EvidenceError('malformed native message')
-            if when <= after:
+            if after is not None and when <= after:
                 continue
             if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
                 return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
             if proof and entry['id'] == proof.get('entry_id'):
                 proven = (entry, when)
             final, final_time = (entry, when)
+        if failure_only:
+            return {'state': 'pending', 'cause': 'acknowledgement-required'}
         if proof:
             if proven is None or header['id'] != proof.get('session_id'):
                 raise EvidenceError('accepted native terminal no longer exists')

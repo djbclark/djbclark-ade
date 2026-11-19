@@ -2409,3 +2409,122 @@ def test_legacy_appointment_cannot_bypass_enrolled_retirement_gate(setup, monkey
     assert path.read_bytes() == before
     assert len(native.calls) == calls
     assert native.created == 1 and native.archived == 0
+
+
+def write_routed_transcript(service, record, stop_reason):
+    """Native Pi evidence, including persistence identity; no injected reader."""
+    transcript = (service.state / 'native-turn.jsonl').resolve()
+    header = {'type': 'session', 'version': 3, 'id': 'native-session', 'cwd': record['cwd']}
+    terminal = {'type': 'message', 'id': 'e1', 'parentId': None,
+                'timestamp': '2026-11-19T12:00:01Z',
+                'message': {'role': 'assistant', 'stopReason': stop_reason,
+                            'usage': {'output': 12},
+                            'content': [{'type': 'text', 'text': 'checkpoint read'}]}}
+    transcript.write_text('\n'.join(json.dumps(x) for x in (header, terminal)) + '\n')
+    key = record['cwd'].strip('/').replace('/', '-') or 'root'
+    stored = service.home / 'agents' / key / (record['successor'] + '.json')
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_text(json.dumps({'id': record['successor'], 'cwd': record['cwd'],
+        'provider': 'pi', 'config': {'model': record['model']},
+        'persistence': {'provider': 'pi', 'sessionId': 'native-session',
+                        'nativeHandle': str(transcript)}}))
+    return transcript
+
+
+@pytest.mark.parametrize('stop_reason', ['error', 'aborted'])
+def test_pre_ack_idle_transcript_failure_allows_retry(setup, stop_reason):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'idle'
+    write_routed_transcript(service, record, stop_reason)
+    failed = service.verify_turn(path)
+    assert failed['status'] == 'first-turn-failed' and failed['ack'] is None
+    assert failed['first_turn_failure'] == {'state': 'failed', 'cause': 'provider-' + stop_reason}
+    assert json.loads(path.read_text()) == failed
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi',
+                           'model': 'opencode-go-account-b/test-model'}
+    retried = service.retry(path)
+    assert retried['pool'] == 'go-account-b' and retried['status'] == 'awaiting-ack'
+    assert retried['attempts'][0]['first_turn_failure'] == failed['first_turn_failure']
+    assert retried['excluded_pools'] == ['go-account-a']
+    assert native.created == 2 and native.archived == 0
+
+
+def test_pre_ack_successful_transcript_still_requires_real_ack(setup):
+    import datetime
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'idle'
+    transcript = write_routed_transcript(service, record, 'stop')
+    pending = service.verify_turn(path)
+    assert pending['status'] == 'awaiting-ack' and pending['ack'] is None
+    assert 'first_real_turn' not in pending
+    with pytest.raises(ss.SessionError):
+        service.retry(path)
+    with pytest.raises(ss.SessionError):
+        service.finish(path)
+    acknowledged = accept(service, pending, path)
+    assert acknowledged['status'] == 'ack-pending-turn'
+    # Append a real terminal after the actual ack timestamp.
+    rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+    later = copy.deepcopy(rows[-1])
+    later.update(id='e2', parentId='e1',
+                 timestamp=(datetime.datetime.fromisoformat(acknowledged['ack_observed_at'])
+                            + datetime.timedelta(seconds=1)).isoformat())
+    transcript.write_text('\n'.join(json.dumps(x) for x in [*rows, later]) + '\n')
+    service.env['PASEO_AGENT_ID'] = PRED
+    assert service.verify_turn(path)['status'] == 'acknowledged'
+    assert native.created == 1 and native.archived == 0
+
+
+@pytest.mark.parametrize('evidence', [
+    {'state': 'complete'}, {'state': 'pending', 'cause': 'unknown'}, {'state': 'unknown'},
+])
+def test_pre_ack_non_failure_evidence_never_acknowledges(setup, evidence):
+    service, native, checkpoint = setup
+    record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
+    path = Path(record['record'])
+    native.rows[SUCC]['Status'] = 'idle'
+    service.evidence_reader = lambda *_, **kw: evidence
+    if evidence['state'] == 'unknown':
+        with pytest.raises(ss.SessionError, match='invalid first-turn'):
+            service.verify_turn(path)
+    else:
+        assert service.verify_turn(path)['status'] == 'awaiting-ack'
+    saved = json.loads(path.read_text())
+    assert saved['ack'] is None and 'first_real_turn' not in saved
+    assert native.archived == 0
+
+
+def test_retry_creation_refusal_preserves_history_on_next_handoff(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'error'
+    service.verify_turn(path)
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi',
+                           'model': 'opencode-go-account-b/test-model'}
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    native.labelled = []
+    refused = service.retry(path)
+    assert refused['status'] == 'creation-refused'
+    assert refused['attempts'][0]['pool'] == 'go-account-a'
+    assert refused['excluded_pools'] == ['go-account-a']
+    native.labelled = [{'id': SUCC}]
+    before = path.read_bytes()
+    with pytest.raises(ss.SessionError, match='no create replayed'):
+        service.handoff(Path(refused['checkpoint']), quiesced=True)
+    assert path.read_bytes() == before
+    native.labelled = []
+    native.run_result = None
+    # No route kind supplied: recovery must preserve the original kind itself.
+    retried = service.handoff(Path(refused['checkpoint']), quiesced=True)
+    assert retried['status'] == 'awaiting-ack' and retried['pool'] == 'go-account-b'
+    for key in ('attempts', 'excluded_pools', 'route_kind'):
+        assert retried[key] == refused[key]
+    assert retried['refused_before'] == refused['native_error']
+    route_argv = [a for a, _ in native.calls if 'route_agent.py' in a[1]][-1]
+    assert route_argv[route_argv.index('--exclude') + 1] == 'go-account-a'
+    assert route_argv[route_argv.index('--kinds') + 1] == 'judgment'
+    assert native.created == 2 and native.archived == 0
