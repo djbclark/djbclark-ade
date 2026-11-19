@@ -1,4 +1,4 @@
-name: Fork coupled acceptance
+name: Fork coupled fixture checks
 on:
   push:
     branches: [fork-maintenance-coupled]
@@ -7,6 +7,11 @@ on:
       - 'tests/fixtures/fork-coupled/**'
       - '.github/workflows/fork-coupled.yml'
   workflow_dispatch:
+    inputs:
+      namespace_probe:
+        description: Run the reviewed privileged disposable namespace registration probe
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -63,9 +68,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: latest
-      - name: Reviewed read-only sudo ancestry diagnostic; no namespace or native execution
-        run: node tests/fixtures/fork-coupled/sudo-ancestor-diagnostic.mjs "$RUNNER_TEMP/native-build-input"
       - name: Actual disposable daemon registrations and missing-profile refusal; not qualification
+        if: github.event_name == 'workflow_dispatch' && inputs.namespace_probe == true
         run: node tests/fixtures/fork-coupled/registration-smoke.mjs "$RUNNER_TEMP/native-build-input"
       # The reviewed expectation is a build-only input. It is not a qualified
       # snapshot, runtime result, promotion grant or approval of this workflow.
+
+      # Automatic jobs check source and BUILD data only. An unrequested probe is
+      # outstanding, never passing runtime evidence. Root dispatches true only
+      # after exact source review, green producer archive and independent pins.

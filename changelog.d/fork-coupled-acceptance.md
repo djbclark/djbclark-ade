@@ -24,3 +24,6 @@
 
 - Capture reviewed read-only sudo ancestry facts in disposable Linux CI before
   the unchanged namespace admission check. No credential predicate is relaxed. (#0)
+
+- Separate automatic source/build fixture checks from explicitly requested
+  privileged namespace attempts, preserving the required runtime assertions. (#0)
