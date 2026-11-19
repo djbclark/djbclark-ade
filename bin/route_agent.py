@@ -3135,8 +3135,13 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
             return "codex", "default"
         return "codex", "openai_api"
     if agent == "antigravity":
-        # the Gemini 4 Argon window is its own aiuse pool family; the provider's other pools are not routed
-        return ("antigravity", "gemini_argon") if (model or "").lower().startswith("gemini-4-argon") else None
+        # the Gemini 4 Argon window is its own aiuse pool family; Neon draws the shared Gemini family; other pools not routed
+        m = (model or "").lower()
+        if m.startswith("gemini-4-argon"):
+            return "antigravity", "gemini_argon"
+        if m.startswith("gemini-4-neon"):
+            return "antigravity", "gemini"
+        return None
     if agent == "opencode":
         if model and model.startswith("opencode-go/"):
             return "opencode-go", None

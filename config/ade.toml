@@ -145,7 +145,7 @@ fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
 # (operator 2026-10-18; route-override did not skip this; the `--kind frontier` check left with bin/acp-dispatch, 2026-11-14, so route_agent's planner is the only gate). gemini-4-argon (operator 2026-10-31): FALLBACK ONLY behind
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
-frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
+frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon", "gemini-4-neon"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
 # reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
@@ -467,6 +467,22 @@ agent = "antigravity"
 # Paseo's antigravity provider folds the effort into the model id (`paseo provider models antigravity`: gemini-4-argon-high);
 # the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and the deleted acp-dispatch used to map a bare one, so write the full id.
 models = { frontier = "gemini-4-argon-high", research = "gemini-4-argon-high" }
+
+[[service]]
+name = "antigravity-neon"
+cli = "antigravity (Gemini 4 Neon; frontier fallback behind gpt-6-astra and Fable; research behind every other research pool)"
+good_at = { frontier = 5, research = 24 }
+billing = "subscription"
+note = "Gemini 4 Neon on the Google AI Pro plan, 1M context; shared Gemini 5-hour + weekly window (not Argon's separate weekly). Frontier fallback behind gpt-6-astra and Fable and a last-resort research pool, both out of the shared window. Added 2026-11-19; rank stays argon's until the operator decides Neon's frontier position."
+judgment_tier = true
+pool = ["antigravity", "gemini"]
+fallback_after = ["codex", "claude"]
+fallback_kinds = ["research"]
+window = "Gemini 5-hour"
+max_parallel = 1
+access = "cli-only"
+agent = "antigravity"
+models = { frontier = "gemini-4-neon-high", research = "gemini-4-neon-high" }
 
 [[service]]
 name = "clinepass"
