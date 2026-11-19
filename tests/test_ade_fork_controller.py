@@ -1364,24 +1364,28 @@ def allow_synthetic_readonly_bytes(monkeypatch):
     monkeypatch.setattr(c,'read_regular',lambda path,limit=c.LIMIT,**kwargs:original(path,limit,owner=os.getuid()))
 
 
-def committed_readonly_source():
-    source_path=Path(__file__).resolve().parents[1]/'native-readonly-source/packages/server/scripts/qualified-system-namespace.py'
+def committed_readonly_source(revision='389'):
+    directory,size,sha = {
+        '389':('native-readonly-source',52756,'605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'),
+        'd8':('native-readonly-d8-source',53480,'4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf'),
+    }[revision]
+    source_path=Path(__file__).resolve().parents[1]/directory/'packages/server/scripts/qualified-system-namespace.py'
     if not source_path.is_file():
         if os.environ.get('ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE')=='1':pytest.fail('required exact native source absent')
         pytest.skip('exact native source is exercised in dedicated controller workflow')
     source=source_path.read_bytes()
-    assert len(source)==52756
-    assert c.hashlib.sha256(source).hexdigest()=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
-    assert c.READONLY_NAMESPACE_SIZE==52756
-    assert c.READONLY_NAMESPACE_SHA256=='605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
+    assert len(source)==size
+    assert c.hashlib.sha256(source).hexdigest()==sha
+    assert (size,sha) in c.READONLY_NAMESPACE_IDENTITIES
     return source
 
 
-def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,monkeypatch):
-    source=committed_readonly_source()
+@pytest.mark.parametrize('revision',['389','d8'])
+def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,monkeypatch,revision):
+    source=committed_readonly_source(revision)
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     allow_synthetic_readonly_bytes(monkeypatch)
-    name='_ade_retained_namespace_'+c.READONLY_NAMESPACE_SHA256
+    name='_ade_retained_namespace_'+c.hashlib.sha256(source).hexdigest()
     previous=c.types.ModuleType(name)
     monkeypatch.setitem(sys.modules,name,previous)
     with pytest.raises(c.ContractError) as caught:c.verify_readonly_namespace(config,manifest)
@@ -1393,6 +1397,7 @@ def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,mo
     assert sys.modules[name] is previous
 
 
+@pytest.mark.parametrize('accepted_size',[52756,53480])
 @pytest.mark.parametrize('source',[
     b'import os\ndef dataclass(cls):\n    os.chdir("/")\n    return cls\n@dataclass\nclass Probe:\n    """review module rebinding"""\ndef verify_existing_namespace(root,digest):return None\n',
     b'import os\ndef property(fn):\n    os.chdir("/")\n    return fn\nclass Probe:\n    @property\n    def value(self):return None\n',
@@ -1403,9 +1408,9 @@ def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,mo
     b'def verify_existing_namespace(root,digest):return True\n',
     b'def verify_existing_namespace(root,digest):return None\n',
 ])
-def test_manifest_matching_unreviewed_helper_refuses_before_compile_or_effect(tmp_path,monkeypatch,source):
-    source=source+b'\n'+b' '*(52756-len(source)-1)
-    assert len(source)==52756
+def test_manifest_matching_unreviewed_helper_refuses_before_compile_or_effect(tmp_path,monkeypatch,source,accepted_size):
+    source=source+b'\n'+b' '*(accepted_size-len(source)-1)
+    assert len(source)==accepted_size
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     assert manifest['files'][0]['sha256']==c.hashlib.sha256(path.read_bytes()).hexdigest()
     allow_synthetic_readonly_bytes(monkeypatch)
@@ -1430,8 +1435,9 @@ def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,chang
 
 
 @pytest.mark.parametrize('change',['bytes','mode'])
-def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch,change):
-    source=committed_readonly_source()
+@pytest.mark.parametrize('revision',['389','d8'])
+def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch,change,revision):
+    source=committed_readonly_source(revision)
     config,manifest,path=readonly_port_fixture(tmp_path,source)
     allow_synthetic_readonly_bytes(monkeypatch)
     path.chmod(0o600)
@@ -1453,6 +1459,30 @@ def test_readonly_port_last_check_refusal_never_starts_cli(monkeypatch):
     monkeypatch.setattr(c.subprocess,'Popen',lambda *args,**kwargs:pytest.fail('CLI cannot start after namespace refusal'))
     with pytest.raises(c.ContractError):facade._call(['daemon','maintenance','status'])
     assert calls==['readonly-final']
+
+
+def test_readonly_reviewed_identity_set_is_closed():
+    assert c.READONLY_NAMESPACE_IDENTITIES==frozenset({
+        (52756,'605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'),
+        (53480,'4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf')})
+
+
+@pytest.mark.parametrize('revision',['389','d8'])
+@pytest.mark.parametrize('change',['cross-size','cross-hash','hash-list','hash-null','size-bool'])
+def test_reviewed_readonly_identity_pairs_cannot_be_mixed(tmp_path,monkeypatch,revision,change):
+    source=committed_readonly_source(revision)
+    config,manifest,path=readonly_port_fixture(tmp_path,source)
+    allow_synthetic_readonly_bytes(monkeypatch)
+    row=manifest['files'][0]
+    other=next(pair for pair in c.READONLY_NAMESPACE_IDENTITIES if pair[0]!=len(source))
+    if change=='cross-size':row['size']=other[0]
+    elif change=='cross-hash':row['sha256']=other[1]
+    elif change=='hash-list':row['sha256']=[]
+    elif change=='hash-null':row['sha256']=None
+    else:row['size']=True
+    def refuse_compile(*args,**kwargs):pytest.fail('unreviewed identity pair must refuse before compile')
+    monkeypatch.setattr(c,'compile',refuse_compile,raising=False)
+    with pytest.raises(c.ContractError,match='independently reviewed'):c.verify_readonly_namespace(config,manifest)
 
 
 @pytest.fixture
