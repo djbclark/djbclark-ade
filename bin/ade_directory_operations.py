@@ -174,7 +174,7 @@ def validate(envelope: object) -> tuple[dict, dict, Path]:
         identifier(request["ownerAgent"], empty=True)
         identifier(request["ownerRecord"], nullable=True)
         ttl = request["ttlHours"]
-        if type(ttl) not in (int, float) or not math.isfinite(ttl) or not 0 <= ttl <= 8784:
+        if type(ttl) not in (int, float) or not 0 <= ttl <= 8784 or not math.isfinite(ttl):
             raise InvalidRequest("invalid ttl")
         if type(facts["head"]) is not str or not re.fullmatch("[0-9a-f]{40}", facts["head"]):
             raise InvalidRequest("invalid head")

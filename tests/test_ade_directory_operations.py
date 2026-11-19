@@ -226,7 +226,7 @@ def test_real_shared_naming_decisions(world, change, expected):
 @pytest.mark.parametrize("field,value", [
     ("version", True), ("cwd", "/missing-directory"), ("claimId", "../escape"),
     ("ownerAgent", "a" * 129), ("ownerRecord", "bad/id"), ("ttlHours", True),
-    ("ttlHours", -1), ("ttlHours", 8785), ("ttlHours", float("nan")),
+    ("ttlHours", -1), ("ttlHours", 8785), ("ttlHours", 10 ** 400), ("ttlHours", float("nan")),
     ("ttlHours", float("inf")), ("branch", "x" * 1025), ("branch", "\ud800"),
     ("branch", "a\0b"), ("argv", []), ("stateDir", "/tmp/elsewhere"),
 ])
