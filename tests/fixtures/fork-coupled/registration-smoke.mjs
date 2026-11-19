@@ -16,7 +16,8 @@ const execute = promisify(execFile);
 const fixtureDirectory = fileURLToPath(new URL('.', import.meta.url));
 const sourceRoot = path.resolve(fixtureDirectory, '../../..');
 const members = ['registration-probe.mjs', 'retained-daemon.mjs', 'retained-cli.mjs', 'owned-cleanup.mjs',
-  'registration-smoke-contract.json', 'namespace-bootstrap-input.json', 'registration-diagnostics.mjs'];
+  'registration-smoke-contract.json', 'namespace-bootstrap-input.json', 'registration-diagnostics.mjs',
+  'registration-readiness.mjs'];
 
 async function sudo(arguments_) {
   await execute('/usr/bin/sudo', ['-k', '-n', ...arguments_], {

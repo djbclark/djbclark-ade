@@ -9,6 +9,7 @@ import path from 'node:path';
 import { launchObservedDaemon } from './retained-daemon.mjs';
 import { cli, getCliFailureStderr } from './retained-cli.mjs';
 import { createRegistrationDiagnostics } from './registration-diagnostics.mjs';
+import { createRegistrationReadinessObserver } from './registration-readiness.mjs';
 
 const builtins = [
   'antigravity-provider', 'claude-usage-source', 'codex-usage-source',
@@ -43,9 +44,14 @@ const diagnostics = await createRegistrationDiagnostics(home);
 let attempt = 0;
 const observedCli = async (phase, args) => {
   diagnostics.assertWithinBounds();
+  daemon.assertAlive();
+  await readiness.assertReady();
+  daemon.assertAlive();
   const ordinal = ++attempt;
   diagnostics.record('cli-start', {command: phase, ordinal});
   try {
+    if (phase === 'plugin-list') assert.ok(performance.now() < startupDeadline,
+      'Original startup deadline exceeded before CLI launch');
     const reply = await cli(root, home, args);
     // Never retain stdout: BEGIN may carry a bearer on an invalid success.
     // Only observational commands have diagnostic stderr retained.
@@ -59,17 +65,32 @@ const observedCli = async (phase, args) => {
     throw error;
   }
 };
-let daemon, failure, result;
+let daemon, readiness, startupDeadline, failure, result;
 try {
   daemon = await launchObservedDaemon(root, home, expectedManifest, 2, diagnostics);
   let plugins;
   const deadline = performance.now() + 180_000;
-  while (performance.now() < deadline) {
-    assert.equal(daemon.child.exitCode, null, 'owned daemon exited during startup');
-    assert.equal(daemon.child.signalCode, null, 'owned daemon stopped during startup');
-    const reply = await observedCli('plugin-list', ['plugin', 'ls']);
-    if (reply.code === 0) { plugins = JSON.parse(reply.stdout); break; }
-    await pause(500);
+  startupDeadline = deadline;
+  daemon.assertAlive();
+  readiness = createRegistrationReadinessObserver(home, daemon.child, deadline);
+  let polls = 0, waitComplete = false, lastReason = 'not-observed';
+  diagnostics.record('readiness-wait-start');
+  try {
+    while (performance.now() < deadline) {
+      daemon.assertAlive();
+      const candidate = await readiness.poll();
+      daemon.assertAlive();
+      polls += 1;
+      lastReason = candidate.reason;
+      if (!candidate.ready) { await pause(500); continue; }
+      assert.ok(performance.now() < deadline, 'Original startup deadline exceeded before CLI');
+      const reply = await observedCli('plugin-list', ['plugin', 'ls']);
+      assert.ok(performance.now() < deadline, 'Original startup deadline exceeded after CLI');
+      if (reply.code === 0) { plugins = JSON.parse(reply.stdout); waitComplete = true; break; }
+      await pause(500);
+    }
+  } finally {
+    diagnostics.record('readiness-wait-end', {polls, lastReason, complete: waitComplete});
   }
   assert.ok(Array.isArray(plugins), 'actual plugin listing did not become available');
   assert.deepEqual(plugins.map((plugin) => plugin.id).sort(), [...builtins].sort(),
@@ -94,6 +115,7 @@ try {
   failure = error;
   diagnostics.record('probe-failed', {name: error.name, message: error.message});
 } finally {
+  readiness?.dispose();
   try { if (daemon) await daemon.dispose(); }
   catch (error) { failure = failure ? new AggregateError([failure, error], 'probe and teardown failed') : error; }
   try { await diagnostics.finish(); }

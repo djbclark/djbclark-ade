@@ -163,11 +163,15 @@ export async function launchObservedDaemon(root, home, expectedManifest, measure
   const child = spawn(invocation.command, invocation.args, {
     env: invocation.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true,
   });
-  let childError = null;
+  const originalPid = child.pid;
+  let childError = null, childClosed = false;
   child.on('error', (error) => { childError = error; diagnostics?.record('daemon-error', {name: error.name, code: error.code}); });
   diagnostics?.record('daemon-spawned', {pid: child.pid});
   child.once('exit', (code, signal) => diagnostics?.record('daemon-exit', {code, signal}));
-  child.once('close', (code, signal) => diagnostics?.record('daemon-close', {code, signal}));
+  child.once('close', (code, signal) => {
+    childClosed = true;
+    diagnostics?.record('daemon-close', {code, signal});
+  });
   const owner = ownDisposableGroup(child);
   const dispose = async () => {
     diagnostics?.record('daemon-disposal-start', {exitCode: child.exitCode, signalCode: child.signalCode});
@@ -220,5 +224,8 @@ export async function launchObservedDaemon(root, home, expectedManifest, measure
     assert.ok(!overflow && !childError && child.exitCode === null && child.connected);
     return reply;
   };
-  return Object.freeze({ child, observation, dispose, diagnostics: () => outputTail });
+  const assertAlive = () => assert.ok(Number.isSafeInteger(originalPid) && originalPid > 0 &&
+    child.pid === originalPid && child.connected && child.exitCode === null &&
+    child.signalCode === null && !childError && !childClosed, 'Original daemon handle unavailable');
+  return Object.freeze({ child, observation, dispose, assertAlive, diagnostics: () => outputTail });
 }
