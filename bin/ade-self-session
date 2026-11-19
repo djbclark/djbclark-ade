@@ -40,6 +40,7 @@ def main():
             q.add_argument('--title', help='successor title; default: the predecessor\'s own name (a lead keeps its name through every handoff)')
             q.add_argument('--role', help='ade.role label for the successor; default: the one the predecessor\'s handoff record carried (Paseo\'s CLI cannot read labels back, so a chain\'s first handoff names it here)')
             q.add_argument('--route-kind', choices=('code', 'judgment', 'research', 'bulk', 'mechanical'), help='explicit routed Pi successor; requires post-ack first-real-turn verification')
+            q.add_argument('--predecessor', help='re-hand this agent instead of the caller (a supervisor re-handoff); default: the caller')
             q.add_argument('--quiesced', action='store_true', help='attest other jobs/writes finished; successor waits for retirement')
         else:
             q.add_argument('--request-id', required=True, help='reuse on retry; new ID only for a deliberately new request')
@@ -63,7 +64,7 @@ def main():
         if a.command == 'handoff':
             result = service.handoff(a.checkpoint, quiesced=a.quiesced, requested_mode=a.mode,
                                      requested_thinking=a.thinking, requested_title=a.title,
-                                     requested_role=a.role, route_kind=a.route_kind)
+                                     requested_role=a.role, route_kind=a.route_kind, predecessor=a.predecessor)
         elif a.command == 'appoint':
             result = service.appoint(a.record, appointed=a.appointed, pool=a.pool,
                                      operator_appointed=a.operator_appointed, quiesced=a.quiesced)
