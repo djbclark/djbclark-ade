@@ -1369,6 +1369,7 @@ def committed_readonly_source(revision='389'):
         '389':('native-readonly-source',52756,'605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'),
         'd8':('native-readonly-d8-source',53480,'4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf'),
         'a3f':('native-readonly-a3f-source',54910,'39ce30d1fc0e102889075e778f26a15c7b12a2ed770c1692325198ced5bc0cda'),
+        '8033':('native-readonly-8033-source',56756,'ef061bcb2de359516a37279d394f19befae0ea351d816f2d2c520032b7f03fd7'),
     }[revision]
     source_path=Path(__file__).resolve().parents[1]/directory/'packages/server/scripts/qualified-system-namespace.py'
     if not source_path.is_file():
@@ -1381,7 +1382,7 @@ def committed_readonly_source(revision='389'):
     return source
 
 
-@pytest.mark.parametrize('revision',['389','d8','a3f'])
+@pytest.mark.parametrize('revision',['389','d8','a3f','8033'])
 def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,monkeypatch,revision):
     source=committed_readonly_source(revision)
     config,manifest,path=readonly_port_fixture(tmp_path,source)
@@ -1398,7 +1399,7 @@ def test_actual_committed_readonly_import_refusal_and_module_cleanup(tmp_path,mo
     assert sys.modules[name] is previous
 
 
-@pytest.mark.parametrize('accepted_size',[52756,53480,54910])
+@pytest.mark.parametrize('accepted_size',[52756,53480,54910,56756])
 @pytest.mark.parametrize('source',[
     b'import os\ndef dataclass(cls):\n    os.chdir("/")\n    return cls\n@dataclass\nclass Probe:\n    """review module rebinding"""\ndef verify_existing_namespace(root,digest):return None\n',
     b'import os\ndef property(fn):\n    os.chdir("/")\n    return fn\nclass Probe:\n    @property\n    def value(self):return None\n',
@@ -1436,7 +1437,7 @@ def test_readonly_port_authentication_precedes_import(tmp_path,monkeypatch,chang
 
 
 @pytest.mark.parametrize('change',['bytes','mode'])
-@pytest.mark.parametrize('revision',['389','d8','a3f'])
+@pytest.mark.parametrize('revision',['389','d8','a3f','8033'])
 def test_accepted_manifest_identity_does_not_hide_changed_member_bytes(tmp_path,monkeypatch,change,revision):
     source=committed_readonly_source(revision)
     config,manifest,path=readonly_port_fixture(tmp_path,source)
@@ -1466,11 +1467,13 @@ def test_readonly_reviewed_identity_set_is_closed():
     assert c.READONLY_NAMESPACE_IDENTITIES==frozenset({
         (52756,'605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'),
         (53480,'4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf'),
-        (54910,'39ce30d1fc0e102889075e778f26a15c7b12a2ed770c1692325198ced5bc0cda')})
+        (54910,'39ce30d1fc0e102889075e778f26a15c7b12a2ed770c1692325198ced5bc0cda'),
+        (56756,'ef061bcb2de359516a37279d394f19befae0ea351d816f2d2c520032b7f03fd7')})
 
 
 @pytest.mark.parametrize('revision,other_revision',[
-    ('389','d8'),('389','a3f'),('d8','389'),('d8','a3f'),('a3f','389'),('a3f','d8')])
+    (revision,other) for revision in ('389','d8','a3f','8033')
+    for other in ('389','d8','a3f','8033') if revision!=other])
 @pytest.mark.parametrize('change',['cross-size','cross-hash','hash-list','hash-null','size-bool'])
 def test_reviewed_readonly_identity_pairs_cannot_be_mixed(tmp_path,monkeypatch,revision,other_revision,change):
     source=committed_readonly_source(revision)

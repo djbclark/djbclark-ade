@@ -563,9 +563,9 @@ Reviewed native source `389bb84ea48c8c800a3c528b23e1d192be052959` provides
 packaged `ROOT/system-closure/namespace-bootstrap.py`, mode 0444. Controller
 preexec now consumes this real port instead of unconditional systemClosure HOLD.
 It first independently authenticates the raw manifest and full sealed inventory,
-then measures that exact member AND requires one of the three independently
-reviewed size/SHA pairs encoded in controller source (listed below):389,d8 or
-a3f. The manifest cannot choose an unreviewed import implementation. All three
+then measures that exact member AND requires one of the four independently
+reviewed size/SHA pairs encoded in controller source (listed below):389,d8,a3f or
+8033. The manifest cannot choose an unreviewed import implementation. All four
 known sources were independently reviewed to import definitions only; no generic
 AST predicate or Python sandbox is claimed. Unknown/modified future helper bytes
 HOLD until a separately reviewed controller adapter source update. There is no
@@ -726,29 +726,31 @@ qualification is not inferred from this positive data test. Existing actual389
 import/refusal and no-Popen-on-final-verifier-failure regressions remain required.
 
 
-### Three reviewed read-only namespace source identities
+### Four reviewed read-only namespace source identities
 
-The controller's source-identity gate now accepts the CLOSED three-pair set:
+The controller's source-identity gate now accepts the CLOSED four-pair set:
 `(52756, 605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7)`
 from reviewed389, and
 `(53480, 4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf)`
 from SOURCE APPROVED `d8f983b964214ea13abf21648d905a50fa5aab40`; and
 `(54910, 39ce30d1fc0e102889075e778f26a15c7b12a2ed770c1692325198ced5bc0cda)`
-from SOURCE APPROVED `a3f19ed7bdf56cc5d72f53fc60014960e8ebcf9a`.
+from SOURCE APPROVED `a3f19ed7bdf56cc5d72f53fc60014960e8ebcf9a`; and
+`(56756, ef061bcb2de359516a37279d394f19befae0ea351d816f2d2c520032b7f03fd7)`
+from SOURCE APPROVED `8033d78d7246ca99c1aefd8933db28cf67c18aab`.
 Both whole byte size and SHA must match the same reviewed pair. The d8 Git bytes
 were independently rehashed before this adapter change. Full R5 source review
 covers its narrow retained-caller/direct-sudo-monitor ancestry amendment; the
 actual read-only port is unchanged. Blocked2c/c19 and every unlisted or modified
 helper remain refused before compilation/import even if manifest claims match.
-This is compatibility for exactly three known read-only implementations; it is not
+This is compatibility for exactly four known read-only implementations; it is not
 a generic fallback, mutable path or manifest-selected import authority.
 
 Fixed member/mode, complete sealed inventory/raw-manifest authentication, actual
 source measurement and postcheck stability, controlled module cleanup and final
 real None-or-raise namespace port before Popen remain required. Dedicated source
-CI checks out all THREE exact Git revisions for actual import/refusal and mutation/
+CI checks out all FOUR exact Git revisions for actual import/refusal and mutation/
 mixed-pair negatives. Existing522 build DATA coverage still uses approved389
-and supplies no namespace qualification. This three-source controller read-only set
+and supplies no namespace qualification. This four-source controller read-only set
 is distinct from privileged launcher/root acquisition pins: those change separately for each exact measured successor archive. No privileged helper/namespace launch,
 Mac/live use, new profile/loader or runtime qualification is performed here.
 
@@ -759,3 +761,10 @@ approve an unmeasured new archive or perform privileged acquisition; no resolver
 logic is copied into the controller. Existing389/d8 baseline read-only
 compatibility, full raw-manifest/sealed inventory, fixed source/member/mode and
 final actual None-or-raise port/native guards remain unchanged.
+
+The8033 source adds only finite administrative syscall-refusal diagnostics;
+FULL exact3861/native8033 source review was read, and frozen helper bytes were
+independently rehashed. Both prior6399 probes remain administrative failures
+before daemon/hook execution, with no inferred syscall site or successful
+namespace. This fourth read-only identity grants no diagnostic/privileged
+launch, archive approval, runtime qualification or exception to existing guards.
