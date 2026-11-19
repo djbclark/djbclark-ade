@@ -24,12 +24,17 @@ AGENTS = [
 
 
 def _pools(**headroom):
-    """aiuse --available JSON: {"<pool_id>": (headroom_percent, usable_now, stale)}."""
+    """aiuse --available JSON: {"<pool_id>": (headroom_percent, usable_now, stale)}.
+
+    A sub-account pool_id may carry an account after a "#" ("opencode:go#t-e"),
+    which becomes the aiuse `account` field. Without one, no account is set.
+    """
     pools = []
-    for pool_id, (headroom, usable, stale) in headroom.items():
+    for key, (headroom, usable, stale) in headroom.items():
+        pool_id, _, account = key.partition("#")
         entry = {"pool_id": pool_id, "headroom_percent": headroom, "usable_now": usable, "stale": stale}
-        if pool_id == "opencode:go":
-            entry["account"] = "t-e"
+        if account:
+            entry["account"] = account
         pools.append(entry)
     return {"fresh": True, "available": pools}
 
@@ -60,7 +65,7 @@ def _stuck_ids(report) -> list[str]:
 
 def test_a_zero_headroom_account_makes_its_agent_stuck_with_an_alternative(tmp_path: Path) -> None:
     report = _run(tmp_path, _pools(**{"openai:openai_api": (0.0, True, False),
-                                      "opencode:go": (40.0, True, False)}))
+                                      "opencode:go#t-e": (40.0, True, False)}))
     assert _stuck_ids(report) == ["a1"]
     stuck = report["stuck"][0]
     assert stuck["account"] == "openai" and stuck["headroom_percent"] == 0.0
@@ -96,7 +101,7 @@ def test_an_aiuse_failure_falls_back_to_the_known_empty_accounts(tmp_path: Path)
 
 
 def test_the_opencode_go_pool_maps_its_sub_account(tmp_path: Path) -> None:
-    report = _run(tmp_path, _pools(**{"opencode:go": (0.0, True, False)}))
+    report = _run(tmp_path, _pools(**{"opencode:go#t-e": (0.0, True, False)}))
     by_id = {o["id"]: o for o in report["all_pi"]}
     assert by_id["b2"]["account"] == "opencode-go-t-e" and by_id["b2"]["stuck"] is True
 
@@ -130,7 +135,7 @@ def test_an_unusable_pool_outranks_a_usable_one_with_less_headroom(tmp_path: Pat
 
 
 def test_the_alternative_is_never_the_agents_own_exhausted_account(tmp_path: Path) -> None:
-    report = _run(tmp_path, _pools(**{"opencode:go": (0.0, True, False)}))
+    report = _run(tmp_path, _pools(**{"opencode:go#t-e": (0.0, True, False)}))
     stuck = [s for s in report["stuck"] if s["id"] == "b2"][0]
     assert stuck["account"] == "opencode-go-t-e"
     assert stuck["alternative"] and not stuck["alternative"].startswith("pi/opencode-go-t-e/")
@@ -213,7 +218,7 @@ def test_closed_archived_and_errored_agents_are_not_flagged(tmp_path: Path) -> N
 def test_an_account_without_a_quota_mapping_is_reported(tmp_path: Path) -> None:
     """A bare `opencode-go/` provider names no billing sub-account: it cannot be judged, so it is not shown as healthy."""
     agents = [{"id": "o1", "provider": "pi/opencode-go/deepseek-v4-pro", "status": "running"}]
-    report = _run(tmp_path, _pools(**{"opencode:go": (40.0, True, False)}), agents=agents)
+    report = _run(tmp_path, _pools(**{"opencode:go#t-e": (40.0, True, False)}), agents=agents)
     assert report["unmapped"] == ["opencode-go"]
     assert report["stuck"] == []
 
@@ -239,3 +244,37 @@ def test_a_pool_with_no_usable_reading_is_fail_closed(tmp_path: Path) -> None:
                                            "usable_now": None, "stale": False}]}
     report = _run(tmp_path, pools)
     assert "anthropic" in report["exhausted"]
+
+
+def test_a_sub_account_pool_maps_each_named_account_and_not_the_bare_prefix(tmp_path: Path) -> None:
+    """clinepass and opencode-go bill several accounts under one pool_id. Each named account is judged on
+    its own reading, so a funded sub-account is not reported unmapped (Carried 79)."""
+    agents = [
+        {"id": "c1", "name": "cline base", "provider": "pi/clinepass/cline-pass/deepseek-v4-pro", "status": "running"},
+        {"id": "c2", "name": "cline te", "provider": "pi/clinepass-t-e/cline-pass/deepseek-v4-pro", "status": "running"},
+        {"id": "g1", "name": "go base", "provider": "pi/opencode-go/deepseek-v4-pro", "status": "idle"},
+        {"id": "g2", "name": "go te", "provider": "pi/opencode-go-t-e/deepseek-v4-pro", "status": "idle"},
+    ]
+    report = _run(tmp_path, _pools(**{
+        "clinepass:default#djbclark": (6.0, True, False),
+        "clinepass:default#t-e": (80.0, True, False),
+        "opencode:go#djbclark": (40.0, True, False),
+        "opencode:go#t-e": (4.0, True, False),
+    }), agents=agents)
+    # The bare `clinepass` and `opencode-go` providers name no sub-account, and aiuse reports this pool only
+    # per named account, so the base provider stays unmapped while each named sub-account is judged.
+    assert report["unmapped"] == ["clinepass", "opencode-go"]
+    by_id = {a["id"]: a for a in report["all_pi"]}
+    assert by_id["c2"]["account"] == "clinepass-t-e" and by_id["c2"]["headroom_percent"] == 80.0
+    assert by_id["c1"]["headroom_percent"] is None
+    assert by_id["g2"]["account"] == "opencode-go-t-e" and by_id["g2"]["headroom_percent"] == 4.0
+    assert by_id["g1"]["headroom_percent"] is None
+    assert by_id["c1"]["stuck"] is False and by_id["c2"]["stuck"] is False
+
+
+def test_an_unlisted_pool_stays_unmapped(tmp_path: Path) -> None:
+    """A provider aiuse has no pool for cannot be judged, and is still reported rather than assumed healthy."""
+    agents = [{"id": "x1", "name": "xai", "provider": "pi/xai-oauth/grok-4.7", "status": "running"}]
+    report = _run(tmp_path, _pools(**{"openai:openai_api": (50.0, True, False)}), agents=agents)
+    assert report["unmapped"] == ["xai-oauth"]
+    assert report["all_pi"][0]["headroom_percent"] is None
