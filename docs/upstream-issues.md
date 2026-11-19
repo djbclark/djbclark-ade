@@ -1538,7 +1538,7 @@ their folder. No duplicate issue was found: four web searches and three `gh sear
 
 ## 21. paseo — `provider models` serves a stale cached catalog until a diagnostic or restart
 
-**Status: `ready-to-file`** (drafted 2026-11-19; not filed — djbclark decides). Target: `getpaseo/paseo`.
+**Status: `already-filed` — [getpaseo/paseo#10248](https://github.com/getpaseo/paseo/issues/10248)** (filed 2026-11-19 on the operator's yes).
 
 ### Observed
 
