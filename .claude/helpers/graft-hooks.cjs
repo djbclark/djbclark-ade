@@ -116,12 +116,35 @@ function entry(name, cheapOnly) {
   return path.join(dir, 'dist', 'claude', name); // last-ditch; import will no-op if absent
 }
 
+// Cursor's sessionStart reads a top-level additional_context, Claude Code's SessionStart hook reads
+// hookSpecificOutput, and an installed trail/graft only knows the Claude event — so a Cursor session start runs the
+// upstream session-start and re-shapes what it printed, instead of doing nothing once trail is installed.
+function reshaped(run) {
+  const write = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => { chunks.push(Buffer.from(chunk)); return true; };
+  const restore = () => { process.stdout.write = write; return Buffer.concat(chunks).toString('utf8'); };
+  Promise.resolve().then(run).then(() => {
+    const text = restore();
+    let shape = null;
+    try {
+      const parsed = JSON.parse(text);
+      const inner = parsed.hookSpecificOutput && parsed.hookSpecificOutput.additionalContext;
+      if (inner) shape = { additional_context: inner };
+      else if (parsed.additional_context) shape = parsed;
+    } catch { shape = null; }        // nothing printed, or not JSON: say nothing
+    if (shape) write(JSON.stringify(shape));
+  }).catch(() => { restore(); /* trail unavailable — no-op */ });
+}
+
 // PreToolUse (pre-bash) runs before every shell command: its own small module,
 // found without a subprocess (never npm root -g), or nothing at all.
 const FAST = process.argv[2] === 'pre-bash';
+const CURSOR_START = process.argv[2] === 'cursor-session-start';
 const target = entry(FAST ? 'pre-bash.js' : "hooks.js", FAST);
-if (fs.existsSync(target)) import(pathToFileURL(target).href).then((m) => m.main(process.argv[2])).catch(() => { /* trail unavailable — no-op */ });
-else if (['session-start', 'cursor-session-start'].includes(process.argv[2])) offerTrail(process.argv[2] === 'cursor-session-start');
+if (fs.existsSync(target) && CURSOR_START) import(pathToFileURL(target).href).then((m) => reshaped(() => m.main('session-start')));
+else if (fs.existsSync(target)) import(pathToFileURL(target).href).then((m) => m.main(process.argv[2])).catch(() => { /* trail unavailable — no-op */ });
+else if (['session-start', 'cursor-session-start'].includes(process.argv[2])) offerTrail(CURSOR_START);
 
 function offerTrail(cursor) {
   const learnings = path.join(dir, '.trail', 'learnings');

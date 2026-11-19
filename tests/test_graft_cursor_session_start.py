@@ -33,9 +33,17 @@ def _project(tmp_path: Path) -> Path:
 
 
 def _run(hook: Path, argument: str, project: Path, tmp_path: Path) -> str:
-    """Run one hook in the temporary project: no trail state, and a PATH without node_modules or npm."""
+    """Run one hook in the temporary project, cut off from every installed trail/graft.
+
+    `entry()` tries a remembered trail home, the packages above the project and above node, the PATH, then
+    `npm root -g`; a PATH holding nothing but a `node` link removes the last three, so the run always takes the
+    in-repo path this file tests instead of importing whatever is installed on the machine.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "node").symlink_to(shutil.which("node"))
     env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project), TRAIL_HOME=str(tmp_path / "trail-home"),
-               PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+               PATH=str(bin_dir))
     done = subprocess.run([shutil.which("node"), str(hook), argument], env=env, capture_output=True, text=True,
                           timeout=60)
     assert done.returncode == 0, done.stderr
@@ -78,3 +86,30 @@ def test_the_two_hook_copies_are_identical() -> None:
 def test_both_copies_speak_cursors_shape(tmp_path: Path) -> None:
     payload = _payload(CLAUDE_HOOK, "cursor-session-start", tmp_path / "a")
     assert "Cursor reads additional_context" in payload["additional_context"]
+
+
+def _fake_upstream(project: Path) -> None:
+    """An installed trail/graft beside the project: `entry()` finds this hooks.js, as on a machine with trail."""
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main(event) {\n"
+        "  process.stdout.write(JSON.stringify({ hookSpecificOutput: {\n"
+        "    hookEventName: 'SessionStart', additionalContext: 'upstream saw ' + event } }));\n"
+        "}\n")
+
+
+def test_an_installed_trail_is_run_as_session_start_and_reshaped(tmp_path: Path) -> None:
+    """Upstream knows only the Claude event: Cursor gets its context, and upstream is asked for session-start."""
+    project = _project(tmp_path)
+    _fake_upstream(project)
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload == {"additional_context": "upstream saw session-start"}
+
+
+def test_an_installed_trail_keeps_claudes_own_event_shape(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    _fake_upstream(project)
+    payload = json.loads(_run(CLAUDE_HOOK, "session-start", project, tmp_path))
+    assert payload["hookSpecificOutput"]["additionalContext"] == "upstream saw session-start"
+    assert "additional_context" not in payload
