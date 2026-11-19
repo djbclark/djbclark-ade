@@ -74,6 +74,7 @@ flagship* (Fable/Astra/Neon/Carbon), while the near-frontier band is the *value 
 4. Record the snapshot date and a `Prior art / docs checked` note; keep every citation and the counter-evidence (a
    board that disagrees) so the page stays an audit, not a vibes table.
 
-This is a periodic script update (per `~/CLAUDE.md` order 13), not a recurring model prompt; the script and its
-schedule live with the fleet maintenance tooling. Unrouted/retired models are pruned by the rule above and do not
-need continual re-lookup.
+Implemented as `bin/ade-model-rankings refresh` (zero-token; scrapes both boards through the self-hosted Firecrawl
+API, rewrites section A above and `docs/model-rankings.data.json`), run by the weekly launchd job
+`com.djbclark.ade-model-rankings`; `bin/ade-model-rankings check` is the stale/incomplete drift guard. Per
+`~/CLAUDE.md` order 13 this is a script, never a recurring model prompt.
