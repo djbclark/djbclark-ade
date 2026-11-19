@@ -14,6 +14,18 @@ sys.path.insert(0, str(REPO / "bin"))
 import ade_client_wiring as cw
 import ade_install as ai
 
+# `~/.hermes/config.yaml` is only read when PyYAML imports, and a TUI whose config cannot be read reports one
+# `hermes/* unknown` row instead of the per-server rows (bin/ade_client_wiring, its documented graceful path). CI runs
+# the suite as `uv run --with pytest --with pyyaml …`; a plain local `uv run --with pytest` has no yaml, so the tests
+# that name Hermes' rows skip with this reason instead of failing four times for a missing dependency.
+try:
+    import yaml  # noqa: F401
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+needs_yaml = pytest.mark.skipif(
+    not HAS_YAML, reason="PyYAML reads ~/.hermes/config.yaml; install it with `uv run --with pytest --with pyyaml`")
+
 FC = "http://127.0.0.1:18804/mcp"
 BM = "http://127.0.0.1:18796/mcp"
 TUIS = cw.tui_roster(REPO)
@@ -98,6 +110,7 @@ def test_roster_validation(tmp_path, sid, url, clients):
 
 # ---- MCP -----------------------------------------------------------------------
 
+@needs_yaml
 def test_mcp_all_ok(tmp_path, roster):
     good_home(tmp_path)
     got = mcp(tmp_path, roster)
@@ -117,6 +130,7 @@ def test_mcp_missing_gives_exact_fix_and_runs_nothing(tmp_path, roster, monkeypa
     assert f"claude mcp add --scope user --transport http firecrawl {FC}" in detail
 
 
+@needs_yaml
 def test_mcp_wrong_url_wrong_type_disabled(tmp_path, roster):
     good_home(tmp_path)
     write_claude(tmp_path, {"firecrawl": {"type": "http", "url": "http://127.0.0.1:9/mcp"},
@@ -151,6 +165,7 @@ def test_mcp_path_secret_control_chars_and_schemeless_url_not_printed(tmp_path, 
         assert st == "warn" and "PATHSECRET" not in detail and "LEAKME" not in detail and "\x1b" not in detail
 
 
+@needs_yaml
 def test_mcp_absent_files_warn_not_crash(tmp_path, roster):
     assert {s for s, _ in mcp(tmp_path, roster).values()} == {"warn"}
 
@@ -303,6 +318,7 @@ def make_root(tmp_path):
     return root
 
 
+@needs_yaml
 def test_observe_one_summary_line_per_tui_then_details(tmp_path):
     root = make_root(tmp_path)
     home = tmp_path / "home"
