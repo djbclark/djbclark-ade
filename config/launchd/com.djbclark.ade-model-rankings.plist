@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Model-rankings refresh, weekly: a zero-token host script (no model prompt) that scrapes the two
+     Artificial Analysis boards once each via the self-hosted Firecrawl API, updates
+     docs/model-rankings.data.json, rewrites section A of docs/model-rankings.md, and exits 3 on an
+     incomplete scrape so the job shows a non-zero run. `bin/ade-model-rankings check` is the drift guard.
+     Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__ and __STATE__. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.ade-model-rankings</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.ade-model-rankings</string><string>--</string>
+    <string>__ADE__/bin/ade-model-rankings</string><string>refresh</string>
+  </array>
+  <key>StartInterval</key><integer>604800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/model-rankings.out</string>
+  <key>StandardErrorPath</key><string>__STATE__/model-rankings.err</string>
+</dict>
+</plist>
