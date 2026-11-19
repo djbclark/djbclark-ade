@@ -6,10 +6,30 @@ const { pathToFileURL } = require('url');
 // Imports use installed helpers only by default. ADE_GRAFT_ALLOW_PROJECT_HOOKS=1
 // explicitly trusts project node_modules packages and the bare dist/claude fallback
 // to execute code as the current user; enable only for a trusted development repo.
+// The launcher must supply a trusted project root and environment. A PATH/env a
+// repo controls is project-controlled: candidate shape or version is not proof
+// of trust. Canonical containment rejects project targets from EVERY source,
+// including symlinks, before ranking. This is not a sandbox for a hostile
+// launcher, Node startup options, or npm itself; those must remain trusted.
 // `dir` is the project, so running this by hand inside a repo with trail installed lets graft wire THAT repo
 // (it rewrites .claude/, .cursor/ and AGENTS.md). Drive it from a temp project — as
 // tests/test_graft_cursor_session_start.py does.
 const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const allowProject = process.env.ADE_GRAFT_ALLOW_PROJECT_HOOKS === '1';
+let projectRoot = null;
+try { projectRoot = fs.realpathSync(dir); } catch { /* fail closed on imports */ }
+
+// Return a canonical path only outside the project (unless explicitly opted in).
+// Check both directory and module: an installed hooks.js can itself be a symlink.
+function permitted(file) {
+  try {
+    if (!file || !projectRoot) return null;
+    const real = fs.realpathSync(file);
+    const relative = path.relative(projectRoot, real);
+    const inside = relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
+    return !allowProject && inside ? null : real;
+  } catch { return null; }
+}
 
 // The same code ships as @trailhq/trail-code and as @nanonets/graft, its old name;
 // either one answers, and the newer wins. @trailhq/trail is what builds from
@@ -22,12 +42,16 @@ const BINS = process.platform === 'win32' ? ['trail.cmd', 'graft.cmd'] : ['trail
 // write: it names code we import.
 function remembered() {
   try {
-    const home = process.env.TRAIL_HOME ? path.resolve(process.env.TRAIL_HOME) : path.join(os.homedir(), '.trail');
+    const configured = process.env.TRAIL_HOME;
+    if (configured && !path.isAbsolute(configured) && !allowProject) return null;
+    // Relative homes are supported only for opted-in development, anchored to
+    // the canonical project root rather than the caller's changing cwd.
+    const home = configured ? path.resolve(projectRoot || os.homedir(), configured) : path.join(os.homedir(), '.trail');
     const file = path.join(home, "install.json");
     const st = fs.statSync(file);
     if (process.getuid && (st.uid !== process.getuid() || (st.mode & 0o022))) return null;
     const d = JSON.parse(fs.readFileSync(file, 'utf8')).claudeDist;
-    return typeof d === 'string' && path.isAbsolute(d) ? d : null;
+    return typeof d === 'string' && path.isAbsolute(d) ? permitted(d) : null;
   } catch { return null; }
 }
 
@@ -103,8 +127,9 @@ function newer(a, b) {
 // The highest-versioned dir in `dirs` that actually contains `name`, or null.
 function best(dirs, name) {
   let bestDir = null, bestVer = null;
-  for (const d of dirs) {
-    if (!d || !fs.existsSync(path.join(d, name))) continue;
+  for (const candidate of dirs) {
+    const d = permitted(candidate);
+    if (!d || !permitted(path.join(d, name))) continue;
     const v = versionOf(d);
     if (bestDir === null || newer(v, bestVer)) { bestDir = d; bestVer = v; }
   }
@@ -113,14 +138,13 @@ function best(dirs, name) {
 
 function entry(name, cheapOnly) {
   // Cheap candidates first, and only shell out to npm when every one of them misses.
-  const allowProject = process.env.ADE_GRAFT_ALLOW_PROJECT_HOOKS === '1';
   const cheap = [remembered(), ...(allowProject ? fromPkg(dir) : []), ...fromPkg(path.join(path.dirname(process.execPath), '..', 'lib')), ...onPath()];
   const hit = best(cheap, name);
-  if (hit) return path.join(hit, name);
+  if (hit) return permitted(path.join(hit, name));
   const gr = cheapOnly ? null : globalRoot();
   const global = gr && best(PKGS.map((p) => path.join(gr, ...p.split('/'), 'dist', 'claude')), name);
-  if (global) return path.join(global, name);
-  return allowProject ? path.join(dir, 'dist', 'claude', name) : null;
+  if (global) return permitted(path.join(global, name));
+  return allowProject ? permitted(path.join(dir, 'dist', 'claude', name)) : null;
 }
 
 // Cursor's sessionStart reads a top-level additional_context, Claude Code's SessionStart hook reads

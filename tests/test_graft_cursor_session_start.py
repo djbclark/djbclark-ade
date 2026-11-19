@@ -33,7 +33,7 @@ def _project(tmp_path: Path) -> Path:
 
 
 def _run(hook: Path, argument: str, project: Path, tmp_path: Path,
-         extra_env: dict[str, str] | None = None) -> str:
+         extra_env: dict[str, str] | None = None, *, exec_path: Path | None = None) -> str:
     """Isolate every install lookup from the host, including node's own lib dir."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -41,7 +41,7 @@ def _run(hook: Path, argument: str, project: Path, tmp_path: Path,
         (bin_dir / "node").symlink_to(shutil.which("node"))
     isolate = tmp_path / "isolate.cjs"
     isolate.write_text("Object.defineProperty(process, 'execPath', {value: "
-                       + json.dumps(str(tmp_path / "node-install" / "bin" / "node")) + "});")
+                       + json.dumps(str(exec_path or tmp_path / "node-install" / "bin" / "node")) + "});")
     env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project), TRAIL_HOME=str(tmp_path / "trail-home"),
                PATH=str(bin_dir))
     env.pop("ADE_GRAFT_ALLOW_PROJECT_HOOKS", None)
@@ -300,3 +300,94 @@ def test_writable_remembered_record_is_rejected(tmp_path: Path, hook: Path, even
     (tmp_path / "trail-home" / "install.json").chmod(0o666)
     assert _run(hook, event, project, tmp_path) == ""
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("hook,event", EVENTS)
+@pytest.mark.parametrize("opt_in", [False, True])
+@pytest.mark.parametrize("route", ["sentinel", "local-bin", "outside-link", "relative-home",
+                                    "absolute-home", "node-lib", "module-link", "directory-link"])
+def test_project_targets_from_install_sources_require_opt_in(
+        tmp_path: Path, hook: Path, event: str, opt_in: bool, route: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    hostile_marker = tmp_path / "hostile-imported"
+    trusted_marker = tmp_path / "trusted-imported"
+    trusted_root = tmp_path / "installed"
+    _marker_package(trusted_root, trusted_marker, "1.0.0")
+    _trusted_dist(tmp_path)
+    root = project
+    if route == "local-bin":
+        root = project / "node_modules" / "@trailhq" / "trail-code"
+    elif route == "node-lib":
+        root = project / "runtime" / "lib" / "node_modules" / "@trailhq" / "trail-code"
+    hostile_dist = _marker_package(root, hostile_marker, "99999.0.0")
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    env = {"ADE_GRAFT_ALLOW_PROJECT_HOOKS": "1" if opt_in else "0"}
+    exec_path = None
+    if route in {"sentinel", "local-bin", "outside-link"}:
+        if route == "sentinel":
+            path_dir = project / "bin"
+            path_dir.mkdir()
+            (path_dir / "trail").touch(mode=0o600)  # Empty and deliberately non-executable.
+        else:
+            path_dir = project / "node_modules" / ".bin" if route == "local-bin" else tmp_path / "outside-bin"
+            path_dir.mkdir(parents=True)
+            cli = root / "dist" / "cli.js"
+            cli.write_text("")
+            (path_dir / "trail").symlink_to(cli)
+        env["PATH"] = os.pathsep.join([str(path_dir), str(bins)])
+    elif route in {"relative-home", "absolute-home"}:
+        home = project / ".trail"
+        home.mkdir()
+        record = home / "install.json"
+        record.write_text(json.dumps({"claudeDist": str(hostile_dist)}))
+        record.chmod(0o600)
+        env["TRAIL_HOME"] = ".trail" if route == "relative-home" else str(home)
+        # Replacing TRAIL_HOME must not hide the legitimate lower-version candidate.
+        cli = trusted_root / "dist" / "cli.js"
+        cli.write_text("")
+        (bins / "trail").symlink_to(cli)
+    elif route == "node-lib":
+        exec_path = project / "runtime" / "bin" / "node"
+    else:
+        wrapper = tmp_path / "wrapper"
+        dist = wrapper / "dist" / "claude"
+        dist.mkdir(parents=True)
+        (wrapper / "package.json").write_text(json.dumps({"name": "@trailhq/trail-code", "version": "99999.0.0"}))
+        if route == "directory-link":
+            dist.rmdir()
+            dist.symlink_to(hostile_dist, target_is_directory=True)
+        else:
+            for name in ("hooks.js", "pre-bash.js"):
+                (dist / name).symlink_to(hostile_dist / name)
+        cli = wrapper / "dist" / "cli.js"
+        cli.write_text("")
+        (bins / "trail").symlink_to(cli)
+    _run(hook, event, project, tmp_path, env, exec_path=exec_path)
+    assert hostile_marker.exists() == opt_in
+    assert trusted_marker.exists() != opt_in
+
+
+@pytest.mark.parametrize("hook,event", EVENTS)
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_global_root_candidates_are_checked_after_realpath(
+        tmp_path: Path, hook: Path, event: str, opt_in: bool) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    hostile_marker = tmp_path / "hostile-imported"
+    trusted_marker = tmp_path / "trusted-imported"
+    modules = project / "global" / "node_modules"
+    _marker_package(modules / "@trailhq" / "trail-code", hostile_marker, "99999.0.0")
+    trusted = tmp_path / "installed"
+    _marker_package(trusted, trusted_marker, "1.0.0")
+    (modules / "@nanonets").mkdir()
+    (modules / "@nanonets" / "graft").symlink_to(trusted, target_is_directory=True)
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    npm = bins / "npm"
+    npm.write_text("#!/bin/sh\nprintf '%s\\n' '" + str(modules) + "'\n")
+    npm.chmod(0o755)
+    _run(hook, event, project, tmp_path, {"ADE_GRAFT_ALLOW_PROJECT_HOOKS": "1" if opt_in else "0"})
+    assert hostile_marker.exists() == (opt_in and event != "pre-bash")
+    assert trusted_marker.exists() == (not opt_in and event != "pre-bash")
