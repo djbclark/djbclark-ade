@@ -265,6 +265,25 @@ def log(msg):
         f.write(f"{stamp()} {msg}\n")
 
 
+def hermes_ping(msg):
+    """One `hermes-ping` line to the operator. True when it was sent, and also when this host has no
+    hermes-ping (nothing to retry); False only for a present-but-failed ping, so a caller stamps its
+    cooldown only after a page actually went out. Never raises: a missing or failing hermes-ping is logged
+    and the caller's next sample retries (2026-11-18: a failed ping used to suppress the alert for the
+    whole cooldown)."""
+    if not HERMES_PING.exists():
+        return True
+    try:
+        r = subprocess.run([str(HERMES_PING), msg], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"hermes ping failed: {e!r}")
+        return False
+    if r.returncode != 0:
+        log(f"hermes ping exited {r.returncode}")
+        return False
+    return True
+
+
 def load_state():
     try:
         return json.loads((STATE_DIR / "state.json").read_text())
@@ -832,11 +851,8 @@ def notify(inc, g, top, path, load1, ncpu, dry):
         ping += (f"; to hand it to a fixer: paseo run --provider cursor/default --label ade.kind=code "
                  f"--title load-watch-{Path(path).stem} --cwd {cwd} --no-wait "
                  f"'Read and act on the load-watch brief at {path}'")
-    if not dry and HERMES_PING.exists():
-        try:
-            subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log(f"incident ping failed: {e!r}")
+    if not dry:
+        hermes_ping(ping)
     return status, ping
 
 
@@ -1132,8 +1148,8 @@ def gevent(label, kind, detail):
 
 
 def gping(msg, dry):
-    if not dry and HERMES_PING.exists():
-        subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch guard: {msg}"], capture_output=True, timeout=60)
+    if not dry:
+        hermes_ping(f"djbclark-ade: load-watch guard: {msg}")
     tell_watcher(f"job guard: {msg}.", dry)
 
 
@@ -1416,12 +1432,7 @@ def churn_alert(st, t, table, dry):
         tell_watcher(f"{body} {tail[0].upper() + tail[1:]}", True)
         return
     log(f"compressor churn {st.get('churn_pages_s', 0)} pages/s since {stamp(since)}; top: {body.split('top: ')[1]}")
-    if ping_due:
-        if HERMES_PING.exists():
-            try:
-                subprocess.run([str(HERMES_PING), f"djbclark-ade: {full}"], capture_output=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                log(f"churn ping failed: {e!r}")
+    if ping_due and hermes_ping(f"djbclark-ade: {full}"):
         cd["churn"] = t
     if watch_due and tell_watcher(f"{body} {tail[0].upper() + tail[1:]}", False) is not None:
         cd["churn-watcher"] = t
@@ -1725,14 +1736,10 @@ def gui_hog_tick(st, t, table, load1, dry):
 
 def operator_notice(st, t, key, msg):
     """The operator-notice path: Hermes at most every COOLDOWN_S per key, the watcher at most hourly (`KEY-watcher`;
-    djbclark, 2026-10-20). Never raises for a missing or failing hermes-ping."""
+    djbclark, 2026-10-20). A present-but-failed hermes-ping does not stamp the key's cooldown, so the page is
+    retried on the next sample (2026-11-18: a failed ping used to suppress the alert for the whole cooldown)."""
     cd = st["cooldown"]
-    if key not in cd:
-        if HERMES_PING.exists():
-            try:
-                subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: {msg}"], capture_output=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                log(f"{key} ping failed: {e!r}")
+    if key not in cd and hermes_ping(f"djbclark-ade: load-watch: {msg}"):
         cd[key] = t
     last = cd.get(key + "-watcher")
     if last is None or t - last >= WATCHER_NOCPU_S:
