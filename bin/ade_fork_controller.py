@@ -879,14 +879,18 @@ def verify_transport_distribution(config):
     return manifest
 
 
-# Independently reviewed native389 source identity, not supplied by artifact JSON.
+# Independently reviewed native389/d8 source identities, not supplied by artifact JSON.
 # A changed helper requires a separately reviewed adapter source update.
 READONLY_NAMESPACE_SHA256 = '605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
 READONLY_NAMESPACE_SIZE = 52756
+READONLY_NAMESPACE_IDENTITIES = frozenset({
+    (READONLY_NAMESPACE_SIZE, READONLY_NAMESPACE_SHA256),
+    (53480, '4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf'),
+})
 
 
 def verify_readonly_namespace(config, manifest):
-    """Invoke only the measured fixed packaged389bb read-only port; no resolver copy."""
+    """Invoke only the fixed packaged port from two reviewed sources; no resolver copy."""
     if type(manifest) is not dict:
         if config.get('cohortVersion')==2:raise ContractError('verified V2 transport manifest absent')
         return
@@ -894,13 +898,13 @@ def verify_readonly_namespace(config, manifest):
     root=Path(config['distributionRoot'])
     member='system-closure/namespace-bootstrap.py'
     rows=[row for row in manifest['files'] if row['path']==member]
-    if (len(rows)!=1 or rows[0]['mode']!=0o444 or type(rows[0].get('size')) is not int or
-            rows[0]['size']!=READONLY_NAMESPACE_SIZE or rows[0].get('sha256')!=READONLY_NAMESPACE_SHA256):
+    if (len(rows)!=1 or rows[0]['mode']!=0o444 or type(rows[0].get('size')) is not int or type(rows[0].get('sha256')) is not str or
+            (rows[0]['size'],rows[0].get('sha256')) not in READONLY_NAMESPACE_IDENTITIES):
         raise ContractError('independently reviewed namespace verifier identity required')
     path=protected_root_path(root/member)
     if stat.S_IMODE(path.lstat().st_mode)!=0o444:raise ContractError('namespace verifier actual mode mismatch')
     source=read_regular(path,rows[0]['size'],owner=0)
-    if len(source)!=READONLY_NAMESPACE_SIZE or hashlib.sha256(source).hexdigest()!=READONLY_NAMESPACE_SHA256:
+    if (len(source),hashlib.sha256(source).hexdigest())!=(rows[0]['size'],rows[0]['sha256']):
         raise ContractError('namespace verifier member identity mismatch')
     name='_ade_retained_namespace_'+rows[0]['sha256']
     module=types.ModuleType(name)
