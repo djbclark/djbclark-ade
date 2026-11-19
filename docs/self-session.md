@@ -6,6 +6,10 @@ running local Paseo daemon. They do not deploy tools, install plugins, restart
 a daemon, select a new provider/model, transfer files between computers or decide
 unattended crash recovery. Tests use fake native commands; live acceptance remains
 unverified. Ordinary successors use positively supported unattended modes.
+Modeless providers (Pi, Go) expose no verified unattended mode and are blocked for
+ordinary unattended succession: a standing role that must self-handoff with no operator
+typing runs on a provider with a positively catalogued unattended mode (Codex
+`full-access`, Claude `bypassPermissions`, Antigravity `full-access`).
 Explicit operator-requested restrictions remain restrictions.
 
 ## A. Prepare a durable checkpoint

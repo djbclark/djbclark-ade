@@ -460,7 +460,7 @@ class Service:
         if (plan.get('status') not in ('ready', 'exempt') or not plan.get('mode_id')
                 or plan.get('provider_options') or not isinstance(catalog['modes'], list)
                 or not any(isinstance(m, dict) and m.get('id') == plan['mode_id'] for m in catalog['modes'])):
-            raise SessionError('supported unattended successor mode unavailable')
+            raise SessionError('supported unattended successor mode unavailable: ' + str(plan.get('reason') or 'no reason'))
         return plan
 
     def verify_successor(self, record, *, allow_failed=False):
