@@ -3,6 +3,12 @@
 import json
 import sys
 from pathlib import Path
+
+# -I ignores environment overrides but does not disable bytecode caching.
+# Set this before loading any sibling for the read-only query, including errors.
+if sys.argv[1:] == ["agent", "relationships"]:
+    sys.dont_write_bytecode = True
+
 def _coord():
     """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
     import importlib.util
@@ -49,7 +55,9 @@ try:
             raise CoordinationError("SNAPSHOT_RECORD_AND_REVISION_REQUIRED")
         if not isinstance(request.get("authority"), dict):
             raise CoordinationError("AUTHORITY_REQUIRED")
-    if command == "handoff transfer":
+    if command == "agent relationships":
+        result = _coord().agent_relationships(request)
+    elif command == "handoff transfer":
         transfer = _coord()._sibling("ade_coord_handoff").transfer
         result = transfer(request)
     elif command in ("wake status", "wake reconcile"):
