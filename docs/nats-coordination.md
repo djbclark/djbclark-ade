@@ -123,9 +123,12 @@ requires approved live pilot/controller evidence, not this source alone.
 ## Read-only configured agent relationships
 
 `bin/ade-coord agent relationships` accepts `{"agent_id":"worker_agent"}`
-on stdin and returns the usual JSON result envelope. It reads local enrollment
+on stdin and returns the usual JSON result envelope (added 2026-11-19). It reads local enrollment
 configuration and its generation manifest only: no broker lookup, native parent
 lookup, send, controller execution, enrollment change or persistent write.
+The driver disables bytecode writes before its first sibling import for this
+command, including invalid requests; neither missing nor stale sibling caches
+may be created or refreshed.
 
 An explicit assignment identifies the worker's recipient role. A well-formed
 `roles.<role>.runtime.owner` consistent with that owner's alias supplies a

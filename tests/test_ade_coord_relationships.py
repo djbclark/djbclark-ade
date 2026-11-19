@@ -91,22 +91,47 @@ class RelationshipTests(unittest.TestCase):
         driver = Path(__file__).resolve().parents[1] / "bin/ade-coord"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); config_path = root / "config.json"; manifest = root / "generation.json"
+            bundle = root / "bin"; bundle.mkdir()
+            isolated_driver = bundle / "ade-coord"
+            isolated_driver.write_bytes(driver.read_bytes())
+            isolated_module = bundle / "ade_coord.py"
+            isolated_module.write_bytes(driver.with_name("ade_coord.py").read_bytes())
             manifest.write_text(json.dumps({"generation": "g", "reconciled": True}))
             cfg = {**enrollment(), "generation": "g", "generation_manifest": str(manifest),
                    "state_dir": str(root / "state"), "identity": {"host": "h", "server": "s"},
                    "claims": {}, "credential_boundary": "/must-not-run", "broker_url": "must-not-contact"}
             config_path.write_text(json.dumps(cfg))
-            before = {p.name: p.read_bytes() for p in root.iterdir()}
             env = {**os.environ, "ADE_COORD_CONFIG": str(config_path), "ADE_COORD_NODE": "/must-not-run",
                    "ADE_COORD_METRICS": str(root / "must-not-write"), "PASEO_AGENT_ID": "wrong-native-parent"}
-            result = subprocess.run([sys.executable, "-I", str(driver), "agent", "relationships"],
-                                    input='{"agent_id":"worker"}', capture_output=True, text=True, env=env, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            data = json.loads(result.stdout)
-            self.assertTrue(data["ok"])
-            self.assertEqual(data["result"]["controller"]["configured_owner"]["agent"], "lead-new")
-            self.assertFalse(data["result"]["contact_authority"])
-            self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, before)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+
+            def snapshot():
+                return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None
+                        for p in root.rglob("*")}
+
+            for cache_state in ["missing", "stale"]:
+                if cache_state == "stale":
+                    import importlib.util
+                    cache = Path(importlib.util.cache_from_source(str(isolated_module)))
+                    cache.parent.mkdir()
+                    cache.write_bytes(b"invalid stale bytecode must stay unchanged")
+                before = snapshot()
+                for payload, expected_code in [('{"agent_id":"worker"}', None),
+                                                ('{}', "AGENT_ID_REQUIRED"),
+                                                ('[]', "JSON_OBJECT_REQUIRED")]:
+                    with self.subTest(cache=cache_state, payload=payload):
+                        result = subprocess.run([sys.executable, "-I", str(isolated_driver), "agent", "relationships"],
+                                                input=payload, capture_output=True, text=True, env=env, timeout=10)
+                        data = json.loads(result.stdout)
+                        if expected_code:
+                            self.assertEqual(result.returncode, 1)
+                            self.assertEqual(data, {"ok": False, "error": {"code": expected_code}})
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertTrue(data["ok"])
+                            self.assertEqual(data["result"]["controller"]["configured_owner"]["agent"], "lead-new")
+                            self.assertFalse(data["result"]["contact_authority"])
+                        self.assertEqual(snapshot(), before)
 
 
 if __name__ == "__main__":

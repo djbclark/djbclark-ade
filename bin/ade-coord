@@ -3,6 +3,12 @@
 import json
 import sys
 from pathlib import Path
+
+# -I ignores environment overrides but does not disable bytecode caching.
+# Set this before loading any sibling for the read-only query, including errors.
+if sys.argv[1:] == ["agent", "relationships"]:
+    sys.dont_write_bytecode = True
+
 def _coord():
     """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
     import importlib.util
