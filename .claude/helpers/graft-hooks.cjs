@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { pathToFileURL } = require('url');
+// `dir` is the project, so running this by hand inside a repo with trail installed lets graft wire THAT repo
+// (it rewrites .claude/, .cursor/ and AGENTS.md). Drive it from a temp project — as
+// tests/test_graft_cursor_session_start.py does.
 const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
 // The same code ships as @trailhq/trail-code and as @nanonets/graft, its old name;
