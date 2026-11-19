@@ -1,0 +1,42 @@
+name: ADE directory plugin adaptation
+on:
+  push:
+    branches: [fork-directory-plugin-adaptation]
+  pull_request:
+    paths:
+      - 'plugins/ade-claim/**'
+      - 'plugins/ade-window-name/**'
+      - '.github/workflows/ade-directory-plugin-adaptation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ade-directory-plugin-adaptation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  business-callbacks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 'lts/*'
+      - name: Ordinary regression and synthetic SDK business callbacks (not qualification)
+        run: >-
+          node --test --test-reporter=junit
+          plugins/ade-claim/server/claim-lib.test.mjs
+          plugins/ade-window-name/server/name-lib.test.mjs
+          plugins/ade-claim/server/lazy-hooks.test.mjs
+          plugins/ade-window-name/server/lazy-hooks.test.mjs
+          plugins/ade-claim/server/semantic-hooks.test.mjs
+          plugins/ade-window-name/server/semantic-hooks.test.mjs
+          > ade-directory-plugins.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ade-directory-plugin-business-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ade-directory-plugins.xml
+          if-no-files-found: error

@@ -26,6 +26,15 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Shared ADE helper decisions, no namespace qualification
         run: uv run --with pytest python -m pytest tests/test_ade_directory_operations.py tests/test_ade_directory_helper_decisions.py tests/test_ade_ws_autoname.py tests/test_ade_ws_names.py tests/test_ade_claims_bind_owner.py tests/test_ade_claims_release.py -q
+      - name: Ordinary plugin regressions and prepared business callbacks; not native qualification
+        run: >-
+          node --test
+          plugins/ade-claim/server/claim-lib.test.mjs
+          plugins/ade-window-name/server/name-lib.test.mjs
+          plugins/ade-claim/server/lazy-hooks.test.mjs
+          plugins/ade-window-name/server/lazy-hooks.test.mjs
+          plugins/ade-claim/server/semantic-hooks.test.mjs
+          plugins/ade-window-name/server/semantic-hooks.test.mjs
       - name: Descriptor and owned-process teardown tests, not runtime qualification
         run: |
           node --check tests/fixtures/fork-coupled/native-roundtrip.mjs
