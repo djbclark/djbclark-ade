@@ -89,7 +89,7 @@ def work_from_title(title: object, repo: str) -> str | None:
     return text if text and text != repo else None
 
 
-def decide(info: dict) -> dict:
+def decide(info: dict, *, repository: str | None = None) -> dict:
     if not isinstance(info, dict):
         return skip("input is not an object")
     if info.get("background"):
@@ -108,7 +108,8 @@ def decide(info: dict) -> dict:
     labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
     if labels.get("slice") and labels.get("ade.lead"):
         return skip("a bin/ade-worker-run launch (slice + ade.lead labels): it names its own window")
-    repo = names.repo_of(cwd)
+    # A fixed helper may supply observed naming DATA; this is not proof or consent.
+    repo = names.repo_of(cwd) if repository is None else repository
     try:
         names.check_repo(repo)
     except ValueError:

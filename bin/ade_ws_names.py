@@ -195,9 +195,18 @@ def repo_of(cwd: str) -> str:
                              capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.TimeoutExpired):
         out = None
-    if out is not None and out.returncode == 0 and out.stdout.strip():
-        common = Path(out.stdout.strip())
+    return repo_from_common_dir(path, out.stdout if out is not None and out.returncode == 0 else None)
+
+
+def repo_from_common_dir(cwd: str, common_dir: str | None) -> str:
+    """Naming DATA from a separately obtained Git fact, with no process launch.
+
+    This does not authenticate a repository or grant helper/namespace authority.
+    The ordinary CLI still obtains its own Git result in repo_of().
+    """
+    if common_dir is not None and common_dir.strip():
+        common = Path(common_dir.strip())
         name = common.parent.name if common.name == ".git" else re.sub(r"\.git$", "", common.name)
         if name:
             return name
-    return Path(path).name
+    return Path(os.path.realpath(cwd)).name

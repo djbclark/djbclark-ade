@@ -2850,13 +2850,26 @@ def install_hooks(start: str = ".") -> tuple[int, list[str]]:
     if rc != 0 or not out.strip():
         return 2, [f"{start} is not inside a git repository"]
     rc, hp = _run_git(["-C", start, "config", "--null", "--get-all", "core.hooksPath"])
-    if rc == 0:                    # set, even to an empty value: git then looks there (or nowhere), never in <common>/hooks
-        shown = hp.split("\0")[-2] if hp.count("\0") else hp
-        return EXIT_HOOKSPATH, [f"core.hooksPath is set (`{shown}`): git would never run the stubs in {out.strip()}/hooks; "
+    return install_hooks_from_facts(start, out, rc, hp)
+
+
+def install_hooks_from_facts(start: str, common_dir: str, hooks_status: int,
+                             hooks_output: str) -> tuple[int, list[str]]:
+    """Shared installation semantics without a nested Git process.
+
+    Facts are DATA, never evidence of permission: a qualified fixed caller must
+    authenticate/bind them and the writable destinations before invoking this.
+    Ordinary install_hooks still performs both real Git queries itself.
+    """
+    if not common_dir.strip() or not Path(common_dir.strip()).is_absolute():
+        return 2, [f"{start} is not inside a git repository"]
+    if hooks_status == 0:          # set, even to an empty value: never <common>/hooks
+        shown = hooks_output.split("\0")[-2] if hooks_output.count("\0") else hooks_output
+        return EXIT_HOOKSPATH, [f"core.hooksPath is set (`{shown}`): git would never run the stubs in {common_dir.strip()}/hooks; "
                                 "not installed. Unset it, or call the stubs from the hooks directory it names"]
-    if rc != 1:
-        return EXIT_HOOKSPATH, [f"git did not say whether core.hooksPath is set (exit {rc}); not installed"]
-    return _install_common(Path(out.strip()))
+    if hooks_status != 1:
+        return EXIT_HOOKSPATH, [f"git did not say whether core.hooksPath is set (exit {hooks_status}); not installed"]
+    return _install_common(Path(common_dir.strip()))
 
 
 def _lazy_install(call: GitCall, env: dict[str, str]) -> None:
