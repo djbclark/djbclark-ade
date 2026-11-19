@@ -4,6 +4,8 @@
   for the actual fork controller/native promotion fixture. Bounded transport
   tests do not qualify runtime artifacts or permit live activation. (#0)
 
-Private CLI bearer validation now uses fixed plain errors, including trailing-newline refusal. Transport failure interrupts the actual-close wait and preserves bounded cleanup failure with its process handoff; synthetic regression coverage does not imply daemon-operation settlement.
+- Redact malformed private bearer errors and bound CLI failure cleanup while
+  preserving its process handoff; synthetic coverage is not daemon settlement. (#0)
 
-The full runtime cohort uses the three external plugins' actual manifest IDs (baton, pr-radar, session-recovery), separately from installer catalog aliases. No required feature is removed.
+- Use actual external plugin manifest IDs in the full runtime cohort, separately
+  from installer aliases, while preserving every required feature. (#0)
