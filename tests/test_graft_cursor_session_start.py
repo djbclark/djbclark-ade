@@ -182,3 +182,16 @@ def test_output_written_after_the_promise_settles_is_still_reshaped(tmp_path: Pa
         "}\n")
     payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
     assert payload == {"additional_context": "LATE session-start"}
+
+
+def test_a_large_context_survives_the_pipe(tmp_path: Path) -> None:
+    """The payload is written when main() settles, not at exit, so a context bigger than a pipe buffer is not cut."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main() {\n"
+        "  process.stdout.write(JSON.stringify({ hookSpecificOutput: { additionalContext: 'X'.repeat(200000) } }));\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert len(payload["additional_context"]) == 200000

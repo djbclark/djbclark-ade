@@ -131,9 +131,13 @@ function reshaped(run) {
     if (typeof done === 'function') process.nextTick(done);                 // the real stream calls back next turn
     return true;
   };
-  // Capture until the process exits, not until main() resolves: an upstream that answers in a later async callback
-  // would otherwise print Claude's shape after the reshape had already gone out.
-  process.once('exit', () => {
+  // Flush as soon as main() settles (a normal write, safe for a large payload on a pipe), and again at exit for an
+  // upstream that answers from a later async callback. The flag keeps it to one payload; Cursor's stdin is passed
+  // through untouched, and an upstream version that reads it sees Cursor's fields rather than Claude's.
+  let flushed = false;
+  const flush = () => {
+    if (flushed) return;
+    flushed = true;
     process.stdout.write = write;
     let shape = null;
     try {
@@ -147,8 +151,11 @@ function reshaped(run) {
       else if (parsed.additional_context) shape = parsed;
     } catch { shape = null; }        // nothing printed, or not JSON: say nothing
     if (shape) write(JSON.stringify(shape));
-  });
-  Promise.resolve().then(run).catch(() => { /* trail unavailable — no-op; whatever it printed is still reshaped */ });
+  };
+  process.once('exit', flush);
+  // Flush on settle only once there is something to write (a large payload must not wait for exit on a pipe);
+  // otherwise the exit hook catches whatever an upstream prints later.
+  Promise.resolve().then(run).then(() => { if (chunks.length) flush(); }, () => flush());
 }
 
 // PreToolUse (pre-bash) runs before every shell command: its own small module,
