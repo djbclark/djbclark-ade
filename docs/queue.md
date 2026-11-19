@@ -11,6 +11,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
+80. **Repeated sudo-secretspec fingerprint (Touch ID) popups** (Plektra lead b1cd786f, 2026-11-18): the operator sees recurring sudo-secretspec fingerprint prompts ("profile-b ... .sh"). Two sudo-secretspec-backup daemons are running — backup.py watch (pid 27500) and observer.py observe (pid 30468) — and the backup watcher is the likely trigger (each scheduled backup/observe re-invokes the privileged client). Investigate the backup watch cadence/privileged elevation and reduce or consolidate the fingerprint prompts; preserve the backup contract and audit.
+
 79. **supervisor-tools follow-ups (post #785)** (peer 22d61b88, 2026-11-18): (a) `bin/ade-pi-stuck` POOL_TO_ACCOUNT has no clinepass-t-e mapping (only clinepass:default -> clinepass), so clinepass-t-e agents read "no quota mapping" — map the aiuse clinepass sub-accounts if aiuse exposes them, else accept the permanent notice; (b) `bin/ade-supervisor-scan` writes the ".redirect-noted" marker only after a delivery, so the "lead was replaced" line repeats every 300s on quiet runs — write the marker on the first resolved redirect.
 
 78. **Harden handoff/session-handoff Step 2 lineage check for no-repo cwd** (peer 228c376c, 2026-11-18): a multi-repo session whose cwd is not a git repo skips the lineage check and creates an orphaned chain (lineage:none, empty parent_handoff_ids) that never lists the touched repo it actually descends from. Fix: when cwd resolves to no repo but the session committed to repos that already have chains, warn/require the check instead of silently writing lineage:none.
