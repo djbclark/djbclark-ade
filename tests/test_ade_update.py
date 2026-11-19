@@ -1460,7 +1460,7 @@ def test_settings_step_skipped_without_the_template_or_live_file(env):
 
 @pytest.mark.parametrize("old", [None, "old helper\n"])
 def test_graft_helper_check_reports_drift_without_writes(env, old):
-    env.publish({".claude/helpers/graft-hooks.cjs": "new helper\n"})
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('new helper');\n"})
     sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
     live = env.home / ".claude/helpers/graft-hooks.cjs"
     if old is not None:
@@ -1479,7 +1479,7 @@ def test_graft_helper_check_reports_drift_without_writes(env, old):
 
 @pytest.mark.parametrize("old", [None, "old helper\n"])
 def test_graft_helper_apply_copies_with_backup_and_is_then_silent(env, old):
-    env.publish({".claude/helpers/graft-hooks.cjs": "new helper\n"})
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('new helper');\n"})
     live = env.home / ".claude/helpers/graft-hooks.cjs"
     if old is not None:
         live.parent.mkdir(parents=True)
@@ -1489,7 +1489,7 @@ def test_graft_helper_apply_copies_with_backup_and_is_then_silent(env, old):
     assert r.returncode == 0, r.stdout + r.stderr
     row = json.loads(r.stdout)["graft_helper"]
     assert row["state"] == "installed"
-    assert live.read_text() == "new helper\n" and not live.is_symlink()
+    assert live.read_text() == "#!/usr/bin/env node\nconsole.log('new helper');\n" and not live.is_symlink()
     assert stat.S_IMODE(live.stat().st_mode) == 0o755
     backups = list(live.parent.glob("graft-hooks.cjs.bak-*"))
     assert len(backups) == int(old is not None)
@@ -1522,3 +1522,90 @@ def test_graft_helper_noncanonical_repo_is_report_only(env, flags):
     assert "fix" not in row
     assert live.read_text() == "live helper\n"
     assert list(live.parent.iterdir()) == [live]
+
+
+@pytest.mark.parametrize("edit", ["local edit\n", "", "#!/usr/bin/env node\nfunction broken("])
+def test_graft_helper_local_edit_cannot_deploy(env, edit):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('committed');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    (env.machine / ".claude/helpers/graft-hooks.cjs").write_text(edit)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json")
+        assert r.returncode == 10, r.stdout + r.stderr
+        row = json.loads(r.stdout)["graft_helper"]
+        assert row["state"] == "refused" and "working-tree" in row["detail"]
+        assert live.read_text() == "good live helper\n"
+        assert list(live.parent.iterdir()) == [live]
+
+
+@pytest.mark.parametrize("source", ["", "#!/usr/bin/env node\n", "garbage", "#!/usr/bin/env node\nfunction broken("])
+def test_graft_helper_invalid_committed_source_cannot_deploy(env, source):
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    r = env.run("--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert json.loads(r.stdout)["graft_helper"]["state"] == "refused"
+    assert live.read_text() == "good live helper\n"
+    assert list(live.parent.iterdir()) == [live]
+
+
+@pytest.mark.parametrize("branch", ["feature", "ahead-master"])
+def test_graft_helper_requires_authorized_branch_and_revision(env, branch):
+    env.publish({".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('committed');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    if branch == "feature":
+        sh("git", "checkout", "-q", "-b", "feature", "--track", "origin/master", cwd=env.machine)
+    else:
+        commit(env.machine, "unpublished", {".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('unpublished');\n"})
+    r = env.run("--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    row = json.loads(r.stdout)["graft_helper"]
+    assert row["state"] == "refused" and "master" in row["detail"]
+    assert not (env.home / ".claude/helpers").exists()
+
+
+@pytest.mark.parametrize("mode", [0o4755, 0o2755, 0o1755])
+def test_graft_helper_special_mode_bits_are_drift(env, mode):
+    source = "#!/usr/bin/env node\nconsole.log('committed');\n"
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text(source)
+    live.chmod(mode)
+    assert stat.S_IMODE(live.stat().st_mode) == mode
+    r = env.run("--check", "--json")
+    assert r.returncode == 10 and json.loads(r.stdout)["graft_helper"]["state"] == "differs"
+    assert stat.S_IMODE(live.stat().st_mode) == mode
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_graft_helper_destination_symlink_becomes_copy(env, dangling):
+    source = "#!/usr/bin/env node\nconsole.log('committed');\n"
+    env.publish({".claude/helpers/graft-hooks.cjs": source})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    target = env.tmp / "symlink-target"
+    if not dangling:
+        target.write_text(source)
+        target.chmod(0o755)
+    live.symlink_to(target)
+    assert env.run("--check").returncode == 10
+    assert live.is_symlink()
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not live.is_symlink() and live.read_text() == source
+    backups = list(live.parent.glob("*.bak-*"))
+    assert len(backups) == int(not dangling)  # absent content cannot be backed up
+    assert target.exists() == (not dangling)
+    if not dangling:
+        assert target.read_text() == source and backups[0].read_text() == source

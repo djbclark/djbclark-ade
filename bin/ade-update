@@ -52,7 +52,10 @@ Steps, in order:
    checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
 3a. Compare `.claude/helpers/graft-hooks.cjs` with `~/.claude/helpers/graft-hooks.cjs`. In the canonical
    checkout, --check reports missing/differing copies with the fix command; apply backs up the old copy
-   as `*.bak-<UTC stamp>` and atomically replaces it with a regular file, mode 0755. Other --repo paths
+   as `*.bak-<UTC stamp>` and atomically replaces it with a regular file, mode 0755. Bytes come from
+   the committed target revision, never the working tree. Installation requires master at fetched origin/master,
+   an identical regular working-tree source, a nonempty Node entrypoint and passing Node syntax validation.
+   Refused sources count as unresolved (exit 10); validation-tool/I/O failures are exit 4. Other --repo paths
    report only, without a fix or a counted problem. A checkout without the source helper skips this step.
 3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
    `macos/gui-hog` (`--check` only says it would). Fails open: no swiftc, a failed or slow build is a note, never a problem or an exit code (the sampler shows no dialog without
@@ -84,6 +87,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -466,19 +470,47 @@ def stuck_rows_hint(script, repo, names):
     return "; not in place: " + ", ".join(bad) if bad else ""
 
 
-def install_graft_helper(repo, check, can_install):
+def install_graft_helper(repo, check, can_install, revision, authorized):
     """Report copy drift; only canonical apply can replace the live helper (never link it)."""
     source = Path(repo) / ".claude/helpers/graft-hooks.cjs"
     live = Path.home() / ".claude/helpers/graft-hooks.cjs"
     row = {"path": str(live), "state": "skipped", "mode": "apply" if can_install and not check else "report-only"}
-    if not source.is_file():
+    rel = ".claude/helpers/graft-hooks.cjs"
+    if git(repo, "cat-file", "-e", f"{revision}:{rel}")[0] != 0:
+        if not source.exists():
+            return row
+        row.update(state="refused", detail="helper is not in the authorized revision")
         return row
     tmp = None
     try:
-        wanted = source.read_bytes()
+        env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
+        blob = subprocess.run(["git", "-C", str(repo), "show", f"{revision}:{rel}"],
+                              capture_output=True, timeout=LOCAL_TIMEOUT, env=env)
+        if blob.returncode:
+            raise OSError("cannot read committed helper")
+        wanted = blob.stdout
+        if can_install:
+            row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
+            reason = None
+            if not authorized:
+                reason = "helper install requires master at the fetched origin/master revision"
+            elif source.is_symlink() or not source.is_file() or source.read_bytes() != wanted:
+                reason = "working-tree helper differs from the authorized revision; inspect local edits before retrying"
+            elif not wanted.startswith(b"#!/usr/bin/env node\n") or not wanted.partition(b"\n")[2].strip():
+                reason = "committed helper is empty or lacks its Node entrypoint"
+            else:
+                # Parse only: never run the hook, and suppress inherited Node preload options.
+                node_env = {k: v for k, v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_PATH", "NODE_V8_COVERAGE")}
+                parsed = subprocess.run(["node", "--check", "--input-type=commonjs"], input=wanted,
+                                        capture_output=True, timeout=LOCAL_TIMEOUT, env=node_env)
+                if parsed.returncode:
+                    reason = "committed helper fails Node syntax validation"
+            if reason:
+                row.update(state="refused", detail=reason)
+                return row
         previous = live.read_bytes() if live.exists() else None
         row["state"] = "missing" if previous is None else "differs"
-        if previous == wanted and not live.is_symlink() and live.stat().st_mode & 0o777 == 0o755:
+        if previous == wanted and not live.is_symlink() and stat.S_IMODE(live.stat().st_mode) == 0o755:
             row["state"] = "ok"
             return row
         if not can_install:
@@ -495,7 +527,7 @@ def install_graft_helper(repo, check, can_install):
                 try:
                     with candidate.open("xb") as f:
                         f.write(previous)
-                    candidate.chmod(live.stat().st_mode & 0o777)
+                    candidate.chmod(stat.S_IMODE(live.stat().st_mode))
                     row["backup"] = str(candidate)
                     break
                 except FileExistsError:
@@ -512,7 +544,7 @@ def install_graft_helper(repo, check, can_install):
         tmp = None
         row["state"] = "installed"
         return row
-    except OSError as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         raise Stop(EXIT_ERROR, f"graft helper install/check failed: {e}") from e
     finally:
         if tmp is not None:
@@ -835,11 +867,13 @@ def update(rep, args, repo):
         rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
 
     # 3a. installed graft hook copy, separate from the report-only symlink inventory.
-    helper = install_graft_helper(repo, check, can_link)
+    helper = install_graft_helper(repo, check, can_link, target,
+                                  branch == "master" and upstream == "origin/master" and target == up)
     d["graft_helper"] = helper
     if helper["state"] not in ("ok", "skipped"):
         if can_link:
-            rep.say(f"graft helper: {helper['state']}; fix: {helper['fix']}")
+            rep.say(f"graft helper: {helper['state']}; {helper.get('detail', '')}; "
+                    f"fix: {helper.get('fix', 'inspect the committed helper before retrying')}")
             if helper["state"] != "installed":
                 problems.append("graft helper")
         else:
