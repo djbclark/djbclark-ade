@@ -455,13 +455,21 @@ from the provisional ack. Legacy same-provider handoffs retain their existing
 contract; they do not acquire a first-turn guarantee by this change.
 
 Before acknowledgement, the predecessor may also run `verify-turn` to inspect
-failure-only evidence. After validating the entire transcript, an error in the
-latest applicable Pi message records `first-turn-failed` and permits retry.
+failure-only evidence. After checking entry IDs/parents, non-decreasing timestamps,
+message objects and supported metadata fields, an error in the latest applicable
+Pi message records `first-turn-failed` and permits retry.
 Recovered output stays pending acknowledgement; malformed tails fail closed.
 Successful output never substitutes for the real ack or retires the predecessor.
+Saved proof session/entry identity and terminal digest are checked on the success
+path, after the failure verdict; they are not prerequisites for recording failure.
 
 The adapter reads the exact owned canonical transcript named by the matching
 Paseo persistence record. It supports unbranched Pi v3 JSONL sessions only.
+Supported non-message entries are `model_change`, `thinking_level_change`,
+`custom`, `label` and `session_info`, with their required string fields and optional
+label/name strings checked. Other entry types (including context edits, compaction
+and branch summaries) are unsupported and fail closed. Timestamps may be equal,
+but must never move backwards; the ack cutoff cannot revive an earlier error.
 Unknown schemas, branches, partial files and providers fail closed. Raw content,
 credential-bearing errors and provider messages are never put into evidence.
 The receipt contains only session/entry IDs, completion time and a fixed class.

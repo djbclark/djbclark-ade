@@ -69,6 +69,7 @@ def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
             raise EvidenceError('native session header mismatch')
         after = None if failure_only else stamp(record['ack_observed_at'])
         parent = None
+        previous_time = None
         seen = set()
         final = None
         final_time = None
@@ -77,12 +78,30 @@ def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
             if not isinstance(entry, dict):
                 raise EvidenceError('malformed native entry')
             eid = entry.get('id')
-            if not isinstance(eid, str) or eid in seen or entry.get('parentId') != parent:
+            if (not isinstance(eid, str) or not eid or eid in seen
+                    or 'parentId' not in entry or entry['parentId'] != parent):
                 raise EvidenceError('branched or malformed native transcript unsupported')
             seen.add(eid)
             parent = eid
             when = stamp(entry.get('timestamp'))
+            if previous_time is not None and when < previous_time:
+                raise EvidenceError('non-monotonic native timestamps')
+            previous_time = when
             if entry.get('type') != 'message':
+                # Only state/metadata entries with known shapes are supported.
+                # Context edits, compaction and branch summaries need a separate adapter.
+                fields = {'model_change': ('provider', 'modelId'),
+                          'thinking_level_change': ('thinkingLevel',),
+                          'custom': ('customType',), 'label': ('targetId',),
+                          'session_info': ()}
+                kind = entry.get('type')
+                if not isinstance(kind, str) or kind not in fields:
+                    raise EvidenceError('unsupported native entry type')
+                if any(not isinstance(entry.get(key), str) or not entry[key] for key in fields[kind]):
+                    raise EvidenceError('malformed native metadata')
+                optional = {'label': 'label', 'session_info': 'name'}.get(kind)
+                if optional in entry and not isinstance(entry[optional], str):
+                    raise EvidenceError('malformed native metadata')
                 continue
             msg = entry.get('message')
             if not isinstance(msg, dict):
@@ -92,8 +111,8 @@ def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
             if proof and entry['id'] == proof.get('entry_id'):
                 proven = (entry, when)
             final, final_time = (entry, when)
-        # Validate every entry before deciding. A historical error can recover,
-        # and an invalid tail must not turn that error into retry permission.
+        # Entry structure and chronology are checked before transcript failure;
+        # saved proof identity/digest checks below are required only for success.
         if final is not None:
             msg = final['message']
             if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):

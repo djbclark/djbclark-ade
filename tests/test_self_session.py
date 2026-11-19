@@ -2530,7 +2530,7 @@ def test_retry_creation_refusal_preserves_history_on_next_handoff(setup):
     assert native.created == 2 and native.archived == 0
 
 
-@pytest.mark.parametrize('tail_kind', ['recovered', 'parent', 'timestamp', 'message', 'entry'])
+@pytest.mark.parametrize('tail_kind', ['recovered', 'parent', 'timestamp', 'message', 'entry', 'missing-type', 'unknown-type'])
 def test_pre_ack_historical_error_does_not_authorize_retry(setup, tail_kind):
     service, native, checkpoint = setup
     record = service.handoff(checkpoint, quiesced=True, route_kind='judgment')
@@ -2551,6 +2551,12 @@ def test_pre_ack_historical_error_does_not_authorize_retry(setup, tail_kind):
     elif tail_kind == 'message':
         tail['message'] = []
         expected = 'malformed native message'
+    elif tail_kind in ('missing-type', 'unknown-type'):
+        if tail_kind == 'missing-type':
+            tail.pop('type')
+        else:
+            tail['type'] = 'unknown-schema'
+        expected = 'unsupported native entry type'
     elif tail_kind == 'entry':
         tail = []
         expected = 'malformed native entry'
@@ -2566,4 +2572,31 @@ def test_pre_ack_historical_error_does_not_authorize_retry(setup, tail_kind):
     assert path.read_bytes() == before
     assert len(native.calls) == calls_before
     assert pending['excluded_pools'] == [] and pending['attempts'] == []
+    assert native.created == 1 and native.archived == 0
+
+
+def test_post_ack_timestamp_cutoff_cannot_resurrect_historical_failure(setup):
+    import datetime
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'idle'
+    transcript = write_routed_transcript(service, record, 'error')
+    rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+    ack_time = datetime.datetime.fromisoformat(record['ack_observed_at'])
+    rows[-1]['timestamp'] = (ack_time + datetime.timedelta(seconds=1)).isoformat()
+    recovered = copy.deepcopy(rows[-1])
+    recovered.update(id='e2', parentId='e1',
+                     timestamp=(ack_time - datetime.timedelta(seconds=1)).isoformat())
+    recovered['message']['stopReason'] = 'stop'
+    transcript.write_text('\n'.join(json.dumps(x) for x in [*rows, recovered]) + '\n')
+    pending = service.verify_turn(path)
+    assert pending['status'] == 'ack-pending-turn'
+    assert pending['first_turn_pending'] == 'non-monotonic native timestamps'
+    assert 'first_turn_failure' not in pending and 'first_real_turn' not in pending
+    before = path.read_bytes()
+    calls_before = len(native.calls)
+    with pytest.raises(ss.SessionError, match='only a routed failed first turn'):
+        service.retry(path)
+    assert path.read_bytes() == before and len(native.calls) == calls_before
+    assert pending['attempts'] == [] and pending['excluded_pools'] == []
     assert native.created == 1 and native.archived == 0
