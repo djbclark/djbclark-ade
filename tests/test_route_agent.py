@@ -530,6 +530,9 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
         self.assertEqual(r.map_agent_to_provider("codex", "gpt-6-luna"), ("codex", "default"))
         self.assertEqual(r.map_agent_to_provider("codex", "gpt-6.1-sol"), ("codex", "openai_api"))
         self.assertEqual(r.map_agent_to_provider("codex", "gpt-6-astra"), ("codex", "openai_api"))
+        self.assertEqual(r.map_agent_to_provider("antigravity", "gemini-4-argon-high"), ("antigravity", "gemini_argon"))
+        self.assertEqual(r.map_agent_to_provider("antigravity", "gemini-4-neon-high"), ("antigravity", "gemini"))
+        self.assertIsNone(r.map_agent_to_provider("antigravity", "gemini-4-hydrogen-high"))
         self.assertEqual(r.dispatch_service_name("codex", "gpt-6-luna"), "codex-subscription")
         self.assertEqual(r.dispatch_service_name("codex", "gpt-6.1-sol"), "codex")
 
