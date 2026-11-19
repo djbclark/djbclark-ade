@@ -37,7 +37,10 @@ trusted host's assertion, not an STS or IAM identity proof. The host must establ
 that binding; this library never probes credentials or creates a client. A
 future host may use boto3 sessions and botocore Config with explicit bounded
 connect/read timeouts, `total_max_attempts=1`, and configured endpoints disabled.
-No custom endpoint or candidate profile is accepted by a shipped facade.
+The port enforces the enrolled connect/read timeout ceiling and a total streaming
+deadline in addition to byte caps; a blocked individual read can finish at most
+one read timeout beyond the streaming deadline. No custom endpoint or candidate
+profile is accepted by a shipped facade.
 
 ## State and finite frontier
 

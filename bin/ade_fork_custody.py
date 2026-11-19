@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
+import time
 from typing import Callable, Protocol
 
 
@@ -103,6 +104,7 @@ class Policy:
     generation: int
     minimum_sequence: int
     maximum_horizon: int
+    transport_seconds: int
 
     def validate(self):
         for name in ("identity", "writer", "reader"):
@@ -267,8 +269,8 @@ class Custody:
 
     def _validate(self, s, p):
         require(type(s) is dict and set(s) == set(genesis(p, 0)), "CTRL schema")
-        require(s["schema"] == 1 and s["identity"] == p.identity
-                and s["generation"] == p.generation and s["policy"] == p.policy_digest
+        require(type(s["schema"]) is int and s["schema"] == 1 and s["identity"] == p.identity
+                and type(s["generation"]) is int and s["generation"] == p.generation and s["policy"] == p.policy_digest
                 and s["contract"] == p.contract_digest, "protected CTRL enrollment binding")
         for k in ("sequence", "mutations", "lifetime", "control_horizon"):
             natural(s[k], k)
@@ -454,13 +456,14 @@ class Custody:
         require(q is not None and q["phase"] == ("ACCEPTED" if baseline else "READY"), "phase pending/held")
         require(self.authority.permits("baseline" if baseline else "accept", q["closure"]) is True,
                 "current closure revoked")
+        require(self.authority.permits("screened", q["closure"]) is True, "current screening revoked")
         c = q["cycles"][-1]
         require(baseline or c["t0"] <= now <= c["deadline"], "cycle expired/clock rollback")
         horizon = max(c["horizon"], now + p.floor_seconds)
         st.current().protected(p, horizon, p.max_control_bytes)
         if baseline:
             origin = st.read(Ref.parse(q["origin"]["frontier"], p))
-            origin.protected(p, now, p.max_control_bytes)
+            origin.protected(p, horizon, p.max_control_bytes)
             prior = decode(origin.body)
             self._validate(prior, p)
             expected = copy.deepcopy(q)
@@ -478,7 +481,9 @@ class Custody:
         require(closure_id(descriptors) == q["closure"], "exact closure")
         manifests = [decode(b) for kind, b in bodies if kind == "manifest"]
         expected = [d for d in descriptors if d["kind"] == "data"]
-        require(len(manifests) == 1 and manifests[0] == {"schema": 1, "data": expected}, "data closure manifest")
+        require(len(manifests) == 1 and type(manifests[0]) is dict
+                and type(manifests[0].get("schema")) is int
+                and manifests[0] == {"schema": 1, "data": expected}, "data closure manifest")
         # Opaque data (including malformed negative fixtures) is hashed, never parsed/executed.
         for job in s["renewals"].values():
             require(job["done"] or now < job["due"], "missed original renewal deadline")
@@ -630,6 +635,9 @@ class S3Store:
         for client in (writer, reader):
             require(client.meta.region_name == policy.region, "client region")
             require(client.meta.config.retries.get("total_max_attempts") == 1, "no hidden SDK retries")
+            for seconds in (client.meta.config.connect_timeout, client.meta.config.read_timeout):
+                require(type(seconds) in (int, float) and 0 < seconds <= policy.transport_seconds,
+                        "bounded SDK connect/read timeout")
         self.writer, self.reader = writer, reader
 
     def _args(self, key, version=None):
@@ -640,6 +648,7 @@ class S3Store:
         return args
 
     def _get(self, key, cap, version=None):
+        deadline = time.monotonic() + self.p.transport_seconds
         response = self.reader.get_object(**self._args(key, version))
         body = response["Body"]
         try:
@@ -647,7 +656,9 @@ class S3Store:
             require(length <= cap, "bounded transport")
             chunks, count = [], 0
             while True:
+                require(time.monotonic() <= deadline, "transport deadline")
                 chunk = body.read(min(1024 * 1024, cap - count + 1))
+                require(time.monotonic() <= deadline, "transport deadline")
                 if not chunk:
                     break
                 count += len(chunk)

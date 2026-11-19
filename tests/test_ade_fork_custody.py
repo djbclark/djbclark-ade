@@ -43,7 +43,7 @@ def policy(**changes):
         max_mutations=120, max_cycles=4, cycle_seconds=24, floor_seconds=100,
         proof_seconds=10, control_reserve_bytes=120000000, preservation_reserve_cash=121000000,
         annual_cash=200000000, lifetime_cash=300000000, byte_liability=1,
-        object_liability=5, generation=1, minimum_sequence=0, maximum_horizon=100000)
+        object_liability=5, generation=1, minimum_sequence=0, maximum_horizon=100000, transport_seconds=5)
     fields.update(changes)
     return m.Policy(**fields)
 
@@ -598,3 +598,54 @@ def test_actual_term_beyond_enrolled_quote_stays_hold_with_liability(env):
     st.change_observation(ref, until=a.p.maximum_horizon + 1)
     assert c.resolve_current().candidate == "HOLD"
     assert st.state()["lifetime"] == before
+
+
+def test_lost_accept_ack_requires_independent_terminal_read(env):
+    c, a, st, clock = env
+    prepared(env)
+    st.fault = "cas-after"
+    with pytest.raises(TimeoutError):
+        c.accept()
+    assert c.resolve_current().baseline == "ACCEPTED"
+    st.change_observation(st.current().ref, hold="OFF")
+    assert c.resolve_current().baseline == "HOLD"
+
+
+def test_screening_revocation_holds_after_upload(env):
+    c, a, st, clock = env
+    prepared(env)
+    a.denied.add("screened")
+    assert c.resolve_current().candidate == "HOLD"
+    with pytest.raises(m.Hold):
+        c.accept()
+
+
+@pytest.mark.parametrize("field", ["schema", "generation"])
+def test_bool_is_not_control_integer_schema(env, field):
+    c, a, st, clock = env
+    prepared(env)
+    st.corrupt_state(lambda s: s.update({field: True}))
+    assert c.resolve_current().candidate == "HOLD"
+
+
+def test_control_pool_stop_keeps_existing_ledger(env):
+    c, a, st, clock = env
+    c.reserve("t", packet(), 5000)
+    st.corrupt_state(lambda s: s.update(mutations=a.p.max_mutations))
+    before = st.state()
+    with pytest.raises(m.Hold, match="pool exhausted"):
+        c.incident("over-pool")
+    assert st.state() == before
+
+
+def test_real_sdk_slow_stream_deadline_closes_body(sdk, monkeypatch):
+    from botocore.response import StreamingBody
+    p, st, w, reader = sdk
+    body = StreamingBody(io.BytesIO(b"x"), 1)
+    reader.add_response("get_object", dict(Body=body, ContentLength=1, VersionId="v", ETag='"e"'),
+                        request(p, p.ctrl_key))
+    times = iter([0.0, 6.0])
+    monkeypatch.setattr(m.time, "monotonic", lambda: next(times))
+    with pytest.raises(m.Hold, match="transport deadline"):
+        st.current()
+    assert body._raw_stream.closed
