@@ -391,3 +391,42 @@ def test_global_root_candidates_are_checked_after_realpath(
     _run(hook, event, project, tmp_path, {"ADE_GRAFT_ALLOW_PROJECT_HOOKS": "1" if opt_in else "0"})
     assert hostile_marker.exists() == (opt_in and event != "pre-bash")
     assert trusted_marker.exists() == (not opt_in and event != "pre-bash")
+
+
+@pytest.mark.parametrize("hook", [CLAUDE_HOOK, CURSOR_HOOK])
+@pytest.mark.parametrize("event", ["session-start", "cursor-session-start", "pre-bash"])
+@pytest.mark.parametrize("opt_in", [False, True])
+@pytest.mark.parametrize("route", ["path", "remembered"])
+def test_case_aliased_project_targets_require_opt_in(
+        tmp_path: Path, hook: Path, event: str, opt_in: bool, route: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    alias = tmp_path / "PROJECT"
+    try:
+        actual, aliased = project.stat(), alias.stat()
+    except FileNotFoundError:
+        pytest.skip("case-insensitive filesystem required: PROJECT does not alias project")
+    if (actual.st_dev, actual.st_ino) != (aliased.st_dev, aliased.st_ino):
+        pytest.skip("case-insensitive filesystem required: spellings have different identities")
+    hostile_marker = tmp_path / "hostile-imported"
+    trusted_marker = tmp_path / "trusted-imported"
+    _marker_package(project, hostile_marker, "99999.0.0")
+    trusted = tmp_path / "installed"
+    _marker_package(trusted, trusted_marker, "1.0.0")
+    _trusted_dist(tmp_path)
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    env = {"ADE_GRAFT_ALLOW_PROJECT_HOOKS": "1" if opt_in else "0"}
+    if route == "path":
+        (project / "bin").mkdir()
+        (project / "bin" / "trail").touch(mode=0o600)
+        env["PATH"] = os.pathsep.join([str(alias / "bin"), str(bins)])
+    else:
+        record = tmp_path / "trail-home" / "install.json"
+        record.write_text(json.dumps({"claudeDist": str(alias / "dist" / "claude")}))
+        cli = trusted / "dist" / "cli.js"
+        cli.write_text("")
+        (bins / "trail").symlink_to(cli)
+    _run(hook, event, project, tmp_path, env)
+    assert hostile_marker.exists() == opt_in
+    assert trusted_marker.exists() != opt_in

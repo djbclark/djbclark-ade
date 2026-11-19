@@ -8,26 +8,41 @@ const { pathToFileURL } = require('url');
 // to execute code as the current user; enable only for a trusted development repo.
 // The launcher must supply a trusted project root and environment. A PATH/env a
 // repo controls is project-controlled: candidate shape or version is not proof
-// of trust. Canonical containment rejects project targets from EVERY source,
-// including symlinks, before ranking. This is not a sandbox for a hostile
-// launcher, Node startup options, or npm itself; those must remain trusted.
+// of trust. Directory identity rejects project targets from EVERY source,
+// including case aliases and symlinks, before ranking. Pathname containment is
+// not a sandbox: hardlinks/bind mounts outside the project can expose project
+// bytes under an accepted name; transitive imports of installed helpers are not
+// validated; concurrent replacement after a check is not prevented. The launcher,
+// Node startup options, and npm itself must remain trusted.
 // `dir` is the project, so running this by hand inside a repo with trail installed lets graft wire THAT repo
 // (it rewrites .claude/, .cursor/ and AGENTS.md). Drive it from a temp project — as
 // tests/test_graft_cursor_session_start.py does.
 const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const allowProject = process.env.ADE_GRAFT_ALLOW_PROJECT_HOOKS === '1';
-let projectRoot = null;
-try { projectRoot = fs.realpathSync(dir); } catch { /* fail closed on imports */ }
+let projectRoot = null, projectIdentity = null;
+try {
+  projectRoot = fs.realpathSync(dir);
+  const st = fs.statSync(projectRoot, { bigint: true });
+  if (st.isDirectory()) projectIdentity = `${st.dev}:${st.ino}`;
+} catch { /* fail closed on imports */ }
 
-// Return a canonical path only outside the project (unless explicitly opted in).
-// Check both directory and module: an installed hooks.js can itself be a symlink.
+// Compare ancestor identities, not spelling: realpath can preserve case aliases
+// on case-insensitive filesystems. Check both directory and final module paths.
 function permitted(file) {
   try {
-    if (!file || !projectRoot) return null;
+    if (!file || !projectIdentity) return null;
     const real = fs.realpathSync(file);
-    const relative = path.relative(projectRoot, real);
-    const inside = relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
-    return !allowProject && inside ? null : real;
+    let unresolved = false;
+    for (let ancestor = real; ; ancestor = path.dirname(ancestor)) {
+      try {
+        const st = fs.statSync(ancestor, { bigint: true });
+        if (`${st.dev}:${st.ino}` === projectIdentity) {
+          return allowProject && !unresolved ? real : null;
+        }
+      } catch { unresolved = true; } // Still walk parents; never infer outside from a failed stat.
+      if (path.dirname(ancestor) === ancestor) break;
+    }
+    return unresolved ? null : real;
   } catch { return null; }
 }
 
