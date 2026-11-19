@@ -542,7 +542,7 @@ def test_guard_catches_a_slow_crash_loop(tmp_path, monkeypatch):
     assert ["launchctl", "bootout", f"gui/{lw.MY_UID}/com.y.slow"] in calls
 
 # ---- brief attribution: the work's repo, and whether it ran under bg (incident 20261018-2056-82c4844a) -----------
-BG = str(Path.home() / "ops/site-private/bin/bg")
+BG = str(Path.home() / "ops/site-private/bin/bgrun")
 
 
 def _work(monkeypatch, procs, parent, cmds, cwds, tops, rows=None, session_top="/r/ade"):
@@ -587,8 +587,15 @@ def test_bg_rules_and_lookalikes():
     lw = load_module()
     assert lw.bg_args(f"/bin/bash {BG} pytest tests/test_x.py") == ["pytest", "tests/test_x.py"]
     assert lw.bg_args(f"{BG} just release") == ["just", "release"]
-    assert lw.bg_args("cat /Users/x/ops/site-private/bin/bg") is None  # reading it is not running it
-    assert lw.bg_args("python other/bin/bg") is None
+    assert lw.bg_args("cat /Users/x/ops/site-private/bin/bgrun") is None  # reading it is not running it
+    assert lw.bg_args("python other/bin/bgrun") is None
+    for name in ("bg", "bgrun"):
+        path = f"/Users/x/ops/site-private-djbclark/bin/{name}"
+        assert lw.bg_args(f"{path} pytest t.py") == ["pytest", "t.py"]
+        assert lw.bg_args(f"/bin/bash {path} pytest t.py") == ["pytest", "t.py"]
+        assert lw.bg_args(f"cat {path}") is None
+        assert lw.bg_args(f"python other/bin/{name}") is None
+    assert lw.bg_args("/Users/x/ops/site-private/bin/bgrunner pytest t.py") is None
     assert lw.bg_rule(["just", "release-all"]) == "release"
     assert lw.bg_rule(["just", "build"]) == ""
     assert lw.bg_rule(["just", "release", "--local-tests"]) == ""

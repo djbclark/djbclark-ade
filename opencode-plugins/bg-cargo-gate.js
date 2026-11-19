@@ -1,8 +1,8 @@
 // 2026-10-28: require bg for Cargo compilation, including release builds.
 // This is an accidental-bypass guard, not a sandbox for arbitrary scripts.
-const reason = "Cargo builds and tests must run through ~/ops/site-private/bin/bg (use the full path). --release is not an exemption. If bg refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
+const reason = "Cargo builds and tests must run through ~/ops/site-private/bin/bgrun (use the full path). --release is not an exemption. If bgrun refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
 const compile = new Set(["build", "b", "test", "t", "check", "c", "clippy", "bench", "run", "r", "rustc", "rustdoc", "doc", "d", "install", "fix", "nextest", "miri", "llvm-cov", "package", "publish"]);
-const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bg", "bgb", "timeout", "gtimeout", "sudo", "caffeinate", "xargs"]);
+const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bgrun", "bg", "bgb", "timeout", "gtimeout", "sudo", "caffeinate", "xargs"]);
 const valueOptions = new Set(["--manifest-path", "--config", "--color", "--target-dir", "--lockfile-path", "-Z", "-C"]);
 const wrapperValues = {
   env: ["-u", "--unset", "-C", "--chdir", "-P"], nice: ["-n", "--adjustment"],
@@ -13,8 +13,8 @@ const wrapperValues = {
 };
 const basename = (s) => s.split("/").pop();
 const assignment = (s) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(s);
-const fullBg = (s) => /^(?:~|\$HOME|\$\{HOME\})\/ops\/(?:site-private|site-djbclark)\/bin\/bg$/.test(s)
-  || /^\/(?:[^/\s]+\/)*ops\/(?:site-private|site-djbclark)\/bin\/bg$/.test(s);
+const fullBg = (s) => /^(?:~|\$HOME|\$\{HOME\})\/ops\/(?:site-private(?:-djbclark)?|site-(?:public-)?djbclark)\/bin\/bg(?:run)?$/.test(s)
+  || /^\/(?:[^/\s]+\/)*ops\/(?:site-private(?:-djbclark)?|site-(?:public-)?djbclark)\/bin\/bg(?:run)?$/.test(s);
 
 function heredocs(line, state) {
   const result = []; let {quote, arithmetic} = state;
@@ -76,7 +76,7 @@ export function requiresBg(command, depth = 0) {
         if (args[0] === "--") args.shift(); continue;
       }
       if (!wrappers.has(name)) break;
-      if (name === "bg" && fullBg(args[0])) { args.length = 0; break; }
+      if (["bgrun", "bg"].includes(name) && fullBg(args[0])) { args.length = 0; break; }
       args.shift();
       if (name === "command" && ["-v", "-V"].includes(args[0])) { args.length = 0; break; }
       if (name === "rtk") {

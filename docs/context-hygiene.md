@@ -182,16 +182,16 @@ an existing row of the same mode (a new reason or note) stay ungated; `ci` over 
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci decide /absolute/worktree local "Small offline focused checks; full matrix on GitHub"
-~/ops/site-private/bin/bg bin/pytest -q tests/test_go_context_plugin.py
+~/ops/site-private/bin/bgrun bin/pytest -q tests/test_go_context_plugin.py
 # Hook suites share a module basename: run separately to avoid import collisions.
-~/ops/site-private/bin/bg bin/pytest -q tests/test_context_size_nudge.py
-~/ops/site-private/bin/bg bin/pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
+~/ops/site-private/bin/bgrun bin/pytest -q tests/test_context_size_nudge.py
+~/ops/site-private/bin/bgrun bin/pytest -q claude/hooks/handoff-tools/tests/test_context_size_nudge.py
 ```
 
 ### macOS CI fallback (operator ruling, 2026-11-12)
 
 CI remains first. A macOS job that is especially slow on CI, or failed/was cancelled
-once, may run locally through `~/ops/site-private-djbclark/bin/bg` at 1-minute
+once, may run locally through `~/ops/site-private-djbclark/bin/bgrun` at 1-minute
 machine load <=16. After two failed/cancelled CI attempts for that job, it bypasses
 the load gate. Linux/other heavy jobs stay on CI; a macOS PR leg still requires
 an explicit request. Slots and parallelism caps remain in force.
@@ -219,7 +219,7 @@ and arguments when `BG_CI_JOB` is unset. The fallback is evaluated per invocatio
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci record /absolute/worktree --job xcode-tests --platform macos --attempt RUN-JOB-ID --result cancelled
-BG_CI_PLATFORM=macos BG_CI_JOB=xcode-tests ~/ops/site-private-djbclark/bin/bg swift test
+BG_CI_PLATFORM=macos BG_CI_JOB=xcode-tests ~/ops/site-private-djbclark/bin/bgrun swift test
 ```
 
 ## 5. Primary sources (archived OpenCode docs)

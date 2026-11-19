@@ -11,7 +11,7 @@ and a differently named wrapper is treated as a build and refused (2026-10-28). 
 never shadows Homebrew's own `pytest`; call it by path.
 
 USAGE
-  ~/ops/site-private/bin/bg bin/pytest [PYTEST ARGS]     # always through bg; no args = tests/ -q
+  ~/ops/site-private/bin/bgrun bin/pytest [PYTEST ARGS]     # always through bg; no args = tests/ -q
   bin/pytest --print                                         # print the command, run nothing
 
 Runs from the repo root of the checkout this file is in (a worktree runs its own tests).

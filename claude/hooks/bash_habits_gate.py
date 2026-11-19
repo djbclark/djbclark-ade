@@ -513,7 +513,7 @@ GH_CANDIDATES = 4        # words named gh tried as the command word (see gh_args
 GH_WATCH_MIN_INTERVAL = 60  # seconds; None would make every watcher a denial
 # Words that only introduce the next command (or wrap it with options of their own).
 SHELL_KW = frozenset({"do", "then", "else", "elif", "if", "while", "until"})
-EXTRA_WRAP = frozenset({"rtk", "bg", "setsid", "caffeinate", "stdbuf", "ionice", "chronic",
+EXTRA_WRAP = frozenset({"rtk", "bg", "bgrun", "setsid", "caffeinate", "stdbuf", "ionice", "chronic",
                         "unbuffer"})
 GH_WATCH_REASON = (
     "Never watch CI with `{what}` (docs/dispatch-footer.md item 20: never wait on CI). Every "
@@ -1130,7 +1130,7 @@ def simple_commands(raw: str, bodies: list[str] | None = None) -> list[list[tupl
 NOT_A_SENDER = frozenset({"echo", "printf", "print", "rg", "grep", "git", "cat", "gh", "jq"})
 # commands that run another command given after their own options (the `paseo` may follow option values: `env -u X paseo`)
 SEND_WRAPPERS = frozenset({
-    "env", "sudo", "timeout", "gtimeout", "bg", "nice", "rtk", "command", "builtin", "exec", "time", "nohup", "deadline",
+    "env", "sudo", "timeout", "gtimeout", "bg", "bgrun", "nice", "rtk", "command", "builtin", "exec", "time", "nohup", "deadline",
     "stdbuf", "ionice", "taskpolicy", "caffeinate", "xargs", "parallel", "run", "--", "noglob", "nocorrect", "coproc",
     "flock", "watch", "script", "direnv", "secretspec", "sudo-secretspec", "op", "ssh", "doas", "genv", "gnohup", "gstdbuf",
     "gnice", "unbuffer", "chronic", "mosh", "uv",     # `ssh host paseo send "`x`"`: the LOCAL shell runs it

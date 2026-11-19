@@ -277,7 +277,7 @@ def test_incidental_files_do_not_spend_the_body_file_budget(live):
     'sh -ec "gh pr edit 41 --body-file live.md"',
     "/usr/bin/env gh pr edit 41 --body %s" % q(APPROVE),
     "/usr/bin/time gh pr edit 41 --body %s" % q(APPROVE),
-    "/Users/djbclark/ops/site-private-djbclark/bin/bg gh pr edit 41 --body %s" % q(APPROVE),
+    "/Users/djbclark/ops/site-private-djbclark/bin/bgrun gh pr edit 41 --body %s" % q(APPROVE),
     "find . -name live.md -exec gh pr edit 41 --body-file {} \\;",
     "watch -n 60 gh pr comment 41 --body %s" % q(APPROVE),
     "script -q /dev/null gh pr comment 41 --body %s" % q(APPROVE),
