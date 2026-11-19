@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createSemanticWindowHandlers } from "./semantic-hooks.mjs";
 import { fixture } from "./semantic-fixture.mjs";
+import { createWindowHandlers } from "./window-workflow.mjs";
 function setup(t, decision, env = {}) {
   const f = fixture(t, "ade-window-name"); const calls = [], titles = [];
   const agent = { id: "agent-a", cwd: f.cwd, workspaceId: "window-a", title: "Work", labels: {}, createdAt: new Date().toISOString() };
@@ -51,9 +52,43 @@ test("dry run still measures decision but never changes native title", async (t)
   await f.handlers["agent.create.after"]({ agent: f.agent }, f.context);
   assert.equal(f.calls.length, 1); assert.deepEqual(f.titles, []);
 });
-test("cancelled event cannot write after settled helper", async (t) => {
+test("selected successful helper after cancellation rejects locally without title or replay", async (t) => {
   const controller = new AbortController();
   const f = setup(t, () => { controller.abort(); return rename; }); f.context.signal = controller.signal;
-  await f.handlers["agent.create.after"]({ agent: f.agent }, f.context);
+  await assert.rejects(f.handlers["agent.create.after"]({ agent: f.agent }, f.context), /aborted/);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.titles, []);
+});
+
+test("abort then real SDK rejection preserves SAME original error, one call and no title", async (t) => {
+  const controller = new AbortController();
+  let entered, reject;
+  const inside = new Promise((resolve) => { entered = resolve; });
+  const pending = new Promise((_, no) => { reject = no; });
+  const original = new Error("distinct SDK proof rejection");
+  const f = setup(t, () => { entered(); return pending; }); f.context.signal = controller.signal;
+  const running = f.handlers["agent.create.after"]({ agent: f.agent }, f.context);
+  // Attach rejection observer before advancing the controlled failure phase.
+  const escaped = assert.rejects(running, (error) => error === original);
+  await inside;
+  assert.equal(f.calls.length, 1);
+  controller.abort(); reject(original);
+  await escaped;
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.titles, []);
+});
+
+test("ordinary abort still normalizes raced decision rejection to fulfilled skip", async (t) => {
+  const controller = new AbortController();
+  let entered, reject, calls = 0;
+  const inside = new Promise((resolve) => { entered = resolve; });
+  const pending = new Promise((_, no) => { reject = no; });
+  const f = setup(t, () => assert.fail("selected operation must not run"));
+  f.context.signal = controller.signal;
+  const handlers = createWindowHandlers({ env: {}, log() {}, decide: () => { calls++; entered(); return pending; } });
+  const running = handlers["agent.create.after"]({ agent: f.agent }, f.context);
+  await inside; controller.abort(); reject(new Error("ordinary decision cancelled"));
+  assert.equal(await running, undefined);
+  assert.equal(calls, 1); assert.equal(f.calls.length, 0);
   assert.deepEqual(f.titles, []);
 });

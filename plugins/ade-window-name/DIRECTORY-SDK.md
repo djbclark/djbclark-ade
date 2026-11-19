@@ -18,3 +18,9 @@ selected namespace must deny raw imports independently of this metadata.
 The dedicated Linux CI includes ordinary naming tests and synthetic semantic
 callback controls. These tests do not attest native namespace, Python/helper
 closure, actual daemon ownership or qualification.
+
+Selected cancellation is fail-closed: SDK rejection retains the same original
+error even if an external abort races it. A successful helper result observed
+after abort produces a local cancellation rejection and no title change. The
+ordinary route retains its fulfilled aborted-skip behavior. Neither route replays
+a helper to classify a failure.

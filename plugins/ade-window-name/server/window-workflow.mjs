@@ -46,7 +46,8 @@ export function isDefaultTitle(windowTitle, agentTitle, young = true) {
 const SCHEME_NAME = /^(?:LEAD|WORKER|OTHER|MAIN|WORKERS|USER) \S+ \(.+\)$/;
 
 /**
- * Handle one agent event. Returns a short outcome record (also the log line) and never throws.
+ * Handle one agent event. Ordinary errors become outcome records; the selected
+ * route propagates original failures, including failures racing cancellation.
  *
  * @param {{ id: string, workspaceId: string|null, parentAgentId?: string|null, cwd: string, title?: string|null, background?: boolean }} agent
  * @param {{ paseo: any }} context
@@ -123,8 +124,10 @@ export async function handleAgentEvent(agent, context, deps = {}) {
     remember(settled, wid);
     return out("renamed", { name: decision.name, kind: decision.kind });
   } catch (err) {
-    if (signal?.aborted) return out("skip", { reason: "aborted (handler budget spent or hook cancelled)" });
+    // Selected SDK/proof failures keep their original identity even when an
+    // external abort races rejection. Only the ordinary route normalizes abort.
     if (deps.propagateErrors) throw err;
+    if (signal?.aborted) return out("skip", { reason: "aborted (handler budget spent or hook cancelled)" });
     return out("error", { error: errText(err) });
   }
 }
