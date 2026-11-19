@@ -65,3 +65,30 @@ literally.
 lead registers it after the merge.
 
 **G. Tests.** `tests/test_upstream_review_gate.py` (temporary git repos for the remote cases).
+
+
+## Native Codex registration (2026-11-18)
+
+`agents/codex/config.toml.tmpl` appends a native `PreToolUse` group with matcher
+`Bash`, command `python3 {{ .home }}/src/djbclark-ade/claude/hooks/upstream_review_gate.py`,
+timeout 15 seconds, synchronous execution. The existing hook emits the typed
+`hookSpecificOutput.permissionDecision = "deny"` with `hookEventName = "PreToolUse"`
+and a nonempty `permissionDecisionReason`. This runs before tools even when approval
+policy is `never`; it does not depend on `PermissionRequest`.
+
+Rechecked against installed Codex 0.170.0 and the [current native hook docs](https://learn.chatgpt.com/docs/hooks)
+on 2026-11-18: canonical shell tool `Bash`, command in `tool_input.command`.
+The regression invokes the registered Python handler with native envelopes for a
+CFEngine PR creation and named pushes to CFEngine and NorthernTechHQ remotes.
+It never executes those writes. This fixture does **not** prove live hook loading,
+trust, Pi, bridge or codemode coverage. The parser limits above still apply.
+
+Render/apply: follow `agents/README.md` to render the Codex config template, then
+use `agents/codex/modify_merge.py --desired RENDERED.toml --live LIVE.toml --write OUT.toml`
+to prepare a reviewable merged file. Its list replacement semantics mean existing
+hook groups must be preserved when preparing the desired configuration. Do not
+blindly replace live hooks or duplicate this registration in both inline config
+and `hooks.json`. No live apply is performed by this change. A separately authorized
+apply must preserve existing definitions and append the group, then trust the exact
+new definition through Codex `/hooks`; do not write trust hashes. Verify in a fresh
+controlled session before claiming deployed protection.

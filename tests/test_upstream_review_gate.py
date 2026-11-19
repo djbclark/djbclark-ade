@@ -703,3 +703,53 @@ def test_remote_name_known_only_at_run_time(libntech, ours):
 def test_literal_loop_values_are_each_judged(libntech):
     assert not denied("for r in fork; do git push $r main; done", libntech)
     assert denied("for r in fork origin; do git push $r main; done", libntech)
+
+
+@pytest.mark.parametrize("command,repo", [
+    ("gh pr create -R cfengine/core", "ours"),
+    ("git push upstream HEAD", "core_fork"),
+    ("git push origin HEAD", "libntech"),
+])
+def test_codex_native_envelope_denies_upstream(command, repo, request):
+    """Invoke the registered handler, not the detector alone; never execute the payload.
+
+    Native Bash envelope only: no Pi, bridge, codemode or live Codex trust proof.
+    """
+    import shlex
+    import tomllib
+
+    root = HOOK.parents[2]
+    template = (root / "agents/codex/config.toml.tmpl").read_text()
+    # Only this hook group is needed; other template values include secret references.
+    hooks_section = template.split("[[hooks.PreToolUse]]", 1)[1].split("[mcp_servers.", 1)[0]
+    groups = tomllib.loads("[[hooks.PreToolUse]]" + hooks_section)
+    matches = [group for group in groups["hooks"]["PreToolUse"]
+               if any("upstream_review_gate.py" in h["command"] for h in group["hooks"])]
+    assert len(matches) == 1
+    group = matches[0]
+    assert group["matcher"] == "Bash"
+    assert len(group["hooks"]) == 1
+    handler = group["hooks"][0]
+    assert handler["type"] == "command"
+    assert handler["timeout"] == 15
+    assert not handler.get("async", False)
+    argv = shlex.split(handler["command"].replace("{{ .home }}/src/djbclark-ade", str(root)))
+    assert argv == ["python3", str(HOOK)]
+    argv[0] = sys.executable
+    envelope = {
+        "session_id": "codex-native-fixture", "transcript_path": None,
+        "cwd": str(request.getfixturevalue(repo)), "hook_event_name": "PreToolUse",
+        "model": "fixture", "turn_id": "turn-fixture",
+        "permission_mode": "bypassPermissions", "tool_name": "Bash",
+        "tool_use_id": "call-fixture", "tool_input": {"command": command},
+    }
+    result = subprocess.run(argv, input=json.dumps(envelope), capture_output=True,
+                            text=True, timeout=20, env=ENV)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    output = json.loads(result.stdout)
+    assert set(output) == {"hookSpecificOutput"}
+    decision = output["hookSpecificOutput"]
+    assert decision["hookEventName"] == "PreToolUse"
+    assert decision["permissionDecision"] == "deny"
+    assert "Upstream review gate" in decision["permissionDecisionReason"]

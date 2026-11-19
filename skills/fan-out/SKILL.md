@@ -88,7 +88,7 @@ the model pin or the per-wave re-check, and no code reserves quota (`docs/slim/l
 # Re-plan immediately before EACH launch when several slices share one quota pool
 # (plan/pool_fits do not yet reserve sibling in-flight usage; see model-routing D5).
 ade-worker-run --lead LEAD --slice NAME --cwd ~/src/<repo> -- \
-  --provider PROVIDER/MODEL --no-wait --mode FULL_ACCESS_MODE \
+  --provider PROVIDER/MODEL --no-wait \
   --label ade.kind=KIND --label ade.name=NAME --label ade.task=TASK \
   "$(cat brief-with-footer.md)"
 # Then (also if the launch failed): ~/src/djbclark-ade/bin/load-watch release <reservation>
@@ -240,7 +240,13 @@ Three independent fixes in one repository, one review:
 
 Always launch our own Codex agents with `--mode full-access`, Claude with
 `--mode bypassPermissions`, and Antigravity with `--mode full-access`.
-`FULL_ACCESS_MODE` in the launch example means that provider's value. Set it at
+`CATALOG_MODE_ID` is an exact ID from the target provider catalog, never a display label.
+For Pi, ClinePass, or any provider with no modes: **omit --mode**, including
+`--mode default`. Add `--mode CATALOG_MODE_ID` to the example only when the provider exposes that exact ID.
+`ade-worker-run` drops explicit modes for a ready modeless catalog with a stderr note;
+unknown, unavailable, or malformed catalogs fail before launch when a mode is requested.
+If the CLI supplies only nonempty display labels, existing explicit modes pass through
+with a validation-limitation note; Paseo validates the ID, and failed-create cleanup applies. Set it at
 creation; changing a running agent's mode did not reliably remove old cards.
 The locally inspected `ProviderOverrideSchema` has no provider default-mode field.
 Omitted modes inherit same-provider parents, or fall through to the provider
