@@ -444,6 +444,194 @@ def finite_git_profile(value):
     return parse(canonical(profile).decode())
 
 
+SHERPA_RECORD = 'native-provenance/sherpa-addon-adaptation.json'
+SHERPA_MEMBER = 'node_modules/sherpa-onnx-linux-x64/sherpa-onnx.node'
+SHERPA_ORIGINAL = 'c139574c7a2323710bdd647c5ee27c200669fa4f65f205d8b04eda12a63fece2'
+SHERPA_REVISION = '86d3d00e28c22c102fb7d01c7b62fdc4e7a69f1b'
+SHERPA_DEPENDENCIES = (
+    ('libsherpa-onnx-c-api.so',5558624,'a1675fd6d4cb726db0bbed629325c1f871387ddcdba668529601ea1af02e300e'),
+    ('libsherpa-onnx-cxx-api.so',224984,'ce4dd50ab292b2d33c258af894ee5bb39b3ca7000977d2420716864a3fcaaf4f'),
+    ('libonnxruntime.so',23665137,'7a6019216c8b6194101291ab8cd1ad9803f087306b10f6f0ef384c52fe879138'))
+# Independently fetched immutable primary text identities; source data, not approval.
+SHERPA_SOURCES = (
+    ('sherpa-LICENSE.txt','k2-fsa/sherpa-onnx',SHERPA_REVISION,'LICENSE',11358,'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'),
+    ('sherpa-cmake.txt','k2-fsa/sherpa-onnx',SHERPA_REVISION,'scripts/node-addon-api/CMakeLists.txt',2721,'6f1c24f3539e6b29f90ff24f26c17a8132054247b85e140e37a8c79fcfb9c98d'),
+    ('sherpa-publish.txt','k2-fsa/sherpa-onnx',SHERPA_REVISION,'.github/scripts/node-addon/run.sh',1313,'c87cec7dbe4bcfb93a602ede19948cde0052c695d88e860c35f8fedff5e2a54d'),
+    ('sherpa-cpu-session.txt','k2-fsa/sherpa-onnx',SHERPA_REVISION,'sherpa-onnx/csrc/session.cc',12252,'eb68f2f1700924e7c70b0b5cca99beac300bd79616b10b62e1ef423b237d7fa8'),
+    ('sherpa-ort-recipe.txt','k2-fsa/sherpa-onnx',SHERPA_REVISION,'cmake/onnxruntime-linux-x86_64.cmake',2785,'cda3b8e81009ae0d412d32b74ef9771b434a594bf8f02dfd18ee36fd4212a157'),
+    ('ort-provider-bridge.txt','csukuangfj/onnxruntime','a83fc4d58cb48eb68890dd689f94f28288cf2278','onnxruntime/core/session/provider_bridge_ort.cc',187818,'43a225c2ba2dc315a4dbc482eafd5f03592b47f4be616fdb37640e2e33ead4e1'),
+    ('ort-posix-loader.txt','csukuangfj/onnxruntime','a83fc4d58cb48eb68890dd689f94f28288cf2278','onnxruntime/core/platform/posix/env.cc',21269,'caefd940d3aab8fff978e448084948ad47268c36353a768ae3b77340a10b2bdb'),
+    ('ort-custom-ops.txt','csukuangfj/onnxruntime','a83fc4d58cb48eb68890dd689f94f28288cf2278','onnxruntime/core/session/abi_session_options.cc',16639,'4f722caf98e04fd6b64fa6201d9f9a91c4e74e4cecb8a31a7f3645061f01fc64'))
+
+
+def sherpa_adaptation_record(raw,manifest):
+    """522ba78 strict finite DATA; never parses/adapts/loads an ELF or grants admission."""
+    def fail(): raise ContractError('invalid copied Sherpa record or manifest binding')
+    def exact(value,keys):
+        if type(value) is not dict or set(value)!=set(keys):fail()
+        return value
+    def number(value,maximum=2**53-1):
+        if type(value) is not int or not 0<=value<=maximum:fail()
+    def text(value,maximum=4096):
+        if type(value) is not str or '\0' in value:fail()
+        try:
+            if len(value.encode('utf8'))>maximum:fail()
+        except UnicodeError:fail()
+    def sha(value):
+        if type(value) is not str or not re.fullmatch('[a-f0-9]{64}',value):fail()
+    def sequence(value,maximum):
+        if type(value) is not list or len(value)>maximum:fail()
+        return value
+    def file_identity(value,path,maximum):
+        exact(value,('path','mode','size','sha256'));number(value['size'],maximum);sha(value['sha256'])
+        if (type(value['mode']) is not int or value['mode']!=0o444 or value['path']!=path or
+                files.get(path)!=value or helpers.get(path)!=value):fail()
+        return value
+    def metadata(value,size):
+        exact(value,('dynamicNames','versionNames','executableLoads','header','programs','sections','dynamicTags'))
+        for key in ('dynamicNames','versionNames'):
+            for item in sequence(value[key],131072):text(item)
+        header=exact(value['header'],('identity','entry','flags'))
+        if (type(header['identity']) is not str or not re.fullmatch('[a-f0-9]{48}',header['identity']) or
+                not header['identity'].startswith('7f454c46020101') or header['identity'][32:40]!='03003e00'):fail()
+        number(header['entry']);number(header['flags'],2**32-1)
+        for row in sequence(value['programs'],128):
+            exact(row,('type','flags','offset','address','fileSize','memorySize','alignment'))
+            for item in row.values():number(item)
+            if row['offset']+row['fileSize']>size or row['fileSize']>row['memorySize'] or row['type']==3:fail()
+            if row['type']==1 and row['flags']&3==3:fail()
+        if not value['programs']:fail()
+        for row in sequence(value['sections'],512):
+            exact(row,('nameOffset','type','flags','address','offset','size','alignment','entrySize','name','loadFlags','relro','sha256'))
+            for key in ('nameOffset','type','flags','address','offset','size','alignment','entrySize'):number(row[key])
+            text(row['name'])
+            if type(row['relro']) is not bool:fail()
+            for item in sequence(row['loadFlags'],128):number(item,7)
+            if row['type']==8:
+                if row['sha256'] is not None:fail()
+            else:
+                sha(row['sha256'])
+                if row['offset']+row['size']>size:fail()
+        if not value['sections']:fail()
+        for row in sequence(value['executableLoads'],128):
+            exact(row,('address','fileSize','memorySize','flags','sha256'));sha(row['sha256'])
+            for key in ('address','fileSize','memorySize','flags'):number(row[key])
+            if row['fileSize']>size or row['fileSize']>row['memorySize'] or row['flags']&3!=1:fail()
+        if not value['executableLoads']:fail()
+        for row in sequence(value['dynamicTags'],65536):
+            exact(row,('tag','value'));number(row['tag'])
+            if row['tag'] in (1,14,15,29):text(row['value'])
+            else:number(row['value'])
+        return value
+    if type(raw) is not bytes or not 0<len(raw)<=4*1024*1024:fail()
+    try:record=parse(raw.decode('utf8'))
+    except (ValueError,UnicodeError,RecursionError) as error:raise ContractError('invalid copied Sherpa JSON') from error
+    try:
+        if builtin_json(record)!=raw:fail()
+    except RecursionError as error:raise ContractError('copied Sherpa JSON nesting bound') from error
+    exact(record,('schemaVersion','recipeId','recipeSha256','recipe','output'))
+    if type(record['schemaVersion']) is not int or record['schemaVersion']!=1 or record['recipeId']!='sherpa-onnx-linux-x64-1.12.28-origin-v1':fail()
+    sha(record['recipeSha256'])
+    files={};helpers={}
+    for key,target in (('files',files),('helperInventory',helpers)):
+        for row in sequence(manifest.get(key),22000):
+            if type(row) is not dict or type(row.get('path')) is not str or row['path'] in target:fail()
+            target[row['path']]=row
+    identity=files.get(SHERPA_RECORD)
+    file_identity(identity,SHERPA_RECORD,4*1024*1024)
+    if identity['size']!=len(raw) or identity['sha256']!=hashlib.sha256(raw).hexdigest():fail()
+    recipe=exact(record['recipe'],('package','member','original','transformation','sources','dependencies'))
+    if (recipe['package']!={'name':'sherpa-onnx-linux-x64','version':'1.12.28',
+            'integrity':'sha512-+7ZwpAqQYz5fjNQ13F9+sR11zKo6+HhOa1OvT+F4g4PjmoCS1o3YYQqT4JZuLeNRWAY6kKn4IXGWLx93K+OV7A==',
+            'sourceRevision':SHERPA_REVISION} or recipe['member']!=SHERPA_MEMBER or
+            hashlib.sha256(builtin_json(recipe)).hexdigest()!=record['recipeSha256']):fail()
+    before=exact(recipe['original'],('sha256','size','provenance','metadata'))
+    if type(before['size']) is not int or before['size']!=840296 or before['sha256']!=SHERPA_ORIGINAL:fail()
+    file_identity(before['provenance'],'native-provenance/sherpa-addon-original.gz',2*1024*1024)
+    tool=exact(recipe['transformation'],('tool','argv','toolSha256','toolSize','toolVersion','toolProvenance'))
+    if tool['tool']!='patchelf' or tool['argv']!=['--set-rpath','$ORIGIN',SHERPA_MEMBER]:fail()
+    sha(tool['toolSha256']);number(tool['toolSize'],16*1024*1024);text(tool['toolVersion'],4096)
+    if not tool['toolSize'] or not re.fullmatch(r'patchelf [^\s\x00-\x1f]+',tool['toolVersion']):fail()
+    file_identity(tool['toolProvenance'],'native-provenance/patchelf-build-tool.gz',17*1024*1024)
+    sources=sequence(recipe['sources'],8)
+    if len(sources)!=8:fail()
+    for row,(name,repo,revision,member,size,digest) in zip(sources,SHERPA_SOURCES):
+        exact(row,('url','sha256','retained'))
+        if row['url']!=f'https://raw.githubusercontent.com/{repo}/{revision}/{member}' or row['sha256']!=digest:fail()
+        retained=file_identity(row['retained'],'native-provenance/'+name,1024*1024)
+        if retained['size']!=size or retained['sha256']!=digest:fail()
+    dependencies=sequence(recipe['dependencies'],3)
+    if len(dependencies)!=3:fail()
+    closure=manifest.get('systemClosure')
+    if type(closure) is not dict or type(closure.get('loaderResolution')) is not dict:fail()
+    layout=closure['loaderResolution'].get('elf')
+    if type(layout) is not list:fail()
+    elfs={}
+    for row in layout:
+        if type(row) is not dict or type(row.get('member')) is not str or row['member'] in elfs:fail()
+        elfs[row['member']]=row
+    for row,(name,size,digest) in zip(dependencies,SHERPA_DEPENDENCIES):
+        exact(row,('path','sha256','size','metadata'));path='node_modules/sherpa-onnx-linux-x64/'+name
+        if row['path']!=path or type(row['size']) is not int or row['size']!=size or row['sha256']!=digest:fail()
+        actual=files.get(path)
+        if type(actual) is not dict or actual.get('mode') not in (0o444,0o555) or actual.get('size')!=size or actual.get('sha256')!=digest or helpers.get(path)!=actual:fail()
+        compact=exact(row['metadata'],('machine','interpreter','needed','rpath','runpath','soname'))
+        if type(compact['machine']) is not int or compact['machine']!=62 or compact['interpreter'] is not None:fail()
+        for key in ('needed','rpath','runpath'):
+            for item in sequence(compact[key],128):text(item)
+        if compact['soname'] is not None:text(compact['soname'])
+        if elfs.get(path)!={'member':path,**compact}:fail()
+    output=exact(record['output'],('sha256','size','metadata'));sha(output['sha256']);number(output['size'],2*1024*1024)
+    actual=files.get(SHERPA_MEMBER)
+    if (not output['size'] or type(actual) is not dict or actual.get('mode') not in (0o444,0o555) or
+            actual.get('size')!=output['size'] or actual.get('sha256')!=output['sha256'] or helpers.get(SHERPA_MEMBER)!=actual):fail()
+    old=metadata(before['metadata'],840296);new=metadata(output['metadata'],output['size'])
+    tags=lambda meta,tag:[row['value'] for row in meta['dynamicTags'] if row['tag']==tag]
+    if (tags(old,29)!=['$ORIGIN:/home/runner/work/sherpa-onnx/sherpa-onnx/build/install/lib:'] or
+            tags(new,29)!=['$ORIGIN'] or tags(old,15) or tags(new,15) or tags(old,14)!=['sherpa-onnx.node'] or
+            tags(old,1)!=['libsherpa-onnx-c-api.so','libstdc++.so.6','libgcc_s.so.1','libc.so.6']):fail()
+    for key in ('header','dynamicNames','versionNames','executableLoads'):
+        if old[key]!=new[key]:fail()
+    stable_tags=lambda meta:[row for row in meta['dynamicTags'] if row['tag'] not in (5,10,29)]
+    if stable_tags(old)!=stable_tags(new):fail()
+    allocated=lambda meta:sorted([{key:row[key] for key in ('name','type','flags','address','size','alignment','entrySize','sha256','loadFlags','relro')}
+        for row in meta['sections'] if row['flags']&2 and row['name'] not in ('.dynstr','.dynamic')],key=lambda row:row['name'])
+    protection=lambda meta:[{key:row[key] for key in ('name','flags','loadFlags','relro')} for row in meta['sections'] if row['name'] in ('.dynstr','.dynamic')]
+    programs=lambda meta:[{key:row[key] for key in ('type','flags','address','memorySize')} for row in meta['programs'] if row['type'] in (7,0x6474e551,0x6474e552,0x6474e553)]
+    if allocated(old)!=allocated(new) or protection(old)!=protection(new) or programs(old)!=programs(new):fail()
+    if elfs.get(SHERPA_MEMBER)!={'member':SHERPA_MEMBER,'machine':62,'interpreter':None,
+            'needed':tags(new,1),'rpath':[],'runpath':['$ORIGIN'],'soname':'sherpa-onnx.node'}:fail()
+    table=manifest.get('builtinModuleTable')
+    if type(table) is not dict or table.get('recipe')!={**BUILTIN_RECIPE,'copiedSherpaAddonRecipeSha256':identity['sha256']}:fail()
+    return record
+
+
+def verify_sherpa_adaptation(manifest,root):
+    """Read measured sealed provenance only; never executes the recorded tool/input."""
+    rows=[row for row in manifest['files'] if row['path']==SHERPA_RECORD]
+    if not rows:
+        table=manifest.get('builtinModuleTable')
+        if type(table) is dict and type(table.get('recipe')) is dict and 'copiedSherpaAddonRecipeSha256' in table['recipe']:
+            raise ContractError('copied Sherpa record missing')
+        return None
+    raw=read_regular(root/SHERPA_RECORD,4*1024*1024,owner=0)
+    record=sherpa_adaptation_record(raw,manifest)
+    # Bounded gzip data verification, single stream, no paths/extraction or ELF resolver.
+    import zlib
+    recipe=record['recipe']
+    for identity,size,digest in ((recipe['original']['provenance'],840296,SHERPA_ORIGINAL),
+            (recipe['transformation']['toolProvenance'],recipe['transformation']['toolSize'],recipe['transformation']['toolSha256'])):
+        compressed=read_regular(root/identity['path'],identity['size'],owner=0)
+        if len(compressed)!=identity['size'] or hashlib.sha256(compressed).hexdigest()!=identity['sha256']:
+            raise ContractError('copied Sherpa compressed provenance mismatch')
+        try:
+            decoder=zlib.decompressobj(31);data=decoder.decompress(compressed,size+1)
+            if len(data)!=size or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or hashlib.sha256(data).hexdigest()!=digest:
+                raise ContractError('copied Sherpa uncompressed provenance mismatch')
+        except zlib.error as error:raise ContractError('invalid copied Sherpa gzip provenance') from error
+    return record
+
+
 def builtin_manifest_identities(manifest,config,host_policy):
     """Map verified manifest bytes plus current protected native profiles, never wire."""
     rows=[row for row in host_policy['qualifications'] if row.get('immutableRoot')==config['distributionRoot']]
@@ -470,7 +658,11 @@ def builtin_manifest_identities(manifest,config,host_policy):
             finite_git_profile(profile['finiteGit'])
         by_id[profile['id']]=profile
     files={item['path']:item for item in manifest['files']}
-    table={'schemaVersion':1,'recipe':BUILTIN_RECIPE,'runtimeSha256':manifest['runtime']['sha256'],
+    recipe=dict(BUILTIN_RECIPE)
+    if SHERPA_RECORD in files:
+        verify_sherpa_adaptation(manifest,Path(config['distributionRoot']))
+        recipe['copiedSherpaAddonRecipeSha256']=files[SHERPA_RECORD]['sha256']
+    table={'schemaVersion':1,'recipe':recipe,'runtimeSha256':manifest['runtime']['sha256'],
            'daemonSha256':files.get('daemon.mjs',{}).get('sha256'),'externalLibraries':manifest['externalLibraries']}
     if 'systemClosure' in manifest or 'systemClosureSha256' in manifest:
         system_closure_metadata(manifest)
@@ -623,6 +815,8 @@ def verify_transport_distribution(config):
     binding_keys = sorted(['@getpaseo/plugin/internal/activity','@getpaseo/plugin','@getpaseo/plugin/server',
         '@getpaseo/plugin/server/provider','@getpaseo/plugin/server/acp','@getpaseo/plugin/server/usage',
         '@getpaseo/client','@getpaseo/client/internal/daemon-client','@getpaseo/protocol/binary-frames/index','zod'])
+    adapted=type(manifest.get('files')) is list and any(type(row) is dict and row.get('path')==SHERPA_RECORD for row in manifest['files'])
+    if adapted:binding_keys=sorted([*binding_keys,'@getpaseo/plugin/internal/builtin-helper'])
     if manifest.get('bindingKeys') != binding_keys: raise ContractError('qualified namespace inventory mismatch')
     files, external = manifest.get('files'), manifest.get('externalLibraries')
     if type(files) is not list or not files or len(files) > 20000 or type(external) is not list or len(external) > 1000:
@@ -669,6 +863,7 @@ def verify_transport_distribution(config):
         if item['path'] in external_names: raise ContractError('duplicate external library')
         external_names.add(item['path'])
     helpers = [item for item in files if item['path'].startswith('runtime/') or
+        (adapted and (item['path'].startswith(('system-closure/','native-provenance/')) or re.search(r'\.so(?:\.[0-9]+)*$',item['path']))) or
         re.search(r'(?:compiler|terminal)-(?:entry|code)\.mjs$', item['path']) or item['path'].endswith('.node') or
         item['path'].endswith('spawn-helper') or item['path'].startswith('node_modules/esbuild/') or
         item['path'] == 'node_modules/typescript/lib/typescript.js'] + external
@@ -678,6 +873,7 @@ def verify_transport_distribution(config):
     if (producer_json(manifest.get('helperInventory')) != producer_json(helpers) or
             manifest.get('helperClosureSha256') != helper_digest or helper_digest != config['closure']['helperClosureSha256']):
         raise ContractError('explicit native/helper inventory mismatch')
+    verify_sherpa_adaptation(manifest,root)
     if read_regular(manifest_path, 4 * 1024 * 1024, owner=0) != raw_manifest:
         raise ContractError('distribution authority changed during verification')
     return manifest

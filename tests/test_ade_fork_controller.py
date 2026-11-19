@@ -1691,3 +1691,180 @@ def test_finite_git_mapping_never_substitutes_manifest_tools_or_parent_approval(
     if mutation in ('distribution','system-closure'):
         finite_git_fixture['recipeSha256']=c.hashlib.sha256(c.builtin_json(finite_git_fixture['recipe'])).hexdigest()
     with pytest.raises(c.ContractError):c.builtin_manifest_identities(manifest,config,policy)
+
+
+
+@pytest.fixture
+def sherpa_record_fixture():
+    """Synthetic DATA, including metadata shapes; never ELF/feature qualification."""
+    import copy
+    def identity(path,size,sha):
+        return {'path':path,'mode':0o444,'size':size,'sha256':sha}
+    def metadata(runpath):
+        return {'header':{'identity':'7f454c46020101'+'00'*9+'03003e00'+'00'*4,'entry':0,'flags':0},
+            'programs':[{'type':1,'flags':5,'offset':0,'address':0,'fileSize':64,'memorySize':64,'alignment':4096}],
+            'sections':[{'nameOffset':0,'type':1,'flags':6,'address':0,'offset':0,'size':64,'alignment':16,'entrySize':0,
+                'name':'.text','loadFlags':[5],'relro':False,'sha256':'b'*64}],
+            'dynamicNames':['','RegisterModule'],'versionNames':['GLIBC_2.17'],
+            'executableLoads':[{'address':0,'fileSize':64,'memorySize':64,'flags':5,'sha256':'b'*64}],
+            'dynamicTags':[{'tag':1,'value':name} for name in
+                ['libsherpa-onnx-c-api.so','libstdc++.so.6','libgcc_s.so.1','libc.so.6']]+[
+                {'tag':14,'value':'sherpa-onnx.node'},{'tag':29,'value':runpath},{'tag':5,'value':64},{'tag':10,'value':128}]}
+    original=identity('native-provenance/sherpa-addon-original.gz',100,'a'*64)
+    tool=identity('native-provenance/patchelf-build-tool.gz',100,'c'*64)
+    sources=[]
+    for name,repo,rev,path,size,sha in c.SHERPA_SOURCES:
+        sources.append({'url':f'https://raw.githubusercontent.com/{repo}/{rev}/{path}','sha256':sha,
+                        'retained':identity('native-provenance/'+name,size,sha)})
+    deps=[];elfs=[];files=[original,tool,*[r['retained'] for r in sources]]
+    for name,size,sha in c.SHERPA_DEPENDENCIES:
+        path='node_modules/sherpa-onnx-linux-x64/'+name
+        compact={'machine':62,'interpreter':None,'needed':['libc.so.6'],'rpath':['$ORIGIN'],'runpath':[],'soname':name}
+        deps.append({'path':path,'size':size,'sha256':sha,'metadata':compact})
+        files.append(identity(path,size,sha));elfs.append({'member':path,**compact})
+    before=metadata('$ORIGIN:/home/runner/work/sherpa-onnx/sherpa-onnx/build/install/lib:')
+    after=metadata('$ORIGIN')
+    recipe={'package':{'name':'sherpa-onnx-linux-x64','version':'1.12.28',
+        'integrity':'sha512-+7ZwpAqQYz5fjNQ13F9+sR11zKo6+HhOa1OvT+F4g4PjmoCS1o3YYQqT4JZuLeNRWAY6kKn4IXGWLx93K+OV7A==',
+        'sourceRevision':c.SHERPA_REVISION},'member':c.SHERPA_MEMBER,
+        'original':{'size':840296,'sha256':c.SHERPA_ORIGINAL,'provenance':original,'metadata':before},
+        'transformation':{'tool':'patchelf','argv':['--set-rpath','$ORIGIN',c.SHERPA_MEMBER],
+            'toolSize':100,'toolSha256':'d'*64,'toolVersion':'patchelf 0.18.0','toolProvenance':tool},
+        'sources':sources,'dependencies':deps}
+    output={'size':1000,'sha256':'e'*64,'metadata':after}
+    files.append(identity(c.SHERPA_MEMBER,1000,'e'*64))
+    elfs.append({'member':c.SHERPA_MEMBER,'machine':62,'interpreter':None,
+        'needed':[r['value'] for r in after['dynamicTags'] if r['tag']==1],'rpath':[],'runpath':['$ORIGIN'],'soname':'sherpa-onnx.node'})
+    record={'schemaVersion':1,'recipeId':'sherpa-onnx-linux-x64-1.12.28-origin-v1','recipeSha256':'',
+            'recipe':recipe,'output':output}
+    manifest={'files':files,'helperInventory':copy.deepcopy(files),
+              'systemClosure':{'loaderResolution':{'elf':elfs}},
+              'builtinModuleTable':{'recipe':dict(c.BUILTIN_RECIPE)}}
+    return record,manifest
+
+
+def bind_sherpa_fixture(record,manifest):
+    record['recipeSha256']=c.hashlib.sha256(c.builtin_json(record['recipe'])).hexdigest()
+    raw=c.builtin_json(record)
+    item={'path':c.SHERPA_RECORD,'mode':0o444,'size':len(raw),'sha256':c.hashlib.sha256(raw).hexdigest()}
+    for key in ('files','helperInventory'):
+        manifest[key][:]=[row for row in manifest[key] if row['path']!=c.SHERPA_RECORD]+[dict(item)]
+    manifest['builtinModuleTable']['recipe']={**c.BUILTIN_RECIPE,'copiedSherpaAddonRecipeSha256':item['sha256']}
+    return raw
+
+
+def test_copied_sherpa_canonical_data_and_distinct_digests(sherpa_record_fixture):
+    record,manifest=sherpa_record_fixture
+    raw=bind_sherpa_fixture(record,manifest)
+    parsed=c.sherpa_adaptation_record(raw,manifest)
+    assert parsed==record
+    assert record['recipeSha256']!=c.hashlib.sha256(raw).hexdigest()
+    manifest['builtinModuleTable']['recipe']['copiedSherpaAddonRecipeSha256']=record['recipeSha256']
+    with pytest.raises(c.ContractError):c.sherpa_adaptation_record(raw,manifest)
+
+
+@pytest.mark.parametrize('change',['package','version','revision','integrity','member','original','original-size','argv','tool',
+    'tool-size','tool-version','tool-provenance','source-url','source-sha','source-size','source-order','missing-license',
+    'dependency-sha','dependency-size','dependency-metadata','dependency-order','output-sha','output-size','output-mode',
+    'unknown','metadata-unknown','metadata-bool','code','relocation','symbols','protections','runpath','duplicate-file',
+    'missing-helper','missing-record','raw-digest','recipe-digest','raw-noncanonical','unknown-extension','missing-closure'])
+def test_copied_sherpa_data_refusals(sherpa_record_fixture,change):
+    record,manifest=sherpa_record_fixture;r=record['recipe'];tool=r['transformation']
+    if change=='package':r['package']['name']='other'
+    elif change=='version':r['package']['version']='1.12.29'
+    elif change=='revision':r['package']['sourceRevision']='0'*40
+    elif change=='integrity':r['package']['integrity']='sha512-other'
+    elif change=='member':r['member']='../sherpa-onnx.node'
+    elif change=='original':r['original']['sha256']='f'*64
+    elif change=='original-size':r['original']['size']=840297
+    elif change=='argv':tool['argv']=['--force-rpath',*tool['argv']]
+    elif change=='tool':tool['tool']='/usr/bin/patchelf'
+    elif change=='tool-size':tool['toolSize']=16*1024*1024+1
+    elif change=='tool-version':tool['toolVersion']='patchelf\n0.18'
+    elif change=='tool-provenance':tool['toolProvenance']['path']='../../tool'
+    elif change=='source-url':r['sources'][0]['url']+='?ref=latest'
+    elif change=='source-sha':r['sources'][0]['sha256']='f'*64
+    elif change=='source-size':r['sources'][0]['retained']['size']+=1
+    elif change=='source-order':r['sources'].reverse()
+    elif change=='missing-license':r['sources'].pop(0)
+    elif change=='dependency-sha':r['dependencies'][0]['sha256']='f'*64
+    elif change=='dependency-size':r['dependencies'][0]['size']+=1
+    elif change=='dependency-metadata':r['dependencies'][0]['metadata']['needed']=['evil.so']
+    elif change=='dependency-order':r['dependencies'].reverse()
+    elif change=='output-sha':record['output']['sha256']='f'*64
+    elif change=='output-size':record['output']['size']+=1
+    elif change=='output-mode':next(row for row in manifest['files'] if row['path']==c.SHERPA_MEMBER)['mode']=0o644
+    elif change=='unknown':r['admitted']=True
+    elif change=='metadata-unknown':record['output']['metadata']['approved']=True
+    elif change=='metadata-bool':record['output']['metadata']['header']['entry']=False
+    elif change=='code':record['output']['metadata']['executableLoads'][0]['sha256']='f'*64
+    elif change=='relocation':record['output']['metadata']['sections'][0]['address']=32
+    elif change=='symbols':record['output']['metadata']['dynamicNames'].append('injected')
+    elif change=='protections':record['output']['metadata']['sections'][0]['relro']=True
+    elif change=='runpath':record['output']['metadata']['dynamicTags'][5]['value']='$ORIGIN:/tmp'
+    elif change=='missing-closure':manifest['systemClosure']=None
+    raw=bind_sherpa_fixture(record,manifest)
+    if change=='duplicate-file':manifest['files'].append(dict(manifest['files'][0]))
+    elif change=='missing-helper':manifest['helperInventory'].pop()
+    elif change=='missing-record':manifest['files'].pop()
+    elif change=='raw-digest':manifest['files'][-1]['sha256']='f'*64
+    elif change=='recipe-digest':
+        record['recipeSha256']='f'*64;raw=c.builtin_json(record)
+    elif change=='raw-noncanonical':raw+=b'\n'
+    elif change=='unknown-extension':manifest['builtinModuleTable']['recipe']['grant']=True
+    with pytest.raises(c.ContractError):c.sherpa_adaptation_record(raw,manifest)
+
+
+@pytest.mark.parametrize('value',[None,[],{},b'null',b'{"schemaVersion":1,"schemaVersion":1}',b'\xff',b'x'*(4*1024*1024+1)])
+def test_copied_sherpa_malformed_input_is_contract_error(value):
+    with pytest.raises(c.ContractError):c.sherpa_adaptation_record(value,{})
+
+
+def test_copied_sherpa_parent_profile_still_required(sherpa_record_fixture,builtin_manifest_fixture,monkeypatch):
+    record,manifest=sherpa_record_fixture;raw=bind_sherpa_fixture(record,manifest)
+    parent,config,policy=builtin_manifest_fixture
+    parent['files'].extend(manifest['files']);parent['helperInventory']=manifest['helperInventory']
+    parent['builtinModuleTable']['recipe']=manifest['builtinModuleTable']['recipe']
+    # Isolate already authenticated record reader; parent profile mismatch must still refuse.
+    monkeypatch.setattr(c,'verify_sherpa_adaptation',lambda *args:record)
+    with pytest.raises(c.ContractError,match='module table'):
+        c.builtin_manifest_identities(parent,config,policy)
+
+
+def test_actual_522_sherpa_build_record_data_only(monkeypatch):
+    """CI retained build bytes, no ELF import/tool execution/namespace or profile claim."""
+    import tarfile
+    archive=os.environ.get('ADE_CI_SHERPA_ARCHIVE')
+    if not archive:pytest.skip('dedicated CI supplies exact retained producer build')
+    with tarfile.open(archive,'r:') as tar:
+        members=tar.getmembers()
+        assert len(members)<=25000
+        by_name={}
+        for member in members:
+            assert member.name not in by_name
+            assert not member.name.startswith('/') and '..' not in member.name.split('/')
+            assert member.isdir() or member.isfile()
+            by_name[member.name]=member
+        def data(name,limit):
+            member=by_name[name]
+            assert member.isfile() and 0<=member.size<=limit
+            with tar.extractfile(member) as stream:return stream.read(limit+1)
+        manifest_raw=data('qualified-daemon.manifest.json',4*1024*1024)
+        manifest=c.parse(manifest_raw.decode())
+        evidence=c.parse(data('qualified-daemon.build-evidence.json',4*1024*1024).decode())
+        assert evidence['source']['commit']=='522ba78b4b54c6b59e293bc58672a248346b47d3'
+        assert evidence['manifestSha256']==c.hashlib.sha256(manifest_raw).hexdigest()
+        raw=data('qualified-daemon/'+c.SHERPA_RECORD,4*1024*1024)
+        record=c.sherpa_adaptation_record(raw,manifest)
+        monkeypatch.setattr(c,'read_regular',lambda path,limit=c.LIMIT,**kwargs:data('qualified-daemon/'+str(path).removeprefix('/data/'),limit))
+        assert c.verify_sherpa_adaptation(manifest,Path('/data'))==record
+        for row in [record['output'],*record['recipe']['dependencies']]:
+            path=row.get('path',c.SHERPA_MEMBER)
+            actual=data('qualified-daemon/'+path,32*1024*1024)
+            assert len(actual)==row['size'] and c.hashlib.sha256(actual).hexdigest()==row['sha256']
+        # Actual manifest raw-byte binding remains mandatory independently of record consistency.
+        config={'distributionRoot':'/not-used','distributionSha256':'0'*64,'closure':{'runtimeClosureSha256':'0'*64}}
+        monkeypatch.setattr(c,'protected_root_path',lambda path:Path('/tmp'))
+        monkeypatch.setattr(c.os,'getuid',lambda:1000)
+        monkeypatch.setattr(c,'read_regular',lambda *args,**kwargs:manifest_raw)
+        with pytest.raises(c.ContractError,match='raw distribution manifest'):c.verify_transport_distribution(config)

@@ -1,0 +1,48 @@
+name: Fork controller ELF profile data
+on:
+  push:
+    branches: [fork-controller-elf-profile]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: djbclark/paseo
+          ref: 389bb84ea48c8c800a3c528b23e1d192be052959
+          path: native-readonly-source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Fetch exact build-only producer evidence as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          timeout 180 gh api repos/djbclark/paseo/actions/artifacts/14488202313/zip > "$RUNNER_TEMP/sherpa-build.zip"
+          python3 - <<'PY'
+          import hashlib, os, pathlib, shutil, zipfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive=root/'sherpa-build.zip'
+          assert archive.stat().st_size==103753254
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()=='74c3570a7907db8bd9ea24bfbcb4fd9f18150a774a7cfc922739924e86f556ba'
+          with zipfile.ZipFile(archive) as z:
+              assert sorted(z.namelist())==['SHA256SUMS','qualified-daemon-build.tar']
+              sums=z.read('SHA256SUMS').decode().strip().split()
+              assert len(sums)==2 and sums[1]=='qualified-daemon-build.tar'
+              member=z.getinfo(sums[1]); assert member.file_size<=512*1024*1024
+              target=root/'qualified-daemon-build.tar'
+              with z.open(member) as source,target.open('xb') as output:
+                  shutil.copyfileobj(source,output,1024*1024)
+              assert target.stat().st_size==member.file_size
+              assert hashlib.sha256(target.read_bytes()).hexdigest()==sums[0]
+          PY
+      - name: Data consumers and existing exact namespace-port source regressions
+        run: uv run --with pytest python -m pytest tests/test_ade_fork_controller.py tests/test_ade_fork_release.py tests/test_ade_fork_ci.py -q
+        env:
+          ADE_CI_REQUIRE_NATIVE_READONLY_SOURCE: "1"
+          ADE_CI_SHERPA_ARCHIVE: ${{ runner.temp }}/qualified-daemon-build.tar
