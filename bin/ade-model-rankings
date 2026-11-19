@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""ade-model-rankings — zero-token periodic model-rankings refresh (docs/model-rankings.md).
+
+Fetches the two Artificial Analysis boards (one scrape each), updates docs/model-rankings.data.json
+with a dated snapshot, and rewrites only the standings table (section A) of docs/model-rankings.md.
+The frontier vs near-frontier classification is a deterministic cut (the MODELS table below), not a
+model prompt (`~/CLAUDE.md` order 13: periodic updates are scripts, never recurring model prompts).
+
+Subcommands:
+  refresh [--dry-run]   scrape the boards, write the data file, rewrite section A
+  check                 exit 3 when the data file is missing, incomplete, or older than STALE_DAYS
+  list                  print the current data-file snapshot as a table
+
+The script never invents a score: a scrape that does not resolve enough models writes an
+``incomplete`` data file and exits 3 so the schedule notices. Extraction regexes are tuned against
+the Firecrawl markdown of each board; if a board changes shape, tune `_score` below.
+
+No model calls, no version pin, no secret.
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+def _repo() -> str:
+    here = os.path.dirname(os.path.realpath(__file__))
+    return subprocess.run(
+        ["git", "-C", here, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+REPO = _repo()
+DATA = os.path.join(REPO, "docs/model-rankings.data.json")
+DOC = os.path.join(REPO, "docs/model-rankings.md")
+FIRECRAWL = "http://127.0.0.1:18805/v2/scrape"
+STALE_DAYS = 7
+
+# Boards: title -> URL. Self-hosted Firecrawl scrape (no commercial API).
+BOARDS = {
+    "coding_agent": "https://artificialanalysis.ai/leaderboards/coding-agents",
+    "intelligence": "https://artificialanalysis.ai/leaderboards/intelligence",
+}
+
+# The models we route, current as of 2026-11-19 (docs/model-rankings.md section B). `frontier=True` is
+# the apex/allowance tier; False is the near-frontier everyday band. Names must match the board's
+# display label (case-insensitive substring). A name added here that nothing routes to anymore is
+# pruned only when routing truth drops it (section C), so keep this table in step with
+# `config/ade.toml` `[dispatch].frontier_models` and the curated service rows manually.
+MODELS = [
+    {"name": "Gemini 4 Neon",            "vendor": "google",    "frontier": True},
+    {"name": "Gemini 4 Carbon",          "vendor": "google",    "frontier": True},
+    {"name": "Claude Fable 5.2",         "vendor": "anthropic", "frontier": True},
+    {"name": "Claude Opus 5.5",          "vendor": "anthropic", "frontier": False},
+    {"name": "Claude Sonnet 5.5",        "vendor": "anthropic", "frontier": False},
+    {"name": "GPT-6.2 Astra",            "vendor": "openai",    "frontier": True},
+    {"name": "GPT-6.2 Sol",              "vendor": "openai",    "frontier": False},
+    {"name": "Gemini 4 Argon",           "vendor": "google",    "frontier": False},
+    {"name": "Gemini 4 Hydrogen",        "vendor": "google",    "frontier": False},
+]
+
+
+def _scrape(url: str) -> str:
+    req = urllib.request.Request(
+        FIRECRAWL,
+        data=json.dumps({"url": url, "formats": ["markdown"]}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=180) as r:
+        body = json.loads(r.read())
+    return body.get("markdown") or body.get("data", {}).get("markdown", "") or body.get("content", "")
+
+
+def _score(board_text: str, name: str) -> float | None:
+    """The nearest number within 300 chars after the board's display label."""
+    for m in re.finditer(re.escape(name), board_text, re.IGNORECASE):
+        window = board_text[m.end():m.end() + 300]
+        n = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)(?!\d)", window)
+        if n:
+            return float(n.group(1))
+    return None
+
+
+def fetch() -> dict:
+    board_text = {b: _scrape(u) for b, u in BOARDS.items()}
+    rows = []
+    for model in MODELS:
+        rows.append({
+            "name": model["name"], "vendor": model["vendor"], "frontier": model["frontier"],
+            "coding_agent": _score(board_text["coding_agent"], model["name"]),
+            "intelligence": _score(board_text["intelligence"], model["name"]),
+        })
+    resolved = sum(1 for r in rows if r["coding_agent"] is not None or r["intelligence"] is not None)
+    return {
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "boards": {b: u for b, u in BOARDS.items()},
+        "incomplete": resolved < max(3, len(rows) // 2),
+        "rows": rows,
+    }
+
+
+def _cell(v):
+    return str(v) if v is not None else "\u2014"
+
+
+def _table(snapshot: dict) -> str:
+    lines = ["| Model | Coding-agent index | Intelligence index | Tier |",
+             "| --- | --- | --- | --- |"]
+    for r in snapshot["rows"]:
+        tier = "frontier" if r["frontier"] else "near-frontier"
+        lines.append(f"| {r['name']} | {_cell(r['coding_agent'])} | {_cell(r['intelligence'])} | {tier} |")
+    return "\n".join(lines)
+
+
+def _rewrite(snapshot: dict, dry: bool) -> None:
+    doc = open(DOC).read()
+    start = doc.index("| Model | Coding-agent index")
+    end = doc.index("## B.", start)
+    new_table = _table(snapshot) + "\n\n"
+    new_doc = doc[:start] + new_table + doc[end:]
+    if dry:
+        print(new_table)
+    else:
+        open(DATA, "w").write(json.dumps(snapshot, indent=2) + "\n")
+        open(DOC, "w").write(new_doc)
+
+
+def cmd_refresh(args):
+    snapshot = fetch()
+    _rewrite(snapshot, args.dry_run)
+    flag = " (INCOMPLETE)" if snapshot["incomplete"] else ""
+    print(f"updated {DATA} — {len(snapshot['rows'])} models{flag}")
+    if snapshot["incomplete"]:
+        sys.exit(3)
+
+
+def cmd_check(_args):
+    try:
+        snapshot = json.load(open(DATA))
+        stamp = dt.datetime.fromisoformat(snapshot["updated_at"])
+    except (OSError, ValueError, KeyError):
+        print("ade-model-rankings: no or unreadable data file; run refresh", file=sys.stderr)
+        sys.exit(3)
+    age = dt.datetime.now(dt.timezone.utc) - stamp
+    if age > dt.timedelta(days=STALE_DAYS):
+        print(f"ade-model-rankings: snapshot is {age.days}d old (>{STALE_DAYS}d)", file=sys.stderr)
+        sys.exit(3)
+    if snapshot.get("incomplete"):
+        print("ade-model-rankings: snapshot marked incomplete; run refresh", file=sys.stderr)
+        sys.exit(3)
+    print(f"snapshot current ({stamp.isoformat()}Z)")
+
+
+def cmd_list(_args):
+    snapshot = json.load(open(DATA))
+    print(f"# {snapshot['updated_at']}")
+    print(_table(snapshot))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    s = p.add_subparsers(dest="cmd", required=True)
+    r = s.add_parser("refresh")
+    r.add_argument("--dry-run", action="store_true")
+    r.set_defaults(func=cmd_refresh)
+    s.add_parser("check").set_defaults(func=cmd_check)
+    s.add_parser("list").set_defaults(func=cmd_list)
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
