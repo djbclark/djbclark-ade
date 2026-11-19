@@ -1574,3 +1574,44 @@ Include the probed CLI's version (or a short TTL) in the catalog cache key, and/
 "antigravity models" (#9718 closed thinking-levels, #6052 open slow-Windows timeouts, #9476 closed older model names,
 #9939 closed getCatalog `isDefault`). No duplicate for catalog staleness was found. The workaround is now the documented
 habit: run `paseo provider diagnostic <provider>` after any provider CLI update.
+
+## 22. trail — the PreToolUse guard refuses legitimate edits of `graft-hooks.cjs`, not just running it
+
+**Status: `ready-to-file`** (noted 2026-11-19; not filed — djbclark decides. It belongs as a comment on the existing
+[trailhq/Trail-Code#866](https://github.com/trailhq/Trail-Code/issues/866) rather than a new issue). Target: `trailhq/Trail-Code`.
+
+### Observed
+
+A dispatched worker could not commit a security fix to `.claude/helpers/graft-hooks.cjs`: `git-commit-own "…"
+.claude/helpers/graft-hooks.cjs .cursor/hooks/graft-hooks.cjs …` was refused with
+
+> Trail's hook scripts run only from the host's hooks, never by hand. If something about Trail looks wrong, tell the
+> person.
+
+No hook was executed. The lead had to commit the same change from a session whose harness lacks the guard.
+
+### Cause (read from the installed package)
+
+`@nanonets/graft/dist/skills/risk.js` tests the command's words against `HOOK_SCRIPT`, whose first pattern is
+`/\b(?:trail|graft)-hooks?[\w*?[\]-]{0,64}(?:\.cjs\b|\*)/i` — so **any** command that merely *names* the file matches,
+including `git add`/`git commit`/`git-commit-own` pathspecs and `rg`/`cat` invocations on it. The guard's own reason
+string states the intent as "run only from the host's hooks", which is narrower than what it enforces.
+
+### Why it matters
+
+The guard blocks the very workflow its own fix requires: changing the hook helper is a normal, reviewable repository
+edit (this repo made two such fixes today, #798 and #827), and the block silently splits "agents that may touch this
+file" by harness. It also pushes work toward bypassing the guard by changing the pathspec, which is worse than a precise
+rule.
+
+### Suggested fix
+
+Match *execution* rather than mention: require the hook path to be the command word (or the interpreter's argument,
+e.g. `node …/graft-hooks.cjs`), and exempt `git` subcommands that take pathspecs (`add`, `commit`, `diff`, `log`,
+`checkout`, `restore`) plus read-only tools (`cat`, `rg`, `grep`, `sed`, editors). Keep denying a bare
+`node .claude/helpers/graft-hooks.cjs …`.
+
+### Searched first (2026-11-19)
+
+`gh search issues --repo trailhq/Trail-Code "hook script"` and `"guard"` found #866 (the repo-controlled-import finding
+this repo filed today) as the nearest thread; no issue covers the guard's false positive on pathspecs.
