@@ -1,10 +1,18 @@
 # NATS rollout evidence — 2026-11-18
 
-The implementation goal remains **incomplete**. Dedicated disposable pilots are
-approved; existing workstreams remain unenrolled. This dated record separates
-executed proofs from CI fixtures and outstanding activation decisions.
+The implementation and approved bounded rollout are **complete**. See the
+[final acceptance](nats-jetstream-final-acceptance.md),
+[implementation plan](nats-jetstream-implementation-plan.md), and
+[execution ledger](nats-jetstream-execution.md) for the published implementation,
+approved activation, native physical two-host succession, first real workstream,
+and recovery evidence.
 
-## Implementation and deployment
+The implementation/deployment snapshot below predates final acceptance and is
+retained as historical evidence. Its earlier pending decisions are resolved as
+recorded below. Existing workstreams remain unenrolled; broader enrollment still
+requires separate authorization.
+
+## Implementation and deployment — historical snapshot
 
 | Artifact | Verified state |
 |---|---|
@@ -62,21 +70,24 @@ The exercised native inbox had no pending report after explicit dispositions.
 No lost accepted report, duplicate committed disposition, unauthorized transfer
 or accepted stale-owner mutation was observed in these exercised proofs.
 
-## Remaining rollout gates
+## Completed rollout gates
 
-1. Finish current-head ADE review/check/bot gates and publish through the normal
-   merge path. Green scoped tests do not substitute for required PR checks.
-2. Await explicit primary activation approval: its dry activation would restart
-   Paseo, Tailscale and Gradle cache and reload D-Bus, without reboot. Revalidate
-   the current published source, baseline and recovery access before activation;
-   then verify services and install the tracked managed client credential.
-3. Complete the dedicated native primary/manual-controller pilot and resource-free
-   native cross-host handoff after that release. Do not substitute a broker-only
-   proof or a client configuration bypass for it.
-4. Obtain separate approval for one concrete real workstream and its staged
-   enrollment. Dedicated pilot consent does not enroll existing workstreams.
-   Keep unenrolled behavior unchanged and retain legacy delivery proofs until
-   the enrolled machine-receipt policy is deliberately activated.
+1. ADE review, required checks and normal merge gates passed; the implementation
+   was published through [PR795](https://github.com/djbclark/djbclark-ade/pull/795).
+2. The operator approved primary activation and its listed restarts. The approved
+   release, subsequent formatting-only release and managed client credential
+   setup completed; source/revision and service checks passed.
+3. Dedicated native physical cross-host handoff passed with independent primary
+   state, preserved intake provenance, explicit processing and stale-owner refusal.
+4. The operator separately approved one fresh resource-free read-only inventory
+   workstream. Machine intake, one reconciled coalesced wake, explicit completion
+   and independent output/artifact verification passed.
+
+The [final acceptance](nats-jetstream-final-acceptance.md) records the exact
+published revisions, checks, limits and evidence for these results. Broader
+workstream enrollment, nonempty remote resource migration and implementation of
+the central-questions feature remain separate work; this closeout does not
+authorize them.
 
 The bounded optional Temporal OSS fake-effect experiment passed in Linux CI.
 No Google resources, Temporal Cloud subscription or paid trial conversion was
