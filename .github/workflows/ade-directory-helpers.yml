@@ -1,0 +1,37 @@
+name: ADE directory business operations
+on:
+  push:
+    branches: [fork-directory-helpers]
+  pull_request:
+    paths:
+      - 'bin/ade_directory_operations.py'
+      - 'bin/ade_claims.py'
+      - 'tests/test_ade_directory_operations.py'
+      - '.github/workflows/ade-directory-helpers.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ade-directory-helpers-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  isolated-business-operations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Actual isolated Python and temporary filesystem operations (not native qualification)
+        run: >-
+          uv run --with pytest python -m pytest
+          tests/test_ade_directory_operations.py tests/test_ade_claims_bind_owner.py
+          tests/test_ade_claims_release.py tests/test_ade_ws_names.py tests/test_ade_ws_autoname.py
+          --junitxml=ade-directory-business.xml -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ade-directory-business-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ade-directory-business.xml
+          if-no-files-found: error

@@ -438,16 +438,20 @@ def update_claim(claim_id: str, **fields: Any) -> Optional[dict[str, Any]]:
 
 def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
                owner_record: Optional[str] = None,
-               owner_session: Optional[str] = None) -> dict[str, Any]:
+               owner_session: Optional[str] = None,
+               expected_path: Optional[str | os.PathLike[str]] = None) -> dict[str, Any]:
     """Merge owner.* fields on an active claim (W3). Raises ValueError when missing or inactive.
 
     Refuses to overwrite a different non-empty ``owner.agent`` (second agent must not
     steal the claim; handover is explicit, not silent).
+    Optional expected_path checks the current association under this same lock.
     """
     with _claims_lock():
         c = read_claim(claim_id)
         if c is None:
             raise ValueError(f"no claim {claim_id!r}")
+        if expected_path is not None and not _same_path(c.get("path"), expected_path):
+            raise ValueError("claim path changed before binding owner")
         if not claim_state_active(c):
             raise ValueError(f"claim {claim_id!r} is not active ({shown_state(c)})")
         owner = dict(c.get("owner") if isinstance(c.get("owner"), dict) else {})
@@ -534,16 +538,20 @@ def rebind_successor(predecessor: str, *, caller: str, record_path: str | os.Pat
     return done
 
 
-def set_state(claim_id: str, state: str) -> Optional[dict[str, Any]]:
+def set_state(claim_id: str, state: str, *,
+              expected_path: Optional[str | os.PathLike[str]] = None) -> Optional[dict[str, Any]]:
     """active|released|merged; released and merged stamp released_at, active clears it. Re-activating a claim
     applies the create_claim path rule under the lock: another owner's active claim on the path raises
-    PathClaimed; the same owner's older active record of that path is released."""
+    PathClaimed; the same owner's older active record of that path is released.
+    Optional expected_path checks the current association under this same lock."""
     if state not in STATES:
         raise ValueError(f"invalid state {state!r}; one of {', '.join(STATES)}")
     with _claims_lock():
         c = read_claim(claim_id)
         if c is None:
             return None
+        if expected_path is not None and not _same_path(c.get("path"), expected_path):
+            raise ValueError("claim path changed before setting state")
         if state == "active":
             mine = _owner_keys(c)
             older: list[str] = []
