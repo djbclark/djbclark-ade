@@ -27,3 +27,6 @@
 
 - Separate automatic source/build fixture checks from explicitly requested
   privileged namespace attempts, preserving the required runtime assertions. (#0)
+
+- Document automatic fixture evidence, explicit namespace attempts and the
+  remaining full evaluator and feature requirements. (#0)
