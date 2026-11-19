@@ -12,8 +12,8 @@ native qualification follows from a passing offline test.
 `ProtectedAuthority.current()` must come from the existing protected controller's
 one-time operator enrollment, independently of candidate metadata. It returns a
 fully specified `Policy`, or None. The separate `permits(purpose, closure)` port
-must evaluate CURRENT authenticated revocations and standing authority. Neither
-port has a production implementation here. JSON bytes, a matching receipt hash,
+must evaluate CURRENT authenticated revocations and standing authority. The source integration below implements these ports; no operator anchor,
+credential source, enrolled account or runtime facade is installed here. JSON bytes, a matching receipt hash,
 READY, ACCEPTED, and an S3 ExpectedBucketOwner parameter are not authentication.
 
 All limits are required enrollment choices; there are no inherited proposal
@@ -34,7 +34,9 @@ candidate-supplied locator enrolls a destination.
 The host supplies separately bound writer and reader clients. `S3Store` checks
 region, distinct identity labels and no hidden SDK retry. Those labels are the
 trusted host's assertion, not an STS or IAM identity proof. The host must establish
-that binding; this library never probes credentials or creates a client. A
+that binding; the standalone S3Store never resolves credentials. The Stage3 binder can create
+explicit clients and perform metered identity checks only after selected protected
+inputs; those calls have not been executed during this delivery. A
 future host may use boto3 sessions and botocore Config with explicit bounded
 connect/read timeouts, `total_max_attempts=1`, and configured endpoints disabled.
 The port accepts only the regional AWS S3 endpoint (plus the legacy global
@@ -187,3 +189,80 @@ Primary API references checked for this source:
 [GetObjectLegalHold](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3/client/get_object_legal_hold.html),
 [PutObjectRetention](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3/client/put_object_retention.html),
 and [botocore Stubber](https://botocore.amazonaws.com/v1/documentation/api/latest/reference/stubber.html).
+
+
+## Stage3 source integration, not runtime enrollment
+
+`Enrollment.load` requires an independently supplied exact anchor digest, expected
+OS owner and selected executor. Every Policy, principal kind/stable ID/session,
+standing scope/privacy digest, executor-specific private journal location/device/
+inode, term, wallet limit and cash quote is mandatory. No selected values ship.
+The loader checks no-follow private regular bytes before SDK/client work. Live
+wire guards recheck anchor bytes/owner/expiry. The CLI stays HOLD and never loads
+an enrollment, credential provider or SDK client by default.
+
+`CredentialBinder` uses explicit immutable CredentialBundle material from the
+selected host, not a credential resolver. The actual lazy boto3 factory passes
+explicit keys/token/region/official endpoint, TLS, bounded timeout and one-attempt
+configuration. An enrolled prepaid identity slot is fsynced before STS
+GetCallerIdentity. Exact Account, ARN and stable user/role ID/session must match;
+two sessions of the same role do not make independent principals. Only then is
+an S3 client constructed from the SAME bundle. Refresh/replacement/expiry needs
+new binding. Identity response alone is not authorization. No credential material
+is stored in request records; unknown SDK parameters are refused before journaling.
+These are actual API source paths, exercised only with dummy offline clients.
+
+Schema2 explicitly appends a protected integration header to the schema1 custody
+shape. It records owner-anchor identity, current authority expiry/fence/floor,
+revocations, exact closure screening and the fully charged RPC-wallet ledger.
+`prepare_schema2` requires exact-source/version consent and the owner-pinned
+header template (excluding the anchor digest, avoiding self-reference).
+`migrate_schema1` is explicit; cold recovery never invokes it. The old READY,
+accepted baseline, census and their exact schema1 versions remain intact.
+Schema2 current validation enforces current floors and actual protected header
+bindings; historical schema1 validation is preserved. Raw READY still needs the
+same complete existing reader predicate. No owner policy/schema migration is
+inferred from discovering a newer candidate.
+
+`AttemptJournal` is an existing selected executor's private consumption file,
+not a new cloud service. Its pure genesis builder never installs or resets it.
+Missing/relocated/nonprivate journals HOLD before client creation. Root-approved
+seed wallets must already be wholly escrowed. Every SDK operation (including
+identity/current/protection/history reads) consumes one durable slot with bounded
+method/destination/body digest/response allowance before send. File and directory
+fsync precede the wire; authorizations, screened closure, time, binding and fence
+are checked AGAIN afterward. A rejected post-fsync send remains charged. No
+status/404/timeout/lost ACK or unused slot refunds a wallet. The whole escrow,
+original issue-year and payload/control reserves remain additive. Request metadata
+contains exact nonsecret targets, hashes and intended new wallet IDs; it cannot
+silently include SDK credential/customer-key fields.
+
+Successor allocation uses current CTRL CAS paid by the old coordination wallet,
+not an unaccounted recursive call. Reservation is immutable and parent-linked;
+local registration waits for actual current readback. Lost replies reuse the same
+observed wallet ID; a new nonce cannot hide uncertain old liability. Explicit
+refencing needs a separate current grant, keeps all old wallets/issuance atoms
+and does not prove quiescence. Every executor consumes only its own selected
+journal/wallet. Journal capacity, attempt/response/cash/term limits HOLD further
+intake rather than reinitializing counters or inventing free discovery.
+
+Cold recovery lazily binds only the independent reader, reads the fixed actual
+CURRENT key and exact VersionId/bytes/protection, ingests its protected authority,
+and calls the SAME resolve_current reader. It never treats an old checkpoint,
+backup journal, raw phase or locator as current consent. A separately surviving
+enrolled executor/journal can consume its own seed, discover registered successor
+wallets and continue within existing standing scope; lost executor wallets remain
+charged and cannot be reused from copied counters. All-journals/anchors-lost
+recovery is an exceptional owner gate, not a new automatic allowance. Deliberate
+protected-host journal rollback or stolen direct credentials remains outside
+this trusted-controller meter; it is not an account-wide provider billing cap.
+
+All fixtures are synthetic. Actual account/architecture/principal/term/budget/
+privacy/executor choices, credential acquisition, cloud enrollment/migration,
+retention/restore/identity proof, runtime facade and CF/Fable/evidence/promotion
+remain unselected or HOLD. No client, STS, S3, account or credential call was run
+on the Mac. Only source/static checks and offline Linux CI belong to this unit.
+
+Primary new API references: [boto3 Session](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html),
+[GetCallerIdentity](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sts/client/get_caller_identity.html),
+and [IAM principal values](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_variables.html#principaltable).
