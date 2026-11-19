@@ -33,11 +33,12 @@ def _project(tmp_path: Path) -> Path:
 
 
 def _run(hook: Path, argument: str, project: Path, tmp_path: Path) -> str:
-    """Run one hook in the temporary project, cut off from every installed trail/graft.
+    """Run one hook in the temporary project with the trail lookups cut off.
 
-    `entry()` tries a remembered trail home, the packages above the project and above node, the PATH, then
-    `npm root -g`; a PATH holding nothing but a `node` link removes the last three, so the run always takes the
-    in-repo path this file tests instead of importing whatever is installed on the machine.
+    `entry()` tries a remembered trail home (defeated by `TRAIL_HOME`), the packages above the project, those above
+    node, the PATH, then `npm root -g`; a PATH holding nothing but a `node` link removes the PATH and npm probes. A
+    node whose `../lib` holds a global trail (setup-node, nvm) can still answer `fromPkg`, and then this run takes the
+    upstream branch: the assertions below name the in-repo text, so that shows up as a failure rather than a false pass.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -195,3 +196,18 @@ def test_a_large_context_survives_the_pipe(tmp_path: Path) -> None:
         "}\n")
     payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
     assert len(payload["additional_context"]) == 200000
+
+
+def test_a_split_write_is_reshaped_once_both_halves_arrive(tmp_path: Path) -> None:
+    """Half a payload at settle must not flush a parse error: the exit hook reshapes the whole thing."""
+    project = _project(tmp_path)
+    dist = project / "dist" / "claude"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "hooks.js").write_text(
+        "export function main() {\n"
+        "  const body = JSON.stringify({ hookSpecificOutput: { additionalContext: 'SPLIT ' + 'Y'.repeat(50) } });\n"
+        "  process.stdout.write(body.slice(0, 20));\n"
+        "  setTimeout(() => process.stdout.write(body.slice(20)), 25);\n"
+        "}\n")
+    payload = json.loads(_run(CURSOR_HOOK, "cursor-session-start", project, tmp_path))
+    assert payload["additional_context"].startswith("SPLIT YYYY")

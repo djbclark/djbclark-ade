@@ -137,20 +137,19 @@ function reshaped(run) {
   let flushed = false;
   const flush = () => {
     if (flushed) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch { return; }              // nothing yet, or half of a payload: not an error, keep capturing for exit
     flushed = true;
     process.stdout.write = write;
-    let shape = null;
-    try {
-      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      const inner = parsed.hookSpecificOutput || {};
-      // Claude's hook output carries its notice at the top level and its context inside hookSpecificOutput; Cursor has
-      // one field for both, so the two are joined rather than one being lost.
-      const context = [parsed.systemMessage, inner.systemMessage, inner.additionalContext]
-        .filter(Boolean).join('\n\n');
-      if (context) shape = { additional_context: context };
-      else if (parsed.additional_context) shape = parsed;
-    } catch { shape = null; }        // nothing printed, or not JSON: say nothing
-    if (shape) write(JSON.stringify(shape));
+    const inner = parsed.hookSpecificOutput || {};
+    // Claude's hook output carries its notice at the top level and its context inside hookSpecificOutput; Cursor has
+    // one field for both, so the two are joined rather than one being lost.
+    const context = [parsed.systemMessage, inner.systemMessage, inner.additionalContext]
+      .filter(Boolean).join('\n\n');
+    if (context) write(JSON.stringify({ additional_context: context }));
+    else if (parsed.additional_context) write(JSON.stringify(parsed));
   };
   process.once('exit', flush);
   // Flush on settle only once there is something to write (a large payload must not wait for exit on a pipe);
