@@ -11,6 +11,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 ## Carried
 
+89. **Fix the MCP positional `args` corruption in PR #771** (operator, 2026-11-19, /steps option 1): https://github.com/djbclark/djbclark-ade/pull/771 is held on an untriaged Codex P2 finding (discussion r4600108952) that MCP `args` positional vectors are still unioned/deduped. Decision: reproduce the corruption and fix it in a claimed worktree, then re-review. Do not resolve the bot thread without a fix, and do not close the PR.
+
 88. **Build Carried 70 + 68 next** (operator, 2026-11-19, /steps option 1): the next implementation slice is the automatic re-handoff of a stuck/errored session onto a verified-healthy pool (Carried 70) together with quota-probe freshness that does not trust a stale reading (Carried 68). Triggered by the live GoUsageLimitError failure (Carried 84). Pre-empts the other queued builds (81 predecessor-archive, 83 upstream-filing edit, 77 stack-rebase). Separately the operator flagged the unmapped-account problem (Carried 79) as fix-asap, ahead of this build.
 
 87. **opencode-go-t-e headroom floor** (operator, 2026-11-19, /steps option 1): the lead session and its workers bill `opencode-go-t-e`, which fell to ~4% headroom. Decision: do NOT pre-emptively re-handoff. Move the session automatically only when it crosses 2% AND a verified-healthy mapped account exists. `opencode-go-djbclark` and `opencode-go-dclark` were both reported unmapped (no trustworthy headroom) so neither is a safe target until it has a real quota mapping (Carried 79a). The supervisor already refuses new re-handoffs to a thin account; this adds the move-at-2% trigger.
