@@ -677,3 +677,51 @@ a fresh execution receipt; retained baseline A remains separately available. The
 same-live synthetic failure trace uses replace expected8->failure CAS9, recover
 expected9->CAS10, then two verifies expected10 with CAS10 unchanged. These counters
 remain distinct from the ADE Journal and native reservation generations.
+
+
+### Copied Sherpa addon provenance is finite data
+
+Producer source `522ba78b4b54c6b59e293bc58672a248346b47d3` (parent
+`da68f41fd430036af2fe42bdeac7b3513923794d`) records exactly one copied
+`node_modules/sherpa-onnx-linux-x64/sherpa-onnx.node` adaptation. The controller
+accepts only its closed schema1 record at fixed
+`native-provenance/sherpa-addon-adaptation.json`, ordinary sealed file/helper
+inventory. No manifest top-level extension or namespace helper change is used.
+`builtinModuleTable.recipe.copiedSherpaAddonRecipeSha256` binds the WHOLE raw
+canonical record file; the record's internal `recipeSha256` separately hashes
+canonicalBuiltinJson(recipe). Substituting one digest for the other refuses.
+The adapted-profile binding table and helper inventory mirror the committed
+producer's builtin-helper binding and system-closure/native-provenance/.so members.
+Legacy manifests without this record retain their existing mapping.
+
+The consumer fixes package1.12.28, integrity/revision/member, original840296-byte
+SHA, three ordered sibling library identities, literal patchelf argv and eight
+ordered primary source URL/size/SHA identities (including LICENSE). Tool version,
+bytes/size and compressed provenance are bound as measured evidence. It validates
+closed bounded before/after metadata and their stable code/relocation/init/symbol/
+version/protection observations, without deriving any observations from ELF bytes.
+Output size/SHA and compact sibling ELF descriptions must match actual manifest,
+helper inventory and systemClosure rows. Original/tool gzip provenance is read
+with bounded single-stream decompression and exact uncompressed size/SHA, without
+writing/extracting/executing anything. Source and all other actual retained bytes
+still pass the existing complete raw-manifest/sealed-file verification first.
+Unknown keys, changed source/tool/argv/dependency/output/metadata, noncanonical
+JSON, missing cross references and bounds violations HOLD.
+
+This is data consistency, not a third ELF resolver, build transformation permission,
+CPU behavior approval, or proof that metadata describes executed code. The reviewed
+packaged389 namespace verifier remains pinned unchanged and checks actual current
+namespace/ELF/cache/inode facts immediately before transport. External protected
+qualification and all14 profiles, actual private owner/full cohort, current consent
+and native CAS remain mandatory. Build provenance and the pinned upstream source
+correlation do not supply reproducible-build attestation or meaningful model-bound
+CPU/native feature proof. No live configuration, profile, schedule or grant is
+installed by this change.
+
+Dedicated Linux source CI consumes the exact producer522 build artifact as DATA,
+checks its independently supplied ZIP digest and inner archive digest, and reads
+only named bounded tar members without extraction/native import. It tests the
+actual measured record/output/siblings and gzip provenance along with synthetic
+canonical/mismatch/unknown-schema negatives. Actual namespace/private execution
+qualification is not inferred from this positive data test. Existing actual389
+import/refusal and no-Popen-on-final-verifier-failure regressions remain required.
