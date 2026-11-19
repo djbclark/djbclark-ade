@@ -188,6 +188,17 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    that yes. Order 9 says how a permitted change is made; this order says whether it may be. Reading, reviewing and reporting on code elsewhere needs no
    permission; a fix found there is reported as a proposal, not applied.
 
+12. **Never develop or test against the live privileged boundary** (operator, 2026-11-19, after a session installed an
+    experimental `sudo-secretspec` build over `/usr/local` and every agent on the machine failed secret resolution for
+    about ten minutes). The installed broker, its sudoers policy, the vault and the service account are shared production
+    infrastructure: other agents call them constantly. Anything that changes them — a new binary, a policy, a config, a
+    schema, a migration — is proven first on a **disposable boundary**: the `test-boundary` cargo feature
+    (`/opt/sudo-secretspec-test`, its own identity and sudoers file) or a throwaway CI runner, never the live prefix.
+    Installing, upgrading or rolling back the operational broker is an operator-approved action done from release media,
+    not a step in a dev loop. The same rule covers every privileged or shared-runtime dependency in this stack
+    (litellm, the oauth bridges, launchd services, anything another agent's turn calls while you work): experiment in a
+    copy, swap the live one only with explicit approval and a tested rollback.
+
 ## Machine context
 
 - **Paseo is the only harness (2026-10-31).** `paseo ls -a -g --json` / `paseo run` /
