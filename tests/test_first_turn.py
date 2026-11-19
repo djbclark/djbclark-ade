@@ -90,3 +90,24 @@ def test_retirement_allows_finish_turn_but_rechecks_original_proof(evidence):
     write(terminal, pending)
     with pytest.raises(EvidenceError, match='changed'):
         pi_first_turn(home, record, {'Status': 'running'}, proof=proof)
+
+
+@pytest.mark.parametrize('metadata,bad_field', [
+    ({'type': 'model_change', 'provider': 'pool', 'modelId': 'model'}, 'modelId'),
+    ({'type': 'thinking_level_change', 'thinkingLevel': 'high'}, 'thinkingLevel'),
+    ({'type': 'custom', 'customType': 'extension-state', 'data': {'value': 1}}, 'customType'),
+    ({'type': 'label', 'targetId': 'e1', 'label': 'bookmark'}, 'label'),
+    ({'type': 'session_info', 'name': 'session'}, 'name'),
+])
+@pytest.mark.parametrize('malformed', [False, True])
+def test_supported_metadata_is_validated_before_verdict(evidence, metadata, bad_field, malformed):
+    home, record, _, terminal, write = evidence
+    tail = {**metadata, 'id': 'e2', 'parentId': 'e1', 'timestamp': '2026-11-18T12:00:02Z'}
+    if malformed:
+        tail[bad_field] = 42
+    write(terminal, tail)
+    if malformed:
+        with pytest.raises(EvidenceError, match='malformed native metadata'):
+            pi_first_turn(home, record, {'Status': 'idle'})
+    else:
+        assert pi_first_turn(home, record, {'Status': 'idle'})['state'] == 'complete'

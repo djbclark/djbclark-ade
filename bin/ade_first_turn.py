@@ -36,11 +36,12 @@ def owned_read(path, limit):
     finally:
         os.close(fd)
 
-def pi_first_turn(home, record, snapshot, *, proof=None):
+def pi_first_turn(home, record, snapshot, *, proof=None, failure_only=False):
     """No credentials or transcript content leave this function, even on failure.
 
     Conservative subset: new, unbranched Pi v3 session. Native terminal stop,
     generated output, post-ack append timestamp and settled runtime are all required.
+    Failure-only inspection needs no ack and can never return completion.
     Unknown providers, branch navigation, schema changes and partial writes fail closed.
     """
     try:
@@ -66,31 +67,58 @@ def pi_first_turn(home, record, snapshot, *, proof=None):
         if (header.get('type') != 'session' or header.get('version') != 3 or
                 header.get('id') != handle.get('sessionId') or header.get('cwd') != cwd):
             raise EvidenceError('native session header mismatch')
-        after = stamp(record['ack_observed_at'])
+        after = None if failure_only else stamp(record['ack_observed_at'])
         parent = None
+        previous_time = None
         seen = set()
         final = None
         final_time = None
         proven = None
         for entry in rows[1:]:
+            if not isinstance(entry, dict):
+                raise EvidenceError('malformed native entry')
             eid = entry.get('id')
-            if not isinstance(eid, str) or eid in seen or entry.get('parentId') != parent:
+            if (not isinstance(eid, str) or not eid or eid in seen
+                    or 'parentId' not in entry or entry['parentId'] != parent):
                 raise EvidenceError('branched or malformed native transcript unsupported')
             seen.add(eid)
             parent = eid
             when = stamp(entry.get('timestamp'))
+            if previous_time is not None and when < previous_time:
+                raise EvidenceError('non-monotonic native timestamps')
+            previous_time = when
             if entry.get('type') != 'message':
+                # Only state/metadata entries with known shapes are supported.
+                # Context edits, compaction and branch summaries need a separate adapter.
+                fields = {'model_change': ('provider', 'modelId'),
+                          'thinking_level_change': ('thinkingLevel',),
+                          'custom': ('customType',), 'label': ('targetId',),
+                          'session_info': ()}
+                kind = entry.get('type')
+                if not isinstance(kind, str) or kind not in fields:
+                    raise EvidenceError('unsupported native entry type')
+                if any(not isinstance(entry.get(key), str) or not entry[key] for key in fields[kind]):
+                    raise EvidenceError('malformed native metadata')
+                optional = {'label': 'label', 'session_info': 'name'}.get(kind)
+                if optional in entry and not isinstance(entry[optional], str):
+                    raise EvidenceError('malformed native metadata')
                 continue
             msg = entry.get('message')
             if not isinstance(msg, dict):
                 raise EvidenceError('malformed native message')
-            if when <= after:
+            if after is not None and when <= after:
                 continue
-            if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
-                return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
             if proof and entry['id'] == proof.get('entry_id'):
                 proven = (entry, when)
             final, final_time = (entry, when)
+        # Entry structure and chronology are checked before transcript failure;
+        # saved proof identity/digest checks below are required only for success.
+        if final is not None:
+            msg = final['message']
+            if msg.get('role') == 'assistant' and msg.get('stopReason') in ('error', 'aborted'):
+                return {'state': 'failed', 'cause': 'provider-' + msg['stopReason']}
+        if failure_only:
+            return {'state': 'pending', 'cause': 'acknowledgement-required'}
         if proof:
             if proven is None or header['id'] != proof.get('session_id'):
                 raise EvidenceError('accepted native terminal no longer exists')

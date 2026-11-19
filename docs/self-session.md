@@ -454,8 +454,22 @@ session identity and a fresh idle runtime readback produces `acknowledged`.
 from the provisional ack. Legacy same-provider handoffs retain their existing
 contract; they do not acquire a first-turn guarantee by this change.
 
+Before acknowledgement, the predecessor may also run `verify-turn` to inspect
+failure-only evidence. After checking entry IDs/parents, non-decreasing timestamps,
+message objects and supported metadata fields, an error in the latest applicable
+Pi message records `first-turn-failed` and permits retry.
+Recovered output stays pending acknowledgement; malformed tails fail closed.
+Successful output never substitutes for the real ack or retires the predecessor.
+Saved proof session/entry identity and terminal digest are checked on the success
+path, after the failure verdict; they are not prerequisites for recording failure.
+
 The adapter reads the exact owned canonical transcript named by the matching
 Paseo persistence record. It supports unbranched Pi v3 JSONL sessions only.
+Supported non-message entries are `model_change`, `thinking_level_change`,
+`custom`, `label` and `session_info`, with their required string fields and optional
+label/name strings checked. Other entry types (including context edits, compaction
+and branch summaries) are unsupported and fail closed. Timestamps may be equal,
+but must never move backwards; the ack cutoff cannot revive an earlier error.
 Unknown schemas, branches, partial files and providers fail closed. Raw content,
 credential-bearing errors and provider messages are never put into evidence.
 The receipt contains only session/entry IDs, completion time and a fixed class.
@@ -467,7 +481,9 @@ failed candidate is idle/error/closed without permission waits, saves visible
 attempt history and excludes its physical router service before requesting a
 fresh plan. It never changes credentials or tries another account inside a
 provider. If planning fails, `retry-ready` is preserved; `handoff --checkpoint
-FILE --quiesced` resumes that intent. Ambiguous creation remains unreplayed.
+FILE --quiesced` resumes that intent. A definite creation refusal also preserves
+attempt history, excluded pools and route kind for the next handoff, which still
+requires the old token-label probe to list no agent. Ambiguous creation remains unreplayed.
 Failed candidates are not archived automatically and have no project authority.
 
 An operator-appointed lead invokes `appoint --record FILE --appointed ID
