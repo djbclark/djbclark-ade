@@ -9,3 +9,7 @@
 
 - Use actual external plugin manifest IDs in the full runtime cohort, separately
   from installer aliases, while preserving every required feature. (#0)
+
+- Prepare a genuine retained public-client metadata component for actual lazy
+  Claude creation, plugin mode/stamp, native title readback and archive. It does
+  not qualify discovery, resume, claims, helpers or the complete runtime. (#0)
