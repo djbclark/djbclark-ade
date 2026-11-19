@@ -879,7 +879,7 @@ def verify_transport_distribution(config):
     return manifest
 
 
-# Independently reviewed native389/d8/a3f/8033 identities, not supplied by artifact JSON.
+# Independently reviewed native389/d8/a3f/8033/06bc identities, not artifact JSON.
 # A changed helper requires a separately reviewed adapter source update.
 READONLY_NAMESPACE_SHA256 = '605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7'
 READONLY_NAMESPACE_SIZE = 52756
@@ -888,11 +888,12 @@ READONLY_NAMESPACE_IDENTITIES = frozenset({
     (53480, '4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf'),
     (54910, '39ce30d1fc0e102889075e778f26a15c7b12a2ed770c1692325198ced5bc0cda'),
     (56756, 'ef061bcb2de359516a37279d394f19befae0ea351d816f2d2c520032b7f03fd7'),
+    (57926, '25ea64e7a238c27931565d5d10faaef927cc85755e69811ee9dc492376178617'),
 })
 
 
 def verify_readonly_namespace(config, manifest):
-    """Invoke only the fixed packaged port from four reviewed sources; no resolver copy."""
+    """Invoke only the fixed packaged port from five reviewed sources; no resolver copy."""
     if type(manifest) is not dict:
         if config.get('cohortVersion')==2:raise ContractError('verified V2 transport manifest absent')
         return

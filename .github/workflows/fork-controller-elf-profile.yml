@@ -36,6 +36,12 @@ jobs:
           ref: 8033d78d7246ca99c1aefd8933db28cf67c18aab
           path: native-readonly-8033-source
           persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: djbclark/paseo
+          ref: 06bc61dcecd645faccf61ca33fa830e0778fea53
+          path: native-readonly-06bc-source
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Fetch exact build-only producer evidence as data
         env:
