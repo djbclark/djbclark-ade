@@ -1,29 +1,60 @@
 #!/usr/bin/env python3
-"""The live re-handoff step a supervisor scan would call. NOT YET BUILT: it refuses rather than guess.
+"""Re-hand the stuck agents a supervisor scan planned, through ade-self-session's cross-agent handoff.
 
-ade-self-session handoff takes a checkpoint file and a --route-kind and lets the router choose the successor pool. It
-has no --agent or --target, so a re-handoff cannot simply name the stuck agent and the alternative ade-pi-stuck
-picked. Doing it correctly means writing a per-agent checkpoint and driving handoff, then accept, verify-turn and
-finish, with the failed pool excluded. That is Carried 70's remaining work.
+The scan (bin/ade-supervisor-scan) decides who is stuck and writes a plan. For each entry marked
+`would-rehandoff`, this writes a small checkpoint and calls `ade-self-session handoff --predecessor <id>`,
+which re-hands that agent rather than the caller (Carried 103). An entry with no healthy alternative is logged
+and left where it is.
 
-Until it is built, this exits non-zero and moves nothing, so the scan logs the failure and no agent is archived or
-relaunched on a guess. The plan file is read only to confirm it is the plan the scan wrote.
+The handoff creates a successor and waits for it to accept. It does not archive the predecessor. That happens
+later, in `finish`, only after the successor's first real turn is verified. So this never archives an agent
+itself, and a failed handoff leaves the agent where it was.
+
+The handoff call is injectable (`runner`) so the tests drive a fake and nothing here reaches a live Paseo unless
+it is actually run.
 
     ade-supervisor-rehandoff PLAN.json
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
-def main(plan_path: Path) -> int:
+def rehandoff(plan_path: Path, runner=None) -> int:
     plan = json.loads(plan_path.read_text())
-    count = len(plan.get("plan") or []) if isinstance(plan, dict) else 0
-    print(f"ade-supervisor-rehandoff: live re-handoff is not built; {count} planned agent(s) left where they are")
-    return 1
+    entries = plan.get("plan") if isinstance(plan, dict) else None
+    if not isinstance(entries, list):
+        print("ade-supervisor-rehandoff: plan has no entry list; nothing moved")
+        return 0
+    run = runner or subprocess.run
+    session = str(Path(__file__).with_name("ade-self-session"))
+    moved = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        agent = entry.get("id")
+        if entry.get("action") != "would-rehandoff" or not agent:
+            print(f"ade-supervisor-rehandoff: leaving {agent} (no healthy alternative)")
+            continue
+        note = (f"Re-handoff {agent} off exhausted account {entry.get('account')} "
+                f"toward {entry.get('alternative')}.\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write(note)
+            checkpoint = fh.name
+        result = run([session, "handoff", "--checkpoint", checkpoint, "--predecessor", agent,
+                      "--route-kind", "code", "--quiesced"], capture_output=True, text=True)
+        if result.returncode == 0:
+            moved += 1
+            print(f"ade-supervisor-rehandoff: re-handed {agent} ({entry.get('account')})")
+        else:
+            print(f"ade-supervisor-rehandoff: {agent} not moved ({result.returncode})")
+    print(f"ade-supervisor-rehandoff: {moved} re-handed, {len(entries) - moved} left")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(Path(sys.argv[1])))
+    sys.exit(rehandoff(Path(sys.argv[1])))

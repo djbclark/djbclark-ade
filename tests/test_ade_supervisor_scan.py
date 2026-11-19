@@ -422,3 +422,31 @@ def test_live_mode_refuses_to_move_anyone_until_the_executor_is_built(tmp_path: 
     log = (state / "supervisor.log").read_text()
     assert "re-handoff executor failed" in log
     assert not any("agent archive" in line for line in sent.read_text().splitlines())
+
+
+def test_the_live_executor_rehands_only_planned_agents_and_through_the_handoff() -> None:
+    """The executor drives ade-self-session handoff for each planned agent and skips one with no alternative.
+    The handoff is faked here, so nothing reaches a live Paseo, and the predecessor is never archived directly."""
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        "rehandoff", importlib.machinery.SourceFileLoader("rehandoff", str(REPO / "bin" / "ade-supervisor-rehandoff")))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls = []
+
+    def fake_run(argv, capture_output, text):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    plan = Path(os.environ.get("TMPDIR", "/tmp")) / "rehandoff-plan.json"
+    plan.write_text(json.dumps({"mode": "live", "plan": [
+        {"id": "agent-stuck", "account": "openai", "alternative": "pi/opencode-go-t-e/x", "action": "would-rehandoff"},
+        {"id": "agent-stuck2", "account": "anthropic", "action": "no-healthy-alternative"},
+    ]}))
+    assert mod.rehandoff(plan, runner=fake_run) == 0
+    assert len(calls) == 1  # only the agent with an alternative is re-handed
+    argv = calls[0]
+    assert argv[1:3] == ["handoff", "--checkpoint"]
+    assert "--predecessor" in argv and argv[argv.index("--predecessor") + 1] == "agent-stuck"
+    assert "agent-stuck2" not in argv
+    plan.unlink()
