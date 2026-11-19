@@ -37,7 +37,9 @@ trusted host's assertion, not an STS or IAM identity proof. The host must establ
 that binding; this library never probes credentials or creates a client. A
 future host may use boto3 sessions and botocore Config with explicit bounded
 connect/read timeouts, `total_max_attempts=1`, and configured endpoints disabled.
-The port enforces the enrolled connect/read timeout ceiling and a total streaming
+The port accepts only the regional AWS S3 endpoint (plus the legacy global
+endpoint for us-east-1); other partition/endpoint support is held. It enforces
+the enrolled connect/read timeout ceiling and a total streaming
 deadline in addition to byte caps; a blocked individual read can finish at most
 one read timeout beyond the streaming deadline. No custom endpoint or candidate
 profile is accepted by a shipped facade.
@@ -79,7 +81,9 @@ is not an AWS billing cap or a guarantee against external account spending.
 `ready` is only a phase transition. `resolve_current` is the ONE normal/recovery
 reader. It independently checks exact actual bytes/version/protection, complete
 closure/manifest, contract/ledger/census, current revocations, original cycle,
-clock, and a stable current CTRL reread. SDK/transport/malformed failures return
+clock, and a stable current CTRL reread. Final authority/closure revocations and the
+clock/floor/cycle/proof window are checked after transport, so a slow read cannot
+backdate acceptance or turn a final-read revocation into a successful result. SDK/transport/malformed failures return
 HOLD. Baseline and proposal are independently reported; a failed latest proposal
 cannot erase an otherwise valid retained baseline. A baseline is reverified and
 must name its exact protected READY origin. Its prior 24-hour proposal window is

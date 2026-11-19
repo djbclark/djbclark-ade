@@ -363,8 +363,10 @@ class Custody:
         latest = store.current()
         latest.protected(p, obs.until, p.max_control_bytes)
         require(latest.ref == obs.ref and latest.etag == obs.etag, "current CTRL changed")
+        require(self.authority.current() == p and self.authority.permits(purpose, closure) is True,
+                "authority/revocation changed during final read")
 
-    def _commit(self, p, now, store, obs, s, purpose, operation, closure=None):
+    def _commit(self, p, now, store, obs, s, purpose, operation, closure=None, final_check=None):
         self._stable(p, store, obs, purpose, closure)
         require(s["mutations"] < p.max_mutations, "control preservation pool exhausted")
         s["sequence"] += 1
@@ -381,6 +383,8 @@ class Custody:
         data = canonical(s)
         require(len(data) <= p.max_control_bytes, "bounded catalogue/control shard full; intake HOLD")
         # A lost reply has no refund/retry path. Refetch current CTRL on next invocation.
+        if final_check is not None:
+            final_check()
         store.cas(obs, data, s["control_horizon"])
 
     def reserve(self, ticket, members, horizon):
@@ -460,15 +464,15 @@ class Custody:
         c = q["cycles"][-1]
         require(baseline or c["t0"] <= now <= c["deadline"], "cycle expired/clock rollback")
         horizon = max(c["horizon"], now + p.floor_seconds)
-        st.current().protected(p, horizon, p.max_control_bytes)
+        untils = [st.current().protected(p, horizon, p.max_control_bytes).until]
         if baseline:
             origin = st.read(Ref.parse(q["origin"]["frontier"], p))
-            origin.protected(p, horizon, p.max_control_bytes)
+            untils.append(origin.protected(p, horizon, p.max_control_bytes).until)
             prior = decode(origin.body)
             self._validate(prior, p)
             expected = copy.deepcopy(q)
             expected["phase"], expected["origin"] = "READY", None
-            require(prior["proposal"] == expected and c["t0"] <= q["origin"]["observed_at"] <= c["deadline"],
+            require(prior["proposal"] == expected and c["t0"] <= q["origin"]["observed_at"] <= min(c["deadline"], now),
                     "accepted origin is not the protected READY frontier")
         require(sum(s["ledger"][a]["size"] for a in q["members"]) <= p.max_packet_bytes, "packet read cap")
         descriptors, bodies = [], []
@@ -476,6 +480,7 @@ class Custody:
             a = s["ledger"][atom]
             require(a["ref"] is not None, "unresolved closure atom")
             actual = st.read(Ref.parse(a["ref"], p)).protected(p, horizon, p.max_object_bytes)
+            untils.append(actual.until)
             descriptors.append(dict(atom=atom, kind=a["kind"], sha256=a["sha256"], size=a["size"]))
             bodies.append((a["kind"], actual.body))
         require(closure_id(descriptors) == q["closure"], "exact closure")
@@ -492,24 +497,38 @@ class Custody:
                 require(0 < job["completed_at"] < job["due"], "late/unproved renewal completion")
                 require(set(job["progress"]) == set(job["census"]), "raw done is not a complete census")
                 for member in job["census"].values():
-                    st.read(self._renew_ref(member, s, p)).protected(p, job["target"],
-                            max(p.max_object_bytes, p.max_control_bytes))
-        return q["closure"]
+                    untils.append(st.read(self._renew_ref(member, s, p)).protected(p, max(horizon, job["target"]),
+                            max(p.max_object_bytes, p.max_control_bytes)).until)
+        check = (now, None if baseline else c["deadline"], min(untils))
+        self._fresh(p, check)
+        return q["closure"], check
+
+    def _fresh(self, p, check):
+        started, deadline, until = check
+        ended = natural(self.clock(), "trusted final clock")
+        require(started <= ended <= started + p.proof_seconds, "expired verification observation")
+        require(deadline is None or ended <= deadline, "cycle expired during verification")
+        require(until >= ended + p.floor_seconds, "final admission floor")
 
     def resolve_current(self):
         """Single reader for normal/recovery/terminal paths; failures are HOLD."""
         try:
             p, now, st, ob, s = self._open("read")
             outcomes = []
-            reasons = []
+            reasons, checks = [], []
             for baseline, record in ((True, s["baseline"]), (False, s["proposal"])):
                 try:
-                    self._verify_record(p, now, st, s, record, baseline)
+                    _, check = self._verify_record(p, now, st, s, record, baseline)
+                    checks.append((check, record["closure"], baseline))
                     outcomes.append("ACCEPTED" if baseline else "VERIFIED")
                 except Exception as exc:
                     outcomes.append("HOLD")
                     reasons.append(str(exc))
             self._stable(p, st, ob, "read")
+            for check, closure, baseline in checks:
+                require(self.authority.permits("baseline" if baseline else "accept", closure) is True
+                        and self.authority.permits("screened", closure) is True, "closure revoked during final read")
+                self._fresh(p, check)
             return Resolution(ob.ref.version, s["sequence"], *outcomes,
                     self.authority.permits("intake", None) is True and
                     (s["proposal"] is None or s["proposal"]["phase"] == "ACCEPTED"),
@@ -521,13 +540,15 @@ class Custody:
         """Recompute complete proof now; never consume caller-supplied READY/proof."""
         p, now, st, ob, s = self._open("accept")
         q = s["proposal"]
-        closure = self._verify_record(p, now, st, s, q)
+        closure, check = self._verify_record(p, now, st, s, q)
         self._stable(p, st, ob, "accept", closure)
-        proof = VerifiedAcceptance(ob.ref.version, s["sequence"], closure, q["cycles"][-1]["id"], now, p.policy_digest)
+        observed_at = natural(self.clock(), "acceptance clock")
+        proof = VerifiedAcceptance(ob.ref.version, s["sequence"], closure, q["cycles"][-1]["id"], observed_at, p.policy_digest)
         q["phase"] = "ACCEPTED"
-        q["origin"] = dict(frontier=ob.ref.wire(), observed_at=now)
+        q["origin"] = dict(frontier=ob.ref.wire(), observed_at=observed_at)
         s["baseline"] = copy.deepcopy(q)
-        self._commit(p, now, st, ob, s, "accept", "accept", closure)
+        self._commit(p, now, st, ob, s, "accept", "accept", closure,
+                     final_check=lambda: self._fresh(p, check))
         # Receipt binds the observed frontier, not the new terminal version itself.
         # Its consumer must resolve_current; it is NOT a self-authenticating grant.
         return proof
@@ -634,6 +655,10 @@ class S3Store:
                 and writer is not reader, "enrolled independent client binding")
         for client in (writer, reader):
             require(client.meta.region_name == policy.region, "client region")
+            endpoints = {"https://s3." + policy.region + ".amazonaws.com"}
+            if policy.region == "us-east-1":
+                endpoints.add("https://s3.amazonaws.com")
+            require(client.meta.endpoint_url in endpoints, "enrolled AWS S3 endpoint required")
             require(client.meta.config.retries.get("total_max_attempts") == 1, "no hidden SDK retries")
             for seconds in (client.meta.config.connect_timeout, client.meta.config.read_timeout):
                 require(type(seconds) in (int, float) and 0 < seconds <= policy.transport_seconds,

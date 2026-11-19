@@ -649,3 +649,71 @@ def test_real_sdk_slow_stream_deadline_closes_body(sdk, monkeypatch):
     with pytest.raises(m.Hold, match="transport deadline"):
         st.current()
     assert body._raw_stream.closed
+
+
+def test_revocation_during_final_current_read_prevents_accept(env):
+    c, a, st, clock = env
+    closure = prepared(env)
+    before = st.state()
+    old, count = st.current, [0]
+    def race():
+        result = old()
+        count[0] += 1
+        if count[0] == 3:
+            a.revoked.add(closure)
+        return result
+    st.current = race
+    with pytest.raises(m.Hold, match="revocation"):
+        c.accept()
+    assert st.state() == before
+
+
+def test_slow_verification_cannot_backdate_cycle_or_floor(env):
+    c, a, st, clock = env
+    prepared(env)
+    old = st.read
+    def slow(ref):
+        result = old(ref)
+        clock[0] += 25
+        return result
+    st.read = slow
+    assert c.resolve_current().candidate == "HOLD"
+    before = st.state()
+    with pytest.raises(m.Hold):
+        c.accept()
+    assert st.state() == before
+
+
+def test_reader_closure_revocation_during_final_current_read_holds(env):
+    c, a, st, clock = env
+    closure = prepared(env)
+    old, count = st.current, [0]
+    def race():
+        result = old()
+        count[0] += 1
+        if count[0] == 3:
+            a.revoked.add(closure)
+        return result
+    st.current = race
+    assert c.resolve_current().candidate == "HOLD"
+
+
+def test_real_sdk_custom_endpoint_and_unbounded_timeout_refused():
+    import boto3
+    from botocore.config import Config
+    p = policy()
+    writer, reader = clients(p)
+    custom = boto3.client("s3", region_name=p.region, aws_access_key_id="offline-dummy",
+        aws_secret_access_key="offline-dummy", endpoint_url="https://candidate.invalid",
+        config=Config(retries={"total_max_attempts": 1}, connect_timeout=1, read_timeout=1))
+    with pytest.raises(m.Hold, match="endpoint"):
+        m.S3Store(p, writer, custom, writer_identity=p.writer, reader_identity=p.reader)
+    custom.close()
+    slow = boto3.client("s3", region_name=p.region, aws_access_key_id="offline-dummy",
+        aws_secret_access_key="offline-dummy", config=Config(retries={"total_max_attempts": 1},
+            connect_timeout=60, read_timeout=60, ignore_configured_endpoint_urls=True))
+    with pytest.raises(m.Hold, match="timeout"):
+        m.S3Store(p, writer, slow, writer_identity=p.writer, reader_identity=p.reader)
+    slow.close()
+    writer.close()
+    reader.close()
