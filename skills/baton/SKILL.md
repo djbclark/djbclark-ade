@@ -72,6 +72,23 @@ home directory), that is NOT a dead end — go straight to
 `session-handoff`'s **Chain discovery fallback** (step 0 of its Reader
 protocol) instead of asking the operator to supply a path.
 
+## Takeover cleanup is part of the resume (2026-11-19)
+
+When the resume is a takeover — the operator names a stuck or superseded session
+to take over from, with or without `/baton` — the receiver owns the
+predecessor's leftovers once the predecessor's state is verified durable (Tier 1
+pointer current, Tier 2 handoff pushed, detached jobs re-armed or retired):
+
+1. **Archive the predecessor agent** (`paseo agent archive <id>`, or MCP
+   `archive_agent`) instead of leaving it parked; a parked predecessor answers
+   no one and its window goes stale. Never archive it mid-turn before its state
+   is durable, and never archive yourself or the window you occupy.
+2. **Tidy the chain's tabs, windows and workspaces** per the `tidy` skill:
+   archive the predecessor chain's finished or closed workers and their empty
+   WORKER/OTHER windows (no terminals, no live agents, `isolation: local`),
+   keep the repo's default `main` workspace and any window you now occupy, and
+   only *list* another lead's workers and windows for the operator.
+
 ## Re-arm detached jobs (after the resume plan, before other work)
 
 Background work does not carry over on its own: a `run_in_background` task or
