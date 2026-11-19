@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import base64
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
+import fcntl
+import os
+from pathlib import Path
+import stat
+import tempfile
+import threading
 import json
 import re
 import time
@@ -24,6 +30,10 @@ class Hold(ValueError):
 
 class Conflict(Hold):
     """Caller must restart from the authoritative current CTRL."""
+
+
+class StaleCurrent(Hold):
+    """A bound CURRENT response completed behind a newer observed frontier."""
 
 
 def require(ok, reason):
@@ -255,6 +265,9 @@ class Custody:
         self.authority, self.factory, self.clock = authority, store_factory, clock
 
     def _open(self, purpose, closure=None):
+        begin = getattr(self.authority, "begin", None)
+        if begin is not None:
+            begin(purpose, closure)
         p = self.authority.current()
         require(type(p) is Policy, "unenrolled")
         p.validate()
@@ -268,8 +281,14 @@ class Custody:
         return p, now, store, obs, s
 
     def _validate(self, s, p, *, current=True):
-        require(type(s) is dict and set(s) == set(genesis(p, 0)), "CTRL schema")
-        require(type(s["schema"]) is int and s["schema"] == 1 and s["identity"] == p.identity
+        require(type(s) is dict and type(s.get("schema")) is int and s["schema"] in (1, 2), "CTRL schema")
+        expected = set(genesis(p, 0)) | ({"integration"} if s["schema"] == 2 else set())
+        require(set(s) == expected, "CTRL schema fields")
+        if s["schema"] == 2:
+            validator = getattr(self.authority, "validate_integration", None)
+            require(validator is not None, "schema2 needs protected integration authority")
+            validator(s, current=current)
+        require(s["identity"] == p.identity
                 and type(s["generation"]) is int and s["generation"] == p.generation and s["policy"] == p.policy_digest
                 and s["contract"] == p.contract_digest, "protected CTRL enrollment binding")
         for k in ("sequence", "mutations", "lifetime", "control_horizon"):
@@ -396,6 +415,13 @@ class Custody:
         if final_check is not None:
             final_check()
         self._authorized(p, purpose, closure)
+        def wire_check():
+            self._authorized(p, purpose, closure)
+            if final_check is not None:
+                final_check()
+        arm = getattr(store, "arm_write", None)
+        if arm is not None:
+            arm(wire_check)
         store.cas(obs, data, s["control_horizon"])
 
     def _cycle_boundary(self, p, cycle, started, horizon=None):
@@ -453,6 +479,12 @@ class Custody:
         self._stable(p, st, ob, "upload", q["closure"])
         self._cycle_boundary(p, q["cycles"][-1], now, a["horizon"])
         self._authorized(p, "upload", q["closure"])
+        def wire_check():
+            self._authorized(p, "upload", q["closure"])
+            self._cycle_boundary(p, q["cycles"][-1], now, a["horizon"])
+        arm = getattr(st, "arm_write", None)
+        if arm is not None:
+            arm(wire_check)
         # Key is uniquely durably issued; IfNoneMatch suppresses duplicate writes.
         st.put(a["key"], body, a["horizon"])
         # Even a successful PUT response is not acceptance or a ledger refund.
@@ -638,6 +670,14 @@ class Custody:
         actual = st.read(ref).protected(p, 0, cap)
         if actual.until < j["target"]:
             self._stable(p, st, ob, "preserve")
+            def wire_check():
+                self._authorized(p, "preserve", None)
+                actual_time = natural(self.clock(), "renewal dispatch clock")
+                require(now <= actual_time < j["due"], "renewal deadline at wire")
+                require(j["target"] >= actual_time + p.floor_seconds, "renewal floor at wire")
+            arm = getattr(st, "arm_write", None)
+            if arm is not None:
+                arm(wire_check)
             st.extend(ref, j["target"])
         st.read(ref).protected(p, j["target"], cap)
         j["progress"][item] = now
@@ -695,11 +735,14 @@ class S3Store:
     The supplied writer must have total_max_attempts=1: PUT uncertainty has no
     automatic retry. Use single-part bounded chunks, never managed multipart.
     """
-    def __init__(self, policy: Policy, writer, reader, *, writer_identity, reader_identity):
+    def __init__(self, policy: Policy, writer, reader, *, writer_identity, reader_identity, read_only=False):
         self.p = policy.validate()
-        require(writer_identity == policy.writer and reader_identity == policy.reader
-                and writer is not reader, "enrolled independent client binding")
-        for client in (writer, reader):
+        require(reader_identity == policy.reader, "enrolled reader binding")
+        if read_only:
+            require(writer is None and writer_identity is None, "read-only has no writer")
+        else:
+            require(writer_identity == policy.writer and writer is not reader, "enrolled independent client binding")
+        for client in ((reader,) if read_only else (writer, reader)):
             require(client.meta.region_name == policy.region, "client region")
             endpoints = {"https://s3." + policy.region + ".amazonaws.com"}
             if policy.region == "us-east-1":
@@ -765,6 +808,7 @@ class S3Store:
         return self._get(key, cap)
 
     def _put(self, key, body, horizon, condition):
+        require(self.writer is not None, "read-only storage")
         require(type(body) is bytes and len(body) <= max(self.p.max_object_bytes, self.p.max_control_bytes), "PUT cap")
         natural(horizon, "retain horizon")
         self.writer.put_object(**self._args(key), Body=body, ContentLength=len(body),
@@ -782,6 +826,7 @@ class S3Store:
         self._put(key, body, horizon, dict(IfNoneMatch="*"))
 
     def extend(self, ref, horizon):
+        require(self.writer is not None, "read-only storage")
         actual = self.read(ref)
         require(actual.mode == "COMPLIANCE" and actual.hold == "ON" and horizon >= actual.until,
                 "monotone COMPLIANCE renewal only")
@@ -789,8 +834,884 @@ class S3Store:
                 Retention=dict(Mode="COMPLIANCE", RetainUntilDate=datetime.fromtimestamp(horizon, timezone.utc)))
 
 
+
+# Integration source. No installed enrollment, credentials resolver, account or
+# runtime facade is supplied. These constructors are inert until explicitly used.
+READ_METHODS = {"get_object", "get_object_retention", "get_object_legal_hold"}
+WRITE_METHODS = {"put_object", "put_object_retention"}
+RPC_METHODS = READ_METHODS | WRITE_METHODS | {"get_caller_identity"}
+
+
+def shape(value, fields, reason):
+    require(type(value) is dict and set(value) == set(fields.split()), reason)
+
+
+def private_bytes(path, uid, cap):
+    """No follow, bounded regular private file; never a candidate locator."""
+    path = Path(path)
+    require(path.is_absolute() and path.parent.resolve(strict=True) == path.parent, "protected absolute path")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= cap, "protected owner/mode/size")
+        data = bytearray()
+        while len(data) <= cap:
+            chunk = os.read(fd, min(65536, cap - len(data) + 1))
+            if not chunk:
+                break
+            data.extend(chunk)
+        require(len(data) == info.st_size <= cap, "protected file changed/oversize")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+@dataclass(frozen=True)
+class Enrollment:
+    path: str
+    sha256: str
+    owner: int
+    executor: str
+    data: dict = field(repr=False)
+    policy: Policy
+
+    @classmethod
+    def load(cls, path, *, expected_digest, expected_owner, expected_executor):
+        # All three expectations must come from the existing protected host,
+        # never from this file, candidate data, environment or a CLI fallback.
+        sha(expected_digest)
+        natural(expected_owner, "selected owner UID")
+        require(os.getuid() == expected_owner, "selected executor OS owner")
+        token(expected_executor, "selected executor")
+        raw = private_bytes(path, expected_owner, 131072)
+        require(digest(raw) == expected_digest, "protected anchor digest")
+        d = decode(raw)
+        shape(d, "schema expires policy principals grants screening executors rpc seeds migration", "enrollment fields")
+        require(type(d["schema"]) is int and d["schema"] == 1, "enrollment version")
+        require(type(d["executors"]) is dict and expected_executor in d["executors"], "selected enrolled executor")
+        for executor, item in d["executors"].items():
+            token(executor, "executor ID")
+            shape(item, "owner journal", "executor fields")
+            natural(item["owner"], "executor owner")
+            shape(item["journal"], "path id max_bytes device inode", "selected durable journal")
+            token(item["journal"]["id"], "journal ID")
+            for name in ("max_bytes", "device", "inode"):
+                natural(item["journal"][name], "journal " + name, True)
+            require(Path(item["journal"]["path"]).is_absolute(), "selected journal path")
+        require(d["executors"][expected_executor]["owner"] == expected_owner, "enrolled executor owner")
+        natural(d["expires"], "enrollment expiry", True)
+        require(type(d["policy"]) is dict and set(d["policy"]) == set(Policy.__dataclass_fields__), "complete selected Policy")
+        p = Policy(**d["policy"]).validate()
+        sha(d["screening"])
+        shape(d["principals"], "reader writer", "selected principals")
+        for role, identity in d["principals"].items():
+            shape(identity, "kind arn unique_id sessions", "principal fields")
+            require(identity["kind"] in {"user", "role"}, "unsupported principal kind")
+            token(identity["unique_id"], "stable principal ID")
+            require(type(identity["sessions"]) is list and len(identity["sessions"]) <= 64,
+                    "bounded exact session names")
+            for session in identity["sessions"]:
+                token(session, "session name")
+            resource = "user/" if identity["kind"] == "user" else "role/"
+            require(isinstance(identity["arn"], str) and identity["arn"].startswith(
+                    "arn:aws:iam::" + p.account + ":" + resource) and "*" not in identity["arn"]
+                    and len(identity["arn"]) <= 512, "exact commercial IAM principal ARN")
+            require(bool(identity["sessions"]) == (identity["kind"] == "role"), "role sessions/user binding")
+        require(d["principals"]["reader"]["unique_id"] != d["principals"]["writer"]["unique_id"],
+                "distinct persistent principals, not role sessions")
+        require(type(d["grants"]) is dict and len(d["grants"]) <= 32, "standing grants")
+        for purpose, closures in d["grants"].items():
+            token(purpose, "purpose")
+            require(type(closures) is list and len(closures) <= p.max_members * p.max_cycles + 2, "grant scope")
+            for closure in closures:
+                if closure not in (None, "*"):
+                    sha(closure)
+        shape(d["rpc"], "max_wallets max_attempts max_response_bytes request_quote byte_quote max_cash", "selected RPC limits")
+        for name, value in d["rpc"].items():
+            natural(value, "selected RPC " + name, True)
+        require(type(d["seeds"]) is dict and bool(d["seeds"]), "explicit prepaid discovery seeds")
+        anchor = cls(str(Path(path)), expected_digest, expected_owner, expected_executor, d, p)
+        for wid, wallet in d["seeds"].items():
+            anchor.wallet(wid, wallet)
+        anchor.cash(d["seeds"], 0, {})
+        if d["migration"] is not None:
+            shape(d["migration"], "source authority_digest", "explicit migration consent")
+            Ref.parse(d["migration"]["source"], p)
+            sha(d["migration"]["authority_digest"])
+        return anchor
+
+    @property
+    def journal(self):
+        return self.data["executors"][self.executor]["journal"]
+
+    def live(self, now):
+        require(natural(now, "trusted clock") < self.data["expires"], "enrollment expired")
+        raw = private_bytes(self.path, self.owner, 131072)
+        require(os.getuid() == self.owner and digest(raw) == self.sha256 and decode(raw) == self.data
+                and Policy(**self.data["policy"]) == self.policy, "anchor/owner/in-memory binding changed")
+
+    def wallet(self, wid, w):
+        token(wid, "wallet ID")
+        shape(w, "parent executor principal fence expires attempts response_bytes charge year methods purposes", "wallet shape")
+        require(w["executor"] in self.data["executors"] and w["principal"] in {"reader", "writer"}, "wallet executor/principal")
+        require(w["parent"] is None or isinstance(w["parent"], str), "wallet parent")
+        if w["parent"] is not None:
+            token(w["parent"], "wallet parent")
+        for name in ("fence", "expires", "attempts", "response_bytes", "charge", "year"):
+            natural(w[name], "wallet " + name, True)
+        require(w["expires"] <= self.data["expires"] and w["attempts"] <= self.data["rpc"]["max_attempts"]
+                and w["response_bytes"] <= self.data["rpc"]["max_response_bytes"], "wallet caps/term")
+        quote = self.data["rpc"]
+        require(w["charge"] == w["attempts"] * (quote["request_quote"] +
+                w["response_bytes"] * quote["byte_quote"]), "full wallet escrow quote")
+        require(type(w["methods"]) is list and bool(w["methods"]) and set(w["methods"]) <= RPC_METHODS,
+                "wallet method scope")
+        require(type(w["purposes"]) is list and bool(w["purposes"]), "wallet purpose scope")
+        for purpose in w["purposes"]:
+            token(purpose, "wallet purpose")
+        return w
+
+    def cash(self, wallets, payload, annual):
+        require(type(wallets) is dict and len(wallets) <= self.data["rpc"]["max_wallets"], "bounded wallet ledger")
+        total, years = 0, {}
+        for wid, w in wallets.items():
+            self.wallet(wid, w)
+            total += w["charge"]
+            years[str(w["year"])] = years.get(str(w["year"]), 0) + w["charge"]
+            require(w["parent"] is None and wid in self.data["seeds"] or w["parent"] in wallets,
+                    "funded parent/seed required")
+            require(w["parent"] != wid, "wallet cannot fund itself")
+            seen, parent = {wid}, w["parent"]
+            while parent is not None:
+                require(parent not in seen, "wallet ancestry cycle")
+                seen.add(parent)
+                parent = wallets[parent]["parent"]
+        require(total <= self.data["rpc"]["max_cash"], "RPC cash cap")
+        p = self.policy
+        require(total + payload + p.preservation_reserve_cash <= p.lifetime_cash, "combined lifetime cash")
+        for year in set(years) | set(annual):
+            require(years.get(year, 0) + annual.get(year, 0) + p.preservation_reserve_cash <= p.annual_cash,
+                    "combined original-year cash")
+
+
+def journal_genesis(anchor):
+    """Pure enrollment artifact builder; never installs or resets a journal."""
+    return canonical(dict(schema=1, enrollment=anchor.sha256, executor=anchor.executor,
+                          journal=anchor.journal["id"], wallets=anchor.data["seeds"], attempts={}))
+
+
+class AttemptJournal:
+    """Fully escrowed local consumption WAL. Missing/restored journals need recovery.
+
+    No automatic initialization or old-counter restoration exists here. The
+    protected executor must not roll this file back; a cold recovery burns old
+    wallets and uses a separately surviving enrolled journal/seed.
+    """
+    def __init__(self, anchor):
+        self.anchor = anchor
+        self.path = Path(anchor.journal["path"])
+        self._directory()
+        self._read()  # Never create a missing journal from a copied anchor.
+
+    def _directory(self):
+        parent = self.path.parent
+        info = parent.stat()
+        require(parent.resolve(strict=True) == parent and info.st_uid == self.anchor.owner
+                and stat.S_IMODE(info.st_mode) == 0o700 and info.st_dev == self.anchor.journal["device"]
+                and info.st_ino == self.anchor.journal["inode"], "protected journal directory/device/inode")
+
+    def _read(self):
+        self._directory()
+        d = decode(private_bytes(self.path, self.anchor.owner, self.anchor.journal["max_bytes"]))
+        shape(d, "schema enrollment executor journal wallets attempts", "journal schema")
+        require(type(d["schema"]) is int and d["schema"] == 1 and d["enrollment"] == self.anchor.sha256
+                and d["executor"] == self.anchor.executor and d["journal"] == self.anchor.journal["id"],
+                "journal protected binding")
+        self.anchor.cash(d["wallets"], 0, {})
+        require(all(d["wallets"].get(wid) == w for wid, w in self.anchor.data["seeds"].items()), "journal seed binding")
+        require(type(d["attempts"]) is dict, "journal attempts")
+        for wid, records in d["attempts"].items():
+            require(wid in d["wallets"] and type(records) is list
+                    and len(records) <= d["wallets"][wid]["attempts"], "spent wallet count")
+            for rec in records:
+                shape(rec, "request state details", "attempt record")
+                sha(rec["request"])
+                require(rec["details"] is None or type(rec["details"]) is dict, "safe attempt details")
+                if rec["details"] is not None:
+                    require(digest(canonical(rec["details"])) == rec["request"], "attempt detail digest")
+                require(rec["state"] in {"ATTEMPTING", "RETURNED", "UNKNOWN"}, "attempt state")
+        return d
+
+    def _locked(self, action):
+        self._directory()
+        lock = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(lock)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == self.anchor.owner
+                    and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1, "journal lock binding")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            d = self._read()
+            result = action(d)
+            data = canonical(d)
+            require(len(data) <= self.anchor.journal["max_bytes"], "journal full, no send")
+            fd, temp = tempfile.mkstemp(prefix=".custody-", dir=self.path.parent)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, self.path)
+                directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
+            return result
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            os.close(lock)
+
+    def register(self, authority, wid):
+        # A wallet can only be learned from a verified CURRENT CTRL, not caller JSON.
+        require(type(authority) is EnrollmentAuthority and authority.current() is not None, "bound current wallet authority")
+        pending, parent = {}, wid
+        while parent is not None:
+            w = copy.deepcopy(authority.wallet(parent))
+            require(parent not in pending, "wallet parent cycle")
+            pending[parent] = w
+            parent = w["parent"]
+        def change(d):
+            for key, w in pending.items():
+                require(key not in d["wallets"] or d["wallets"][key] == w, "wallet immutable")
+                d["wallets"][key] = w
+        self._locked(change)
+
+    def available(self, wid, wallet):
+        d = self._read()
+        require(wallet["executor"] == self.anchor.executor and d["wallets"].get(wid) == wallet,
+                "selected executor registered wallet")
+        require(len(d["attempts"].get(wid, [])) < wallet["attempts"], "wallet exhausted before client")
+
+    def claim(self, wid, wallet, request):
+        def consume(d):
+            require(wallet["executor"] == self.anchor.executor and d["wallets"].get(wid) == wallet,
+                    "wallet not durably registered for this executor")
+            records = d["attempts"].setdefault(wid, [])
+            require(len(records) < wallet["attempts"], "wallet exhausted")
+            details = copy.deepcopy(request) if type(request) is dict else None
+            request_digest = digest(canonical(details)) if details is not None else sha(request)
+            records.append(dict(request=request_digest, state="ATTEMPTING", details=details))
+            return len(records) - 1
+        return self._locked(consume)
+
+    def finish(self, wid, index, state):
+        require(state in {"RETURNED", "UNKNOWN"}, "outcome")
+        def update(d):
+            d["attempts"][wid][index]["state"] = state
+        self._locked(update)
+
+
+class EnrollmentAuthority:
+    def __init__(self, anchor, clock):
+        self.anchor, self.clock = anchor, clock
+        self.observation, self.state = None, None
+        self.local = threading.local()
+        self.last_time = 0
+        self._store = None
+        self._publication_lock = threading.RLock()
+        self._read_serial = 0
+        self._blocked_through = 0
+        self._high_sequence = -1
+        self._high_identity = None
+        self._conflict_sequence = -1
+        self.available = False
+
+    def now(self):
+        with self._publication_lock:
+            t = natural(self.clock(), "trusted integration clock")
+            require(t >= self.last_time, "integration clock rollback")
+            self.last_time = t
+            self.anchor.live(t)
+            return t
+
+    def begin(self, purpose, closure=None):
+        self.local.purpose, self.local.closure = purpose, closure
+
+    def context(self):
+        return getattr(self.local, "purpose", "discover"), getattr(self.local, "closure", None)
+
+    def current(self):
+        with self._publication_lock:
+            try:
+                now = self.now()
+                require(self.available and self.state is not None and self.observation is not None
+                        and decode(self.observation.body) == self.state
+                        and digest(self.observation.body) == self.observation.ref.sha256
+                        and now < self.state["integration"]["expires"], "current authority absent/expired/unbound")
+                return replace(self.anchor.policy, minimum_sequence=max(self.anchor.policy.minimum_sequence,
+                               self.state["integration"]["floor"]))
+            except (Hold, OSError):
+                return None
+
+    def permits(self, purpose, closure):
+        with self._publication_lock:
+            if self.current() is None:
+                return False
+            h = self.state["integration"]
+            scope = self.anchor.data["grants"].get(purpose, [])
+            if closure not in scope and "*" not in scope:
+                return False
+            if any(r["purpose"] in {purpose, "*"} and r["closure"] in {closure, "*"} for r in h["revoked"]):
+                return False
+            if purpose == "screened":
+                proof = h["screened"].get(closure)
+                return proof is not None and proof["policy"] == self.anchor.data["screening"] and self.now() < proof["expires"]
+            return True
+
+    def validate_integration(self, s, *, current=True):
+        with self._publication_lock:
+            h = s["integration"]
+            shape(h, "enrollment fence expires floor revoked screened wallets", "integration schema")
+            require(h["enrollment"] == self.anchor.sha256, "protected enrollment root")
+            for name in ("fence", "expires", "floor"):
+                natural(h[name], "authority " + name, name != "floor")
+            require(h["expires"] <= self.anchor.data["expires"] and h["floor"] <= s["sequence"], "authority limits")
+            require(type(h["revoked"]) is list and len(h["revoked"]) <= self.anchor.policy.max_mutations,
+                    "bounded revocation list")
+            for item in h["revoked"]:
+                shape(item, "purpose closure", "revocation shape")
+                token(item["purpose"], "revocation purpose")
+                if item["closure"] not in (None, "*"):
+                    sha(item["closure"])
+            require(type(h["screened"]) is dict and len(h["screened"]) <= self.anchor.policy.max_members * self.anchor.policy.max_cycles,
+                    "bounded exact screening")
+            for closure, proof in h["screened"].items():
+                sha(closure)
+                shape(proof, "policy expires", "screening proof")
+                require(proof["policy"] == self.anchor.data["screening"], "selected privacy policy")
+                natural(proof["expires"], "screening expiry", True)
+            self.anchor.cash(h["wallets"], s["lifetime"], s["annual"])
+            for wid, w in self.anchor.data["seeds"].items():
+                require(h["wallets"].get(wid) == w, "seed escrow cannot disappear/change")
+            if current:
+                require(s["sequence"] >= max(self.anchor.policy.minimum_sequence, h["floor"]), "CURRENT authority rollback")
+                if self.state is not None:
+                    require(h["fence"] >= self.state["integration"]["fence"] and h["floor"] >= self.state["integration"]["floor"],
+                            "observed fence/floor rollback")
+
+    def start_current_read(self):
+        with self._publication_lock:
+            self._read_serial += 1
+            return self._read_serial
+
+    def deny_current(self):
+        with self._publication_lock:
+            # Outstanding responses cannot clear a denial observed after they began.
+            self._blocked_through = self._read_serial
+            self.available = False
+
+    def ingest(self, observation, *, transport=None, read_serial=None):
+        with self._publication_lock:
+            require(transport is not None and transport is self._store
+                    and transport._pending is not None and transport._pending[0] == read_serial
+                    and transport._pending[1] is observation,
+                    "CURRENT requires bound metered transport, not receipt consistency")
+            require(type(read_serial) is int and read_serial > self._blocked_through,
+                    "CURRENT response predates denial/conflict")
+            p, now = self.anchor.policy, self.now()
+            # Protection authentication and intake's future floor are separate.
+            observation.protected(p, 0, p.max_control_bytes)
+            require(observation.ref.key == p.ctrl_key, "fixed CURRENT locator")
+            state = decode(observation.body)
+            require(state.get("schema") == 2 and type(state.get("schema")) is int,
+                    "explicit schema1 migration required")
+            sequence = natural(state.get("sequence"), "CURRENT sequence")
+            if sequence < self._high_sequence:
+                raise StaleCurrent("CURRENT completed behind observed high-water sequence")
+            identity = (observation.ref, observation.body, observation.etag)
+            if sequence == self._high_sequence and identity != self._high_identity:
+                self._conflict_sequence = max(self._conflict_sequence, sequence)
+                raise Conflict("conflicting CURRENT identity at same sequence")
+            require(sequence > self._conflict_sequence, "CURRENT conflict needs a newer sequence")
+            Custody(self, lambda _: None, self.clock)._validate(state, p)
+            # The comparison, validation and BOTH assignments are one critical section.
+            self._high_sequence, self._high_identity = sequence, identity
+            self.observation, self.state = observation, state
+            self.available = True
+
+    def wallet(self, wid):
+        require(self.state is not None and wid in self.state["integration"]["wallets"], "unverified wallet")
+        return self.state["integration"]["wallets"][wid]
+
+
+@dataclass(frozen=True)
+class CredentialBundle:
+    access_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
+    session_token: str | None = field(repr=False)
+    expires: int
+
+    def valid(self, now):
+        require(isinstance(self.access_key, str) and bool(self.access_key)
+                and isinstance(self.secret_key, str) and bool(self.secret_key)
+                and (self.session_token is None or isinstance(self.session_token, str)), "explicit credential bundle")
+        require(natural(self.expires, "credential expiry", True) > now, "credential bundle expired")
+
+
+def boto_client(service, bundle, policy):
+    """Lazy actual SDK source. Explicit material only; no provider hook or chain."""
+    require(service in {"sts", "s3"}, "service")
+    import boto3
+    from botocore.config import Config
+    session = boto3.Session(aws_access_key_id=bundle.access_key, aws_secret_access_key=bundle.secret_key,
+                            aws_session_token=bundle.session_token, region_name=policy.region)
+    return session.client(service, region_name=policy.region, endpoint_url="https://" + service + "." + policy.region + ".amazonaws.com",
+            verify=True, config=Config(signature_version="s3v4" if service == "s3" else "v4",
+                connect_timeout=policy.transport_seconds, read_timeout=policy.transport_seconds,
+                retries={"mode": "standard", "total_max_attempts": 1}, ignore_configured_endpoint_urls=True,
+                proxies={}))
+
+
+
+def journal_timestamp(value):
+    require(type(value) is datetime and value.tzinfo is not None and value.utcoffset() is not None
+            and value.microsecond == 0, "aware whole-second SDK timestamp required")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def journal_request_projection(params):
+    """Finite allowed SDK schema, never arbitrary recursive default=str.
+
+    The actual request is untouched: SDK datetime objects remain datetime.
+    """
+    require(type(params) is dict and len(params) <= 16, "finite SDK journal parameters")
+    out = {}
+    for key, value in params.items():
+        if key == "Body":
+            require(type(value) is bytes, "journal exact bytes")
+            out[key] = dict(sha256=digest(value), size=len(value))
+        elif key == "Retention":
+            shape(value, "Mode RetainUntilDate", "journal retention shape")
+            require(value["Mode"] == "COMPLIANCE", "journal COMPLIANCE retention")
+            out[key] = dict(Mode="COMPLIANCE", RetainUntilDate=journal_timestamp(value["RetainUntilDate"]))
+        elif key == "ObjectLockRetainUntilDate":
+            out[key] = journal_timestamp(value)
+        else:
+            require(type(value) in (str, int), "unsupported SDK journal value")
+            out[key] = value
+    return out
+
+
+class AttemptGate:
+    """Every SDK invocation consumes a durable, wholly prepaid slot first."""
+    def __init__(self, authority, journal, wallets):
+        self.authority, self.journal, self.wallet_ids = authority, journal, dict(wallets)
+        require(set(wallets) <= {"reader", "writer"}, "explicit per-principal wallets")
+        self.bindings, self.guards = {}, threading.local()
+        self.response_versions = set()
+        self.migration = None
+
+    def arm_write(self, guard):
+        require(callable(guard), "write predicate")
+        self.guards.write = guard
+
+    def _wallet(self, role):
+        require(role in self.wallet_ids, "principal wallet unavailable")
+        wid = self.wallet_ids[role]
+        if self.authority.state is None:
+            w = self.authority.anchor.data["seeds"].get(wid)
+            require(w is not None, "no prepaid discovery seed")
+        else:
+            w = self.authority.wallet(wid)
+        require(w["principal"] == role and w["executor"] == self.authority.anchor.executor, "wallet principal/executor")
+        return wid, w
+
+    def _guard(self, role, method, params, bundle):
+        a, p = self.authority, self.authority.anchor.policy
+        now = a.now()
+        bundle.valid(now)
+        wid, w = self._wallet(role)
+        require(now < w["expires"] and method in w["methods"], "wallet expiry/method")
+        purpose, closure = ("identity", None) if method == "get_caller_identity" else a.context()
+        require(purpose in w["purposes"], "wallet purpose")
+        if method == "get_caller_identity":
+            require(not params, "identity request parameters")
+            require(None in a.anchor.data["grants"].get("identity", []) or "*" in a.anchor.data["grants"].get("identity", []),
+                    "selected identity discovery grant")
+            require(a.state is None or a.permits("identity", None), "current identity revoked")
+            return wid, w
+        base = {"Bucket", "Key", "ExpectedBucketOwner"}
+        allowed = base | ({"VersionId"} if method in READ_METHODS else
+                {"Body", "ContentLength", "ChecksumSHA256", "ServerSideEncryption", "StorageClass",
+                 "ObjectLockMode", "ObjectLockRetainUntilDate", "ObjectLockLegalHoldStatus", "IfMatch", "IfNoneMatch"}
+                if method == "put_object" else {"VersionId", "Retention"})
+        require(base <= set(params) <= allowed, "SDK parameter allowlist")
+        if method in {"get_object_retention", "get_object_legal_hold", "put_object_retention"}:
+            require(isinstance(params.get("VersionId"), str), "exact protection version")
+        if method == "put_object":
+            body = params.get("Body")
+            require(type(body) is bytes and params.get("ContentLength") == len(body)
+                    and params.get("ChecksumSHA256") == base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+                    and params.get("ServerSideEncryption") == "AES256" and params.get("StorageClass") == "STANDARD"
+                    and params.get("ObjectLockMode") == "COMPLIANCE" and params.get("ObjectLockLegalHoldStatus") == "ON",
+                    "exact protected PUT parameters")
+        if method == "put_object_retention":
+            shape(params["Retention"], "Mode RetainUntilDate", "renewal parameter allowlist")
+            require(params["Retention"]["Mode"] == "COMPLIANCE", "COMPLIANCE renewal")
+            journal_timestamp(params["Retention"]["RetainUntilDate"])
+        require(role in self.bindings and self.bindings[role] is bundle, "unbound/replaced credential material")
+        require(params.get("Bucket") == p.bucket and params.get("ExpectedBucketOwner") == p.account,
+                "fixed destination/owner")
+        key = params.get("Key")
+        Ref(key, params.get("VersionId", "pending"), "0" * 64, 0).validate(p)
+        migration_write = a.state is None and method == "put_object" and purpose == "migrate"
+        unavailable_discovery = not a.available and purpose == "discover"
+        if a.state is None or unavailable_discovery:
+            require(None in a.anchor.data["grants"].get(purpose, []) or "*" in a.anchor.data["grants"].get(purpose, []),
+                    "selected bootstrap purpose grant")
+            if migration_write:
+                require(role == "writer" and self.migration is not None and key == p.ctrl_key
+                        and (None in a.anchor.data["grants"].get("migrate", []) or "*" in a.anchor.data["grants"].get("migrate", [])),
+                        "explicit migration bootstrap grant")
+                source, body = self.migration
+                require(params.get("IfMatch") == source.etag and params.get("Body") == body,
+                        "exact consented migration CAS only")
+            else:
+                require(purpose == "discover" and method in READ_METHODS and key == p.ctrl_key,
+                        "bootstrap only fixed read discovery")
+                require(params.get("VersionId") is None or (key, params["VersionId"]) in self.response_versions,
+                        "actual discovery response version")
+        else:
+            require(a.permits(purpose, closure), "current operation revoked")
+            if key == p.ctrl_key and params.get("VersionId") is not None:
+                known = a.state["controls"] + [a.observation.ref.wire()]
+                require(any(r["version"] == params["VersionId"] and r["key"] == key for r in known)
+                        or (key, params["VersionId"]) in self.response_versions, "registered CTRL version")
+            if key != p.ctrl_key:
+                issued = [x for x in a.state["ledger"].values() if x["key"] == key]
+                refs = a.state["controls"] + [a.state["baseline"]["origin"]["frontier"]] if a.state["baseline"] else a.state["controls"]
+                exact = any(r["key"] == key and r["version"] == params.get("VersionId") for r in refs)
+                exact |= (key, params.get("VersionId")) in self.response_versions
+                require(bool(issued) or exact, "unregistered object/reference")
+                if params.get("VersionId") is not None and issued:
+                    require(any(x["ref"] is not None and x["ref"]["version"] == params["VersionId"] for x in issued)
+                            or (key, params["VersionId"]) in self.response_versions, "exact registered version")
+        if method in WRITE_METHODS and migration_write:
+            require(callable(getattr(self.guards, "write", None)), "migration write not armed")
+            self.guards.write()
+        elif method in WRITE_METHODS:
+            require(role == "writer" and a.state is not None and w["fence"] == a.state["integration"]["fence"],
+                    "current writer fence")
+            require(purpose != "discover" and callable(getattr(self.guards, "write", None)), "write not armed")
+            if closure is not None and purpose in {"intake", "upload", "accept", "revalidate"}:
+                require(a.permits("screened", closure), "screening revoked at wire")
+            self.guards.write()
+            if method == "put_object":
+                body = params.get("Body")
+                require(type(body) is bytes, "exact bytes only")
+                if key == p.ctrl_key:
+                    require(params.get("IfMatch") == a.observation.etag, "current CAS ETag")
+                    candidate = decode(body)
+                    require(candidate.get("schema") == 2 and candidate["sequence"] == a.state["sequence"] + 1,
+                            "explicit schema2 current transition")
+                    Custody(a, lambda _: None, a.clock)._validate(candidate, p)
+                    if purpose == "fund-wallet":
+                        old, new = a.state["integration"], candidate["integration"]
+                        require(all(new[k] == old[k] for k in old if k not in {"wallets", "fence"}),
+                                "funding cannot change authority/screening")
+                        require(set(new["wallets"]) > set(old["wallets"]) and len(new["wallets"]) == len(old["wallets"]) + 1
+                                and all(new["wallets"][k] == v for k, v in old["wallets"].items()), "immutable wallet append")
+                    else:
+                        require(candidate["integration"] == a.state["integration"], "custody cannot grant authority")
+                else:
+                    require(params.get("IfNoneMatch") == "*" and any(x["key"] == key and x["sha256"] == digest(body)
+                            and x["size"] == len(body) for x in a.state["ledger"].values()), "issued exact PUT")
+        return wid, w
+
+    def call(self, role, client, method, params, bundle):
+        require(method in RPC_METHODS, "SDK operation not enrolled")
+        wid, w = self._guard(role, method, params, bundle)
+        safe = journal_request_projection(params)
+        purpose, closure = ("identity", None) if method == "get_caller_identity" else self.authority.context()
+        intended = {}
+        if method == "put_object" and purpose == "fund-wallet":
+            proposed = decode(params["Body"])["integration"]["wallets"]
+            intended = {k: v for k, v in proposed.items() if k not in self.authority.state["integration"]["wallets"]}
+        request = dict(method=method, role=role, params=safe, purpose=purpose, closure=closure,
+                       fence=w["fence"], wallets=intended)
+        index = self.journal.claim(wid, w, request)  # fsync BEFORE wire, including identity/discovery
+        try:
+            self._guard(role, method, params, bundle)  # revocation/time/refence during fsync
+            require(journal_request_projection(params) == safe, "request changed during journal fsync")
+            result = getattr(client, method)(**params)
+            if method == "get_object":
+                size = result.get("ContentLength")
+                if type(size) is not int or not 0 <= size <= w["response_bytes"]:
+                    if "Body" in result:
+                        result["Body"].close()
+                    raise Hold("wallet response cap")
+        except BaseException as primary:
+            # Even KeyboardInterrupt/SystemExit after durable issue cannot refund.
+            # A secondary outcome-journal failure cannot hide the primary error.
+            try:
+                self.journal.finish(wid, index, "UNKNOWN")
+            except BaseException as secondary:
+                primary.add_note("attempt remains spent; outcome journal failed: " + type(secondary).__name__)
+            raise
+        finally:
+            if method in WRITE_METHODS:
+                self.guards.write = None
+        if method == "get_object" and isinstance(result.get("VersionId"), str):
+            self.response_versions.add((params["Key"], result["VersionId"]))
+        try:
+            self.journal.finish(wid, index, "RETURNED")
+        except BaseException:
+            if method == "get_object" and "Body" in result:
+                result["Body"].close()
+            raise
+        return result
+
+
+class MeteredClient:
+    def __init__(self, role, client, bundle, gate):
+        self.role, self.client, self.bundle, self.gate = role, client, bundle, gate
+        self.meta = client.meta
+
+    def __getattr__(self, method):
+        require(method in RPC_METHODS, "unsupported metered SDK method")
+        return lambda **params: self.gate.call(self.role, self.client, method, params, self.bundle)
+
+
+class CredentialBinder:
+    def __init__(self, gate, client_factory=boto_client):
+        self.gate, self.factory = gate, client_factory
+        self.clients = []
+
+    def bind(self, role, bundle):
+        require(role in {"reader", "writer"} and type(bundle) is CredentialBundle, "selected explicit credential role")
+        a, p = self.gate.authority, self.gate.authority.anchor.policy
+        a.anchor.live(a.now())
+        bundle.valid(a.now())
+        wid, wallet = self.gate._wallet(role)
+        require(self.gate.authority.now() < wallet["expires"] and "identity" in wallet["purposes"]
+                and "get_caller_identity" in wallet["methods"], "identity allowance absent/expired")
+        self.gate.journal.available(wid, wallet)  # no client if no enrolled prepaid allowance
+        sts = self.factory("sts", bundle, p)
+        self.clients.append(sts)
+        require(sts.meta.region_name == p.region and sts.meta.endpoint_url == "https://sts." + p.region + ".amazonaws.com"
+                and sts.meta.config.retries.get("total_max_attempts") == 1, "fixed no-retry identity endpoint")
+        try:
+            identity = self.gate.call(role, sts, "get_caller_identity", {}, bundle)
+        finally:
+            sts.close()
+            self.clients.remove(sts)
+        bundle.valid(a.now())
+        self.gate._guard(role, "get_caller_identity", {}, bundle)
+        self.gate.journal.available(wid, wallet)
+        expected = a.anchor.data["principals"][role]
+        require(type(identity) is dict and identity.get("Account") == p.account, "actual caller account mismatch")
+        if expected["kind"] == "user":
+            match = identity.get("Arn") == expected["arn"] and identity.get("UserId") == expected["unique_id"]
+        else:
+            role_name = expected["arn"].rsplit("/", 1)[-1]
+            prefix = "arn:aws:sts::" + p.account + ":assumed-role/" + role_name + "/"
+            arn, userid = identity.get("Arn"), identity.get("UserId")
+            session = arn[len(prefix):] if isinstance(arn, str) and arn.startswith(prefix) else None
+            match = session in expected["sessions"] and userid == expected["unique_id"] + ":" + session if session else False
+        require(match, "actual stable principal/session mismatch")
+        # Same immutable object is passed to STS and S3; refresh/default-chain substitution is forbidden.
+        self.gate.bindings[role] = bundle
+        s3 = self.factory("s3", bundle, p)
+        self.clients.append(s3)
+        return MeteredClient(role, s3, bundle, self.gate)
+
+    def close(self):
+        for client in self.clients:
+            client.close()
+
+
+class IntegratedStore:
+    def __init__(self, authority, gate, raw):
+        self.authority, self.gate, self.raw = authority, gate, raw
+        require(authority._store is None, "one bound store per authority")
+        authority._store = self
+        self.observed = None
+        self._pending = None
+
+    def _bound(self):
+        require(type(self.raw) is S3Store and type(self.raw.reader) is MeteredClient
+                and self.raw.reader.gate is self.gate and self.raw.reader.role == "reader"
+                and self.gate.authority is self.authority, "bound metered reader transport")
+
+    def current(self):
+        serial = self.authority.start_current_read()
+        try:
+            self._bound()
+            observation = self.raw.current()
+            with self.authority._publication_lock:
+                self._pending = (serial, observation)
+                try:
+                    self.authority.ingest(observation, transport=self, read_serial=serial)
+                    self.observed = observation
+                finally:
+                    self._pending = None
+            return observation
+        except StaleCurrent:
+            # Keep the newer known authority, but refuse this affected operation.
+            raise
+        except BaseException:
+            self.authority.deny_current()
+            raise
+
+    def read(self, ref):
+        return self.raw.read(ref)
+
+    def latest(self, key, cap):
+        return self.raw.latest(key, cap)
+
+    def arm_write(self, guard):
+        self.gate.arm_write(guard)
+
+    def cas(self, previous, body, horizon):
+        return self.raw.cas(previous, body, horizon)
+
+    def put(self, key, body, horizon):
+        return self.raw.put(key, body, horizon)
+
+    def extend(self, ref, horizon):
+        return self.raw.extend(ref, horizon)
+
+
+def prepare_schema2(anchor, source, integration):
+    """Explicit exact-source migration builder. It does not send/install anything.
+
+    Consent pins the source and integration WITHOUT the enrollment digest, avoiding
+    a digest self-reference. The resulting full bytes are deterministic after the
+    owner anchor is fixed. A runtime migration executor is deliberately not a CLI.
+    """
+    consent = anchor.data["migration"]
+    require(consent is not None and Ref.parse(consent["source"], anchor.policy) == source.ref,
+            "explicit exact-source migration consent required")
+    require(type(integration) is dict and "enrollment" not in integration
+            and digest(canonical(integration)) == consent["authority_digest"], "exact migration authority template")
+    source.protected(anchor.policy, 0, anchor.policy.max_control_bytes)
+    original = decode(source.body)
+    require(original.get("schema") == 1, "schema1 migration source")
+    validator = Custody(EnrollmentAuthority(anchor, lambda: 0), lambda _: None, lambda: 0)
+    validator._validate(original, anchor.policy)
+    migrated = copy.deepcopy(original)
+    migrated.update(schema=2, integration=dict(copy.deepcopy(integration), enrollment=anchor.sha256))
+    # Advancing the actual frontier is explicit; historical refs/bodies are untouched.
+    migrated["sequence"] += 1
+    migrated["mutations"] += 1
+    migrated["controls"].append(source.ref.wire())
+    migrated["last_operation"] = "explicit-schema2-migration"
+    validator._validate(migrated, anchor.policy)
+    data = canonical(migrated)
+    require(len(data) <= anchor.policy.max_control_bytes, "migration control cap")
+    return data
+
+
+class CustodyRuntime:
+    """Explicit source factory, no credential acquisition or public runtime CLI."""
+    def __init__(self, anchor, journal, clock, wallet_ids, bundles, *, client_factory=boto_client):
+        require(type(anchor) is Enrollment and journal.anchor == anchor, "protected runtime enrollment")
+        self.authority = EnrollmentAuthority(anchor, clock)
+        self.authority.now()
+        self.gate = AttemptGate(self.authority, journal, wallet_ids)
+        self.binder = CredentialBinder(self.gate, client_factory)
+        self.reader = self.binder.bind("reader", bundles["reader"])
+        self.writer = None
+        self.raw = S3Store(anchor.policy, None, self.reader, writer_identity=None,
+                           reader_identity=anchor.policy.reader, read_only=True)
+        self.store = IntegratedStore(self.authority, self.gate, self.raw)
+        self.custody = Custody(self.authority, lambda _: self.store, clock)
+
+    def migrate_schema1(self, integration, writer_bundle):
+        """Explicit selected consent only; never called by cold recovery or main."""
+        a, p = self.authority, self.authority.anchor.policy
+        require(a.state is None, "migration only before schema2 binding")
+        a.begin("discover")
+        source = self.raw.current()
+        data = prepare_schema2(a.anchor, source, integration)
+        writer = self.binder.bind("writer", writer_bundle)
+        raw = S3Store(p, writer, self.reader, writer_identity=p.writer, reader_identity=p.reader)
+        # Fresh actual source reread BEFORE burning the final migration write slot.
+        a.begin("discover")
+        current = raw.current()
+        require(current.ref == source.ref and current.etag == source.etag, "migration source no longer CURRENT")
+        started = a.now()
+        def final():
+            now = a.now()
+            require(started <= now <= started + p.proof_seconds, "migration proof expired")
+            current.protected(p, now + p.floor_seconds, p.max_control_bytes)
+        self.gate.migration = (source, data)
+        a.begin("migrate")
+        self.gate.arm_write(final)
+        raw.cas(source, data, decode(data)["control_horizon"])
+        self.writer, self.raw, self.store.raw = writer, raw, raw
+        self.gate.migration = None
+        return self.cold_recover()
+
+    def cold_recover(self):
+        self.authority.begin("discover")
+        self.store.current()  # actual fixed CURRENT bytes/version/protection, never old checkpoint
+        return self.custody.resolve_current()  # SAME current-floor/history/phase reader
+
+    def enable_writer(self, bundle):
+        require(self.authority.current() is not None, "recover CURRENT before writer binding")
+        self.writer = self.binder.bind("writer", bundle)
+        p = self.authority.anchor.policy
+        self.raw = S3Store(p, self.writer, self.reader, writer_identity=p.writer, reader_identity=p.reader)
+        self.store.raw = self.raw
+
+    def reserve_wallet(self, wid, wallet, *, new_fence):
+        """Fresh CAS paid by existing coordination slots; unknown ACK never refunds.
+
+        No active slot/journal => no allocation. Caller supplies selected finite
+        values; no new executor/principal or grant is enrolled by this operation.
+        """
+        c, a = self.custody, self.authority
+        p, now, st, ob, s = c._open("fund-wallet")
+        h = s["integration"]
+        require(wid not in h["wallets"] and wallet["parent"] in h["wallets"], "new parent-funded wallet")
+        parent = h["wallets"][wallet["parent"]]
+        require(wallet["parent"] in self.gate.wallet_ids.values(), "active coordination parent")
+        require(parent["fence"] == h["fence"] and now < parent["expires"], "current parent coordination authority")
+        require(type(new_fence) is int and new_fence in {h["fence"], h["fence"] + 1}
+                and wallet["fence"] == new_fence, "bounded explicit refence")
+        if new_fence != h["fence"]:
+            require(a.permits("refence", None), "separate current refence grant")
+        a.anchor.wallet(wid, wallet)
+        require(wallet["year"] == datetime.fromtimestamp(now, timezone.utc).year and now < wallet["expires"], "new wallet dates")
+        h["wallets"][wid], h["fence"] = copy.deepcopy(wallet), new_fence
+        def check():
+            fresh = a.now()
+            require(now <= fresh < min(parent["expires"], wallet["expires"]), "allocation time expired")
+            if new_fence != a.state["integration"]["fence"]:
+                require(a.permits("refence", None), "refence revoked")
+        c._commit(p, now, st, ob, s, "fund-wallet", "reserve-wallet", final_check=check)
+        # No registration from CAS reply. Exact current readback is mandatory.
+        self.authority.begin("discover")
+        self.store.current()
+        self.gate.journal.register(a, wid)
+
+    def use_wallet(self, role, wid):
+        w = self.authority.wallet(wid)
+        require(w["principal"] == role and w["executor"] == self.authority.anchor.executor, "selected wallet role/executor")
+        self.gate.journal.register(self.authority, wid)
+        self.gate.journal.available(wid, w)
+        self.gate.wallet_ids[role] = wid
+
+    def close(self):
+        self.binder.close()
+
 def main():
-    print("HOLD: custody source pilot; protected enrollment and controller integration unavailable")
+    print("HOLD: selected protected enrollment/executor and runtime facade required")
     return 2
 
 

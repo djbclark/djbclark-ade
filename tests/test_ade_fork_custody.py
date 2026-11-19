@@ -951,3 +951,807 @@ def test_floor_exception_never_substitutes_wrong_exact_history_bytes(env):
     with pytest.raises(m.Hold, match="exact bytes"):
         c.renew_finish("r")
     assert st.state() == before
+
+
+# Stage3 integration: synthetic protected enrollment and authoritative offline
+# API model. Actual STS/S3 SDK Stubber parameter tests are separate below.
+import os
+
+
+class ModelSDK:
+    def __init__(self, service, role, factory):
+        self.service, self.role, self.f = service, role, factory
+        self.meta = SimpleNamespace(region_name=factory.p.region,
+            endpoint_url="https://" + service + "." + factory.p.region + ".amazonaws.com",
+            config=SimpleNamespace(retries={"total_max_attempts": 1}, connect_timeout=1, read_timeout=1))
+        self.closed = False
+    def close(self):
+        self.closed = True
+    def get_caller_identity(self):
+        self.f.wires.append((self.role, "get_caller_identity"))
+        if self.role in self.f.identities:
+            return self.f.identities[self.role]
+        expected = self.f.anchor.data["principals"][self.role]
+        session = expected["sessions"][0]
+        return dict(Account=self.f.p.account, UserId=expected["unique_id"] + ":" + session,
+            Arn="arn:aws:sts::" + self.f.p.account + ":assumed-role/" + self.role + "/" + session)
+    def _ob(self, args):
+        assert args["Bucket"] == self.f.p.bucket and args["ExpectedBucketOwner"] == self.f.p.account
+        if "VersionId" in args:
+            return self.f.model.versions[(args["Key"], args["VersionId"])]
+        return self.f.model.heads[args["Key"]]
+    def get_object(self, **args):
+        from botocore.response import StreamingBody
+        self.f.wires.append((self.role, "get_object"))
+        ob = self._ob(args)
+        return dict(Body=StreamingBody(io.BytesIO(ob.body), len(ob.body)), ContentLength=len(ob.body),
+                    VersionId=ob.ref.version, ETag=ob.etag)
+    def get_object_retention(self, **args):
+        self.f.wires.append((self.role, "get_object_retention"))
+        ob = self._ob(args)
+        return dict(Retention=dict(Mode=ob.mode, RetainUntilDate=datetime.fromtimestamp(ob.until, timezone.utc)))
+    def get_object_legal_hold(self, **args):
+        self.f.wires.append((self.role, "get_object_legal_hold"))
+        return dict(LegalHold=dict(Status=self._ob(args).hold))
+    def put_object(self, **args):
+        self.f.wires.append((self.role, "put_object"))
+        assert args["ChecksumSHA256"] == base64.b64encode(hashlib.sha256(args["Body"]).digest()).decode()
+        assert args["ObjectLockMode"] == "COMPLIANCE" and args["ObjectLockLegalHoldStatus"] == "ON"
+        until = int(args["ObjectLockRetainUntilDate"].timestamp())
+        if args["Key"] == self.f.p.ctrl_key:
+            previous = self.f.model.heads[args["Key"]]
+            assert args["IfMatch"] == previous.etag
+            self.f.model.cas(previous, args["Body"], until)
+        else:
+            assert args["IfNoneMatch"] == "*"
+            self.f.model.put(args["Key"], args["Body"], until)
+        return dict(VersionId=self.f.model.heads[args["Key"]].ref.version)
+    def put_object_retention(self, **args):
+        self.f.wires.append((self.role, "put_object_retention"))
+        ob = self._ob(args)
+        self.f.model.extend(ob.ref, int(args["Retention"]["RetainUntilDate"].timestamp()))
+        return {}
+
+
+class ModelFactory:
+    def __init__(self, anchor, model):
+        self.anchor, self.p, self.model = anchor, anchor.policy, model
+        self.created, self.wires, self.identities = [], [], {}
+    def __call__(self, service, bundle, policy):
+        assert policy == self.p
+        role = "reader" if bundle.access_key == "dummy-reader" else "writer"
+        obj = ModelSDK(service, role, self)
+        self.created.append((service, role, bundle, obj))
+        return obj
+
+
+def integration_fixture(tmp_path, *, schema2=True, change=None, baseline=False):
+    tmp_path.chmod(0o700)
+    p = policy(annual_cash=1_000_000_000_000, lifetime_cash=2_000_000_000_000)
+    model, clock = Model(p, 1000), [1000]
+    old_closure = None
+    if baseline:
+        old_authority = Authority(p)
+        old_custody = m.Custody(old_authority, lambda _: model, lambda: clock[0])
+        old_closure = prepared((old_custody, old_authority, model, clock))
+        old_custody.accept()
+    methods = sorted(m.RPC_METHODS)
+    purposes = ["identity", "discover", "read", "intake", "upload", "accept", "baseline", "revalidate",
+                "preserve", "screened", "migrate", "fund-wallet", "refence"]
+    seeds = {}
+    for role in ("reader", "writer"):
+        seeds["seed-" + role] = dict(parent=None, executor="executor-one", principal=role, fence=1,
+            expires=8000, attempts=512, response_bytes=p.max_control_bytes,
+            charge=512 * (1 + p.max_control_bytes), year=1970, methods=methods, purposes=purposes)
+    inode = tmp_path.stat()
+    template = dict(fence=1, expires=8000, floor=0, revoked=[], screened={}, wallets=seeds)
+    if old_closure:
+        template["screened"][old_closure] = dict(policy="c" * 64, expires=7000)
+    d = dict(schema=1, expires=9000, policy={name: getattr(p, name) for name in p.__dataclass_fields__},
+        principals={role: dict(kind="role", arn="arn:aws:iam::" + p.account + ":role/" + role,
+            unique_id="stable-" + role, sessions=["session-" + role]) for role in ("reader", "writer")},
+        grants={purpose: ["*"] for purpose in purposes}, screening="c" * 64,
+        executors={"executor-one": dict(owner=os.getuid(), journal=dict(path=str(tmp_path / "attempts.json"),
+            id="journal-one", max_bytes=2000000, device=inode.st_dev, inode=inode.st_ino))},
+        rpc=dict(max_wallets=8, max_attempts=2048, max_response_bytes=p.max_control_bytes,
+            request_quote=1, byte_quote=1, max_cash=100_000_000_000), seeds=seeds,
+        migration=dict(source=model.current().ref.wire(), authority_digest=m.digest(m.canonical(template))))
+    if change:
+        change(d, template)
+    d["migration"]["authority_digest"] = m.digest(m.canonical(template))
+    path = tmp_path / "enrollment.json"
+    raw = m.canonical(d)
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    anchor = m.Enrollment.load(path, expected_digest=m.digest(raw), expected_owner=os.getuid(),
+                               expected_executor="executor-one")
+    journal_path = Path(anchor.journal["path"])
+    journal_path.write_bytes(m.journal_genesis(anchor))
+    journal_path.chmod(0o600)
+    journal = m.AttemptJournal(anchor)
+    if schema2:
+        body = m.prepare_schema2(anchor, model.current(), template)
+        model._new(p.ctrl_key, body, 7000)
+    factory = ModelFactory(anchor, model)
+    bundles = {role: m.CredentialBundle("dummy-" + role, "dummy-secret", "dummy-session", 7500)
+               for role in ("reader", "writer")}
+    return SimpleNamespace(anchor=anchor, journal=journal, template=template, model=model,
+        clock=clock, factory=factory, bundles=bundles)
+
+
+def runtime(e):
+    return m.CustodyRuntime(e.anchor, e.journal, lambda: e.clock[0],
+        dict(reader="seed-reader", writer="seed-writer"), e.bundles, client_factory=e.factory)
+
+
+def external_authority_update(e, runtime, change):
+    # A synthetic protected authority publishes a new actual version, then its
+    # authenticated observation is delivered to the authority port.
+    s = e.model.state()
+    change(s["integration"])
+    s["sequence"] += 1
+    s["mutations"] += 1
+    e.model._new(e.anchor.policy.ctrl_key, m.canonical(s), 7000)
+    purpose, closure = runtime.authority.context()
+    runtime.authority.begin("discover")
+    runtime.store.current()  # actual metered API model readback, not a receipt brand
+    runtime.authority.begin(purpose, closure)
+
+
+def integrated_packet(e, r):
+    packet_data = packet()
+    closure = m.closure_id([dict(atom=a, kind=k, sha256=m.digest(b), size=len(b)) for a, k, b in packet_data])
+    external_authority_update(e, r, lambda h: h["screened"].update({closure: dict(policy=e.anchor.data["screening"], expires=7000)}))
+    return closure, packet_data
+
+
+def test_stage3_main_and_unselected_anchor_have_zero_clients(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "boto_client", lambda *a: pytest.fail("SDK before enrollment"))
+    assert m.main() == 2
+    with pytest.raises(m.Hold):
+        m.Enrollment.load(tmp_path / "missing", expected_digest=None,
+                          expected_owner=os.getuid(), expected_executor="executor-one")
+
+
+@pytest.mark.parametrize("bad", ["digest", "owner", "executor", "mode", "symlink", "policy-field", "same-role"])
+def test_anchor_refuses_exact_protection_mismatch_before_client(tmp_path, bad):
+    if bad in {"policy-field", "same-role"}:
+        def change(d, template):
+            if bad == "policy-field":
+                del d["policy"]["annual_cash"]
+            else:
+                d["principals"]["writer"]["unique_id"] = d["principals"]["reader"]["unique_id"]
+        with pytest.raises(m.Hold):
+            integration_fixture(tmp_path, change=change)
+        return
+    e = integration_fixture(tmp_path)
+    path, expected, owner, executor = Path(e.anchor.path), e.anchor.sha256, os.getuid(), e.anchor.executor
+    if bad == "digest":
+        expected = "0" * 64
+    elif bad == "owner":
+        owner += 1
+    elif bad == "executor":
+        executor = "other-executor"
+    elif bad == "mode":
+        path.chmod(0o644)
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(path)
+        path = alias
+    with pytest.raises((m.Hold, OSError)):
+        m.Enrollment.load(path, expected_digest=expected, expected_owner=owner, expected_executor=executor)
+    assert e.factory.created == []
+
+
+@pytest.mark.parametrize("field,value", [("Account", "999999999999"), ("UserId", "same-name-recreated:session-reader"),
+    ("Arn", "arn:aws:sts::123456789012:assumed-role/other/session-reader")])
+def test_actual_identity_mismatch_burns_attempt_no_s3_client(tmp_path, field, value):
+    e = integration_fixture(tmp_path)
+    correct = dict(Account=e.anchor.policy.account, UserId="stable-reader:session-reader",
+        Arn="arn:aws:sts::123456789012:assumed-role/reader/session-reader")
+    correct[field] = value
+    e.factory.identities["reader"] = correct
+    with pytest.raises(m.Hold, match="mismatch"):
+        runtime(e)
+    assert [x[0] for x in e.factory.created] == ["sts"]
+    d = e.journal._read()
+    assert len(d["attempts"]["seed-reader"]) == 1
+    assert d["wallets"] == e.anchor.data["seeds"]
+
+
+def test_missing_expired_exhausted_or_wrong_executor_wallet_zero_client(tmp_path):
+    e = integration_fixture(tmp_path)
+    w = e.anchor.data["seeds"]["seed-reader"]
+    for i in range(w["attempts"]):
+        e.journal.claim("seed-reader", w, "d" * 64)
+    with pytest.raises(m.Hold, match="exhausted"):
+        runtime(e)
+    assert not e.factory.created and not e.factory.wires
+
+
+def test_cold_same_resolver_and_source_only_flags(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    result = r.cold_recover()
+    assert result.version == e.model.current().ref.version and result.intake_allowed
+    assert not result.runtime_qualified and not result.promotion_authority
+    assert e.factory.created[0][2] is e.factory.created[1][2] is e.bundles["reader"]
+    assert all(role == "reader" for service, role, bundle, client in e.factory.created)
+    r.close()
+
+
+def test_real_integrated_model_reaches_baseline_without_raw_ready_shortcut(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("packet1", members, 5000)
+    assert r.cold_recover().candidate == "HOLD"
+    for atom, _, body in members:
+        r.custody.upload(atom, body)
+        r.custody.reconcile(atom)
+    r.custody.ready()
+    assert r.cold_recover().candidate == "VERIFIED"
+    r.custody.accept()
+    assert r.cold_recover().baseline == "ACCEPTED"
+    # Current floor advances without rewriting the exact schema2 READY origin.
+    external_authority_update(e, r, lambda h: h.update(floor=e.model.state()["sequence"]))
+    assert r.cold_recover().baseline == "ACCEPTED"
+    assert e.model.state()["schema"] == 2
+    r.close()
+
+
+def test_schema1_migration_is_explicit_and_historical_bytes_untouched(tmp_path):
+    e = integration_fixture(tmp_path, schema2=False)
+    r = runtime(e)
+    original = e.model.current()
+    with pytest.raises(m.Hold, match="explicit schema1 migration"):
+        r.cold_recover()
+    assert e.model.current().ref == original.ref
+    result = r.migrate_schema1(e.template, e.bundles["writer"])
+    assert result.version == e.model.current().ref.version
+    assert e.model.state()["schema"] == 2
+    assert e.model.read(original.ref).body == original.body
+    assert original.ref.wire() in e.model.state()["controls"]
+    r.close()
+
+
+def test_migration_requires_exact_source_and_nonrecursive_owner_consent(tmp_path):
+    e = integration_fixture(tmp_path, schema2=False)
+    wrong = copy.deepcopy(e.template)
+    wrong["fence"] = 2
+    with pytest.raises(m.Hold, match="template"):
+        m.prepare_schema2(e.anchor, e.model.current(), wrong)
+    e.model.corrupt_state(lambda s: s["incidents"].append("new-current"))
+    with pytest.raises(m.Hold, match="exact-source"):
+        m.prepare_schema2(e.anchor, e.model.current(), e.template)
+    assert not e.factory.wires
+
+
+def test_pre_send_fsync_failure_and_post_fsync_crash_never_refund(tmp_path, monkeypatch):
+    e = integration_fixture(tmp_path)
+    original = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(OSError("fsync fault")))
+    with pytest.raises(OSError):
+        runtime(e)
+    assert not e.factory.wires
+    monkeypatch.setattr(os, "fsync", original)
+    # A durable claim before a crash with no send stays spent and cannot reset.
+    w = e.anchor.data["seeds"]["seed-reader"]
+    e.journal.claim("seed-reader", w, "e" * 64)
+    j2 = m.AttemptJournal(e.anchor)
+    assert len(j2._read()["attempts"]["seed-reader"]) == 1
+    assert j2._read()["attempts"]["seed-reader"][0]["state"] == "ATTEMPTING"
+
+
+@pytest.mark.parametrize("change", ["screened", "time", "fence"])
+def test_post_fsync_last_guard_blocks_new_put_without_q_reset(tmp_path, monkeypatch, change):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("packet", members, 5000)
+    before = copy.deepcopy(e.model.state())
+    writes = e.factory.wires.count(("writer", "put_object"))
+    original, fired = e.journal.claim, [False]
+    def claim(wid, w, request):
+        index = original(wid, w, request)
+        if wid == "seed-writer" and not fired[0]:
+            fired[0] = True
+            if change == "screened":
+                external_authority_update(e, r, lambda h: h["revoked"].append(dict(purpose="screened", closure=closure)))
+            elif change == "time":
+                e.clock[0] += 25
+            else:
+                external_authority_update(e, r, lambda h: h.update(fence=2))
+        return index
+    monkeypatch.setattr(e.journal, "claim", claim)
+    with pytest.raises(m.Hold):
+        r.custody.upload("data", members[0][2])
+    assert fired[0] and e.factory.wires.count(("writer", "put_object")) == writes
+    assert e.model.state()["ledger"] == before["ledger"] and e.model.state()["lifetime"] == before["lifetime"]
+    assert e.journal._read()["attempts"]["seed-writer"][-1]["state"] == "UNKNOWN"
+    r.close()
+
+
+def test_lost_allocation_ack_keeps_both_escrows_and_recovers_same_id(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    r.enable_writer(e.bundles["writer"])
+    w = copy.deepcopy(e.anchor.data["seeds"]["seed-writer"])
+    w.update(parent="seed-writer", attempts=10)
+    w["charge"] = w["attempts"] * (1 + w["response_bytes"])
+    e.model.fault = "cas-after"
+    with pytest.raises(TimeoutError):
+        r.reserve_wallet("writer-next", w, new_fence=1)
+    assert len(e.model.state()["integration"]["wallets"]) == 3
+    assert "writer-next" not in e.journal._read()["wallets"]
+    r.cold_recover()
+    r.use_wallet("writer", "writer-next")
+    assert r.gate.wallet_ids["writer"] == "writer-next"
+    with pytest.raises(m.Hold):
+        r.reserve_wallet("writer-next", w, new_fence=1)
+    assert len(e.model.state()["integration"]["wallets"]) == 3
+    r.close()
+
+
+def test_missing_or_relocated_journal_never_reinitializes_from_anchor(tmp_path):
+    e = integration_fixture(tmp_path)
+    path = Path(e.anchor.journal["path"])
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        m.AttemptJournal(e.anchor)
+    assert not path.exists() and not e.factory.created
+
+
+def test_unregistered_history_and_payload_never_send(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    before = len(e.factory.wires)
+    with pytest.raises(m.Hold, match="registered"):
+        r.store.read(m.Ref(e.anchor.policy.ctrl_key, "unregistered", "a" * 64, 1))
+    with pytest.raises(m.Hold, match="unregistered"):
+        r.store.latest(e.anchor.policy.prefix + "objects/unknown", 100)
+    assert len(e.factory.wires) == before
+    r.close()
+
+
+def test_real_boto_lazy_explicit_sts_binding_with_stubber(tmp_path):
+    from botocore.stub import Stubber
+    e = integration_fixture(tmp_path)
+    made, stubs = [], []
+    def factory(service, bundle, p):
+        client = m.boto_client(service, bundle, p)
+        made.append((service, bundle, client))
+        stub = Stubber(client)
+        if service == "sts":
+            stub.add_response("get_caller_identity", dict(Account=p.account,
+                Arn="arn:aws:sts::123456789012:assumed-role/reader/session-reader",
+                UserId="stable-reader:session-reader"), {})
+        stub.activate()
+        stubs.append(stub)
+        return client
+    r = m.CustodyRuntime(e.anchor, e.journal, lambda: e.clock[0], dict(reader="seed-reader"),
+        dict(reader=e.bundles["reader"]), client_factory=factory)
+    assert made[0][0] == "sts" and made[1][0] == "s3" and made[0][1] is made[1][1]
+    for stub in stubs:
+        stub.assert_no_pending_responses()
+        stub.deactivate()
+    r.close()
+
+
+def test_explicit_migration_preserves_genuine_schema1_baseline_history(tmp_path):
+    e = integration_fixture(tmp_path, schema2=False, baseline=True)
+    old = e.model.state()["baseline"]
+    origin = m.Ref.parse(old["origin"]["frontier"], e.anchor.policy)
+    assert m.decode(e.model.read(origin).body)["schema"] == 1
+    r = runtime(e)
+    result = r.migrate_schema1(e.template, e.bundles["writer"])
+    assert result.baseline == "ACCEPTED"
+    assert e.model.state()["baseline"] == old
+    assert m.decode(e.model.read(origin).body)["schema"] == 1
+    r.close()
+
+
+def test_unknown_sdk_parameters_never_enter_journal_or_wire(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    before, wires = e.journal._read(), len(e.factory.wires)
+    with pytest.raises(m.Hold, match="parameter allowlist"):
+        r.reader.get_object(Bucket=e.anchor.policy.bucket, Key=e.anchor.policy.ctrl_key,
+            ExpectedBucketOwner=e.anchor.policy.account, SSECustomerKey="must-never-be-journaled")
+    assert e.journal._read() == before and len(e.factory.wires) == wires
+    r.close()
+
+
+
+def test_anchor_and_current_memory_copies_cannot_self_authorize(tmp_path):
+    e = integration_fixture(tmp_path)
+    e.anchor.data["grants"]["extra-unselected-purpose"] = ["*"]
+    with pytest.raises(m.Hold, match="in-memory binding"):
+        runtime(e)
+    assert not e.factory.created
+
+
+def test_current_authority_memory_mutation_requires_actual_observation(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    r.authority.state["integration"]["screened"]["d" * 64] = dict(policy=e.anchor.data["screening"], expires=7000)
+    before = len(e.factory.wires)
+    assert r.custody.resolve_current().candidate == "HOLD"
+    assert len(e.factory.wires) == before
+    r.close()
+
+
+def test_expired_control_protection_allows_only_authorized_preservation(tmp_path):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    e.model.change_observation(e.model.current().ref, until=999)
+    assert r.cold_recover().candidate == "HOLD"
+    r.enable_writer(e.bundles["writer"])
+    r.custody.incident("expired-protection")
+    assert e.model.current().until >= e.clock[0] + e.anchor.policy.floor_seconds
+    assert e.model.state()["incidents"] == ["expired-protection"]
+    r.close()
+
+
+def test_two_callers_cannot_reuse_one_durable_slot(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    def one_slot(d, template):
+        w = d["seeds"]["seed-reader"]
+        w["attempts"] = 1
+        w["charge"] = 1 + w["response_bytes"]
+    e = integration_fixture(tmp_path, change=one_slot)
+    w = e.anchor.data["seeds"]["seed-reader"]
+    second = m.AttemptJournal(e.anchor)
+    def claim(journal):
+        try:
+            return journal.claim("seed-reader", w, "a" * 64)
+        except m.Hold:
+            return "HOLD"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim, [e.journal, second]))
+    assert results.count(0) == 1 and results.count("HOLD") == 1
+    assert len(e.journal._read()["attempts"]["seed-reader"]) == 1
+    assert not e.factory.wires
+
+
+def test_surviving_independent_executor_recovers_without_reusing_lost_wallet(tmp_path):
+    second_dir = tmp_path / "independent"
+    second_dir.mkdir(mode=0o700)
+    def extra_executor(d, template):
+        info = second_dir.stat()
+        d["executors"]["executor-two"] = dict(owner=os.getuid(), journal=dict(path=str(second_dir / "attempts.json"),
+            id="independent-journal", max_bytes=2000000, device=info.st_dev, inode=info.st_ino))
+        w = copy.deepcopy(d["seeds"]["seed-reader"])
+        w["executor"] = "executor-two"
+        d["seeds"]["recovery-reader"] = w
+    e = integration_fixture(tmp_path, change=extra_executor)
+    other = m.Enrollment.load(e.anchor.path, expected_digest=e.anchor.sha256, expected_owner=os.getuid(),
+                               expected_executor="executor-two")
+    # Both pre-funded journals already exist before simulated loss of the Mac.
+    other_path = Path(other.journal["path"])
+    other_path.write_bytes(m.journal_genesis(other))
+    other_path.chmod(0o600)
+    other_journal = m.AttemptJournal(other)
+    r = runtime(e)
+    r.cold_recover()
+    old_cash = sum(w["charge"] for w in e.model.state()["integration"]["wallets"].values())
+    r.close()
+    Path(e.anchor.journal["path"]).unlink()
+    with pytest.raises(FileNotFoundError):
+        m.AttemptJournal(e.anchor)
+    recovered = m.CustodyRuntime(other, other_journal, lambda: e.clock[0], dict(reader="recovery-reader"),
+        dict(reader=e.bundles["reader"]), client_factory=e.factory)
+    assert recovered.cold_recover().version == e.model.current().ref.version
+    assert sum(w["charge"] for w in e.model.state()["integration"]["wallets"].values()) == old_cash
+    assert "seed-reader" not in other_journal._read()["attempts"]
+    recovered.close()
+    other_path.unlink()
+    with pytest.raises(FileNotFoundError):
+        m.AttemptJournal(other)
+
+
+
+def test_raw_consistent_current_receipt_is_not_transport_authentication(tmp_path):
+    e = integration_fixture(tmp_path)
+    authority = m.EnrollmentAuthority(e.anchor, lambda: e.clock[0])
+    with pytest.raises(m.Hold, match="bound metered transport"):
+        authority.ingest(e.model.current())
+    assert authority.current() is None and not e.factory.wires
+
+
+def test_journal_directory_binding_is_checked_again_before_send(tmp_path):
+    e = integration_fixture(tmp_path)
+    original = e.anchor.journal["inode"]
+    # A relocated executor directory must not reuse copied counters, even if a
+    # journal object was made before the relocation was observed.
+    e.anchor.data["executors"][e.anchor.executor]["journal"]["inode"] = original + 1
+    with pytest.raises(m.Hold, match="directory/device/inode"):
+        e.journal.available("seed-reader", e.anchor.data["seeds"]["seed-reader"])
+    assert not e.factory.wires
+
+
+# Stage3 adversary: authenticated CURRENT completion order is not publication
+# order; retention's nested datetime must be journaled without changing the SDK.
+def integrated_baseline(e):
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("retained-packet", members, 5000)
+    for atom, _, body in members:
+        r.custody.upload(atom, body)
+        r.custody.reconcile(atom)
+    r.custody.ready()
+    r.custody.accept()
+    return r, closure
+
+
+def test_delayed_actual_current_after_new_screened_revocation_cannot_publish_or_upload(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    closure, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("pending-packet", members, 5000)
+    before = copy.deepcopy(e.model.state())
+    writes = e.factory.wires.count(("writer", "put_object"))
+    reader_spend = len(e.journal._read()["attempts"]["seed-reader"])
+    selected, release = threading.Event(), threading.Event()
+    original, reads = r.reader.client.get_object, [0]
+    class DelayedBody:
+        def __init__(self, body):
+            self.body, self.waited = body, False
+        def read(self, amount):
+            if not self.waited:
+                self.waited = True
+                selected.set()
+                assert release.wait(10), "test failed to release the older CURRENT body"
+            return self.body.read(amount)
+        def close(self):
+            self.body.close()
+    def get_object(**params):
+        result = original(**params)
+        if threading.current_thread().name.startswith("old-upload") and params["Key"] == e.anchor.policy.ctrl_key and "VersionId" not in params:
+            reads[0] += 1
+            if reads[0] == 2:  # actual _stable CURRENT GET selected old V
+                result["Body"] = DelayedBody(result["Body"])
+        return result
+    monkeypatch.setattr(r.reader.client, "get_object", get_object)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-upload") as pool:
+        older = pool.submit(r.custody.upload, "data", members[0][2])
+        try:
+            assert selected.wait(10), "upload did not reach the intended CURRENT transport phase"
+            external_authority_update(e, r, lambda h: h["revoked"].append(dict(purpose="screened", closure=closure)))
+            newer = r.authority.observation
+            assert r.authority.state["sequence"] == before["sequence"] + 1
+            assert not r.authority.permits("screened", closure)
+        finally:
+            release.set()
+        with pytest.raises(m.StaleCurrent, match="high-water"):
+            older.result(timeout=15)
+    assert r.authority.observation == newer and r.authority.current() is not None
+    assert not r.authority.permits("screened", closure)
+    assert e.factory.wires.count(("writer", "put_object")) == writes
+    assert e.model.state()["ledger"] == before["ledger"] and e.model.state()["lifetime"] == before["lifetime"]
+    assert len(e.journal._read()["attempts"]["seed-reader"]) > reader_spend
+    r.close()
+
+
+@pytest.mark.parametrize("kind", ["new-ref", "etag", "body"])
+def test_same_sequence_identity_conflict_holds_without_cached_grant_fallback(tmp_path, kind):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    old = r.authority.observation
+    if kind == "etag":
+        e.model.change_observation(old.ref, etag='"conflicting-etag"')
+    else:
+        state = e.model.state()
+        if kind == "body":
+            state["incidents"].append("conflicting-body")
+        e.model._new(e.anchor.policy.ctrl_key, m.canonical(state), old.until)
+    with pytest.raises(m.Conflict, match="same sequence"):
+        r.store.current()
+    assert r.authority.observation == old and r.authority.current() is None
+    assert not r.authority.permits("upload", None)
+    # Replaying even the formerly valid identity cannot silently clear a fork.
+    e.model.heads[e.anchor.policy.ctrl_key] = old
+    r.authority.begin("discover")
+    with pytest.raises(m.Hold, match="newer sequence"):
+        r.store.current()
+    assert r.authority.current() is None
+    # A genuinely newer protected CURRENT can establish authority again.
+    state = m.decode(old.body)
+    state["sequence"] += 1
+    state["mutations"] += 1
+    e.model._new(e.anchor.policy.ctrl_key, m.canonical(state), old.until)
+    r.store.current()
+    assert r.authority.current() is not None
+    r.close()
+
+
+def test_current_denial_never_falls_back_to_cached_upload_grant(tmp_path, monkeypatch):
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    _, members = integrated_packet(e, r)
+    r.enable_writer(e.bundles["writer"])
+    r.custody.reserve("pending", members, 5000)
+    original = r.reader.client.get_object
+    def denied(**params):
+        raise PermissionError("synthetic CURRENT denial")
+    monkeypatch.setattr(r.reader.client, "get_object", denied)
+    with pytest.raises(PermissionError):
+        r.store.current()
+    assert r.authority.current() is None
+    writes = e.factory.wires.count(("writer", "put_object"))
+    with pytest.raises(m.Hold):
+        r.custody.upload("data", members[0][2])
+    assert e.factory.wires.count(("writer", "put_object")) == writes
+    # Only a new actual fixed-CURRENT discovery may clear a transient read failure.
+    monkeypatch.setattr(r.reader.client, "get_object", original)
+    r.cold_recover()
+    assert r.authority.current() is not None
+    r.close()
+
+
+def test_composed_retention_extension_journals_exact_datetime_before_wire_and_progresses(tmp_path, monkeypatch):
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    original, captured = r.writer.client.put_object_retention, []
+    def extend(**params):
+        record = e.journal._read()["attempts"]["seed-writer"][-1]
+        assert record["state"] == "ATTEMPTING"
+        actual_date = params["Retention"]["RetainUntilDate"]
+        assert type(actual_date) is datetime and actual_date == datetime.fromtimestamp(6000, timezone.utc)
+        assert record["details"]["params"]["Retention"] == dict(Mode="COMPLIANCE", RetainUntilDate=actual_date.isoformat())
+        m.canonical(record)  # durable exact JSON projection, no default=str
+        captured.append(params)
+        return original(**params)
+    monkeypatch.setattr(r.writer.client, "put_object_retention", extend)
+    r.custody.renew_item("renew", "atom:data")
+    ref = m.Ref.parse(e.model.state()["ledger"]["data"]["ref"], e.anchor.policy)
+    assert e.model.read(ref).until == 6000 and len(captured) == 1
+    assert e.model.state()["renewals"]["renew"]["progress"]["atom:data"] == e.clock[0]
+    r.custody.renew_item("renew", "atom:data")
+    assert len(captured) == 1  # actual readback prevents an unneeded duplicate extension
+    r.close()
+
+
+@pytest.mark.parametrize("fault", ["revoked", "late", "unknown"])
+def test_composed_retention_faults_keep_escrow_and_never_send_on_bad_guard(tmp_path, monkeypatch, fault):
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    before = e.model.state()
+    cash = copy.deepcopy(before["integration"]["wallets"])
+    spent = len(e.journal._read()["attempts"]["seed-writer"])
+    calls = e.factory.wires.count(("writer", "put_object_retention"))
+    original = e.journal.claim
+    def claim(wid, wallet, request):
+        index = original(wid, wallet, request)
+        if type(request) is dict and request["method"] == "put_object_retention":
+            if fault == "revoked":
+                external_authority_update(e, r, lambda h: h["revoked"].append(dict(purpose="preserve", closure=None)))
+            elif fault == "late":
+                e.clock[0] = 1051
+        return index
+    monkeypatch.setattr(e.journal, "claim", claim)
+    if fault == "unknown":
+        e.model.fault = "extend-after"
+        error = TimeoutError
+    else:
+        error = m.Hold
+    with pytest.raises(error):
+        r.custody.renew_item("renew", "atom:data")
+    expected_calls = calls + (fault == "unknown")
+    assert e.factory.wires.count(("writer", "put_object_retention")) == expected_calls
+    assert e.model.state()["integration"]["wallets"] == cash and e.model.state()["lifetime"] == before["lifetime"]
+    assert not e.model.state()["renewals"]["renew"]["progress"]
+    records = e.journal._read()["attempts"]["seed-writer"]
+    assert len(records) > spent and records[-1]["state"] == "UNKNOWN"
+    if fault == "unknown":
+        r.custody.renew_item("renew", "atom:data")
+        assert e.factory.wires.count(("writer", "put_object_retention")) == expected_calls
+        assert "atom:data" in e.model.state()["renewals"]["renew"]["progress"]
+    r.close()
+
+
+@pytest.mark.parametrize("value", [datetime(2020, 1, 1), "2020-01-01", object(),
+    {"Mode": "COMPLIANCE", "RetainUntilDate": datetime(2020, 1, 1, tzinfo=timezone.utc), "extra": 1}])
+def test_nested_journal_projection_is_finite_and_type_strict(value):
+    retention = value if type(value) is dict else dict(Mode="COMPLIANCE", RetainUntilDate=value)
+    with pytest.raises(m.Hold):
+        m.journal_request_projection(dict(Retention=retention))
+
+
+
+def test_metered_retention_keeps_actual_sdk_datetime_with_stubber(tmp_path, monkeypatch):
+    from botocore.stub import Stubber
+    e = integration_fixture(tmp_path)
+    r, closure = integrated_baseline(e)
+    r.custody.renew_begin("renew", 6000, 1050)
+    ref = m.Ref.parse(e.model.state()["ledger"]["data"]["ref"], e.anchor.policy)
+    bundle = e.bundles["writer"]
+    sdk = m.boto_client("s3", bundle, e.anchor.policy)
+    expected = dict(**request(e.anchor.policy, ref.key, ref.version),
+        Retention=dict(Mode="COMPLIANCE", RetainUntilDate=datetime.fromtimestamp(6000, timezone.utc)))
+    with Stubber(sdk) as stub:
+        stub.add_response("put_object_retention", {}, expected)
+        original, seen = sdk.put_object_retention, []
+        def call(**params):
+            record = e.journal._read()["attempts"]["seed-writer"][-1]
+            assert record["state"] == "ATTEMPTING"
+            assert type(params["Retention"]["RetainUntilDate"]) is datetime
+            assert record["details"]["params"]["Retention"]["RetainUntilDate"] == "1970-01-01T01:40:00+00:00"
+            seen.append(True)
+            return original(**params)  # actual SDK parameter validation; no network
+        monkeypatch.setattr(sdk, "put_object_retention", call)
+        metered = m.MeteredClient("writer", sdk, bundle, r.gate)
+        raw = m.S3Store(e.anchor.policy, metered, r.reader,
+            writer_identity=e.anchor.policy.writer, reader_identity=e.anchor.policy.reader)
+        r.gate.arm_write(lambda: r.custody._authorized(r.authority.current(), "preserve", None))
+        raw.extend(ref, 6000)
+        assert seen == [True]
+        stub.assert_no_pending_responses()
+    sdk.close()
+    r.close()
+
+
+def test_current_response_started_before_denial_cannot_restore_cached_authority(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    e = integration_fixture(tmp_path)
+    r = runtime(e)
+    r.cold_recover()
+    selected, release = threading.Event(), threading.Event()
+    original = r.reader.client.get_object
+    class DelayedBody:
+        def __init__(self, body):
+            self.body, self.waited = body, False
+        def read(self, amount):
+            if not self.waited:
+                self.waited = True
+                selected.set()
+                assert release.wait(10)
+            return self.body.read(amount)
+        def close(self):
+            self.body.close()
+    def get_object(**params):
+        if threading.current_thread().name.startswith("old-current"):
+            result = original(**params)
+            result["Body"] = DelayedBody(result["Body"])
+            return result
+        raise PermissionError("new current request denied")
+    monkeypatch.setattr(r.reader.client, "get_object", get_object)
+    def older_read():
+        r.authority.begin("discover")
+        return r.store.current()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-current") as pool:
+        older = pool.submit(older_read)
+        try:
+            assert selected.wait(10)
+            r.authority.begin("discover")
+            with pytest.raises(PermissionError):
+                r.store.current()
+            assert r.authority.current() is None
+        finally:
+            release.set()
+        with pytest.raises(m.Hold):
+            older.result(timeout=15)
+    assert r.authority.current() is None and not r.authority.permits("upload", None)
+    monkeypatch.setattr(r.reader.client, "get_object", original)
+    assert r.cold_recover().version == e.model.current().ref.version
+    r.close()
