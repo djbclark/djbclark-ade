@@ -4,6 +4,8 @@ A1. The approved implementation and bounded rollout have passed. This record sup
 
 A2. Scope is the approved sequence: observation, isolated protocol shadow, dedicated native physical two-host pilot, and one fresh resource-free real workstream activated through machine intake then one coalesced wake. Existing leads/claims were not migrated. Broader enrollment, remote resource migration and the central-questions implementation remain separate work.
 
+A3. On 2026-11-19 the current ADE lead reconfirmed that the implementation in [PR795](https://github.com/djbclark/djbclark-ade/pull/795) and publication of this acceptance in [PR804](https://github.com/djbclark/djbclark-ade/pull/804) remain accepted. Apparent deletions in a stale shared-checkout index were not a decision to retire this work. Shared-checkout reconciliation and the audit of other affected changes are separate from this acceptance; no completed repair or fleet-wide absence of impact is claimed here. The operator's later plugin/system-package investigation is recorded as the [last plan item, after a completed and reviewed soak](nats-jetstream-implementation-plan.md#g-final-follow-up-after-soak).
+
 ## B. Published and activated artifacts
 
 | Artifact | Verified result |
