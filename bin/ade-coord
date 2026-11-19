@@ -49,7 +49,9 @@ try:
             raise CoordinationError("SNAPSHOT_RECORD_AND_REVISION_REQUIRED")
         if not isinstance(request.get("authority"), dict):
             raise CoordinationError("AUTHORITY_REQUIRED")
-    if command == "handoff transfer":
+    if command == "agent relationships":
+        result = _coord().agent_relationships(request)
+    elif command == "handoff transfer":
         transfer = _coord()._sibling("ade_coord_handoff").transfer
         result = transfer(request)
     elif command in ("wake status", "wake reconcile"):

@@ -120,6 +120,37 @@ fence; it defaults off until pilot approval. Durable inbox remains the truth and
 queued notifications never mean intake or processing. Goal completion still
 requires approved live pilot/controller evidence, not this source alone.
 
+## Read-only configured agent relationships
+
+`bin/ade-coord agent relationships` accepts `{"agent_id":"worker_agent"}`
+on stdin and returns the usual JSON result envelope. It reads local enrollment
+configuration and its generation manifest only: no broker lookup, native parent
+lookup, send, controller execution, enrollment change or persistent write.
+
+An explicit assignment identifies the worker's recipient role. A well-formed
+`roles.<role>.runtime.owner` consistent with that owner's alias supplies a
+**configured** controller candidate. The result reports that edge in
+`controller`, plus `configured_owned_roles`, `alias_role` and reverse `workers`
+edges for the queried agent. Historical/successor aliases alone never identify
+the current owner or imply control of the role's workers. `controller` and
+`controlled_pilot` configuration flags are not controller identities.
+
+`controller.status` is `known`, `unknown` or `ambiguous`. Here `known` means
+explicit configured evidence, not a verified current owner. Missing assignments,
+missing/malformed owners or inconsistent aliases stay unknown. Self-control and
+control cycles are ambiguous. Neither a missing assignment nor an empty worker
+list establishes an uncontrolled agent or a root lead. `workers_complete:false`
+means this is not a fleet-wide worker census.
+
+Every result declares `evidence:"local_enrollment_config"`,
+`current_owner_verified:false`, `contact_authority:false` and
+`requires_online_owner_revalidation:true`. Unknown and ambiguous controllers
+remain non-contactable; this query grants no contact authority even for a known
+configured edge. A consumer must revalidate the role owner through existing
+online authority before sending. Stale runtime retirement evidence is never
+promoted into current ownership. A live broker-refreshed graph or coordinator
+enforcement policy is separate work; this command creates no new controller.
+
 ## Shared external-operation intent
 
 The local SQLite operation journal remains available for legacy/local use; it

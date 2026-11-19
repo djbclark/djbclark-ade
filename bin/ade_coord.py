@@ -133,6 +133,77 @@ def role_for(identifier, *, cfg=None):
         raise CoordinationError("UNBOUND_ROLE_ALIAS")
     return role
 
+
+def agent_relationships(request, *, cfg=None):
+    """Describe configured edges only; never establish current owner/contact authority."""
+    agent = request.get("agent_id")
+    if not isinstance(agent, str) or not agent.strip():
+        raise CoordinationError("AGENT_ID_REQUIRED")
+    cfg = config() if cfg is None else cfg
+    cfg = {"roles": {}, "aliases": {}, "assignments": {}} if cfg is None else cfg
+    if not all(isinstance(cfg.get(key), dict) for key in ("roles", "aliases", "assignments")):
+        raise CoordinationError("INVALID_RELATIONSHIP_CONFIG")
+    roles, aliases, assignments = (cfg[key] for key in ("roles", "aliases", "assignments"))
+    owners = {}
+    for role, settings in roles.items():
+        runtime = settings.get("runtime") if isinstance(settings, dict) else None
+        owner = runtime.get("owner") if isinstance(runtime, dict) else None
+        if (isinstance(owner, dict) and set(owner) == {"host", "server", "agent"}
+                and all(isinstance(value, str) and value.strip() for value in owner.values())
+                and aliases.get(owner["agent"]) == role):
+            owners[role] = {key: owner[key] for key in ("host", "server", "agent")}
+
+    edges = {}
+    for worker, assignment in assignments.items():
+        if not isinstance(worker, str) or not worker.strip():
+            continue
+        role = assignment.get("recipient_role") if isinstance(assignment, dict) else None
+        if not isinstance(role, str) or role not in roles:
+            edges[worker] = {"status": "unknown", "reason": "recipient_role_missing"}
+        elif role not in owners:
+            edges[worker] = {"status": "unknown", "reason": "configured_owner_missing_or_inconsistent",
+                             "recipient_role": role}
+        else:
+            edges[worker] = {"status": "known", "recipient_role": role,
+                             "configured_owner": owners[role]}
+
+    # A control cycle, including a self-assignment, cannot establish a lead.
+    # Keep its explicit edge as evidence, but never select a controller from it.
+    cyclic = set()
+    for worker in edges:
+        path, seen, current = [], set(), worker
+        while edges.get(current, {}).get("status") == "known":
+            if current in seen:
+                cyclic.update(path)
+                break
+            seen.add(current)
+            path.append(current)
+            current = edges[current]["configured_owner"]["agent"]
+    for worker in cyclic:
+        edges[worker] = {**edges[worker], "status": "ambiguous", "reason": "control_cycle"}
+
+    controller = edges.get(agent, {"status": "unknown", "reason": "no_explicit_assignment"})
+    owned_roles = sorted(role for role, owner in owners.items() if owner["agent"] == agent)
+    workers = [
+        {"agent_id": worker, **edge}
+        for worker, edge in sorted(edges.items())
+        if edge.get("configured_owner", {}).get("agent") == agent
+    ]
+    alias = aliases.get(agent)
+    return {
+        "agent_id": agent,
+        "evidence": "local_enrollment_config",
+        "controller": controller,
+        "configured_owned_roles": owned_roles,
+        "alias_role": alias if isinstance(alias, str) and alias in roles else None,
+        "workers": workers,
+        "workers_complete": False,
+        "current_owner_verified": False,
+        "contact_authority": False,
+        "requires_online_owner_revalidation": True,
+    }
+
+
 def snapshot(role, *, cfg=None, active=True):
     cfg = cfg or config()
     if not cfg or role not in cfg["roles"]:
