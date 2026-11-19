@@ -43,7 +43,7 @@ def policy(**changes):
         max_mutations=120, max_cycles=4, cycle_seconds=24, floor_seconds=100,
         proof_seconds=10, control_reserve_bytes=120000000, preservation_reserve_cash=121000000,
         annual_cash=200000000, lifetime_cash=300000000, byte_liability=1,
-        object_liability=5, generation=1, minimum_sequence=0)
+        object_liability=5, generation=1, minimum_sequence=0, maximum_horizon=100000)
     fields.update(changes)
     return m.Policy(**fields)
 
@@ -569,3 +569,32 @@ def test_real_sdk_client_binding_and_no_hidden_retry_requirements():
         m.S3Store(p, writer, reader, writer_identity="untrusted", reader_identity=p.reader)
     writer.close()
     reader.close()
+
+
+def test_unquoted_unbounded_retention_term_cannot_spend_finite_grant(env):
+    c, a, st, clock = env
+    with pytest.raises(m.Hold, match="term ceiling"):
+        c.reserve("t", packet(), a.p.maximum_horizon + 1)
+    assert st.state()["ledger"] == {}
+
+
+def test_authorized_preservation_can_repair_expired_compliance_with_hold_on(env):
+    c, a, st, clock = env
+    prepared(env)
+    # Existing locked bytes and legal hold remain; intake cannot treat expired date as proof.
+    old = st.current().ref
+    st.change_observation(old, until=999)
+    assert c.resolve_current().candidate == "HOLD"
+    c.incident("expired-protection")
+    assert st.state()["incidents"] == ["expired-protection"]
+    assert st.current().until >= clock[0] + a.p.floor_seconds
+
+
+def test_actual_term_beyond_enrolled_quote_stays_hold_with_liability(env):
+    c, a, st, clock = env
+    prepared(env)
+    before = st.state()["lifetime"]
+    ref = m.Ref.parse(st.state()["ledger"]["data"]["ref"], a.p)
+    st.change_observation(ref, until=a.p.maximum_horizon + 1)
+    assert c.resolve_current().candidate == "HOLD"
+    assert st.state()["lifetime"] == before

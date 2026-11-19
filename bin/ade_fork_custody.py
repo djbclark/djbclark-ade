@@ -102,6 +102,7 @@ class Policy:
     object_liability: int
     generation: int
     minimum_sequence: int
+    maximum_horizon: int
 
     def validate(self):
         for name in ("identity", "writer", "reader"):
@@ -185,6 +186,7 @@ class Observation:
         require(type(self.body) is bytes and len(self.body) == self.ref.size <= cap
                 and digest(self.body) == self.ref.sha256, "independent exact bytes")
         natural(self.until, "actual retain date")
+        require(self.until <= p.maximum_horizon, "actual term exceeds enrolled liability bound")
         require(self.mode == "COMPLIANCE" and self.hold == "ON" and self.until >= horizon,
                 "actual protection/date insufficient")
         require(isinstance(self.etag, str) and bool(self.etag), "ETag missing")
@@ -258,7 +260,7 @@ class Custody:
         now = natural(self.clock(), "trusted clock")
         store = self.factory(p)
         obs = store.current()
-        obs.protected(p, now, p.max_control_bytes)
+        obs.protected(p, 0 if purpose == "preserve" else now, p.max_control_bytes)
         s = decode(obs.body)
         self._validate(s, p)
         return p, now, store, obs, s
@@ -270,6 +272,7 @@ class Custody:
                 and s["contract"] == p.contract_digest, "protected CTRL enrollment binding")
         for k in ("sequence", "mutations", "lifetime", "control_horizon"):
             natural(s[k], k)
+        require(s["control_horizon"] <= p.maximum_horizon, "control term liability bound")
         require(s["sequence"] >= p.minimum_sequence and s["mutations"] <= p.max_mutations,
                 "rollback floor/control pool")
         require(type(s["ledger"]) is dict and len(s["ledger"]) <= p.max_members * p.max_cycles,
@@ -289,6 +292,7 @@ class Custody:
                 natural(a[k], k)
             require(a["kind"] in ("data", "manifest") and a["size"] <= p.max_object_bytes,
                     "issuance member")
+            require(a["horizon"] <= p.maximum_horizon, "issuance term liability bound")
             token(a["cohort"], "birth cohort")
             require(a["charge"] == a["size"] * p.byte_liability + p.object_liability, "liability quote")
             if a["ref"] is not None:
@@ -338,6 +342,7 @@ class Custody:
             natural(job["completed_at"], "completion clock")
             natural(job["cutoff"], "cutoff")
             natural(job["target"], "target")
+            require(job["target"] <= p.maximum_horizon, "renewal term liability bound")
             natural(job["due"], "due")
             require(type(job["progress"]) is dict and set(job["progress"]) <= set(job["census"])
                     and type(job["done"]) is bool, "renewal progress")
@@ -396,7 +401,7 @@ class Custody:
         require(len(members) <= p.max_members and len({x[0] for x in members}) == len(members), "member cap/duplicates")
         require(sum(len(x[2]) for x in members) <= p.max_packet_bytes, "packet cap")
         natural(horizon, "horizon")
-        require(horizon >= now + p.floor_seconds, "admission floor")
+        require(now + p.floor_seconds <= horizon <= p.maximum_horizon, "admission floor/term ceiling")
         year = datetime.fromtimestamp(now, timezone.utc).year
         for atom, kind, body in members:
             require(atom not in s["ledger"] and len(body) <= p.max_object_bytes, "new bounded atom")
@@ -547,6 +552,7 @@ class Custody:
         token(renewal, "renewal")
         require(renewal not in s["renewals"] and len(s["renewals"]) < p.max_cycles, "finite renewal jobs")
         require(type(horizon) is int and horizon >= now + p.floor_seconds
+                and horizon <= p.maximum_horizon
                 and type(due) is int and now < due <= s["control_horizon"], "renewal dates")
         census = {"atom:" + a: dict(atom=a, ref=None) for a in s["ledger"]}
         for r in s["controls"] + [ob.ref.wire()]:
@@ -580,7 +586,7 @@ class Custody:
         require(now < j["due"], "original deadline missed")
         ref = self._renew_ref(j["census"][item], s, p)
         cap = max(p.max_object_bytes, p.max_control_bytes)
-        actual = st.read(ref).protected(p, now, cap)
+        actual = st.read(ref).protected(p, 0, cap)
         if actual.until < j["target"]:
             self._stable(p, st, ob, "preserve")
             st.extend(ref, j["target"])

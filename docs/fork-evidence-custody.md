@@ -20,7 +20,11 @@ All limits are required enrollment choices; there are no inherited proposal
 values or accepted default architecture. The protected binding includes account,
 region, bucket, namespace, contract/policy digests, generation/sequence rollback
 floor, distinct persistent writer/reader identities, object/packet/control caps,
-finite cycles and mutations, clocks, cash quotes and preservation reserve.
+finite cycles and mutations, clocks, an absolute maximum authorized retention
+horizon, cash quotes and preservation reserve. The cash quote must cover that
+whole finite horizon; it cannot fund an arbitrarily chosen future date. Unknown
+actual protection beyond the quoted ceiling holds admission and requires incident
+reconciliation without erasing the original reservation.
 The binding must remain recoverable independently of a lost Mac/journal. An old
 offline checkpoint is not authoritative latest discovery. The existing host must
 fetch the enrolled fixed CTRL key using authenticated S3 reads and obtain the
@@ -98,7 +102,8 @@ choice and are refused against the old CTRL in this pilot.
 
 Preservation has its own current authority purpose and remains possible while
 intake is denied or an upload outcome is unknown. Incidents, known exact outcome
-reconciliation and renewal use the same CTRL CAS; no state is overwritten from
+reconciliation and renewal use the same CTRL CAS; an expired COMPLIANCE date can be repaired
+under preservation authority while actual legal hold remains ON; no state is overwritten from
 a stale snapshot and no reservation is cleared to make room.
 
 `renew_begin` persists a fixed protected source frontier, sequence cutoff, exact
