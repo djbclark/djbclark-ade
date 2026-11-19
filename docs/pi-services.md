@@ -69,12 +69,20 @@ The provider loaded and the task succeeded despite the warning; it was neither
 suppressed nor fixed by editing the installed package. Keep optional search and
 image resources disabled unless separately chosen.
 
-Grok and Antigravity remain manual service paths. Their successful basic checks
-do not add them to `ade/auto`; named-pool freshness, identity, failure handling
-and continuation acceptance must precede a routing-policy change. The operator
-gate is `config/pi-pool-acceptance.toml` (`accepted = false` for both as of
-2026-11-09); `bin/ade-pi-pools check` and `bin/pi-default` refuse automatic
-routing to an unaccepted pool ([dynamic defaults](pi-defaults.md) B4).
+Grok remains a manual service path. Antigravity is accepted for automatic routing
+since 2026-11-19 (`config/pi-pool-acceptance.toml`), on this evidence: a fresh
+`aiuse sample --force` antigravity reading (Gemini 5-hour 4.8 %, weekly 3.4 %), model
+identity confirmed in both `pi --list-models` and `paseo provider models pi`
+(`antigravity/gemini-4-neon`, 1M context / 262K output, tools and reasoning enabled),
+and clean failure handling — a Neon turn that the backend refused ended with one
+specific `Antigravity API error … Resource has been exhausted`, not a hang or a
+silent success. Continuation on Neon specifically is **not** re-verified: Neon was
+out of quota at review time, so the older 2026-11-08 bounded native task remains the
+continuation evidence. Re-check continuation after a Neon quota reset. Grok keeps
+the stricter gate: named-pool freshness, identity, failure handling and continuation
+acceptance must precede any routing-policy change there. `bin/ade-pi-pools check`
+and `bin/pi-default` refuse automatic routing to an unaccepted pool
+([dynamic defaults](pi-defaults.md) B4).
 
 ## SIPB's 32k context
 

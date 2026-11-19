@@ -28,9 +28,10 @@ accepted = false
 note = "xAI subscription via Pi; manual only until accepted"
 
 [pools.antigravity]
-accepted = false
-# 2026-11-08: basic tool check only; not in ade/auto shortlist (docs/pi-services.md)
-note = "Google OAuth via Pi; manual only until accepted"
+accepted = true
+# 2026-11-08: basic tool check only. 2026-11-19 acceptance review: freshness, identity and failure handling
+# verified; continuation not re-verified because Gemini 4 Neon was out of quota at review time.
+note = "Google OAuth via Pi; accepted 2026-11-19 on fresh quota, model identity (antigravity/gemini-4-neon 1M/262K, tools+reasoning) and clean failure handling; continuation re-check pending a Neon quota reset"
 
 [pools.sipb]
 accepted = false
