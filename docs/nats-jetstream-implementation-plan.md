@@ -1,6 +1,6 @@
 # NATS JetStream implementation plan — ADE issue 779
 
-Status: implementation and the approved bounded rollout verified complete. See [final acceptance](nats-jetstream-final-acceptance.md) and [the execution ledger](nats-jetstream-execution.md) for published code, CI, native two-host succession, the first real workstream, activation and recovery evidence. Broader enrollment remains separately gated. Updated on 2026-11-18; existing NixOS `vps-hub`, no Google Cloud.
+Status: implementation and the approved bounded rollout verified complete; the current lead reconfirmed acceptance on 2026-11-19. See [final acceptance](nats-jetstream-final-acceptance.md) and [the execution ledger](nats-jetstream-execution.md) for published code, CI, native two-host succession, the first real workstream, activation and recovery evidence. Broader enrollment remains separately gated. The final follow-up in [section G](#g-final-follow-up-after-soak) is a packaging study gated on a completed, reviewed soak; it does not reopen the completed implementation goal. Updated on 2026-11-19; existing NixOS `vps-hub`, no Google Cloud.
 
 Issue: [Rethink handoff: pub/sub and leadership-token registry](https://github.com/djbclark/djbclark-ade/issues/779).
 
@@ -139,3 +139,13 @@ F5. <a id="S5"></a>NixOS source, CI and published-head deployment conventions: [
 F7. <a id="S7"></a>Temporal mocked Activities and time-skipping tests: [Python testing guidance](https://docs.temporal.io/develop/python/best-practices/testing-suite).
 
 F8. <a id="S8"></a>Temporal trial credits and billing: [pricing terms](https://temporal.io/pricing.md).
+
+## G. Final follow-up after soak
+
+G1. Operator ruling, 2026-11-19: place this investigation last, after soak. Before starting it, record the soak's agreed scope, duration and acceptance criteria, then complete the soak and review its results. No soak duration or successful soak is asserted by the completed bounded-rollout acceptance. Preserve existing enrollment boundaries while that gate remains pending.
+
+G2. After that gate, investigate packaging the whole coordination system as a self-contained Paseo plugin, with external dependencies where appropriate supplied through widely available system packages such as Homebrew, apt or equivalent distribution packages. Inventory the existing plugin, protocol library, Python helpers, controller, guards, credential boundary, broker and recovery tooling; distinguish what can be bundled, what remains infrastructure, and what genuinely needs upstream support. Verify current package availability and supported host/provider APIs rather than assuming them.
+
+G3. Evaluate the smallest generic Paseo upstream changes needed to preserve admission checks, confirmed runtime quiescence, ownership fencing and durable delivery. Preserve the accepted behavior, authority, artifacts, receipts, outboxes and recovery guarantees. Packaging alone must not imply enforcement over arbitrary filesystem writes, broader enrollment or safe migration of nonempty remote resources.
+
+G4. Return a reviewed feasibility and migration proposal with dependency/install/update requirements, upstream gaps, compatibility and rollback strategy, and the tests needed to demonstrate parity with the accepted system. Reconcile conflicting work with the current lead and operator before proposing removals. This follow-up authorizes investigation after soak; it does not authorize an immediate rewrite, retirement, deployment or dependency installation.
