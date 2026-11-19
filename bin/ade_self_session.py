@@ -489,8 +489,13 @@ class Service:
         return row
 
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
-                requested_title=None, requested_role=None, route_kind=None):
-        predecessor = self.actor()
+                requested_title=None, requested_role=None, route_kind=None, predecessor=None):
+        # A self-handoff acts as the caller. A cross-agent handoff (Carried 103) names the predecessor
+        # explicitly, so a supervisor can re-hand a different stuck agent. The caller is recorded as the
+        # requester and is never itself the predecessor in that case.
+        requester = self.actor()
+        predecessor = requester if predecessor is None else ident(predecessor)
+        cross_agent = predecessor != requester
         role_for = _coord().role_for
         CoordinationError = _coord().CoordinationError
         if role_for(predecessor) is not None:
@@ -577,7 +582,8 @@ class Service:
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
             record = {'schema_version': 1, 'kind': 'handoff', 'token': token, 'identity': identity,
-                      'predecessor': predecessor, 'successor': None, 'home': str(self.home),
+                      'predecessor': predecessor, 'requested_by': requester, 'cross_agent': cross_agent,
+                      'successor': None, 'home': str(self.home),
                       'cwd': cwd, 'workspace': workspace, 'workspace_placement': placement,
                       'provider': launch_source['Provider'],
                       'model': launch_source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),

@@ -2409,3 +2409,27 @@ def test_legacy_appointment_cannot_bypass_enrolled_retirement_gate(setup, monkey
     assert path.read_bytes() == before
     assert len(native.calls) == calls
     assert native.created == 1 and native.archived == 0
+
+
+def test_a_supervisor_can_rehand_a_different_agent(tmp_path: Path) -> None:
+    """A cross-agent handoff names the predecessor explicitly, so a supervisor can re-hand a stuck agent that is
+    not itself. The caller is recorded as the requester and is not the predecessor (Carried 103)."""
+    cwd = tmp_path / 'work tree'
+    cwd.mkdir()
+    stuck = '44444444-4444-4444-8444-444444444444'
+    supervisor = PRED
+    env = {'PASEO_AGENT_ID': supervisor, 'PASEO_AGENT_CWD': str(cwd), 'PASEO_WORKSPACE_ID': WS,
+           'PASEO_HOME': str(tmp_path / 'daemon home')}
+    native = Native(cwd)
+    native.rows[stuck] = {**native.rows[PRED], 'Id': stuck, 'Status': 'idle'}
+    service = ss.Service(tmp_path / 'state', Path(env['PASEO_HOME']), env=env, runner=native,
+                         clock=native.clock, sleep=native.clock.sleep)
+    checkpoint = tmp_path / 'brief.md'
+    checkpoint.write_text('re-handoff the stuck agent off its exhausted pool\n')
+    record = service.handoff(checkpoint, quiesced=True, predecessor=stuck)
+    assert record['predecessor'] == stuck
+    assert record['requested_by'] == supervisor
+    assert record['cross_agent'] is True
+    assert record['predecessor'] != record['requested_by']
+    assert record['status'] == 'awaiting-ack'
+    assert native.archived == 0  # the handoff creates a successor; it never archives the predecessor itself
