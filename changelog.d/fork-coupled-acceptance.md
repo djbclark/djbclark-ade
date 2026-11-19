@@ -15,3 +15,6 @@
   not qualify discovery, resume, claims, helpers or the complete runtime. (#0)
 - Require the public client entry in the verified payload inventory and check
   maintenance authority on the same connection used for metadata mutations. (#0)
+
+- Bind the completed retained-system-library build archive by exact run and
+  payload digests for disposable CI namespace and registration checks. (#0)

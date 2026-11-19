@@ -25,7 +25,7 @@ jobs:
           node-version: latest
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Shared ADE helper decisions, no namespace qualification
-        run: uv run --with pytest python -m pytest tests/test_ade_directory_helper_decisions.py tests/test_ade_ws_autoname.py tests/test_ade_ws_names.py tests/test_ade_claims_bind_owner.py tests/test_ade_claims_release.py -q
+        run: uv run --with pytest python -m pytest tests/test_ade_directory_operations.py tests/test_ade_directory_helper_decisions.py tests/test_ade_ws_autoname.py tests/test_ade_ws_names.py tests/test_ade_claims_bind_owner.py tests/test_ade_claims_release.py -q
       - name: Descriptor and owned-process teardown tests, not runtime qualification
         run: |
           node --check tests/fixtures/fork-coupled/native-roundtrip.mjs
