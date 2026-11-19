@@ -80,9 +80,6 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 11. **Templates, Phase 1** (2026-10-20): declare the `TODO_*` secret names, give each template field a home, make the
     Codex and Claude templates merges, and the `ade-template-check` scanner LOWs (adversary round 3 on PR 23). Lives in
     `agents/README.md`.
-12. **Delete the credential vault after 2026-11-19** (owner djbclark): `~/.local/state/ade/credential-bak/`,
-    nothing reads it. `ade-install doctor` WARNs within 14 days before that date and FAILs on/after it while
-    the vault still exists (never deletes; operator yes still required). Lives in `bin/ade_install.py`.
 13. **`ade-backup-stores` LOWs and schedule** (PR 24 rounds 4-22): a launchd schedule, a generation retention,
     `O_NOFOLLOW` walks, the unscrubbed `.part`; and scrub or delete the first generation (it predates the credential
     scrub). Lives in `bin/ade-backup-stores`.
@@ -264,3 +261,4 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 33. `route`/`plan` skip a pool with no model profile for the kind and name it under `skipped`; placeholder only when no capable pool has a profile (rt-bulk; 2026-11-15, [PR 756](https://github.com/djbclark/djbclark-ade/pull/756); Plektra lead 0416bbec's bulk report, `herdr-generic`).
 34. A self-handoff successor inherits its predecessor's ade_claims claims (cl-succ; 2026-11-15, [PR 757](https://github.com/djbclark/djbclark-ade/pull/757); Plektra QA lead 515d25fe's report): `ade-self-session finish` rebinds them via `ade_claims.py successor-of`, verified against the handoff record; `docs/git-guard.md`.
 35. Bookkeeping PR (bookkeeping; 2026-11-15): removed the tracked `.claude/skills/fastino-glide/` and its `skills-lock.json` entry (Carried 47 (c)) and closed 47 (a); `archived_send_gate` backstop skips ids right after `/`; `load-watch ci decide` audit events name the mode (`lw-pending-*`, rv-758 B1); carried findings 56-61 and the 19 Kiri note.
+36. **Credential vault deleted** (former Carried 12; 2026-11-19): `~/.local/state/ade/credential-bak/` held 15 dated `.bak` copies of key-holding configs, moved there 2026-10-20 on the operator's "keep 30 days"; the operator approved the delete in `steps`, `ade_install.observe_credential_bak()` reads `ok`, and the probe (which never deletes) stays in `bin/ade_install.py`. `tests/test_ade_jobs_inventory.py` no longer depends on a machine's copy ([PR 807](https://github.com/djbclark/djbclark-ade/pull/807)).
