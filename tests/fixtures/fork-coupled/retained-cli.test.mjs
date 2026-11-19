@@ -162,3 +162,68 @@ test('stderr overflow evidence stays within original cap and preserves the faile
       });
     } finally { await rm(root, {recursive: true, force: true}); }
   });
+
+
+// Controlled disposal timing and raw bytes are diagnostic DATA tests, not an
+// assertion that a real process settled or that forced teardown became valid.
+for (const token of [null, 'a'.repeat(43)]) {
+  test('late disposal deadline retains only observational stderr; token=' + (token !== null),
+    {timeout: 2000}, async () => {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      let disposals = 0;
+      const owner = {
+        closed: Promise.resolve({code: 0}),
+        dispose: async () => {
+          disposals += 1;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        },
+      };
+      const pending = collectCliResponse(child, owner, {token, timeoutMs: 20});
+      child.stderr.write('late disposal marker');
+      await assert.rejects(pending, (error) => {
+        assert.ok(error instanceof assert.AssertionError);
+        assert.equal(error.message, 'CLI deadline exceeded after actual disposal');
+        const evidence = getCliFailureStderr(error);
+        if (token !== null) assert.equal(evidence, null);
+        else assert.deepEqual(evidence, {stderr: 'late disposal marker',
+          stderrBytes: Buffer.byteLength('late disposal marker'), stderrTruncated: false});
+        return true;
+      });
+      assert.equal(disposals, 1);
+    });
+}
+
+for (const [label, chunks, expected, truncated] of [
+  ['invalid UTF-8 expansion', [Buffer.alloc(16384, 255)], '\ufffd'.repeat(5461), true],
+  ['incomplete boundary', [Buffer.alloc(16383, 97), Buffer.from([0xc3])], 'a'.repeat(16383), true],
+  ['valid split character', [Buffer.from([0xe2]), Buffer.from([0x82, 0xac])], '\u20ac', false],
+]) {
+  test('failed stderr snapshot bounds decoded UTF-8: ' + label, async () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    let rejectClose, disposals = 0;
+    const primary = new Error('controlled original close rejection');
+    const owner = {
+      closed: new Promise((resolve, reject) => { rejectClose = reject; }),
+      dispose: async () => { disposals += 1; },
+    };
+    const pending = collectCliResponse(child, owner, {timeoutMs: 1000});
+    for (const chunk of chunks) child.stderr.write(chunk);
+    rejectClose(primary);
+    await assert.rejects(pending, (error) => {
+      assert.equal(error, primary);
+      const evidence = getCliFailureStderr(error);
+      assert.equal(evidence.stderr, expected);
+      assert.equal(evidence.stderrBytes, chunks.reduce((total, chunk) => total + chunk.length, 0));
+      assert.equal(evidence.stderrTruncated, truncated);
+      assert.ok(Buffer.byteLength(evidence.stderr) <= 16384);
+      assert.ok(Object.isFrozen(evidence));
+      return true;
+    });
+    assert.equal(disposals, 1);
+  });
+}

@@ -12,6 +12,17 @@ export function getCliFailureStderr(error) {
   return failureStderr.get(error) ?? null;
 }
 
+function failureStderrSnapshot(errors, stderrBytes) {
+  const decoded = Buffer.from(Buffer.concat(errors).toString('utf8'), 'utf8');
+  let end = Math.min(decoded.length, 16384);
+  // Decoding invalid input can expand it; cut only at a UTF-8 boundary.
+  while (end < decoded.length && end > 0 && (decoded[end] & 0xc0) === 0x80) end -= 1;
+  return Object.freeze({
+    stderr: decoded.subarray(0, end).toString('utf8'), stderrBytes,
+    stderrTruncated: stderrBytes > 16384 || end < decoded.length,
+  });
+}
+
 export function requireOwnerToken(value) {
   if (typeof value !== 'string' || value.length !== 43 || /[^A-Za-z0-9_-]/u.test(value)) {
     throw new Error('Invalid private owner token');
@@ -74,15 +85,14 @@ export async function collectCliResponse(child, owner, {token = null, timeoutMs}
     try { await owner.dispose(); }
     catch (error) { failure = failure ? new AggregateError([failure, error], 'CLI and cleanup failed') : error; }
   }
-  if (failure) {
-    if (token === null && typeof failure === 'object' && failure !== null) {
-      failureStderr.set(failure, Object.freeze({
-        stderr: Buffer.concat(errors).toString('utf8'),
-        stderrBytes, stderrTruncated: stderrBytes > 16384,
-      }));
+  try {
+    if (failure) throw failure;
+    assert.ok(performance.now() < deadline, 'CLI deadline exceeded after actual disposal');
+  } catch (error) {
+    if (token === null && typeof error === 'object' && error !== null) {
+      failureStderr.set(error, failureStderrSnapshot(errors, stderrBytes));
     }
-    throw failure;
+    throw error;
   }
-  assert.ok(performance.now() < deadline, 'CLI deadline exceeded after actual disposal');
   return response;
 }
