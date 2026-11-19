@@ -1532,13 +1532,14 @@ def test_graft_helper_local_edit_cannot_deploy(env, edit):
     live = env.home / ".claude/helpers/graft-hooks.cjs"
     live.parent.mkdir(parents=True)
     live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
     for flags in [("--check",), ()]:
         r = env.run(*flags, "--json")
         assert r.returncode == 10, r.stdout + r.stderr
         row = json.loads(r.stdout)["graft_helper"]
         assert row["state"] == "refused" and "working-tree" in row["detail"]
         assert live.read_text() == "good live helper\n"
-        assert list(live.parent.iterdir()) == [live]
+        assert helper_snapshot(live.parent) == saved
 
 
 @pytest.mark.parametrize("source", ["", "#!/usr/bin/env node\n", "garbage", "#!/usr/bin/env node\nfunction broken("])
@@ -1547,11 +1548,12 @@ def test_graft_helper_invalid_committed_source_cannot_deploy(env, source):
     live = env.home / ".claude/helpers/graft-hooks.cjs"
     live.parent.mkdir(parents=True)
     live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
     r = env.run("--json")
     assert r.returncode == 10, r.stdout + r.stderr
     assert json.loads(r.stdout)["graft_helper"]["state"] == "refused"
     assert live.read_text() == "good live helper\n"
-    assert list(live.parent.iterdir()) == [live]
+    assert helper_snapshot(live.parent) == saved
 
 
 @pytest.mark.parametrize("branch", ["feature", "ahead-master"])
@@ -1562,11 +1564,15 @@ def test_graft_helper_requires_authorized_branch_and_revision(env, branch):
         sh("git", "checkout", "-q", "-b", "feature", "--track", "origin/master", cwd=env.machine)
     else:
         commit(env.machine, "unpublished", {".claude/helpers/graft-hooks.cjs": "#!/usr/bin/env node\nconsole.log('unpublished');\n"})
+    live = env.home / ".claude/helpers/graft-hooks.cjs"
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
     r = env.run("--json")
     assert r.returncode == 10, r.stdout + r.stderr
     row = json.loads(r.stdout)["graft_helper"]
     assert row["state"] == "refused" and "master" in row["detail"]
-    assert not (env.home / ".claude/helpers").exists()
+    assert helper_snapshot(live.parent) == saved
 
 
 @pytest.mark.parametrize("mode", [0o4755, 0o2755, 0o1755])
@@ -1609,3 +1615,87 @@ def test_graft_helper_destination_symlink_becomes_copy(env, dangling):
     assert target.exists() == (not dangling)
     if not dangling:
         assert target.read_text() == source and backups[0].read_text() == source
+
+
+def helper_snapshot(directory):
+    return {p.name: (p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) for p in directory.iterdir()}
+
+
+def seed_helper_backup(live):
+    live.chmod(0o755)
+    backup = live.with_name(live.name + ".bak-20260101T000000Z")
+    backup.write_bytes(b"existing backup\n")
+    backup.chmod(0o640)
+    return helper_snapshot(live.parent)
+
+
+def test_graft_helper_replacement_ref_cannot_authorize_other_bytes(env, monkeypatch):
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    authorized = env.head(env.machine)
+    # B is a real local commit, but master and origin/master still name A.
+    sh("git", "checkout", "-q", "-b", "replacement", cwd=env.machine)
+    replacement = "#!/usr/bin/env node\nconsole.log('replacement');\n"
+    commit(env.machine, "replacement bytes", {rel: replacement})
+    other = env.head(env.machine)
+    sh("git", "checkout", "-q", "master", cwd=env.machine)
+    sh("git", "replace", authorized, other, cwd=env.machine)
+    (env.machine / rel).write_text(replacement)
+    assert sh("git", "show", f"{authorized}:{rel}", cwd=env.machine) == replacement.strip()
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    for flags in [("--check",), ()]:
+        r = env.run(*flags, "--json")
+        assert r.returncode == 10, r.stdout + r.stderr
+        assert json.loads(r.stdout)["graft_helper"]["state"] == "refused"
+        assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("code", [124, 127, 128, 2])
+@pytest.mark.parametrize("working_source", [False, True])
+def test_graft_helper_git_probe_failure_is_error(env, code, working_source):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    if not working_source:
+        (env.machine / rel).unlink()
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    real_git = shutil.which("git")
+    fake = env.bin / "git"
+    fake.write_text(f"""#!{sys.executable}
+import os, sys
+if 'cat-file' in sys.argv and any(a.endswith(':{rel}') for a in sys.argv):
+    print('injected object read failure', file=sys.stderr)
+    sys.exit({code})
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "injected object read failure" in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved
+
+
+@pytest.mark.parametrize("failure", ["signal", "unexpected"])
+def test_graft_helper_node_tool_failure_is_error(env, failure):
+    rel = ".claude/helpers/graft-hooks.cjs"
+    env.publish({rel: "#!/usr/bin/env node\nconsole.log('authorized');\n"})
+    live = env.home / rel
+    live.parent.mkdir(parents=True)
+    live.write_text("good live helper\n")
+    saved = seed_helper_backup(live)
+    fake = env.bin / "node"
+    action = "os.kill(os.getpid(), signal.SIGTERM)" if failure == "signal" else "sys.exit(2)"
+    fake.write_text(f"#!{sys.executable}\nimport os, signal, sys\nprint('injected node failure', file=sys.stderr, flush=True)\n{action}\n")
+    fake.chmod(0o755)
+    r = env.run("--json")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "injected node failure" in json.loads(r.stdout)["error"]
+    assert helper_snapshot(live.parent) == saved

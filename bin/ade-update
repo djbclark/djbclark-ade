@@ -55,6 +55,7 @@ Steps, in order:
    as `*.bak-<UTC stamp>` and atomically replaces it with a regular file, mode 0755. Bytes come from
    the committed target revision, never the working tree. Installation requires master at fetched origin/master,
    an identical regular working-tree source, a nonempty Node entrypoint and passing Node syntax validation.
+   Git replacement refs are ignored. The revision is a snapshot; this step does not serialize concurrent branch changes.
    Refused sources count as unresolved (exit 10); validation-tool/I/O failures are exit 4. Other --repo paths
    report only, without a fix or a counted problem. A checkout without the source helper skips this step.
 3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
@@ -136,11 +137,17 @@ def run(argv, cwd=None, env=None, timeout=LOCAL_TIMEOUT):
         return 127, "", f"{argv[0]}: {e}"
 
 
-def git(repo, *args, timeout=LOCAL_TIMEOUT):
+def git_env():
+    """One environment for every Git call: local replacement refs never authorize bytes."""
     env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["LC_ALL"] = "C"  # pull_failure_code matches git's English messages
-    return run(["git", "-C", str(repo), *args], env=env, timeout=timeout)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def git(repo, *args, timeout=LOCAL_TIMEOUT):
+    return run(["git", "-C", str(repo), *args], env=git_env(), timeout=timeout)
 
 
 def git_out(repo, *args):
@@ -476,18 +483,29 @@ def install_graft_helper(repo, check, can_install, revision, authorized):
     live = Path.home() / ".claude/helpers/graft-hooks.cjs"
     row = {"path": str(live), "state": "skipped", "mode": "apply" if can_install and not check else "report-only"}
     rel = ".claude/helpers/graft-hooks.cjs"
-    if git(repo, "cat-file", "-e", f"{revision}:{rel}")[0] != 0:
+    # ls-tree distinguishes a genuinely absent path (success, no rows) from object/tool errors.
+    # Git cat-file -e commonly returns 128 for absence, the same code as corrupt-object errors.
+    rc, listing, err = git(repo, "ls-tree", revision, "--", rel)
+    if rc:
+        raise Stop(EXIT_ERROR, f"graft helper ls-tree failed (rc={rc}): {(err or listing).strip()}")
+    absent = not listing.strip()
+    if not absent:
+        rc, out, err = git(repo, "cat-file", "-e", f"{revision}:{rel}")
+        absent = rc == 1 and ("does not exist in" in err or ("path " in err and "does not exist" in err))
+        if rc and not absent:
+            raise Stop(EXIT_ERROR, f"graft helper cat-file failed (rc={rc}): {(err or out).strip()}")
+    if absent:
         if not source.exists():
             return row
         row.update(state="refused", detail="helper is not in the authorized revision")
         return row
     tmp = None
     try:
-        env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
         blob = subprocess.run(["git", "-C", str(repo), "show", f"{revision}:{rel}"],
-                              capture_output=True, timeout=LOCAL_TIMEOUT, env=env)
+                              capture_output=True, timeout=LOCAL_TIMEOUT, env=git_env())
         if blob.returncode:
-            raise OSError("cannot read committed helper")
+            raise OSError(f"cannot read committed helper (rc={blob.returncode}): "
+                          + blob.stderr.decode("utf-8", errors="replace").strip())
         wanted = blob.stdout
         if can_install:
             row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
@@ -503,8 +521,11 @@ def install_graft_helper(repo, check, can_install, revision, authorized):
                 node_env = {k: v for k, v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_PATH", "NODE_V8_COVERAGE")}
                 parsed = subprocess.run(["node", "--check", "--input-type=commonjs"], input=wanted,
                                         capture_output=True, timeout=LOCAL_TIMEOUT, env=node_env)
-                if parsed.returncode:
+                if parsed.returncode == 1:
                     reason = "committed helper fails Node syntax validation"
+                elif parsed.returncode:
+                    raise OSError(f"Node validation failed (rc={parsed.returncode}): "
+                                  + parsed.stderr.decode("utf-8", errors="replace").strip())
             if reason:
                 row.update(state="refused", detail=reason)
                 return row
@@ -901,11 +922,11 @@ def update(rep, args, repo):
     # is a note, never an exit code (the live file is untouched).
     sa = Path(__file__).resolve().parent / "ade-settings-apply"
     live_settings = Path.home() / ".claude" / "settings.json"
-    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, timeout=30).returncode == 0:
+    if can_link and sa.exists() and live_settings.is_file() and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, timeout=30, env=git_env()).returncode == 0:
         # The template is read from the committed revision (`target`), never the working tree: an uncommitted edit in the shared checkout must not
         # reach every Claude session (adversary A2).
         try:
-            shown = subprocess.run(["git", "-C", str(repo), "show", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, text=True, timeout=30)
+            shown = subprocess.run(["git", "-C", str(repo), "show", f"{target}:agents/claude/settings.json.tmpl"], capture_output=True, text=True, timeout=30, env=git_env())
             if shown.returncode != 0:
                 raise OSError("template not in " + short(target))
             with tempfile.TemporaryDirectory(prefix="ade-settings-") as td:
