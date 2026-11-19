@@ -118,6 +118,12 @@ def _table(snapshot: dict) -> str:
 
 
 def _rewrite(snapshot: dict, dry: bool) -> None:
+    if not os.path.exists(DOC):
+        # This script rewrites only section A's table; it must never invent sections B-D.
+        sys.stderr.write(
+            f"ade-model-rankings: {DOC} is missing; restore it from git "
+            "(it holds the classification and refresh procedure this script must not author)")
+        sys.exit(3)
     doc = open(DOC).read()
     start = doc.index("| Model | Coding-agent index")
     end = doc.index("## B.", start)

@@ -55,3 +55,21 @@ def test_check_exits_3_on_missing_data(tmp_path, monkeypatch):
         except SystemExit as e:
             raised = e.code == 3
     assert raised
+
+def test_rewrite_refuses_missing_document(tmp_path, monkeypatch):
+    """A clean checkout without the doc must fail loudly, not half-write a snapshot."""
+    m = _load()
+    monkeypatch.setattr(m, "DOC", str(tmp_path / "missing.md"))
+    monkeypatch.setattr(m, "DATA", str(tmp_path / "snap.json"))
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        raised = False
+        try:
+            m._rewrite({"rows": []}, False)
+        except SystemExit as e:
+            raised = e.code == 3
+    assert raised
+    assert "restore it from git" in err.getvalue()
+    assert not (tmp_path / "snap.json").exists()
