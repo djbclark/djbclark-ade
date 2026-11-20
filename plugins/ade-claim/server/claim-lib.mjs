@@ -602,6 +602,75 @@ export function mergeOpenBeforeEnv(env, opts = {}) {
 }
 
 /**
+ * Q4 (2026-11-20): is the claim's owner agent archived or gone? Reads ONE `paseo agent inspect <id> --json`
+ * result (exit status, stdout, stderr of the spawn). Only two outcomes prove the owner dead:
+ *   - exit 0 and a JSON object whose `Id` is exactly the owner and `Archived === true`  -> "archived"
+ *   - non-zero exit and a JSON `error.code === "AGENT_NOT_FOUND"` (stdout or stderr)   -> "gone"
+ * `Archived === false` is "live". Everything else (spawn error, timeout, non-JSON, a different `Id` from a prefix
+ * match, a missing `Archived`, any other error code) is "unknown": the caller fails closed and rebinds nothing.
+ *
+ * @param {string} ownerId
+ * @param {{ status?: number | null, stdout?: string | null, stderr?: string | null, error?: unknown }} run
+ * @returns {"live" | "archived" | "gone" | "unknown"}
+ */
+export function classifyOwnerAgent(ownerId, run) {
+  if (!run || run.error || typeof run.status !== "number") return "unknown";
+  /** @type {unknown} */
+  let body;
+  for (const text of [run.stdout, run.stderr]) {
+    if (typeof text !== "string" || !text.trim()) continue;
+    try {
+      body = JSON.parse(text);
+      break;
+    } catch {
+      // try the other channel
+    }
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "unknown";
+  const rec = /** @type {Record<string, unknown>} */ (body);
+  if (run.status === 0) {
+    if (rec.Id !== ownerId) return "unknown";
+    if (rec.Archived === true) return "archived";
+    if (rec.Archived === false) return "live";
+    return "unknown";
+  }
+  const err = rec.error;
+  if (err && typeof err === "object" && /** @type {Record<string, unknown>} */ (err).code === "AGENT_NOT_FOUND") {
+    return "gone";
+  }
+  return "unknown";
+}
+
+/**
+ * @param {{
+ *   adeClaimsScript: string,
+ *   claimId: string,
+ *   fromAgent: string,
+ *   ownerAgent: string,
+ *   ownerState: "archived" | "gone",
+ * }} opts
+ */
+export function buildAdeClaimsRebindOwnerArgv(opts) {
+  const { adeClaimsScript, claimId, fromAgent, ownerAgent, ownerState } = opts;
+  if (typeof adeClaimsScript !== "string" || !adeClaimsScript) {
+    throw new Error("adeClaimsScript is required");
+  }
+  if (typeof claimId !== "string" || !ID_RE.test(claimId)) {
+    throw new Error(`claimId must be a valid claim id, got ${JSON.stringify(claimId)}`);
+  }
+  for (const [name, v] of [["fromAgent", fromAgent], ["ownerAgent", ownerAgent]]) {
+    if (typeof v !== "string" || !v.trim()) throw new Error(`${name} must be a non-empty string`);
+  }
+  if (fromAgent === ownerAgent) throw new Error("fromAgent and ownerAgent must differ");
+  if (ownerState !== "archived" && ownerState !== "gone") throw new Error("ownerState must be archived or gone");
+  return {
+    python: "python3",
+    script: adeClaimsScript,
+    argv: ["rebind-owner", "--id", claimId, "--from-agent", fromAgent, "--owner-agent", ownerAgent, "--owner-state", ownerState],
+  };
+}
+
+/**
  * @param {{
  *   adeClaimsScript: string,
  *   claimId: string,

@@ -159,6 +159,11 @@ generic `set-state` had no caller and are gone (the library functions `read_clai
     ade_claims.py bind-owner --id ID --owner-agent A [--owner-record R] [--owner-session S]
                                             merge owner fields on an active claim (W3 / ade-claim plugin);
                                             exit 2 when missing, inactive or usage error
+    ade_claims.py rebind-owner --id ID --from-agent OLD --owner-agent NEW --owner-state archived|gone
+                                            compare-and-swap owner.agent OLD -> NEW on an active claim (ade-claim
+                                            plugin, after it proved OLD archived or gone); exit 2 and nothing
+                                            changed when the claim is missing, inactive, no longer names OLD, or its owner is not
+                                            the bind-owner shape (record == agent, no session); plugin use only
     ade_claims.py successor-of PRED --record handoff-<uuid>.json [--self-session-state DIR]
                                             self-handoff takeover: rebind PRED's active claims to the caller
                                             (PASEO_AGENT_ID); exit 2 and nothing changed unless the record is
@@ -504,6 +509,50 @@ def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
         updated = _update_unlocked(claim_id, owner=owner)
         assert updated is not None
         return updated
+
+
+def rebind_owner(claim_id: str, *, from_agent: str, to_agent: str, owner_state: str) -> dict[str, Any]:
+    """Compare-and-swap rebind of an ACTIVE claim's owner.agent from `from_agent` to `to_agent` (ade-claim plugin,
+    operator ruling Q4, 2026-11-20: a claim whose owner agent is archived passes to the next agent created in its
+    workspace). PLUGIN USE ONLY: this function does not check that `from_agent` is archived; the caller proved it and
+    says how in `owner_state` (`archived` or `gone`), which goes into the claim's `history`. For an ordinary writer
+    transfer use release + new (docs/git-guard.md). It swaps only when the claim still has exactly the shape
+    `bind-owner` writes for a Paseo agent: owner.agent == owner.record == `from_agent` and no owner.session. A claim
+    whose owner.agent is only a harness label (`codex`, `pi`, ... with the real identity in owner.session) is refused,
+    since such a name is never a Paseo agent id and its owner may be live. Raises ValueError (nothing written) when the
+    claim is missing, released/merged/expired, or not in that shape. No handoff record is read, so no stale record can
+    be replayed (queue Carried 58 a). owner.record becomes `to_agent` and owner.session stays empty; a `history` line
+    records the old owner, the new one and the proven state."""
+    if not from_agent or not to_agent:
+        raise ValueError("rebind needs a non-empty --from-agent and --owner-agent")
+    if from_agent == to_agent:
+        raise ValueError("rebind: from-agent and owner-agent are the same")
+    if owner_state not in REBIND_OWNER_STATES:
+        raise ValueError(f"rebind: --owner-state must be one of {', '.join(REBIND_OWNER_STATES)}")
+    with _claims_lock():
+        c = read_claim(claim_id)
+        if c is None:
+            raise ValueError(f"no claim {claim_id!r}")
+        if not claim_state_active(c):
+            raise ValueError(f"claim {claim_id!r} is not active ({shown_state(c)})")
+        owner = dict(c.get("owner") if isinstance(c.get("owner"), dict) else {})
+        if owner.get("agent") != from_agent:
+            raise ValueError(f"claim {claim_id!r} owner is {owner.get('agent')!r}, not {from_agent!r}; refusing rebind")
+        if owner.get("record") != from_agent or owner.get("session"):
+            raise ValueError(f"claim {claim_id!r} owner {from_agent!r} is not a bind-owner-shaped Paseo agent "
+                             "(record must equal agent, no session); refusing rebind")
+        owner["agent"] = to_agent
+        owner["record"] = to_agent
+        owner["session"] = None
+        hist = c.get("history") if isinstance(c.get("history"), list) else []
+        hist = [h for h in hist if isinstance(h, str)][-49:]
+        hist.append(f"{utc_now()} rebound from {from_agent} ({owner_state}) to {to_agent} by agent.create.after")
+        updated = _update_unlocked(claim_id, owner=owner, history=hist)
+        assert updated is not None
+        return updated
+
+
+REBIND_OWNER_STATES = ("archived", "gone")
 
 
 HANDOFF_RECORD_RE = re.compile(r"handoff-[0-9a-f-]{36}\.json")
@@ -2993,6 +3042,13 @@ def _cli(argv: Sequence[str]) -> int:
     bo.add_argument("--owner-agent", required=True)
     bo.add_argument("--owner-record")
     bo.add_argument("--owner-session")
+    ro = sp.add_parser("rebind-owner", help="PLUGIN USE ONLY (a manual transfer is release + new): swap an active claim's owner "
+                       "FROM-AGENT -> OWNER-AGENT while it still has the bind-owner shape for FROM-AGENT")
+    ro.add_argument("--id", required=True)
+    ro.add_argument("--from-agent", required=True)
+    ro.add_argument("--owner-agent", required=True)
+    ro.add_argument("--owner-state", required=True, choices=REBIND_OWNER_STATES,
+                    help="what the caller proved about --from-agent (recorded in history)")
     so = sp.add_parser("successor-of", help="self-handoff takeover: rebind every active claim of PREDECESSOR to the "
                        "caller (PASEO_AGENT_ID), verified against its archived handoff record")
     so.add_argument("predecessor")
@@ -3025,6 +3081,9 @@ def _cli(argv: Sequence[str]) -> int:
         elif a.cmd == "bind-owner":
             c = bind_owner(a.id, owner_agent=a.owner_agent, owner_record=a.owner_record,
                            owner_session=a.owner_session)
+            print(c.get("id"))
+        elif a.cmd == "rebind-owner":
+            c = rebind_owner(a.id, from_agent=a.from_agent, to_agent=a.owner_agent, owner_state=a.owner_state)
             print(c.get("id"))
         elif a.cmd == "successor-of":
             ids = rebind_successor(a.predecessor, caller=os.environ.get("PASEO_AGENT_ID", ""), record_path=a.record,
