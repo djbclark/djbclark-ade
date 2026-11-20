@@ -1577,8 +1577,7 @@ habit: run `paseo provider diagnostic <provider>` after any provider CLI update.
 
 ## 22. trail — the PreToolUse guard refuses legitimate edits of `graft-hooks.cjs`, not just running it
 
-**Status: `ready-to-file`** (noted 2026-11-19; not filed — djbclark decides. It belongs as a comment on the existing
-[trailhq/Trail-Code#866](https://github.com/trailhq/Trail-Code/issues/866) rather than a new issue). Target: `trailhq/Trail-Code`.
+**Status: `already-filed`** — posted 2026-11-20 as a comment on [trailhq/Trail-Code#866](https://github.com/trailhq/Trail-Code/issues/866#issuecomment-7043109579) (operator's yes), because it is the same file and area as that issue rather than a separate report.
 
 ### Observed
 
