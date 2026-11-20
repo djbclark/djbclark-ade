@@ -5,8 +5,9 @@
 
 PR Radar (a Paseo plugin, not ours) runs this script with its context JSON on stdin and reads launch overrides as
 JSON on stdout. The signal -> route kind mapping lives here, with the routing policy (operator ruling 2026-11-14),
-and the answer comes from `route_agent.py route`. This file is the single implementation: pr-radar's
-`examples/pr-radar-route.py` is a synced, byte-identical copy of it, so it is stdlib-only and works from either place.
+and the answer comes from `route_agent.py route`. This file is the single implementation. pr-radar's
+`examples/pr-radar-route.py` is not a copy of it: omercnet/paseo-plugins#618 replaced the synced copy with a
+self-contained 55-line example, so the two drift on purpose. This script stays stdlib-only.
 
 stdin (only the named fields are read; everything else, titles and comments included, is external text and is
 never passed on):

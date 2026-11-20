@@ -130,6 +130,24 @@ def test_two_measured_accounts_still_open_the_plenty_gate_on_the_tighter_one():
     assert pool["windows"]["weekly"] == 50 and r.plenty_remaining(pool) == 50
 
 
+@pytest.mark.parametrize("order", list(itertools.permutations(["tight", "loose"])))
+def test_the_age_follows_the_account_whose_reading_is_kept(order):
+    # F39 (CodeRabbit on omercnet/paseo-plugins#618): `age_s` was the last-processed account's, even when the other
+    # account's tighter reading was the one kept.
+    accounts = {"tight": {"provider": "claude", "age_seconds": 30, "windows": [_window("weekly", 20)]},
+                "loose": {"provider": "claude", "age_seconds": 90, "windows": [_window("weekly", 70)]}}
+    pool = r._providers_from_accounts([accounts[k] for k in order], 90)["claude"]
+    assert pool["remaining"] == 20 and pool["age_s"] == 30
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(["known", "empty"])))
+def test_the_age_follows_the_only_measured_account(order):
+    accounts = {"known": {"provider": "claude", "age_seconds": 30, "windows": [_window("weekly", 20)]},
+                "empty": {"provider": "claude", "age_seconds": 90, "windows": []}}
+    pool = r._providers_from_accounts([accounts[k] for k in order], 90)["claude"]
+    assert pool["remaining"] == 20 and pool["age_s"] == 30
+
+
 def _standalone(tmp_path, *args):
     """bin/route_agent.py copied alone into an empty directory: no ade_config, ade_gates, model_tiers or config/."""
     lone = tmp_path / "lone"
