@@ -42,7 +42,11 @@ def merge_owned(live: Any, desired: Any) -> Any:
     if isinstance(desired, dict):
         out = copy.deepcopy(live) if isinstance(live, dict) else {}
         for key, value in desired.items():
-            if key in out:
+            # `args` is an executable's positional argv, like `notify`: repeated flags are meaningful
+            # and the whole vector is replaced, never unioned or deduped (Codex review on #771).
+            if key == "args" and isinstance(value, list):
+                out[key] = copy.deepcopy(value)
+            elif key in out:
                 out[key] = merge_owned(out[key], value)
             else:
                 out[key] = merge_owned(None, value)
