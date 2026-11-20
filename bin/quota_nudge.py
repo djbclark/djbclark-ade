@@ -130,11 +130,37 @@ def print_reminder(quota):
             print(f"    operator profile: {p['name']} until {p['until']} (advisory only)")
 
 
+def print_reset_reminder(quota):
+    """Name every pool whose binding window has already refilled since its reading.
+
+    A 0% (or tight) reading that predates the window's reset is stale, not exhausted: this is the
+    zero-token nudge that tells a lead to re-probe before treating the pool as out of quota (2026-11-20).
+    """
+    import route_agent
+    refilled = []
+    for pool, info in (quota or {}).items():
+        if not isinstance(info, dict):
+            continue
+        resets = info.get("resets_at")
+        try:
+            if resets and route_agent.hours_to_reset(resets) == 0.0:
+                refilled.append((pool, resets))
+        except (ValueError, TypeError):
+            continue
+    if not refilled:
+        print("[quota reset] no pool's window has refilled since its reading")
+        return
+    print("[quota reset] re-probe these pools (their window already refilled):")
+    for pool, resets in sorted(refilled):
+        print(f"  {pool}: window reset {resets}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--set-profile", metavar="POOL")
     group.add_argument("--clear-profile", metavar="POOL")
+    group.add_argument("--reset", action="store_true", help="name pools whose window already refilled (re-probe)")
     parser.add_argument("--name")
     parser.add_argument("--until", help="ISO-8601 timestamp with timezone")
     args = parser.parse_args(argv)
@@ -153,7 +179,7 @@ def main(argv=None):
             parser.error("--name/--until require --set-profile")
         import route_agent
         quota, _age = route_agent.load_snapshot()
-        print_reminder(quota)
+        print_reset_reminder(quota) if args.reset else print_reminder(quota)
     return 0
 
 

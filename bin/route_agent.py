@@ -1034,8 +1034,17 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         stale = ((row_age is None or row_age > STALE_SOFT)
                  or row.get("reading_expired") is True)
         head = _pct(row.get("headroom_percent"))
-        if ("usable_now" in row and row["usable_now"] is not True) or row.get("state") == "blocked" or head == 0:
+        row_reset_passed = _reset_passed(row.get("available_at")) or any(
+            _reset_passed(w.get("resets_at")) for w in (row.get("windows") or []) if isinstance(w, dict))
+        if row.get("state") == "blocked":
             top: float | None = 0.0
+        elif ("usable_now" in row and row["usable_now"] is not True) or head == 0:
+            if row_reset_passed:
+                # a 0% reading whose window already refilled is stale, not exhausted: re-probe (2026-11-20).
+                top = None
+                stale = True
+            else:
+                top = 0.0
         elif stale:
             top = None
         else:
@@ -1155,11 +1164,13 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
             state = w.get("state")
             headroom = _pct(w.get("headroom_percent"))
-            if (state == "exhausted" or (headroom is not None and headroom == 0)
-                    or w.get("measurement_frozen") is True):
+            if w.get("measurement_frozen") is True:
                 # a frozen window (flat while acp-run spent the pool, aiuse "not trusted for routing") reads exhausted,
                 # as aiuse's own `--available` does (2026-10-31, adversary F3)
                 remaining = 0.0
+            elif state == "exhausted" or (headroom is not None and headroom == 0):
+                # a 0% window whose reset already passed refilled: read unknown, re-probe (2026-11-20).
+                remaining = None if _reset_passed(w.get("resets_at")) else 0.0
             elif is_old:
                 remaining = None
             else:
@@ -1918,6 +1929,11 @@ def hours_to_reset(resets_at: Any, *, now: datetime | None = None) -> float | No
         return max(0.0, (stamp - now).total_seconds() / 3600.0)
     except (ValueError, TypeError):
         return None
+
+
+def _reset_passed(resets_at: Any, *, now: datetime | None = None) -> bool:
+    """True when `resets_at` is parseable and already reached: the window has refilled."""
+    return hours_to_reset(resets_at, now=now) == 0.0
 
 
 def expected_waste(remaining: float | None, pace_ratio: Any,

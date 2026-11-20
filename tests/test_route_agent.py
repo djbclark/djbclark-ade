@@ -3163,12 +3163,19 @@ class TestFableWaitsNeverDegrades2026_11_13(unittest.TestCase):
     def test_aiuse_snapshot_carries_the_fable_reset(self):
         q = TestFableSublimitAndCursorSplit.load(self, [{"provider": "claude", "windows": [
             {"label": "Claude Code weekly", "pool_family": "default", "remaining_percent": 96.0, "headroom_percent": 96.0,
-             "state": "ok", "quota_scope": "shared", "resets_at": "2026-11-20T09:59:59+00:00"},
+             "state": "ok", "quota_scope": "shared", "resets_at": "2099-01-01T09:59:59+00:00"},
             {"label": "Claude Code weekly - Fable", "pool_family": "fable", "remaining_percent": 0.0, "headroom_percent": 0.0,
              "state": "exhausted", "quota_scope": "model_sublimit", "shared_pool_family": "default",
-             "max_share_of_parent_percent": 50.0, "resets_at": "2026-11-20T10:00:00+00:00"}]}])
+             "max_share_of_parent_percent": 50.0, "resets_at": "2099-01-01T10:00:00+00:00"}]}])
         self.assertEqual(q["claude"]["sublimits"], {"fable": 0.0})
-        self.assertEqual(q["claude"]["sublimit_resets"], {"fable": "2026-11-20T10:00:00+00:00"})
+        self.assertEqual(q["claude"]["sublimit_resets"], {"fable": "2099-01-01T10:00:00+00:00"})
+
+    def test_an_exhausted_window_reads_refilled_once_its_reset_has_passed(self):
+        # a 0% window whose reset is already in the past is stale, not exhausted: re-probe (2026-11-20).
+        q = TestFableSublimitAndCursorSplit.load(self, [{"provider": "claude", "windows": [
+            {"label": "Claude Code weekly", "pool_family": "default", "remaining_percent": 0.0, "headroom_percent": 0.0,
+             "state": "exhausted", "quota_scope": "shared", "resets_at": "2020-01-01T00:00:00+00:00"}]}])
+        self.assertIsNone(q["claude"]["remaining"])
 
     def test_a_merge_keeps_the_reset(self):
         into = {"claude": {"remaining": 80.0, "windows": {}, "sublimits": {"fable": 3.0},
