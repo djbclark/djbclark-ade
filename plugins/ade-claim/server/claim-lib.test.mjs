@@ -31,6 +31,8 @@ import {
   activeClaimForPath,
   buildAdeClaimsBindOwnerArgv,
   buildAdeClaimsNewArgv,
+  buildAdeClaimsRebindOwnerArgv,
+  classifyOwnerAgent,
   buildAdeClaimsReleaseArgv,
   buildAdeGitGuardInstallArgv,
   claimAllowsAgent,
@@ -528,7 +530,7 @@ function harness({ modeText, env = {}, claims } = {}) {
     now: () => new Date("2026-11-13T00:00:00.000Z"),
   };
   const mutating = () => calls.filter((c) =>
-    (c.cmd === "python3" && ["new", "bind-owner", "release"].includes(c.args[1])) || c.cmd === guard);
+    (c.cmd === "python3" && ["new", "bind-owner", "rebind-owner", "release"].includes(c.args[1])) || c.cmd === guard);
   const jsonl = () => {
     try {
       return readFileSync(join(stateDir, CLAIM_OBSERVE_LOG), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -749,4 +751,174 @@ test("hook.mjs loads when import.meta is empty, as in Paseo's CJS bundle (esbuil
   const mod = await import(join(dir, "hook.mjs"));
   assert.equal(mod.PLUGIN_ROOT_RESOLVED, undefined);
   assert.equal(typeof mod.registerAdeClaimHooks, "function");
+});
+
+// ---- Q4 (2026-11-20): a claim whose owner agent is archived or gone passes to the next created agent ----
+
+const OLD = "11111111-aaaa-bbbb-cccc-000000000001";
+const NEW = "22222222-aaaa-bbbb-cccc-000000000002";
+
+/** A harness whose claim is owned by OLD and whose `paseo agent inspect OLD` answers `inspect(...)`. */
+function rebindHarness({ modeText = "enforce", rowsFor, inspect, rebindStatus = 0 } = {}) {
+  const h = harness({ modeText });
+  const rows = rowsFor
+    ? rowsFor(h.cwd)
+    : [{ id: "wt-test-1", path: h.cwd, shown_state: "active", owner: { agent: OLD, record: OLD } }];
+  const base = h.deps.spawn;
+  h.deps.spawn = (cmd, args, opts) => {
+    if (cmd === "python3" && args[1] === "list") {
+      h.calls.push({ cmd, args });
+      return { status: 0, stdout: JSON.stringify(rows), stderr: "" };
+    }
+    if (cmd === "paseo") {
+      h.calls.push({ cmd, args });
+      return inspect(args);
+    }
+    if (cmd === "python3" && args[1] === "rebind-owner") {
+      h.calls.push({ cmd, args });
+      return { status: rebindStatus, stdout: "", stderr: rebindStatus ? "refused" : "" };
+    }
+    return base(cmd, args, opts);
+  };
+  registerAgentClaimOwnerHook(h.server, h.deps);
+  const create = () => h.hooks.get("agent.create.after")({ agent: { id: NEW, cwd: h.cwd } });
+  const rebinds = () => h.calls.filter((c) => c.cmd === "python3" && c.args[1] === "rebind-owner");
+  const binds = () => h.calls.filter((c) => c.cmd === "python3" && c.args[1] === "bind-owner");
+  const inspects = () => h.calls.filter((c) => c.cmd === "paseo");
+  return { h, create, rebinds, binds, inspects };
+}
+
+const archived = (id = OLD) => ({ status: 0, stdout: JSON.stringify({ Id: id, Archived: true }), stderr: "" });
+const live = (id = OLD) => ({ status: 0, stdout: JSON.stringify({ Id: id, Archived: false }), stderr: "" });
+const notFound = () => ({ status: 1, stdout: JSON.stringify({ error: { code: "AGENT_NOT_FOUND", message: "Agent not found" } }), stderr: "" });
+
+test("Q4: a live owner is never rebound away", async () => {
+  const t = rebindHarness({ inspect: () => live() });
+  await t.create();
+  assert.equal(t.rebinds().length, 0);
+  assert.equal(t.binds().length, 0);
+  assert.equal(t.h.mutating().length, 0);
+  const rec = t.h.jsonl();
+  assert.equal(rec.length, 1);
+  assert.equal(rec[0].planned.action, "none");
+});
+
+test("Q4: an archived owner is rebound to the new agent, with one log line", async () => {
+  const t = rebindHarness({ inspect: () => archived() });
+  await t.create();
+  assert.deepEqual(t.inspects()[0].args, ["agent", "inspect", "--json", "--", OLD]);
+  assert.equal(t.rebinds().length, 1);
+  assert.deepEqual(t.rebinds()[0].args.slice(1), ["rebind-owner", "--id", "wt-test-1", "--from-agent", OLD, "--owner-agent", NEW, "--owner-state", "archived"]);
+  assert.equal(t.binds().length, 0, "the plain bind-owner path is not also run");
+  const rec = t.h.jsonl();
+  assert.equal(rec.length, 1, "one line per rebind");
+  assert.equal(rec[0].error, undefined);
+  assert.equal(rec[0].planned.action, "rebind-owner");
+  assert.equal(rec[0].planned.from, OLD);
+  assert.equal(rec[0].planned.to, NEW);
+  assert.equal(rec[0].planned.claim, "wt-test-1");
+  assert.equal(rec[0].planned.workspace, t.h.cwd);
+  assert.equal(t.h.lines.length, 1);
+  assert.ok(t.h.lines[0].includes(OLD) && t.h.lines[0].includes(NEW) && t.h.lines[0].includes("wt-test-1"));
+});
+
+test("Q4: an owner the daemon no longer knows (AGENT_NOT_FOUND) is rebound", async () => {
+  const t = rebindHarness({ inspect: () => notFound() });
+  await t.create();
+  assert.equal(t.rebinds().length, 1);
+  assert.equal(t.h.jsonl()[0].planned.owner_state, "gone");
+});
+
+test("Q4: observe mode logs the planned rebind and writes nothing", async () => {
+  const t = rebindHarness({ modeText: "observe", inspect: () => archived() });
+  await t.create();
+  assert.equal(t.rebinds().length, 0);
+  assert.equal(t.h.mutating().length, 0);
+  const rec = t.h.jsonl();
+  assert.equal(rec.length, 1);
+  assert.equal(rec[0].mode, "observe");
+  assert.equal(rec[0].planned.action, "rebind-owner");
+});
+
+test("Q4: a released claim is untouched (no active claim: no inspect, no rebind)", async () => {
+  const t = rebindHarness({
+    rowsFor: (cwd) => [{ id: "wt-test-1", path: cwd, shown_state: "released", owner: { agent: OLD, record: OLD } }],
+    inspect: () => archived(),
+  });
+  await t.create();
+  assert.equal(t.rebinds().length, 0);
+  assert.equal(t.inspects().length, 0);
+  assert.equal(t.h.jsonl()[0].planned.why, "no active claim for cwd");
+});
+
+test("Q4: an owner lookup failure fails closed (no rebind)", async () => {
+  const failures = {
+    "inspect exits non-zero with no JSON": () => ({ status: 1, stdout: "", stderr: "daemon down" }),
+    "inspect exits 0 with garbage": () => ({ status: 0, stdout: "not json", stderr: "" }),
+    "spawn error": () => ({ status: null, error: new Error("ENOENT"), stdout: "", stderr: "" }),
+    "timeout (null status)": () => ({ status: null, signal: "SIGTERM", stdout: "", stderr: "" }),
+    "another agent answered (prefix match)": () => archived("99999999-0000-0000-0000-000000000009"),
+    "Archived missing": () => ({ status: 0, stdout: JSON.stringify({ Id: OLD }), stderr: "" }),
+    "other error code": () => ({ status: 1, stdout: JSON.stringify({ error: { code: "AMBIGUOUS" } }), stderr: "" }),
+  };
+  for (const [name, inspect] of Object.entries(failures)) {
+    const t = rebindHarness({ inspect });
+    await t.create();
+    assert.equal(t.rebinds().length, 0, name);
+    assert.equal(t.h.mutating().length, 0, name);
+    const rec = t.h.jsonl();
+    assert.equal(rec.length, 1, name);
+    assert.match(String(rec[0].error), /no rebind/, name);
+  }
+});
+
+test("Q4: a failed rebind-owner (claim changed owner meanwhile) is logged, never thrown", async () => {
+  const t = rebindHarness({ inspect: () => archived(), rebindStatus: 2 });
+  await t.create();
+  assert.equal(t.rebinds().length, 1);
+  assert.match(String(t.h.jsonl()[0].error), /rebind-owner failed \(exit 2\)/);
+});
+
+test("Q4: a harness-label owner with a session key is never rebound, even on AGENT_NOT_FOUND (adversary H1)", async () => {
+  for (const owner of [
+    { agent: "codex", record: "codex", session: "s1" },
+    { agent: "codex", session: "s1" },
+    { agent: "codex" },
+    { agent: OLD, record: OLD, session: "s1" },
+    { agent: OLD, record: "other" },
+  ]) {
+    const t = rebindHarness({
+      rowsFor: (cwd) => [{ id: "wt-test-1", path: cwd, shown_state: "active", owner }],
+      inspect: () => notFound(),
+    });
+    await t.create();
+    assert.equal(t.rebinds().length, 0, JSON.stringify(owner));
+    assert.equal(t.inspects().length, 0, "no lookup for a shape that is never taken");
+    assert.equal(t.h.mutating().length, 0);
+  }
+});
+
+test("Q4: a claim owned only by a record key (no owner.agent) is not rebound", async () => {
+  const t = rebindHarness({
+    rowsFor: (cwd) => [{ id: "wt-test-1", path: cwd, shown_state: "active", owner: { record: OLD } }],
+    inspect: () => archived(),
+  });
+  await t.create();
+  assert.equal(t.rebinds().length, 0);
+  assert.equal(t.inspects().length, 0);
+});
+
+test("classifyOwnerAgent and buildAdeClaimsRebindOwnerArgv", () => {
+  assert.equal(classifyOwnerAgent("a", archived("a")), "archived");
+  assert.equal(classifyOwnerAgent("a", live("a")), "live");
+  assert.equal(classifyOwnerAgent("a", notFound()), "gone");
+  assert.equal(classifyOwnerAgent("a", { status: 0, stdout: "[]", stderr: "" }), "unknown");
+  assert.equal(classifyOwnerAgent("a", undefined), "unknown");
+  assert.deepEqual(
+    buildAdeClaimsRebindOwnerArgv({ adeClaimsScript: "/x/ade_claims.py", claimId: "wt-1", fromAgent: "a", ownerAgent: "b", ownerState: "gone" }).argv,
+    ["rebind-owner", "--id", "wt-1", "--from-agent", "a", "--owner-agent", "b", "--owner-state", "gone"],
+  );
+  assert.throws(() => buildAdeClaimsRebindOwnerArgv({ adeClaimsScript: "/x", claimId: "wt-1", fromAgent: "a", ownerAgent: "a", ownerState: "gone" }));
+  assert.throws(() => buildAdeClaimsRebindOwnerArgv({ adeClaimsScript: "/x", claimId: "bad id", fromAgent: "a", ownerAgent: "b", ownerState: "gone" }));
+  assert.throws(() => buildAdeClaimsRebindOwnerArgv({ adeClaimsScript: "/x", claimId: "wt-1", fromAgent: "a", ownerAgent: "b" }));
 });
