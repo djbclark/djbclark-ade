@@ -130,6 +130,41 @@ def test_two_measured_accounts_still_open_the_plenty_gate_on_the_tighter_one():
     assert pool["windows"]["weekly"] == 50 and r.plenty_remaining(pool) == 50
 
 
+@pytest.mark.parametrize("order", list(itertools.permutations(["tight", "loose"])))
+def test_the_age_follows_the_account_whose_reading_is_kept(order):
+    # F39 (CodeRabbit on omercnet/paseo-plugins#618): `age_s` was the last-processed account's, even when the other
+    # account's tighter reading was the one kept.
+    accounts = {"tight": {"provider": "claude", "age_seconds": 30, "windows": [_window("weekly", 20)]},
+                "loose": {"provider": "claude", "age_seconds": 90, "windows": [_window("weekly", 70)]}}
+    pool = r._providers_from_accounts([accounts[k] for k in order], 90)["claude"]
+    assert pool["remaining"] == 20 and pool["age_s"] == 30
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(["fresh", "stale"])))
+def test_a_stale_second_account_keeps_the_pool_age_stale_in_either_order(order):
+    # adversary M1: the pool's age must not read fresher than an account that has no usable reading, whichever was
+    # folded first, so the frontier gate (judged_guard_block) stays closed on the measured account alone.
+    from datetime import UTC, datetime, timedelta
+
+    import ade_gates
+    accounts = {"fresh": {"provider": "claude", "age_seconds": 30, "windows": [_window("weekly", 40)]},
+                "stale": {"provider": "claude", "age_seconds": 99999, "windows": [_window("weekly", 70)]}}
+    pool = r._providers_from_accounts([accounts[k] for k in order], 90)["claude"]
+    assert pool["remaining"] == 40 and pool["age_s"] == 99999
+    now = datetime.now(UTC)
+    state = {"checked_at": ade_gates.iso(now - timedelta(seconds=pool["age_s"])), "remaining": pool["remaining"],
+             "fable_left": 90}
+    assert "min old" in ade_gates.judged_guard_block(state, dict(ade_gates.FRONTIER_DEFAULTS), now)
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(["a", "b"])))
+def test_a_pool_with_no_unmeasured_account_takes_its_age_from_the_oldest_when_one_is_empty(order):
+    accounts = {"a": {"provider": "claude", "age_seconds": 30, "windows": [_window("weekly", 20)]},
+                "b": {"provider": "claude", "age_seconds": 90, "windows": []}}
+    pool = r._providers_from_accounts([accounts[k] for k in order], 90)["claude"]
+    assert pool["remaining"] == 20 and pool["age_s"] == 90
+
+
 def _standalone(tmp_path, *args):
     """bin/route_agent.py copied alone into an empty directory: no ade_config, ade_gates, model_tiers or config/."""
     lone = tmp_path / "lone"

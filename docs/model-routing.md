@@ -38,8 +38,9 @@ A2. `bin/route_agent.py plan --kinds …` applies them to the live quota and pri
 A2a. **Unattended dispatch (2026-11-12):** `Choice.dispatch` adds the provider-native mode from `[dispatch].unattended_modes`: Claude `bypassPermissions`, Codex and Antigravity `full-access`. Pi reports no selectable modes in `paseo provider ls --json`, so no mode is passed. This prevents workers from inheriting Default permissions.
 A2b. **PR Radar adapter (2026-11-14):** `bin/pr-radar-route` is the routing script of the pr-radar Paseo plugin (a third-party
 plugin; it runs the script with its context JSON on stdin and reads launch overrides from stdout). It is the **single
-implementation**: pr-radar's `examples/pr-radar-route.py` is a synced copy of this file and **must stay byte-identical**
-(stdlib only, no ADE imports, so it runs from either place). The PR-signal to kind mapping lives in `pick_kind` (operator
+implementation**: pr-radar's `examples/pr-radar-route.py` is not a copy of this file (omercnet/paseo-plugins#618 replaced
+the synced copy with a self-contained 55-line example, on purpose; nothing keeps the two byte-identical). This script stays
+stdlib only, no ADE imports. The PR-signal to kind mapping lives in `pick_kind` (operator
 ruling 2026-11-14): `reviewRequestedFromMe` or `isSecurity` is `judgment`, `authorKind == "bot"` is `bulk`, everything
 else (Issues-tab items included) is `code`. It runs `route_agent.py route --kind K [--repo NAME] --json`, 25 s timeout
 (`NAME` is the bare lowercase repo name, dropped when outside `[a-z0-9._-]` or starting with `-`), and prints `{provider, model,

@@ -1220,12 +1220,22 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         for key, (worst, detail, sublimits, bind) in per_key.items():
             prior = providers.get(key) or {}
             prior_rem = prior.get("remaining")
+            # the age belongs to the entry whose reading `remaining` and the bind fields come from
+            entry_age = acct_age
+            if key in providers and (prior_rem is None) != (worst is None):
+                # exactly one account has no usable reading (stale, expired or windowless): the pool is only as fresh as
+                # its oldest age, whichever account was folded first, so the frontier gate's age test (judged_guard_block)
+                # sees a pool of two accounts, one older than the stale limit, as old in either order. It does not close
+                # an expired/windowless second account with a fresh age, or three accounts (queue Carried 84).
+                ages = [a for a in (prior.get("age_s"), acct_age) if a is not None]
+                entry_age = max(ages) if ages else None
             if prior_rem is not None and worst is not None:
                 if prior_rem < worst:
-                    # several accounts: the tightest wins, keep its bind fields
+                    # several accounts: the tightest wins, keep its bind fields and its age
                     worst = prior_rem
                     bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                       "window_minutes")}
+                    entry_age = prior.get("age_s")
                 # else keep this account's bind (already set for `worst`)
             elif prior_rem is not None and worst is None:
                 worst = prior_rem
@@ -1239,7 +1249,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 # known-beats-unknown
                 "windows": _merge_windows(prior.get("windows"), detail),
                 "sublimits": _merge_caps(prior.get("sublimits"), sublimits),
-                "age_s": acct_age,
+                "age_s": entry_age,
                 "billing_kind": acct.get("billing_kind"),
                 "pace_ratio": bind.get("pace_ratio"),
                 "resets_at": bind.get("resets_at"),
