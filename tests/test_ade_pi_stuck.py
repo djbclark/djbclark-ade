@@ -239,3 +239,18 @@ def test_a_pool_with_no_usable_reading_is_fail_closed(tmp_path: Path) -> None:
                                            "usable_now": None, "stale": False}]}
     report = _run(tmp_path, pools)
     assert "anthropic" in report["exhausted"]
+
+
+def test_an_errored_non_pi_agent_is_stuck_but_a_healthy_one_is_not(tmp_path: Path) -> None:
+    """A lead in a hard error is stuck on any provider, not just Pi. A healthy non-Pi agent is still ignored
+    (Carried 104: the Forks and cfengine leads sat in error on Codex and nothing re-handed them)."""
+    agents = [
+        {"id": "e1", "name": "forks", "provider": "codex/gpt-6.1-sol", "status": "error"},
+        {"id": "e2", "name": "healthy", "provider": "codex/gpt-6.1-sol", "status": "running"},
+        {"id": "e3", "name": "closed", "provider": "claude/opus", "status": "closed"},
+    ]
+    report = _run(tmp_path, _pools(**{"openai:openai_api": (50.0, True, False)}), agents=agents)
+    stuck = {o["id"] for o in report["all_pi"] if o["stuck"]}
+    assert stuck == {"e1"}
+    assert "e2" not in {o["id"] for o in report["all_pi"]}
+    assert "e3" not in {o["id"] for o in report["all_pi"]}

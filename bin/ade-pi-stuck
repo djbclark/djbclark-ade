@@ -187,15 +187,18 @@ def main():
     out = []
     for a in rows:
         prov = a.get("provider") or ""
-        # "pi/<account>/<model>" only: a bare startswith("pi") would also take any provider merely named "pi…".
-        if not prov.startswith("pi/"):
+        # A Pi agent is judged on its quota. Any other provider is watched only for a hard error: a lead stuck in
+        # `error` on Codex or Claude is as stuck as a Pi one, and was invisible when this checked Pi alone
+        # (Carried 104, the Forks and cfengine leads, 2026-11-20).
+        if not prov.startswith("pi/") and (a.get("status") or "") != "error":
             continue
-        # paseo ls provider is "pi/<account>/<model>" (e.g. pi/openai/gpt-6.1-sol)
         rest = prov[3:] if prov.startswith("pi/") else prov
         model = rest
         acct = account_of(rest)
         status = a.get("status") or ""
-        stuck = acct in exhausted and status not in NOT_LIVE
+        # Stuck on an exhausted account, or in a hard error on any provider (Carried 104). A closed or archived
+        # agent is not stuck: there is nothing to re-hand.
+        stuck = (acct in exhausted and status not in NOT_LIVE) or (status == "error" and not prov.startswith("pi/"))
         q = accounts.get(acct) or {}
         out.append({"id": a.get("id"), "name": a.get("name"), "model": model,
                     "account": acct, "status": status, "stuck": stuck,
