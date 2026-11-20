@@ -411,6 +411,77 @@ def test_a_read_outside_the_worktree_trips_even_though_the_key_refuses_it(world,
     assert r.returncode == (0 if ok else 77), r.stderr
 
 
+@pytest.mark.parametrize("case,expected", [
+    ("own", 0), ("tilde", 0), ("other-session", 77), ("wrong-name", 77),
+    ("symlink", 77), ("parent-symlink", 77), ("directory", 77), ("missing", 77),
+    ("elsewhere", 77), ("other-cwd", 77), ("Grep", 77), ("Glob", 77),
+    ("unknown-session", 77), ("late-session", 77), ("mismatch", 77), ("invalid-session", 77),
+])
+def test_session_spool_read_exception(world, case, expected):
+    # All spool artifacts live under the fixture HOME, never the operator's projects.
+    import re
+    world.passed_check()
+    sid = "11111111-1111-4111-8111-111111111111"
+    encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(world.wt.resolve()))
+    project = world.home / ".claude" / "projects" / encoded
+    spool = project / sid / "tool-results"
+    spool.mkdir(parents=True)
+    target = spool / "toolu_x.txt"
+    target.write_text("oversized tool output")
+    init = {"session_id": sid}
+    result_sid = sid
+    name = "Read"
+    if case == "other-session":
+        init["session_id"] = result_sid = "other-session"
+    elif case == "wrong-name":
+        target = spool / "toolu_x.txt.backup"
+        target.write_text("not a spool file")
+    elif case == "symlink":
+        target.unlink()
+        target.symlink_to(world.wt / "a.txt")
+    elif case == "parent-symlink":
+        moved = world.tmp / "moved-spool"
+        spool.rename(moved)
+        spool.symlink_to(moved, target_is_directory=True)
+    elif case == "directory":
+        target.unlink()
+        target.mkdir()
+    elif case == "missing":
+        target.unlink()
+    elif case == "elsewhere":
+        target = project / "toolu_x.txt"
+        target.write_text("session data")
+    elif case == "other-cwd":
+        target = world.home / ".claude/projects/other-cwd" / sid / "tool-results/toolu_x.txt"
+        target.parent.mkdir(parents=True)
+        target.write_text("another cwd")
+    elif case in ("Grep", "Glob"):
+        name = case
+    elif case in ("unknown-session", "late-session"):
+        init = {}
+    elif case == "mismatch":
+        result_sid = "other-session"
+    elif case == "invalid-session":
+        init["session_id"] = "../escape"
+    path = str(target)
+    if case == "tilde":
+        path = "~/" + str(target.relative_to(world.home))
+    inp = {"file_path": path} if name == "Read" else {"path": path, "pattern": "*"}
+    scenario = {"init": init, "tool_uses": [{"name": name, "input": inp}]}
+    if case != "unknown-session":
+        scenario["result_session_id"] = result_sid
+    world.scenario(**scenario)
+    r = world.launch("--json")
+    assert r.returncode == expected, r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["spool_reads"] == (1 if case in ("own", "tilde", "mismatch") else 0)
+    if case in ("unknown-session", "late-session"):
+        assert "no stream session_id yet" in rec["reason"]
+    if case == "mismatch":
+        assert "session_id mismatch" in rec["reason"]
+        assert rec["structured_output"] is None
+
+
 # ---- a symlink that leaves the worktree (refused before the launch, exit 2) ----------------------------------
 
 def commit_link(world, name: str, target: Path | str) -> None:
