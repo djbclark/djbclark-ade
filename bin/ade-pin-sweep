@@ -1,0 +1,42 @@
+#!/usr/bin/env -S python3 -I
+"""ade-pin-sweep: re-apply the non-worker pin (label + native sidebar pin) on an interval.
+
+Runs bin/ade-pin-interactive (the `ade.interactive=1` label tag) then bin/ade-pin-workspaces pin
+(the native workspace pin), both idempotent. A launchd job runs this every 15 minutes so a new lead
+or operator-started agent is pinned shortly after it appears, with no operator typing.
+
+Zero-token: no model call. Exit 0 both steps ok, 1 one of them failed (their stderr is preserved).
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+
+
+def run(name: str, *argv: str) -> int:
+    try:
+        proc = subprocess.run([str(BIN / name), *argv], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"ade-pin-sweep: {name} failed: {exc}", file=sys.stderr)
+        return 1
+    last_out = (proc.stdout or "").strip().splitlines()
+    tail = last_out[-1] if last_out else ""
+    if proc.returncode != 0:
+        print(f"ade-pin-sweep: {name} rc={proc.returncode}: {(proc.stderr or '').strip() or tail}", file=sys.stderr)
+        return 1
+    if tail:
+        print(f"ade-pin-sweep: {name}: {tail}")
+    return 0
+
+
+def main() -> int:
+    a = run("ade-pin-interactive")
+    b = run("ade-pin-workspaces", "pin")
+    return 0 if a == 0 and b == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
