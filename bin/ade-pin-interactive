@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""ade-pin-interactive — tag non-worker (human-interaction) agents so they are easy to find.
+
+Operator request 2026-11-20: non-worker agents — leads and operator-started agents that can require
+human interaction — were too hard to find among workers and Herald summaries. This tool tags them
+`ade.interactive=1` (retroactively, and idempotently on every sweep) so `paseo ls --label
+ade.interactive=1` lists them in one command.
+
+Why a label and not Paseo's native "pin": Paseo's sidebar pin is the workspace `pinnedAt` field, set
+only by the desktop UI through the `workspace.pin.set` RPC — neither `paseo workspace` (CLI) nor the
+plugin SDK (`PaseoWorkspaceHandle` has setTitle/archive, no pin) exposes it. Filed upstream (see
+docs/upstream-issues.md draft 23). Until it lands, the label is the durable, machine-writable signal.
+
+Classification (read from `paseo ls -a -g --json`; the row omits arbitrary labels, so the signal is
+the name and lifecycle, matching `ade-worker-run`'s own conventions):
+  - worker: name starts `worker `, or name == "Herald summary", or `background` is true.
+  - non-worker (tag): status != closed, not archived, and not a worker.
+
+Only adds the label (no unpin of anything it did not tag); idempotent. Never archives, renames, or
+touches any other field. Read-only except the label writes.
+
+Exit 0 tagged/none needed; 1 a `paseo` call failed.
+"""
+import argparse
+import json
+import subprocess
+import sys
+
+LABEL = "ade.interactive=1"
+
+
+def paseo_json(*argv):
+    proc = subprocess.run(["paseo", *argv, "--json"], capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise SystemExit(f"paseo {' '.join(argv)} failed (rc {proc.returncode}): {proc.stderr.strip()[:300]}")
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        raise SystemExit(f"paseo {' '.join(argv)} printed no JSON: {exc}") from exc
+
+
+def is_worker(row):
+    name = row.get("name") or ""
+    if row.get("background") is True:
+        return True
+    if name == "Herald summary":
+        return True
+    return name.startswith("worker ")
+
+
+def non_worker_ids(rows):
+    return [r["id"] for r in rows
+            if r.get("status") != "closed" and r.get("id") and not is_worker(r)]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--check", action="store_true", help="report who would be tagged; change nothing")
+    args = ap.parse_args()
+    rows = paseo_json("ls", "-a", "-g")
+    ids = non_worker_ids(rows)
+    if args.check:
+        for r in rows:
+            if r.get("id") in ids:
+                print(f"would-tag {r['id']} {(r.get('name') or '')[:60]}")
+        print(f"{len(ids)} non-worker agents")
+        return 0
+    tagged = 0
+    for aid in ids:
+        subprocess.run(["paseo", "agent", "update", aid, "--label", LABEL],
+                       capture_output=True, text=True, timeout=60, check=False)
+        tagged += 1
+    print(f"tagged {tagged} non-worker agents {LABEL}")
+    return 0
+
+
+if __name__ == "__main__":
+    main()
