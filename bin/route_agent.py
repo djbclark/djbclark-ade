@@ -1225,7 +1225,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             if key in providers and (prior_rem is None) != (worst is None):
                 # exactly one account has no usable reading (stale, expired or windowless): the pool is only as fresh as
                 # its oldest age, whichever account was folded first, so the frontier gate's age test (judged_guard_block)
-                # cannot open on the measured account alone (adversary M1 on this change)
+                # sees a pool of two accounts, one older than the stale limit, as old in either order. It does not close
+                # an expired/windowless second account with a fresh age, or three accounts (queue Carried 83).
                 ages = [a for a in (prior.get("age_s"), acct_age) if a is not None]
                 entry_age = max(ages) if ages else None
             if prior_rem is not None and worst is not None:
