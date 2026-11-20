@@ -1618,7 +1618,7 @@ this repo filed today) as the nearest thread; no issue covers the guard's false 
 
 ## 23. paseo — workspace pin/unpin is not exposed to the CLI or the plugin SDK
 
-**Status: `ready-to-file`** (noted 2026-11-20; not filed — djbclark decides). Target: `getpaseo/paseo`.
+**Status: `already-filed` — [getpaseo/paseo#10353](https://github.com/getpaseo/paseo/issues/10353)** (filed 2026-11-20 on the operator's yes).
 
 ### Observed
 
