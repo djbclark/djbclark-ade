@@ -1637,8 +1637,9 @@ So a plugin or script cannot pin a workspace without either driving the raw webs
 ### Why it matters
 
 Automation cannot reproduce what the user does by hand: keeping "these agents need attention" pinned to the top is a
-findability feature that only the UI can perform. This repo works around it with an `ade.interactive=1` agent label
-(`bin/ade-pin-interactive`) until the primitive exists.
+findability feature that only the UI can perform. This repo works around it: `bin/ade-pin-interactive` tags non-worker agents `ade.interactive=1` (the durable
+query signal), and `bin/ade-pin-workspaces` drives the UI's own `workspace.pin.set` RPC through the bundled CLI client
+(the same mechanism as `bin/paseo-set-model`) to apply the real sidebar pin.
 
 ### Suggested fix
 

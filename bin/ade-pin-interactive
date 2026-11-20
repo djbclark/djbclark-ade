@@ -9,7 +9,7 @@ ade.interactive=1` lists them in one command.
 Why a label and not Paseo's native "pin": Paseo's sidebar pin is the workspace `pinnedAt` field, set
 only by the desktop UI through the `workspace.pin.set` RPC — neither `paseo workspace` (CLI) nor the
 plugin SDK (`PaseoWorkspaceHandle` has setTitle/archive, no pin) exposes it. Filed upstream (see
-docs/upstream-issues.md draft 23). Until it lands, the label is the durable, machine-writable signal.
+docs/upstream-issues.md draft 23). The real sidebar pin is now applied by `bin/ade-pin-workspaces pin` (the bundled-CLI-client path); this tool stays as the durable, queryable label.
 
 Classification (read from `paseo ls -a -g --json`; the row omits arbitrary labels, so the signal is
 the name and lifecycle, matching `ade-worker-run`'s own conventions):
