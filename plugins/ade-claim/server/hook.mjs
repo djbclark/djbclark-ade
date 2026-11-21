@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import {
   appendObserveLog,
   buildAdeClaimsBindOwnerArgv,
+  buildAdeClaimsRebindOwnerArgv,
+  classifyOwnerAgent,
   buildObserveEntry,
   buildAdeClaimsReleaseArgv,
   buildAdeGitGuardInstallArgv,
@@ -388,6 +390,79 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
 }
 
 /**
+ * Q4 (operator ruling 2026-11-20): an active claim whose owner agent is archived (or gone) passes to the next
+ * agent created in its workspace, so a reused workspace whose every agent was archived does not leave the new agent
+ * without a write identity (agent.open.before ran before the rebind, so a Claude-provider agent has no ADE_CLAIM_ID on its first launch; ade_claims.is_mine accepts its PASEO_AGENT_ID as owner.record of this claim shape instead, M1). Fails closed: the owner must be PROVEN archived or gone by one
+ * `paseo agent inspect` (`classifyOwnerAgent`); a live owner, a failed lookup and any odd answer leave the claim
+ * alone. The swap is `ade_claims.py rebind-owner`, a compare-and-swap on the exact owner that was inspected, on an
+ * ACTIVE claim only (a released or expired claim is never revived). No handoff record is read, so nothing stale
+ * can be replayed (queue Carried 58 a). One log line per call: observe logs the planned argv, enforce the argv and
+ * the outcome.
+ *
+ * @param {ReturnType<typeof hookContext>} ctx
+ * @param {{ mode: string, reason?: string }} m
+ * @param {string} hook
+ * @param {{ claim: { id: string, owner?: Record<string, unknown> }, parsed: { id: string, cwd: string },
+ *           script: string, ids: Record<string, unknown> }} a
+ */
+async function rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids }) {
+  const owner = claim.owner && typeof claim.owner === "object" ? claim.owner : {};
+  const oldOwner = typeof owner.agent === "string" ? owner.agent.trim() : "";
+  const baseIds = { ...ids, claim: claim.id, workspace: parsed.cwd };
+  // Only the shape `bind-owner` writes for a Paseo agent is ours to take: owner.agent === owner.record and no
+  // owner.session. A harness label (`codex`, `pi`, ... with the real identity in owner.session) is never a Paseo
+  // agent id: Paseo answers AGENT_NOT_FOUND for it while the owner may be live (adversary H1).
+  const ownerRecord = typeof owner.record === "string" ? owner.record.trim() : "";
+  const ownerSession = typeof owner.session === "string" ? owner.session.trim() : "";
+  if (!oldOwner || ownerRecord !== oldOwner || ownerSession) {
+    record(ctx, m, hook, { action: "none", why: "claim owned by another agent" }, baseIds);
+    return;
+  }
+  const paseo = typeof ctx.env.PASEO_CLI === "string" && ctx.env.PASEO_CLI.startsWith("/") ? ctx.env.PASEO_CLI : "paseo";
+  const inspect = ctx.spawn(paseo, ["agent", "inspect", "--json", "--", oldOwner], { encoding: "utf8", timeout: 10_000 });
+  const state = classifyOwnerAgent(oldOwner, inspect);
+  if (state === "live") {
+    record(ctx, m, hook, { action: "none", why: "claim owned by another agent" }, baseIds);
+    return;
+  }
+  if (state === "unknown") {
+    record(ctx, m, hook, { action: "none", why: "owner state unknown, not rebinding" }, baseIds,
+      `owner lookup failed for ${oldOwner} (exit ${inspect?.status ?? "none"}): no rebind`);
+    return;
+  }
+  let built;
+  try {
+    built = buildAdeClaimsRebindOwnerArgv({
+      adeClaimsScript: script, claimId: claim.id, fromAgent: oldOwner, ownerAgent: parsed.id, ownerState: state,
+    });
+  } catch (err) {
+    record(ctx, m, hook, null, baseIds, `rebind-owner argv: ${errText(err)}`);
+    return;
+  }
+  const planned = {
+    action: "rebind-owner",
+    owner_state: state,
+    from: oldOwner,
+    to: parsed.id,
+    claim: claim.id,
+    workspace: parsed.cwd,
+    argv: [built.python, built.script, ...built.argv],
+  };
+  const idsRebind = { ...baseIds, from: oldOwner };
+  if (m.mode === "observe") {
+    record(ctx, m, hook, planned, idsRebind);
+    return;
+  }
+  const run = ctx.spawn(built.python, [built.script, ...built.argv], { encoding: "utf8" });
+  if (run.status !== 0) {
+    const detail = (run.stderr || run.stdout || "").trim();
+    record(ctx, m, hook, planned, idsRebind, `rebind-owner failed (exit ${run.status})${detail ? `: ${detail}` : ""}`);
+    return;
+  }
+  record(ctx, m, hook, planned, idsRebind);
+}
+
+/**
  * W3: bind owner.agent (and owner.record) once the agent id exists.
  * Observe mode logs the planned bind-owner argv and does not write the registry.
  *
@@ -424,9 +499,13 @@ export function registerAgentClaimOwnerHook(server, deps = {}) {
       record(ctx, m, hook, null, ids, `claim lookup failed: ${errText(err)}`);
       return;
     }
-    if (!claim || !claimAllowsAgent(claim, parsed.id)) {
-      // No claim, or another agent already owns it: do not overwrite.
-      record(ctx, m, hook, { action: "none", why: claim ? "claim owned by another agent" : "no active claim for cwd" }, ids);
+    if (!claim) {
+      record(ctx, m, hook, { action: "none", why: "no active claim for cwd" }, ids);
+      return;
+    }
+    if (!claimAllowsAgent(claim, parsed.id)) {
+      // Another agent owns it: never overwrite a live owner; an archived or gone owner is rebound (Q4).
+      await rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids });
       return;
     }
     const { python, argv } = buildAdeClaimsBindOwnerArgv({

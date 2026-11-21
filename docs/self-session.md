@@ -148,11 +148,16 @@ The successor runs this once after `accept`; it does the waiting itself (2026-11
 bin/ade-self-session finish --record /absolute/state/handoff-PREDECESSOR_UUID.json [--stable S] [--wait-timeout S] [--poll S]
 ```
 
-Once the predecessor is archived, `finish` rebinds every active, unexpired `ade_claims` claim the predecessor owned to the successor (cl-succ, 2026-11-15): same claim id, a `history` line `rebound from <predecessor> by self-handoff <token>`, ids saved as `rebound_claims` in the record (a failure as `claims_rebind_error`; it never fails `finish`, and a re-run retries it). The rebind is `ade_claims.py successor-of` (docs/git-guard.md) and is refused unless the record is `archived` and names this agent as successor. Never `release` and re-`new` a claim after a self-handoff.
+Once the predecessor is archived, `finish` rebinds every active, unexpired `ade_claims` claim the predecessor owned to the successor (cl-succ, 2026-11-15): same claim id, a `history` line `rebound from <predecessor> by self-handoff <token>`, ids saved as `rebound_claims` in the record (a failure as `claims_rebind_error`; it never fails `finish`, and a re-run retries it). The rebind is `ade_claims.py successor-of` (docs/git-guard.md) and is refused unless the record is `archived` and names this agent as successor. `finish` also records the predecessor's active claim ids just before it archives (`predecessor_claims`, merged on every look, never shrunk; `finish` also scans the claims' own `history` for a plugin rebind away from the predecessor, so an archive done by someone else before `finish` ran, or a re-run after `archive-unknown`, is covered too). A claim in that list that is not the successor's afterwards was rebound to another agent created in its workspace by the ade-claim plugin (operator ruling Q4) between the archive and `finish`: `finish` does not take it back from that live agent and does not hide it, it lists it as `claims_not_rebound` (id, owner) in the record and the progress output; resolve it with that owner (release + new). Released, merged, expired or deleted claims are normal endings and not listed. Never `release` and re-`new` a claim after a self-handoff.
 
 `finish` samples `agent inspect` of the predecessor every `--poll` seconds (default 5) and archives only after
 it has been `idle` with `PendingPermissions == []` in every sample for `--stable` seconds (default 45; any busy
-sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). One idle sample
+sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). A predecessor whose
+`Status` is `error` (out of quota, a crashed provider) is archived at once, without the stable-idle window and
+whatever its `PendingPermissions` (operator ruling 2026-11-21: "We should always close out errored (out of quota)
+tabs after successfully taking a handoff from them; we do not need to wait for them to be in idle state."); the
+successor's acknowledgement is still required first, and if a message wakes it before the archive call Paseo answers
+`AGENT_RUNNING` and `finish` goes back to the stable-idle wait. One idle sample
 is never enough: peer messages wake a handed-off lead, and a single sample was stale by the time `agent archive`
 ran (2026-11-14 21:02Z: Paseo answered `AGENT_RUNNING`, `finish` failed with `archive-unknown`). The wait is
 read-only: it never forces, never archives a workspace and never sends the predecessor anything, and it holds the

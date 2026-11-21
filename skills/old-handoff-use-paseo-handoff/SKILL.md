@@ -311,7 +311,8 @@ passes it explicitly or checks the successor's level after launch (2026-11-14).
 Follow [the native transaction protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
 Creation is pending, not completion: the exact successor reads and acknowledges
 the preserved checkpoint and next action with `accept`, then runs `finish` once: it waits (bounded,
-default 45 s of stable idle, 25 min overall) for the predecessor to be idle and verifies retirement without `--force`.
+default 45 s of stable idle, 25 min overall) for the predecessor to be idle and verifies retirement without `--force`;
+a predecessor in `error` status (out of quota) is archived at once after the ack, with no idle wait (operator ruling 2026-11-21).
 `finish` also rebinds every active claim the predecessor owned to the successor (same claim id, a `history` line `rebound from <pred> by self-handoff <token>`; ids in the record's `rebound_claims`, a failure in `claims_rebind_error`), so never `release` and `new --id` them again. Check `ade_claims.py list` before further project writes. End this
 turn after requesting the handoff; stop scheduling project writes.
 
@@ -321,7 +322,7 @@ An ambiguous creation must be reconciled first; never launch a duplicate.
 The fallback starts top-level in the existing workspace, with the provider's
 verified unattended mode and the chain's exact pointer in its first prompt.
 The successor acknowledges the checkpoint and next action before retiring the
-idle predecessor. Keep the predecessor available if verification fails; report
+idle (or errored) predecessor. Keep the predecessor available if verification fails; report
 the precise blocker. Asking the operator to type reset or resume commands is
 never the fallback. A separately authorized model change follows routing policy
 and the same acknowledgement/retirement checks.

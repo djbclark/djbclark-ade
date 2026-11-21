@@ -201,6 +201,10 @@ report folder into a workspace.
   (same meanings as orchestration-practices §5): 0 DONE, 1 unfinished / still running, 3 no report,
   4 BLOCKED (or a pending permission), 124 timed out. Poll with short `paseo wait` / `paseo ls` looks when
   you must not block.
+- A lead's background waiter on a worker's done marker passes an explicit timeout:
+  `~/src/djbclark-ade/bin/wait-file --timeout 7000 /ABS/<report>.done` with the Bash tool's `run_in_background: true`
+  and `timeout: 7200000`. The 1200 s default ends before most code slices finish (2026-11-20: a Move 2 waiter exited 124
+  while the worker was still testing); a 124 is not a failure, so check the report's `STATUS:` line and re-arm.
 - `paseo ls -a -g --json` (filter on your `ade.*` labels) classifies every slice of the task at once
   against its report paths.
 - `paseo ls -g --label ade.task=TASK` shows what runs; `paseo permit ls` the permission cards.

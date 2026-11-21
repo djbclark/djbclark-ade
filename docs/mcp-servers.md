@@ -7,6 +7,10 @@ repo's `.mcp.json`.
 
 ## Roster
 
+**Every client, measured cost and usage (2026-11-21):** [mcp-on-demand.md](mcp-on-demand.md) section 2 inventories all MCP servers
+in Claude Code, Codex, Cursor, OpenCode, Hermes and Pi. It found this table stale: `graft` is back in Claude and Codex user
+config, `hermes` is HTTP `127.0.0.1:18790/mcp` in Codex only, and Hindsight is retired.
+
 Since 2026-10-10, 12 servers (ghost-os, cua-driver, paper-search and 9
 claude.ai connectors) are blocked in Claude Code through `deniedMcpServers` in
 `~/.claude/settings.json`; [history/disabled-skills.md](history/disabled-skills.md) lists them,

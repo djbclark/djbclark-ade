@@ -34,6 +34,8 @@ import tempfile
 import time
 import tomllib
 import unittest
+from collections.abc import Callable
+from typing import Any, ClassVar, override
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -46,10 +48,12 @@ SET_KEYS = {
     "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "DIGESTS",
     "BASH_ENV": "HOME/.bashrc",
     "ENABLE_PROMPT_CACHING_1H": "1",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1",
     "MCP_TIMEOUT": "300000",
     "CLAUDE_CODE_HARBOR_KITE": "1",
     "GRAFT_NO_GITIGNORE": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
 }
 IN_HERDR = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w9", "HERDR_TAB_ID": "w9:t7", "HERDR_PANE_ID": "w9:p7",
             "HERDR_SOCKET_PATH": "/tmp/herdr-test.sock", "HERDR_BIN_PATH": "/tmp/herdr-test-bin"}
@@ -62,14 +66,14 @@ TERMINAL_CONTEXT = {"TERM": "xterm-256color", "COLORTERM": "truecolor", "TMUX": 
 SYNTHETIC_SECRETS = {"ZZ_SYNTHETIC_SECRET": "s3", "OPENAI_API_KEY": "k1", "GITHUB_TOKEN": "t1"}
 
 
-def rendered(home: str) -> dict:
+def rendered(home: str) -> dict[str, Any]:
     """The template with every {{ }} tag filled (each sits in a quoted scalar) and parsed."""
     text = TEMPLATE.read_text()
     text = text.replace("{{ .home }}", home).replace("{{ .codex_browser_client_sha256s }}", "DIGESTS")
     return tomllib.loads(re.sub(r"\{\{.*?\}\}", "x", text))
 
 
-def policy_toml(policy: dict) -> str:
+def policy_toml(policy: dict[str, Any]) -> str:
     out = ["[shell_environment_policy]"]
     for k, v in policy.items():
         if k != "set":
@@ -82,7 +86,11 @@ def policy_toml(policy: dict) -> str:
 class Policy(unittest.TestCase):
     """Layer 1: what the rendered template says."""
 
+    home: ClassVar[str]
+    p: ClassVar[dict[str, Any]]
+
     @classmethod
+    @override
     def setUpClass(cls) -> None:
         cls.home = "/h"
         cls.p = rendered(cls.home)["shell_environment_policy"]
@@ -114,30 +122,34 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
 
     A throwaway CODEX_HOME holds only `policy_text`; `env` is the whole environment of the app-server process (the
     stand-in for the Codex process inside its pane). No model is called."""
+    codex = CODEX
+    assert codex is not None, "codex is not installed"  # callers skip without it
     with tempfile.TemporaryDirectory(prefix="cxpol-") as home:
-        pathlib.Path(home, "config.toml").write_text(policy_text)
+        _ = pathlib.Path(home, "config.toml").write_text(policy_text)
         full = {**env, "CODEX_HOME": home}
-        proc = subprocess.Popen([CODEX, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, env=full, text=True, cwd=home, start_new_session=True)
+        stdin, stdout = proc.stdin, proc.stdout  # PIPE was requested for both
+        assert stdin is not None and stdout is not None
         n = [0]
 
-        def send(method: str, params: dict | None = None, notify: bool = False) -> int:
-            msg: dict = {"method": method}
+        def send(method: str, params: dict[str, Any] | None = None, notify: bool = False) -> int:
+            msg: dict[str, Any] = {"method": method}
             if params is not None:
                 msg["params"] = params
             if not notify:
                 n[0] += 1
                 msg["id"] = n[0]
-            proc.stdin.write(json.dumps(msg) + "\n")
-            proc.stdin.flush()
+            _ = stdin.write(json.dumps(msg) + "\n")
+            stdin.flush()
             return n[0]
 
-        def wait_for(pred) -> dict:
+        def wait_for(pred: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
             end = time.time() + timeout
             while time.time() < end:
-                if not select.select([proc.stdout], [], [], 1)[0]:
+                if not select.select([stdout], [], [], 1)[0]:
                     continue
-                line = proc.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     break
                 msg = json.loads(line)
@@ -147,11 +159,11 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
 
         try:
             i = send("initialize", {"clientInfo": {"name": "env-policy-test", "version": "0"}})
-            wait_for(lambda m: m.get("id") == i)
-            send("initialized", notify=True)
+            _ = wait_for(lambda m: m.get("id") == i)
+            _ = send("initialized", notify=True)
             i = send("thread/start", {"cwd": home})
             tid = wait_for(lambda m: m.get("id") == i)["result"]["thread"]["id"]
-            send("thread/shellCommand", {"threadId": tid, "command": "/usr/bin/env -0"})
+            _ = send("thread/shellCommand", {"threadId": tid, "command": "/usr/bin/env -0"})
             done = wait_for(lambda m: m.get("method") == "item/completed"
                             and m["params"]["item"].get("type") == "commandExecution")
             out = done["params"]["item"]["aggregatedOutput"]
@@ -160,7 +172,7 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            proc.wait()
+            _ = proc.wait()
     return dict(x.split("=", 1) for x in out.split("\0") if "=" in x)
 
 
@@ -299,10 +311,12 @@ inherit = "core"
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123"
 BASH_ENV = "{home}/.bashrc"
 ENABLE_PROMPT_CACHING_1H = "1"
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
+CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1"
 MCP_TIMEOUT = "300000"
 CLAUDE_CODE_HARBOR_KITE = "1"
 GRAFT_NO_GITIGNORE = "1"
+CLAUDE_CODE_SUBAGENT_MODEL = "sonnet"
+CLAUDE_CODE_FORK_SUBAGENT = "0"
 
 [mcp_servers.below.http_headers]
 Authorization = "Bearer SECRET-BELOW-2"
@@ -515,7 +529,7 @@ ignore_default_excludes = true
         # adversary MSG 4: the old policy may spell its explicit set inline under [shell_environment_policy].
         def live(d: str, timeout: str) -> str:
             inline = ('set = { NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123", BASH_ENV = "%s/.bashrc", ENABLE_PROMPT_CACHING_1H = "1", '
-                      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1" }' % (d, timeout))
+                      'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1", CLAUDE_CODE_SUBAGENT_MODEL = "sonnet", CLAUDE_CODE_FORK_SUBAGENT = "0" }' % (d, timeout))
             return f'model = "m"\n\n[projects."/x"]\ntrust_level = "trusted"\n\n[shell_environment_policy]\ninherit = "core"\n{inline}\n\n[hooks.state."/y"]\ntrusted_hash = "SECRET-AFTER-8"\n'
         secrets = ("SECRETDIGEST-0123", "SECRET-INLINE-7", "SECRET-AFTER-8")
         with tempfile.TemporaryDirectory() as d:
@@ -560,6 +574,61 @@ ignore_default_excludes = true
                 return mod.main([str(TEMPLATE), str(t), "--write"]), err.getvalue()
             except SystemExit as e:
                 return e.code, err.getvalue()
+
+    def stale_live(self, d: str) -> pathlib.Path:
+        """A live config that still carries the old Claude Code flag the template replaced."""
+        t = pathlib.Path(d, "config.toml")
+        t.write_text(self.LIVE.format(home=d).replace("CLAUDE_CODE_EXPERIMENTAL_CODE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"))
+        return t
+
+    def run_args(self, mod, t: pathlib.Path, home: str, *extra: str) -> tuple[object, str]:
+        import contextlib, io
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": home}), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                return mod.main([str(TEMPLATE), str(t), "--write", *extra]), err.getvalue()
+            except SystemExit as e:
+                return e.code, err.getvalue()
+
+    def test_a_set_key_change_is_refused_by_default(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            before = t.read_bytes()
+            code, err = self.run_args(mod, t, d)
+            self.assertEqual(code, 1)
+            self.assertIn("would change the explicit set", err)
+            self.assertEqual((t.read_bytes(), sorted(os.listdir(d))), (before, ["config.toml"]))
+
+    def test_allow_set_keys_applies_exactly_the_named_keys(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,CLAUDE_CODE_EXPERIMENTAL_CODE_MODE")
+            self.assertEqual((code, err), (0, ""))
+            import tomllib
+            s = tomllib.loads(t.read_text())["shell_environment_policy"]["set"]
+            self.assertEqual(s["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE"], "1")
+            self.assertNotIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", s)
+            self.assertEqual(s["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"], "SECRETDIGEST-0123")  # the machine's digest is kept
+
+    def test_allow_set_keys_still_refuses_an_unnamed_key(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            before = t.read_bytes()
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE")
+            self.assertEqual(code, 1)
+            self.assertIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", err)
+            self.assertEqual(t.read_bytes(), before)
+
+    def test_the_browser_digest_key_cannot_be_allowed(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S")
+            self.assertEqual(code, 1)
+            self.assertIn("cannot be allowed", err)
 
     def test_a_change_between_read_and_recheck_refuses_and_keeps_the_concurrent_edit(self) -> None:
         mod = self.apply_module()

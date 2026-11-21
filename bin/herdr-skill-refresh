@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Refresh skills/herdr/SKILL.md from the installed herdr binary's bundled copy.
+
+`herdr --skill` prints the upstream skill byte-identical to herdrdev/herdr master.
+The tracked file is three parts: the loosened frontmatter (LOOSENED), the ADE
+rules (ADE_OVERLAY: how this machine's orders override the upstream text) and the
+upstream body, untouched. Edit the overlay here, never the body: upstream is the
+source and `--check` reports any hand edit as drift. Run after a herdr upgrade
+from a claimed linked worktree (it refuses to write elsewhere, exit 2: the shared
+checkout is every TUI's live link target); commit the result.
+
+    bin/herdr-skill-refresh            # rewrite skills/herdr/SKILL.md in this linked worktree
+    bin/herdr-skill-refresh --check    # exit 1 if the tracked file differs from the render
+
+SECURITY: the output of whatever `herdr` is first on PATH becomes instruction text
+that every TUI loads. Read the diff of every refresh PR as a prompt-injection
+surface (new commands, "ignore"/"always"/"never" rules, URLs), not as boilerplate.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+LOOSENED = """---
+name: herdr
+description: >-
+  Control Herdr, a terminal multiplexer for coding agents. Use whenever a task
+  names or implies a terminal, tab, pane or workspace ("in tab xyz", "in the N
+  pane", "another agent's terminal") to inspect or control panes, tabs and
+  workspaces, run a command in a shell pane, or locate another agent (then
+  message it with paseo send / SendMessage, see the ADE rules inside). Check
+  Herdr tab/pane names AND Paseo workspace/tab names together when locating
+  one. Do not use merely because a task could benefit from a background
+  terminal, delegation, or parallel work. Requires HERDR_ENV=1 and a pane that
+  is really this agent's own.
+---
+"""
+
+ADE_OVERLAY = """## ADE rules (override the upstream text below)
+
+These rules come from this machine's operating orders (`~/CLAUDE.md`, the
+djbclark-ade `AGENTS.md`). Where the upstream text below disagrees, these win.
+
+1. **Am I really in Herdr?** `HERDR_ENV=1` can be inherited from a daemon started in a
+   pane, so it is not proof. Act only if `PASEO_AGENT_ID` is unset, or if
+   `herdr pane current --current` names a pane whose process tree holds this
+   agent. Otherwise treat yourself as outside Herdr: use `paseo send` or the
+   paseo skill, and never touch the launcher's pane.
+2. **Messaging an agent is not typing into its pane.** Never use `herdr agent prompt`,
+   `herdr agent send-keys` or `herdr pane run` to put text into another agent's
+   pane as a message: the receiver sees operator keystrokes, not a peer message,
+   and nothing proves delivery. Send with `paseo send --json --no-wait <id> --prompt '…'`
+   and ask for a named `ack <your id>` (order 10); a non-Paseo Claude session is
+   reached with `SendMessage` (name from `ListAgents`). Ask for the reply on **both** routes:
+   SendMessage and an atomic reply file at a path you name (temp file beside it,
+   then rename). Only the receiver writes an ack file, never the sender's own
+   status. See the agent-surfaces skill and `docs/cross-harness-messaging.md`.
+   Typing into a pane is only for a pane the operator names, and answering an
+   approval or question card stays the operator's call.
+3. **Launching agents is not `herdr agent start`.** Launch through
+   `bin/route_agent.py plan` then `ade-worker-run` (`skills/fan-out`), so quota,
+   labels and the delivery footer apply. Use `herdr agent start` only when the
+   operator asks for it by name, and never in a workspace another writer holds,
+   in a claimed worktree you do not own, or in a shared checkout (`~/src/<repo>`).
+4. **Builds and tests in a pane** still go through `~/ops/site-private-djbclark/bin/bgrun`
+   (after `load-watch ci decide`): `pane run` is not a way around it.
+
+"""
+
+
+def render(upstream: str) -> str:
+    """Loosened frontmatter + the ADE overlay + the untouched upstream body; ValueError when upstream has no frontmatter."""
+    if not upstream.startswith("---"):
+        raise ValueError("no frontmatter")
+    end = upstream.find("\n---", 3)
+    if end < 0:
+        raise ValueError("frontmatter has no closing ---")
+    body = upstream[end + len("\n---"):].lstrip("\n")
+    return LOOSENED + ADE_OVERLAY + body
+
+
+def is_linked_worktree(root: Path) -> bool:
+    """True when ROOT is a linked git worktree (git-dir differs from the common dir)."""
+    def rev(flag: str) -> str | None:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", flag],
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+    gd, cd = rev("--git-dir"), rev("--git-common-dir")
+    return bool(gd and cd and gd != cd)
+
+
+def main(argv: list[str]) -> int:
+    check = argv[1:] == ["--check"]
+    if argv[1:] and not check:
+        print("usage: herdr-skill-refresh [--check]", file=sys.stderr)
+        return 2
+    skill = Path(__file__).resolve().parent.parent / "skills" / "herdr" / "SKILL.md"
+    try:
+        r = subprocess.run(["herdr", "--skill"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print("herdr-skill-refresh: herdr is not installed (not on PATH)", file=sys.stderr)
+        return 1
+    if r.returncode != 0:
+        print(f"herdr-skill-refresh: herdr --skill exited {r.returncode}: {r.stderr.strip()[:200]}", file=sys.stderr)
+        return 1
+    try:
+        text = render(r.stdout)
+    except ValueError as e:
+        print(f"herdr-skill-refresh: herdr --skill output unusable: {e}", file=sys.stderr)
+        return 1
+    if check:
+        same = skill.is_file() and skill.read_text() == text
+        print(f"herdr-skill-refresh: {skill} {'is current' if same else 'DIFFERS from herdr --skill'}")
+        return 0 if same else 1
+    if not is_linked_worktree(skill.parents[2]):
+        print("herdr-skill-refresh: refusing to write outside a linked worktree (the shared checkout is every "
+              "TUI's live link target); run it from your claimed worktree, or use --check", file=sys.stderr)
+        return 2
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=skill.parent, prefix=".SKILL.md.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, skill)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    print(f"herdr-skill-refresh: wrote {skill} ({len(text)} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

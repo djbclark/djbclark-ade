@@ -215,8 +215,7 @@ The card has no header chip, no per-option description, no `helpText` and no
 4. On `stop`, stop. Report what was decided and what is still open.
 5. **If he picks `/compact`** (or the context prompt's compact tier, +140k since
    the start or last compaction or 217k total, fires mid-walk; never compact earlier,
-   it costs more than it saves, 2026-10-10): an agent cannot run `/compact` on itself
-   (the `self-slash` that typed it was removed 2026-11-06), so note the remaining queue
+   it costs more than it saves, 2026-10-10): an agent requests its own compaction with `bin/ade-self-session compact` (docs/self-session.md section B; `requested` is not completed), so note the remaining queue
    and ask him to type `/compact <focus: the open items>`; with nobody at the keyboard,
    auto-compaction takes it. Grok Bot: does not apply (2d.6).
 

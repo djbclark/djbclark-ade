@@ -142,6 +142,10 @@ D5. **Quota fit uses `[dispatch.estimate_floor]` (and repo overrides for tendcf 
 in-flight reservations across a parallel wave (that was the retired Wave 6 dispatch shim's write-and-recheck path).
 Until a native reservation lands: re-run `plan` immediately before each `paseo run`, and do not launch more same-pool
 slices from one plan snapshot than the floor estimate fits in remaining.
+D5b. **A quota window that already reset reads fresh, not as its old reading (2026-11-20).** Never dispatch from memory of a pool's
+state: before any quota-sensitive dispatch, re-probe `aiuse --available --json` (or `route_agent.py plan` fresh), and if a
+window's `resets_at` has passed, treat the old 0%/tight reading as refilled — `route_agent.py` now reads such a window as
+unknown (re-probe) rather than exhausted, and `bin/quota_nudge.py --reset` names the pools whose window already refilled.
 D5a. **A repo's frontier reviewer order (rt-01, 2026-11-14):** `[dispatch.repo_overrides.REPO] frontier_order` in `config/ade.toml`
 (tendcf: `codex`, `claude`, `antigravity-argon`, its standing rule 3) makes `route_agent.py plan --kinds frontier --repo REPO`
 sort the pools that already passed every gate by that order (unlisted ones after), the score only inside a position. It never

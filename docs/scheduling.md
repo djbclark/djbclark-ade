@@ -71,6 +71,16 @@ bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ad
   --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
 ```
 
+`config/launchd/com.djbclark.ade-pin-sweep.plist` (2026-11-20) re-applies the non-worker pin every 900 s: it runs
+`bin/ade-pin-sweep`, which calls `bin/ade-pin-interactive` (the `ade.interactive=1` label tag) and
+`bin/ade-pin-workspaces pin` (the native sidebar pin, driving the UI's `workspace.pin.set` RPC through the bundled
+CLI client). Both idempotent, zero-token, macOS only. Install the same way:
+
+```sh
+bin/ade-sched install config/launchd/com.djbclark.ade-pin-sweep.plist --ade ~/src/djbclark-ade \
+  --set __STATE__=$HOME/.local/state/djbclark-ade/pin
+```
+
 The `com.djbclark.ade-net-resume` template runs a one-shot network and quota scan
 every minute with `--quota --apply` and preventive requests enabled. Installation enables sends. After merge, the lead must reinstall the updated template from the
 canonical checkout, replacing `LEAD_UUID` with the intended lead UUID. A source

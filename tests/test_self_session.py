@@ -1262,6 +1262,49 @@ def test_timeout_before_any_archive_keeps_both_sessions(setup):
     assert 'native_error' not in json.loads(path.read_text())
 
 
+# --- an errored predecessor is retired without the idle wait (operator ruling 2026-11-21) ---------------
+
+def test_errored_predecessor_is_archived_without_the_idle_wait(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'  # out of quota: it runs no turn and never becomes idle
+    saw = []
+    service.progress = saw.append
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+    assert native.clock.now < ss.FINISH_STABLE and not native.clock.sleeps  # no stable window was waited out
+    assert any('status error' in m for m in saw)
+    only_reads_and_archive(native)
+
+
+def test_errored_predecessor_with_a_permission_wait_is_still_archived(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'
+    native.rows[PRED]['PendingPermissions'] = [{'id': 'p'}]  # left over from the turn that failed
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+
+
+def test_errored_predecessor_still_needs_the_successor_ack(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'
+    record = json.loads(path.read_text())
+    record['ack'] = None
+    path.write_text(json.dumps(record))
+    with pytest.raises(ss.SessionError, match='acknowledgement required'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_errored_predecessor_woken_before_archive_goes_back_to_the_idle_wait(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # error at first, a peer message wakes it (archive refused AGENT_RUNNING), then it settles idle
+    native.status_at = lambda now: 'error' if now < 1 else ('running' if now < 30 else 'idle')
+    native.archive_queue = [RUNNING]
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 2
+    assert native.clock.now >= 30 + 45  # the second attempt waited for a full stable idle window
+
+
 def test_timeout_after_agent_running_answers_stays_archive_unknown(setup):
     service, native, path = finished_up_to_archive(setup)
     native.archive_queue = [RUNNING] * 50  # always refused
@@ -2147,6 +2190,111 @@ def test_rebound_claims_accumulate_across_finish_reruns(setup, tmp_path):
     assert service.finish(path)['rebound_claims'] == ['c-1']  # a no-op re-run keeps the earlier list
     _claim('c-2', PRED, tmp_path)
     assert service.finish(path)['rebound_claims'] == ['c-1', 'c-2']
+
+
+def _plugin_rebinds_on_archive(service, claim_id, to_agent):
+    """Stand in for the ade-claim plugin: the moment Paseo archives the predecessor, an agent created in the workspace
+    takes the predecessor's claim (agent.create.after -> rebind-owner)."""
+    import ade_claims
+    real = service.native
+
+    def native_call(*args, **kw):
+        out = real(*args, **kw)
+        if args[:2] == ('agent', 'archive'):
+            ade_claims.rebind_owner(claim_id, from_agent=PRED, to_agent=to_agent, owner_state='archived')
+        return out
+    service.native = native_call
+
+
+def test_m2_a_claim_the_plugin_rebound_to_someone_else_is_reported_not_lost_or_taken(setup, tmp_path):
+    """M2: between the archive and `rebind_claims` the plugin handed c-race to another new agent. finish neither takes it back
+    (it is live) nor drops it silently: it records it, with the owner, in claims_not_rebound."""
+    import ade_claims
+    _claim('c-race', PRED, tmp_path)
+    _claim('c-calm', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    messages = []
+    service.progress = messages.append
+    _plugin_rebinds_on_archive(service, 'c-race', 'agent-x')
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['rebound_claims'] == ['c-calm']
+    assert out['predecessor_claims'] == ['c-calm', 'c-race']
+    assert out['claims_not_rebound'] == [{'id': 'c-race', 'fate': 'other', 'owner': 'agent-x'}]
+    assert ade_claims.read_claim('c-race')['owner']['agent'] == 'agent-x'      # not stolen back
+    assert ade_claims.read_claim('c-calm')['owner']['agent'] == SUCC
+    assert any('c-race' in m and 'agent-x' in m for m in messages)
+    assert json.loads(path.read_text())['claims_not_rebound'] == out['claims_not_rebound']
+
+
+def test_m2_a_claim_already_the_successors_is_not_reported_or_rebound_twice(setup, tmp_path):
+    """The plugin (or an earlier finish run) already gave the claim to the successor: it is accounted for, not an error."""
+    import ade_claims
+    _claim('c-mine', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    _plugin_rebinds_on_archive(service, 'c-mine', SUCC)
+    out = service.finish(path)
+    assert out['rebound_claims'] == [] and 'claims_not_rebound' not in out
+    c = ade_claims.read_claim('c-mine')
+    assert c['owner']['agent'] == SUCC and sum('rebound from' in h for h in c['history']) == 1
+
+
+def test_m2_a_claim_released_before_the_archive_is_a_normal_ending(setup, tmp_path):
+    _claim('c-rel2', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    import ade_claims
+    real = service.native
+
+    def native_call(*args, **kw):
+        if args[:2] == ('agent', 'archive'):
+            ade_claims.set_state('c-rel2', 'released')
+        return real(*args, **kw)
+    service.native = native_call
+    out = service.finish(path)
+    assert out['rebound_claims'] == [] and 'claims_not_rebound' not in out
+
+
+def test_m2_a_rerun_keeps_the_report(setup, tmp_path):
+    _claim('c-race', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    _plugin_rebinds_on_archive(service, 'c-race', 'agent-x')
+    first = service.finish(path)['claims_not_rebound']
+    assert service.finish(path)['claims_not_rebound'] == first   # archived re-run: same snapshot, same report
+
+
+def test_m2_a_rerun_after_archive_unknown_still_reports_the_claim_the_plugin_gave_away(setup, tmp_path):
+    """Adversary M-1: the first finish archives but fails to read the receipt; the plugin hands c-race to agent-x; the re-run's
+    fresh snapshot no longer lists it, yet it is reported (snapshots merge, and the claim's history names the rebind)."""
+    import ade_claims
+    _claim('c-race', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    real = service.native
+    state = {'n': 0}
+
+    def native_call(*args, **kw):
+        out = real(*args, **kw)
+        if args[:2] == ('agent', 'archive'):
+            ade_claims.rebind_owner('c-race', from_agent=PRED, to_agent='agent-x', owner_state='archived')
+            state['n'] += 1
+            if state['n'] == 1:
+                raise ss.SessionError('archive outcome unknown')
+        return out
+    service.native = native_call
+    with pytest.raises(ss.SessionError, match='outcome unknown'):
+        service.finish(path, stable=0, timeout=100, poll=5)
+    out = service.finish(path, stable=0, timeout=100, poll=5)
+    assert out['status'] == 'archived'
+    assert out['claims_not_rebound'] == [{'id': 'c-race', 'fate': 'other', 'owner': 'agent-x'}]
+
+
+def test_m2_an_archive_done_before_finish_is_covered_by_the_claim_history(setup, tmp_path):
+    """No snapshot exists (the predecessor was archived by someone else first); the claim's history still names the rebind."""
+    import ade_claims
+    _claim('c-race', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    ade_claims.rebind_owner('c-race', from_agent=PRED, to_agent='agent-x', owner_state='archived')
+    native.rows[PRED]['Archived'] = True
+    out = service.finish(path, stable=0, timeout=100, poll=5)
+    assert out['claims_not_rebound'] == [{'id': 'c-race', 'fate': 'other', 'owner': 'agent-x'}]
 
 
 @pytest.mark.parametrize(('field', 'value'), [

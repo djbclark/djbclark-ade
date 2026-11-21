@@ -1034,8 +1034,17 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         stale = ((row_age is None or row_age > STALE_SOFT)
                  or row.get("reading_expired") is True)
         head = _pct(row.get("headroom_percent"))
-        if ("usable_now" in row and row["usable_now"] is not True) or row.get("state") == "blocked" or head == 0:
+        row_reset_passed = _reset_passed(row.get("available_at")) or any(
+            _reset_passed(w.get("resets_at")) for w in (row.get("windows") or []) if isinstance(w, dict))
+        if row.get("state") == "blocked":
             top: float | None = 0.0
+        elif ("usable_now" in row and row["usable_now"] is not True) or head == 0:
+            if row_reset_passed:
+                # a 0% reading whose window already refilled is stale, not exhausted: re-probe (2026-11-20).
+                top = None
+                stale = True
+            else:
+                top = 0.0
         elif stale:
             top = None
         else:
@@ -1155,11 +1164,13 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
             state = w.get("state")
             headroom = _pct(w.get("headroom_percent"))
-            if (state == "exhausted" or (headroom is not None and headroom == 0)
-                    or w.get("measurement_frozen") is True):
+            if w.get("measurement_frozen") is True:
                 # a frozen window (flat while acp-run spent the pool, aiuse "not trusted for routing") reads exhausted,
                 # as aiuse's own `--available` does (2026-10-31, adversary F3)
                 remaining = 0.0
+            elif state == "exhausted" or (headroom is not None and headroom == 0):
+                # a 0% window whose reset already passed refilled: read unknown, re-probe (2026-11-20).
+                remaining = None if _reset_passed(w.get("resets_at")) else 0.0
             elif is_old:
                 remaining = None
             else:
@@ -1220,12 +1231,22 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         for key, (worst, detail, sublimits, bind) in per_key.items():
             prior = providers.get(key) or {}
             prior_rem = prior.get("remaining")
+            # the age belongs to the entry whose reading `remaining` and the bind fields come from
+            entry_age = acct_age
+            if key in providers and (prior_rem is None) != (worst is None):
+                # exactly one account has no usable reading (stale, expired or windowless): the pool is only as fresh as
+                # its oldest age, whichever account was folded first, so the frontier gate's age test (judged_guard_block)
+                # sees a pool of two accounts, one older than the stale limit, as old in either order. It does not close
+                # an expired/windowless second account with a fresh age, or three accounts (queue Carried 84).
+                ages = [a for a in (prior.get("age_s"), acct_age) if a is not None]
+                entry_age = max(ages) if ages else None
             if prior_rem is not None and worst is not None:
                 if prior_rem < worst:
-                    # several accounts: the tightest wins, keep its bind fields
+                    # several accounts: the tightest wins, keep its bind fields and its age
                     worst = prior_rem
                     bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                       "window_minutes")}
+                    entry_age = prior.get("age_s")
                 # else keep this account's bind (already set for `worst`)
             elif prior_rem is not None and worst is None:
                 worst = prior_rem
@@ -1239,7 +1260,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 # known-beats-unknown
                 "windows": _merge_windows(prior.get("windows"), detail),
                 "sublimits": _merge_caps(prior.get("sublimits"), sublimits),
-                "age_s": acct_age,
+                "age_s": entry_age,
                 "billing_kind": acct.get("billing_kind"),
                 "pace_ratio": bind.get("pace_ratio"),
                 "resets_at": bind.get("resets_at"),
@@ -1918,6 +1939,11 @@ def hours_to_reset(resets_at: Any, *, now: datetime | None = None) -> float | No
         return max(0.0, (stamp - now).total_seconds() / 3600.0)
     except (ValueError, TypeError):
         return None
+
+
+def _reset_passed(resets_at: Any, *, now: datetime | None = None) -> bool:
+    """True when `resets_at` is parseable and already reached: the window has refilled."""
+    return hours_to_reset(resets_at, now=now) == 0.0
 
 
 def expected_waste(remaining: float | None, pace_ratio: Any,

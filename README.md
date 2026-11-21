@@ -41,8 +41,12 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
 ~/src/djbclark-ade/bin/skill-everywhere <name>          # link one skill into every TUI's skills dir
 ~/src/djbclark-ade/bin/skill-everywhere --all           # every public, private and site skill
 ~/src/djbclark-ade/bin/ade-update --check               # report only; exit 10 when behind
-~/src/djbclark-ade/bin/ade-update                       # fast-forward, relink skills, check links, print the changelog delta
+~/src/djbclark-ade/bin/ade-update                       # fast-forward, relink skills, link repo tools onto PATH, check links, print the changelog delta
 ```
+
+Repo tools named bare in the instructions (`git-commit-own`, `load-watch`, `agent-id`: the `BIN_LINKS` table in
+`bin/ade-update`) are linked as `~/.local/bin/<name>` -> the canonical checkout's `bin/<name>` by `ade-update`; it never
+overwrites a regular file or a symlink that is not into a djbclark-ade checkout (it reports those, exit 10).
 
 Targets: `~/.claude/skills` (cursor-agent reads it too), `~/.agents/skills` (Codex + Pi),
 Hermes' external dir, a copy for Grok Bot; roots: this repo, `~/ops/site-private/skills`,

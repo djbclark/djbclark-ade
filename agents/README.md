@@ -50,7 +50,9 @@ read-back through the installed `codex app-server` (no model call).
    `bin/codex-env-policy-apply TEMPLATE TARGET` prints a diff of the policy span only (the two `shell_environment_policy`
    tables and the comment block above them, old against new; only the template's own lines and `inherit`/`ignore_default_excludes` literals print, every other assignment line (including its key), comment and continuation is hidden;
    no line of any neighbouring table); `--write` applies it and does nothing if already applied. It replaces that span
-   byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a private (0600, O_EXCL)
+   byte-for-byte, checks that every other table and the `set` values are unchanged (by default any add, drop or change of a `set` key is refused;
+   `--allow-set-keys KEY[,KEY...]` permits a change to exactly the named keys and refuses the rest; the browser digest key can never be
+   allowed), keeps a private (0600, O_EXCL)
    `.bak-UTC-TIME-env-policy` copy, writes a temp file beside the target and `os.replace`s it on the realpath, and
    refuses (exit 1, nothing replaced) if the file changed after it was read or after the temp file was written.
    Table headers may have trailing TOML comments; their comments remain hidden in the diff.

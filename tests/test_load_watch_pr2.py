@@ -187,7 +187,7 @@ class Run:
         return rc, json.loads(out.out), out.err
 
 
-SOFT = dict(LW_FAKE_LOAD1=CORES * 3.0, LW_FAKE_CHURN=40000)   # load over the 2.0 base but under 4.0, churn 30-60k: soft refusals
+SOFT = dict(LW_FAKE_LOAD1=CORES * 3.0, LW_FAKE_CHURN=40000)   # load over the explicit 2.0 base but under the 5.0 boost line, churn 30-60k: soft refusals
 
 
 def test_starved_soft_refusal_gets_through_after_five_minutes(monkeypatch, tmp_path, capsys):
@@ -225,7 +225,7 @@ def test_the_soft_threshold_is_an_env_knob_and_zero_turns_the_valve_off(monkeypa
     dict(LW_FAKE_LOAD1=0.1, LW_FAKE_CHURN=70000),                       # churn over the hard line 60000
     dict(LW_FAKE_LOAD1=0.1, LW_FAKE_SWAPINS=500),                       # swap-ins over their limit
     dict(LW_FAKE_LOAD1=0.1, LW_FAKE_FREE_MB=200),                       # free memory under 300 MB
-    dict(LW_FAKE_LOAD1=CORES * 5.0, LW_FAKE_CHURN=40000),               # load over the 4.0 boost line
+    dict(LW_FAKE_LOAD1=CORES * 6.0, LW_FAKE_CHURN=40000),               # load over the 5.0 boost line
     dict(LW_FAKE_LOAD1=CORES * 3.0, LW_FAKE_CHURN=40000, LW_FAKE_SWAPINS=500),   # a hard one among soft ones
 ], ids=["churn-hard", "swapins", "free-300", "load-boost", "mixed"])
 def test_hard_gates_never_yield(env, monkeypatch, tmp_path, capsys):

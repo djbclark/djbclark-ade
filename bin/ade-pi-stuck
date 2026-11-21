@@ -55,6 +55,33 @@ POOL_TO_ACCOUNT = {
     "clinepass:default": "clinepass",
 }
 
+# Pools where one pool_id bills several accounts. aiuse names the account in its
+# `account` field and Pi prefixes the provider with it (opencode-go-t-e,
+# clinepass-djbclark). Without this, every sub-account but the bare prefix reads
+# "no quota mapping" even though aiuse reported it (Carried 79, 2026-11-19).
+SUBACCOUNT_POOLS = {
+    "opencode:go": "opencode-go",
+    "clinepass:default": "clinepass",
+}
+
+
+def account_for_pool(pool):
+    """The Pi billing account a single aiuse pool reading maps to, or None.
+
+    A sub-account pool maps to `<prefix>-<account>` when aiuse names one, and to
+    the bare prefix when it does not (the account-less reading still vouches for
+    the base account). Every other pool maps through POOL_TO_ACCOUNT, and an
+    unlisted pool maps to nothing: it must not mark an account exhausted.
+    """
+    pool_id = str(pool.get("pool_id"))
+    prefix = SUBACCOUNT_POOLS.get(pool_id)
+    if prefix:
+        name = pool.get("account")
+        if name:
+            return f"{prefix}-{name}"
+        return prefix
+    return POOL_TO_ACCOUNT.get(pool_id)
+
 # Accounts the operator has confirmed empty.  Only a fresh reading that shows
 # positive headroom can clear one: a stale reading is not evidence of balance
 # (2026-11-17: openai prepaid reported 28.8% from a 21 h old reading while the
@@ -83,13 +110,7 @@ def quota_by_account(avail):
     for p in pools or []:
         if not isinstance(p, dict):
             continue
-        acct = POOL_TO_ACCOUNT.get(str(p.get("pool_id")))
-        if not acct and str(p.get("pool_id")) == "opencode:go":
-            # One pool_id, three billing accounts; aiuse's account field names
-            # them (djbclark / t-e / dclark) and Pi prefixes them opencode-go-<acct>.
-            name = p.get("account")
-            if name:
-                acct = f"opencode-go-{name}"
+        acct = account_for_pool(p)
         if not acct:
             continue
         hr = p.get("headroom_percent")
