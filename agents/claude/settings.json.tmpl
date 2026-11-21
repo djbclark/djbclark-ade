@@ -551,6 +551,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "f=\"$HOME/.claude/hooks/ref_integrity_gate.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "{{ .home }}/ops/site-public-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" stop || exit 0",
             "timeout": 10
           }
