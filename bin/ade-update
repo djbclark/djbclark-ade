@@ -70,7 +70,8 @@ Steps, in order:
    with a djbclark-ade checkout or worktree as `<root>` (a directory holding `bin/ade-update` and `skills/`, or, when it
    is gone, a path with a component starting `djbclark-ade`): a stale link to a removed worktree is the usual case. A
    regular file or directory, or a symlink to anywhere else, is never touched: it is reported with a fix to run by hand and
-   is unresolved (exit 10), like a skill link the helper leaves alone. A listed tool with no executable `bin/<name>` in
+   is unresolved (exit 10), like a skill link the helper leaves alone. A bin directory that is not on PATH, or an earlier
+   PATH entry holding an executable of the same name (a shadow), is a `warning:` line (JSON `bin_links.warnings`), never an exit code. A listed tool with no executable `bin/<name>` in
    the checkout (agent-id before PR 842 lands) is skipped with an info line, never an error; `--check` on a checkout
    that is behind says the tool is new upstream. `--check` writes nothing (missing and stale links count as exit 10, like
    a missing ~/.claude link); a non-canonical --repo is report-only and never links, because the links would point at it.
@@ -728,7 +729,25 @@ def check_bin_links(repo, check, upstream_rev=None):
             d["problems"].append(row)
             continue
         d["repaired_now" if replace else "linked_now"].append(name)
+    d["warnings"] = bin_link_warnings(bin_dir, [n for k in ("ok", "linked_now", "repaired_now") for n in d[k]])
     return d
+
+
+def bin_link_warnings(bin_dir, names):
+    """[text]: `bin_dir` is not on PATH, or an earlier absolute PATH entry holds an executable of the same name that
+    would shadow a link in `bin_dir`. Warnings only: they never change an exit code or stop a link."""
+    entries = [os.path.normpath(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p and os.path.isabs(p)]
+    here = os.path.normpath(str(bin_dir))
+    if here not in entries:
+        return [f"{bin_dir} is not on PATH: the links are not found by bare name until it is"] if names else []
+    warnings = []
+    for name in names:
+        for entry in entries[:entries.index(here)]:
+            cand = Path(entry) / name
+            if cand.is_file() and os.access(cand, os.X_OK):
+                warnings.append(f"{cand} comes before {bin_dir} on PATH and shadows the {name} link")
+                break
+    return warnings
 
 
 # --- report -------------------------------------------------------------------------------
@@ -1008,6 +1027,8 @@ def update(rep, args, repo):
         for p in bl["problems"]:
             if p.get("unresolved"):
                 rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
+        for w in bl["warnings"]:
+            rep.say(f"  warning: {w}")
         if bl["skipped"]:
             rep.say(f"  info: no executable bin/ file in this checkout for: {', '.join(bl['skipped'])}; skipped")
         if bl["new_upstream"]:

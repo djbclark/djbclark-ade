@@ -1886,3 +1886,57 @@ def test_new_upstream_bin_tool_is_info_only_under_check(env):
     assert r.returncode == 10, r.stdout + r.stderr  # behind, nothing else
     assert "new upstream tools, linked after the pull: agent-id" in r.stdout
     assert "bin links" not in json.loads(env.run("--check", "--json").stdout)["problems"]
+
+
+def test_dangling_link_outside_djbclark_ade_is_foreign_not_repaired(env):
+    """Mutation target: the `any(part.startswith("djbclark-ade") ...)` rule for a root that no longer exists."""
+    bin_tools(env, "load-watch")
+    bin_dir(env).mkdir(parents=True)
+    gone = env.tmp / "some-other-project-gone" / "bin" / "load-watch"  # dangles, and no djbclark-ade component
+    os.symlink(gone, bin_dir(env) / "load-watch")
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert os.readlink(bin_dir(env) / "load-watch") == str(gone)
+    assert "not a djbclark-ade checkout" in r.stdout
+
+
+@pytest.mark.parametrize("rel", ["bin/other-tool", "tools/load-watch", "load-watch"])
+def test_link_to_a_different_name_or_outside_bin_is_foreign(env, rel):
+    """Mutation target: the `t.name != dest.name or t.parent.name != "bin"` check, even inside a djbclark-ade tree."""
+    bin_tools(env, "load-watch")
+    bin_dir(env).mkdir(parents=True)
+    wt = env.tmp / "djbclark-ade-x-wt"
+    target = wt / rel
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    (wt / "bin").mkdir(exist_ok=True)
+    (wt / "bin" / "ade-update").write_text("")
+    (wt / "skills").mkdir(exist_ok=True)
+    os.symlink(target, bin_dir(env) / "load-watch")
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert os.readlink(bin_dir(env) / "load-watch") == str(target)
+    assert "not a djbclark-ade checkout" in r.stdout
+
+
+def test_path_warnings_never_change_the_exit_code(env):
+    bin_tools(env, "load-watch")
+    plain = os.environ["PATH"]
+    # bin dir not on PATH (the default test PATH): a warning, exit 0, link still made
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"warning: {bin_dir(env)} is not on PATH" in r.stdout
+    # on PATH, nothing earlier: no warning
+    r = env.run(extra_env={"PATH": f"{bin_dir(env)}{os.pathsep}{plain}"})
+    assert r.returncode == 0 and "warning:" not in r.stdout, r.stdout + r.stderr
+    # an earlier entry holding an executable of the same name shadows the link
+    shadow = env.tmp / "shadow"
+    shadow.mkdir()
+    (shadow / "load-watch").write_text("#!/bin/sh\n")
+    (shadow / "load-watch").chmod(0o755)
+    r = env.run("--json", extra_env={"PATH": f"{shadow}{os.pathsep}{bin_dir(env)}{os.pathsep}{plain}"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any("shadows the load-watch link" in w for w in json.loads(r.stdout)["bin_links"]["warnings"])
+    # a shadow AFTER the bin dir is not a shadow
+    r = env.run(extra_env={"PATH": f"{bin_dir(env)}{os.pathsep}{shadow}{os.pathsep}{plain}"})
+    assert "shadows" not in r.stdout
