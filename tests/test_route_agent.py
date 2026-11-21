@@ -2477,6 +2477,44 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertNotIn("read as stale", r.quota_source_info()["detail"])
         self.assertIn("stale_pools", r.quota_source_info()["detail"])
 
+    # -- a reused reading inside the pool's own query gate keeps its value (2026-11-21) --------
+
+    def stale_argon_quota(self, **row_extra):
+        """Load a payload whose only stale pool is the Argon one (aiuse's 600 s limit, 900 s gate)."""
+        stale = [{"provider": "antigravity", "account": None, "pool_family": "gemini_argon",
+                  "age_seconds": row_extra.get("age_seconds", 700.0)}]
+        path = self.write("reuse.json", self.payload(
+            [dict(self.GOOD_ROW, age_seconds=20), {**self.argon_row(), "headroom_percent": 100.0, **row_extra}],
+            fresh=False, age_seconds=700.0, stale_pools=stale))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        return quota
+
+    def test_a_stale_pool_inside_the_query_gate_keeps_its_reading(self):
+        quota = self.stale_argon_quota(age_seconds=700.0)
+        self.assertEqual(quota["antigravity-argon"]["remaining"], 100.0)
+        self.assertEqual(quota["antigravity-argon"]["age_s"], 700.0)
+        self.assertEqual(quota["omp"]["remaining"], 70.0)
+        self.assertIn("reused reading kept for antigravity/gemini_argon", r.quota_source_info()["detail"])
+
+    def test_a_reused_reading_opens_research_when_nothing_else_has_room(self):
+        quota = self.stale_argon_quota(age_seconds=700.0)
+        spent = {s.name: {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}} for s in r.SERVICES}
+        spent["antigravity-argon"] = quota["antigravity-argon"]
+        self.assertEqual(r.route("research", quota=spent).service.name, "antigravity-argon")
+
+    def test_a_stale_pool_past_the_reuse_age_stays_unknown(self):
+        quota = self.stale_argon_quota(age_seconds=r.STALE_REUSE_MAX_AGE + 1)
+        self.assertIsNone(quota["antigravity-argon"]["remaining"])
+
+    def test_a_stale_pool_below_the_reuse_floor_stays_unknown(self):
+        quota = self.stale_argon_quota(age_seconds=700.0, headroom_percent=r.STALE_REUSE_MIN_LEFT - 1)
+        self.assertIsNone(quota["antigravity-argon"]["remaining"])
+
+    def test_a_stale_pool_with_an_expired_reading_or_no_headroom_stays_unknown(self):
+        for extra in ({"reading_expired": True}, {"headroom_percent": None}):
+            quota = self.stale_argon_quota(age_seconds=700.0, **extra)
+            self.assertIsNone(quota["antigravity-argon"]["remaining"], extra)
+
     def test_a_listed_pool_is_unknown_and_a_pool_absent_from_a_young_payload_still_reads_spent(self):
         stale = [{"provider": "omp", "pool_family": None}]
         path = self.write("sp.json", self.payload(
@@ -2542,7 +2580,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
 
     def test_a_stale_argon_row_never_reads_available_when_its_entry_misnames_it(self):
         """Adversary 2026-11-13 F1: an entry that matches no row marked nothing and left a 700 s Argon reading fresh."""
-        argon = dict(self.argon_row(), age_seconds=700)
+        # older than STALE_REUSE_MAX_AGE: a named row inside the query gate keeps its reading (2026-11-21)
+        argon = dict(self.argon_row(), age_seconds=r.STALE_REUSE_MAX_AGE + 100)
         entries = {"contract-shaped": {"provider": "antigravity", "pool_family": "gemini_argon"},
                    "family-key-missing": {"provider": "antigravity"},
                    "family-misspelled": {"provider": "antigravity", "pool_family": "gemini-argon"},
@@ -2559,7 +2598,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         stale = [{"provider": "antigravity", "pool_family": "gemini_argon"}]
         ageless = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
         path = self.write("ageless.json", self.payload(
-            [ageless, dict(self.codex_row(), age_seconds=20), dict(self.argon_row(), age_seconds=700)],
+            [ageless, dict(self.codex_row(), age_seconds=20), dict(self.argon_row(), age_seconds=r.STALE_REUSE_MAX_AGE + 100)],
             fresh=False, age_seconds=30.0, stale_pools=stale))
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertIsNone(quota["omp"]["remaining"])

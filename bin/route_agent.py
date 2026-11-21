@@ -155,6 +155,14 @@ DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
+# A pool aiuse names in `stale_pools` only because its reused reading passed that pool's SHORTER fresh limit
+# (antigravity: 600 s fresh, one query per 900 s, so a reused reading is stale ~1/3 of the time and `--live`
+# cannot refresh it inside the gate) keeps its reading when the row's own age is within STALE_REUSE_MAX_AGE
+# (the 900 s gate plus the 180 s sampler step, rounded up) and it shows at least STALE_REUSE_MIN_LEFT percent:
+# a burst that drains a half-full pool inside one gate is rare, while "unknown" closed research for 1/3 of
+# every quarter hour with Gemini at 100% (2026-11-21, two refused plans). Older or lower readings stay unknown.
+STALE_REUSE_MAX_AGE = 20 * 60
+STALE_REUSE_MIN_LEFT = 50.0
 
 # KINDS, BURN_FIRST_* and the curated SERVICES rows are
 # loaded from effective config (see load_policy / load_effective_policy / apply_policy below).
@@ -1771,6 +1779,17 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
+def _reusable_stale_row(row: dict[str, Any]) -> bool:
+    """May a row aiuse blamed in `stale_pools` keep its own reading (see STALE_REUSE_MAX_AGE)?
+
+    Only a usable row with a clean own age within STALE_REUSE_MAX_AGE, an explicit headroom of at least
+    STALE_REUSE_MIN_LEFT and no `reading_expired`. Anything else stays unknown (fail closed)."""
+    age, head = _clean_age(row.get("age_seconds")), _pct(row.get("headroom_percent"))
+    return (row.get("usable_now") is True and row.get("reading_expired") is not True
+            and age is not None and age <= STALE_REUSE_MAX_AGE
+            and head is not None and head >= STALE_REUSE_MIN_LEFT)
+
+
 def _stale_pool_keys(payload: dict[str, Any], p_age: float | None) -> set[tuple[str, Any]] | None:
     """The (provider, pool_family) rows a `fresh: false` payload blames, or None when it blames nothing usable.
 
@@ -1830,7 +1849,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                     stale_keys, marked_stale = blamed, False
                     label = (f"{label} (payload fresh={payload.get('fresh')!r}: stale_pools names "
                              + ", ".join(sorted(f"{p}/{f}" if f else p for p, f in blamed))
-                             + "; those pools read unknown)")
+                             + "; those pools read unknown unless their own reading is reused)")
                 else:
                     label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
                     if p_age is None or p_age <= STALE_SOFT:
@@ -1844,12 +1863,20 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                     # a row without a usable age is stale, never fresh
                     rows = [dict(row, age_seconds=(
                         STALE_HARD + 1 if marked_stale
-                        or (row.get("provider"), row.get("pool_family")) in stale_keys
+                        or ((row.get("provider"), row.get("pool_family")) in stale_keys
+                            and not _reusable_stale_row(row))
                         else _clean_age(row.get("age_seconds"))
                         if _clean_age(row.get("age_seconds")) is not None
                         else (p_age if p_age is not None and not stale_keys else STALE_HARD + 1)))
                         for row in payload["available"]]
                     fresh = _providers_from_available(rows, p_age)
+                    reused = sorted({f"{r_['provider']}/{r_['pool_family']}" if r_.get("pool_family") else r_["provider"]
+                                     for r_ in payload["available"]
+                                     if (r_.get("provider"), r_.get("pool_family")) in stale_keys
+                                     and _reusable_stale_row(r_)})
+                    if reused:
+                        label += (f"; reused reading kept for {', '.join(reused)} (age <= {STALE_REUSE_MAX_AGE // 60} min, "
+                                  f">= {STALE_REUSE_MIN_LEFT:g}% left)")
                 except (ValueError, TypeError, AttributeError, OverflowError):
                     label = f"{label}: unparseable rows"
         if canned:
