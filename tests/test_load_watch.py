@@ -559,6 +559,28 @@ def test_a_ci_row_recorded_during_the_ticket_check_is_not_overwritten(tmp_path):
     assert rows(tmp_path)[0][1] == "ci"
 
 
+def test_a_ci_row_at_the_main_checkout_or_a_glob_recorded_during_the_ticket_check_is_not_shadowed(tmp_path):
+    # the race guard must use decision() (main worktree, pasture source, covering glob), not only the row at the directory itself
+    repo = _repo(tmp_path)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(git + ["worktree", "add", "-q", str(wt)], check=True)
+    top = os.path.realpath(repo)
+    for key in (top, os.path.dirname(top) + "/*"):  # the main checkout, then a glob over its parent
+        (tmp_path / "ci-only.tsv").unlink(missing_ok=True)
+        ask_calls = stub_sudo_ask(tmp_path, 1)  # the dialog is denied
+        ask_calls.unlink(missing_ok=True)
+        bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+        bgrun.parent.mkdir(parents=True, exist_ok=True)
+        reg = tmp_path / "ci-only.tsv"
+        bgrun.write_text(f"#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\n' '{key}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
+        bgrun.chmod(0o755)
+        r = run(tmp_path, "ci", "decide", str(wt), "local", "race")
+        assert r.returncode == 1 and ask_calls.exists(), key  # the dialog decided (and denied), not the ticket
+        assert [row[0] for row in rows(tmp_path)] == [key]  # no row was written at the worktree
+
+
 def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path):
     repo = _repo(tmp_path)
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
