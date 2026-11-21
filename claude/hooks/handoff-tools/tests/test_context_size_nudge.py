@@ -47,6 +47,17 @@ def _no_fable_lead(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
 
 
+@pytest.fixture(autouse=True)
+def settings_file(monkeypatch, tmp_path_factory):
+    """The hook reads the session's compaction window from SETTINGS_PATH and the env (2026-11-21): never
+    the host's. Default: the shipped 300k autoCompactWindow, so the wall is 267k; a test rewrites it."""
+    monkeypatch.delenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", raising=False)
+    path = tmp_path_factory.mktemp("claude") / "settings.json"
+    path.write_text(json.dumps({"autoCompactWindow": 300_000}))
+    monkeypatch.setattr(nudge, "SETTINGS_PATH", path)
+    return path
+
+
 @pytest.fixture
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
@@ -75,15 +86,83 @@ def hook(monkeypatch, tmp_path, capsys):
 
 
 def test_constants_match_the_300k_window():
+    """The module constants are the FALLBACK tiers (a 300k window, wall 267k), 2026-11-21."""
     wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
     assert nudge.AUTO_COMPACT_WINDOW == 300_000 and wall == 267_000
     assert nudge.PAGE_TOTAL == 400_000
-    assert nudge.BOUNDARY_TOTAL == 120_000
     # The hard tier fires with 50k+ tokens of headroom before the native wall (2026-10-28).
     assert nudge.ASK_TOTAL == wall - nudge.ASK_HEADROOM == 217_000
     assert nudge.ASK_HEADROOM >= 50_000
-    assert nudge.EARLY_GROWTH == 32_000 < nudge.ASK_GROWTH == 140_000
-    assert nudge.ASK_GROWTH < nudge.ASK_TOTAL < wall
+    # The boundary tier is near the limit, not a fixed 120k (2026-11-21).
+    assert nudge.BOUNDARY_TOTAL == wall - nudge.BOUNDARY_HEADROOM == 187_000
+    assert nudge.BOUNDARY_FLOOR == 120_000
+    assert not hasattr(nudge, "ASK_GROWTH")
+    assert nudge.EARLY_GROWTH == 32_000
+    assert nudge.EARLY_GROWTH < nudge.BOUNDARY_TOTAL < nudge.ASK_TOTAL < wall
+
+
+@pytest.mark.parametrize("wall, ask, boundary, page_total, page_growth", [
+    (267_000, 217_000, 187_000, 400_000, 300_000),
+    (967_000, 917_000, 887_000, 917_000, 817_000),     # a [1m] model with no autoCompactWindow
+    (167_000, 117_000, 117_000, 400_000, 300_000),     # 200k window: 120k floor, capped at the hard tier
+    (217_000, 167_000, 137_000, 400_000, 300_000),
+    (200_000, 150_000, 120_000, 400_000, 300_000),     # wall - 80k = 120k exactly
+])
+def test_tiers_derive_from_the_wall(wall, ask, boundary, page_total, page_growth):
+    assert tuple(nudge._tiers(wall)) == (wall, ask, boundary, page_total, page_growth)
+    assert boundary <= ask
+
+
+def _write_settings(path, **kw):
+    path.write_text(json.dumps(kw))
+
+
+def test_wall_from_the_configured_window(settings_file):
+    assert nudge.compaction_wall() == 267_000   # fixture: autoCompactWindow 300k
+    assert nudge.compaction_wall(nudge.read_settings(), "claude-opus-5-5") == 267_000
+
+
+def test_wall_of_a_1m_model_without_a_window_is_967k(settings_file):
+    _write_settings(settings_file)
+    assert nudge.compaction_wall(None, "claude-opus-5-5[1m]") == 967_000
+    _write_settings(settings_file, model="opus[1m]")  # settings' own default model
+    assert nudge.compaction_wall() == 967_000
+
+
+def test_wall_is_the_lower_of_the_window_and_the_model(settings_file):
+    _write_settings(settings_file, autoCompactWindow=300_000)
+    assert nudge.compaction_wall(None, "claude-haiku-5-5") == 167_000
+    _write_settings(settings_file, autoCompactWindow=2_000_000)
+    assert nudge.compaction_wall(None, "claude-opus-5-5[1m]") == 967_000
+
+
+def test_wall_env_beats_settings_and_modelsettings(settings_file, monkeypatch):
+    _write_settings(settings_file, autoCompactWindow=300_000,
+                    modelSettings={"claude-opus-5-5": {"autoCompactWindow": 500_000}})
+    assert nudge.compaction_wall(None, "claude-opus-5-5") == 467_000  # per-model beats the top level
+    assert nudge.compaction_wall(None, "claude-sonnet-5-5") == 267_000
+    monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "150000")
+    assert nudge.compaction_wall(None, "claude-opus-5-5") == 117_000
+    monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "junk")  # not a window: settings decide again
+    assert nudge.compaction_wall(None, "claude-opus-5-5") == 467_000
+
+
+@pytest.mark.parametrize("raw", [None, "not json", "[]", json.dumps({"autoCompactWindow": "auto"}),
+                                 json.dumps({"autoCompactWindow": 10})])
+def test_unreadable_or_unusable_settings_fall_back_to_267k(settings_file, raw):
+    if raw is None:
+        settings_file.unlink()
+    else:
+        settings_file.write_text(raw)
+    assert nudge.compaction_wall() == nudge.AUTO_COMPACT_WALL == 267_000
+    assert nudge._tiers(nudge.compaction_wall()).ask_total == nudge.ASK_TOTAL
+
+
+def test_level_scales_with_the_wall():
+    big = nudge._tiers(967_000)
+    assert nudge._level(300_000, 300_000, big) == 1      # only the early tier
+    assert nudge._level(917_000, 0, big) == 2
+    assert nudge._level(300_000, 0, nudge._tiers(267_000)) == 2
 
 
 def test_below_early_tier_stays_silent(hook, tmp_path):
@@ -102,12 +181,15 @@ def test_early_message_at_plus_32k(hook, tmp_path):
     assert out2 == ""
 
 
-def test_boundary_note_once_at_120k(hook, tmp_path):
-    out, _ = hook("s-bound", _transcript(tmp_path, 100_000, nudge.BOUNDARY_TOTAL - 1))
+def test_boundary_note_once_near_the_wall(hook, tmp_path):
+    out, _ = hook("s-bound", _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL - 1))
     assert "handoff" not in out
-    path = _transcript(tmp_path, 100_000, nudge.BOUNDARY_TOTAL)
+    path = _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-bound", path)
     assert "At the next task completion" in out
+    assert "80,000 tokens left before Claude Code compacts this session at 267,000" in out
+    assert "a finished task alone is no reason to hand off or compact" in out
+    assert "never hand the operator a /new" in out and "when handing off, do it yourself" in out
     assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
     assert "/new is ready" not in out and "self-slash" not in out
     assert "Do not compact mid-task" in out
@@ -119,26 +201,27 @@ def test_boundary_note_once_at_120k(hook, tmp_path):
 
 def test_boundary_note_survives_compaction(hook, tmp_path):
     """Once per session id: a compaction does not re-arm it, a /new (new id) does."""
-    path = _transcript(tmp_path, 50_000, 160_000)
+    path = _transcript(tmp_path, 50_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-once", path)
     assert "At the next task completion" in out
     _append(path, json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
     hook("s-once", path)
-    _append(path, _usage(104_000) + _usage(170_000))
+    _append(path, _usage(104_000) + _usage(nudge.BOUNDARY_TOTAL + 10_000))
     out, _ = hook("s-once", path)
     assert "At the next task completion" not in out
-    out, _ = hook("s-new-id", _transcript(tmp_path, 160_000, name="t2.jsonl"))
+    out, _ = hook("s-new-id", _transcript(tmp_path, nudge.BOUNDARY_TOTAL, name="t2.jsonl"))
     assert "At the next task completion" in out
 
 
-def test_ask_message_at_plus_200k_bare(hook, tmp_path):
-    out, pings = hook("s-ask", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+def test_ask_message_at_the_hard_tier_bare(hook, tmp_path):
+    out, pings = hook("s-ask", _transcript(tmp_path, 46_000, nudge.ASK_TOTAL))
     assert "Context is large" in out
     expected = f"{nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER:,}"
     assert f"by itself at about {expected} tokens" in out
     assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
     assert "/new is ready" not in out and "never hand the operator a /new" in out
     assert "self-slash" not in out
+    assert f"{nudge.AUTO_COMPACT_WALL - nudge.ASK_TOTAL:,} from now" in out
     assert pings == []
 
 
@@ -151,17 +234,30 @@ def _is_ask(out):
     return "Context is large" in out or "Context is still growing" in out
 
 
-def test_growth_tier_boundary(hook, tmp_path):
-    """Low floor: the growth tier decides (46k + 140k = 186k, below ASK_TOTAL)."""
-    out, _ = hook("s-g-1", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH - 1))
-    assert not _is_ask(out) and "Context check" in out  # still the early tier
-    out, _ = hook("s-g-0", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
-    assert "Context is large" in out
+def test_growth_no_longer_fires_the_hard_tier(hook, tmp_path):
+    """2026-11-21: floor 35k + the old ASK_GROWTH 140k = 175k fired "hand off" with 92k left to the wall.
+    Now only the early tier speaks there, and neither the boundary nor the hard text."""
+    out, _ = hook("s-g-175", _transcript(tmp_path, 35_000, 175_000))
+    assert "Context check" in out and not _is_ask(out)
+    assert "At the next task completion" not in out and "handoff Step 9" not in out
+    out, _ = hook("s-g-186", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL - 1))
+    assert "Context check" in out and not _is_ask(out) and "handoff Step 9" not in out
+    assert hook.state()["s-g-186"]["level"] == 1
+
+
+def test_no_early_handoff_message_at_150k_on_a_267k_wall(hook, tmp_path):
+    """The 2026-11-21 incident: a lead handed itself off at ~150k with 117k left. Whatever the floor,
+    nothing at 150k may read as a handoff instruction."""
+    for floor in (35_000, 71_000, 104_000, 150_000):
+        out, pings = hook(f"s-150-{floor}", _transcript(tmp_path, floor, 150_000, name=f"t{floor}.jsonl"))
+        for phrase in ("handoff Step 9", "At the next task completion", "hand off", "Context is large"):
+            assert phrase not in out, (floor, phrase)
+        assert pings == []
+    assert nudge.BOUNDARY_TOTAL - 150_000 >= 30_000
 
 
 def test_total_tier_boundary_with_a_high_floor(hook, tmp_path):
-    """Floor 100k (post-compaction size): growth stays below ASK_GROWTH, the total tier fires."""
-    assert nudge.ASK_TOTAL - 100_000 < nudge.ASK_GROWTH
+    """Floor 100k (post-compaction size): the total tier fires (growth is no trigger)."""
     out, _ = hook("s-t-1", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL - 1))
     assert not _is_ask(out)
     out, _ = hook("s-t-0", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
@@ -462,14 +558,15 @@ def test_a_boundary_named_in_a_tool_input_is_not_a_compaction(hook, tmp_path):
 
 
 def test_a_dip_below_the_total_tier_keeps_the_fired_level_with_a_low_floor(hook, tmp_path):
-    """Adversary round 3, F2: floor 20k, level 2 fired at 160k (growth 140k). A dip to 125k is
-    inside the 25% band but below the total tiers; clamping the stored level against the dipped
-    total lowered it to 1 and the next climb printed the hard message again."""
+    """Adversary round 3, F2: floor 20k, level 2 fired at the hard tier. A dip inside the 25% band
+    (165k after 217k) is below the total tier; clamping the stored level against the dipped
+    total lowered it to 1 and the next climb printed the hard message again. (Rebased 2026-11-21:
+    it used to fire by growth at 160k; only the total fires the hard tier now.)"""
     (tmp_path / "state.json").write_text(json.dumps({"s-lowfloor": {"level": 0, "baseline": 20_000}}))
-    path = _transcript(tmp_path, 160_000)
+    path = _transcript(tmp_path, nudge.ASK_TOTAL)
     assert _is_ask(hook("s-lowfloor", path)[0])
     outs = []
-    for size in (125_000, 161_000, 126_000, 162_000):
+    for size in (165_000, 218_000, 166_000, 219_000):
         _append(path, _usage(size))
         outs.append(_is_ask(hook("s-lowfloor", path)[0]))
     assert outs == [False] * 4
@@ -523,12 +620,12 @@ def test_a_stored_level_above_what_the_total_can_compute_is_clamped(hook, tmp_pa
 
 
 def test_repeat_ask_every_100k(hook, tmp_path):
-    path = _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH)
+    path = _transcript(tmp_path, 46_000, nudge.ASK_TOTAL)
     hook("s-rep", path)
-    _append(path, _usage(46_000 + nudge.ASK_GROWTH + nudge.REPEAT_EVERY - 1))
+    _append(path, _usage(nudge.ASK_TOTAL + nudge.REPEAT_EVERY - 1))
     out, _ = hook("s-rep", path)
     assert "Context is" not in out
-    _append(path, _usage(46_000 + nudge.ASK_GROWTH + nudge.REPEAT_EVERY))
+    _append(path, _usage(nudge.ASK_TOTAL + nudge.REPEAT_EVERY))
     out, _ = hook("s-rep", path)
     assert "Context is still growing" in out
 
@@ -651,7 +748,7 @@ def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     out, _ = hook("s-fable", path)
     assert out.count(_OPUS_NOTE) == 1 and "At the next task completion" in out
     assert "this session runs on Fable" in out and "self-slash" not in out
-    _append(path, _model_transcript(tmp_path, _FABLE, 46_000 + nudge.ASK_GROWTH, name="x.jsonl").read_text())
+    _append(path, _model_transcript(tmp_path, _FABLE, nudge.ASK_TOTAL, name="x.jsonl").read_text())
     out, _ = hook("s-fable", path)
     assert "Context is large" in out and _OPUS_NOTE in out
 
@@ -737,3 +834,71 @@ def test_fable_lead_line_scan_without_tomllib(monkeypatch, tmp_path, text, want)
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     monkeypatch.setitem(sys.modules, "tomllib", None)
     assert nudge._fable_lead_allowed() is want
+
+
+# --- the real wall per session (2026-11-21): every tier scales with the model's and settings' window ---
+
+
+def test_a_1m_model_without_a_window_has_its_tiers_near_967k(hook, tmp_path, settings_file):
+    _write_settings(settings_file)  # no autoCompactWindow: the model's own 1M window
+    path = _model_transcript(tmp_path, "claude-opus-5-5[1m]", 150_000, 400_000)
+    out, pings = hook("s-1m", path)
+    assert "At the next task completion" not in out and "Context is large" not in out
+    assert pings == []  # 400k total, no paging below the hard tier
+    _append(path, _model_transcript(tmp_path, "claude-opus-5-5[1m]", 886_999, name="y.jsonl").read_text())
+    out, _ = hook("s-1m", path)
+    assert "At the next task completion" not in out
+    _append(path, _model_transcript(tmp_path, "claude-opus-5-5[1m]", 887_000, name="z.jsonl").read_text())
+    out, _ = hook("s-1m", path)
+    assert "At the next task completion" in out and "80,000 tokens left before Claude Code compacts this session at 967,000" in out
+    assert "Context is large" not in out
+    _append(path, _model_transcript(tmp_path, "claude-opus-5-5[1m]", 917_000, name="w.jsonl").read_text())
+    out, pings = hook("s-1m", path)
+    assert "Context is large" in out and "by itself at about 967,000 tokens" in out
+    assert len(pings) == 1  # paging scales: first at the hard tier, not at 400k
+
+
+def test_settings_model_with_1m_and_no_window_sets_the_wall_from_a_bare_transcript(hook, tmp_path, settings_file):
+    _write_settings(settings_file, model="opus[1m]")
+    out, _ = hook("s-1m-set", _transcript(tmp_path, 170_000, 230_000))  # a 267k wall would be hard (217k)
+    assert not _is_ask(out) and "At the next task completion" not in out
+
+
+def test_env_window_moves_the_tiers(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")  # wall 167k: boundary = hard = 117k
+    out, _ = hook("s-env", _transcript(tmp_path, 100_000, 118_000))
+    assert "Context is large" in out and "by itself at about 167,000 tokens" in out
+    assert "At the next task completion" in out and "49,000 tokens left" in out
+
+
+def test_a_larger_window_pushes_the_boundary_out(hook, tmp_path, settings_file):
+    _write_settings(settings_file, autoCompactWindow=500_000)  # wall 467k: boundary 387k, hard 417k
+    out, _ = hook("s-500", _transcript(tmp_path, 300_000, 386_999))
+    assert "At the next task completion" not in out and not _is_ask(out)
+    out, _ = hook("s-500b", _transcript(tmp_path, 300_000, 387_000, name="b.jsonl"))
+    assert "At the next task completion" in out and "467,000" in out
+
+
+def test_unreadable_settings_keep_todays_267k_behaviour(hook, tmp_path, settings_file):
+    settings_file.write_text("{ not json")
+    out, _ = hook("s-fallback", _transcript(tmp_path, 170_000, 186_999))
+    assert out == ""
+    out, _ = hook("s-fallback", _transcript(tmp_path, 170_000, 187_000, name="a.jsonl"))
+    assert "At the next task completion" in out and "267,000" in out
+    out, _ = hook("s-fallback2", _transcript(tmp_path, 170_000, nudge.ASK_TOTAL, name="b.jsonl"))
+    assert "Context is large" in out and "by itself at about 267,000 tokens" in out
+
+
+def test_settings_are_read_once_per_run(hook, tmp_path, monkeypatch):
+    reads = []
+    real = nudge.read_settings
+    monkeypatch.setattr(nudge, "read_settings", lambda: reads.append(1) or real())
+    hook("s-once-read", _transcript(tmp_path, 170_000, 190_000))
+    assert len(reads) == 1
+
+
+def test_messages_never_print_the_constant_when_the_wall_differs(hook, tmp_path, settings_file):
+    _write_settings(settings_file, autoCompactWindow=250_000)  # wall 217k: hard = 167k
+    out, _ = hook("s-217", _transcript(tmp_path, 100_000, 170_000))
+    assert "by itself at about 217,000 tokens" in out and "267,000" not in out
+    assert "About 47,000 tokens remain before Claude Code compacts this session at 217,000" in out

@@ -28,16 +28,16 @@ copied), so the nudge hook and this readout always agree on the size. Only the l
 transcript is read (the hook's limit): an agent whose newest usage block is further back than that
 (one turn of huge tool output) prints `?` (status unreadable), though the transcript is fine.
 
-Ceiling, per agent: its compaction window minus the hook's AUTO_COMPACT_BUFFER (33k, imported).
-Window = min(configured, model window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of THIS process
-(assumed to beat settings; the agent's own env is unknowable here), else `modelSettings[<model>]
-.autoCompactWindow`, else `autoCompactWindow` of ~/.claude/settings.json (300k -> 267k); `"auto"` or
+Ceiling, per agent: the hook's `compaction_wall` (one copy, imported, 2026-11-21): its compaction window minus
+AUTO_COMPACT_BUFFER (33k). Window = min(configured, model window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of THIS process
+(assumed to beat settings; the agent's own env is unknowable here; the hook itself, a child of the session, sees the real one),
+else `modelSettings[<model>].autoCompactWindow`, else `autoCompactWindow` of ~/.claude/settings.json (300k -> 267k); `"auto"` or
 no value (or one that is not a whole number in 34k..10M) is no configuration. Model window: 1M for `[1m]` ids, 200k for Haiku (Claude Code caps the
 window at the model's), unknown for any other id. The model is the agent's provider string
 (`claude/<model>`), else the transcript's newest assistant record. Neither configured nor known:
-the guess 1M if settings `model` carries `[1m]`, else 200k. Not read: project-level settings,
-`--autocompact`, other models' windows. The nudge hook hard-codes its own 300k window
-(`AUTO_COMPACT_WINDOW`), so the two disagree if settings change it; only the buffer is shared.
+1M if settings `model` carries `[1m]`, else the hook's 300k fallback (267k: until 2026-11-21 this readout guessed 200k, so it
+disagreed with the hook). Not read: project-level settings, `--autocompact`, other models' windows. The hook's tiers (hard = wall - 50k,
+boundary = wall - 80k and at least 120k) derive from the same wall, so the band printed here is the one the hook uses.
 
 Agent text (titles, cwd) and ids are untrusted: text goes through `clean_text` (escape sequences, control,
 bidi and zero-width characters out; copied from session-finder's fleet.py on 2026-11-06 so this tool no
@@ -80,9 +80,6 @@ import unicodedata
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # before the imports by path below: "nothing is written" includes __pycache__
-DEFAULT_MODEL_WINDOW = 200_000
-LONG_MODEL_WINDOW = 1_000_000
-MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
 # Urgency ladder shared by --min-band and the line label; keep in sync with nudge_band().
 BAND_ORDER = ("ok", "early", "boundary", "hard", "wall")
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
@@ -117,29 +114,12 @@ def _hook():
 
 
 def read_settings():
-    try:
-        data = json.loads((Path.home() / ".claude" / "settings.json").read_text())
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _window(value):
-    """A usable window from a setting: a whole number above the buffer and at most MAX_WINDOW (`"auto"`, strings,
-    bools, fractions, junk, absurd sizes: None). A float such as 300000.0 counts when integral."""
-    if isinstance(value, float) and value.is_integer():
-        value = int(value)
-    ok = (isinstance(value, int) and not isinstance(value, bool)
-          and _hook().AUTO_COMPACT_BUFFER < value <= MAX_WINDOW)
-    return value if ok else None
+    return _hook().read_settings()
 
 
 def model_window(model):
-    """The model's own context window when the id says so: 1M for `[1m]`, 200k for Haiku; None when unknown."""
-    name = (model or "").lower()
-    if "[1m]" in name:
-        return LONG_MODEL_WINDOW
-    return DEFAULT_MODEL_WINDOW if "haiku" in name else None
+    """The model's own window when the id says so (the hook's copy): 1M for `[1m]`, 200k for Haiku; else None."""
+    return _hook().model_window(model)
 
 
 def paseo_meter_window(model):
@@ -147,7 +127,7 @@ def paseo_meter_window(model):
     window, never autoCompactWindow. Haiku is 200k; every other Claude id is treated as 1M (the
     hardcoded manifest value that makes the percentage wrong when autoCompactWindow is lower)."""
     known = model_window(model)
-    return known if known is not None else LONG_MODEL_WINDOW
+    return known if known is not None else _hook().LONG_MODEL_WINDOW
 
 
 def nudge_state_path():
@@ -172,19 +152,19 @@ def session_nudge(state, session):
 
 
 def nudge_band(tokens, ceiling, growth=None):
-    """ok / early / boundary / hard / wall against this agent's real ceiling and the hook's tiers.
+    """ok / early / boundary / hard / wall against this agent's real ceiling and the hook's tiers (hook._tiers).
 
-    wall: at or past the autoCompact wall. hard: within ASK_HEADROOM of that wall, at or past the
-    hook's ASK_TOTAL, or growth past ASK_GROWTH. boundary: at or past BOUNDARY_TOTAL. early: growth
-    past EARLY_GROWTH (needs a baseline from the nudge state). Totals alone never invent early.
+    wall: at or past the autoCompact wall. hard: at or past wall - ASK_HEADROOM. boundary: at or past
+    wall - BOUNDARY_HEADROOM (never below BOUNDARY_FLOOR). early: growth past EARLY_GROWTH (needs a baseline
+    from the nudge state). Totals alone never invent early; growth never makes hard (2026-11-21).
     """
     hook = _hook()
     if tokens >= ceiling:
         return "wall"
-    if (tokens >= ceiling - hook.ASK_HEADROOM or tokens >= hook.ASK_TOTAL
-            or (isinstance(growth, int) and growth >= hook.ASK_GROWTH)):
+    tiers = hook._tiers(ceiling)
+    if tokens >= tiers.ask_total:
         return "hard"
-    if tokens >= hook.BOUNDARY_TOTAL:
+    if tokens >= tiers.boundary_total:
         return "boundary"
     if isinstance(growth, int) and growth >= hook.EARLY_GROWTH:
         return "early"
@@ -192,31 +172,10 @@ def nudge_band(tokens, ceiling, growth=None):
 
 
 def ceiling(settings, model=None):
-    """Tokens at which Claude Code auto-compacts this agent: its window minus the hook's AUTO_COMPACT_BUFFER.
-    Window = min(the configured window, the model's window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of this
-    process (assumed to beat settings), else settings `modelSettings[<model>].autoCompactWindow`, else
-    `autoCompactWindow`. With neither: the model window, else the guess 1M when settings `model` carries `[1m]`,
-    else 200k. Not knowable here, so not read: the agent's own env, project settings, `--autocompact`, the
-    `modelSettings` key format beyond an exact model id, and the window of any model but Haiku/`[1m]` ids."""
-    configured = None
-    try:
-        configured = _window(int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")))
-    except ValueError:
-        pass
-    per_model = settings.get("modelSettings")
-    per_model = per_model.get(model) if isinstance(per_model, dict) and model else None
-    if configured is None and isinstance(per_model, dict):
-        configured = _window(per_model.get("autoCompactWindow"))
-    if configured is None:
-        configured = _window(settings.get("autoCompactWindow"))
-    known = [w for w in (configured, model_window(model)) if w]
-    if known:
-        window = min(known)
-    else:
-        default_model = settings.get("model")
-        long_model = isinstance(default_model, str) and "[1m]" in default_model.lower()
-        window = LONG_MODEL_WINDOW if long_model else DEFAULT_MODEL_WINDOW
-    return window - _hook().AUTO_COMPACT_BUFFER
+    """Tokens at which Claude Code auto-compacts this agent: the hook's compaction_wall (ONE copy, 2026-11-21).
+    See there: min(configured window, the model's window) less AUTO_COMPACT_BUFFER, env first, then
+    `modelSettings[<model>]`, then `autoCompactWindow`; nothing known: 300k (267k), as the hook falls back."""
+    return _hook().compaction_wall(settings, model)
 
 
 def projects_dir():

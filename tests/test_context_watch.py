@@ -123,8 +123,10 @@ def test_ceiling_follows_autocompactwindow_minus_33k(box):
 def test_without_settings_falls_back_to_the_model_window(box):
     box.agent(ID_A, "x", SESS_A)  # no settings.json at all
     box.transcript(SESS_A, [assistant(1000, 50000, 0)])
-    # 200k model window - 33k
-    assert box.run("--json").stdout and json.loads(box.run("--json").stdout)[0]["ceiling"] == 167000
+    # nothing known: the hook's 300k fallback window - 33k (the readout used to guess 200k, 2026-11-21)
+    assert json.loads(box.run("--json").stdout)[0]["ceiling"] == 267000
+    box.settings()  # readable settings with no window and no [1m] model: the same fallback
+    assert json.loads(box.run("--json").stdout)[0]["ceiling"] == 267000
     box.settings(model="opus[1m]")
     assert json.loads(box.run("--json").stdout)[0]["ceiling"] == 967000
 
@@ -336,16 +338,16 @@ def test_a_huge_configured_window_is_ignored_not_a_traceback(box):
     box.transcript(SESS_A, [assistant(1, 50000, 0)])
     r = box.run()
     assert (r.returncode, r.stdout) == (
-        0, "aaaaaaaa x 50k/167k (30%) ok · wall in 117k · paseo~5%\n"), r.stderr
+        0, "aaaaaaaa x 50k/267k (19%) ok · wall in 217k · paseo~5%\n"), r.stderr
     r = box.run(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "9" * 400})
     assert (r.returncode, r.stdout) == (
-        0, "aaaaaaaa x 50k/167k (30%) ok · wall in 117k · paseo~5%\n"), r.stderr
+        0, "aaaaaaaa x 50k/267k (19%) ok · wall in 217k · paseo~5%\n"), r.stderr
 
 
 def test_a_window_just_over_the_cap_is_ignored_and_one_at_the_cap_is_kept(box):
     box.agent(ID_A, "x", SESS_A)  # sonnet: no model window of its own
     box.transcript(SESS_A, [assistant(1, 50000, 0)])
-    assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "10000001"}) == 167000  # unset: 200k guess
+    assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "10000001"}) == 267000  # unset: the hook's 300k fallback
     assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "10000000"}) == 9_967_000
 
 
@@ -495,9 +497,31 @@ def test_nudge_band_ladder_matches_the_hook_against_the_real_ceiling():
     cw = _module()
     assert cw.nudge_band(50_000, 267_000) == "ok"
     assert cw.nudge_band(50_000, 267_000, growth=40_000) == "early"
-    assert cw.nudge_band(130_000, 267_000) == "boundary"
+    # 2026-11-21: boundary only near the wall (wall - 80k = 187k), not at a fixed 120k
+    assert cw.nudge_band(130_000, 267_000) == "ok"
+    assert cw.nudge_band(150_000, 267_000) == "ok"
+    assert cw.nudge_band(186_999, 267_000) == "ok"
+    assert cw.nudge_band(187_000, 267_000) == "boundary"
+    assert cw.nudge_band(216_999, 267_000) == "boundary"
+    assert cw.nudge_band(217_000, 267_000) == "hard"
     assert cw.nudge_band(220_000, 267_000) == "hard"
-    assert cw.nudge_band(200_000, 267_000, growth=140_000) == "hard"
+    # growth alone never makes the hard tier any more (ASK_GROWTH is gone)
+    assert cw.nudge_band(175_000, 267_000, growth=140_000) == "early"
+    assert cw.nudge_band(200_000, 267_000, growth=140_000) == "boundary"
+    # a 1M-model wall (967k): boundary at 887k, hard at 917k
+    assert cw.nudge_band(300_000, 967_000) == "ok"
+    assert cw.nudge_band(887_000, 967_000) == "boundary"
+    assert cw.nudge_band(917_000, 967_000) == "hard"
+    # a small wall: the 120k floor would sit above the hard tier (117k), so boundary is capped there and hard wins
+    assert cw.nudge_band(116_999, 167_000) == "ok"
+    assert cw.nudge_band(117_000, 167_000) == "hard"
+    # a 217k wall: boundary = wall - 80k = 137k, hard = 167k
+    assert cw.nudge_band(136_999, 217_000) == "ok"
+    assert cw.nudge_band(137_000, 217_000) == "boundary"
+    assert cw.nudge_band(167_000, 217_000) == "hard"
+    # the 120k floor binds when wall - 80k is lower: wall 200k -> boundary 120k
+    assert cw.nudge_band(119_999, 200_000) == "ok"
+    assert cw.nudge_band(120_000, 200_000) == "boundary"
     assert cw.nudge_band(270_000, 267_000) == "wall"
     assert cw.nudge_band(20_000, 67_000) == "hard"  # within ASK_HEADROOM of a small wall
 
@@ -544,3 +568,27 @@ def test_haiku_paseo_meter_uses_200k_not_1m(box):
         167000, 200_000, 50.0, "ok")
     assert box.run().stdout.splitlines() == [
         "aaaaaaaa x 100k/167k (60%) ok · wall in 67k · paseo~50%"]
+
+
+def test_ceiling_and_bands_are_the_hooks_own_functions_one_copy(box, monkeypatch):
+    """2026-11-21: the readout calls the hook's compaction_wall and _tiers; it keeps no second copy of the
+    window logic, so it cannot disagree with the nudges the hook sends."""
+    cw = _module()
+    hook = cw._hook()
+    monkeypatch.delenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", raising=False)
+    cases = [({"autoCompactWindow": 300_000}, "claude-opus-5-5"), ({}, "claude-opus-5-5[1m]"),
+             ({"model": "opus[1m]"}, None), ({}, None), ({"autoCompactWindow": 150_000}, "claude-haiku-5-5"),
+             ({"modelSettings": {"m": {"autoCompactWindow": 500_000}}}, "m")]
+    for settings, model in cases:
+        wall = cw.ceiling(settings, model)
+        assert wall == hook.compaction_wall(settings, model)
+        tiers = hook._tiers(wall)
+        for total in range(0, wall + 5_000, 1_000):
+            band = cw.nudge_band(total, wall)
+            level = hook._level(total, 0, tiers)
+            assert (band in ("hard", "wall")) == (level >= 2), (settings, model, total)
+            if band == "boundary":
+                assert level < 2 and total >= tiers.boundary_total
+            if total < tiers.boundary_total:
+                assert band == "ok"
+    assert not hasattr(cw, "_window") and not hasattr(cw, "MAX_WINDOW")
