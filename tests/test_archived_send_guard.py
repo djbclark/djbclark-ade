@@ -926,9 +926,9 @@ def test_a_live_own_worker_is_a_plain_pass_with_no_resume(world):
     assert (d.action, d.resumed) == (guard.PASS, "")
 
 
-def test_an_owner_who_also_names_the_override_still_passes_as_owner(world):
+def test_an_owner_who_also_names_the_operator_override_passes_by_the_override(world):
     d = decide_as(world, LEAD, A, {A: True}, owned_by_label((f"ade.lead={LEAD}", [A])), allow_archived=A)
-    assert (d.action, d.resumed) == (guard.PASS, "owner")
+    assert (d.action, d.resumed) == (guard.PASS, "")  # the override came first: no ownership lookup, no owner log line
 
 
 def read_log(path):
