@@ -244,7 +244,7 @@ conversation, don't pad.
 
 ## Step 6 — Commit
 
-**ops-djbclark suite target (memory exception flow, EXACTLY this — plain git,
+**ops-djbclark suite target (memory exception flow, EXACTLY this — plain git plus `git-commit-own`,
 per the 2026-08-23 operator decision retiring `just ops-memory-sync`; that
 target's release-gating precondition was failing for site-djbclark):**
 
