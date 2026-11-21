@@ -395,9 +395,25 @@ def test_the_tick_and_status_hand_the_quiet_set_to_the_decision_the_snapshot_and
     gh.tick({}, T0 + 5, table, rss, ttys, state_dir=w.state, my_uid=ME, cfg=c, lsapps=w.lsapps(), exe_of=w.ops.exe, out=lambda x: None, auto_freeze=False,
             gui_ok=False, load_avg=(1, 2, 3), ncpu=10)
     assert seen["should_show"] == [want] and seen["build_snapshot"] == [want]
+    assert seen["would_show_line"] == [want]   # the other busy apps make the dialog fire, so the dry-run line is built too
     seen.clear()
     gh.status_lines({}, w.state, T0 + 5, c)
     assert seen["should_show"] == [want]
+
+
+def test_only_a_hold_the_sampler_can_act_on_makes_an_unfrozen_always_app_quiet(tmp_path, monkeypatch):   # R8 and R13 of the #872 re-review
+    c, key = _cfg(), OTHER.casefold()
+    state = tmp_path / "state"
+    state.mkdir()
+    old_not_live = held(refused=("not-a-relievable-gate",))   # old enough, but no gate that desktop apps can relieve: `hold_active` has no live hold
+    assert gh.hold_active(old_not_live, T0, c)[0] and not gh.hold_active(old_not_live, T0, c)[1]
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=old_not_live) == frozenset()
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=held()) == frozenset({key})
+
+    def boom(*a, **k):
+        raise OSError("unreadable")
+    monkeypatch.setattr(gh, "read_snooze", boom)   # a failed hold or snooze read must mean "the sampler may not act", never "it may"
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=held()) == frozenset()
 
 
 def test_an_unreadable_state_never_hides_an_always_app(tmp_path):

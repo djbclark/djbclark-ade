@@ -208,28 +208,81 @@ def test_status_lines_name_the_load_sources(tmp_path):
     assert "load sources" in text and "bgrun (owner: claude), heaviest rustc" in text and "a build or test job" in text and "can freeze" in text   # Slack
 
 
-def test_no_argument_leaks_into_a_label_even_inside_an_app_bundle():   # adversary L1 of #872: the label is the executable name, never its arguments
-    import gui_hog_sources as gs
-    for cmd, want in (("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "clang"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo -apiToken s3cr3tvalue", "Foo"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo /Users/me/secret/file.txt", "Foo"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo secretword", "Foo"),
-                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --type=renderer --token=hunter2", "Google Chrome"),
-                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
-                      ("/Applications/Ghostty.app/Contents/MacOS/ghostty -e hunter2", "ghostty"),
-                      ("/Applications/Foo.app/Contents/MacOS/other-exe -x hunter2", "other-exe")):
-        label = gs._label(cmd)
-        assert label == want, (cmd, label)
-        assert "hunter2" not in label and "s3cr3t" not in label and "secret" not in label
+MARK = "/Contents/MacOS/"
+REAL = "/Applications/Real.app" + MARK + "real-exe"   # what the kernel reports: differs from every word of the command lines below
+GONE = (lambda pid: None, lambda pid: (_ for _ in ()).throw(OSError("gone")), lambda pid: "/")   # a lookup that gives no path: nothing, raises, root
+LEAKY = ("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "/Applications/Foo.app" + MARK + "Foo -apiToken hunter2",
+         "/usr/bin/tool --path=/x" + MARK + "hunter2 -k", "/usr/bin/tool SECRET" + MARK + "hunter2", "/bin/cp Foo.app" + MARK + "hunter2 dest",
+         "API_TOKEN=hunter2",   # an empty argv[0]: `ps` prints the first environment string
+         "7 API_TOKEN=hunter2",   # an empty or blank argv[0]: `ps` prints argv[1] and the environment
+         "  7", "/Users/me/Acme Merger 2027/bin/tool 7",   # an argv[0] with a space: cut inside its path
+         "/Applications/Google Chrome.app" + MARK + "Google Chrome --type=renderer --token=hunter2", "/bin/sh -c cd /A.app" + MARK + " && ./Foo")
 
 
-def test_a_label_comes_from_the_kernel_executable_not_from_an_argument_that_holds_the_bundle_mark():   # adversary L1r of #872
-    mark = "tool --path=/x/Contents/MacOS/hunter2 -k"
-    assert gs._label("/usr/bin/" + mark, 7, lambda pid: "/usr/bin/tool") == "tool"   # the kernel path wins over argv
-    assert gs._label("/usr/bin/" + mark) == "tool"   # no kernel path: the fallback refuses a mark that sits inside an argument
-    assert gs._label("/usr/bin/codesign -v /Applications/Foo.app/Contents/MacOS/Foo") == "codesign"
-    assert gs._label("/bin/sh -c cd /A.app/Contents/MacOS/ && ./Foo") == "sh"
-    assert gs._label("/Applications/Foo.app/Contents/MacOS/Foo -x", 7, lambda pid: None) == "Foo"   # an unreadable kernel path falls back to the parse
-    table = {"10": (1, 501, 2.0, "/usr/bin/" + mark)}
-    out = gs.group_sources(table, {"10": 1024}, [], exe_of=lambda pid: "/usr/bin/tool")
-    assert [r["name"] for r in out] == ["tool"] and "hunter2" not in json.dumps(out)
+def test_with_a_lookup_a_label_is_the_kernel_name_or_a_question_mark_never_command_line_text():   # adversary M1 and L1 of #875
+    for cmd in LEAKY:
+        for gone in GONE:
+            assert gs._label(cmd, 7, gone) == "?", (cmd, gone)   # unreadable: not one word of the command
+        assert gs._label(cmd, None, lambda pid: REAL) == "?"   # no pid to ask about
+        assert gs._label(cmd, 7, lambda pid: REAL) == "real-exe", cmd   # readable: the kernel name, whatever the command says
+        assert gs._label(cmd, "7", lambda pid: REAL + "/") == "real-exe"
+
+
+def test_the_kernel_is_asked_about_every_command_not_only_one_with_a_bundle_mark():   # kills `_label` asking only for `/Contents/MacOS/` (M1)
+    asked = []
+    assert gs._label("API_TOKEN=hunter2", 7, lambda pid: asked.append(pid) or REAL) == "real-exe" and asked == [7]
+    assert gs._label("/usr/bin/plain --x", 8, lambda pid: asked.append(pid) or "/usr/bin/plain-real") == "plain-real" and asked == [7, 8]
+
+
+def test_without_a_lookup_only_a_fixture_label_is_the_first_word_and_the_sampler_always_supplies_one():
+    assert gs._label("/usr/bin/plain --x") == "plain" and gs._label("") == "?"
+    import inspect
+    assert "exe_of=exe_of" in inspect.getsource(gh.tick)   # the sampler's call to group_sources passes its lookup
+
+
+def test_group_sources_labels_system_heaviest_and_build_names_from_the_kernel_path():   # kills R3: every `_label` call site passes exe_of
+    seen = []
+
+    def exe_of(pid):
+        seen.append(pid)
+        return REAL
+    rows = {"10": (1, ME, 2.0, "/usr/bin/tool SECRET" + MARK + "hunter2"),
+            "20": (1, ME, 1.0, "/usr/bin/other SECRET" + MARK + "hunter2"), "21": (20, ME, 3.0, "/usr/bin/third SECRET" + MARK + "hunter2")}
+    out = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], exe_of=exe_of)}
+    assert out["system:real-exe"]["name"] == "real-exe" and out["system:real-exe"]["heaviest"] == "real-exe"   # the system key, its name and its heaviest
+    assert "hunter2" not in json.dumps(list(out.values())) and seen
+    held = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], held_pids=("10",), exe_of=exe_of)}
+    assert held["build:10"]["name"] == "admit" and "hunter2" not in json.dumps(list(held.values()))
+    plain = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [])}
+    assert "hunter2" not in json.dumps(list(plain.values())) and "system:tool" in plain   # no lookup: argv[0], never an argument
+    leaky = {"10": (1, ME, 2.0, "API_TOKEN=hunter2"), "20": (1, ME, 1.0, "7 API_TOKEN=hunter2"), "21": (20, ME, 3.0, "/Users/me/Acme Merger 2027/bin/tool 7")}
+    lost = {s["key"]: s for s in gs.group_sources(leaky, {p: 1024 for p in leaky}, [], exe_of=lambda pid: None)}   # every process exited before the lookup
+    assert set(lost) == {"system:?"} and lost["system:?"]["heaviest"] == "?" and "hunter2" not in json.dumps(list(lost.values())) and "Acme" not in json.dumps(list(lost.values()))
+    calls = []
+    gs.group_sources(rows, {p: 1024 for p in rows}, [], exe_of=lambda pid: calls.append(pid) or REAL)
+    assert sorted(calls) == sorted(set(calls))   # one lookup per process however many labels ask
+
+
+def test_a_terminal_subtree_inside_an_app_is_named_from_the_kernel_path_too():   # kills R3c: the third `_label` call site
+    t = table()
+    t["51"] = (50, ME, 0.01, "/usr/bin/login SECRET" + MARK + "hunter2")   # the top of the shell subtree inside Ghostty
+    seen = {s["key"]: s for s in gs.group_sources(t, {p: 1024 for p in t}, apps(), exe_of=lambda pid: REAL if str(pid) == "51" else None, agent_clis={"claude"})}
+    assert seen["build:51"]["name"] == "terminal session (real-exe)" and "hunter2" not in json.dumps(list(seen.values()))
+    plain = {s["key"]: s for s in gs.group_sources(t, {p: 1024 for p in t}, apps(), agent_clis={"claude"})}
+    assert plain["build:51"]["name"] == "terminal session (login)"
+
+
+def test_the_tick_gives_the_sampler_s_exe_of_to_the_labels(tmp_path):   # kills R4: tick stops passing exe_of to group_sources
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    gh.hold_write(state, os.getpid(), "S", "bg", T0 - 400, ["pageins"], T0)
+    t = table()
+    t["60"] = (1, ME, 1.4, "/usr/bin/tool SECRET" + MARK + "hunter2")
+    ls = [{"name": "Slack", "bundle_id": "com.example.slack", "bundle_path": "/Applications/Slack.app", "exe": SLACK, "pid": 10, "type": "Foreground"}]
+    gh.tick({}, T0, t, {p: 1024 for p in t}, set(), state_dir=state, my_uid=ME, agent_clis={"claude"}, cfg=cfg(), lsapps=ls, dry=False,
+            exe_of=lambda p: REAL if str(p) == "60" else (SLACK if str(p) in ("10", "11") else None), start_of=lambda p: "S", launch=False, gui_ok=False,
+            load_avg=(1.0, 2.0, 3.0), ncpu=10)
+    snap = json.loads((state / "gui-hog" / "snapshot.json").read_text())
+    names = [r["name"] for r in snap["sources"]]
+    assert "real-exe" in names and "tool" not in names and "hunter2" not in json.dumps(snap)
+

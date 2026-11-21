@@ -34,33 +34,22 @@ MAX_SOURCES = 40   # per sample, after sorting by cores
 
 
 def _label(cmd, pid=None, exe_of=None):
-    """A cleaned program name for an unclaimed process, never any of its arguments. Only a command containing an app bundle's `/Contents/MacOS/` is hard
-    to cut (the executable may contain spaces, and an ARGUMENT may contain the mark too), so for it the name comes from the kernel's executable path
-    (`exe_of(pid)`, never argv), and only without one from the command line, accepted when the text before the mark looks like one path with no option
-    or `=` word in it (adversary L1r of #872: `tool --path=/x/Contents/MacOS/hunter2` must label `tool`)."""
-    cmd = str(cmd)
-    mark = "/Contents/MacOS/"
-    if mark in cmd:
+    """A cleaned program name for an unclaimed process, never any text of its command line. With a lookup (`exe_of`, the kernel's executable path: the
+    sampler always supplies one) the name is the base name of that path, asked for EVERY command: the first word `ps` prints cannot be proven to be
+    argv[0] (an empty or blank argv[0] makes it argv[1] or an environment string, and an argv[0] with a space is cut inside its path). When the lookup
+    returns nothing (the process exited between the table read and the lookup) the label is `?`, never a word of the command. Without a lookup
+    (fixtures and pure-data callers, which vouch for their own table) it is the base name of the command's first word. Adversary M1 and L1 of #875,
+    L1r and L1r' of #872."""
+    if exe_of is not None:
         exe = None
-        if exe_of is not None and pid is not None:
+        if pid is not None:
             try:
                 exe = exe_of(int(pid))
             except Exception:  # noqa: BLE001
                 exe = None
-        if exe:
-            return gh.clean(os.path.basename(str(exe).rstrip("/")) or "?", 40)
-        head, rest = cmd.split(mark, 1)
-        if head.startswith("/") and not any(w[:1] in ("-", "/") or "=" in w for w in head.split()[1:]):
-            # a bundle's executable may contain spaces ("Google Chrome Helper (Renderer)") and the arguments follow it: the executable name is taken
-            # only when it matches the bundle's own name (its length bounds the cut, so no argument rides along), else the first word after the mark
-            bundle = os.path.basename(head.rstrip("/"))
-            bundle = bundle[:-4] if bundle.endswith(".app") else bundle
-            if bundle and rest[:len(bundle)].casefold() == bundle.casefold() and (len(rest) == len(bundle) or rest[len(bundle)] in " \t"):
-                name = rest[:len(bundle)]
-            else:
-                name = (rest.split() or [""])[0]
-            return gh.clean(name or "?", 40)
-    first = (cmd.split() or [""])[0]
+        name = os.path.basename(str(exe).rstrip("/")) if exe else ""
+        return gh.clean(name or "?", 40)
+    first = (str(cmd).split() or [""])[0]
     return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
 
 
@@ -80,6 +69,13 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=No
     {pid: KB}, `apps` the records of `gui_hog.group_apps` (their `member_pids`, `kept_pids` and `build_pids` say which process is whose),
     `held_pids` the pids of waiting `admit` callers, `exe_of` the kernel executable lookup the labels use. Reads only: the result is data about processes, never a handle to signal one."""
     held = {str(p) for p in held_pids}
+    if exe_of is not None:   # one kernel lookup per process per sample, however many labels ask for it
+        _raw, _memo = exe_of, {}
+
+        def exe_of(pid):
+            if pid not in _memo:
+                _memo[pid] = _raw(pid)
+            return _memo[pid]
     agents = set(agent_clis) - {"bg"}   # `bg` is a build here, an exclusion marker in group_apps
     app_of, inbuild, app_by_id = {}, set(), {}
     for a in apps:
