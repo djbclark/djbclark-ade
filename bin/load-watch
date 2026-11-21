@@ -120,7 +120,7 @@ covers every repo under that directory. Older 3-column rows (repo, CI command, d
 Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate a launcher calls before it
 starts an agent (the dispatch shim that called it with `--load-wait` / `--no-load-gate` was deleted 2026-11-14). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
-2.0, was 1.5 until 2026-11-13; `bg`'s own base is 3.0 since 2026-11-14 (2.5 from 2026-11-01) and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
+5.0 since 2026-11-21, was 2.0, 1.5 until 2026-11-13; `bg`'s own base is 5.0 since 2026-11-21 (3.0 from 2026-11-14, 2.5 from 2026-11-01) and it passes that; the 5.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
@@ -169,7 +169,7 @@ LW_MDS_CORES (0.5) or more over consecutive samples spanning LW_MDS_SUSTAIN_S (1
 restarts the span), one log line per LW_MDS_COOLDOWN_S (1800) names mds, Finder and the six busiest other processes by
 program name only. No ping, no signal, no root required; an optional installed root helper may append XPC clients.
 Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default = the compressor limit, 30000 since 2026-11-13; 20000 from 2026-11-01 to 2026-11-13, 25000 before)
-the per-core limit is --boost-per-core (default 4.0, was 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
+the per-core limit is --boost-per-core (default 5.0 since 2026-11-21, was 4.0, 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
 passes its base; at higher churn, or when churn cannot be read, the base limit holds. Hysteresis (2026-11-01): the boost
 applies only after the machine has stayed calm (churn at most the boost line, free memory above the floor, pageins under
 their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot reading, by `admit` or by the 20 s `sample` step,
@@ -184,7 +184,7 @@ Starvation valve (2026-11-14): a caller that has waited long enough gets through
 one chunk, and a chunk shorter than LW_STARVE_SOFT_S never gets it unless the caller hands its hold start over with `--refused-since` (below): once refused without a break for LW_STARVE_SOFT_S (300; 0 turns the valve off), it is admitted anyway when
 every refusing gate is SOFT: load per core up to the boost line, corroborated churn and pageins, the agent cap, free memory at or above 300 MB.
 HARD gates never yield: churn above LW_MAX_COMPRESSOR_HARD_S (60000), swap-ins above --max-swapins, free memory below 300 MB, load per core
-above the boost line (--boost-per-core, 4.0), an unreadable memory or agent count. At most one forced admit per LW_STARVE_MIN_GAP_S (120)
+above the boost line (--boost-per-core, 5.0), an unreadable memory or agent count. At most one forced admit per LW_STARVE_MIN_GAP_S (120)
 machine-wide (LW_STARVE_MIN_GAP_S, 0 = no limit; starve.json in the state dir, replaced atomically under a flock; the claim is written only
 once the forced admit's agent reservation, when --max-agents asks for one, has been recorded). It prints
 `admit ok forced=starved waited_s=N overrode=reason,reason ...` (JSON: forced, overrode) and exits 0; a forced admit under --max-agents still
@@ -2046,7 +2046,6 @@ def cmd_ci_only(a):
     return 0
 
 
-ADMIT_PER_CORE = 2.0  # admit's own default base (1.5 until 2026-11-13); `bg` passes its own (3.0 since 2026-11-14, 2.5 from 2026-11-01). LOAD_PER_CORE (4.0) is only the blame step
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
 
 
@@ -2057,6 +2056,9 @@ def _env_float(name, default, lo=0.0):
     except ValueError:
         return default
     return v if math.isfinite(v) and v >= lo else default
+
+
+ADMIT_PER_CORE = _env_float("LW_ADMIT_PER_CORE", 5.0)  # admit's own default base (5.0 since 2026-11-21, operator: "mac is still perfectly usable at 50 on bigmac's 10 cores"; was 2.0, 1.5 until 2026-11-13); `bg` passes its own (5.0 since 2026-11-21, 3.0 from 2026-11-14). LOAD_PER_CORE (4.0) is only the blame step
 
 
 # Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
@@ -2154,7 +2156,7 @@ ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' 
 # memory above the floor, pageins under their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot
 # reading, by `admit` or by the 20 s sampler, resets the clock (calm.json in the state dir). The boost line now
 # equals the compressor limit: churn between 20k and 25k used to boost and is now refused outright.
-ADMIT_BOOST_PER_CORE = 4.0
+ADMIT_BOOST_PER_CORE = 5.0
 ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
 # Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 19 of 20 live agents and
