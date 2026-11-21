@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""The live re-handoff step a supervisor scan would call. NOT YET BUILT: it refuses rather than guess.
+
+ade-self-session handoff takes a checkpoint file and a --route-kind and lets the router choose the successor pool. It
+has no --agent or --target, so a re-handoff cannot simply name the stuck agent and the alternative ade-pi-stuck
+picked. Doing it correctly means writing a per-agent checkpoint and driving handoff, then accept, verify-turn and
+finish, with the failed pool excluded. That is Carried 70's remaining work.
+
+Until it is built, this exits non-zero and moves nothing, so the scan logs the failure and no agent is archived or
+relaunched on a guess. The plan file is read only to confirm it is the plan the scan wrote.
+
+    ade-supervisor-rehandoff PLAN.json
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def main(plan_path: Path) -> int:
+    plan = json.loads(plan_path.read_text())
+    count = len(plan.get("plan") or []) if isinstance(plan, dict) else 0
+    print(f"ade-supervisor-rehandoff: live re-handoff is not built; {count} planned agent(s) left where they are")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(Path(sys.argv[1])))
