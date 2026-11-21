@@ -46,7 +46,8 @@ agent and model with `~/src/djbclark-ade/bin/route_agent.py plan --kinds KIND` (
 `docs/dispatch-footer.md`: a report file whose last line is `DONE`, a `.done` marker touched last, and
 `BLOCKED: <question>` as the first line instead of a question at the end of a turn. Paste the filled
 footer into every Agent-tool or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`);
-`agent_footer_gate` appends it when an Agent-tool prompt lacks it.
+`agent_footer_gate` appends it when an Agent-tool prompt lacks it. A read-only type (Explore, Plan, web-fetch) cannot write the
+report: the hook appends `docs/dispatch-footer-readonly.md` instead and the caller saves its final message (no `.done` appears).
 
 **Search first and last (operator, 2026-11-13; footer rule 24).** Every brief carries a required line:
 

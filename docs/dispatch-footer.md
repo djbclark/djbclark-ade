@@ -1,6 +1,6 @@
 ## Delivery contract (shared footer; leads paste it into Agent-tool / `paseo run` briefs; `agent_footer_gate` fills it inline)
 
-The `acp-dispatch footer` helper left with the Wave 6 shim deletion (2026-11-14, [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)); `bin/ade-worker-run` appends a one-line pointer to this file to the brief. `agent_footer_gate` fills `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` inline for Agent-tool prompts; new `paseo run` briefs fill them themselves.
+The `acp-dispatch footer` helper left with the Wave 6 shim deletion (2026-11-14, [docs/slim/wave6-follow-up.md](slim/wave6-follow-up.md)); `bin/ade-worker-run` appends a one-line pointer to this file to the brief. `agent_footer_gate` fills `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` inline for Agent-tool prompts; new `paseo run` briefs fill them themselves. A sub-agent type that cannot write files (the built-ins Explore, Plan and web-fetch, or an agent definition whose `tools:` lists neither Write nor Bash) cannot follow this contract: it gets [dispatch-footer-readonly.md](dispatch-footer-readonly.md) instead (its final message is the report, no `.done`).
 
 
 1. Write the full deliverable to `{report}`. Create it early with `STATUS: working` as its first line and update it as you go; finish it **before** any optional verification. Nothing else counts as delivered.
