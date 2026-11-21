@@ -61,10 +61,12 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    the stop. A post with no Ref line gets only a non-blocking note, and none when
    it is a short progress note (item 1). The hook never loops: it allows the stop
    when Claude Code reports `stop_hook_active`, blocks a given message once per
-   session, skips sub-agents, makes no network call, fails open on an error and is
+   session, skips sub-agents, makes no network call, fails open on an error (an `issued.log` that exists but cannot be read
+   is allowed and logged; an absent one, or one without the id, is "never issued" and blocks) and is
    switched off with `REF_GATE_OFF=1`. Its decisions go to
    `~/.local/state/ade/ref-gate/decisions.log`. Other TUIs (Codex, Pi, Cursor,
-   Hermes) have no such hook yet and rely on this page.
+   Hermes) have no such hook yet and rely on this page. Never end a post with any other
+   `Ref:` line (a URL, `#861`): the hook blocks it as not of the form.
 7. **If the hook blocks you**, its reason names the problem. Run `ref <BOT>`, then
    send the post again with its last line replaced by the exact line the script
    printed (do not edit it, and do not fix it by hand: that is the failure the
@@ -82,8 +84,9 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
 ## Install
 
 - `bin/ref` (issues; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
-  The hook is linked into `~/.claude/hooks/` by `ade-update` and wired by the
-  `Stop` entry of the settings template. Refs directory defaults to
+  `ade-update` reports a missing `~/.claude/hooks/` link with its `ln -sfn` fix (the template's
+  `[ -f ] || exit 0` guard leaves an unlinked hook silently off); the `Stop` entry of the
+  settings template wires it. Refs directory defaults to
   `~/.local/state/djbclark-ade/refs/` (`REFS_DIR` or `--dir` overrides; the flag
   wins). Agent hint comes from `REF_AGENT` / `PASEO_AGENT_ID` / `AGENT_ID` /
   `CURSOR_CONVERSATION_ID`.

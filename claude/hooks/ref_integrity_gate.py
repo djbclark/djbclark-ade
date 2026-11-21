@@ -19,7 +19,9 @@ Part B item 1).
 Never loops: nothing is blocked when `stop_hook_active` is set, and a message (by hash) is blocked
 at most once per session. Sub-agents (`agent_id` in the payload) are skipped: their final message
 goes to the parent, not the operator. Local and fast: it reads issued.log and the transcript tail,
-no network. Fails open on any error; REF_GATE_OFF=1 disables it. The log is read as `ref lookup`
+no network. Fails open on any error, including an issued.log that exists but cannot be read
+(logged `allowed-unreadable-log`); an absent log or one without the id is "never issued" and
+blocks. REF_GATE_OFF=1 disables it. The log is read as `ref lookup`
 (bin/ref) reads it; the form check here is stricter (upper-case BOT, lower-case id) and the block
 reason never repeats text from the post, so a Ref line cannot smuggle an instruction into it.
 tests/test_ref_integrity_gate.py keeps the two in step.
@@ -30,6 +32,7 @@ decisions log, default ~/.local/state/ade/ref-gate).
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -68,8 +71,14 @@ def last_line(text: str) -> str:
     return ""
 
 
+class LogUnreadable(Exception):
+    """issued.log exists but cannot be read: the hook cannot judge a Ref, so it fails open."""
+
+
 def issued_bot(ident: str) -> str:
-    """The bot issued.log recorded for `ident`, "" when it was never issued. Reads the log as
+    """The bot issued.log recorded for `ident`, "" when it was never issued (the log or its
+    directory is absent, or readable without the id). Raises LogUnreadable when the log exists but
+    cannot be read (permissions, I/O error, not a regular file). Reads the log as
     `ref lookup` does (shared flock on an existing .lock, first matching line, nothing created);
     a stuck writer is waited for LOCK_WAIT seconds only, and only regular files are opened."""
     d = refs_dir()
@@ -95,14 +104,15 @@ def issued_bot(ident: str) -> str:
         fd = os.open(os.path.join(d, "issued.log"), os.O_RDONLY | os.O_NONBLOCK)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
-            return ""
+            raise LogUnreadable("issued.log is not a regular file")
         with os.fdopen(fd, encoding="utf-8", errors="replace") as log:
             for line in log:
                 cols = line.rstrip("\n").split("\t")
                 if cols[0] == ident and len(cols) >= 2:
                     return cols[1]
-    except OSError:
-        pass
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            raise LogUnreadable(os.strerror(exc.errno or 0)) from exc
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
@@ -264,7 +274,11 @@ def main() -> int:
                 "ref-integrity: this post has no `Ref:` last line. Operator-facing posts end with one "
                 "from `ref <BOT>` (docs/ref-labels.md Part B); a short progress note is exempt.")}))
         return 0
-    problem = check(message, transcript)
+    try:
+        problem = check(message, transcript)
+    except LogUnreadable as exc:
+        log_decision(session, "allowed-unreadable-log", line, str(exc))
+        return 0
     if problem is None:
         return 0
     why = problem

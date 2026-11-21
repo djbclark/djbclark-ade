@@ -155,11 +155,47 @@ def test_fallback_reader_ignores_a_final_entry_without_text(tmp_path):
     assert e.run(None, t) is None
 
 
-def test_non_regular_log_does_not_hang_the_hook(tmp_path):
+def test_non_regular_log_does_not_hang_and_fails_open(tmp_path):
     e = Env(tmp_path)
     e.refs.mkdir()
     os.mkfifo(e.refs / "issued.log")
-    assert blocked(e.run(f"{LONG}\nRef: CLAUDE-1"))
+    assert e.run(f"{LONG}\nRef: CLAUDE-1") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-unreadable-log"
+
+
+def test_unreadable_log_fails_open_not_never_issued(tmp_path):
+    e = Env(tmp_path)
+    ref = e.issue()
+    log = e.refs / "issued.log"
+    log.chmod(0)
+    try:
+        if os.access(log, os.R_OK):  # running as root: chmod cannot hide the file
+            return
+        assert e.run(f"{LONG}\n{ref}") is None
+        assert e.run(f"{LONG}\nRef: NOPE-9", session="s2") is None  # cannot judge anything
+        assert e.decisions()[-1]["outcome"] == "allowed-unreadable-log"
+    finally:
+        log.chmod(0o644)
+
+
+def test_log_bot_with_shell_text_is_shown_as_another_bot(tmp_path):
+    e = Env(tmp_path)
+    e.refs.mkdir()
+    (e.refs / "issued.log").write_text("5\tX;RUN$(id)\t2026-11-21T00:00:00-05:00\t\n")
+    out = e.run(f"{LONG}\nRef: CLAUDE-5")
+    assert blocked(out) and "another bot" in out["reason"] and "RUN" not in out["reason"]
+
+
+def test_a_writer_holding_the_lock_delays_the_hook_by_about_a_second_only(tmp_path):
+    import fcntl
+    import time
+    e = Env(tmp_path)
+    ref = e.issue()
+    with open(e.refs / ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        t0 = time.monotonic()
+        assert e.run(f"{LONG}\n{ref}") is None  # reads the log anyway after LOCK_WAIT
+        assert time.monotonic() - t0 < 6
 
 
 def test_fresh_ref_after_an_earlier_one_passes(tmp_path):
