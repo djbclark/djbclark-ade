@@ -113,7 +113,7 @@ through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` 
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...); recording one needs djbclark's fresh
 approval (operator, 2026-11-15: `sudo-ask` Allow dialog + Touch ID, as `bg approve-local`; fails closed; logged in ~/.local/state/bg/approvals.log);
 a live any-command `bgrun approve-local` ticket covering the directory (`bgrun approve-local check DIR` exits 0) stands in for the dialog for `local` only (operator, 2026-11-21; logged `lw-local-ticket` with `ticket=ID`).
-That row is time-limited like the ticket: its text starts `[ticket ID]`, and `ci check` treats it as undecided as soon as `bgrun approve-local check` no longer covers the directory (expired or revoked). A ticket never overwrites a `ci` decision and never records a `DIR/*` glob row.
+That row is time-limited: its text starts `[ticket ID]` (the ticket that recorded it), and `ci check` treats it as undecided as soon as no live any-command ticket covers the directory (`bgrun approve-local check` fails; any covering ticket keeps it alive, not only ID), or when the directory asked about (a linked worktree) is outside every ticket. A ticket never overwrites a `ci` decision and never records a `DIR/*` glob row.
 `pending`: runs here but `bg` reminds the agent to investigate (repos seeded from 7 days of `bg` use); recording one is gated exactly like `local`
 (operator, 2026-11-15; an existing row of the same mode only changes its note; `ci` is never gated).
 No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
@@ -1980,7 +1980,7 @@ def approve_local_decision(top, text, mode="local"):
     if mode == "local" and not top.endswith("/*") and ((decision(top, registry())[1] or [""])[0] != "ci") \
             and (ticket := live_bgrun_ticket(top)) is not None:
         local_approval_log("lw-local-ticket", top, text, mode, ticket=ticket[0])
-        print(f"load-watch: a `local` decision for {top} is covered by a live bgrun approval ticket ({ticket[1]}); the row lasts only as long as the ticket; "
+        print(f"load-watch: a `local` decision for {top} is covered by a live bgrun approval ticket ({ticket[1]}); the row lasts only while a live ticket covers the directory; "
               "no dialog was shown.", file=sys.stderr)
         return ticket[0]
     msg = f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
@@ -2026,8 +2026,9 @@ def cmd_ci(a):
         key, row = decision(top, rows)
         if row is None:
             return 1
-        if row[0] == "local" and TICKET_ROW.match(row[1]) and live_bgrun_ticket(key) is None:
-            print(f"load-watch: the `local` decision for {key} was recorded under a bgrun approval ticket that no longer covers it (expired or "
+        # a ticket row needs a live ticket over the directory being run (a linked worktree may sit outside the ticket's scope) and over the row's own key
+        if row[0] == "local" and TICKET_ROW.match(row[1]) and (live_bgrun_ticket(top) is None or (key != top and live_bgrun_ticket(key) is None)):
+            print(f"load-watch: the `local` decision for {key} was recorded under a bgrun approval ticket, and no live ticket covers {top} now (expired or "
                   "revoked); treating it as undecided", file=sys.stderr)
             return 1
         print(f"{row[0]}\t{row[1]}\t{key}")
@@ -2043,11 +2044,15 @@ def cmd_ci(a):
         ticket_id = ""
 
         def change(rows):
+            nonlocal approved, ticket_id
             # `local` and `pending` both run here, so both are gated (operator 2026-11-15); an existing row of the same mode at this key
             # may only change its reason or note; `ci` is never gated
             # a row recorded under a ticket is not a plain `local` row: changing its note must not make it permanent
             if a.mode in ("local", "pending") and not approved and ((rows.get(top) or [""])[0] != a.mode or TICKET_ROW.match((rows.get(top) or ["", ""])[1])):
                 check_registry_rows(rows)  # a damaged row refuses now, not after djbclark has clicked Allow and touched the sensor
+                return "ask"
+            if ticket_id and (decision(top, rows)[1] or [""])[0] == "ci":  # a `ci` decision landed while the ticket was checked: only the dialog may replace it
+                approved, ticket_id = False, ""
                 return "ask"
             rows[top] = [a.mode, (f"[ticket {ticket_id}] " if ticket_id else "") + a.text, time.strftime("%Y-%m-%d")]
 

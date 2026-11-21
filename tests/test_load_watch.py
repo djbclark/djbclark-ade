@@ -478,6 +478,9 @@ def test_no_live_ticket_falls_through_to_the_dialog(tmp_path, monkeypatch):
     lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 1, ask_rc=1)
     assert lw.approve_local_decision("/some/repo", "why") is False  # a refused dialog is still a refusal
     ask_calls.unlink(missing_ok=True)
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 1, out="7f3a9c01 until later")  # an id-shaped line with a non-zero exit: not a ticket
+    assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
+    ask_calls.unlink(missing_ok=True)
     lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until later")  # exit 0 but no 8-hex id to name: not trusted
     assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
 
@@ -521,7 +524,7 @@ def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path
     assert run(tmp_path, "ci", "check", str(repo)).stdout.startswith("local\t[ticket 0badc0de] ")  # live: honoured
     stub_bgrun(bgrun, 1)  # ticket expired or revoked: the row no longer counts
     r = run(tmp_path, "ci", "check", str(repo))
-    assert r.returncode == 1 and r.stdout == "" and "no longer covers" in r.stderr
+    assert r.returncode == 1 and r.stdout == "" and "no live ticket covers" in r.stderr
     r = run(tmp_path, "ci", "decide", str(repo), "local", "new note")  # a ticket row's note cannot be changed into a permanent row without the dialog
     assert r.returncode == 1 and rows(tmp_path)[0][2].startswith("[ticket ")
     stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
@@ -539,6 +542,42 @@ def test_a_ticket_never_overwrites_a_ci_decision_or_records_a_glob(tmp_path):
     g = run(tmp_path, "ci", "decide", str(tmp_path) + "/*", "local", "everywhere")  # a glob row: asks too, ticket or no ticket
     assert g.returncode == 1 and all(r[0] != str(tmp_path) + "/*" for r in rows(tmp_path))
     assert not bg_calls.exists()
+
+
+def test_a_ci_row_recorded_during_the_ticket_check_is_not_overwritten(tmp_path):
+    repo = _repo(tmp_path)
+    top = os.path.realpath(repo)
+    ask_calls = stub_sudo_ask(tmp_path, 1)  # the dialog is denied
+    bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    bgrun.parent.mkdir(parents=True, exist_ok=True)
+    reg = tmp_path / "ci-only.tsv"
+    # the stub covers the directory, but writes a `ci` row for it first (another agent deciding at the same moment)
+    bgrun.write_text(f"#!/bin/sh\nmkdir -p '{reg.parent}'\nprintf '%s\\t%s\\t%s\\t%s\\n' '{top}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
+    bgrun.chmod(0o755)
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "race")
+    assert r.returncode == 1 and ask_calls.exists()  # the dialog decided (and denied), the ticket did not
+    assert rows(tmp_path)[0][1] == "ci"
+
+
+def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path):
+    repo = _repo(tmp_path)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(git + ["worktree", "add", "-q", str(wt)], check=True)
+    bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    stub_sudo_ask(tmp_path, 1)
+    stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "tests").returncode == 0
+    assert run(tmp_path, "ci", "check", str(wt)).returncode == 0  # the ticket covers the worktree too
+    # a ticket scoped to the repo only: bgrun's check fails for the worktree path, so the inherited row does not apply there
+    bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(wt)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
+    r = run(tmp_path, "ci", "check", str(wt))
+    assert r.returncode == 1 and "no live ticket covers" in r.stderr
+    assert run(tmp_path, "ci", "check", str(repo)).returncode == 0
+    # and the other way round: covered at the worktree but not at the row's own directory
+    bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(repo)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
+    assert run(tmp_path, "ci", "check", str(wt)).returncode == 1
 
 
 def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):
