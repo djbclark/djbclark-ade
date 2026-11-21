@@ -302,7 +302,7 @@ def _refusal(router: Any, kind: str, choice: Any, cfg: dict[str, Any]) -> str | 
     model = parts[0] if parts else ""
     if _names_never(set(cfg["never_target"]), svc, model):
         return f"{svc.name} is in [routing.adjust].never_target"
-    if kind == "frontier" and not router.is_frontier_model(model):
+    if kind == "frontier" and not (router.is_frontier_slice_model(model)):
         return (f"frontier slice would run on {svc.name} {model or '(no model)'}, "
                 "a cheaper tier: refused, not downgraded")
     return None

@@ -157,6 +157,10 @@ fable_gated_efforts = ["xhigh", "max"]
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 # A token with `*` is a family (`gpt-*-astra` matches gpt-6-astra and gpt-6.2-astra alike, 2026-11-21).
 frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
+# Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3).
+# `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
+# estimate floor and no frontier gate, so Neon judgment/code slices stay ordinary slices.
+frontier_slice_models = ["gemini-*-neon"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
 # reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
@@ -303,7 +307,7 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 
 [[service]]
 name = "codex"
-cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol for judgment/code/research on the OpenAI API prepaid credits)"
+cli = "codex (newest gpt-*-astra for frontier; newest gpt-*-sol for judgment/code/research on the OpenAI API prepaid credits)"
 # The Codex CLI's OpenAI API prepaid credits (its `credits` balance) gate the API-only models
 # gpt-6.1-sol and gpt-6-astra; they do NOT bill the ChatGPT subscription. aiuse surfaces that
 # balance as the codex provider's `openai_api` pool family, distinct from the subscription
@@ -319,7 +323,7 @@ good_at = { frontier = 1, judgment = 3, code = 13, research = 13, ui-automation 
 billing = "prepaid"
 pool = ["codex", "openai_api"]
 agent = "codex"
-note = "OpenAI API prepaid credits (pool family openai_api), independent of the Codex subscription windows; frontier astra one per wave, judgment/code/research on gpt-6.1-sol only while the prepaid balance is fresh and >= plenty_min"
+note = "OpenAI API prepaid credits (pool family openai_api), independent of the Codex subscription windows; frontier astra one per wave, judgment/code/research on the newest gpt-*-sol only while the prepaid balance is fresh and >= plenty_min"
 judgment_tier = true
 max_parallel = 1
 # Tolerated rather than committed: OpenAI neither permits nor
@@ -349,7 +353,7 @@ good_at = { mechanical = 12, bulk = 20 }
 billing = "subscription"
 pool = ["codex", "default"]
 agent = "codex"
-note = "Codex/ChatGPT subscription windows (pool family default) gate gpt-6-luna bulk/mechanical; gpt-6.1-sol / gpt-6-astra are OpenAI-API prepaid models and live on the codex service"
+note = "Codex/ChatGPT subscription windows (pool family default) gate gpt-6-luna bulk/mechanical; the gpt-*-sol / gpt-*-astra families are OpenAI-API prepaid models and live on the codex service"
 max_parallel = 1
 access = "cli-only"
 plenty_kinds = ["bulk", "mechanical"]
@@ -467,7 +471,7 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 # itself (the acp-dispatch shim that once could is gone): the lead dispatches Argon only when `route_agent.py plan` names it.
 [[service]]
 name = "antigravity-argon"
-cli = "antigravity (Gemini 4 Argon; frontier fallback behind gpt-6-astra and Fable; research behind every other research pool)"
+cli = "antigravity (Gemini 4 Argon; frontier fallback behind codex's newest astra and Fable; research behind every other research pool)"
 good_at = { frontier = 5, research = 24 }
 billing = "subscription"
 note = "Gemini 4 Argon, Google AI Pro window until 2026-11-21 (Ultra 20x since: one shared google:gemini pool, no Argon reading, so this row fails closed); up to 512K context in Antigravity (1M is the API figure); own weekly window; frontier fallback (blocked while both codex and claude can, operator 2026-10-31) and a last-resort research pool since 2026-11-16, both out of that one window"

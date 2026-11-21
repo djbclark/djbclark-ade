@@ -230,3 +230,146 @@ class TestRouteAgentResolution:
         assert r.is_frontier_model("gpt-6-astra")
         assert not r.is_frontier_model("gpt-6.2-sol")
         assert r.is_frontier_model("gemini-4-argon-high")
+    def test_a_newer_frontier_family_token_does_not_match_a_variant_line(self, catalog):
+        assert not r.is_frontier_model("gpt-7-mini-astra")
+
+
+# --- repair round 1 (adversary 2026-11-21): version-only wildcards, adjust vs Neon, state lock ------------------------------
+
+class TestWildcardIsVersionOnly:
+    """MED-2: a `*` stands for a version, so a different line of the family never wins as 'newest'."""
+
+    def test_sol_ignores_mini_lite_flash_and_preview_lines(self):
+        ids = ["gpt-6.1-sol", "gpt-7-mini-sol", "gpt-9-lite-sol", "gpt-8-flash-sol", "gpt-9-preview-sol"]
+        assert mf.newest("gpt-*-sol", ids) == "gpt-6.1-sol"
+
+    def test_neon_ignores_variant_lines_and_dates(self):
+        ids = ["gemini-4-neon-high", "gemini-4.5-flash-lite-neon-high", "gemini-5-preview-neon-high",
+               "gemini-20261121-neon-high", "gemini-4-neon-high-preview"]
+        assert mf.newest("gemini-*-neon-high", ids) == "gemini-4-neon-high"
+
+    def test_a_variant_alone_is_no_match_so_state_is_used(self):
+        res = mf.resolve("gpt-*-sol", ["gpt-7-mini-sol"], last="gpt-6.1-sol")
+        assert (res.source, res.model) == ("state", "gpt-6.1-sol")
+
+    def test_real_versions_still_order_numerically(self):
+        ids = ["gpt-6.9-sol", "gpt-6.10-sol", "gpt-7-mini-sol"]
+        assert mf.newest("gpt-*-sol", ids) == "gpt-6.10-sol"
+        assert mf.newest("gpt-*-sol", [*ids, "gpt-7-sol"]) == "gpt-7-sol"
+
+    def test_question_mark_is_one_digit(self):
+        assert mf.newest("gpt-?-sol", ["gpt-6-sol", "gpt-x-sol", "gpt-7-sol", "gpt-6.2-sol"]) == "gpt-7-sol"
+
+    def test_family_ids_in_the_roster_resolve_the_same_way(self, catalog):
+        catalog({"codex": [*CODEX, "gpt-7-mini-sol", "gpt-8-mini-astra"]})
+        assert r.suggest_model(svc("codex"), "judgment", {}).startswith("gpt-6.2-sol")
+        assert r.suggest_model(svc("codex"), "frontier", {}).startswith("gpt-6.2-astra")
+
+
+class TestAdjustAcceptsAServiceOwnFrontierModel:
+    """MED-1: Neon is frontier r3 (ruling 2026-11-21) but not a `[dispatch].frontier_models` token; adjust must not refuse it."""
+
+    CFG = {"never_target": ["omp"]}
+
+    def refusal(self, name, model):
+        import route_adjust as ra
+        choice = r.Choice(svc(name), 50.0, 0.0, model=model, kind="frontier")
+        return ra._refusal(r, "frontier", choice, self.CFG)
+
+    def test_neon_frontier_slice_is_not_refused(self, catalog):
+        catalog(AGY)
+        assert self.refusal("antigravity-neon", "gemini-4-neon-high --effort high") is None
+        assert self.refusal("antigravity-neon", "gemini-5-neon-high") is None          # a newer release, still its own model
+
+    def test_other_frontier_models_still_pass(self, catalog):
+        catalog({"codex": CODEX})
+        assert self.refusal("codex", "gpt-6.2-astra --effort high") is None
+        assert self.refusal("antigravity-argon", "gemini-4-argon-high") is None
+
+    def test_a_cheaper_model_on_a_frontier_ranked_pool_is_still_refused(self, catalog):
+        catalog({"codex": CODEX})
+        assert "cheaper tier" in (self.refusal("codex", "gpt-6.2-sol --effort high") or "")
+        assert "cheaper tier" in (self.refusal("claude", "opus --effort high") or "")
+        assert "cheaper tier" in (self.refusal("antigravity-neon", "gemini-4-flash-high") or "")
+
+    def test_a_pool_that_does_not_rank_frontier_is_refused_even_on_its_own_model(self, catalog):
+        assert "frontier" not in svc("zai").good_at
+        assert "cheaper tier" in (self.refusal("zai", svc("zai").models.get("research", "glm-5").split()[0]) or "")
+
+    def test_is_frontier_slice_model(self, catalog):
+        assert r.is_frontier_slice_model("gemini-4.1-neon-high --effort high")
+        assert r.is_frontier_slice_model("gpt-6.2-astra")
+        assert not r.is_frontier_slice_model("gemini-4-flash-high")
+        assert not r.is_frontier_slice_model("gemini-4.5-flash-lite-neon-high")
+        assert not r.is_frontier_slice_model("")
+
+    def test_neon_is_not_a_frontier_model_for_floors_and_gates(self, catalog):
+        """Putting it in `frontier_models` would floor and gate every Neon judgment/code slice as a frontier one."""
+        assert not r.is_frontier_model("gemini-4-neon-high")
+        assert r.is_frontier_model("gemini-4-argon-high")
+
+
+class TestLowRepairs:
+    def test_provider_map_follows_the_version(self):
+        for model, want in (("gemini-4-argon-high", "gemini_argon"), ("gemini-5-argon-high", "gemini_argon"),
+                            ("gemini-4.1-neon-high", "gemini"), ("gemini-5-neon-high", "gemini")):
+            assert r.map_agent_to_provider("antigravity", model) == ("antigravity", want), model
+        assert r.map_agent_to_provider("antigravity", "gemini-5-flash-high") is None
+
+    def test_unresolved_family_warns_on_a_placement_less_route_too(self, catalog):
+        catalog({})
+        model = r.suggest_model(svc("codex"), "frontier", {})
+        c = r.Choice(svc("codex"), 50.0, 0.0, model=model, kind="frontier")      # `route`: no placement
+        warns = c.dispatch_warnings
+        assert any("did not resolve" in w for w in warns)
+        assert any("no placement" in w for w in warns)
+
+    def test_resolved_family_adds_no_family_warning(self, catalog):
+        catalog({"codex": CODEX})
+        model = r.suggest_model(svc("codex"), "frontier", {})
+        c = r.Choice(svc("codex"), 50.0, 0.0, model=model, kind="frontier")
+        assert not any("did not resolve" in w for w in c.dispatch_warnings)
+
+
+class TestStateLock:
+    def test_record_waits_for_the_lock_then_keeps_both_rows(self, tmp_path):
+        import threading
+        import time
+        path = tmp_path / "state.json"
+        assert mf.record("codex", "a-*", "a-1", path=path) is False
+        done = threading.Event()
+        result: list[bool] = []
+
+        def other():
+            result.append(mf.record("codex", "b-*", "b-1", path=path))
+            done.set()
+
+        with mf._locked(path):
+            t = threading.Thread(target=other)
+            t.start()
+            assert not done.wait(0.4), "record() wrote while another writer held the state lock"
+        assert done.wait(5)
+        t.join()
+        assert result == [False]
+        assert set(mf.load_state(path)) == {"codex:a-*", "codex:b-*"}
+
+    def test_many_writers_lose_no_family(self, tmp_path):
+        import threading
+        path = tmp_path / "state.json"
+        fams = [f"f{i}-*" for i in range(24)]
+        threads = [threading.Thread(target=mf.record, args=("p", f, f"{f[:-1]}1"), kwargs={"path": path}) for f in fams]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert set(mf.load_state(path)) == {f"p:{f}" for f in fams}
+
+    def test_failed_write_leaves_no_temp_file(self, tmp_path, monkeypatch):
+        path = tmp_path / "state.json"
+
+        def boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mf.os, "replace", boom)
+        assert mf.record("p", "f-*", "f-1", path=path) is False
+        assert [p.name for p in tmp_path.iterdir() if p.name != "state.json.lock"] == []

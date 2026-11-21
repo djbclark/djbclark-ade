@@ -1086,7 +1086,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
-            "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol for judgment/code/research "
+            "cli": ("codex (newest gpt-*-astra for frontier; newest gpt-*-sol for judgment/code/research "
                     "on the OpenAI API prepaid credits)"),
             "good_at": {"frontier": 1, "judgment": 3, "code": 13, "research": 13, "ui-automation": 4},
             "billing": "prepaid",
@@ -1364,7 +1364,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("codex", out)
         self.assertIn("frontier", out)
-        self.assertIn("gpt-6-astra", out)
+        self.assertIn("gpt-*-astra", out)
 
     def test_policy_md_and_json_carry_the_lead_session_model(self):
         """[lead] (2026-10-23): the session that dispatches runs on Opus 5.5 at high, Sonnet at

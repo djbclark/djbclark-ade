@@ -7,3 +7,7 @@
 
 - `antigravity-neon` is a normal pool (operator 2026-11-21): frontier r3, judgment r2, code r13, research r11 at `neon-high`, no `fallback_after`, no last-resort research rule; `codex` code rank 13 (ahead of `cursor-auto`), `zai` loses `code`, code quality band 10 -> 8; Neon and Argon notes now say 512K context and Ultra 20x, and `docs/model-routing.md` B7/B7a/H3 follow. (#881)
 - `docs/queue.md` item 65: trial Gemini 4 Hydrogen and Orchestrator after the Google pool settles. (#881)
+
+### Fixed
+
+- Model-family repair after review (adversary 2026-11-21): a family `*` matches version text only, so `-mini`, `-lite`, `-flash`, `-preview` and dated ids never win as the newest of `gpt-*-sol` or `gemini-*-neon-high`; `route_agent.py adjust` no longer refuses a Neon frontier slice (new `[dispatch].frontier_slice_models = ["gemini-*-neon"]`); `map_agent_to_provider` follows the Gemini version; an unresolved family warns on a single-slice `route` too; the state file is written under a lock; routing text names families, not pinned ids. (#881)

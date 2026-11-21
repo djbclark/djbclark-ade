@@ -21,6 +21,7 @@ Pure functions plus one small JSON state file; no network and no subprocess here
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -29,6 +30,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # not POSIX: the replace stays atomic, only the read-modify-write is unserialized
+    fcntl = None  # type: ignore[assignment]
 
 WILDCARDS = ("*", "?")
 STATE_ENV = "ROUTE_AGENT_MODEL_STATE"
@@ -39,11 +45,18 @@ def is_family(model: str) -> bool:
     return any(w in model for w in WILDCARDS)
 
 
+# A `*` stands for a VERSION (1-3 digits per dotted part: 6, 6.2, 6.10), never for words or dates, so `gpt-*-astra` does not
+# match gpt-6-mini-astra, gemini-*-neon-high does not match gemini-4.5-flash-lite-neon-high or gpt-20261121-astra, and a
+# `-preview` or `-mini` line is never "the newest" of a family that does not name it (adversary 2026-11-21, MED-2).
+VERSION = r"[0-9]{1,3}(?:\.[0-9]{1,3})*"
+
+
 def family_regex(glob: str) -> re.Pattern[str]:
-    """`*` and `?` as capture groups, everything else literal; the captures are what the version order reads."""
+    """`*` as a capture group that matches version text only, `?` as one digit; everything else literal. The captures
+    are what the version order reads."""
     out = []
     for ch in glob:
-        out.append("(.*)" if ch == "*" else "(.)" if ch == "?" else re.escape(ch))
+        out.append(f"({VERSION})" if ch == "*" else "([0-9])" if ch == "?" else re.escape(ch))
     return re.compile("".join(out))
 
 
@@ -165,28 +178,50 @@ def load_state(path: Path | None = None) -> dict[str, dict[str, str]]:
 
 def record(provider: str, family: str, model_id: str, *, now: datetime | None = None, path: Path | None = None) -> bool:
     """Record `model_id` as the newest catalog id of the family. True when it differs from the recorded one (a first
-    sighting is not a change). The file is replaced atomically; a read-only state directory is ignored (False)."""
+    sighting is not a change). The read-modify-write holds an exclusive lock on `<state>.lock` (two routers recording
+    different families at once no longer lose one row) and the file is replaced atomically; a read-only state
+    directory is ignored (False)."""
     path = path or state_path()
-    state = load_state(path)
-    key = state_key(provider, family)
     stamp = (now or datetime.now(UTC)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    old = state.get(key)
-    if old and old.get("id") == model_id:
-        return False
-    row = {"id": model_id, "at": stamp}
-    if old:
-        row["previous"] = old["id"]
-        row["changed_at"] = stamp
-    state[key] = row
+    key = state_key(provider, family)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
-        with os.fdopen(fd, "w") as fh:
-            json.dump(state, fh, indent=1, sort_keys=True)
-        os.replace(tmp, path)
+        with _locked(path):
+            state = load_state(path)
+            old = state.get(key)
+            if old and old.get("id") == model_id:
+                return False
+            row = {"id": model_id, "at": stamp}
+            if old:
+                row["previous"] = old["id"]
+                row["changed_at"] = stamp
+            state[key] = row
+            fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(state, fh, indent=1, sort_keys=True)
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
     except OSError:
         return False
     return bool(old)
+
+
+@contextlib.contextmanager
+def _locked(path: Path):
+    """Exclusive advisory lock on `<path>.lock` for the duration of the block (a no-op without fcntl)."""
+    if fcntl is None:
+        yield
+        return
+    with open(path.with_name(path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def last_id(provider: str, family: str, path: Path | None = None) -> str | None:

@@ -62,15 +62,15 @@ The operator's standing routing rules are encoded as hard constraints, not
 preferences, because they encode consequences a score cannot see:
 
 - free and chronically-unused pools first for bulk work;
-- judgment goes to claude's Opus 5.5 at high first, omp's Opus next, and (2026-10-25) codex's gpt-6.1-sol
+- judgment goes to claude's Opus 5.5 at high first, omp's Opus next, and (2026-10-25) codex's gpt-*-sol
   at high only while every window has plenty_min left; the two frontier models, Claude
-  Fable 5.2 and codex's gpt-6-astra, are reached ONLY through the explicit
+  Fable 5.2 and codex's newest gpt-*-astra, are reached ONLY through the explicit
   `frontier` kind, at most one slice per pool per wave (two on claude under the
   standing allowance of 2026-10-27 while the Claude reading passes: docs/gates.md), for work that really
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
   never run). Everyday work goes to the other pools, and ALSO to codex's
-  everyday models (gpt-6.1-sol for judgment and code, gpt-6-luna for bulk and mechanical;
+  everyday models (gpt-*-sol for judgment and code, gpt-6-luna for bulk and mechanical;
   never astra) while its quota is plentiful (operator 2026-10-25: "if we have
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
@@ -674,6 +674,7 @@ def policy_public() -> dict[str, Any]:
             "operator_gated": list(POLICY["dispatch"]["operator_gated"]),
             "fable_gated_efforts": list(POLICY["dispatch"]["fable_gated_efforts"]),
             "frontier_models": list(POLICY["dispatch"].get("frontier_models") or []),
+            "frontier_slice_models": list(POLICY["dispatch"].get("frontier_slice_models") or []),
             "inflight_cap": {str(k): int(v)
                              for k, v in (POLICY["dispatch"].get("inflight_cap") or {}).items()},
             "estimate_floor": {str(k): float(v)
@@ -732,6 +733,8 @@ def policy_markdown() -> str:
     lines.append(f"| dispatch.estimate_floor | {floors} |")
     frontiers = ", ".join(d.get("frontier_models") or []) or "(none)"
     lines.append(f"| dispatch.frontier_models | {frontiers} |")
+    slice_models = ", ".join(d.get("frontier_slice_models") or []) or "(none)"
+    lines.append(f"| dispatch.frontier_slice_models | {slice_models} |")
     fg = frontier_gate()
     lines.append(f"| gates.frontier1_per_wave / frontier2_per_wave | {fg['frontier1_per_wave']:g} / {fg['frontier2_per_wave']:g} |")
     lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
@@ -2266,14 +2269,14 @@ class Choice:
         if self.service.acp_agent == "cursor-cloud":
             return []                   # a cloud agent: no Paseo workspace to place it in
         pl = self.placement
-        if pl is None:
-            return ["bare `paseo run` template with no placement: launch through "
-                    f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
-                    "or the worker lands in the caller's own workspace (`paseo run --cwd` is ignored, getpaseo/paseo#9699)"]
         out = []
         if _family.is_family(self.model.split()[0] if self.model.split() else ""):
             out.append(f"model family {self.model.split()[0]} did not resolve (catalog unreadable and no id in state): "
                        f"replace it with an id from `paseo provider models {self.service.acp_agent}`")
+        if pl is None:
+            return [*out, "bare `paseo run` template with no placement: launch through "
+                    f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
+                    "or the worker lands in the caller's own workspace (`paseo run --cwd` is ignored, getpaseo/paseo#9699)"]
         if not self.model.split():
             out.append(f"no model profile for {self.kind or 'this kind'} on {self.service.acp_agent}: replace the quoted "
                        f"--provider placeholder with an id from `paseo provider models {self.service.acp_agent}`")
@@ -2606,6 +2609,17 @@ def is_frontier_model(model: str | None) -> bool:
     # newer release (gpt-6.2-astra) is frontier the day it resolves, with no list edit.
     return bool(low) and any((_family.family_regex(str(tok).lower()).search(low) if _family.is_family(str(tok))
                               else str(tok).lower() in low) for tok in frontier_model_tokens())
+
+
+def is_frontier_slice_model(model: str | None) -> bool:
+    """May `model` take a `frontier` slice? A frontier model (`is_frontier_model`) or a `[dispatch].frontier_slice_models` family.
+    Neon is frontier r3 (operator 2026-11-21) but stays out of `frontier_models`, which also floors and gates every slice of a
+    matching model, Neon judgment included; `adjust` asks this, so its never-downgrade rule does not refuse a Neon frontier route."""
+    low = (model or "").lower()
+    toks = list((POLICY.get("dispatch") or {}).get("frontier_slice_models") or [])
+    return is_frontier_model(model) or (bool(low) and any(
+        (_family.family_regex(str(t).lower()).search(low) if _family.is_family(str(t)) else str(t).lower() in low)
+        for t in toks))
 
 
 def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:
@@ -3320,9 +3334,9 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     if agent == "antigravity":
         # the Gemini 4 Argon window is its own aiuse pool family; Neon draws the shared Gemini family; other pools not routed
         m = (model or "").lower()
-        if m.startswith("gemini-4-argon"):
+        if re.match(r"gemini-[0-9]+(?:\.[0-9]+)*-argon", m):
             return "antigravity", "gemini_argon"
-        if m.startswith("gemini-4-neon"):
+        if re.match(r"gemini-[0-9]+(?:\.[0-9]+)*-neon", m):
             return "antigravity", "gemini"
         return None
     if agent == "opencode":
