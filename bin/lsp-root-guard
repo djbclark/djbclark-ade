@@ -54,7 +54,7 @@ PROJECT_MARKERS = (".git", ".jj", ".hg", "pyproject.toml", "setup.py", "package.
 DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/s/*", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
                       "/Users", "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp",
                       "/private", "/private/tmp", "/var", "/private/var", "/Library", "/home", "/nix", "/mnt", "/srv",
-                      "/Network")
+                      "/Network", "/media", "/root")
 HEURISTIC_SCAN_LIMIT = 400
 
 
@@ -94,7 +94,9 @@ def uri_to_path(uri_or_path: str) -> str | None:
             elif not rest.startswith("/"):
                 return None
         path = unquote(rest)
-        return path if path.startswith("/") else None  # `file:relproj` is no root: the guard and the server would disagree on it
+        # `file:Users/x` has no root slash; WHATWG URL and vscode-uri read it as `/Users/x`, so the guard judges that path
+        # (None here would let a malformed client hand the server `~` unchecked)
+        return path if path.startswith("/") else "/" + path
     if "://" in uri_or_path:
         return None
     return uri_or_path
@@ -260,6 +262,20 @@ class Guard:
         p = uri_to_path(uri) if isinstance(uri, str) else None
         return p is not None and is_container(p, self.containers, self.min_children, self.heuristic)
 
+    @staticmethod
+    def _same_folder(uri: Any) -> Any:
+        """A comparison key for a folder URI: its real path (trailing slash, percent-encoding and symlinks agree)."""
+        p = uri_to_path(uri) if isinstance(uri, str) else None
+        return os.path.realpath(p) if p else uri
+
+    def _forget(self, event: dict[str, Any]) -> None:
+        """Drop folders the client removed from the kept list, so a closed folder is not re-added."""
+        removed = event.get("removed")
+        if not isinstance(removed, list):
+            return
+        gone = {self._same_folder(f.get("uri")) for f in removed if isinstance(f, dict)}
+        self.kept = [f for f in self.kept if not (isinstance(f, dict) and self._same_folder(f.get("uri")) in gone)]
+
     def client_wants(self, body: bytes) -> bool:
         if b'"initialize"' in body or b"didChangeWorkspaceFolders" in body:
             return True
@@ -298,11 +314,12 @@ class Guard:
             event = (msg.get("params") or {}).get("event")
             if isinstance(event, dict) and isinstance(event.get("added"), list):
                 event["added"] = [f for f in event["added"] if not (isinstance(f, dict) and self._bad(f.get("uri")))]
-                gone = {f.get("uri") for f in event.get("removed") or [] if isinstance(f, dict)}
-                self.kept = [f for f in self.kept if not (isinstance(f, dict) and f.get("uri") in gone)]  # a closed folder is not re-added
+                self._forget(event)
                 if not event["added"] and not event.get("removed"):
                     return None
                 return frame(msg)
+            if isinstance(event, dict):
+                self._forget(event)  # a removal alone still closes a kept folder
             return raw
         if "method" not in msg and msg.get("id") in self.folder_request_ids:
             with self.lock:

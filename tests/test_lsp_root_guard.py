@@ -340,7 +340,7 @@ def test_default_containers_match_the_config() -> None:
 def test_top_level_trees_stay_containers_under_no_heuristic() -> None:
     """#895 L1: the structural rule is off under --no-heuristic, so the list itself must name these trees."""
     mod = _guard_module()
-    for tree in ("/Library", "/home", "/nix", "/mnt", "/srv", "/Network"):
+    for tree in ("/Library", "/home", "/nix", "/mnt", "/srv", "/Network", "/media", "/root"):
         assert tree in mod.DEFAULT_CONTAINERS
     assert mod.is_container("/Library", list(mod.DEFAULT_CONTAINERS), 3, False)
 
@@ -353,7 +353,7 @@ def test_relative_file_uri_and_missing_folder_are_never_kept(tmp_path: Path, mon
     (proj / ".git").mkdir(parents=True)
     (tmp_path / "relproj2").mkdir()
     monkeypatch.chdir(tmp_path)
-    assert mod.uri_to_path("file:relproj2") is None and mod.uri_to_path("file:///abs/x") == "/abs/x"
+    assert mod.uri_to_path("file:relproj2") == "/relproj2" and mod.uri_to_path("file:///abs/x") == "/abs/x"
     folders = [{"uri": home.as_uri(), "name": "h"}, {"uri": "file:relproj2", "name": "r"},
                {"uri": (tmp_path / "missing").as_uri(), "name": "m"}, {"uri": proj.as_uri(), "name": "p"}]
     msg = _initialize({"rootUri": home.as_uri(), "rootPath": str(home), "workspaceFolders": folders})
@@ -385,3 +385,55 @@ def test_kept_folder_is_not_resurrected_by_an_empty_reply_or_after_removal(tmp_p
               "params": {"event": {"added": [{"uri": home.as_uri(), "name": "h"}], "removed": [{"uri": puri, "name": "p"}]}}}
     assert g.from_client(b"raw", change) is not None
     assert reply(3, [{"uri": home.as_uri(), "name": "h"}]) == []  # proj was closed: not re-added
+
+
+def test_relative_file_uri_is_judged_as_the_path_the_server_will_read(tmp_path: Path) -> None:
+    """#902 L1: `file:Users/x` is `/Users/x` to a WHATWG/vscode-uri server, so the guard must judge that path (a None
+    here let initialize, a didChange folder and a folder reply pass a container through)."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    rel = "file:" + str(home).lstrip("/")
+    assert mod.uri_to_path(rel) == str(home)
+    # initialize with only the relative URI: stripped, not forwarded
+    msg = _initialize({"rootUri": rel})
+    assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
+    assert msg["params"]["rootUri"] is None
+    # filter mode: a relative container folder in didChange and in a folder reply is dropped
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    g = mod.Guard([str(home)], 3, False)
+    init = _initialize({"rootUri": proj.as_uri(), "rootPath": str(proj), "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+    assert g.from_client(b"raw", init) is not None and g.mode == "filter"
+    change = {"method": "workspace/didChangeWorkspaceFolders",
+              "params": {"event": {"added": [{"uri": rel, "name": "h"}, {"uri": proj.as_uri(), "name": "p"}], "removed": []}}}
+    out = g.from_client(b"raw", change)
+    assert out is not None and [f["uri"] for f in json.loads(out.split(b"\r\n\r\n", 1)[1])["params"]["event"]["added"]] == [proj.as_uri()]
+    g.from_server({"method": "workspace/workspaceFolders", "id": 7})
+    out = g.from_client(b"raw", {"id": 7, "result": [{"uri": rel, "name": "h"}]})
+    assert out is not None and json.loads(out.split(b"\r\n\r\n", 1)[1])["result"] == [{"uri": proj.as_uri(), "name": "proj"}]
+
+
+def test_kept_folder_removal_matches_by_real_path_and_needs_no_added_list(tmp_path: Path) -> None:
+    """#902 L2: a trailing slash or other URI spelling still closes a kept folder; a removal alone prunes too."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    other = home / "src" / "other"
+    (other / ".git").mkdir(parents=True)
+    g = mod.Guard([str(home)], 3, False)
+    init = _initialize({"rootUri": proj.as_uri() + "/", "rootPath": str(proj),
+                        "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+    assert g.from_client(b"raw", init) is not None and len(g.kept) == 1
+    only_removed = {"method": "workspace/didChangeWorkspaceFolders",
+                    "params": {"event": {"removed": [{"uri": proj.as_uri() + "/", "name": "p"}]}}}
+    assert g.from_client(b"raw", only_removed) is not None
+    assert g.kept == []
+    # a removal that names a different folder leaves the kept one alone
+    g2 = mod.Guard([str(home)], 3, False)
+    assert g2.from_client(b"raw", _initialize({"rootUri": proj.as_uri(), "rootPath": str(proj),
+                                               "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})) is not None
+    unrelated = {"method": "workspace/didChangeWorkspaceFolders",
+                 "params": {"event": {"added": [], "removed": [{"uri": other.as_uri(), "name": "o"}]}}}
+    g2.from_client(b"raw", unrelated)
+    assert len(g2.kept) == 1

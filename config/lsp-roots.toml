@@ -4,7 +4,7 @@
 [containers]
 paths = ["~", "~/src", "~/s", "~/s/*", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
          "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp", "/private",
-         "/private/tmp", "/var", "/private/var", "/Library", "/home", "/nix", "/mnt", "/srv", "/Network"]
+         "/private/tmp", "/var", "/private/var", "/Library", "/home", "/nix", "/mnt", "/srv", "/Network", "/media", "/root"]
 # Also a container without being listed: a non-project directory directly under / or above $HOME, and one that is not
 # itself a project (no .git, pyproject.toml, package.json, ...) and has at least this many immediate children (symlinks
 # followed) holding a .git.
