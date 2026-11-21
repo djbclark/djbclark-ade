@@ -83,8 +83,8 @@ For each request:
 7. A probe that exercises a launcher pins a fake before it trusts the result.
    Prefer the test fake under `$FAKE_PASEO_STATE` / `tests/fakes/paseo` for native
    `paseo run` / `paseo send` probes — do not invent shim flags (`--acp-run`,
-   `resume`, `reap`) that Wave 6 retired. If a remaining shim test still
-   exposes a runner pin, assert `shlex.split(rec["cmd"])[0]` equals the fake
+   `resume`, `reap`) that Wave 6 retired (the shim tests that used them were
+deleted 2026-11-14). When a fake runner is pinned, assert `shlex.split(rec["cmd"])[0]` equals the fake
    (`cmd` is a shell-quoted string, never index it directly) before and after
    any continue path; never continue a record whose runner you did not create.
    2026-10-25, round 2: a reroute probe omitted the pin, fell through to the

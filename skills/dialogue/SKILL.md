@@ -165,7 +165,7 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    `set` entries are ignored. Always give a `model`. `claude` (`claude -p --model <m> --effort <e>`, prompt on
    stdin, `CLAUDECODE` unset) and `cmd` (any argv with `{prompt}`/`{cwd}`) are unchanged.
 3. Defaults: the cursor route was the unprobed second route until 2026-11-07, when it was listed as the Grok
-   seat's first route — as of 2026-11-12 (#568), CLI `resolve_launch_mode` only allows catalog-mode
+   seat's first route (the Cursor grok model, not the never-routed `grok`/`grok-bot` providers) — as of 2026-11-12 (#568), CLI `resolve_launch_mode` only allows catalog-mode
    providers (`claude`, `codex`, `antigravity`, `copilot`) and raises `ModeUnavailable` for `cursor` on CLI
    `dialogue.py` launches because Cursor requires the SDK `auto_accept` control hook
    (the standalone xAI CLI retired 2026-11-07; grok-bot is the other possible occupant; override a `paseo`

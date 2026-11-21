@@ -204,7 +204,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
    only; the `model-routing` skill is unchanged until a run has exercised
    this): **lead and reviewer are the latest xAI model**, reached through `cursor-agent`
-   (the grok model as Cursor names it: check its model list before the first call; never guess the
+   (the grok model as Cursor names it — not the never-routed `grok`/`grok-bot` providers: check its model list before the first call; never guess the
    id; the standalone xAI CLI retired 2026-11-07, so there is no other route). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
    go to a Cursor slice on that model and its verdict is applied as given. **Every worker
