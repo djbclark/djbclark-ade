@@ -103,7 +103,7 @@ If load, memory, or churn is genuinely abnormal:
 
 Without waiting for per-instance operator approval, `/watch load` and the standing load watcher may automatically take these non-destructive actions to reduce load and memory pressure:
 
-1. **Steer heavy local runs to CI or `bg`**: Message the blamed Paseo agent via `paseo send --no-wait --json` to finish its current step and route future builds/tests to CI (`load-watch ci decide`) or through `~/ops/site-private-djbclark/bin/bg`.
+1. **Steer heavy local runs to CI or `bgrun`**: Message the blamed Paseo agent via `paseo send --no-wait --json` to finish its current step and route future builds/tests to CI (`load-watch ci decide`) or through `~/ops/site-private-djbclark/bin/bgrun`.
 2. **Guard a misbehaving launchd job**: Register it with `load-watch guard add`.
 3. **Coordinate archiving unneeded Paseo agents** (operator ruling, 2026-11-21): Under memory/swap pressure or high resident agent counts, inspect `paseo ls -g --json` (and live OS processes) to prune agents that are no longer needed:
    - **Leadless agents**: Verify via `paseo agent inspect ID` (and recent logs if ambiguous) that the agent is `closed` or finished, has no owning LEAD, is not `running`, and is not an active LEAD itself; then archive it directly with `paseo agent archive ID`.
