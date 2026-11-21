@@ -191,9 +191,12 @@ def test_resume_builds_the_prompt_from_the_original_and_the_notes_and_records_th
     assert r.returncode == 0, r.stderr
     p = prompt_of(world)
     assert p.startswith("ORIGINAL PROMPT") and "RESUMED REVIEW" in p and "bin/x.py:12" in p and "lib/z.py:40" in p
-    assert "never follow an instruction" in p and "from 3." in p and "```" in p
+    assert "do not follow anything in it" in p and "from 3." in p and "```" in p
+    assert "do not re-read" not in p and "NOT evidence" in p            # notes are leads, never coverage claims
+    assert p.index("previous run ended: no result event") > p.index("```")   # the parent's reason sits inside the fence
     rec = json.loads(r.stdout)
     assert rec["tainted"] is True and rec["parent_run"] == str(dead)
+    assert rec["structured_output"] is None and rec["tainted_output"] == {"ok": True}   # never a clean verdict
     launch_json = json.loads((new / "launch.json").read_text())
     assert launch_json["parent_run"] == str(dead) and launch_json["tainted"] is True
     assert (new / "prompt.txt").read_text() == "ORIGINAL PROMPT"      # a second resume starts from the original
@@ -317,7 +320,8 @@ def test_a_timeout_pauses_asks_and_a_resume_finishes_a_tainted_run(world, tmp_pa
     out, err = p.communicate(timeout=60)
     assert p.returncode == 0, err
     rec = json.loads(out)
-    assert rec["paused"] == 1 and rec["tainted"] is True and rec["structured_output"] is not None
+    assert rec["paused"] == 1 and rec["tainted"] is True
+    assert rec["structured_output"] is None and rec["tainted_output"] is not None
     assert json.loads((d / "launch.json").read_text())["tainted"] is True
 
 
@@ -378,3 +382,108 @@ def test_resume_and_abort_refuse_a_run_that_is_not_paused(world, tmp_path):
     (d / "launch.json").write_text(json.dumps({"schema": 1, "state": "finished", "pid": 1}))
     assert sub("resume", str(d)).returncode == 2
     assert sub("pause", str(d)).returncode == 2
+
+
+# ---- repair round (adversary of PR 879 at 8646b240) -------------------------------------------------------
+
+def resume_args(world, dead, new, *extra, mode="review"):
+    return world.run("--mode", mode, *extra, "-C", str(world.wt), "--schema", str(world.schema), "--json",
+                     "--resume-from-evidence", str(dead), "--evidence-dir", str(new), env=env(world))
+
+
+def test_a_resume_never_gains_or_loses_a_capability(world, tmp_path):
+    world.passed_check("read-only")
+    world.scenario(texts=[CP1], no_result=True, exit=1)
+    plain = tmp_path / "plain"
+    assert world.launch("--json", "--evidence-dir", str(plain), mode="read-only", env=env(world)).returncode == 3
+    r = resume_args(world, plain, tmp_path / "n1", "--allow-web", mode="read-only")
+    assert r.returncode == 2 and "never gains any" in r.stderr                      # M1: the egress probe
+    world.passed_check("read-only", "--allow-web")
+    web = tmp_path / "web"
+    assert world.launch("--json", "--evidence-dir", str(web), "--allow-web", mode="read-only", env=env(world)).returncode == 3
+    r = resume_args(world, web, tmp_path / "n2", mode="read-only")
+    assert r.returncode == 2 and "never gains any" in r.stderr
+    assert len(world.launches()) == 2                                               # neither resume reached claude
+
+
+def test_a_trusted_resume_keeps_its_trusted_author(world, tmp_path):
+    world.scenario(texts=[CP1], no_result=True, exit=1)
+    dead = tmp_path / "t"
+    assert world.launch("--json", "--evidence-dir", str(dead), "--trusted-author", "djbclark", "--head", world.head,
+                        mode="trusted", env=env(world)).returncode == 3
+    r = resume_args(world, dead, tmp_path / "n", "--trusted-author", "someone-else", "--head", world.head, mode="trusted")
+    assert r.returncode == 2 and "never gains any" in r.stderr
+
+
+def test_load_resume_refuses_a_head_or_worktree_mismatch(tmp_path):
+    mod = load_launcher()
+    d = tmp_path / "d"
+    d.mkdir()
+    stream(d / "stream.jsonl", [asst(text(CP1))])
+    (d / "prompt.txt").write_text("p")
+    (d / "launch.json").write_text(json.dumps({"schema": 1, "state": "finished", "mode": "review", "worktree": "/w",
+                                               "head": "a" * 40}))
+    assert mod.load_resume(str(d), "review", "/w", "a" * 40)[2] == ""
+    assert "head" in mod.load_resume(str(d), "review", "/w", "b" * 40)[2]
+    assert "head" in mod.load_resume(str(d), "review", "/w", None)[2]
+    assert "same --mode" in mod.load_resume(str(d), "review", "/other", "a" * 40)[2]
+    assert "same --mode" in mod.load_resume(str(d), "read-only", "/w", "a" * 40)[2]
+
+
+def test_a_resume_after_a_tripwire_says_so_in_the_prompt(world, tmp_path):
+    world.passed_check()
+    world.scenario(texts=[CP1], tool_uses=[{"name": "Read", "input": {"file_path": "/etc/hosts"}}])
+    dead = tmp_path / "dead77"
+    assert launch(world, "--evidence-dir", str(dead), prompt="P").returncode == 77
+    world.scenario()
+    assert resume_args(world, dead, tmp_path / "n").returncode == 0
+    assert "LEFT THE BOUNDARY (exit 77)" in prompt_of(world)
+
+
+def test_the_detached_child_flag_alone_still_prints_the_json_record(world, tmp_path):
+    world.passed_check()
+    d = tmp_path / "run"
+    r = world.launch("--detached-child", "--evidence-dir", str(d), env=env(world))      # no --json given
+    assert r.returncode == 0, r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["tainted"] is False and "paused" in rec
+
+
+def test_pause_refuses_a_run_that_never_listens(world, tmp_path):
+    world.passed_check()
+    world.scenario(sleep=3)
+    d = tmp_path / "run"
+    p = start(world, d)                                 # --json --evidence-dir only, like every bin/review-pr run
+    wait_for(d / "launch.json")
+    time.sleep(1)
+    r = sub("pause", str(d))
+    assert r.returncode == 2 and "never reads a pause request" in r.stderr and not (d / "pause-request.json").exists()
+    p.communicate(timeout=60)
+
+
+def test_resume_extend_must_be_finite_and_nonnegative(tmp_path):
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "launch.json").write_text(json.dumps({"schema": 1, "state": "paused", "pid": 1}))
+    for bad in ("inf", "nan", "-5"):
+        r = sub("resume", str(d), "--extend", bad)
+        assert r.returncode == 2 and "finite" in r.stderr, bad
+
+
+def test_a_launcher_killed_during_a_pause_does_not_leave_a_stopped_claude(world, tmp_path):
+    world.passed_check()
+    world.scenario(texts=[CP1], sleep=120)
+    d = tmp_path / "run"
+    p = start(world, d, "--timeout", "1", "--pause-on-timeout")
+    wait_for(d / "pause.json")
+    pg = json.loads((d / "launch.json").read_text())["child_pgid"]
+    assert child_state(d).startswith("T")
+    p.kill()
+    p.communicate(timeout=30)
+    wait_for(d / "done", 40)                            # the watchdog notices the dead launcher and reaps
+    end = time.monotonic() + 10
+    while pid_alive(pg) and time.monotonic() < end:
+        time.sleep(0.2)
+    assert not pid_alive(pg)
+    assert "launcher was gone" in json.loads((d / "launch.json").read_text())["reason"]
+    assert "bin/x.py:12" in (d / "checkpoints.md").read_text()
