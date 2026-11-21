@@ -1254,8 +1254,10 @@ class Service:
             ids = ade_claims.active_claim_ids_of(record['predecessor'])
         except Exception:  # noqa: BLE001 - advisory
             return
-        if record.get('predecessor_claims') != ids:
-            record['predecessor_claims'] = ids
+        earlier = record.get('predecessor_claims')
+        merged = sorted(set(ids) | {i for i in (earlier if isinstance(earlier, list) else []) if isinstance(i, str)})
+        if earlier != merged:    # merged, never replaced: a claim the plugin gave away since the last look must stay listed
+            record['predecessor_claims'] = merged
             if target is not None:
                 self.save(target, record)
 
@@ -1265,7 +1267,11 @@ class Service:
         `claims_not_rebound` (id, fate `other`, owner) and announced, so the successor resolves it (release + new, or ask the owner).
         Nothing is rebound twice: `rebind_successor` only takes claims the predecessor still owns."""
         snapshot = record.get('predecessor_claims')
-        if not isinstance(snapshot, list):
+        snapshot = [i for i in snapshot if isinstance(i, str)] if isinstance(snapshot, list) else []
+        # also the claims whose own history says the plugin rebound them away from the predecessor: no snapshot is needed for these,
+        # so an archive done before finish started, or a re-run after `archive-unknown`, still reports them
+        snapshot = sorted(set(snapshot) | set(ade_claims.claim_ids_rebound_from(record['predecessor'])))
+        if not snapshot:
             record.pop('claims_not_rebound', None)
             return
         taken = set(record.get('rebound_claims') or [])
@@ -1276,12 +1282,13 @@ class Service:
             fate = ade_claims.claim_fate(cid, self.actor())
             if fate.get('fate') == 'other':    # released, merged, expired or deleted claims are normal endings, not a loss
                 gone.append(fate)
+        gone = gone[:50]
         if gone:
             if record.get('claims_not_rebound') != gone:
                 self.progress('claim(s) the predecessor owned before its archive are not the successor\'s: '
                               + '; '.join(f"{g['id']} -> {g.get('owner')}" for g in gone[:8])
                               + ' (record claims_not_rebound): resolve them before writing there')
-            record['claims_not_rebound'] = gone[:50]
+            record['claims_not_rebound'] = gone
         else:
             record.pop('claims_not_rebound', None)
 

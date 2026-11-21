@@ -178,3 +178,11 @@ def test_m1_git_guard_lets_the_rebound_agent_write_on_first_launch(tmp_path, mon
         return ade_claims.evaluate(call, env)
     assert decide("agent-new").allowed
     assert not decide("agent-intruder").allowed
+
+
+def test_m1_the_caller_ident_survives_copy_and_pickle():
+    import copy
+    import pickle
+    ident = ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="s", PASEO_AGENT_ID="agent-new"))
+    for twin in (copy.copy(ident), copy.deepcopy(ident), pickle.loads(pickle.dumps(ident))):
+        assert twin == "s" and twin.paseo_agent == "agent-new"

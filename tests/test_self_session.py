@@ -2218,6 +2218,42 @@ def test_m2_a_rerun_keeps_the_report(setup, tmp_path):
     assert service.finish(path)['claims_not_rebound'] == first   # archived re-run: same snapshot, same report
 
 
+def test_m2_a_rerun_after_archive_unknown_still_reports_the_claim_the_plugin_gave_away(setup, tmp_path):
+    """Adversary M-1: the first finish archives but fails to read the receipt; the plugin hands c-race to agent-x; the re-run's
+    fresh snapshot no longer lists it, yet it is reported (snapshots merge, and the claim's history names the rebind)."""
+    import ade_claims
+    _claim('c-race', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    real = service.native
+    state = {'n': 0}
+
+    def native_call(*args, **kw):
+        out = real(*args, **kw)
+        if args[:2] == ('agent', 'archive'):
+            ade_claims.rebind_owner('c-race', from_agent=PRED, to_agent='agent-x', owner_state='archived')
+            state['n'] += 1
+            if state['n'] == 1:
+                raise ss.SessionError('archive outcome unknown')
+        return out
+    service.native = native_call
+    with pytest.raises(ss.SessionError, match='outcome unknown'):
+        service.finish(path, stable=0, timeout=100, poll=5)
+    out = service.finish(path, stable=0, timeout=100, poll=5)
+    assert out['status'] == 'archived'
+    assert out['claims_not_rebound'] == [{'id': 'c-race', 'fate': 'other', 'owner': 'agent-x'}]
+
+
+def test_m2_an_archive_done_before_finish_is_covered_by_the_claim_history(setup, tmp_path):
+    """No snapshot exists (the predecessor was archived by someone else first); the claim's history still names the rebind."""
+    import ade_claims
+    _claim('c-race', PRED, tmp_path)
+    service, native, path = finished_up_to_archive(setup)
+    ade_claims.rebind_owner('c-race', from_agent=PRED, to_agent='agent-x', owner_state='archived')
+    native.rows[PRED]['Archived'] = True
+    out = service.finish(path, stable=0, timeout=100, poll=5)
+    assert out['claims_not_rebound'] == [{'id': 'c-race', 'fate': 'other', 'owner': 'agent-x'}]
+
+
 @pytest.mark.parametrize(('field', 'value'), [
     ('Status', 'error'), ('Status', 'closed'), ('Status', None),
     ('stopReason', 'error'), ('StopReason', 'error'),

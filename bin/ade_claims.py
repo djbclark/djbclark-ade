@@ -606,6 +606,19 @@ def active_claim_ids_of(agent: str) -> list[str]:
     return sorted(str(c["id"]) for c in list_claims("active") if _owned_by_agent(c, agent))
 
 
+def claim_ids_rebound_from(agent: str) -> list[str]:
+    """Ids of ACTIVE claims whose `history` records a plugin rebind away from `agent` (`rebind_owner` writes
+    `rebound from AGENT (archived|gone) to NEW by agent.create.after`). Needs no snapshot, so ade-self-session finish still sees a
+    claim the plugin gave away before finish ran (M2: an archive done by someone else, or a finish re-run after `archive-unknown`)."""
+    prefix = f" rebound from {agent} ("
+    out = []
+    for c in list_claims("active"):
+        hist = c.get("history") if isinstance(c.get("history"), list) else []
+        if any(isinstance(h, str) and prefix in h and h.endswith(" by agent.create.after") for h in hist):
+            out.append(str(c["id"]))
+    return sorted(out)
+
+
 def claim_fate(claim_id: str, ident: str) -> dict[str, str]:
     """Where a claim stands now, for a caller that expected to own it: `mine` (is_mine for `ident`), `other` (an active claim
     someone else owns; `owner` names it), `inactive` (released, merged or expired) or `missing`. Read-only."""
@@ -755,13 +768,18 @@ def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
 class CallerIdent(str):
     """caller_ident's answer when a Claude session id wins and the process also has a PASEO_AGENT_ID: still equal to (and hashing as)
     the session id, with the Paseo id riding along as `.paseo_agent` for is_mine's one narrow M1 rule. An explicit ADE_CLAIM_ID never
-    carries it: that identity is the claim's own, set on open, and no other id is added to it."""
+    carries it: that identity is the claim's own, set on open, and no other id is added to it. Anything that rebuilds the string
+    (str(), strip(), an f-string, a slice) drops it and falls back to the plain session id, so compare idents as they come from
+    caller_ident. A process that inherits a Paseo agent's PASEO_AGENT_ID (a nested `claude -p`) is that agent for bind-owner-shaped claims."""
     paseo_agent: str
 
     def __new__(cls, value: str, paseo_agent: str):
         obj = super().__new__(cls, value)
         obj.paseo_agent = paseo_agent
         return obj
+
+    def __getnewargs__(self):    # copy, deepcopy and pickle rebuild through __new__(value, paseo_agent)
+        return (str(self), self.paseo_agent)
 
 
 def is_agent_env(env: Optional[dict[str, str]] = None) -> bool:
