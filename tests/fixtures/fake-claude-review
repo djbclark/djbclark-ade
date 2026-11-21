@@ -139,5 +139,6 @@ if is_check or not scen.get("no_result"):
     err = bool(scen.get("is_error")) and not is_check
     emit({"type": "result", "subtype": "error_during_execution" if err else "success", "is_error": err,
           "structured_output": None if (scen.get("no_structured") and not is_check) else output,
+          **({"session_id": scen["result_session_id"]} if "result_session_id" in scen else {}),
           "permission_denials": denials, "num_turns": 3, "result": json.dumps(output)})
 sys.exit(0 if is_check else scen.get("exit", 0))
