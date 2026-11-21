@@ -563,7 +563,11 @@ def test_swift_rows_keep_their_order_and_buttons_never_move_under_the_pointer():
     model, ui = swift_text()["Model.swift"], swift_text()["UI.swift"]
     assert "func mergeRows(" in model and "let clickGraceS = 0.7" in model and "func clickAllowed(" in model
     assert "rows = mergeRows(old: rows, new: s.rows)" in ui and "snap.rows" not in ui   # the window shows the merged rows, never the re-sorted snapshot
-    assert ui.count("clickAllowed(lastLayout:") >= 3   # Quit, Force Quit and the non-Wait bottom buttons
+    # the click grace is per control group (ClickGrace, PR 859): a row's change never delays another row's click
+    assert "struct ClickGrace" in model and "lastLayout" not in ui and "clickAllowed(lastLayout:" not in ui
+    assert ui.count('allowed("row:" + rows[sender.tag].appId)') >= 4   # Freeze, Quit, Force Quit and the other row buttons
+    assert 'allowed("entry:" + frozenEntries[sender.tag].id)' in ui    # Unfreeze on a Frozen entry
+    assert '!allowed("bottom")' in ui and "grace.note(" in ui and "grace.keepOnly(" in ui   # the non-Wait bottom buttons
     assert "setFrameTopLeftPoint(" in ui
     assert "b.refusesFirstResponder = true" in ui and "refusesFirstResponder = buttonRefusesFocus(spec.action)" in ui
     ob = ui[ui.index("if cfg.manual || cfg.demo {"):]
