@@ -127,33 +127,48 @@ TAIL_BYTES = 1 << 20  # far more than any --days window of ~110-byte lines
 UNGUARDED_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z lsp-guard: .*?; (\S+) starts UNGUARDED$")
 
 
-def _tail_text(path: str) -> str:
-    """The last TAIL_BYTES of a regular file as text (undecodable bytes replaced); "" for anything else or on any OS error
-    (a FIFO or /dev/zero must not hang or bloat the census)."""
-    p = os.path.expanduser(path)
+def _clean(s: str) -> str:
+    """No control or escape character reaches the terminal (process data and log text are not trusted)."""
+    return "".join(ch for ch in s if ch.isprintable())
+
+
+def _read_bounded(path: str, tail: bool) -> bytes:
+    """At most TAIL_BYTES of a regular file, the last ones when `tail` (a cut that lands inside a line drops that partial
+    line), else the first ones; b"" for anything else or on any OS error. The file is opened without blocking and checked
+    with `fstat` on the descriptor, so a FIFO swapped in after a path check cannot hang the census, and the read is capped
+    even when the file grows meanwhile."""
     try:
-        if not stat.S_ISREG(os.stat(p).st_mode):
-            return ""
-        with open(p, "rb") as f:
-            size = f.seek(0, os.SEEK_END)
-            start = max(0, size - TAIL_BYTES)
-            _ = f.seek(start)
-            raw = f.read()
+        fd = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
-        return ""
-    text = raw.decode("utf-8", errors="replace")
-    return text.split("\n", 1)[1] if start and "\n" in text else text  # drop the line the cut may have split
+        return b""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return b""
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            start = max(0, f.seek(0, os.SEEK_END) - TAIL_BYTES) if tail else 0
+            _ = f.seek(max(0, start - 1))  # one byte before the cut tells whether it landed on a line start
+            raw = f.read(TAIL_BYTES + (1 if start else 0))
+    except OSError:
+        return b""
+    finally:
+        os.close(fd)
+    if not start:
+        return raw
+    if raw[:1] == b"\n":
+        return raw[1:]
+    cut = raw.find(b"\n")
+    return raw[cut + 1:] if cut >= 0 else b""
 
 
 def guard_switch(settings_path: str) -> dict[str, Any]:
     """Where `ADE_LSP_ROOT_GUARD` is set: the `env` of Claude's settings.json and this process's environment (key and value of
-    this one variable only; None when unset or unreadable)."""
+    this one variable only; None when unset or unreadable; read like the log, regular file only and capped)."""
     value: Any = None
     try:
-        data = json.loads(Path(os.path.expanduser(settings_path)).read_text(errors="replace"))
+        data = json.loads(_read_bounded(settings_path, tail=False).decode("utf-8", errors="replace"))
         env = data.get("env") if isinstance(data, dict) else None
         value = env.get(SWITCH) if isinstance(env, dict) else None
-    except (OSError, ValueError):
+    except (ValueError, RecursionError):  # also an empty or truncated read
         pass
     return {"settings": value if isinstance(value, str) else None, "env": os.environ.get(SWITCH)}
 
@@ -168,7 +183,7 @@ def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str
         cutoff = datetime.min.replace(tzinfo=timezone.utc)
     by_server: dict[str, int] = {}
     newest = ""
-    for line in _tail_text(path).splitlines():
+    for line in _read_bounded(path, tail=True).decode("utf-8", errors="replace").splitlines():
         m = UNGUARDED_LINE.match(line)
         if m is None:
             continue
@@ -178,8 +193,9 @@ def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str
             continue
         if when < cutoff:
             continue
-        by_server[m.group(2)] = by_server.get(m.group(2), 0) + 1
-        newest = "".join(ch for ch in line if ch.isprintable())  # no escape sequence reaches the terminal
+        server = _clean(m.group(2))
+        by_server[server] = by_server.get(server, 0) + 1
+        newest = _clean(line)
     return {"path": path, "days": days, "total": sum(by_server.values()), "by_server": by_server, "newest": newest}
 
 
@@ -214,7 +230,7 @@ def main(argv: list[str]) -> int:
         extra = f"  footprint {c['footprint_mb']:>9.1f} MB" if "footprint_mb" in c else ""
         print(f"{name:20s} n={c['n']:3d}  rss {c['rss_mb']:>9.1f} MB{extra}")
         for root, n in sorted(cast(dict[str, int], c.get("roots", {})).items()):
-            print(f"    {n} x {root}")
+            print(f"    {n} x {_clean(root)}")
     if log is not None:
         if log["total"]:
             per = ", ".join(f"{s} {n}" for s, n in sorted(cast(dict[str, int], log["by_server"]).items()))
@@ -228,7 +244,8 @@ def main(argv: list[str]) -> int:
             print(f"{SWITCH}=off is set in {' and '.join(where)}: the guard is skipped at every LSP start and nothing is logged "
                   f"(deliberate; unset it and restart sessions to restore the RAM relief)")
         else:
-            print(f"{SWITCH}: not off")
+            print(f"{SWITCH}: not off in settings.json env or this process's environment "
+                  f"(other settings layers and running sessions are not checked)")
     return 0
 
 

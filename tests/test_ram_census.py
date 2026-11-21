@@ -161,3 +161,46 @@ def test_roots_reports_the_off_switch_from_settings_and_from_the_environment(tmp
     assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout
     r = _text(tmp_path, *base[:-1], str(tmp_path / "missing.json"))
     assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout
+
+
+def test_escapes_in_a_server_name_or_a_root_never_reach_the_terminal(tmp_path: Path) -> None:
+    log = tmp_path / "unguarded.log"
+    _ = log.write_bytes("2999-01-01T00:00:00Z lsp-guard: lsp-root-guard unavailable; mark\x1b]0;PWNED\x07\u009bman starts UNGUARDED\n".encode())
+    args = ["--roots", "--unguarded-log", str(log), "--claude-settings", str(tmp_path / NONE)]
+    r = _text(tmp_path, *args)
+    assert r.returncode == 0 and "\x1b" not in r.stdout and "\x07" not in r.stdout and "\u009b" not in r.stdout
+    assert "(mark]0;PWNEDman 1)" in r.stdout
+    got = json.loads(_text(tmp_path, "--json", *args).stdout)["_unguarded_log"]
+    assert list(got["by_server"]) == ["mark]0;PWNEDman"]
+
+
+def test_a_hostile_settings_file_never_breaks_or_hangs_the_census(tmp_path: Path) -> None:
+    base = ["--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings"]
+    fifo = tmp_path / "settings.fifo"
+    os.mkfifo(fifo)  # a blocking read would hang
+    r = _text(tmp_path, *base, str(fifo))
+    assert r.returncode == 0 and "not off" in r.stdout
+    deep = tmp_path / "deep.json"
+    _ = deep.write_text("[" * 200000)  # RecursionError in the JSON parser
+    r = _text(tmp_path, *base, str(deep))
+    assert r.returncode == 0 and "not off" in r.stdout and "Traceback" not in r.stderr
+    d = tmp_path / "adir"
+    d.mkdir()
+    r = _text(tmp_path, *base, str(d))
+    assert r.returncode == 0 and "not off" in r.stdout
+
+
+def test_a_cut_that_lands_on_a_line_start_keeps_that_line(tmp_path: Path) -> None:
+    log = tmp_path / "unguarded.log"
+    pad = "x" * (128 - len("2999-01-01T00:00:00Z lsp-guard: ; marksman starts UNGUARDED\n"))
+    line = f"2999-01-01T00:00:00Z lsp-guard: {pad}; marksman starts UNGUARDED\n"
+    assert len(line) == 128 and (1 << 20) % 128 == 0
+    _ = log.write_text(line * 8193)  # exactly one line more than the 1 MiB tail: the tail is 8192 whole lines
+    got = json.loads(_text(tmp_path, "--json", "--roots", "--unguarded-log", str(log),
+                           "--claude-settings", str(tmp_path / NONE)).stdout)["_unguarded_log"]
+    assert got["total"] == 8192
+
+
+def test_the_not_off_line_says_what_was_checked(tmp_path: Path) -> None:
+    r = _text(tmp_path, "--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings", str(tmp_path / NONE))
+    assert "other settings layers and running sessions are not checked" in r.stdout
