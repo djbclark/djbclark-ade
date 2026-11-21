@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""ade-pr-open — open a PR and fill its changelog fragment's PR number in one step (2026-11-21).
+
+A worker writes `changelog.d/<branch with / -> ->.md` before the PR exists, so it cannot know N
+(bin/changelog-fold wants every bullet to end `(#N)`; ten agent PRs went CI-red in three days on
+exactly that). Write the placeholder `(#PR)` instead, commit and push the branch, then:
+
+    bin/ade-pr-open [--existing N] [--message MSG] [--] <gh pr create args...>
+
+It runs `gh pr create` with your args, reads the new PR number from the URL gh prints, replaces
+the literal `(#PR)` at the end of a line of the branch's own fragment (bullets, wrapped ones on
+their last line; an optional final period is kept) with `(#N)`, runs `bin/changelog-fold --check`,
+and commits and pushes that one file with `bin/git-commit-own`. Nothing else is touched, and
+`changelog-fold --check` still rejects a leftover `(#PR)`, so skipping this helper fails CI.
+
+  --existing N   the PR already exists (a rerun after exit 4): skip `gh pr create`, use N.
+  --message MSG  the fill-in commit message (default: "docs: fill changelog fragment PR number (#N)").
+  gh args        pass --title and --body/--body-file (or --fill) yourself; gh cannot prompt here.
+
+Run it from the worktree of the branch, with the fragment committed and pushed (the PR needs the
+branch on the remote) and clean in the tree.
+
+exit codes: 0 done (also when the fragment holds no placeholder: the PR is opened and the check run);
+2 usage or preflight refusal, nothing created; 3 `gh pr create` failed (its exit code and output
+are shown, no PR number to fill); 4 the PR exists but filling, checking or pushing the fragment
+failed (the URL and the repair command are printed; rerun with --existing N).
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+EXIT_OK, EXIT_USAGE, EXIT_GH, EXIT_FOLLOWUP = 0, 2, 3, 4
+PLACEHOLDER = re.compile(r"\(#PR\)(\.?)[ \t]*$", re.MULTILINE)
+PR_URL = re.compile(r"/pull/(\d+)\s*$")
+HERE = Path(__file__).resolve().parent
+
+
+def run(argv, cwd, timeout=900, **kw):
+    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, **kw)
+
+
+def fail(code, msg):
+    print(f"ade-pr-open: {msg}", file=sys.stderr)
+    return code
+
+
+def fragment_for(root: Path):
+    """(branch, fragment path) of the checked-out branch; ValueError when detached."""
+    r = run(["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"], root)
+    branch = r.stdout.strip()
+    if r.returncode or not branch:
+        raise ValueError("detached HEAD: check out the PR's branch first")
+    return branch, root / "changelog.d" / (branch.replace("/", "-") + ".md")
+
+
+def fill(text: str, number: int):
+    """(new text, replacements): `(#PR)` at the end of a line becomes `(#N)`; nothing else does."""
+    return PLACEHOLDER.subn(lambda m: f"(#{number}){m.group(1)}", text)
+
+
+def write_atomic(path: Path, text: str):
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def main(argv):
+    # Our own options come first; the first other word (or `--`) starts gh's arguments verbatim,
+    # so `--title`, `--body` and the rest reach gh untouched.
+    existing, message, rest = None, None, list(argv)
+    while rest and rest[0] in ("--existing", "--message", "-h", "--help"):
+        flag = rest.pop(0)
+        if flag in ("-h", "--help"):
+            print(__doc__)
+            return EXIT_OK
+        if not rest:
+            return fail(EXIT_USAGE, f"{flag} needs a value")
+        value = rest.pop(0)
+        if flag == "--message":
+            message = value
+        elif value.isdigit():
+            existing = int(value)
+        else:
+            return fail(EXIT_USAGE, f"--existing needs a PR number, not {value!r}")
+    gh_args = rest[1:] if rest[:1] == ["--"] else rest
+    ns = argparse.Namespace(existing=existing, message=message)
+    if ns.existing is None and not gh_args:
+        return fail(EXIT_USAGE, "give the `gh pr create` arguments (or --existing N)")
+
+    cwd = Path.cwd()
+    top = run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"], cwd)
+    if top.returncode:
+        return fail(EXIT_USAGE, "not inside a git worktree")
+    root = Path(top.stdout.strip())
+    try:
+        branch, fragment = fragment_for(root)
+    except ValueError as exc:
+        return fail(EXIT_USAGE, str(exc))
+    rel = fragment.relative_to(root).as_posix()
+    if not fragment.is_file():
+        return fail(EXIT_USAGE, f"no fragment {rel} for branch {branch}: write it (with `(#PR)` on each "
+                    "bullet) and push it before opening the PR; nothing was created")
+    dirty = run(["git", "-C", str(root), "status", "--porcelain", "--", rel], root).stdout.strip()
+    if dirty and ns.existing is None:
+        return fail(EXIT_USAGE, f"{rel} has uncommitted changes ({dirty[:2].strip()}); commit and push it "
+                    "first; nothing was created")
+
+    if ns.existing is not None:
+        number = ns.existing
+        url = f"PR #{number}"
+    else:
+        gh = run(["gh", "pr", "create", *gh_args], root)
+        sys.stderr.write(gh.stderr)
+        if gh.returncode:
+            sys.stdout.write(gh.stdout)
+            return fail(EXIT_GH, f"gh pr create exited {gh.returncode}; no PR number to fill")
+        sys.stdout.write(gh.stdout)
+        url = gh.stdout.strip().splitlines()[-1] if gh.stdout.strip() else ""
+        m = PR_URL.search(url)
+        if not m:
+            return fail(EXIT_FOLLOWUP, f"gh pr create printed no PR URL I can read ({url!r}); find the number "
+                        f"and run: bin/ade-pr-open --existing N")
+        number = int(m.group(1))
+
+    repair = f"repair: bin/ade-pr-open --existing {number} (from {root})"
+    try:
+        text = fragment.read_text(encoding="utf-8")
+        new, count = fill(text, number)
+        if count:
+            write_atomic(fragment, new)
+        check = run([sys.executable, str(HERE / "changelog-fold"), "--repo", str(root), "--check"], root)
+        if check.returncode:
+            sys.stderr.write(check.stdout + check.stderr)
+            return fail(EXIT_FOLLOWUP, f"{url} is open but changelog-fold --check exited {check.returncode} "
+                        f"(fragment {'filled but not committed' if count else 'unchanged'}); fix {rel}, then {repair}")
+        pending = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", rel], root).stdout.strip())
+        if not count and not pending:
+            print(f"ade-pr-open: {url}: {rel} has no `(#PR)` placeholder and is clean; fragment check passed, nothing to commit")
+            return EXIT_OK
+        msg = ns.message or f"docs: fill changelog fragment PR number (#{number})"
+        done = run([str(HERE / "git-commit-own"), msg, rel], root)
+        sys.stdout.write(done.stdout)
+        sys.stderr.write(done.stderr)
+        if done.returncode:
+            return fail(EXIT_FOLLOWUP, f"{url} is open, fragment filled, but git-commit-own exited "
+                        f"{done.returncode}; resolve that, then publish {rel}")
+    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        return fail(EXIT_FOLLOWUP, f"{url} is open but filling {rel} failed: {exc}; {repair}")
+    print(f"ade-pr-open: {url}: filled {count} placeholder(s) in {rel} (or committed an earlier fill), checked, committed and pushed")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
