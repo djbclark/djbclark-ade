@@ -680,8 +680,10 @@ for building the aggregator.
    `initializationOptions.maxTsServerMemory` and passes it to tsserver as `--max-old-space-size` (the same ask is open as
    anthropics/claude-plugins-official#6800); a lower cap has caused tsserver restart loops for others (schwepps/claude-mods#1
    kept 3072), so 2048 is a test value, not a verified one: the two 4.2 GB tsservers in `~/src/paseo` are the largest single
-   item in 12.1 and the place to try it. The official `pyright-lsp` plugin (`pyright-langserver`, not installed here) and
-   `typescript-lsp` entries duplicate `local-lsp`; disabling them is the operator's call (`enabledPlugins`).
+   item in 12.1 and the place to try it. The official `pyright-lsp` plugin (`pyright-langserver`, installed at `/opt/homebrew/bin`, enabled) and
+   `typescript-lsp` entries duplicate `local-lsp` and would root at the home directory unguarded if Claude Code ever preferred
+   them (2026-11-21: `local-lsp` wins per extension, 0 `pyright-langserver` against 12 `basedpyright-langserver` processes; the
+   precedence is not documented). Disabling them is the operator's call (`enabledPlugins`). After #290 the guarded entries fall back to the plain server when `lsp-root-guard` is missing.
 
 ### 12.4 Estimated saving
 
