@@ -1,3 +1,0 @@
-### Added
-
-- `skills/herdr/SKILL.md`: the official herdr skill, tracked from `herdr --skill` and linked into every TUI by `bin/skill-everywhere --all`. It is the loosened description (upstream's "do not use merely for delegation or parallel work" kept), an ADE rules overlay that overrides the upstream text (messages go by `paseo send` with a named ack or SendMessage with two reply routes, never typed into an agent's pane; agents launch through `route_agent.py plan` and `ade-worker-run`; pane builds go through `bgrun`; `HERDR_ENV` may be inherited), and the untouched upstream body. `bin/herdr-skill-refresh` regenerates it (`--check` reports drift, writes only from a linked worktree, atomic write, clear errors). Listed in `docs/skills.md`. (#855)

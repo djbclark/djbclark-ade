@@ -1,3 +1,0 @@
-### Added
-
-- `bin/ade_settings_apply.py`: `--allow-env-add NAME` and `--allow-env-remove NAME` (each repeatable, empty by default) let a caller-named `env` key be added (in the template, absent from live, also when live has no `env` block) or removed (in live, no longer in the template; a template that still has it removes nothing). The `--apply` "live key would disappear" refusal exempts exactly the removed `/env/NAME` paths, so the #844 case (drop `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, add `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE`) applies in one run; no value is changed or printed. The `env` block is still never auto-added (mirrors `codex-env-policy-apply --allow-set-keys`); `ade update` passes neither flag. (#846)
