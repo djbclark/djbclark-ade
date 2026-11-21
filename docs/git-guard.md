@@ -189,7 +189,7 @@ every write is refused as `foreign-claim`. Trust level: `PASEO_AGENT_ID`, `ADE_C
 that inherits `PASEO_AGENT_ID` (a nested `claude -p`, an in-process sub-agent) is that agent. This stops accidents between
 cooperating agents, not forgery (the accepted weakness of [peer-trust.md](peer-trust.md), AGENTS.md Trust). A refusal that
 names the caller itself as an owner says so and never tells it to message itself; it offers `bind-owner` only when that can succeed
-(`owner.agent` empty or the caller's own Paseo agent id, and the claim has no `owner.session`: a plain `bind-owner --owner-agent` does not clear a session, so a session-bound claim still refuses the caller after a bind that exits 0; only an explicit empty `--owner-session ''` clears it, and the refusal never advises that) and otherwise advises `release` plus a new claim; for a session-bound claim that advice says to release only once the owning session has finished (while it is live the refusal is the guard working).
+(`owner.agent` empty or the caller's own Paseo agent id, and the claim has no `owner.session`: `bind-owner --owner-agent` alone leaves a session in place, so a session-bound claim still refuses the caller after a bind that exits 0; any `--owner-session` value replaces or clears it (an empty one clears it, another session's id moves the binding to that session), and the refusal never advises that) and otherwise advises `release` plus a new claim; for a session-bound claim that advice says to release only once the owning session has finished (while it is live the refusal is the guard working).
 
 ## The hooks (refs)
 
