@@ -1188,7 +1188,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
 
 # ----------------------------------------------------------------------------------------------- helper prune
 
-# Machine-wide prune of finished Baton "[Handoff writer]" helpers (2026-11-14). Baton (djbclark/paseo-baton, server/controller.ts
+# Machine-wide prune of finished Baton "[Handoff writer]" helpers (2026-11-14). Baton (frdminc/paseo-baton, server/controller.ts
 # spawnHandoffWriter) creates one writer agent per idle parent at its context threshold, titled `[Handoff writer]`, labelled
 # `baton-writer=1` and `paseo.parent-agent-id=<parent>`, in the parent's workspace; it keeps the writer idle so its prompt can be
 # read, and only Paseo's cascade (the parent's archive) or the next handoff of the same parent removes it. 83 of them filled swap.

@@ -132,7 +132,7 @@ There is no default; missing or invalid input refuses installation. This command
 
 ## Helper prune: `bin/ade-tidy prune` every 30 minutes (2026-11-14)
 
-Why: the Baton plugin ([djbclark/paseo-baton](https://github.com/djbclark/paseo-baton), `server/controller.ts` `spawnHandoffWriter`) starts one
+Why: the Baton plugin ([frdminc/paseo-baton](https://github.com/frdminc/paseo-baton), `server/controller.ts` `spawnHandoffWriter`) starts one
 `[Handoff writer]` agent per parent at its context threshold, in the parent's workspace, and keeps it idle so its prompt can be
 read; only the parent's archive (Paseo's cascade) or the next handoff of the same parent removes it. On 2026-11-14 83 Claude sessions
 (57 that morning) filled swap (12.5 of 13.3 GB). What Baton records on a helper: title `[Handoff writer]`, labels `baton-writer=1`

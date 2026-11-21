@@ -112,7 +112,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
         Hard dependency by operator ruling of 2026-11-07. Also **cswap** (`claude-swap`), which aiuse reads.
       - **Paseo** (`getpaseo/paseo`), its skill bundle (`npx skills add getpaseo/paseo`, set user-invocable-only),
         and the Paseo plugins of the J6 set, each with its settings from `[install.paseo_plugins]`: session-guard,
-        baton, asks, questions-please (`djbclark/paseo-plugin-questions-please`), tell-agent, resources (`zedobaia/resources`, mac host RAM; vitals on Linux only — `docs/paseo-host-ram-plugins.md`), skills,
+        baton, asks, questions-please (`frdminc/paseo-plugin-questions-please`), tell-agent, resources (`zedobaia/resources`, mac host RAM; vitals on Linux only — `docs/paseo-host-ram-plugins.md`), skills,
         pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
         (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
       - **The operator's own Paseo plugins and forks**, each as a Paseo plugin component:
@@ -120,12 +120,12 @@ and security sequencing in the older plan; other unfinished planning stays intac
           (server core, no UI yet, 2026-11-07). Its `scripts/sync-plugins.mjs` installs, disabled, every plugin one
           daemon has onto the daemons that lack it, which is how `just update` keeps the Mac and vps-primary in step.
           An earlier draft of this plan listed it as a consumer of djbclark-ade; that was wrong, corrected 2026-11-07.
-        - `djbclark/paseo-plugin-questions-please` (above) and `djbclark/paseo-plugin-dann-workspace-accent`.
-        - The forks `djbclark/paseo-baton`, `djbclark/paseo-plugins` and `djbclark/paseo-transcript-search`: install
+        - `frdminc/paseo-plugin-questions-please` (above) and `frdminc/paseo-plugin-dann-workspace-accent`.
+        - The forks `frdminc/paseo-baton`, `frdminc/paseo-plugins-gpambrozio` and `djbclark/paseo-transcript-search`: install
           the upstream unless the fork carries a change not yet upstreamed (standing order 8), and record which one in
           `[install]`. The baton fork was pushed on 2026-11-07, while the J6 set names upstream baton (dennyferra):
           decide which one at build time.
-        - The Paseo fork `djbclark/paseo` follows the same rule: upstream Paseo unless the fork is needed.
+        - The Paseo fork `frdminc/paseo` follows the same rule: upstream Paseo unless the fork is needed.
       - **`graft`** (`@nanonets/graft`), **`gh`**, **`uv`**, **`just`**, `git`, and the modern-CLI tools
         (site-djbclark's `skills/setup-modern-cli` list moves into `[install]`).
       - **The provider clients:** Pi, plus vendor clients required for monthly plans (Claude Code, Codex,
@@ -159,7 +159,7 @@ and security sequencing in the older plan; other unfinished planning stays intac
         alternative to a self-hosted firecrawl.
       - **Greptile and CodeRabbit:** their CLIs or apps, keys in `sudo-secretspec`, and their skills (from site-djbclark)
         linked.
-      - **The herdr bridges:** `herdr4paseo` and `paseo4herdr` (`djbclark/paseo4herdr`) and `bin/herdr-server-run`, the
+      - **The herdr bridges:** `herdr4paseo` and `paseo4herdr` (`frdminc/paseo4herdr`) and `bin/herdr-server-run`, the
         last herdr pieces, only for someone who still runs herdr.
    4. **Suggested, not installed: hosting.** A user who wants an always-on agent host (what vps-primary is here) is
       pointed at **OVHcloud** (operator, 2026-11-07: "suggest OVHcloud not Hetzner"). site-djbclark's `ovhcloud-api`

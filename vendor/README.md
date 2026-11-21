@@ -25,7 +25,7 @@ The complete component list, with each one's install, update and probe command, 
   github.com/frdminc/sudo-secretspec (`brew install frdminc/sudo-secretspec/sudo-secretspec`).
 - **peer-link** — Grok Bot's channel code: github.com/frdminc/peer-link; the sender is Hermes'
   `tell_chief_of_staff.py` (`../skills/tell-chief-of-staff/SKILL.md`).
-- **herdr4paseo / paseo4herdr** — the last herdr bridges: github.com/djbclark/paseo4herdr.
+- **herdr4paseo / paseo4herdr** — the last herdr bridges: github.com/frdminc/paseo4herdr.
 - **paseo-runner** — the operator's Paseo plugin (script packs as button tabs; `scripts/sync-plugins.mjs` syncs
   plugins across daemons): github.com/djbclark/paseo-runner. Other own Paseo repos: `../docs/setup-plan.md` S3.
 - **site-djbclark** — the moved skills, `bin/fleet-watch` and `home-agents.md`; its `skills/` is the third

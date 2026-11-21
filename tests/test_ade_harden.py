@@ -447,8 +447,8 @@ def test_observe_uncovered_non_fork_inventory(tmp_path):
                     '"name":"djbclark-ade","owner":"djbclark"}\n'
                     '{"full_name":"djbclark/other","fork":false,'
                     '"name":"other","owner":"djbclark"}\n'
-                    '{"full_name":"djbclark/paseo","fork":true,'
-                    '"name":"paseo","owner":"djbclark"}\n'
+                    '{"full_name":"djbclark/core","fork":true,'
+                    '"name":"core","owner":"djbclark"}\n'
                 ),
                 stderr="",
             )
@@ -502,7 +502,7 @@ def test_observe_uncovered_non_fork_inventory(tmp_path):
     assert "djbclark/other" in unc.found
     forks = next(f for f in findings if f.setting == "inventory.forks")
     assert forks.status == "ok"
-    assert "djbclark/paseo" in forks.found
+    assert "djbclark/core" in forks.found
 
 
 def test_ade_toml_dual_source_refused_only_when_it_carries_hardening(tmp_path):
