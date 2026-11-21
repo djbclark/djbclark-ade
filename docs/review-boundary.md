@@ -90,13 +90,26 @@ Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus revi
   (`git ls-files -s` mode 120000) and on disk. It refuses with exit 2, naming the link, when any of them resolves
   outside the worktree (a dangling link included). A relative Glob or Grep pattern is also resolved against its base,
   so `link/**` counts as outside. A repository that commits outward symlinks (site-djbclark's `skills/`) cannot be
-  reviewed through this boundary.
+  reviewed through this boundary. A link that stays inside the worktree (`CLAUDE.md -> AGENTS.md`, committed in every
+  repo here) is allowed, and a Read of one is judged by where it resolves; a Read of a symlink that lies outside the
+  worktree trips unless it is the spool file below (which must be a regular file, never a link).
 - **The deny list.** It is the hand list plus every `deny` pattern in `config/secret-deny.toml`, or in the rendered
   `config/secret_deny_policy.json` where Python has no `tomllib`. A file that exists but does not parse refuses every
   launch with exit 2. The TOML's `allow` exceptions do not carry over.
 - **The tripwire.** It acts after Claude may already have run a call. It is a second layer behind
   `blockReadsOutsideWorkingDirectories` and the deny rules, not the boundary itself. A passed self-check is cached under
   `REVIEW_LAUNCH_STATE_DIR` and trusted as found, because the caller already controls the launch.
+- **The tool-results spool (2026-11-21, one exception to the tripwire).** Claude writes a tool result too large for the
+  context to `$CLAUDE_CONFIG_DIR` (default `~/.claude`)`/projects/<encoded worktree>/<session id>/tool-results/toolu_*.txt`
+  and tells the model to Read it; without an exception that read left the worktree and killed the review (exit 77) after
+  the work was paid for. A Read is exempt only when the path is exactly a direct child of that run's own spool, the
+  file is a regular file (no symlink below the configuration directory, which is itself resolved, and the spool root not redirected), the name matches `toolu_*.txt`, and
+  the session id comes from the CLI's init event and agrees with its result event. Grep and Glob get no exception, an
+  unknown session gets none, and `--json` reports the count as `spool_reads` next to `session_id`. The folder name is
+  Claude Code's own encoding of the worktree path (non-alphanumerics to `-`, and for a path over 200 characters the first
+  200 plus `-` and a base-36 signed 32-bit hash); `claude_project_name` copies it, so a change in a later CLI makes
+  the exception stop matching, which fails closed (exit 77 again), and `tests/test_review_launch.py` checks it against
+  an independent JS encoder.
 
 Every launch is `claude -p --output-format stream-json --verbose --tools … --permission-mode default --setting-sources ""
 --strict-mcp-config --no-session-persistence --settings SETTINGS --json-schema … [--model] [--max-turns] -- PROMPT`, in the
