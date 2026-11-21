@@ -6,9 +6,12 @@ in docs/mcp-on-demand.md section 12: chrome-devtools, graft-mcp, extrabar, based
 ts-language-server, claude, codex. `--footprint` also runs `footprint -p PID` on each matched process (macOS; counts
 compressed and swapped pages that `ps rss` leaves out; slow for hundreds of processes). `--roots` adds the working
 directory of each LSP server's parent, which is the workspace root Claude Code passes to it, and flags container
-roots with the `lsp-root-guard --check` rule.
+roots with the `lsp-root-guard --check` rule, and reports the unguarded-start log of the site-public-djbclark `local-lsp`
+plugin (`~/.local/state/lsp-guard/unguarded.log`, one line each time a guarded entry fell back to the plain server because
+the guard was missing or failed `--check /`; a deliberate `ADE_LSP_ROOT_GUARD=off` is not logged): the count per server
+over the last `--days` (default 7) and the newest line, so a silent loss of the RAM relief shows up here.
 
-Usage:  bin/ram-census [--json] [--footprint] [--roots] [--ps-file FILE]
+Usage:  bin/ram-census [--json] [--footprint] [--roots] [--ps-file FILE] [--unguarded-log FILE] [--days N]
 Exit:   0 ok, 2 bad arguments. It starts nothing, kills nothing, and prints no command line, only class names,
         counts, megabytes and root directories.
 """
@@ -18,9 +21,11 @@ import argparse
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -109,12 +114,44 @@ def census(rows: list[tuple[int, int, int, str]], want_fp: bool, want_roots: boo
     return out
 
 
+DEFAULT_UNGUARDED_LOG = "~/.local/state/lsp-guard/unguarded.log"
+UNGUARDED_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z lsp-guard: .*?; (\S+) starts UNGUARDED$")
+
+
+def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str, Any]:
+    """Recent fallbacks recorded by the local-lsp plugin: {"path", "days", "total", "by_server", "newest"} (an unreadable or
+    missing file is zero entries; a line that does not parse is skipped)."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        cutoff = now - timedelta(days=days)
+    except OverflowError:  # a window longer than the calendar: everything counts
+        cutoff = datetime.min.replace(tzinfo=timezone.utc)
+    by_server: dict[str, int] = {}
+    newest = ""
+    try:
+        text = Path(os.path.expanduser(path)).read_text(errors="replace")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        m = UNGUARDED_LINE.match(line)
+        if m is None:
+            continue
+        when = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        if when < cutoff:
+            continue
+        by_server[m.group(2)] = by_server.get(m.group(2), 0) + 1
+        newest = line
+    return {"path": path, "days": days, "total": sum(by_server.values()), "by_server": by_server, "newest": newest}
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--footprint", action="store_true")
     ap.add_argument("--roots", action="store_true")
     ap.add_argument("--ps-file")
+    ap.add_argument("--unguarded-log", default=DEFAULT_UNGUARDED_LOG)
+    ap.add_argument("--days", type=int, default=7)
     a = ap.parse_args(argv)
     if a.ps_file:
         try:
@@ -125,14 +162,22 @@ def main(argv: list[str]) -> int:
     else:
         text = subprocess.run(["ps", "-axo", "pid,ppid,rss,command"], capture_output=True, text=True, check=True).stdout
     res = census(parse_ps(text), a.footprint, a.roots)
+    log = unguarded_log(a.unguarded_log, a.days) if a.roots else None
     if a.json:
-        print(json.dumps(res, indent=1, sort_keys=True))
+        print(json.dumps({**res, "_unguarded_log": log} if log is not None else res, indent=1, sort_keys=True))
         return 0
     for name, c in sorted(res.items()):
         extra = f"  footprint {c['footprint_mb']:>9.1f} MB" if "footprint_mb" in c else ""
         print(f"{name:20s} n={c['n']:3d}  rss {c['rss_mb']:>9.1f} MB{extra}")
         for root, n in sorted(cast(dict[str, int], c.get("roots", {})).items()):
             print(f"    {n} x {root}")
+    if log is not None:
+        if log["total"]:
+            per = ", ".join(f"{s} {n}" for s, n in sorted(cast(dict[str, int], log["by_server"]).items()))
+            print(f"UNGUARDED starts, last {log['days']} days: {log['total']} ({per}); newest: {log['newest']}")
+            print(f"    the RAM relief was off for those servers; see {log['path']}")
+        else:
+            print(f"unguarded starts, last {log['days']} days: none ({log['path']})")
     return 0
 
 

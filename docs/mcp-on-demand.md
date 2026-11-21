@@ -661,9 +661,12 @@ for building the aggregator.
    project root, and every other message in both directions, passes through byte for byte. It never uses a shell and it
    writes one line to stderr when it strips a root. `--check ROOT` prints `container` or `project`. Tests:
    `tests/test_lsp_root_guard.py` (fixture server that echoes the `initialize` it received).
-3. **`bin/ram-census [--json] [--footprint] [--roots]`** prints the table in 12.1 from `ps`, and with `--roots` lists each LSP
-   server's workspace root and whether the guard would strip it. Read-only; it starts and kills nothing. Tests:
-   `tests/test_ram_census.py`.
+3. **`bin/ram-census [--json] [--footprint] [--roots] [--unguarded-log FILE] [--days N]`** prints the table in 12.1 from `ps`, and with
+   `--roots` lists each LSP server's workspace root and whether the guard would strip it, then reports the local-lsp plugin's
+   `~/.local/state/lsp-guard/unguarded.log` (site-public-djbclark 1.0.7: a line each time a guarded entry fell back because the
+   guard was missing or failed `--check /`; a deliberate `ADE_LSP_ROOT_GUARD=off` is not logged): count per server over the last
+   `--days` (default 7) and the newest line, so a silent loss of the RAM relief shows up in the census (JSON key
+   `_unguarded_log`). Read-only; it starts and kills nothing. Tests: `tests/test_ram_census.py`.
 4. **`ade-update` step 3d** links `lsp-root-guard` into `~/.local/bin` (`BIN_LINKS`), so a plugin entry can say
    `"command": "lsp-root-guard"` (`~/.local/bin` is on this session's PATH; whether Claude Code's LSP launcher uses the
    same PATH is not verified: step 12.5.3 checks it).
