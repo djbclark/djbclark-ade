@@ -153,8 +153,8 @@ def _self_text(ws, owner, caller):
 
 
 def test_refusal_offers_bind_owner_only_when_it_can_succeed(tmp_path):
-    # owner.agent empty (the caller is only owner.record), and owner.agent already the caller's own id
-    for i, owner in enumerate([dict(owner_record=W), dict(owner_agent=W, owner_session="S1")]):
+    # owner.agent empty (the caller is only owner.record), and owner.agent already the caller's own id; no owner.session
+    for i, owner in enumerate([dict(owner_record=W), dict(owner_agent=W), dict(owner_agent=W, owner_record=W)]):
         text, cid = _self_text(_sub(tmp_path, f"a{i}"), owner, W)
         assert f"bind-owner --id {cid} --owner-agent {W}" in text, owner
         assert "release this claim" not in text, owner
@@ -163,12 +163,17 @@ def test_refusal_offers_bind_owner_only_when_it_can_succeed(tmp_path):
 def test_refusal_advises_release_and_new_when_bind_owner_would_refuse(tmp_path):
     cases = [(dict(owner_agent="claude", owner_record=W, owner_session="S1"), W),    # a label owns the claim (probe F)
              (dict(owner_agent=OTHER, owner_record=W), W),                           # another Paseo agent is owner.agent
-             (dict(owner_agent="codex", owner_record="codex"), "codex")]             # the caller itself is a label
+             (dict(owner_agent="codex", owner_record="codex"), "codex"),             # the caller itself is a label
+             (dict(owner_agent=W, owner_session="S1"), W),                           # session-bound: bind-owner exits 0, still refused
+             (dict(owner_record=W, owner_session="S1"), W),
+             (dict(owner_agent=W, owner_record=W, owner_session="S1"), W)]
     for i, (owner, caller) in enumerate(cases):
         text, cid = _self_text(_sub(tmp_path, f"b{i}"), owner, caller)
         assert "release this claim" in text and f"ade_claims.py release --id {cid}" in text, (owner, caller)
         assert "bind-owner --id" not in text.replace("bind-owner cannot replace", ""), (owner, caller)
         assert "Do not message yourself" in text
+        if owner.get("owner_session"):
+            assert "bound to a session" in text, (owner, caller)
 
 
 def _sub(tmp_path, name):
