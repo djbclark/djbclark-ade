@@ -164,11 +164,12 @@ fable_gated_efforts = ["xhigh", "max"]
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 # A token with `*` is a family (`gpt-*-astra` matches gpt-6-astra and gpt-6.2-astra alike, 2026-11-21).
 frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
-# Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3).
+# Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3); the cursor-grok service's newest Grok likewise.
 # `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
 # estimate floor, and a Neon judgment/code slice is not a frontier model; the per-wave frontier cap still counts a Neon
-# `frontier` slice, because it is keyed on the kind and the pool, not on the model.
-frontier_slice_models = ["gemini-*-neon"]
+# `frontier` slice, because it is keyed on the kind and the pool, not on the model. A token matches the WHOLE model id (`grok-*` is
+# grok-4.7, not grok-4.7-fast or grok-3-mini), so it is written as the id family, effort word included.
+frontier_slice_models = ["gemini-*-neon-high", "grok-*"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
 # reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
@@ -428,6 +429,18 @@ agent = "pi"
 measured_only = true
 burn_first = true
 models = { code = "cursor/composer-2.5", mechanical = "cursor/composer-2.5", bulk = "cursor/composer-2.5", research = "cursor/composer-2.5" }
+
+[[service]]
+name = "cursor-grok"
+cli = "cursor-agent via Paseo's native cursor provider (newest Grok)"
+good_at = { frontier = 4, research = 14 }
+billing = "subscription"
+judgment_tier = true
+note = "The newest xAI Grok model on Cursor's third-party model pool (operator 2026-11-21: research lead and reviewer, skills/research 1b). Not the never-routed standalone grok CLI, and never the GrokBot Chief-of-Staff pool (grok-bot stays in never_route)."
+shares_pool = "cursor"        # the Cursor third-party pool reading (the `cursor` row), as cursor-cloud does
+max_parallel = 1
+agent = "cursor"
+models = { frontier = "grok-*", research = "grok-*" }
 
 # Pi direct-model profile, 2026-11-08. Ranks are conservative fitness priors, not benchmark scores.
 # Flash receives 3x the Coding Plan quota of GLM-5.3; use high for substantive work rather than
