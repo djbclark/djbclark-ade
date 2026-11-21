@@ -56,14 +56,18 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    questions, sleeping, or claiming a choice is waiting in a visible picker.
    Keep unanswered decisions pending. A preselected option or elapsed time is
    not an answer. Honor the native tool's question schema and limits.
-3a. **Antigravity under Paseo:** its `ask_question` picker does not work yet
-   (getpaseo/paseo#9355). Even after #10193 moved Paseo to `agy acp` (0.17.0-beta.1),
-   the ACP client sends `clientCapabilities: {}` without `createElicitation`, so
-   `ask_question` returns an empty `A1: ` in about 1 s. An Antigravity session hosted
-   under Paseo skips `ask_question` and goes straight to rule 4's numbered text walk
-   until ACP elicitation is wired.
+3a. **Antigravity under Paseo:** its `ask_question` has no working picker here.
+   getpaseo/paseo#9355 asked for one and was closed by getpaseo/paseo#10193
+   (0.17.0-beta.1, which moved Paseo to `agy acp`), but #10193 shipped without
+   native question forms (its non-goals defer them to follow-up work, and no open
+   follow-up issue was found 2026-11-21). The ACP client sends
+   `clientCapabilities: {}` without `createElicitation`, so `ask_question` returns
+   an empty `A1: ` in about 1 s. An Antigravity session hosted under Paseo skips
+   `ask_question` and goes straight to rule 4's numbered text walk until ACP
+   elicitation is wired.
 4. **No native chooser (no `AskUserQuestion`/`question`/`clarify` tool in the
-   function list, and not Grok Bot, which has rule 5):** the walk falls back
+   function list, or Antigravity under Paseo, rule 3a, whose `ask_question` returns
+   empty; and not Grok Bot, which has rule 5):** the walk falls back
    to a numbered text walk, still one
    item per message, still recommendation first. Do NOT refuse with a one-line
    "I cannot prompt" and stop. Instead:
@@ -78,7 +82,8 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    3. Say the queue size up front (`1/2`), and offer `stop` once per question.
       Keep it to a single short paragraph — do not re-dump the whole queue
       every turn.
-   4. This fallback is for runtimes **without** a picker only. Any agent that
+   4. This fallback is for runtimes **without a working** picker only (rule 3a
+      counts). Any agent that
       HAS `AskUserQuestion` / `question` / `clarify` keeps using it (rules
       1–3 above) and never drops to this text fallback; Grok Bot keeps its
       widget (rule 5).
