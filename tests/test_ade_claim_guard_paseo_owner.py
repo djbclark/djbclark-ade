@@ -174,6 +174,9 @@ def test_refusal_advises_release_and_new_when_bind_owner_would_refuse(tmp_path):
         assert "Do not message yourself" in text
         if owner.get("owner_session"):
             assert "bound to a session" in text, (owner, caller)
+            assert "owning session (owner.session) has finished" in text, (owner, caller)
+            assert "never clears" not in text and "cannot clear" not in text
+            assert "plain" not in text and "re-binding is not the fix" in text    # no hint that another bind form clears it
 
 
 def _sub(tmp_path, name):
