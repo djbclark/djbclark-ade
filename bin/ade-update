@@ -997,7 +997,10 @@ def update(rep, args, repo):
                            f"{stuck_rows_hint(script, repo, fixable)}; links may be partly made; rerun after fixing")
             after, _ = check_skills(script, repo, fixable)
             left = {(s, tui) for s, tui, st in after if classify(st) != "ok"}
-            skills["linked_now"] = sorted(set(fixable) - {s for s, _ in left})
+            # a skill is linked now when none of the rows this run could fix is still bad: a stuck row of the same
+            # skill (paseo/claude beside the Hermes link just made) must not hide the link that was made
+            fixed_rows = {(s, tui) for s, tui, st in bad if classify(st) == "fixable"}
+            skills["linked_now"] = sorted(s for s in fixable if not any(p in left for p in fixed_rows if p[0] == s))
             rep.say(f"  ran: {shlex.join([script, *fixable])} (rc={rc}); linked now: {', '.join(skills['linked_now']) or 'none'}")
             bad = [b for b in bad if b[0] not in fixable or (b[0], b[1]) in left]
             for s, tui, st in bad:

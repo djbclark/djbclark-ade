@@ -257,6 +257,7 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
 }
 
 rc=0
+paseo_named=0  # `--remove paseo` names the paseo step explicitly
 # Skill links can be healthy while Codex's shared instructions point at a
 # retired home-agents.md location. Report that separately in read-only checks.
 codex_instructions="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
@@ -272,6 +273,7 @@ for name in "$@"; do
   elif [[ -f $site_root/$name/SKILL.md ]]; then src="$site_root/$name"
   elif [[ -f $chrome_root/$name/SKILL.md ]]; then src="$chrome_root/$name"
   elif [[ $name == paseo ]]; then
+    paseo_named=1
     continue  # not a skill of ours: `skill-everywhere paseo` is only the paseo_step below (ade-update's fix command)
   else
     if [[ $mode != remove ]]; then
@@ -350,13 +352,14 @@ done
 # Link mode creates that one link (idempotent; a foreign real dir at the target is left alone and is an error, like a
 # collision with one of our own names; a missing source creates nothing). --check fails (exit 1, `error:` line on
 # stderr) when `paseo` is absent from any live target: claude, codex/pi or hermes, a target being live only when its
-# client is installed. --remove leaves it alone. The step prints a `== paseo` section in link mode and with --all.
+# client is installed. `--remove paseo` removes the Hermes link when it is ours (a link to the Paseo copy), and other
+# --remove runs leave it alone. The step prints a `== paseo (managed by Paseo)` section in link and remove modes and with --all.
 paseo_src="$HOME/.agents/skills/paseo"
 paseo_step() {
-  [[ $mode != remove ]] || return 0
+  [[ $mode != remove ]] || ((paseo_named)) || return 0  # --remove acts on the Hermes link only when `paseo` is named
   local bin dir link state have_src=0 show=0 hint
   [[ -f $paseo_src/SKILL.md ]] && have_src=1
-  if [[ $mode == link ]] || ((all)); then show=1; fi
+  if [[ $mode != check ]] || ((all)); then show=1; fi
   ((!show)) || echo "== paseo (managed by Paseo)"
   while IFS='|' read -r bin dir; do
     [[ -z $bin ]] && continue
@@ -383,6 +386,10 @@ paseo_step() {
           printf 'error: paseo skill is %s on %s (%s): %s\n' "$state" "$bin" "$link" "$hint" >&2
           rc=1
         fi ;;
+      remove)
+        if [[ $bin != hermes ]]; then printf '  %-13s %s (Paseo-managed; not touched)\n' "$bin" "$state"
+        elif [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
+        else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         [[ $bin == hermes ]] || { printf '  %-13s %s (Paseo-managed; not touched)\n' "$bin" "$state"; continue; }
         if [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"

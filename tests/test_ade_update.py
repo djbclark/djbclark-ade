@@ -335,6 +335,13 @@ def test_a_paseo_gap_line_does_not_hide_a_real_helper_failure(env):
     assert "bash: boom" in r.stdout
 
 
+def test_linked_now_names_paseo_when_a_stuck_row_of_it_remains(env):  # PR 874 adversary low
+    env.skills({"alpha": [["claude", "linked"]], "__paseo__": [["hermes", "missing"], ["claude", "missing"]]})
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr  # the claude row is Paseo's to sync: still stuck
+    assert "linked now: paseo" in r.stdout and "linked now: none" not in r.stdout
+
+
 def test_unfixable_skill_link_is_reported_and_blocks_the_state_record(env):
     env.skills({"alpha": [["claude", "real dir/file (not ours)"]]})
     r = env.run()
