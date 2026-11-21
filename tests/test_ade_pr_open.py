@@ -177,7 +177,8 @@ def test_existing_flag_reruns_the_fill_without_gh(env):
     r = open_pr(repo, e, "--existing", "42", "--message", "fill it")
 
     assert r.returncode == 0, r.stderr
-    assert not log.exists()
+    calls = log.read_text().splitlines()  # only the verification read: no `pr create`
+    assert calls == ["pr view 42 --json number,headRefName,url"], calls
     assert "one (#42)" in (repo / FRAGMENT).read_text()
     assert git(repo, "log", "-1", "--format=%s") == "fill it"
 
