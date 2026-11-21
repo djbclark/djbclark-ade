@@ -1073,7 +1073,8 @@ class Service:
             self.save(target, record)  # HEAD is back at the recorded head: the old claim is stale
 
     def wait_for_idle(self, agent, deadline, stable, poll):
-        """Inspect `agent` until it is archived, or idle with `PendingPermissions == []` for `stable` seconds.
+        """Inspect `agent` until it is archived, in `error` status (returned at once), or idle with
+        `PendingPermissions == []` for `stable` seconds.
 
         Several consecutive samples, never one: any busy sample restarts the window. Read-only (inspect only):
         the wait never forces anything and never sends the agent a message. IdleTimeout past `deadline`.
@@ -1083,6 +1084,13 @@ class Service:
             row = self.inspect(agent)
             now = self.clock()
             if row.get('Archived') is True:
+                return row
+            if row.get('Status') == 'error':
+                # Operator ruling 2026-11-21: "We should always close out errored (out of quota) tabs after successfully
+                # taking a handoff from them; we do not need to wait for them to be in idle state." The caller already
+                # holds the successor's acknowledgement; an errored agent runs no turn, so there is nothing to wait out.
+                # If a message wakes it before the archive call, Paseo answers AGENT_RUNNING and finish waits again.
+                self.progress(f'predecessor {agent}: status error; retiring without the idle wait (ruling 2026-11-21)')
                 return row
             idle = row.get('Status') == 'idle' and row.get('PendingPermissions') == []
             if idle:

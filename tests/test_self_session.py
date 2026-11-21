@@ -1262,6 +1262,49 @@ def test_timeout_before_any_archive_keeps_both_sessions(setup):
     assert 'native_error' not in json.loads(path.read_text())
 
 
+# --- an errored predecessor is retired without the idle wait (operator ruling 2026-11-21) ---------------
+
+def test_errored_predecessor_is_archived_without_the_idle_wait(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'  # out of quota: it runs no turn and never becomes idle
+    saw = []
+    service.progress = saw.append
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+    assert native.clock.now < ss.FINISH_STABLE and not native.clock.sleeps  # no stable window was waited out
+    assert any('status error' in m for m in saw)
+    only_reads_and_archive(native)
+
+
+def test_errored_predecessor_with_a_permission_wait_is_still_archived(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'
+    native.rows[PRED]['PendingPermissions'] = [{'id': 'p'}]  # left over from the turn that failed
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 1
+
+
+def test_errored_predecessor_still_needs_the_successor_ack(setup):
+    service, native, path = finished_up_to_archive(setup)
+    native.rows[PRED]['Status'] = 'error'
+    record = json.loads(path.read_text())
+    record['ack'] = None
+    path.write_text(json.dumps(record))
+    with pytest.raises(ss.SessionError, match='acknowledgement required'):
+        service.finish(path)
+    assert native.archived == 0
+
+
+def test_errored_predecessor_woken_before_archive_goes_back_to_the_idle_wait(setup):
+    service, native, path = finished_up_to_archive(setup)
+    # error at first, a peer message wakes it (archive refused AGENT_RUNNING), then it settles idle
+    native.status_at = lambda now: 'error' if now < 1 else ('running' if now < 30 else 'idle')
+    native.archive_queue = [RUNNING]
+    assert service.finish(path)['status'] == 'archived'
+    assert native.archived == 2
+    assert native.clock.now >= 30 + 45  # the second attempt waited for a full stable idle window
+
+
 def test_timeout_after_agent_running_answers_stays_archive_unknown(setup):
     service, native, path = finished_up_to_archive(setup)
     native.archive_queue = [RUNNING] * 50  # always refused

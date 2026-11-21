@@ -21,7 +21,7 @@ successor's thinking level; without it the successor inherits yours) and the
 [acknowledged successor protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
 If the helper refuses before creation, launch the top-level successor yourself
 with the documented unattended fallback. Verify its acknowledgement and idle-only
-retirement; operator typing is never the fallback. Partial transfers keep the
+retirement (a predecessor in `error` status is retired at once after the ack, ruling 2026-11-21); operator typing is never the fallback. Partial transfers keep the
 predecessor running, as specified by Step 9.
 
 A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID
