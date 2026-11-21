@@ -127,12 +127,13 @@ confinement, the fixed flags or the self-check key; a hook event still trips.
   * --checkpoint appends a protocol asking for that text every 5 tool calls (default on for fable/opus/astra models with an evidence
     dir). Best-effort: a model can ignore it (c56c5261 E5: 0 text blocks). Enforcing it is queue item 104.
   * --resume-from-evidence DEAD_RUN: a NEW run whose prompt is the dead run's prompt.txt plus its checkpoints (fenced, unverified, never
-    obeyed). Same --mode, -C and --head required; needs --json; the run is TAINTED (`tainted: true`), never a clean verdict.
+    obeyed). Same --mode, -C, --head, --allow-web and --trusted-author required; needs --json; the run is TAINTED (`tainted: true`), never a clean verdict.
   * --detach: the same launch in a session of its own; returns {run_dir, pid, done, ...} at once and survives the caller.
   * PAUSE (non-fatal conditions only): --pause-on-timeout, or a pause-request.json (`review-launch pause RUN`), SIGSTOPs the claude
     child, writes pause.json and ASK.txt and runs `hermes-ping`; `review-launch resume RUN [--extend S]` continues (TAINTED),
     `abort RUN` ends it with exit 3 and the notes, and an unanswered pause aborts after --pause-max. The tripwire (exit 77), a failed
-    init proof, a hook, a tool outside the allowlist and a path outside the worktree are FATAL: they never pause and never resume.
+    init proof, a hook, a tool outside the allowlist and a path outside the worktree are FATAL: they never pause and are never SIGCONT-resumed
+    (a run that ended 77 may only seed a NEW, tainted run through --resume-from-evidence).
 
 Python 3.9+ (the Mac's stock python3), macOS and Linux.
 """
@@ -279,7 +280,11 @@ CHECK_TIMEOUT = 300
 SCHEMA_VERSION = 1
 
 
+_NOTES: list[str] = []      # what this process said on stderr (a detached child records it in result.json if it dies early)
+
+
 def note(msg: str) -> None:
+    _NOTES.append(msg)
     print(f"review-launch: {msg}", file=sys.stderr)
 
 
@@ -348,6 +353,8 @@ RUN_FILES = ("launch.json", "result.json", "done", "checkpoints.md", "prompt.txt
              "decision.json", "pause-request.json")
 RETRY = -1.0                         # pause_and_wait: an event was queued, nothing was paused
 PAUSE_MAX_DEFAULT = 6 * 3600.0       # a pause nobody answers ends as an ABORT (never an automatic resume)
+WATCHDOG_POLL = 2.0
+PAUSE_SETTLE = 0.3       # seconds a SIGSTOPped child gets to flush before the queue is re-checked (tests shrink it)
 SUBCOMMANDS = ("checkpoints", "status", "pause", "resume", "abort", "watchdog")
 
 
@@ -817,6 +824,94 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
     def trip(why: str) -> None:
         run.exit, run.reason = EXIT_TRIP, f"tripwire: {why}"
 
+    def handle(raw: bytes) -> bool:
+        """Process one stream line (evidence, init proof, tripwire, results); True ends the run."""
+        nonlocal last_output, result_at
+        last_output = time.monotonic()
+        if evidence:
+            evidence.write(raw)
+            evidence.flush()
+        text = raw.decode("utf-8", "replace")
+        if keep_raw:
+            raw_parts.append(text)
+        try:
+            ev = json.loads(text)
+        except ValueError:
+            return False
+        if not isinstance(ev, dict):
+            return False
+        kind, sub = ev.get("type"), ev.get("subtype")
+        if not trusted and (kind == "result" or (kind == "system" and sub == "init")):
+            sid = ev.get("session_id")
+            if sid is not None:
+                if not isinstance(sid, str) or re.fullmatch(r"[A-Za-z0-9_-]+", sid) is None:
+                    trip("invalid stream session_id")
+                    return True
+                if run.session_id is not None and sid != run.session_id:
+                    trip("init/result session_id mismatch")
+                    return True
+                run.session_id = sid
+        if kind == "system" and sub == "init":
+            probs = init_problems(ev, mode, worktree)
+            run.init = ev
+            if probs:
+                trip("; ".join(probs))
+                return True
+        elif kind == "system" and isinstance(sub, str) and sub.startswith("hook") and trusted:
+            return False
+        elif kind == "system" and isinstance(sub, str) and sub.startswith("hook"):
+            trip(f"a hook ran ({sub}): no hook may run inside the boundary")
+            return True
+        elif kind == "assistant":
+            if run.init is None:
+                trip("an assistant event came before any init event (init missing)")
+                return True
+            bad = None
+            for item in ((ev.get("message") or {}).get("content") or []):
+                kind_item = item.get("type") if isinstance(item, dict) else None
+                if kind_item not in CONTENT_TYPES:
+                    bad = f"an assistant content item of type {kind_item!r} (only {sorted(CONTENT_TYPES)} may appear)"
+                    break
+                if kind_item != "tool_use":
+                    continue
+                name, inp = item.get("name"), item.get("input")
+                run.tool_uses.append({"id": item.get("id"), "name": name, "input": inp})
+                if name not in allowed:
+                    bad = f"tool {name!r} is outside the allowlist {sorted(allowed)}"
+                elif path_trip and name in PATH_TOOLS:
+                    bad = tool_use_outside(name, inp, worktree)
+                    # A Read of a symlink that sits OUTSIDE the worktree trips even when it resolves inside:
+                    # realpath follows it, so path_outside alone would allow a spool link aimed at a worktree
+                    # file. Only a genuine regular file in this run's own spool is exempt. A link inside the
+                    # worktree is judged by where it resolves (an escaping one is bad above, and refused at launch).
+                    if name == "Read" and isinstance(inp, dict) and read_follows_symlink(inp.get("file_path"), worktree):
+                        # own_spool_read never accepts a link (it lstat-checks for a regular file), so this
+                        # branch always trips.
+                        bad = f"Read file_path={inp.get('file_path')!r} follows a symlink"
+                    elif bad and name == "Read" and isinstance(inp, dict):
+                        if own_spool_read(inp.get("file_path"), worktree, run.session_id):
+                            run.spool_reads += 1
+                            bad = None
+                        elif run.session_id is None:
+                            bad += "; spool exception unavailable: no stream session_id yet"
+                if bad:
+                    break
+            if bad:
+                trip(bad)
+                return True
+        elif kind == "user":
+            decisions = {m.get("id"): ((m.get("permission_decision") or {}).get("decision"))
+                         for m in (ev.get("tool_result_meta") or []) if isinstance(m, dict)}
+            for item in ((ev.get("message") or {}).get("content") or []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tid = item.get("tool_use_id")
+                    run.tool_results[tid] = {"is_error": bool(item.get("is_error")), "content": item.get("content"),
+                                             "decision": decisions.get(tid)}
+        elif kind == "result":
+            run.result = ev
+            result_at = time.monotonic()
+        return False
+
     def pause_and_wait(kind: str, why: str) -> float | None:
         """SIGSTOP the child's group, record the state, ask the operator, wait for resume or abort. Returns the extra
         seconds the operator granted on resume, or None for an abort (also: nobody answered in pause_max, the launcher
@@ -833,7 +928,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             os.killpg(proc.pid, signal.SIGSTOP)
         except (ProcessLookupError, PermissionError):
             return None
-        time.sleep(0.3)          # let the reader thread queue what the child had already written
+        time.sleep(PAUSE_SETTLE)  # let the reader thread queue what the child had already written
         if not lines.empty():    # an event is waiting: judge it first (a violation is fatal, never paused over)
             try:
                 os.killpg(proc.pid, signal.SIGCONT)
@@ -938,89 +1033,17 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                 continue
             if raw is None:
                 break
-            last_output = time.monotonic()
-            if evidence:
-                evidence.write(raw)
-                evidence.flush()
-            text = raw.decode("utf-8", "replace")
-            if keep_raw:
-                raw_parts.append(text)
-            try:
-                ev = json.loads(text)
-            except ValueError:
-                continue
-            if not isinstance(ev, dict):
-                continue
-            kind, sub = ev.get("type"), ev.get("subtype")
-            if not trusted and (kind == "result" or (kind == "system" and sub == "init")):
-                sid = ev.get("session_id")
-                if sid is not None:
-                    if not isinstance(sid, str) or re.fullmatch(r"[A-Za-z0-9_-]+", sid) is None:
-                        trip("invalid stream session_id")
-                        break
-                    if run.session_id is not None and sid != run.session_id:
-                        trip("init/result session_id mismatch")
-                        break
-                    run.session_id = sid
-            if kind == "system" and sub == "init":
-                probs = init_problems(ev, mode, worktree)
-                run.init = ev
-                if probs:
-                    trip("; ".join(probs))
-                    break
-            elif kind == "system" and isinstance(sub, str) and sub.startswith("hook") and trusted:
-                continue
-            elif kind == "system" and isinstance(sub, str) and sub.startswith("hook"):
-                trip(f"a hook ran ({sub}): no hook may run inside the boundary")
+            if handle(raw):
                 break
-            elif kind == "assistant":
-                if run.init is None:
-                    trip("an assistant event came before any init event (init missing)")
-                    break
-                bad = None
-                for item in ((ev.get("message") or {}).get("content") or []):
-                    kind_item = item.get("type") if isinstance(item, dict) else None
-                    if kind_item not in CONTENT_TYPES:
-                        bad = f"an assistant content item of type {kind_item!r} (only {sorted(CONTENT_TYPES)} may appear)"
-                        break
-                    if kind_item != "tool_use":
-                        continue
-                    name, inp = item.get("name"), item.get("input")
-                    run.tool_uses.append({"id": item.get("id"), "name": name, "input": inp})
-                    if name not in allowed:
-                        bad = f"tool {name!r} is outside the allowlist {sorted(allowed)}"
-                    elif path_trip and name in PATH_TOOLS:
-                        bad = tool_use_outside(name, inp, worktree)
-                        # A Read of a symlink that sits OUTSIDE the worktree trips even when it resolves inside:
-                        # realpath follows it, so path_outside alone would allow a spool link aimed at a worktree
-                        # file. Only a genuine regular file in this run's own spool is exempt. A link inside the
-                        # worktree is judged by where it resolves (an escaping one is bad above, and refused at launch).
-                        if name == "Read" and isinstance(inp, dict) and read_follows_symlink(inp.get("file_path"), worktree):
-                            # own_spool_read never accepts a link (it lstat-checks for a regular file), so this
-                            # branch always trips.
-                            bad = f"Read file_path={inp.get('file_path')!r} follows a symlink"
-                        elif bad and name == "Read" and isinstance(inp, dict):
-                            if own_spool_read(inp.get("file_path"), worktree, run.session_id):
-                                run.spool_reads += 1
-                                bad = None
-                            elif run.session_id is None:
-                                bad += "; spool exception unavailable: no stream session_id yet"
-                    if bad:
-                        break
-                if bad:
-                    trip(bad)
-                    break
-            elif kind == "user":
-                decisions = {m.get("id"): ((m.get("permission_decision") or {}).get("decision"))
-                             for m in (ev.get("tool_result_meta") or []) if isinstance(m, dict)}
-                for item in ((ev.get("message") or {}).get("content") or []):
-                    if isinstance(item, dict) and item.get("type") == "tool_result":
-                        tid = item.get("tool_use_id")
-                        run.tool_results[tid] = {"is_error": bool(item.get("is_error")), "content": item.get("content"),
-                                                 "decision": decisions.get(tid)}
-            elif kind == "result":
-                run.result = ev
-                result_at = time.monotonic()
+        # Whatever the loop left in the queue (a pause that was aborted, a timeout, a stall) still goes through the same
+        # checks and into the evidence: a violation queued behind the break is exit 77, not a quiet 3 or 124.
+        while run.exit != EXIT_TRIP:
+            try:
+                raw = lines.get_nowait()
+            except queue.Empty:
+                break
+            if raw is None or handle(raw):
+                break
     except Interrupted as e:
         # A signal (SIGTERM/SIGHUP/SIGINT to the launcher) ends the run without output: exit 3, never the signal's
         # 128+N, so a caller's exit-code contract stays the documented one (E8 review, 2026-11-07). A tripwire
@@ -1374,14 +1397,19 @@ def subcommand(argv: list[str]) -> int:
         return EXIT_USAGE
     if cmd == "watchdog":
         # Started with every pause: if the launcher dies (SIGKILL, OOM) while the child is stopped, kill that child.
+        dead_polls = 0
         while True:
             doc = read_json(d / "launch.json") or {}
             if doc.get("state") != "paused":
                 return EXIT_OK
-            if not launcher_alive(doc):
-                reap_dead(d, doc)
-                return EXIT_OK
-            time.sleep(2)
+            if launcher_alive(doc):
+                dead_polls = 0
+            else:
+                dead_polls += 1          # two polls in a row: one failed ps/lstart read must not kill a live paused run
+                if dead_polls >= 2:
+                    reap_dead(d, doc)
+                    return EXIT_OK
+            time.sleep(WATCHDOG_POLL)
     if cmd == "checkpoints":
         out = save_checkpoints(d, str(doc.get("reason") or doc.get("state") or "unknown"))
         if out is None:
@@ -1393,7 +1421,8 @@ def subcommand(argv: list[str]) -> int:
     if cmd == "status":
         print(json.dumps({"run_dir": str(d), "state": doc.get("state"), "exit": doc.get("exit"), "reason": doc.get("reason"),
                           "paused": paused, "launcher_alive": launcher_alive(doc), "done": (d / "done").exists(),
-                          "stopped_orphan": doc.get("state") == "paused" and not launcher_alive(doc) and not (d / "done").exists(),
+                          "stopped_orphan": doc.get("state") != "finished" and isinstance(doc.get("pid"), int)
+                          and not launcher_alive(doc) and not (d / "done").exists(),
                           "tainted": bool(doc.get("tainted")), "parent_run": doc.get("parent_run"),
                           "checkpoints_file": str(d / "checkpoints.md") if (d / "checkpoints.md").exists() else None},
                          sort_keys=True))
@@ -1465,7 +1494,7 @@ def load_resume(raw: str, mode: str, wt: str, head: str | None, allow_web: bool 
     return d, original, ""
 
 
-def main(argv: list[str]) -> int:
+def launch_main(argv: list[str]) -> int:
     if argv and argv[0] in SUBCOMMANDS:
         return subcommand(argv)
     flag = bypass_flag(argv, parser())
@@ -1600,8 +1629,6 @@ def main(argv: list[str]) -> int:
     if a.evidence_dir is not None and (a.evidence_dir / "stream.jsonl").exists():
         note(f"cannot preserve evidence: {a.evidence_dir}/stream.jsonl already exists")
         return EXIT_USAGE
-    if detaching:
-        return detach(argv, a, wt, mode)
     if trusted:
         ok, where, check = True, "none: trusted YOLO mode claims no read boundary", None
     else:
@@ -1609,6 +1636,8 @@ def main(argv: list[str]) -> int:
     if not ok:
         note(f"refused: {where}")
         return EXIT_USAGE
+    if detaching:      # after the self-check: a failed one is refused here, in the caller, not lost in a child (round 2)
+        return detach(argv, a, wt, mode)
     run_dir = a.evidence_dir
     ctl = PauseCtl(run_dir, a.pause_on_timeout, a.pause_max) if run_dir is not None and (
         a.pause_on_timeout or a.detached_child) else None
@@ -1620,7 +1649,7 @@ def main(argv: list[str]) -> int:
                           pid_started=proc_start(os.getpid()), started=utc_now(), mode=mode, allow_web=bool(a.allow_web),
                           worktree=wt, head=a.head, model=a.model, timeout=a.timeout, checkpoint=ckpt, trusted_author=a.trusted_author,
                           pause_on_timeout=bool(a.pause_on_timeout), detached=bool(a.detached_child),
-                          parent_run=str(parent) if parent else None, tainted=parent is not None, paused=0)
+                          parent_run=str(parent.resolve()) if parent else None, tainted=parent is not None, paused=0)
         run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout,
                          stall_timeout=a.stall_timeout, evidence_dir=run_dir, ctl=ctl)
     except OSError as e:
@@ -1639,7 +1668,7 @@ def main(argv: list[str]) -> int:
            "num_turns": (run.result or {}).get("num_turns"), "tool_uses": len(run.tool_uses), "spool_reads": run.spool_reads,
            "session_id": run.session_id,
            "check": where, "accepted_exposures": (check or {}).get("accepted_exposures"),
-           "checkpoint": ckpt, "tainted": tainted, "parent_run": str(parent) if parent else None, "paused": run.paused}
+           "checkpoint": ckpt, "tainted": tainted, "parent_run": str(parent.resolve()) if parent else None, "paused": run.paused}
     if tainted:
         # A resumed or paused-and-continued run is never a clean verdict: its output is moved where no consumer that
         # reads `structured_output` (bin/review-pr) can take it for one. A fresh, untainted look is needed.
@@ -1687,6 +1716,42 @@ def detach(argv: list[str], a: argparse.Namespace, wt: str, mode: str) -> int:
     print(json.dumps({"run_dir": str(run_dir), "pid": proc.pid, "done": str(run_dir / "done"),
                       "result": str(run_dir / "result.json"), "launch": str(run_dir / "launch.json")}, sort_keys=True))
     return EXIT_OK
+
+
+def child_evidence_dir(argv: list[str]) -> Path | None:
+    """The --evidence-dir the detach parent put last on a detached child's argv (the last occurrence wins)."""
+    found = None
+    for i, tok in enumerate(argv):
+        if tok == "--evidence-dir" and i + 1 < len(argv):
+            found = argv[i + 1]
+        elif tok.startswith("--evidence-dir="):
+            found = tok.split("=", 1)[1]
+    return Path(found) if found else None
+
+
+def main(argv: list[str]) -> int:
+    """A detached child has nobody watching its stderr: whatever way it ends, RUN/done and RUN/result.json must say
+    so (a refusal, a crash or a failed self-check would otherwise leave a run that never finishes: round-2 M1)."""
+    if "--detached-child" not in argv:
+        return launch_main(argv)
+    run_dir = child_evidence_dir(argv)
+    try:
+        code = launch_main(argv)
+        crash = None
+    except BaseException as e:      # noqa: BLE001 - the record must be written whatever killed us
+        code, crash = EXIT_USAGE, f"{type(e).__name__}: {e}"
+    if run_dir is not None and not (run_dir / "done").exists():
+        reason = crash or "; ".join(_NOTES[-3:]) or "the detached launcher ended without a run record"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            write_private(run_dir / "result.json", json.dumps(
+                {"exit": code, "reason": reason, "structured_output": None, "tainted": None, "evidence_dir": str(run_dir)},
+                sort_keys=True) + "\n")
+            update_launch(run_dir, state="finished", exit=code, reason=reason, ended=utc_now())
+            write_private(run_dir / "done", f"exit={code}\n")
+        except OSError as e:
+            print(f"review-launch: cannot write the failure record: {e}", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

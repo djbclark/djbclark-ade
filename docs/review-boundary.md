@@ -200,7 +200,8 @@ needed. `--json` is required for a resume, for `--pause-on-timeout`, and is forc
 own process group, no controlling terminal, stdin `/dev/null`, stdout and stderr in `RUN/launcher.stdout` and `launcher.stderr`) and returns
 `{"run_dir", "pid", "done", "result", "launch"}` at once, so it is not a child of the caller's job: a SIGHUP, a job-group kill or the end of
 the caller's session no longer reaches it. Every refusal that does not need claude (usage, dirty worktree, symlinks, a missing resume
-dir) is returned by the caller immediately; the self-check runs in the child. The run dir defaults to
+dir, a failed boundary self-check) is returned by the caller immediately, exit 2, nothing started; the child repeats the self-check (a
+cache hit) and, if it still fails or crashes, writes `RUN/result.json` and `RUN/done` (`exit=2`, the reason) so a waiter never hangs. The run dir defaults to
 `$REVIEW_LAUNCH_STATE_DIR/runs/<UTC>-<id>`. Wait with `bin/wait-file RUN/done`. A detached run is always `--json` and listens for pause
 requests. (No `ade-sched` one-shot or Paseo terminal: they add a scheduler or a UI for what one `setsid` does.)
 
@@ -210,7 +211,7 @@ requests. (No `ade-sched` one-shot or Paseo terminal: they add a scheduler or a 
 |---|---|
 | `--timeout` reached with `--pause-on-timeout` | **pause** (without the flag: exit 124 as before, notes saved) |
 | `RUN/pause-request.json` written by `review-launch pause RUN` or any quota/allowance watcher | **pause** (a running run with a run dir listens when `--pause-on-timeout` or `--detach` is set) |
-| a real out-of-scope Read/Grep/Glob, a symlink read, a tool outside the allowlist, a failed init proof, a hook event, a bad session id | **FATAL, exit 77, never paused, never resumed** (unchanged; PR 869 adversary L1) |
+| a real out-of-scope Read/Grep/Glob, a symlink read, a tool outside the allowlist, a failed init proof, a hook event, a bad session id | **FATAL, exit 77, never paused, never SIGCONT-resumed** (unchanged; PR 869 adversary L1); a 77 run's notes may only seed a NEW, tainted run (`--resume-from-evidence`) |
 | `--stall-timeout` | exit 124 as before (a stalled child makes no progress to protect) |
 
 A pause is only taken when no stream event is queued (a queued violation is judged first, and a pause that finds one is undone and

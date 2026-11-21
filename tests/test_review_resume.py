@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -348,7 +349,7 @@ def test_an_unanswered_pause_aborts_never_resumes(world, tmp_path):
 
 def test_a_pause_request_pauses_a_running_review(world, tmp_path):
     world.passed_check()
-    world.scenario(texts=[CP1], sleep=3)
+    world.scenario(texts=[CP1], sleep=10)
     d = tmp_path / "run"
     p = start(world, d, "--pause-on-timeout", "--timeout", "60")
     wait_for(d / "launch.json")
@@ -487,3 +488,160 @@ def test_a_launcher_killed_during_a_pause_does_not_leave_a_stopped_claude(world,
     assert not pid_alive(pg)
     assert "launcher was gone" in json.loads((d / "launch.json").read_text())["reason"]
     assert "bin/x.py:12" in (d / "checkpoints.md").read_text()
+
+
+# ---- round 2 (adversary r2, head 1fc91448) --------------------------------------------------------------
+
+def test_a_detached_run_whose_self_check_fails_is_refused_by_the_caller(world, tmp_path):
+    world.scenario(check="leak")                     # no check passed before: the first use fails
+    d = tmp_path / "run"
+    r = world.launch("--detach", "--evidence-dir", str(d), env=env(world))
+    assert r.returncode == 2 and "self-check failed" in r.stderr, r.stdout + r.stderr
+    assert world.launches() == [] and not (d / "launch.json").exists()          # nothing was started, no hung run dir
+
+
+def test_a_detached_child_that_cannot_start_leaves_done_and_result_with_the_failure(world, tmp_path):
+    # What the parent cannot see (the cache expired, a refusal, a crash after it returned): the child writes the record.
+    world.scenario(check="leak")
+    d = tmp_path / "run"
+    r = subprocess.run([sys.executable, "-I", str(LAUNCH), "--mode", "review", "-C", str(world.wt), "--schema", str(world.schema),
+                        "-p", "x", "--detach", "--evidence-dir", str(d), "--json", "--detached-child"],
+                       env=env(world), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert (d / "done").read_text() == "exit=2\n"
+    rec = json.loads((d / "result.json").read_text())
+    assert rec["exit"] == 2 and "self-check failed" in rec["reason"] and rec["structured_output"] is None
+    doc = json.loads((d / "launch.json").read_text())
+    assert doc["state"] == "finished" and doc["exit"] == 2 and "self-check" in doc["reason"]
+
+
+def test_a_detached_child_that_is_refused_early_still_leaves_the_record(world, tmp_path):
+    world.passed_check()
+    d = tmp_path / "run"
+    r = subprocess.run([sys.executable, "-I", str(LAUNCH), "--mode", "review", "-C", str(tmp_path / "nowhere"), "--schema", str(world.schema),
+                        "-p", "x", "--evidence-dir", str(d), "--detached-child"], env=env(world), capture_output=True, text=True,
+                       timeout=120)
+    assert r.returncode == 2 and (d / "done").read_text() == "exit=2\n"
+    assert "no such worktree" in json.loads((d / "result.json").read_text())["reason"]
+
+
+def stub_claude(tmp_path: Path, wt: Path, events: list, tail: float = 30) -> list:
+    """argv of a script that prints init + the given events, then lingers."""
+    init = {"type": "system", "subtype": "init", "cwd": str(wt), "tools": ["Glob", "Grep", "Read", "StructuredOutput"],
+            "mcp_servers": [], "permissionMode": "default", "additional_directories": []}
+    body = "".join(json.dumps(e) + "\n" for e in [init, *events])
+    script = tmp_path / "stub-claude.py"
+    script.write_text("import sys, time\nsys.stdout.write(%r)\nsys.stdout.flush()\ntime.sleep(%r)\n" % (body, tail))
+    return [sys.executable, str(script)]
+
+
+def test_a_violation_queued_behind_a_timeout_is_still_judged_and_ends_77(world, tmp_path, monkeypatch):
+    mod = load_launcher()
+    real = mod.json.loads
+
+    def slow(s, *a, **k):
+        if isinstance(s, str) and "SLOWME" in s:
+            time.sleep(2.2)                        # the loop is busy on this line when the time limit passes
+        return real(s, *a, **k)
+
+    monkeypatch.setattr(mod.json, "loads", slow)
+    argv = stub_claude(tmp_path, world.wt, [{"type": "system", "subtype": "SLOWME"}, asst(read("/etc/hosts"))])
+    run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 1.0, evidence_dir=tmp_path / "ev")
+    assert run.exit == 77, (run.exit, run.reason)
+    assert "/etc/hosts" in (tmp_path / "ev" / "stream.jsonl").read_text()
+
+
+def test_a_pause_found_with_an_event_queued_is_undone_and_retried(world, tmp_path, monkeypatch):
+    import threading
+    mod = load_launcher()
+    d = tmp_path / "ev"
+    d.mkdir()
+    orig_queue = mod.queue.Queue
+
+    class FirstEmptyIsFalse(orig_queue):
+        flaked = False
+
+        def empty(self):
+            if not FirstEmptyIsFalse.flaked:
+                FirstEmptyIsFalse.flaked = True
+                return False                        # "an event arrived while the child was stopped"
+            return super().empty()
+
+    sent = []
+    real_killpg = os.killpg
+
+    def killpg(pg, sig):
+        if sig in (signal.SIGSTOP, signal.SIGCONT):
+            sent.append(int(sig))
+        return real_killpg(pg, sig)
+
+    monkeypatch.setattr(mod.queue, "Queue", FirstEmptyIsFalse)
+    monkeypatch.setattr(mod.os, "killpg", killpg)
+    monkeypatch.setattr(mod, "notify_operator", lambda msg: None)
+    monkeypatch.setattr(mod, "PAUSE_SETTLE", 0.05)
+    mod.update_launch(d, schema=1, state="running", pid=os.getpid(), pid_started=mod.proc_start(os.getpid()))
+    (d / "pause-request.json").write_text(json.dumps({"reason": "test"}))
+    argv = stub_claude(tmp_path, world.wt, [])
+
+    def answer():
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not (d / "pause.json").exists():
+            time.sleep(0.05)
+        (d / "decision.json").write_text(json.dumps({"decision": "abort"}))
+
+    t = threading.Thread(target=answer)
+    t.start()
+    run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 60.0, evidence_dir=d / "evid", ctl=mod.PauseCtl(d, False, 30))
+    t.join()
+    mod.update_launch(d, state="finished")         # lets the pause watchdog it started exit
+    assert run.pause_aborted
+    assert sent[:3] == [int(signal.SIGSTOP), int(signal.SIGCONT), int(signal.SIGSTOP)], sent   # stop, undo, stop again for real
+
+
+def stopped_run(tmp_path: Path, state: str, mod, alive: bool) -> Path:
+    d = Path(tempfile.mkdtemp(prefix=f"run-{state}-{alive}-", dir=tmp_path))
+    if alive:
+        pid, started = os.getpid(), mod.proc_start(os.getpid())
+    else:
+        p = subprocess.Popen(["sleep", "0.01"])
+        pid, started = p.pid, mod.proc_start(p.pid)
+        p.wait()
+    (d / "launch.json").write_text(json.dumps({"schema": 1, "state": state, "pid": pid, "pid_started": started}))
+    return d
+
+
+def test_status_reports_an_orphan_for_any_unfinished_run_whose_launcher_is_dead(tmp_path, capsys):
+    mod = load_launcher()
+    for state, alive, want in (("running", False, True), ("starting", False, True), ("paused", False, True),
+                               ("running", True, False), ("finished", False, False)):
+        d = stopped_run(tmp_path, state, mod, alive)
+        assert mod.subcommand(["status", str(d)]) == 0
+        assert json.loads(capsys.readouterr().out)["stopped_orphan"] is want, (state, alive)
+    d = stopped_run(tmp_path, "running", mod, False)
+    (d / "done").write_text("exit=0\n")
+    mod.subcommand(["status", str(d)])
+    assert json.loads(capsys.readouterr().out)["stopped_orphan"] is False
+
+
+def test_the_watchdog_needs_two_dead_polls_in_a_row(tmp_path, monkeypatch):
+    mod = load_launcher()
+    d = stopped_run(tmp_path, "paused", mod, True)
+    seq = iter([False, True, False, False, False, False])
+    polls = []
+    reaped = []
+    monkeypatch.setattr(mod, "WATCHDOG_POLL", 0.01)
+    monkeypatch.setattr(mod, "launcher_alive", lambda doc: polls.append(1) or next(seq))
+    monkeypatch.setattr(mod, "reap_dead", lambda dd, doc: reaped.append(len(polls)))
+    assert mod.subcommand(["watchdog", str(d)]) == 0
+    assert reaped == [4]                           # dead, alive (the count restarts), dead, dead: one blip never reaps
+
+
+def test_a_resume_records_the_parents_resolved_path(world, tmp_path):
+    world.passed_check()
+    d = dead_run(world, tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(d.parent)
+    r = world.run("--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "--json",
+                  "--resume-from-evidence", str(link / d.name), "--evidence-dir", str(tmp_path / "new"), env=env(world))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["parent_run"] == str(d.resolve())
