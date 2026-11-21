@@ -589,6 +589,9 @@ def kill_all(proc: subprocess.Popen, tracked: dict[int, str]) -> None:
         pass
 
 
+SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
 class Interrupted(Exception):
     pass
 
@@ -794,14 +797,28 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         fd = os.open(evidence_dir / "stream.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         evidence = os.fdopen(fd, "wb")
     err = tempfile.TemporaryFile()
+    # From before the Popen until the main loop owns the run, a signal is only RECORDED (a handler that raised could leave
+    # claude, which runs in a session of its own, with nobody to stop it); the main loop turns it into Interrupted.
+    pending: list[int] = []
+    old = {s: signal.signal(s, lambda signum, _frame: pending.append(signum)) for s in SIGNALS}
+
+    def restore_signals() -> None:
+        for s, h in old.items():
+            signal.signal(s, h)
+
     try:
         proc = subprocess.Popen(argv, cwd=worktree, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=err, start_new_session=True)
-    except OSError as e:
+    except BaseException as e:
+        restore_signals()
         if evidence:
             evidence.close()
         err.close()
+        if not isinstance(e, OSError):
+            raise
         run.reason = f"cannot start claude: {e}"
+        if pending:
+            signal.raise_signal(pending[0])          # the signal that came meanwhile is not lost
         return run
     lines: queue.Queue = queue.Queue()
 
@@ -819,6 +836,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         threading.Thread(target=reader, daemon=True).start()
     except BaseException:
         kill_all(proc, {})
+        restore_signals()
         if evidence:
             evidence.close()
         err.close()
@@ -985,8 +1003,11 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             extend = 0.0
         return extend if math.isfinite(extend) and extend > 0 else 0.0
 
-    old = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     try:
+        for s in SIGNALS:
+            signal.signal(s, _on_signal)
+        if pending:
+            raise Interrupted(f"signal {pending[0]}")      # one came while claude was starting: the finally stops claude
         while True:
             now = time.monotonic()
             overdue = now >= deadline
@@ -1062,9 +1083,10 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         # that fired first keeps its 77.
         run.exit, run.reason = (EXIT_TRIP if run.exit == EXIT_TRIP else EXIT_NO_OUTPUT), f"interrupted ({e})"
     finally:
-        for s, h in old.items():
-            signal.signal(s, h)
+        for s in SIGNALS:                      # a second signal must not cut the kill short
+            signal.signal(s, signal.SIG_IGN)
         kill_all(proc, tracked)
+        restore_signals()
         run.returncode = proc.returncode
         try:
             err.seek(0)
@@ -1756,7 +1778,7 @@ def main(argv: list[str]) -> int:
     if "--detached-child" not in argv:
         return launch_main(argv)
     run_dir = child_evidence_dir(argv)
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):     # an abort before claude starts still leaves a record
+    for sig in SIGNALS:     # an abort before claude starts still leaves a record
         signal.signal(sig, _on_signal)
     try:
         code = launch_main(argv)

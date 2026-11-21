@@ -816,3 +816,75 @@ def test_a_signal_right_after_claude_starts_does_not_leave_it_running(world, tmp
         for p_ in started:
             if p_.poll() is None:
                 os.killpg(p_.pid, signal.SIGKILL)
+
+
+# ---- the follow-up to PR 917 (adversary LOW-1, LOW-2) --------------------------------------------------
+
+def test_a_signal_during_the_popen_stops_claude_in_a_plain_run_too(world, tmp_path, monkeypatch, kept_signals):
+    mod = load_launcher()
+    started = []
+    real_popen = subprocess.Popen
+
+    class Signalled(real_popen):
+        def __init__(self, argv, *a, **k):
+            if "stub-claude.py" in " ".join(map(str, argv)):
+                os.kill(os.getpid(), signal.SIGTERM)       # abort lands while claude is being started
+            super().__init__(argv, *a, **k)
+            if "stub-claude.py" in " ".join(map(str, argv)):
+                started.append(self)
+
+    monkeypatch.setattr(mod.subprocess, "Popen", Signalled)
+    argv = stub_claude(tmp_path, world.wt, [], tail=60)
+    try:
+        run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 3.0, evidence_dir=tmp_path / "ev")
+        assert run.exit == 3 and "signal 15" in run.reason         # the signal that came during the Popen ended the run
+        (proc,) = started
+        end = time.monotonic() + 10
+        while proc.poll() is None and time.monotonic() < end:
+            time.sleep(0.1)
+        assert proc.poll() is not None, "claude was left running"
+    finally:
+        for p_ in started:
+            if p_.poll() is None:
+                os.killpg(p_.pid, signal.SIGKILL)
+
+
+def test_a_second_signal_during_the_final_kill_does_not_cut_it_short(world, tmp_path, monkeypatch, kept_signals):
+    mod = load_launcher()
+    real_kill_all = mod.kill_all
+    done = []
+
+    def kill_all_after_a_signal(proc, tracked):
+        os.kill(os.getpid(), signal.SIGTERM)               # a second abort, in the finally
+        real_kill_all(proc, tracked)
+        done.append(proc)
+
+    monkeypatch.setattr(mod, "kill_all", kill_all_after_a_signal)
+    argv = stub_claude(tmp_path, world.wt, [], tail=60)
+    run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 1.0, evidence_dir=tmp_path / "ev")     # ends by timeout
+    assert run.exit == 124 and len(done) == 1 and done[0].poll() is not None
+
+
+def test_a_no_init_tripwire_followed_by_a_full_disk_at_the_record_is_still_a_77(world, tmp_path, monkeypatch, kept_signals):
+    stub = tmp_path / "claude-without-init"
+    stub.write_text('#!/bin/sh\necho \'{"type":"system","subtype":"ui_invalidate"}\'\n')
+    stub.chmod(0o755)
+    for k, v in world.env(REVIEW_LAUNCH_CLAUDE=str(stub)).items():
+        monkeypatch.setenv(k, v)
+    mod = load_launcher()
+    monkeypatch.setattr(mod, "ensure_check", lambda binary, mode, model=None: (True, "test", None))
+    real = mod.write_private
+    failed = []
+
+    def full_once(path, text):
+        if Path(path).name == "result.json" and not failed:
+            failed.append(path)
+            raise OSError(28, "No space left on device")        # launch_main's own record; the wrapper's retry works
+        return real(path, text)
+
+    monkeypatch.setattr(mod, "write_private", full_once)
+    d = tmp_path / "run"
+    code = mod.main(["--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "-p", "x", "--json",
+                     "--evidence-dir", str(d), "--detached-child"])
+    assert failed and code == 77 and (d / "done").read_text() == "exit=77\n"
+    assert "no init event" in json.loads((d / "result.json").read_text())["reason"] or "tripwire" in (d / "result.json").read_text()
