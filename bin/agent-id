@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Resolve the full human-facing identity of one agent, for the "always identify an
+agent you mention" rule (docs/agent-identity.md, 2026-11-20).
+
+When an agent mentions another agent to a human, it must give: the agent id, the
+workspace name, the window (Paseo) / tab (herdr) name, and the tab (Paseo) /
+pane (herdr) name. This script gathers exactly those fields so the rule is a
+command, not a memory.
+
+    agent-id <AGENT_ID> [--json]
+
+Fields are best-effort: a field that cannot be resolved prints `?`. Paseo's
+window name is the workspace name (Paseo has no separate window field); herdr's
+tab is Paseo's window equivalent, and herdr's pane is Paseo's tab equivalent.
+
+Read-only: paseo workspace ls / agent inspect, and herdr workspace/tab/pane list.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _json_argv(argv: list[str]) -> object:
+    r = subprocess.run(argv, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _herdr_argv(argv: list[str]) -> dict:
+    """herdr prints an envelope {"result": {...}}."""
+    r = subprocess.run(["herdr", *argv], capture_output=True, text=True)
+    if r.returncode != 0:
+        return {}
+    try:
+        return (json.loads(r.stdout) or {}).get("result", {})
+    except (ValueError, RecursionError):
+        return {}
+
+
+def paseo_workspace_name(agent: dict, workspaces: list) -> str:
+    wsid = agent.get("WorkspaceId") or agent.get("workspaceId")
+    if not wsid:
+        # A Paseo agent with no WorkspaceId is in no window we can name.
+        return "?"
+    for w in workspaces:
+        if w.get("workspaceId") == wsid:
+            return w.get("name") or "?"
+    return "?"
+
+
+def herdr_placements(agent_id: str) -> tuple[str, str, str]:
+    """(workspace_label, tab_label, pane_id) for the pane whose agent session is agent_id."""
+    tabs = _herdr_argv(["tab", "list"]).get("tabs") or []
+    panes = _herdr_argv(["pane", "list"]).get("panes") or []
+    workspaces = _herdr_argv(["workspace", "list"]).get("workspaces") or []
+    for pane in panes:
+        session = (pane.get("agent_session") or {}).get("value")
+        if session == agent_id:
+            tab_id = pane.get("tab_id")
+            ws_id = pane.get("workspace_id")
+            tab_label = next((t.get("label") or "?" for t in tabs if t.get("tab_id") == tab_id), "?")
+            ws_label = next((w.get("label") or "?" for w in workspaces if w.get("workspace_id") == ws_id), "?")
+            return ws_label, tab_label, pane.get("pane_id") or "?"
+    return "?", "?", "?"
+
+
+def main() -> int:
+    agent_id = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not agent_id:
+        print("agent-id <AGENT_ID> [--json]", file=sys.stderr)
+        return 2
+    as_json = "--json" in sys.argv
+    insp = _json_argv(["paseo", "agent", "inspect", agent_id, "--json"])
+    agent = insp if isinstance(insp, dict) else {}
+    workspaces = _json_argv(["paseo", "workspace", "ls", "--json"]) or []
+    if not isinstance(workspaces, list):
+        workspaces = workspaces.get("workspaces", []) if isinstance(workspaces, dict) else []
+    ws_name = paseo_workspace_name(agent, workspaces)
+    herdr_ws, herdr_tab, herdr_pane = herdr_placements(agent_id)
+    rec = {
+        "agent_id": agent_id,
+        "workspace": ws_name,
+        "window_paseo_or_tab_herdr": herdr_tab if herdr_tab != "?" else ws_name,
+        "tab_paseo_or_pane_herdr": herdr_pane,
+    }
+    if as_json:
+        print(json.dumps(rec, indent=1))
+    else:
+        print(f"agent  : {rec['agent_id']}")
+        print(f"workspace : {rec['workspace']}")
+        print(f"window (Paseo) / tab (herdr): {rec['window_paseo_or_tab_herdr']}")
+        print(f"tab (Paseo) / pane (herdr): {rec['tab_paseo_or_pane_herdr']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
