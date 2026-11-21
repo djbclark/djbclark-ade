@@ -19,8 +19,10 @@ Part B item 1).
 Never loops: nothing is blocked when `stop_hook_active` is set, and a message (by hash) is blocked
 at most once per session. Sub-agents (`agent_id` in the payload) are skipped: their final message
 goes to the parent, not the operator. Local and fast: it reads issued.log and the transcript tail,
-no network. Fails open on any error; REF_GATE_OFF=1 disables it. The ids are looked up by the same
-rules as `ref lookup` (bin/ref); tests/test_ref_integrity_gate.py keeps the two in step.
+no network. Fails open on any error; REF_GATE_OFF=1 disables it. The log is read as `ref lookup`
+(bin/ref) reads it; the form check here is stricter (upper-case BOT, lower-case id) and the block
+reason never repeats text from the post, so a Ref line cannot smuggle an instruction into it.
+tests/test_ref_integrity_gate.py keeps the two in step.
 
 Environment: REFS_DIR (issued.log directory), REF_GATE_STATE_DIR (once-per-message state and the
 decisions log, default ~/.local/state/ade/ref-gate).
@@ -33,12 +35,17 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import time
 
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 REF_LINE = re.compile(r"^Ref:")
-REF_FORM = re.compile(r"^Ref: ([^\s-]+)-([0-9a-z]+)$")
+# The form is closed on purpose: nothing outside it is ever echoed into the block reason (a
+# Ref line can carry text from untrusted content, and the reason reads like a harness order).
+REF_FORM = re.compile(r"^Ref: ([A-Z0-9_]{1,32})-([0-9a-z]{1,13})$")
+SAFE_BOT = re.compile(r"[A-Z0-9_]{1,32}")
+LOCK_WAIT = 1.0  # seconds to wait for a writer holding the log before reading anyway
 SHORT_POST = 200  # docs/ref-labels.md Part B item 1: a progress note under 200 chars is exempt
 TRANSCRIPT_TAIL = 64 * 1024 * 1024
 STATE_MAX_AGE = 14 * 86400
@@ -62,17 +69,34 @@ def last_line(text: str) -> str:
 
 
 def issued_bot(ident: str) -> str:
-    """The bot issued.log recorded for `ident`, "" when it was never issued (same rules as
-    `ref lookup`: shared flock on an existing .lock, first matching line, nothing created)."""
+    """The bot issued.log recorded for `ident`, "" when it was never issued. Reads the log as
+    `ref lookup` does (shared flock on an existing .lock, first matching line, nothing created);
+    a stuck writer is waited for LOCK_WAIT seconds only, and only regular files are opened."""
     d = refs_dir()
     lock_fd = None
     try:
-        lock_fd = os.open(os.path.join(d, ".lock"), os.O_RDONLY)
-        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        lock_fd = os.open(os.path.join(d, ".lock"), os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            os.close(lock_fd)
+            lock_fd = None
+        else:
+            deadline = time.monotonic() + LOCK_WAIT
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.05)
     except OSError:
         lock_fd = None
     try:
-        with open(os.path.join(d, "issued.log"), encoding="utf-8", errors="replace") as log:
+        fd = os.open(os.path.join(d, "issued.log"), os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return ""
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as log:
             for line in log:
                 cols = line.rstrip("\n").split("\t")
                 if cols[0] == ident and len(cols) >= 2:
@@ -120,7 +144,7 @@ def assistant_texts(path: str) -> list[tuple[str, str]]:
 
 def last_transcript_text(path: str) -> str:
     """Text of the final assistant message in the transcript (fallback when the payload has no
-    `last_assistant_message`); only its newest text entry, from the tail."""
+    `last_assistant_message`); the newest assistant entry only, from the tail; "" when it has no text."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -135,15 +159,16 @@ def last_transcript_text(path: str) -> str:
             entry = json.loads(line)
         except ValueError:
             continue
-        msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message")
         content = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            texts = [b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
-                     and isinstance(b.get("text"), str)]
-            if texts:
-                return "\n".join(texts)
+            return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+                             and isinstance(b.get("text"), str))
+        return ""  # the newest assistant entry carries no text: there is no final post to judge
     return ""
 
 
@@ -156,24 +181,27 @@ def used_earlier(path: str, ref_line: str, message: str) -> bool:
         if last_line(text) == ref_line:
             ends.append((mid, text))
     if ends and message.rstrip().endswith(ends[-1][1].rstrip()):
-        ends.pop()
+        cur = ends[-1][0]  # drop the current message, even when its entry was written twice
+        ends = [e for e in ends if e[0] != cur] if cur else ends[:-1]
     return bool(ends)
 
 
-def check(message: str, transcript: str) -> tuple[str, str] | None:
-    """None when the post is fine; else (problem, bot to show)."""
+def check(message: str, transcript: str) -> str | None:
+    """None when the post is fine; else the problem, built only from fixed text and from values
+    that matched REF_FORM (or the log's bot, when it is a plain prefix)."""
     line = last_line(message)
     form = REF_FORM.match(line)
     if not form:
-        return (f"`{line[:120]}` is not of the form `Ref: <BOT>-<base36 id>`", "<BOT>")
+        return "the last line is not of the form `Ref: <BOT>-<base36 id>` (BOT upper case, id lower case)"
     bot, ident = form.groups()
     issued = issued_bot(ident)
     if not issued:
-        return (f"id `{ident}` was never issued by `ref` (a git hash, PR number or hand-typed id is not a Ref)", bot)
+        return f"id `{ident}` was never issued by `ref` (a git hash, PR number or hand-typed id is not a Ref)"
     if issued != bot:
-        return (f"id `{ident}` was issued to bot `{issued}`, not `{bot}`", bot)
+        shown = issued if SAFE_BOT.fullmatch(issued) else "another bot"
+        return f"id `{ident}` was issued to bot `{shown}`, not `{bot}`"
     if transcript and used_earlier(transcript, line, message):
-        return (f"`{line}` already ended an earlier post of this session (one Ref per post, never reused)", bot)
+        return f"`{line}` already ended an earlier post of this session (one Ref per post, never reused)"
     return None
 
 
@@ -239,7 +267,7 @@ def main() -> int:
     problem = check(message, transcript)
     if problem is None:
         return 0
-    why, bot = problem
+    why = problem
     digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
     if data.get("stop_hook_active"):
         log_decision(session, "allowed-stop-hook-active", line, why)
@@ -250,9 +278,10 @@ def main() -> int:
     log_decision(session, "blocked", line, why)
     reason = (
         f"Invalid Ref line: {why}. A Ref is a unique id issued by a script for one operator-facing "
-        f"post; never a commit hash, PR number or text you typed. Run `ref {bot}` with Bash (BOT is "
-        "your prefix from docs/ref-labels.md, for example CLAUDE), then send the post again with its "
-        "last line replaced by the exact line `ref` printed."
+        "post; never a commit hash, PR number or text you typed. Run `ref <BOT>` with Bash, where BOT is "
+        "your own prefix from the table in docs/ref-labels.md (CLAUDE for a Claude Code session unless "
+        "your instructions name another), then send the post again with its last line replaced by the "
+        "exact line `ref` printed."
     )
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0

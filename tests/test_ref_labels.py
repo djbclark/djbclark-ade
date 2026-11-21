@@ -78,3 +78,12 @@ def test_ref_lookup_is_read_only_and_survives_a_missing_dir(tmp_path):
     r = run(["ref", "lookup", "OLDBOT-7"], env_with(d2))
     assert r.returncode == 0 and "unknown" in r.stdout and "none recorded" in r.stdout
     assert sorted(p.name for p in d2.iterdir()) == before
+
+
+def test_ref_lookup_word_is_reserved_in_any_case_and_a_fifo_log_does_not_hang(tmp_path):
+    d = tmp_path / "refs"
+    d.mkdir()
+    os.mkfifo(d / "issued.log")
+    e = env_with(d)
+    assert run(["ref", "LOOKUP", "1"], e).returncode == 1  # the subcommand, not a bot called LOOKUP
+    assert not (d / "GLOBAL.count").exists()

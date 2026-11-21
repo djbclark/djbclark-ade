@@ -30,8 +30,10 @@ therefore a reserved word: it cannot be a bot name.
 import fcntl
 import os
 import re
+import stat
 import sys
 import tempfile
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -57,7 +59,7 @@ def parse_args(argv):
         d, args = args[1], args[2:]
     elif args and args[0].startswith("--dir="):
         d, args = args[0].split("=", 1)[1], args[1:]
-    if args and args[0] == "lookup":
+    if args and args[0].lower() == "lookup":
         if len(args) != 2 or args[1].startswith("-"):
             sys.exit(USAGE)
         return d, ("lookup", args[1])
@@ -124,12 +126,24 @@ def find_issued(d: str, ident: str):
     log_path = os.path.join(d, "issued.log")
     lock_fd = None
     try:
-        lock_fd = os.open(os.path.join(d, ".lock"), os.O_RDONLY)
-        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        lock_fd = os.open(os.path.join(d, ".lock"), os.O_RDONLY | os.O_NONBLOCK)
+        deadline = time.monotonic() + 2.0  # a stuck writer is waited for 2 s, then the log is read anyway
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
     except OSError:
         lock_fd = None  # no lock file means ref never ran here: the log read below says so
     try:
-        with open(log_path, encoding="utf-8", errors="replace") as log:
+        fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as log:
             for line in log:
                 cols = line.rstrip("\n").split("\t")
                 if cols[0] == ident and len(cols) >= 2:

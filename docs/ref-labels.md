@@ -46,7 +46,7 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
 3. The id comes from one global counter shared by every bot, base 36 (0-9 a-z),
    never reset, file locked with `flock`. Every issued id is logged in
    `issued.log` (id, bot, time, agent hint); the bot prefix is normalized
-   (uppercase, spaces/hyphens removed). `lookup` is reserved and cannot be a bot name.
+   (uppercase, spaces/hyphens removed). `lookup` (any case) is reserved and cannot be a bot name.
 4. `ref-append` adds the Ref line to a draft and refuses if it already ends with one.
 5. **`ref lookup ID`** (`CLAUDE-74` or `74`) prints the bot, the issue time and
    the agent hint, read-only. Exit 1: never issued (or issued to a different bot
