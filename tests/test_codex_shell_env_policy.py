@@ -46,10 +46,12 @@ SET_KEYS = {
     "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "DIGESTS",
     "BASH_ENV": "HOME/.bashrc",
     "ENABLE_PROMPT_CACHING_1H": "1",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1",
     "MCP_TIMEOUT": "300000",
     "CLAUDE_CODE_HARBOR_KITE": "1",
     "GRAFT_NO_GITIGNORE": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
 }
 IN_HERDR = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w9", "HERDR_TAB_ID": "w9:t7", "HERDR_PANE_ID": "w9:p7",
             "HERDR_SOCKET_PATH": "/tmp/herdr-test.sock", "HERDR_BIN_PATH": "/tmp/herdr-test-bin"}
@@ -299,10 +301,12 @@ inherit = "core"
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123"
 BASH_ENV = "{home}/.bashrc"
 ENABLE_PROMPT_CACHING_1H = "1"
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
+CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1"
 MCP_TIMEOUT = "300000"
 CLAUDE_CODE_HARBOR_KITE = "1"
 GRAFT_NO_GITIGNORE = "1"
+CLAUDE_CODE_SUBAGENT_MODEL = "sonnet"
+CLAUDE_CODE_FORK_SUBAGENT = "0"
 
 [mcp_servers.below.http_headers]
 Authorization = "Bearer SECRET-BELOW-2"
@@ -515,7 +519,7 @@ ignore_default_excludes = true
         # adversary MSG 4: the old policy may spell its explicit set inline under [shell_environment_policy].
         def live(d: str, timeout: str) -> str:
             inline = ('set = { NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123", BASH_ENV = "%s/.bashrc", ENABLE_PROMPT_CACHING_1H = "1", '
-                      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1" }' % (d, timeout))
+                      'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1", CLAUDE_CODE_SUBAGENT_MODEL = "sonnet", CLAUDE_CODE_FORK_SUBAGENT = "0" }' % (d, timeout))
             return f'model = "m"\n\n[projects."/x"]\ntrust_level = "trusted"\n\n[shell_environment_policy]\ninherit = "core"\n{inline}\n\n[hooks.state."/y"]\ntrusted_hash = "SECRET-AFTER-8"\n'
         secrets = ("SECRETDIGEST-0123", "SECRET-INLINE-7", "SECRET-AFTER-8")
         with tempfile.TemporaryDirectory() as d:
@@ -560,6 +564,61 @@ ignore_default_excludes = true
                 return mod.main([str(TEMPLATE), str(t), "--write"]), err.getvalue()
             except SystemExit as e:
                 return e.code, err.getvalue()
+
+    def stale_live(self, d: str) -> pathlib.Path:
+        """A live config that still carries the old Claude Code flag the template replaced."""
+        t = pathlib.Path(d, "config.toml")
+        t.write_text(self.LIVE.format(home=d).replace("CLAUDE_CODE_EXPERIMENTAL_CODE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"))
+        return t
+
+    def run_args(self, mod, t: pathlib.Path, home: str, *extra: str) -> tuple[object, str]:
+        import contextlib, io
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": home}), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                return mod.main([str(TEMPLATE), str(t), "--write", *extra]), err.getvalue()
+            except SystemExit as e:
+                return e.code, err.getvalue()
+
+    def test_a_set_key_change_is_refused_by_default(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            before = t.read_bytes()
+            code, err = self.run_args(mod, t, d)
+            self.assertEqual(code, 1)
+            self.assertIn("would change the explicit set", err)
+            self.assertEqual((t.read_bytes(), sorted(os.listdir(d))), (before, ["config.toml"]))
+
+    def test_allow_set_keys_applies_exactly_the_named_keys(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,CLAUDE_CODE_EXPERIMENTAL_CODE_MODE")
+            self.assertEqual((code, err), (0, ""))
+            import tomllib
+            s = tomllib.loads(t.read_text())["shell_environment_policy"]["set"]
+            self.assertEqual(s["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE"], "1")
+            self.assertNotIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", s)
+            self.assertEqual(s["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"], "SECRETDIGEST-0123")  # the machine's digest is kept
+
+    def test_allow_set_keys_still_refuses_an_unnamed_key(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            before = t.read_bytes()
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE")
+            self.assertEqual(code, 1)
+            self.assertIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", err)
+            self.assertEqual(t.read_bytes(), before)
+
+    def test_the_browser_digest_key_cannot_be_allowed(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            code, err = self.run_args(mod, t, d, "--allow-set-keys", "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S")
+            self.assertEqual(code, 1)
+            self.assertIn("cannot be allowed", err)
 
     def test_a_change_between_read_and_recheck_refuses_and_keeps_the_concurrent_edit(self) -> None:
         mod = self.apply_module()
