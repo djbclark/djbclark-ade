@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/lsp-root-guard` (queue 89, the four LOWs of the #887 review): a project root kept after a container-only folder list stays kept when the client later answers `workspace/workspaceFolders` with `[container]`; a relative or missing `rootPath` is no longer kept (it used to raise and forward the container to the server); `--no-heuristic` now means listed roots only (the structural rule moved behind it); the module docstring and docs/mcp-on-demand.md 12.3 say so; `~/s/*` joins the built-in fallback list, with tests for the glob entry, the child-of-`/` rule, a `rootPath`-only keep and the fallback/config match (#PR)

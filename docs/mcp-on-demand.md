@@ -653,10 +653,11 @@ for building the aggregator.
    fix sits between the client and the server.
 2. **`bin/lsp-root-guard [--container PATH] [--no-heuristic] -- CMD ARGS`** is a stdio proxy. On `initialize` it checks
    each named root. A container (realpath in `config/lsp-roots.toml`, in `ADE_LSP_CONTAINER_ROOTS`, or a directory that
-   is not a project and has at least 3 child repositories, symlinked ones counted, or is a non-project directory directly under `/` or above `$HOME`) gets `rootUri`, `rootPath` and `workspaceFolders` set to null,
+   is not a project and has at least 3 child repositories, symlinked ones counted, or is a non-project directory directly under `/` or above `$HOME`; `--no-heuristic` turns off both of these last two rules and leaves the listed roots only) gets `rootUri`, `rootPath` and `workspaceFolders` set to null,
    so the server serves only the files the client opens and walks nothing. It also answers a server's
    `workspace/workspaceFolders` request with null and drops `didChangeWorkspaceFolders` (strip mode; in a multi-root session it
-   filters both lists instead), so the root cannot come back. A
+   filters both lists instead; a project `rootUri` or `rootPath` that survives a container-only folder list is kept as the single
+   folder, and answered again if the client later replies `[container]`; a relative or missing root is never kept), so the root cannot come back. A
    project root, and every other message in both directions, passes through byte for byte. It never uses a shell and it
    writes one line to stderr when it strips a root. `--check ROOT` prints `container` or `project`. Tests:
    `tests/test_lsp_root_guard.py` (fixture server that echoes the `initialize` it received).
