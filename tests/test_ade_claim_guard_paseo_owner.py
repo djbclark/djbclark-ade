@@ -57,10 +57,27 @@ def test_owner_agent_alone_is_enough_for_a_plain_paseo_caller(tmp_path):
     assert not ade_claims.is_mine(claim, ade_claims.caller_ident(_env(PASEO_AGENT_ID=OTHER)))
 
 
-def test_owner_agent_matches_with_a_claude_session_and_with_other_record_or_session(tmp_path):
-    claim = _claim(_ws(tmp_path), owner_agent=W, owner_record="rec-x", owner_session="sess-x")
+def test_owner_agent_matches_with_a_claude_session_and_with_another_record(tmp_path):
+    claim = _claim(_ws(tmp_path), owner_agent=W, owner_record="rec-x")
     assert ade_claims.is_mine(claim, ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="s-new", PASEO_AGENT_ID=W)))
     assert ade_claims.is_mine(claim, ade_claims.caller_ident(_env(PASEO_AGENT_ID=W)))
+
+
+def test_a_session_bound_claim_is_not_taken_by_an_inherited_paseo_id(tmp_path):
+    """#886 LOW 1 (probe D): `new --owner-agent L --owner-session S1`; a nested `claude -p` / successor with its own session S2 inherits
+    PASEO_AGENT_ID=L and must still be refused, as before #886."""
+    ws = _ws(tmp_path)
+    ade_claims.create_claim(ade_claims.make_claim(id="sb", path=ws, branch="b", base_sha="abcd", owner_agent=W, owner_record=W,
+                                                  owner_session="S1"))
+    claim = ade_claims.read_claim("sb")
+    assert ade_claims.is_mine(claim, ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="S1", PASEO_AGENT_ID=W)))    # its own session
+    assert not ade_claims.is_mine(claim, ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="S2", PASEO_AGENT_ID=W)))
+    assert not _decide(ws, CLAUDE_CODE_SESSION_ID="S2", PASEO_AGENT_ID=W)[1].allowed
+    # owner.agent alone with a session and a different record: also not the agent rule
+    ws2 = _ws(tmp_path, "w2")
+    ade_claims.create_claim(ade_claims.make_claim(id="sb2", path=ws2, branch="b", base_sha="abcd", owner_agent=W, owner_record="rec-x",
+                                                  owner_session="S1"))
+    assert not ade_claims.is_mine(ade_claims.read_claim("sb2"), ade_claims.caller_ident(_env(PASEO_AGENT_ID=W)))
 
 
 def test_a_label_or_non_uuid_owner_agent_never_matches_by_agent(tmp_path):
@@ -125,6 +142,39 @@ def test_refusal_for_a_real_stranger_keeps_the_owner_text(tmp_path, monkeypatch)
     call, d = _decide(ws, PASEO_AGENT_ID=OTHER)
     text = ade_claims.refusal_text(d, call)
     assert "Ask the owner (a Paseo agent)" in text and "names you" not in text and f"you are {OTHER}" in text
+
+
+def _self_text(ws, owner, caller):
+    subprocess.run(["git", "init", "-q", str(ws)], check=True)
+    claim = _claim(ws, cid=f"c-{ws.name}", **owner)
+    d = ade_claims._foreign(claim, "foreign-claim", ade_claims.FOREIGN_ALT)
+    d.detail["ident"] = "S2"
+    return ade_claims._refusal_lines(d, "S2", {"PASEO_AGENT_ID": caller})[1], claim["id"]
+
+
+def test_refusal_offers_bind_owner_only_when_it_can_succeed(tmp_path):
+    # owner.agent empty (the caller is only owner.record), and owner.agent already the caller's own id
+    for i, owner in enumerate([dict(owner_record=W), dict(owner_agent=W, owner_session="S1")]):
+        text, cid = _self_text(_sub(tmp_path, f"a{i}"), owner, W)
+        assert f"bind-owner --id {cid} --owner-agent {W}" in text, owner
+        assert "release this claim" not in text, owner
+
+
+def test_refusal_advises_release_and_new_when_bind_owner_would_refuse(tmp_path):
+    cases = [(dict(owner_agent="claude", owner_record=W, owner_session="S1"), W),    # a label owns the claim (probe F)
+             (dict(owner_agent=OTHER, owner_record=W), W),                           # another Paseo agent is owner.agent
+             (dict(owner_agent="codex", owner_record="codex"), "codex")]             # the caller itself is a label
+    for i, (owner, caller) in enumerate(cases):
+        text, cid = _self_text(_sub(tmp_path, f"b{i}"), owner, caller)
+        assert "release this claim" in text and f"ade_claims.py release --id {cid}" in text, (owner, caller)
+        assert "bind-owner --id" not in text.replace("bind-owner cannot replace", ""), (owner, caller)
+        assert "Do not message yourself" in text
+
+
+def _sub(tmp_path, name):
+    d = tmp_path / name
+    d.mkdir()
+    return d
 
 
 def test_hook_refusal_has_the_same_self_owner_text(tmp_path, capsys):

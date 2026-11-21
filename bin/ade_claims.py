@@ -711,11 +711,13 @@ def is_mine(claim: dict[str, Any], ident: Optional[str]) -> bool:
         return True
     # claim-guard (2026-11-21): a lead that pre-creates a claim for a Paseo worker can only name the worker by its agent id
     # (`bind-owner --owner-agent ID`). A caller whose own PASEO_AGENT_ID is a Paseo UUID equal to owner.agent is that owner,
-    # whatever owner.record or owner.session say; a harness label ("codex") or any non-UUID owner.agent never matches. Trust
+    # but only while the claim has no owner.session (2026-11-21, #886 LOW 1: a session binding is deliberate, and a nested
+    # `claude -p` or a successor with its own session that inherits the id must still be refused); a harness label ("codex")
+    # or any non-UUID owner.agent never matches. Trust
     # level: PASEO_AGENT_ID is self-set environment (a process that inherits it, such as an in-process sub-agent, is that
     # agent), the same as every other owner key here: it stops accidents between cooperating agents, not forgery (docs/peer-trust.md).
     owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
-    return is_paseo_agent_id(paseo) and owner.get("agent") == paseo
+    return is_paseo_agent_id(paseo) and owner.get("agent") == paseo and not owner.get("session")
 
 
 def _bind_owner_shape(claim: dict[str, Any]) -> Optional[str]:
@@ -1785,7 +1787,9 @@ def call_workspaces(call: GitCall) -> tuple[list[Optional[Workspace]], bool]:
 def _foreign(claim: dict[str, Any], rule: str, alt: str) -> Decision:
     owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
     ids = sorted({v for v in (owner.get("agent"), owner.get("record"), owner.get("session")) if isinstance(v, str) and v})
-    return Decision(False, rule, alt, str(claim.get("id") or ""), owner_label(claim), detail={"owner_ids": ids})
+    agent = owner.get("agent") if isinstance(owner.get("agent"), str) else ""
+    return Decision(False, rule, alt, str(claim.get("id") or ""), owner_label(claim),
+                    detail={"owner_ids": ids, "owner_agent": agent})
 
 
 BANG_ALT = {"shell alias": "a `!` alias runs a shell that reaches the real git past this guard; spell the git "
@@ -2709,9 +2713,14 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
     if paseo and paseo in (d.detail.get("owner_ids") or []):
         who = (f"  claim {_esc(d.claim_id)} names you (Paseo agent {_esc(paseo)}) as an owner, but the guard identified you as {me}, "
                "which is not one of its owner keys.\n")
+        agent = d.detail.get("owner_agent") or ""
+        if is_paseo_agent_id(paseo) and agent in ("", paseo):    # bind-owner refuses to replace a different owner.agent
+            fix = f"re-bind it with `ade_claims.py bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`"
+        else:
+            fix = (f"release this claim (`ade_claims.py release --id {_esc(d.claim_id)}`) and make a new one for you "
+                   "(`ade_claims.py new --path DIR --owner-agent <your Paseo agent id>`): bind-owner cannot replace its owner.agent")
         nxt = ("  Do not message yourself. The guard reads ADE_CLAIM_ID first (it must be this claim's id: unset it when stale), then "
-               "your Claude session id, then PASEO_AGENT_ID; ask the lead that made the claim to re-bind it with `ade_claims.py "
-               f"bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`. {log}")
+               f"your Claude session id, then PASEO_AGENT_ID; ask the lead that made the claim to {fix}. {log}")
         return who, nxt
     who = (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id
            else f"  {_esc(d.owner)}; you are {me}.\n")
