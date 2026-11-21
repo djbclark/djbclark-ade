@@ -1,3 +1,0 @@
-### Fixed
-
-- `AGENTS.md`, `skills/loose/SKILL.md`, `skills/steps/SKILL.md`, `skills/eli5/SKILL.md`, `claude/agents/adversary.md`, `skills/research/SKILL.md`, `skills/dialogue/SKILL.md`: correct stale facts found by the read-only prompt audit (2026-11-21) — self-compaction now uses `bin/ade-self-session compact` (the old self-slash was removed), the GUI-hog window and Freeze PRs are merged, the handoff skill is a compatibility alias, the ade-claim hook implements claim creation (observe-only), standing order 5 uses Roman sections, the retired shim tests are deleted, and the Cursor grok model is not the never-routed grok/grok-bot providers. (#851)

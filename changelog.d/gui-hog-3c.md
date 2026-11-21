@@ -1,3 +1,0 @@
-### Added
-
-- GUI-hog dialog PR 3c, Freeze: `gui-hog freeze | resume | thaw | frozen` stop an app's whole process tree on an operator click only (never automatic), with a write-ahead record, a four-field identity check before every signal, the protected list on the root and every member, and a thaw on every path (timed 10 min default, Resume in the window and the new menu-bar item, the sampler's first step each tick, crash recovery, load-watch's removal, `gui-hog thaw --all`); row buttons Freeze N min and Freeze…, a Frozen section with Resume, and `[freeze] enabled = false` to hide the buttons; the dialog window can now be minimized to the Dock (it acts on nothing and keeps refreshing) (#730)

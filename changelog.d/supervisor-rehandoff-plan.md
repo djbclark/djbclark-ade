@@ -1,3 +1,0 @@
-### Added
-
-- `bin/ade-supervisor-scan`: each scan now writes the re-handoff it would perform for a stuck Pi agent (who, which exhausted account, which healthy alternative) and logs it. The default is a dry run that archives and relaunches nothing. `ADE_SUPERVISOR_REHANDOFF=live` calls `bin/ade-supervisor-rehandoff`, which is not yet built and refuses, so no agent moves until the ade-self-session handoff path is wired (Carried 70). The plan file is written temp-then-rename, the plan line is logged only when the plan changes (an empty plan never), and `ADE_SUPERVISOR_REHANDOFF` is documented in docs/scheduling.md and the watch skill. The plan names only Pi agents (each entry carries `family`), so an errored Codex or Claude agent is never in it. (#822)

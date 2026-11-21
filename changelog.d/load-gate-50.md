@@ -1,3 +1,0 @@
-### Changed
-
-- `bin/load-watch`: `ADMIT_PER_CORE` rises from 2.0 to 5.0 (now env-overridable via `LW_ADMIT_PER_CORE`) and `ADMIT_BOOST_PER_CORE` from 4.0 to 5.0, per the operator ruling (2026-11-21) that bigmac's 10-core Mac stays usable at load 50. Runaway-process and thrash alerts are unchanged (`LW_MIN_CORES` 1.5, compressor churn 50k pages/s, Chrome 0.9 cores). The watcher's steer/ping line `LW_LOAD_PER_CORE` rises from 4.0 to 5.0 too (operator ruling 2026-11-21) so admit and steer agree at load 50; `LW_ADMIT_PER_CORE` has a 0.01 floor. The calm boost (5.0) now equals the default base, so it only matters to a caller that passes a lower base (bg's 3.0 until its own change lands). (#854)

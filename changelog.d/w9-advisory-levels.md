@@ -1,3 +1,0 @@
-### Added
-
-- Add per-pool advisory quota levels, batch reminders, and expiring operator spending profiles visible in the router show command; routing and gates remain unchanged. (#587)
