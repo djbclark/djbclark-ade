@@ -24,6 +24,7 @@ def run(tool_input, tool="Agent", env=None, session="s1", cwd=None):
 def footer_env(tmp_path, body=None, missing=False):
     """AGENT_FOOTER_* overrides: point the hook at a fixture footer (or a missing path)."""
     env = dict(os.environ, AGENT_FOOTER_REPORT_DIR=str(tmp_path / "reports"))
+    env.pop("CLAUDE_PROJECT_DIR", None)                                    # the hook reads project agents from it: keep tests hermetic
     path = tmp_path / "dispatch-footer.md"
     if missing:
         env["AGENT_FOOTER_FILE"] = str(tmp_path / "no-such-footer.md")
@@ -718,7 +719,7 @@ def test_disallowed_tools_can_make_a_type_read_only(tmp_path):
 
 def test_a_project_definition_is_found_through_the_hooks_cwd(tmp_path):
     proj = tmp_path / "proj"
-    (proj / ".claude" / "agents").mkdir(parents=True)
+    (proj / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
     (proj / ".claude" / "agents" / "local-scout.md").write_text("---\nname: local-scout\ntools: Read, Grep\n---\n")
     env = footer_env(tmp_path)                                            # no AGENT_FOOTER_AGENT_DIRS: project dir, then ~/.claude/agents
     out = run({"subagent_type": "local-scout", "prompt": "q"}, env=env, cwd=proj)
@@ -800,3 +801,138 @@ def test_an_unreadable_definition_fails_open_to_the_standard_footer(tmp_path):
         assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
     finally:
         bad.chmod(0o644)
+
+
+# ---- round-1 repair of PR 900 (adversary BLOCK): Claude Code's normalized subagent_type match, LOW 1-5 ----
+
+# what Claude Code 2.1.330 accepts after an exact match fails: NFKC, lower-case, then drop White_Space, Pd (dashes) and `_`
+@pytest.mark.parametrize("spelling", ["explore", "EXPLORE", "eXpLoRe", "Explore ", "Ｅxplore", " explore"])
+def test_other_spellings_of_explore_get_the_read_only_footer(tmp_path, spelling):
+    out = run({"subagent_type": spelling, "prompt": "find X"}, env=ro_env(tmp_path))
+    assert_read_only_footer(tmp_path, out)
+    assert "`Explore`" in out["additionalContext"]                          # reported under the type Claude Code will run
+    assert out["updatedInput"]["subagent_type"] == spelling                 # the call itself is not rewritten
+
+
+@pytest.mark.parametrize("spelling", ["plan", "PLAN", "Plan ", "p_l_a_n"])
+def test_other_spellings_of_plan_get_the_read_only_footer(tmp_path, spelling):
+    assert_read_only_footer(tmp_path, run({"subagent_type": spelling, "prompt": "plan X"}, env=ro_env(tmp_path)))
+
+
+@pytest.mark.parametrize("spelling", ["web_fetch", "webfetch", "Web Fetch", "WEB-FETCH", "web‑fetch", "web–fetch", "Web_Fetch", "web  fetch"])
+def test_other_spellings_of_web_fetch_get_the_read_only_footer(tmp_path, spelling):
+    assert_read_only_footer(tmp_path, run({"subagent_type": spelling, "prompt": "fetch X"}, env=ro_env(tmp_path)))
+
+
+@pytest.mark.parametrize("spelling", ["my_scout", "My Scout", "MYSCOUT", "my-scout", "my—scout"])
+def test_a_definition_is_reached_by_a_normalized_name(tmp_path, spelling):
+    env = ro_env(tmp_path, {"my-scout": "---\nname: my-scout\ntools: Read, Grep\n---\n"})
+    assert_read_only_footer(tmp_path, run({"subagent_type": spelling, "prompt": "q"}, env=env))
+
+
+@pytest.mark.parametrize("spelling", ["general_purpose", "General Purpose", "generalpurpose", "claude_code_guide", "back_end", "Fable Deep", "explorer", "explore-x", "plan-b", "exploreplan", "web", "fetch"])
+def test_the_looser_match_never_catches_a_type_that_can_write_or_a_different_name(tmp_path, spelling):
+    """Only equality of the normalized names counts: neither a writable type nor a name that merely contains `explore`/`plan`."""
+    env = ro_env(tmp_path, {"backend": "---\nname: backend\n---\n", "fable-deep": "---\nname: fable-deep\ntools: Read, Write\n---\n"})
+    prompt = run({"subagent_type": spelling, "description": "Review X!", "prompt": "do X"}, env=env)
+    if prompt is None:                                                        # claude-code-guide, even misspelled, is exempt
+        assert spelling == "claude_code_guide"
+        return
+    assert "read-only" not in prompt["updatedInput"]["prompt"] and "READ-ONLY" not in prompt["additionalContext"]
+    assert "## Delivery contract (test)" in prompt["updatedInput"]["prompt"]
+
+
+def test_a_writable_definition_named_like_a_read_only_builtin_wins_by_exact_name_and_normalized_name(tmp_path):
+    env = ro_env(tmp_path, {"Explore": "---\nname: Explore\ntools: Read, Write\n---\n"})
+    for spelling in ("Explore", "explore", "EXPLORE"):
+        out = run({"subagent_type": spelling, "prompt": "q"}, env=env)
+        assert "## Delivery contract (test)" in out["updatedInput"]["prompt"], spelling
+
+
+def test_an_ambiguous_normalized_name_keeps_the_standard_footer(tmp_path):
+    """Claude Code refuses the launch ('ambiguous'); the hook must not pick a side: a writable `explore` beside the built-in `Explore`."""
+    env = ro_env(tmp_path, {"explore-lower": "---\nname: explore\ntools: Read, Write\n---\n"})
+    assert "## Delivery contract (test)" in run({"subagent_type": "EXPLORE", "prompt": "q"}, env=env)["updatedInput"]["prompt"]
+    out = run({"subagent_type": "Explore", "prompt": "q"}, env=env)               # the exact name still picks the built-in
+    assert "## Delivery contract (read-only" in out["updatedInput"]["prompt"]
+
+
+def test_a_misspelled_exempt_type_is_exempt_too(tmp_path):
+    env = ro_env(tmp_path)
+    assert run({"subagent_type": "Claude_Code_Guide", "prompt": "q"}, env=env) is None
+    assert run({"subagent_type": "statusline setup", "prompt": "q"}, env=env) is None
+
+
+# LOW-1: an Edit-only definition is classed read-only (no report file) but is not told it may change nothing at all
+def test_the_read_only_footer_does_not_forbid_an_editors_own_edit():
+    text = RO_REPO_FOOTER.read_text()
+    assert "Change nothing" not in text and "Create no report, marker or other new file" in text
+    assert "edit an existing file only if your own task says to" in text
+
+
+# LOW-2: one unreadable or undecodable definition must not turn the built-ins off
+def test_an_undecodable_unrelated_definition_leaves_the_builtins_read_only(tmp_path):
+    env = ro_env(tmp_path)
+    (Path(env["AGENT_FOOTER_AGENT_DIRS"]) / "junk.md").write_bytes(b"\xff\xfe\x00bad\xc3\x28")
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Explore", "prompt": "q"}, env=env))
+    assert_read_only_footer(tmp_path, run({"subagent_type": "explore", "prompt": "q"}, env=env))
+    out = run({"subagent_type": "junk", "prompt": "q"}, env=env)                  # the bad file's own type fails open
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
+
+
+def test_an_unreadable_unrelated_definition_leaves_the_builtins_read_only(tmp_path):
+    env = ro_env(tmp_path, {"locked": "---\nname: locked\ntools: Read\n---\n"})
+    locked = Path(env["AGENT_FOOTER_AGENT_DIRS"]) / "locked.md"
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):
+            return                                                            # running as root
+        assert_read_only_footer(tmp_path, run({"subagent_type": "Plan", "prompt": "q"}, env=env))
+    finally:
+        locked.chmod(0o644)
+
+
+# LOW-3: a writable type whose prompt carries the read-only heading still gets the standard footer
+def test_a_writable_type_with_the_read_only_heading_gets_the_standard_footer(tmp_path):
+    prompt = "do X\n\n## Delivery contract (read-only sub-agent: no file tools)\n1. final message\n"
+    out = run({"subagent_type": "general-purpose", "description": "Do X", "prompt": prompt}, env=ro_env(tmp_path))
+    new = out["updatedInput"]["prompt"]
+    assert new.startswith(prompt.rstrip()) and new.count("## Delivery contract (test)") == 1
+    assert str(tmp_path / "reports" / "s1" / "do-x-report.md") in out["additionalContext"]
+
+
+# LOW-5: project before user, and the project root from CLAUDE_PROJECT_DIR when the session has cd'd into a subdirectory
+def _proj_and_home(tmp_path, project_def, user_def):
+    proj, home = tmp_path / "proj", tmp_path / "home"
+    (proj / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+    (proj / ".claude" / "agents" / "dup.md").write_text(project_def)
+    (home / ".claude" / "agents" / "dup.md").write_text(user_def)
+    env = footer_env(tmp_path)                                                    # no AGENT_FOOTER_AGENT_DIRS
+    env["HOME"] = str(home)
+    return proj, env
+
+
+def test_a_project_definition_beats_the_user_definition_of_the_same_name(tmp_path):
+    ro, rw = "---\nname: dup\ntools: Read\n---\n", "---\nname: dup\ntools: Read, Write\n---\n"
+    proj, env = _proj_and_home(tmp_path, ro, rw)
+    assert "## Delivery contract (read-only" in run({"subagent_type": "dup", "prompt": "q"}, env=env, cwd=proj)["updatedInput"]["prompt"]
+    proj, env = _proj_and_home(tmp_path, rw, ro)
+    assert "## Delivery contract (test)" in run({"subagent_type": "dup", "prompt": "q"}, env=env, cwd=proj)["updatedInput"]["prompt"]
+
+
+def test_claude_project_dir_finds_the_project_definitions_from_a_subdirectory(tmp_path):
+    proj, env = _proj_and_home(tmp_path, "---\nname: dup\ntools: Read\n---\n", "---\nname: other\ntools: Read\n---\n")
+    sub = proj / "src" / "deep"
+    sub.mkdir(parents=True)
+    out = run({"subagent_type": "dup", "prompt": "q"}, env=env, cwd=sub)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]          # cwd alone misses it
+    out = run({"subagent_type": "dup", "prompt": "q"}, env=dict(env, CLAUDE_PROJECT_DIR=str(proj)), cwd=sub)
+    assert "## Delivery contract (read-only" in out["updatedInput"]["prompt"]
+
+
+# LOW-4: the read-only footer keeps the secrets, graft and closing-search rules that still apply to a Bash-capable Explore/Plan
+def test_the_read_only_footer_keeps_secret_graft_and_closing_search_rules():
+    text = RO_REPO_FOOTER.read_text()
+    assert "never a whole line with a credential" in text
+    assert "--no-refresh" in text and "Closing search:" in text

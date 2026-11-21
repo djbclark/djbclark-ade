@@ -27,23 +27,35 @@ agent definition whose `tools:` list has neither Write nor Bash) cannot create a
 `docs/dispatch-footer-readonly.md` instead (its final message is the report) and the hook's `additionalContext` tells the
 caller to save that message and not to wait for a `.done` file. The resume guard does not apply (no report file exists). A
 standard footer pasted into such a prompt is overridden by appending the read-only one. Types that can write are unchanged.
+`subagent_type` is resolved as Claude Code resolves it (2.1.330): an exact match first, else the one type whose normalized name
+(NFKC, lower-case, no whitespace, dashes or `_`) equals the request's, so `explore`, `web_fetch` and `Web Fetch` count as `Explore`
+and `web-fetch`; two matches are ambiguous (Claude Code refuses the launch) and keep the standard footer. Definitions are read from
+`CLAUDE_PROJECT_DIR`, the hook's cwd and `~/.claude/agents`; one unreadable file only affects its own type.
 """
 
 import json
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 MARK = "Delivery contract"
 # The footer's own heading at the start of a line (`## Delivery contract (...)`): a mention of the words in prose, or a peer's
 # whole footer pasted in a fence or quote, is not this prompt's footer (lead review 14760b15 B3: fail closed = append ours).
-FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK)
+# The read-only footer's heading ("Delivery contract (read-only") is not the standard footer: a writable type whose prompt carries
+# it still gets the standard one appended (adversary r1 LOW-3).
+FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK + r"(?! \(read-only)")
 EXEMPT = {"claude-code-guide", "statusline-setup"}
 # Built-in sub-agent types that cannot deliver a report file. Explore and Plan have no Write/Edit/NotebookEdit; they keep Bash,
 # but their system prompts forbid creating files by any means (redirects and heredocs included), so a footer that says "write
 # your report to X" cannot be followed. web-fetch has WebFetch only. A user definition with the same name wins (see agent_tools).
 READONLY_BUILTIN = {"Explore", "Plan", "web-fetch"}
+# Built-in types that can write (or are exempt): known only so the normalized-name match can see a collision with a definition.
+WRITABLE_BUILTIN = {"general-purpose", "claude", "claude-code-guide", "statusline-setup"}
+KNOWN_BUILTIN = READONLY_BUILTIN | WRITABLE_BUILTIN
+# Unicode White_Space (what Claude Code's normalizer strips with \p{White_Space}): \t\n\v\f\r, space, NEL, NBSP, and the general spaces.
+_WHITE_SPACE = frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000") | {chr(c) for c in range(0x2000, 0x200B)}
 WRITE_TOOLS = {"Write", "Bash"}                     # either one can create the report file; Edit and NotebookEdit cannot make a new file
 DEFAULT_LEAD = "main"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -235,11 +247,17 @@ def log_relaunch(data, tool_input, path, why):
 
 
 def agent_dirs(cwd):
-    """Directories holding agent definitions: AGENT_FOOTER_AGENT_DIRS (os.pathsep list, for tests), else project then user."""
+    """Directories holding agent definitions: AGENT_FOOTER_AGENT_DIRS (os.pathsep list, for tests), else the project root
+    (`CLAUDE_PROJECT_DIR`, which Claude Code sets for hooks and which survives a `cd` into a subdirectory), the hook's cwd,
+    then the user dir. The first definition of a name wins (project before user, as Claude Code resolves them)."""
     override = os.environ.get("AGENT_FOOTER_AGENT_DIRS")
     if override is not None:
         return [Path(d) for d in override.split(os.pathsep) if d]
-    dirs = [Path(cwd) / ".claude" / "agents"] if cwd else []
+    dirs = []
+    for root in (os.environ.get("CLAUDE_PROJECT_DIR"), cwd):
+        d = Path(root) / ".claude" / "agents" if root else None
+        if d is not None and d not in dirs:
+            dirs.append(d)
     return dirs + [Path.home() / ".claude" / "agents"]
 
 
@@ -271,18 +289,47 @@ def _tool_names(value):
     return names
 
 
-def agent_tools(subagent_type, cwd):
-    """(allowed, disallowed) of the agent definition named `subagent_type` (file stem or `name:`), allowed None when it has no
-    `tools:` line (all tools), or None when no definition is found. Plugin agents are not looked up (they stay writable)."""
+def norm_type(name):
+    """Claude Code's subagent_type normalizer (2.1.330, `MQ`): NFKC, lower-case, then drop White_Space, dash punctuation (Pd)
+    and `_`. `Explore`, `explore`, `web_fetch`, `Web Fetch` and `webfetch` all name the same type once it fails an exact match."""
+    text = unicodedata.normalize("NFKC", name).lower()
+    return "".join(c for c in text if c != "_" and c not in _WHITE_SPACE and unicodedata.category(c) != "Pd")
+
+
+def agent_definitions(cwd):
+    """{type name (file stem or `name:`): (allowed, disallowed) or None} for every definition found, the first one of a name
+    winning. allowed is None when the definition has no `tools:` line (all tools); the value is None when the file cannot be
+    read, so that one definition (never the others, adversary r1 LOW-2) falls back to the standard footer. Plugin agents are
+    not looked up (they stay writable)."""
+    defs = {}
     for d in agent_dirs(cwd):
-        if not d.is_dir():
+        try:
+            files = sorted(d.glob("*.md")) if d.is_dir() else []
+        except OSError:
             continue
-        for f in sorted(d.glob("*.md")):
-            fm = _frontmatter(f.read_text())
-            if (fm.get("name") or f.stem).strip("'\"") == subagent_type:
+        for f in files:
+            try:
+                fm = _frontmatter(f.read_text())
+                name = (fm.get("name") or f.stem).strip("'\"")
                 tools = fm.get("tools")
-                return (_tool_names(tools) if tools else None), _tool_names(fm.get("disallowedtools", ""))
-    return None
+                entry = ((_tool_names(tools) if tools else None), _tool_names(fm.get("disallowedtools", "")))
+            except Exception:  # noqa: BLE001 - one unreadable or undecodable file must not hide the rest
+                name, entry = f.stem, None
+            defs.setdefault(name, entry)
+    return defs
+
+
+def resolve_type(subagent_type, defs):
+    """The type name Claude Code will launch for `subagent_type`: an exact match first (a definition, then a built-in), else the
+    one type whose normalized name equals the normalized request. Two or more such types are ambiguous (Claude Code refuses
+    the launch) and none is not a known type: None either way, which keeps the standard footer."""
+    if subagent_type in defs or subagent_type in KNOWN_BUILTIN:
+        return subagent_type
+    wanted = norm_type(subagent_type)
+    if not wanted:
+        return None
+    hits = {n for n in set(defs) | KNOWN_BUILTIN if norm_type(n) == wanted}
+    return hits.pop() if len(hits) == 1 else None
 
 
 def can_write_files(allowed, disallowed):
@@ -292,18 +339,21 @@ def can_write_files(allowed, disallowed):
     return bool(WRITE_TOOLS & (allowed - disallowed))
 
 
-def read_only_agent(subagent_type, cwd):
-    """True when the sub-agent type cannot create a report file (the read-only footer applies). Any error means False: an
-    unknown or unreadable type keeps the standard footer (fail open to the old behaviour)."""
+def classify_type(subagent_type, cwd):
+    """(type name Claude Code will run or None, True when it cannot create a report file: the read-only footer applies). Any
+    error means (None, False): an unknown or unreadable type keeps the standard footer (fail open to the old behaviour)."""
     try:
         if not subagent_type:
-            return False
-        found = agent_tools(subagent_type, cwd)
-        if found is not None:
-            return not can_write_files(*found)
-        return subagent_type in READONLY_BUILTIN
+            return None, False
+        defs = agent_definitions(cwd)
+        name = resolve_type(subagent_type, defs)
+        if name is None:
+            return None, False
+        if name in defs:
+            return name, defs[name] is not None and not can_write_files(*defs[name])
+        return name, name in READONLY_BUILTIN
     except Exception:  # noqa: BLE001
-        return False
+        return None, False
 
 
 def footer_file():
@@ -369,8 +419,11 @@ try:
     if subagent in EXEMPT:
         sys.exit(0)
     prompt_text = str(tool_input.get("prompt") or "")
-    if read_only_agent(subagent, data.get("cwd")):          # no report file, no .done, no resume guard: the final message is the report
-        result = read_only_result(subagent, prompt_text, tool_input)
+    resolved, read_only = classify_type(subagent, data.get("cwd"))      # the type Claude Code will really run (exact, else normalized)
+    if resolved in EXEMPT:
+        sys.exit(0)
+    if read_only:          # no report file, no .done, no resume guard: the final message is the report
+        result = read_only_result(resolved, prompt_text, tool_input)
         if result is not None:
             print(json.dumps(result))
         sys.exit(0)
