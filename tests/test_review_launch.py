@@ -482,6 +482,116 @@ def test_session_spool_read_exception(world, case, expected):
         assert rec["structured_output"] is None
 
 
+def test_a_read_of_a_symlink_that_stays_inside_the_worktree_is_allowed(world):
+    """CLAUDE.md -> AGENTS.md is committed in every repo here; reading it must not kill the review (exit 77)."""
+    world.passed_check()
+    commit_link(world, "CLAUDE.md", "a.txt")
+    world.scenario(tool_uses=[{"name": "Read", "input": {"file_path": str(world.wt / "CLAUDE.md")}},
+                              {"name": "Read", "input": {"file_path": "CLAUDE.md"}}])
+    r = world.launch("--json", "--head", world.head)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["spool_reads"] == 0
+
+
+def test_a_read_of_a_symlink_that_escapes_the_worktree_still_trips(world):
+    """A link the launch check never saw (created while the run was going) and that points out of the worktree is
+    refused by the tripwire: realpath says where it leads, whatever the link's own name."""
+    world.passed_check()
+    secret = world.tmp / "outside.txt"
+    secret.write_text("not for the model\n")
+    world.scenario(make_links={"late-link": str(secret)},
+                   tool_uses=[{"name": "Read", "input": {"file_path": str(world.wt / "late-link")}}])
+    r = world.launch("--json")
+    assert r.returncode == 77, r.stderr
+    assert "outside the worktree" in json.loads(r.stdout)["reason"]
+
+
+def test_read_follows_symlink_only_judges_links_outside_the_worktree(tmp_path):
+    rl = load_launcher()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "a.txt").write_text("a\n")
+    (wt / "inside").symlink_to("a.txt")
+    (wt / "escapes").symlink_to(tmp_path)
+    (tmp_path / "outside-link").symlink_to(wt / "a.txt")
+    wt_s = str(wt)
+    assert rl.read_follows_symlink("inside", wt_s) is False                        # inside, resolves inside
+    assert rl.read_follows_symlink(str(wt / "escapes"), wt_s) is False             # inside by name: path_outside judges it
+    assert rl.path_outside(str(wt / "escapes"), wt_s) is True
+    assert rl.read_follows_symlink(str(wt / ".." / "outside-link"), wt_s) is True  # outside by name, a link: refused
+    assert rl.read_follows_symlink(str(tmp_path / "outside-link"), wt_s) is True
+    assert rl.read_follows_symlink(str(wt / "a.txt"), wt_s) is False
+
+
+def _node_project_name(cwd: str) -> str:
+    """Claude Code's own encoding, written independently in JS (the hash is a signed 32-bit one over UTF-16 units)."""
+    js = (
+        "const s=process.argv[1];const e=s.replace(/[^a-zA-Z0-9]/g,'-');"
+        "if(e.length<=200){console.log(e);}else{let h=0;for(let i=0;i<s.length;i++){h=(h<<5)-h+s.charCodeAt(i);h|=0;}"
+        "console.log(e.slice(0,200)+'-'+Math.abs(h).toString(36));}"
+    )
+    return subprocess.run(["node", "-e", js, cwd], capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is the reference encoder")
+@pytest.mark.parametrize("cwd", [
+    "/tmp/short",
+    "/Users/djbclark/src/djbclark-ade-pr835-fix-wt",
+    "/private/var/folders/xx/" + "very-long-directory-name-" * 10 + "wt",        # > 200 characters: the hashed branch
+    "/private/var/folders/" + "ü-ünïcode-" * 30 + "wt",                           # non-ASCII UTF-16 units
+])
+def test_claude_project_name_matches_the_js_encoding(cwd):
+    rl = load_launcher()
+    assert rl.claude_project_name(cwd) == _node_project_name(cwd)
+    if len(cwd) > 200:
+        assert len(rl.claude_project_name(cwd)) > 200 and rl.claude_project_name(cwd).count("-") > 5
+
+
+def test_a_long_worktree_path_reads_its_own_spool(tmp_path):
+    """End to end with a worktree path long enough for the hashed project folder name."""
+    deep = tmp_path / ("very-long-directory-name-" * 9)
+    deep.mkdir()
+    w = World(deep)
+    w.passed_check()
+    rl = load_launcher()
+    assert len(str(w.wt.resolve())) > 200
+    sid = "22222222-2222-4222-8222-222222222222"
+    spool = w.home / ".claude" / "projects" / rl.claude_project_name(str(w.wt.resolve())) / sid / "tool-results"
+    spool.mkdir(parents=True)
+    (spool / "toolu_long.txt").write_text("big output")
+    w.scenario(init={"session_id": sid}, result_session_id=sid,
+               tool_uses=[{"name": "Read", "input": {"file_path": str(spool / "toolu_long.txt")}}])
+    r = w.launch("--json")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["spool_reads"] == 1
+
+
+def test_claude_config_dir_moves_the_spool(world, tmp_path):
+    """With CLAUDE_CONFIG_DIR set the child spools there, so the exemption must look there and not in ~/.claude."""
+    import re
+    cfg = world.tmp / "claude-config"
+    sid = "33333333-3333-4333-8333-333333333333"
+    encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(world.wt.resolve()))
+    spool = cfg / "projects" / encoded / sid / "tool-results"
+    spool.mkdir(parents=True)
+    (spool / "toolu_cfg.txt").write_text("big output")
+    env = world.env(CLAUDE_CONFIG_DIR=str(cfg))
+    r = world.run("--check", "--mode", "review", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    world.scenario(init={"session_id": sid}, result_session_id=sid,
+                   tool_uses=[{"name": "Read", "input": {"file_path": str(spool / "toolu_cfg.txt")}}])
+    r = world.launch("--json", env=env)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["spool_reads"] == 1
+    # The same file under the default ~/.claude is NOT this run's spool when the config dir was moved.
+    other = world.home / ".claude" / "projects" / encoded / sid / "tool-results"
+    other.mkdir(parents=True)
+    (other / "toolu_cfg.txt").write_text("big output")
+    world.scenario(init={"session_id": sid}, result_session_id=sid,
+                   tool_uses=[{"name": "Read", "input": {"file_path": str(other / "toolu_cfg.txt")}}])
+    assert world.launch("--json", env=env).returncode == 77
+
+
 # ---- a symlink that leaves the worktree (refused before the launch, exit 2) ----------------------------------
 
 def commit_link(world, name: str, target: Path | str) -> None:

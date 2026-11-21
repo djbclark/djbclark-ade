@@ -65,11 +65,17 @@ THE BOUNDARY IS PROVEN FROM THE RUN'S OWN STREAM, and the run is killed (exit 77
   * a hook event (`system` subtype hook_*) trips: managed settings load whatever --setting-sources says.
   * an assistant content item must be text, thinking (or redacted_thinking) or tool_use; every `tool_use` must
     name an allowed tool, and a Read/Grep/Glob path outside the worktree (after ~, `..` and symlinks) trips too,
-    except Read of a regular toolu_*.txt in this stream session's own tool-results spool (no symlinks;
-    init/result session IDs must agree; counted as spool_reads). An unknown session fails closed.
-    Everything else trips even though the key already refuses it, as does any `..` component in a Glob pattern or a Grep glob, and a
+    even though the key already refuses it, as does any `..` component in a Glob pattern or a Grep glob, and a
     pattern or glob whose fixed prefix (up to its first wildcard; a relative one joined to the tool's path or the
     worktree) resolves outside; the refusals Claude reports in `result.permission_denials` are logged to stderr.
+  One exception, for Read only: a regular `toolu_*.txt` file in this run's own tool-results spool,
+  `$CLAUDE_CONFIG_DIR` (default ~/.claude)/projects/<encoded worktree>/<session id>/tool-results/. Claude spools a
+  tool result too big for the context there and tells the model to Read it; killing that read lost the whole review.
+  The session id comes only from the CLI's own init and result events (they must agree; `[A-Za-z0-9_-]+`), the
+  folder name is Claude Code's own project encoding (claude_project_name; a change to it fails closed), the path
+  must be exactly that spool's direct child, a symlink anywhere on it is refused, and an unknown session gets no
+  exception. A Read of a symlink that lies inside the worktree (`CLAUDE.md -> AGENTS.md`) is judged by where it
+  resolves, like any other path. Each exempt read is counted as `spool_reads` in --json.
   This path tripwire acts on the stream, so it fires AFTER Claude may already have run the call: it is a second
   layer behind blockReadsOutsideWorkingDirectories (and the symlink refusal above), and it ends the run and
   withholds the output, but it is not itself the boundary.
@@ -452,20 +458,33 @@ def claude_project_name(cwd: str) -> str:
 
 
 def read_follows_symlink(value: object, worktree: str) -> bool:
-    """True when a Read path is a symlink, so realpath would hide where it points."""
+    """True when a Read path OUTSIDE the worktree is a symlink: realpath would hide where it points, and the one
+    place such a path may be read is this run's own spool, which must be a regular file. A link INSIDE the worktree
+    (`CLAUDE.md -> AGENTS.md`, which every repo here commits) is not this: path_outside judges where it resolves, and
+    escaping_links already refused every outward one at launch."""
     if not isinstance(value, str):
         return False
     p = os.path.expanduser(value)
     if not os.path.isabs(p):
         p = os.path.join(worktree, p)
+    if _inside(os.path.normpath(p), worktree):
+        return False
     return os.path.islink(p)
+
+
+def claude_config_dir() -> Path:
+    """Where Claude Code keeps projects/: $CLAUDE_CONFIG_DIR when set (the launcher keeps it in the child's
+    environment, so the child spools there), else ~/.claude."""
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(os.path.expanduser(env)) if env else Path.home() / ".claude"
+    return base.resolve()
 
 
 def own_spool_read(value: object, worktree: str, session_id: str | None) -> bool:
     """Only a regular tool result in this run's exact spool; never follow a file symlink."""
     if not session_id or not isinstance(value, str):
         return False
-    root = Path.home().resolve() / ".claude" / "projects" / claude_project_name(worktree) / session_id / "tool-results"
+    root = claude_config_dir() / "projects" / claude_project_name(worktree) / session_id / "tool-results"
     p = Path(os.path.expanduser(value))
     if not p.is_absolute():
         p = Path(worktree) / p
@@ -651,9 +670,10 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                         bad = f"tool {name!r} is outside the allowlist {sorted(allowed)}"
                     elif path_trip and name in PATH_TOOLS:
                         bad = tool_use_outside(name, inp, worktree)
-                        # A Read through a symlink trips even when the link resolves inside the worktree:
-                        # realpath follows it, so path_outside alone would allow a link aimed at a worktree
-                        # file. Only a genuine regular file in this run's own spool is exempt.
+                        # A Read of a symlink that sits OUTSIDE the worktree trips even when it resolves inside:
+                        # realpath follows it, so path_outside alone would allow a spool link aimed at a worktree
+                        # file. Only a genuine regular file in this run's own spool is exempt. A link inside the
+                        # worktree is judged by where it resolves (an escaping one is bad above, and refused at launch).
                         if name == "Read" and isinstance(inp, dict) and read_follows_symlink(inp.get("file_path"), worktree):
                             if own_spool_read(inp.get("file_path"), worktree, run.session_id):
                                 run.spool_reads += 1

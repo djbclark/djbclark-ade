@@ -9,7 +9,7 @@ the init event, StructuredOutput as a tool_use, `permission_denials` in the resu
 Scenario keys for a LAUNCH (a prompt without the self-check mark): init (merged into the init event), no_init,
 init_after_assistant, hook_event, content_items (one assistant message's content list), tool_uses
 ([{name, input}]), output, no_structured, is_error, no_result,
-sleep (seconds before the output), spawn ("group" | "session": start a `sleep 300` child, its pid written to
+make_links ({name: target}: symlinks created in the cwd before the tool calls), sleep (seconds before the output), spawn ("group" | "session": start a `sleep 300` child, its pid written to
 pid_file), exit, denials. For the SELF-CHECK: check = refuse (default) | leak | leak_quiet | readable_md |
 skip:<name> | control_fails | trip, check_init (merged into its init event). version / version_rc answer
 `claude --version`.
@@ -127,6 +127,8 @@ if is_check:
 else:
     if scen.get("content_items"):
         emit({"type": "assistant", "message": {"content": scen["content_items"]}})
+    for link, target in (scen.get("make_links") or {}).items():       # a link that appears after the launch check
+        os.symlink(target, link)                                       # (cwd is the worktree)
     for tu in scen.get("tool_uses", []):
         tool(tu["name"], tu.get("input", {}), tu.get("content", "ok"))
     if scen.get("init_after_assistant"):
