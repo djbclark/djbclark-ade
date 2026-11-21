@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Cross-harness messaging helper (docs/cross-harness-messaging.md).
+
+    xmsg to-paseo [--reply-file PATH] [--reply-name NAME] AGENT_ID 'message…'
+    xmsg to-claude [--replace] REPLY_PATH 'message…'
+    xmsg ack [--replace] REPLY_PATH 'ack text…'
+
+Rules the command enforces (adversary review of #847):
+
+* An ack file is written ONLY by its receiver (`ack` / `to-claude`). `to-paseo`
+  never touches the reply path: the send's own status (`queued` = accepted, not
+  delivered) goes to `REPLY_PATH.status`, a different file a watcher does not wait on.
+* `to-paseo` refuses a reply path that already exists, so a stale ack cannot pass
+  for the new one. `ack` / `to-claude` create the file exclusively (atomic temp
+  file, then a hard link that fails if the name exists); `--replace` overwrites.
+* A sender outside Paseo (no PASEO_AGENT_ID) must offer two reply routes: a
+  `--reply-file` AND a `--reply-name` (its SendMessage name). The text always
+  carries them, so the reply path is explicit in the message, never guessed.
+* Exit codes of `to-paseo`, as `bin/completion-notice`: 0 delivered (`sent` /
+  `completed`), 5 accepted only (`queued`; proof is the peer's ack), 1 failed,
+  2 usage, 3 reply path already exists.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+EXIT_DELIVERED, EXIT_FAILED, EXIT_USAGE, EXIT_EXISTS, EXIT_ACCEPTED = 0, 1, 2, 3, 5
+DELIVERED = {"sent", "completed"}
+
+
+def _write_temp(path: Path, text: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return tmp
+
+
+def atomic_write(path: Path, text: str, replace: bool = True) -> bool:
+    """Write TEXT whole or not at all. replace=False never clobbers (False when PATH exists)."""
+    tmp = _write_temp(path, text)
+    try:
+        if replace:
+            os.replace(tmp, path)
+            return True
+        try:
+            os.link(tmp, path)  # fails with FileExistsError when PATH exists
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def reply_instructions(my_id: str | None, reply_file: str | None, reply_name: str | None) -> str:
+    lines = []
+    if my_id:
+        lines.append(f"Please reply: ack {my_id} (paseo send --json --no-wait {my_id} --prompt 'ack {my_id} …')")
+    if reply_name:
+        lines.append(f"Reply route: SendMessage to {reply_name}")
+    if reply_file:
+        lines.append(f"Reply via: xmsg ack {reply_file} 'ack <your id> …'")
+    return "\n".join(lines)
+
+
+def to_paseo(agent_id: str, text: str, reply_file: str | None, reply_name: str | None) -> int:
+    my_id = os.environ.get("PASEO_AGENT_ID") or None
+    if not my_id and not (reply_file and reply_name):
+        print("xmsg: a sender outside Paseo must give two reply routes: --reply-file AND --reply-name",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if reply_file and Path(reply_file).exists():
+        print(f"xmsg: reply path {reply_file} already exists: use a fresh path, a stale ack must not "
+              "pass for a new one", file=sys.stderr)
+        return EXIT_EXISTS
+    body_text = text.rstrip("\n") + "\n\n" + reply_instructions(my_id, reply_file, reply_name)
+    argv = ["paseo", "send", "--json", "--no-wait", "--prompt", body_text, "--", agent_id]
+    r = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        body = json.loads(r.stdout)
+    except ValueError:
+        body = None
+    # rc 5 is paseo's own "accepted" in some builds; any other non-zero rc is a failure
+    if r.returncode not in (0, EXIT_ACCEPTED) or not isinstance(body, dict):
+        print(f"xmsg: paseo send failed (rc={r.returncode}): {(r.stderr or r.stdout).strip()[:300]}",
+              file=sys.stderr)
+        return EXIT_FAILED
+    status = str(body.get("status", "?"))
+    delivered = status in DELIVERED
+    print(f"xmsg: to-paseo {agent_id} status={status} ({'delivered' if delivered else 'accepted, not proven: wait for the ack'})")
+    if reply_file:
+        # The sender's own status, in a file the ack watcher does not watch.
+        atomic_write(Path(reply_file + ".status"), f"xmsg-status: {status}")
+    return EXIT_DELIVERED if delivered else EXIT_ACCEPTED
+
+
+def receiver_write(reply_path: str, text: str, replace: bool, verb: str) -> int:
+    p = Path(reply_path)
+    if not atomic_write(p, text, replace=replace):
+        print(f"xmsg: {p} already exists; not overwritten (use --replace)", file=sys.stderr)
+        return EXIT_EXISTS
+    print(f"xmsg: {verb} -> {p}")
+    return EXIT_DELIVERED
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="xmsg", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("to-paseo", help="message a Paseo agent; the ack comes back from the peer")
+    p.add_argument("--reply-file")
+    p.add_argument("--reply-name", help="the sender's own SendMessage name")
+    p.add_argument("agent_id")
+    p.add_argument("text")
+    for name in ("to-claude", "ack"):
+        q = sub.add_parser(name, help="the receiver writes the file the sender named")
+        q.add_argument("--replace", action="store_true", help="overwrite an existing file")
+        q.add_argument("reply_path")
+        q.add_argument("text")
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    try:
+        a = build_parser().parse_args(argv)
+    except SystemExit as e:
+        return EXIT_DELIVERED if e.code in (0, None) else EXIT_USAGE
+    if a.cmd == "to-paseo":
+        return to_paseo(a.agent_id, a.text, a.reply_file, a.reply_name)
+    return receiver_write(a.reply_path, a.text, a.replace, a.cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
