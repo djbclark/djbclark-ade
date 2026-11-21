@@ -375,3 +375,14 @@ def test_kernel_name_survives_a_missing_libproc(monkeypatch):
     monkeypatch.setattr(gh, "_libproc", Boom())
     monkeypatch.setattr(gh.sys, "platform", "darwin")
     assert gh.kernel_name(7) is None
+
+
+def test_a_name_that_cleans_to_nothing_is_a_question_mark_never_an_empty_label():   # adversary LOW-2 of #880
+    junk = "\x1b\x07"   # a file name of only control characters: gh.clean drops all of it
+    assert gh.clean(junk, 40) == ""
+    assert gs._label("x", 7, lambda pid: "/bin/" + junk) == "?"   # through the kernel path
+    assert gs._label("x", 7, lambda pid: None, lambda pid: junk) == "?"   # through the short name
+    assert gs._label(junk + " arg") == "?"   # a fixture's first word
+    rows = {"10": (1, ME, 2.0, "x")}
+    out = gs.group_sources(rows, {"10": 1024}, [], exe_of=lambda pid: None, name_of=lambda pid: junk)
+    assert [s["key"] for s in out] == ["system:?"] and out[0]["name"] == "?" and out[0]["heaviest"] == "?"

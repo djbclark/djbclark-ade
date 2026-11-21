@@ -374,7 +374,7 @@ def kernel_exe(pid):
 def kernel_name(pid):
     """The kernel's short process name for `pid` (libproc `proc_name`, the p_comm the kernel took from the exec'd file's name: not argv and not the
     environment), or None. It answers for a process whose executable was replaced on disk by an upgrade (where `proc_pidpath` fails), and gives nothing
-    for a zombie or a process that is gone. macOS only: Linux has no such name that the process cannot set itself (/proc/PID/comm can be changed by
+    for a zombie, a process that is gone, or (it is a same-user lookup in the kernel) another user's process. macOS only: Linux has no such name that the process cannot set itself (/proc/PID/comm can be changed by
     prctl), so there it is None."""
     try:
         if sys.platform != "darwin":

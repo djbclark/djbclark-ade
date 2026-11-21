@@ -48,8 +48,11 @@ def _label(cmd, pid=None, exe_of=None, name_of=None):
     """A cleaned program name for an unclaimed process, never any text of its command line or environment. With a lookup (`exe_of`, the kernel's
     executable path: the sampler always supplies one) the name is the base name of that path, asked for EVERY command: the first word `ps` prints
     cannot be proven to be argv[0] (an empty or blank argv[0] makes it argv[1] or an environment string, and an argv[0] with a space is cut inside
-    its path). When the path is unreadable (the process exited, its executable was replaced on disk by an upgrade, or it is not ours to read) the
-    kernel's short name from `name_of` (libproc `proc_name`: the exec'd file's name, not argv) is used, and `?` when that gives nothing either.
+    its path). When the path is unreadable (the process exited, or its executable was replaced on disk by an upgrade) the
+    kernel's short name from `name_of` (libproc `proc_name`: the exec'd file's name, not argv) is used, and `?` when that gives nothing either (a zombie, a gone process, or another user's process: `proc_name` answers only for the sampler's own user, so
+    a path another user's process withholds stays `?`). The name is cleaned and, when cleaning leaves nothing (a file name of only control characters), is `?` too: never an empty label.
+    The lookup runs after the table read, so a pid reused in between can lend its name to a process that exited: display only, never a signal target
+    (system sources cannot be frozen and Freeze re-checks identity with `verify_identity`).
     Without an `exe_of` (fixtures and pure-data callers, which vouch for their own table) it is the base name of the command's first word.
     Adversary M1 and L1 of #875, L1r and L1r' of #872, the r2 Low of #875."""
     if exe_of is not None:
@@ -65,9 +68,9 @@ def _label(cmd, pid=None, exe_of=None, name_of=None):
                 name = str(name_of(int(pid)) or "")
             except Exception:  # noqa: BLE001
                 name = ""
-        return gh.clean(name or "?", 40)
+        return gh.clean(name, 40) or "?"
     first = (str(cmd).split() or [""])[0]
-    return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
+    return gh.clean(os.path.basename(first.rstrip("/")), 40) or "?"
 
 
 def _build_head(cmd):
