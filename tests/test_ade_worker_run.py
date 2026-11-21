@@ -2001,7 +2001,7 @@ def test_the_footer_path_never_names_the_worktree(env, tmp_path):
     main, wt = make_repo(tmp_path)
     for rel in ("bin", "docs"):
         (wt / rel).mkdir(exist_ok=True)
-    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py", "ade_claims.py"):
+    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py", "ade_claims.py", "ade_mcp_on_demand.py"):
         (wt / "bin" / f).write_text((ROOT / "bin" / f).read_text())
     (wt / "bin/ade-worker-run").chmod(0o755)
     (wt / "docs/dispatch-footer.md").write_text("footer\n")
