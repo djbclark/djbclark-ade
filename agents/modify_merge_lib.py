@@ -1,7 +1,9 @@
 """Owned-key merge for agents/ chezmoi modify_ helpers (Phase 1 residual, 2026-11-10).
 
 Desired (rendered template) keys are owned and applied; keys that exist only in the live
-file stay. Dicts merge recursively; lists and scalars from desired replace. No secrets,
+file stay. Dicts merge recursively. When both values are lists, retain desired entries
+first, then live-only entries, without deep-equality duplicates. Scalars and differing
+types use desired. No secrets,
 no companion render, and no write to the operator's live ~/.claude or ~/.codex paths
 (order 11): those targets are refused until a later chezmoi apply slice owns that step.
 """
@@ -27,16 +29,29 @@ _LIVE_REFUSE = (
 def merge_owned(live: Any, desired: Any) -> Any:
     """Keep unowned live keys; apply owned desired keys.
 
-    When both sides are dicts, recurse. Otherwise desired replaces live (lists and
-    scalars are owned wholesale when present in the template).
+    Desired dicts recurse and keep live-only keys when live is a dict. Lists
+    retain the first occurrence of each deeply equal entry in desired then live
+    order. Entries are opaque whole values: compare and deep-copy their original
+    content without normalizing nested dicts/lists or merging by identity.
+    An empty desired list preserves live entries; deletion requires removing entries
+    explicitly outside this helper. New/type-changing desired dictionaries recurse by
+    key until each list boundary; new/type-changing lists deduplicate outer entries
+    on the first merge, too. Otherwise desired replaces live. Results are
+    deep copies, so changing them never changes either input.
     """
-    if isinstance(live, dict) and isinstance(desired, dict):
-        out = copy.deepcopy(live)
+    if isinstance(desired, dict):
+        out = copy.deepcopy(live) if isinstance(live, dict) else {}
         for key, value in desired.items():
-            if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            if key in out:
                 out[key] = merge_owned(out[key], value)
             else:
-                out[key] = copy.deepcopy(value)
+                out[key] = merge_owned(None, value)
+        return out
+    if isinstance(desired, list):
+        out = []
+        for entry in desired + (live if isinstance(live, list) else []):
+            if entry not in out:
+                out.append(copy.deepcopy(entry))
         return out
     return copy.deepcopy(desired)
 
