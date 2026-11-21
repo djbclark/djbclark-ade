@@ -13,11 +13,16 @@ Usage in an LSP plugin entry:   "command": "lsp-root-guard", "args": ["--", "bas
 
   lsp-root-guard [--container PATH]... [--no-heuristic] [--check URI_OR_PATH] -- CMD [ARGS...]
 
-A root is a container when its realpath is in `config/lsp-roots.toml` [containers].paths (`~` expanded), in
-`--container`, or in `ADE_LSP_CONTAINER_ROOTS` (colon list); or, unless --no-heuristic, when it is not itself a project
-(no .git, .jj, .hg, pyproject.toml, setup.py, package.json, Cargo.toml, go.mod, Package.swift, tsconfig.json, Makefile,
-Gemfile or an empty `.lsp-root-guard-project` file, the opt-out) and at least `min_repo_children`
-(default 3) of its first 400 children hold a `.git`.
+A root is a container when its realpath is in `config/lsp-roots.toml` [containers].paths (`~` expanded; an entry with a
+`*` is a glob, e.g. `~/s/*`), in `--container`, or in `ADE_LSP_CONTAINER_ROOTS` (colon list); or, unless --no-heuristic
+(which means "listed roots only"), when it is not itself a project (no .git, .jj, .hg, pyproject.toml, setup.py,
+package.json, Cargo.toml, go.mod, Package.swift, tsconfig.json, Makefile, Gemfile, pyrightconfig.json, requirements.txt,
+setup.cfg, deno.json, flake.nix, or an empty `.lsp-root-guard-project` file, the opt-out) and either is a directory
+directly under `/` or above `$HOME` (structural rule), or has at least `min_repo_children` (default 3) of its first 400
+children holding a `.git` (symlinked children count).
+
+A root that is not an absolute, existing directory is never kept as a project root: with every root a container the
+server gets none.
 
   --check ROOT   print `container` or `project` for ROOT and exit 0 (no server is started)
 
@@ -46,7 +51,7 @@ except ModuleNotFoundError:  # Python < 3.11: the built-in container list below 
 PROJECT_MARKERS = (".git", ".jj", ".hg", "pyproject.toml", "setup.py", "package.json", "Cargo.toml", "go.mod",
                    "Package.swift", "tsconfig.json", "Makefile", "Gemfile", "pyrightconfig.json", "requirements.txt", "setup.cfg",
                    "deno.json", "flake.nix", ".lsp-root-guard-project")
-DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
+DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/s/*", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
                       "/Users", "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp",
                       "/private", "/private/tmp", "/var", "/private/var")
 HEURISTIC_SCAN_LIMIT = 400
@@ -114,12 +119,12 @@ def is_container(root: str, containers: list[str], min_repo_children: int, heuri
         return False
     if any(os.path.exists(os.path.join(real, m)) for m in PROJECT_MARKERS):
         return False
+    if not heuristic:  # --no-heuristic: listed roots only
+        return False
     # structural rule: a non-project directory directly under / or above $HOME is a container whatever the list says
     home = _real("~")
     if os.path.dirname(real) == "/" or home.startswith(real.rstrip(os.sep) + os.sep):
         return True
-    if not heuristic:
-        return False
     repos = 0
     try:
         with os.scandir(real) as it:
@@ -179,7 +184,10 @@ def guard_initialize(msg: dict[str, Any], containers: list[str], min_children: i
     else:
         keep = next((r for r in (uri_to_path(params["rootUri"]) if isinstance(params.get("rootUri"), str) else None,
                                  params.get("rootPath") if isinstance(params.get("rootPath"), str) else None)
-                     if r and r not in bad and not is_container(r, containers, min_children, heuristic)), None)
+                     # an absolute, existing directory only: a relative path cannot become a URI and a missing one
+                     # is no root worth keeping (both used to fail open and hand the server the container)
+                     if r and os.path.isabs(r) and os.path.isdir(r) and r not in bad
+                     and not is_container(r, containers, min_children, heuristic)), None)
         if keep is not None:  # a project root with a container-only folder list: the root wins
             params["rootUri"] = Path(keep).as_uri()
             params["rootPath"] = keep
@@ -230,11 +238,13 @@ def frame(obj: dict[str, Any]) -> bytes:
 
 class Guard:
     """mode None: root untouched. "strip": every root was a container, folders are answered null. "filter": a
-    multi-root client kept its project folders, so folder lists are filtered, never nulled."""
+    multi-root client kept its project folders, so folder lists are filtered, never nulled. `kept` holds the folders
+    the rewritten `initialize` named: a later folder reply that filtering would empty is answered with them."""
 
     def __init__(self, containers: list[str], min_children: int, heuristic: bool) -> None:
         self.containers, self.min_children, self.heuristic = containers, min_children, heuristic
         self.mode: str | None = None
+        self.kept: list[Any] = []
         self.folder_request_ids: set[Any] = set()
         self.lock = threading.Lock()
 
@@ -267,10 +277,10 @@ class Guard:
             denied = guard_initialize(msg, self.containers, self.min_children, self.heuristic)
             if denied is None:
                 return raw
-            kept = bool((msg.get("params") or {}).get("workspaceFolders"))
-            self.mode = "filter" if kept else "strip"
+            self.kept = list((msg.get("params") or {}).get("workspaceFolders") or [])
+            self.mode = "filter" if self.kept else "strip"
             sys.stderr.write(f"lsp-root-guard: workspace root {denied} is a container, "
-                             f"{'its folder dropped' if kept else 'started with no root'}\n")
+                             f"{'its folder dropped' if self.kept else 'started with no root'}\n")
             return frame(msg) if json.dumps(msg.get("params"), sort_keys=True) != before else raw
         if self.mode is None:
             return raw
@@ -293,6 +303,8 @@ class Guard:
                 msg["result"] = None
             elif isinstance(msg.get("result"), list):
                 msg["result"] = [f for f in msg["result"] if not (isinstance(f, dict) and self._bad(f.get("uri")))]
+                if not msg["result"] and self.kept:  # the client's list held only containers: keep the root we kept
+                    msg["result"] = list(self.kept)
             return frame(msg)
         return raw
 
