@@ -7,7 +7,7 @@ git HEAD). The stream's shapes are the ones Claude Code 2.1.319 produced on 2026
 the init event, StructuredOutput as a tool_use, `permission_denials` in the result).
 
 Scenario keys for a LAUNCH (a prompt without the self-check mark): init (merged into the init event), no_init,
-init_after_assistant, hook_event, content_items (one assistant message's content list), tool_uses
+init_after_assistant, hook_event, texts (assistant text items emitted right after init: a model's CHECKPOINT notes), content_items (one assistant message's content list), tool_uses
 ([{name, input}]), output, no_structured, is_error, no_result,
 make_links ({name: target}: symlinks created in the cwd before the tool calls), sleep (seconds before the output), spawn ("group" | "session": start a `sleep 300` child, its pid written to
 pid_file), exit, denials. For the SELF-CHECK: check = refuse (default) | leak | leak_quiet | readable_md |
@@ -74,6 +74,9 @@ if not is_check and scen.get("hook_event"):
     emit({"type": "system", "subtype": "hook_started", "hook_name": "SessionStart"})
 if is_check or not (scen.get("no_init") or scen.get("init_after_assistant")):
     emit(init)
+if not is_check:
+    for _t in scen.get("texts", []):    # assistant text items (a model's CHECKPOINT notes) right after init
+        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": _t}]}})
 if not is_check and scen.get("spawn"):
     child = subprocess.Popen(["sleep", "300"], start_new_session=scen["spawn"] == "session")
     with open(scen["pid_file"], "w") as f:
