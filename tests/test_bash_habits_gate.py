@@ -1234,6 +1234,9 @@ def test_zsh_modifier_special_parameters_and_positionals_are_denied(command):
 @pytest.mark.parametrize("command", [
     "echo $C:gr", "echo $C:wr", "echo $C:fr", "echo $C:Fr", "echo $C:gwr", "echo $C:fgr", "echo $C:F:2:r", "echo $C:F::r",
     "echo $C:F:2:fr", "echo $C:gs/a/b/", "echo $C:s/a/b/ $C:s:x:y:",
+    "echo $C:W:x:r", "echo $C:W:/:t", "echo $C:F:1:W:x:t",                    # W:sep: and F:expr: take an argument
+    "echo $C:F/2/r", "echo $C:F,2,r", "echo $C:F{2}r", "echo $C:F[2]r", "echo $C:W/x/r", "echo $C:W,x,t", "echo $C:W[x]t",
+    "echo $C:W(x)t",
 ])
 def test_zsh_modifier_prefixes_f_g_w_and_F_are_denied(command):
     _assert_zsh_modifier_denied(command)
@@ -1309,7 +1312,7 @@ def test_zsh_modifier_follows_command_substitution_inside_double_quotes(command)
     "echo $C:",
     "echo $C::x $C:/y $C:-x $C:x $C:p $C:S $C:1 $a:b:c",
     "echo $C:f $C:F $C:ff $C:g $C:gp $C:Fx $C:FZ $C:F:r $C:F:2 $C:fx",    # a prefix with no modifier after it is plain
-    "echo $C:Fxt $C:F2t",
+    "echo $C:Fxt $C:F2t $C:Wr $C:W:x $C:W:x: $C:g:o:r $C:g:e:r",
     "echo \\$C:r",
     "echo \"${C}:r\" \"x:$C\"",
     "echo $PATH:/usr/bin $HOST:8080 scp $HOST:path .",

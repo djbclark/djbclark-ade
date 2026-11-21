@@ -1017,13 +1017,15 @@ ZSH_MODIFIER_REASON = (
     "`git push origin $C:refs/heads/x` pushed `<sha>efs/heads/x` (2026-11-21), and `\"$h:c...\"` ate the `:c`; refspecs, "
     "`scp host:path` and rsync targets are hit the same way. Write `${{NAME}}:...` instead (braced forms, single quotes and "
     "`\\$` are safe). An unquoted heredoc body (`<<EOF`) is expanded too: quote its delimiter (`<<'EOF'`) or use `${{NAME}}`.")
-# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21): a A c e h l P q Q r s t u &, and before one of them any
-# prefixes f, g, w, `F` or `F:expr:` (`:gs/a/b/`, `:gr`, `:fr`, `:F:2:r`, `:Fr`). Not modifiers there, so left alone: p S x, 0-9,
-# `::`, `:-`, `:/`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and the name: parameter flags `= ~ ^ + #`
-# (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob, not a subscript).
+# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21; zsh manual, Expansion: Modifiers): a A c e h l P q Q r s t u &,
+# and before one of them any prefixes f, g, w, a bare `F`, `F` or `W` with an argument in a delimiter pair (`:F:2:r`, `:W:/:t`, also
+# `/x/`, `,x,`, `(x)`, `[x]`, `{x}`; other delimiters are not followed) (`:gs/a/b/`, `:gr`, `:fr`, `:Fr`). Not modifiers there, so left
+# alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and
+# the name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
+_ZSH_MODIFIER_ARG = r"[FW](?::[^:\s]*:|/[^/\s]*/|,[^,\s]*,|\([^)\s]*\)|\[[^\]\s]*\]|\{[^}\s]*\})"
 ZSH_MODIFIER = re.compile(
     r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]*\])?|\d+|[#?$!-])"
-    r":(?:[fgw]|F:[^:\s]*:|F)*[aAcehlPqQrstu&]")
+    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + r"|F)*[aAcehlPqQrstu&]")
 ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
 
 

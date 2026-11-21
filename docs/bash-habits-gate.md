@@ -44,7 +44,7 @@ assignment value, rare), `--x=y`, `-d=`, heredoc bodies, comments, and the insid
 modifier letter, unquoted or double-quoted: `C=<sha>; git push origin $C:refs/heads/ci/x` pushed `<sha>efs/heads/ci/x` (`$C:r`), and
 `git show "$h:c..."` ate the `:c`; refspecs, `scp host:path` and rsync targets are all exposed. Modifier set probed with `/bin/zsh -f`:
 `a A c e h l P q Q r s t u &` (`&` only inside double quotes; unquoted it is the background operator, already denied), after any run of the prefixes
-`f`, `g`, `w`, `F` and `F:expr:` (`:gs/a/b/`, `:gr`, `:fr`, `:Fr`, `:F:2:r`: `docker tag x $IMG:frontend` is `:fr`). Also reached: parameter flags between `$` and the name
+`f`, `g`, `w`, `F`, and `F` or `W` with an argument in a delimiter pair (`:gs/a/b/`, `:gr`, `:fr`, `:Fr`, `:F:2:r`, `:W:/:t`; `docker tag x $IMG:frontend` is `:fr`; the pairs followed are `:x:`, `/x/`, `,x,`, `(x)`, `[x]`, `{x}`). Also reached: parameter flags between `$` and the name
 (`$=C:t`, `$~C:t`, `$^C:t`, `$+C:t`, `$#C:t`) and one subscript after it (`$C[1]:r`, `$@[1]:t`). Denied: an unescaped, unquoted or double-quoted `$NAME:` + one
 of those. The rule runs for every TUI the gate serves (Bash tool, Codex, Cursor): all use this Mac's zsh, and the hook cannot tell the shell.
 The scan follows `$(...)` and backtick bodies as fresh command text, also inside double quotes (so `"$(echo '$C:r')"` passes and
@@ -52,7 +52,7 @@ The scan follows `$(...)` and backtick bodies as fresh command text, also inside
 the shell expands `$C:r` there before `bash <<EOF` or `ssh host <<EOF` runs anything, so `git push origin $C:refs/heads/x` inside such a body is denied too (only a
 backslash and `$` are special in a body; quotes and `#` are literal). Passes: `${NAME}:x` (write this), single quotes, `\$C:r` (also in a body), comments,
 quoted-delimiter heredoc bodies (`<<'EOF'`, `<<"EOF"`), `$$C:r` (the pid, then plain text), `${C:-d}` / `${C:t}` parameter expansions, and
-colon forms zsh leaves alone (`$C::`, `$C:-`, `$C:/`, `$C:p`, `$C:x`, `$C:S`, digits, a prefix with nothing after it such as `$C:f` or `$C:F:r`, `$1[1]:r`, `${C}[1]:r`), so `scp $HOST:path .` is not denied (`:p` is not applied).
+colon forms zsh leaves alone (`$C::`, `$C:-`, `$C:/`, `$C:p`, `$C:x`, `$C:S`, `$C:g:o:r`, digits, a prefix with nothing after it such as `$C:f`, `$C:Wr` or `$C:F:r`, `$1[1]:r`, `${C}[1]:r`), so `scp $HOST:path .` is not denied (`:p` is not applied).
 Known gap: `<<\EOF` (backslash-quoted delimiter) is not recognised as a heredoc by the shared introducer scan, so its literal body is scanned as commands and a `$C:r` in it is denied.
 The Codex argv form `bash -lc ...` is judged like the rest even though bash would leave `$C:r` alone (writing `${C}:` costs nothing).
 
