@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""ade-pi-stuck: list live Pi agents and flag any whose billing account is quota-exhausted.
+"""ade-pi-stuck: list live Pi agents and flag any whose billing account is quota-exhausted, and any agent in `error`.
 
 Usage: ade-pi-stuck [--json]
 
 Read-only. Maps each live Pi agent's model to a billing account, cross-references
 aiuse/paseo quota, and flags agents on an account with no headroom. For each stuck
-agent prints a comparable healthy alternative (for a re-handoff). The actual switch
+Pi agent prints a comparable healthy alternative (for a re-handoff). The actual switch
 (archive + relaunch + tell-to-continue) is a separate gated action, not this script.
+
+An agent in `error` is flagged on EVERY provider, Pi or not (Carried 104; queue item 82 is a Pi agent on
+xai-oauth that a 402 left in `error`). It covers all agents, not just leads: `paseo ls --json` carries no role or
+label, so this script cannot tell a lead from a worker, and an errored worker is as dead; the notice goes to the
+lead, who decides. An errored Codex, Claude or other non-Pi agent gets NO alternative: the Pi alternatives are
+DeepSeek models on other vendors' accounts, and handing a frontier agent's task and context to them is a quality
+downgrade and a cross-vendor data move. Such an entry carries `"family"` (its provider's first segment) and
+`"alternative": null`; its fallback has to stay within its own family (the native path, not built yet). In the
+`--json` output the key `all_pi` still holds every row listed (Pi agents and errored non-Pi ones).
 
 Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
 others are cross-checked against aiuse pools when a clean mapping exists. The
@@ -82,9 +91,10 @@ KNOWN_EMPTY = {"openai"}
 # Below this, an account is thin enough to flag before it hits zero.
 LOW_HEADROOM_PERCENT = 10.0
 
-# Statuses that mean the agent is not running and cannot be re-handoff-ed as it stands: `error` is what
-# bin/ade-progress treats as dead, so flagging one "stuck on an exhausted account" would be noise.
+# Statuses that mean the agent is not running: it is not counted live, and never makes an account "unmapped".
 NOT_LIVE = ("closed", "archived", "error")
+# Statuses with nothing to re-hand: finished or archived. `error` is not here: a hard error IS stuck (Carried 104).
+FINISHED = ("closed", "archived")
 
 
 def quota_by_account(avail):
@@ -208,23 +218,30 @@ def main():
     out = []
     for a in rows:
         prov = a.get("provider") or ""
-        # "pi/<account>/<model>" only: a bare startswith("pi") would also take any provider merely named "pi…".
-        if not prov.startswith("pi/"):
+        # A Pi agent is judged on its quota. Any other provider is watched only for a hard error: an agent stuck in
+        # `error` on Codex or Claude is as stuck as a Pi one, and was invisible when this checked Pi alone
+        # (Carried 104, the Forks and cfengine leads, 2026-11-20).
+        is_pi = prov.startswith("pi/")
+        if not is_pi and (a.get("status") or "") != "error":
             continue
-        # paseo ls provider is "pi/<account>/<model>" (e.g. pi/openai/gpt-6.1-sol)
-        rest = prov[3:] if prov.startswith("pi/") else prov
+        rest = prov[3:] if is_pi else prov
         model = rest
         acct = account_of(rest)
         status = a.get("status") or ""
-        stuck = acct in exhausted and status not in NOT_LIVE
+        family = "pi" if is_pi else (prov.split("/")[0] if prov.split("/")[0] not in ("", "pi") else "unknown")
+        # Stuck on an exhausted account, or in a hard error on any provider, Pi included (queue item 82: a Pi agent
+        # on xai-oauth left in `error` by a 402). A closed or archived agent is not stuck: nothing to re-hand.
+        stuck = status == "error" or (acct in exhausted and status not in FINISHED)
         q = accounts.get(acct) or {}
-        out.append({"id": a.get("id"), "name": a.get("name"), "model": model,
+        out.append({"id": a.get("id"), "name": a.get("name"), "model": model, "family": family,
                     "account": acct, "status": status, "stuck": stuck,
                     "headroom_percent": q.get("headroom"),
                     "quota_stale": q.get("stale"),
-                    "alternative": alt(model, acct, exhausted, accounts) if stuck else None})
+                    # Only a Pi agent gets a Pi alternative: the candidates are DeepSeek models on other vendors'
+                    # accounts, never a fallback for a Codex or Claude agent (a downgrade and a cross-vendor move).
+                    "alternative": alt(model, acct, exhausted, accounts) if stuck and is_pi else None})
     stuck = [o for o in out if o["stuck"]]
-    live = [o for o in out if o["status"] not in NOT_LIVE]
+    live = [o for o in out if o["status"] not in NOT_LIVE and o["family"] == "pi"]
     # An account with no aiuse mapping (a bare `opencode-go/` provider names no billing sub-account) cannot be judged:
     # say so instead of showing a bare "?" that reads as healthy.
     unmapped = sorted({o["account"] for o in live
@@ -238,14 +255,17 @@ def main():
         for o in out:
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
             print(f"{'STUCK' if o['stuck'] else 'ok   '}  {o['account']:22} {o['status']:9} {hr}% {o['model']:38} {o['id']}")
-            if o["stuck"]:
+            if o["stuck"] and o["family"] != "pi":
+                print(f"        -> {o['family']} agent in error: no Pi alternative (a fallback stays within {o['family']})")
+            elif o["stuck"]:
                 print(f"        -> switch to {o['alternative']}" if o["alternative"]
                       else "        -> no healthy alternative found")
         for acct in unmapped:
             print(f"\nno quota mapping for account {acct}: its agents cannot be judged")
         if quota_error:
             print(f"\nquota read failed ({quota_error}): only the known-empty accounts are flagged")
-        print(f"\n{len(stuck)} stuck / {len(live)} live Pi agents")
+        errored = sum(1 for o in stuck if o["status"] == "error")
+        print(f"\n{len(stuck)} stuck ({errored} in error, any provider) / {len(live)} live Pi agents")
     return 0
 
 if __name__ == "__main__":

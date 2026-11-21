@@ -123,14 +123,21 @@ To release the role when done:
 freezes or quits an app on its own judgment, and does not call `gui_hog_freeze.freeze`. Resuming is always allowed: `bin/gui-hog frozen` lists what is stopped, `bin/gui-hog thaw --all`
 resumes it, and `bin/gui-hog thaw --all --stopped-apps` is the last resort for a lost state file. Every freeze and thaw is logged with `by` in `~/.local/state/load-watch/gui-hog/events.jsonl`.
 
-## 5. `/watch stuck` — Pi agents out of tokens
+## 5. `/watch stuck` — Pi agents out of tokens, and agents in `error`
 
 `/watch stuck` runs `bin/ade-pi-stuck` (read-only): it lists the Pi agents Paseo
 reports (closed ones carry their status; Paseo does not list archived ones at all), maps
 each to its billing account (from the `pi/<account>/<model>` provider), and flags the
-live ones — not closed, archived or in `error` — whose account is quota-exhausted. For each stuck
-agent it prints a comparable healthy alternative model under a different, not-exhausted
+live ones — not closed or archived — whose account is quota-exhausted. For each stuck
+Pi agent it prints a comparable healthy alternative model under a different, not-exhausted
 account (or `no healthy alternative found`) — never the account that just ran dry.
+An agent in `error` is flagged too, **on every provider** (Pi, Codex, Claude, …) and for any
+agent, not just leads: `paseo ls --json` carries no role, so the script cannot tell a lead from a
+worker, and an errored worker is as dead (the notice goes to the lead, who decides). A Pi agent in
+`error` (queue item 82: a 402 on `xai-oauth`) keeps its Pi alternative. **A Codex or Claude agent in
+`error` gets no alternative** (`family` names its provider, `alternative` is null): the Pi candidates are
+DeepSeek models on other vendors' accounts, so offering one would hand a frontier agent's task and context
+to a weaker model and another vendor. Restart it or re-hand it within its own provider family.
 `aiuse` exits 3 when every pool is unusable and still prints its JSON, so that read is
 accepted: a failed quota read keeps the known-empty accounts stuck instead of clearing them.
 
@@ -141,7 +148,8 @@ accepted: a failed quota read keeps the known-empty accounts stuck instead of cl
 
 The re-handoff itself (archive the exhausted agent, relaunch the same task on the
 healthy alternative, and tell the new agent to continue) is a separate gated
-action — the supervisor agent owns it, not `ade-pi-stuck` (read-only).
+action — the supervisor agent owns it, not `ade-pi-stuck` (read-only), and only for an entry whose
+`family` is `pi`.
 
 The periodic `bin/ade-supervisor-scan` (every 300 s) also logs a dry-run re-handoff plan to
 `~/.local/state/djbclark-ade/supervisor/supervisor.log`: one `re-handoff plan (dry-run) {...}` line, only when the plan
