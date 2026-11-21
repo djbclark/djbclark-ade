@@ -2634,11 +2634,19 @@ def _frontier_slice_only(svc: Service, kind: str) -> bool:
     """Is `svc` a pool that takes a `frontier` slice only as a slice model (`frontier_slice_models`: Neon, cursor-grok), not as a
     `frontier_models` model (Astra, Fable, Argon)? Only for kind `frontier`. `route` keeps such a pool behind every frontier_models
     pool with room, whatever the pressure, burn bonus or pace penalty says (adversary PR 899 MED-1 rounds 1 and 2, 2026-11-21: the
-    3-point pace penalty on a hot Astra pool, or the 4-point burn bonus, otherwise carried the hardest slice to an r3/r4 pool)."""
+    3-point pace penalty on a hot Astra pool, or the 4-point burn bonus, otherwise carried the hardest slice to an r3/r5/r6 pool)."""
     if kind != "frontier":
         return False
     model = svc.models.get("frontier", "")
     return bool(model) and not is_frontier_model(model)
+
+
+def _frontier_tail(svc: Service, kind: str) -> bool:
+    """Is `svc` in the tail of the `frontier` order: a slice-only pool (`_frontier_slice_only`: Neon, cursor-grok) or the Argon
+    fallback? `route` sorts the tail behind every other frontier pool that has room and orders it by static rank, not pressure:
+    Neon (r3), antigravity-argon (r5), cursor-grok (r6) (operator ruling 2026-11-21 via /steps: after PR 899, with Fable short and
+    codex out, Argon goes BEFORE Grok)."""
+    return kind == "frontier" and (_frontier_slice_only(svc, kind) or bool(svc.fallback_after))
 
 
 def _slice_token_matches(tok: str, model: str | None) -> bool:
@@ -2899,7 +2907,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             pressure = (100.0 - remaining) * weight / 10.0
         rank = svc.rank_for(kind) + pressure
         tags: list[str] = []
-        # A frontier slice is not spent to burn idle quota on a pool outside `frontier_models` (Neon r3, cursor-grok r4): the
+        # A frontier slice is not spent to burn idle quota on a pool outside `frontier_models` (Neon r3, cursor-grok r6): the
         # bonus (4.0) would lift it above the Astra/Fable tier the policy calls frontier (adversary PR 899 MED-1, 2026-11-21)
         burn_bonus_ok = not _frontier_slice_only(svc, kind)
         waste = expected_waste(remaining, info.get("pace_ratio"),
@@ -2956,7 +2964,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after),
                                kind in t[1].fallback_kinds,   # last-resort kinds sort last, whatever the score
                                position.get(t[1].name, len(position)),
-                               _frontier_slice_only(t[1], kind) or (kind == "frontier" and bool(t[1].fallback_after)),   # frontier: a slice-only pool (Neon, cursor-grok) or the Argon fallback sorts behind every other frontier_models pool that has room, by rank among themselves
+                               _frontier_tail(t[1], kind),   # frontier: Neon, Argon and cursor-grok sort behind every other frontier_models pool that has room
+                               t[1].rank_for(kind) if _frontier_tail(t[1], kind) else 0.0,   # the tail is ordered by static rank, not by pressure
                                t[0], t[1].name))
     best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]

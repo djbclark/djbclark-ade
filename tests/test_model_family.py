@@ -508,6 +508,39 @@ class TestCursorGrokRoute:
         assert r.route("frontier", quota=q, repo="x").service.name == "cursor-grok"
         assert r.route("frontier", quota=q, repo="y").service.name == "codex"
 
+    def test_the_frontier_tail_is_neon_then_argon_then_grok(self, catalog):
+        """Operator ruling 2026-11-21 (/steps): with claude Fable-short and codex out, Argon goes BEFORE Grok; Neon stays first.
+        The tail is ordered by static rank, so pressure cannot swap it."""
+        catalog({"cursor": self.CURSOR, "codex": CODEX, **AGY})
+
+        def reading(pct):
+            return {"remaining": pct, "age_s": 0, "windows": {"weekly": pct}}
+        q = {s.name: reading(0.0) for s in r.SERVICES}
+        q.update({"antigravity-neon": reading(100.0), "antigravity-argon": reading(100.0), "cursor-grok": reading(100.0)})
+        assert r.route("frontier", quota=q).service.name == "antigravity-neon"
+        q["antigravity-neon"] = reading(0.0)
+        assert r.route("frontier", quota=q).service.name == "antigravity-argon"
+        q["antigravity-argon"] = reading(0.0)
+        assert r.route("frontier", quota=q).service.name == "cursor-grok"
+        # a thin Argon and a full Grok: pressure does not reorder the tail (Argon still above the 15% floor)
+        q["antigravity-argon"] = reading(20.0)
+        assert r.route("frontier", quota=q).service.name == "antigravity-argon"
+        q["antigravity-neon"] = reading(20.0)
+        assert r.route("frontier", quota=q).service.name == "antigravity-neon"
+        q["antigravity-argon"] = reading(100.0)
+        assert [r.plan(["frontier"], quota=q)[0][1].service.name] == ["antigravity-neon"]
+
+    def test_a_repo_frontier_order_does_not_lift_the_argon_fallback(self, catalog, monkeypatch):
+        """Adversary PR 911 LOW-1: `fallback_after` sorts ahead of the repo position, so Argon listed first is still behind a codex
+        that has room."""
+        catalog({"cursor": self.CURSOR, "codex": CODEX, **AGY})
+        q = {s.name: {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}} for s in r.SERVICES}
+        q["codex"] = q["antigravity-argon"] = {"remaining": 80.0, "age_s": 0, "windows": {"weekly": 80.0}}
+        monkeypatch.setattr(r, "repo_frontier_order", lambda repo: ("antigravity-argon", "codex"))
+        assert r.route("frontier", quota=q, repo="x").service.name == "codex"
+        q["codex"] = {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}}
+        assert r.route("frontier", quota=q, repo="x").service.name == "antigravity-argon"
+
     def test_a_lapsed_login_falls_back_to_the_last_resolved_grok_from_state(self, catalog):
         """A5: an unreadable catalog or one with no match keeps the last good id from state (docs B4a said `unresolved`)."""
         catalog({"cursor": self.CURSOR})

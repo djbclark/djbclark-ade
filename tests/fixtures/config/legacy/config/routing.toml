@@ -426,7 +426,7 @@ models = { code = "cursor/composer-2.5", mechanical = "cursor/composer-2.5", bul
 [[service]]
 name = "cursor-grok"
 cli = "cursor-agent via Paseo's native cursor provider (newest Grok)"
-good_at = { frontier = 4, research = 14 }
+good_at = { frontier = 6, research = 14 }
 billing = "subscription"
 judgment_tier = true
 note = "The newest xAI Grok model on Cursor's third-party model pool (operator 2026-11-21: research lead and reviewer, skills/research 1b). Not the never-routed standalone grok CLI, and never the GrokBot Chief-of-Staff pool (grok-bot stays in never_route)."
