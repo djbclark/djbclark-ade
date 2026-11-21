@@ -70,7 +70,7 @@ ever automatic.
 
 C1. **Today's data is not enough.** The sampler (`load-watch sample`, launchd every 20 s,
 `launchd/com.djbclark.load-watch.plist`) keeps per-process samples **only while the load is hot**
-(`bin/load-watch` ~1478-1496: `st["samples"]` is cleared when `load1/ncpu < LW_LOAD_PER_CORE`, 4.0). But a build is
+(`bin/load-watch` ~1478-1496: `st["samples"]` is cleared when `load1/ncpu < LW_LOAD_PER_CORE`, 5.0 since 2026-11-21, 4.0 when this was written). But a build is
 often held by `pageins`, `swapins`, churn or the free-memory floor while the load is below 4/core (2026-11-13: the only
 refusal measured was `pageins`). The samples also do not store RSS (`PSTATE` has it for the current sample only).
 `admit` keeps no on-disk record of who is waiting *now*: `admit_log` writes one line when a call **ends**.
