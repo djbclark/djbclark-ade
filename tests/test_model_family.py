@@ -497,6 +497,17 @@ class TestCursorGrokRoute:
         assert r._frontier_slice_only(svc("cursor-grok"), "frontier") and not r._frontier_slice_only(svc("cursor-grok"), "research")
         assert not r._frontier_slice_only(svc("codex"), "frontier") and not r._frontier_slice_only(svc("claude"), "frontier")
 
+    def test_a_repo_frontier_order_overrides_the_slice_only_sort(self, catalog, monkeypatch):
+        """Adversary PR 899 r3 note 1: a repo's declared `frontier_order` is an operator override and is checked before the
+        slice-only tier term; without it the same quota routes codex."""
+        catalog({"cursor": self.CURSOR, "codex": CODEX})
+        q = {s.name: {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}} for s in r.SERVICES}
+        q["codex"] = q["cursor-grok"] = {"remaining": 80.0, "age_s": 0, "windows": {"weekly": 80.0}}
+        assert r.route("frontier", quota=q, repo="x").service.name == "codex"
+        monkeypatch.setattr(r, "repo_frontier_order", lambda repo: ("cursor-grok", "codex") if repo == "x" else ())
+        assert r.route("frontier", quota=q, repo="x").service.name == "cursor-grok"
+        assert r.route("frontier", quota=q, repo="y").service.name == "codex"
+
     def test_a_lapsed_login_falls_back_to_the_last_resolved_grok_from_state(self, catalog):
         """A5: an unreadable catalog or one with no match keeps the last good id from state (docs B4a said `unresolved`)."""
         catalog({"cursor": self.CURSOR})
