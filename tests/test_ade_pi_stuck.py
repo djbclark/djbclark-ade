@@ -297,3 +297,12 @@ def test_an_errored_non_pi_agent_is_stuck_but_a_healthy_one_is_not(tmp_path: Pat
     assert "e2" not in {o["id"] for o in report["all_pi"]}
     assert "e3" not in {o["id"] for o in report["all_pi"]}
     assert [o["alternative"] for o in report["stuck"]] == [None]            # never a Pi alternative for a Codex agent
+
+
+def test_a_bare_pi_provider_is_not_a_pi_family_agent(tmp_path: Path) -> None:
+    """Only `pi/<account>/<model>` is a Pi agent: a provider named just "pi" in error is stuck with no alternative and
+    its family is not "pi" (so the scan never plans it)."""
+    agents = [{"id": "b1", "provider": "pi", "status": "error"}]
+    report = _run(tmp_path, _pools(**{"opencode:go": (90.0, True, False)}), agents=agents)
+    assert _stuck_ids(report) == ["b1"]
+    assert report["stuck"][0]["family"] == "unknown" and report["stuck"][0]["alternative"] is None

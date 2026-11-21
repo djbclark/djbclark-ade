@@ -59,6 +59,8 @@ def _run(bin_dir: Path, home: Path, lead: str | None = LEAD) -> int:
     state = home / ".local" / "state" / "djbclark-ade" / "supervisor"
     env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}")
     env.pop("ADE_SUPERVISOR_LEAD", None)
+    env.pop("BASH_ENV", None)                       # bash would source ~/.bashrc, which puts the REAL paseo and
+    env.pop("ENV", None)                            # hermes-ping ahead of the test's fakes (tests/test_ade_paseo_guard.py)
     env["ADE_SUPERVISOR_STATE_DIR"] = str(state)
     if lead is not None:
         env["ADE_SUPERVISOR_LEAD"] = lead

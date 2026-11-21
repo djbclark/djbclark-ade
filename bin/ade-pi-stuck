@@ -207,7 +207,7 @@ def main():
         model = rest
         acct = account_of(rest)
         status = a.get("status") or ""
-        family = "pi" if is_pi else (prov.split("/")[0] or "unknown")
+        family = "pi" if is_pi else (prov.split("/")[0] if prov.split("/")[0] not in ("", "pi") else "unknown")
         # Stuck on an exhausted account, or in a hard error on any provider, Pi included (queue item 82: a Pi agent
         # on xai-oauth left in `error` by a 402). A closed or archived agent is not stuck: nothing to re-hand.
         stuck = status == "error" or (acct in exhausted and status not in FINISHED)
