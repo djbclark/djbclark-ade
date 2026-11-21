@@ -112,3 +112,69 @@ def test_rebind_requires_a_proven_owner_state(tmp_path):
     cid = _claim(tmp_path)
     with pytest.raises(ValueError, match="owner-state"):
         ade_claims.rebind_owner(cid, from_agent="agent-old", to_agent="agent-new", owner_state="live")
+
+
+# --- M1 (2026-11-21): the rebound agent's first launch has only CLAUDE_CODE_SESSION_ID + PASEO_AGENT_ID ---
+
+def _env(**kw):
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+def test_m1_paseo_id_is_the_owner_for_a_rebound_claim_when_a_claude_session_id_wins(tmp_path):
+    cid = _claim(tmp_path)
+    ade_claims.rebind_owner(cid, from_agent="agent-old", to_agent="agent-new", owner_state="archived")
+    claim = ade_claims.read_claim(cid)
+    ident = ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="sess-first", PASEO_AGENT_ID="agent-new"))
+    assert ident == "sess-first"                      # still the session id to every comparison
+    assert ade_claims.is_mine(claim, ident)
+    assert not ade_claims.is_mine(claim, ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="sess-first")))
+
+
+def test_m1_only_the_exact_owner_record_passes(tmp_path):
+    cid = _claim(tmp_path)
+    ade_claims.rebind_owner(cid, from_agent="agent-old", to_agent="agent-new", owner_state="archived")
+    claim = ade_claims.read_claim(cid)
+    for other in ("agent-old", "agent-neu", "agent-new2", "agent-ne", "AGENT-NEW"):
+        ident = ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="s", PASEO_AGENT_ID=other))
+        assert not ade_claims.is_mine(claim, ident), other
+
+
+def test_m1_not_for_other_owner_shapes(tmp_path):
+    # a harness-label owner with its identity in owner.session, a record that differs from agent, and an owner with a session
+    for i, (agent, record, session) in enumerate([("codex", "agent-new", "sess-x"), ("agent-new", "other-rec", None),
+                                                 ("agent-new", "agent-new", "sess-y"), (None, "agent-new", None)]):
+        path = tmp_path / f"w{i}"
+        path.mkdir()
+        c = ade_claims.make_claim(id=f"c{i}", path=path, branch="b", base_sha="abcd", owner_agent=agent,
+                                  owner_record=record, owner_session=session)
+        ade_claims.create_claim(c)
+        ident = ade_claims.caller_ident(_env(CLAUDE_CODE_SESSION_ID="s", PASEO_AGENT_ID="agent-new"))
+        assert not ade_claims.is_mine(ade_claims.read_claim(f"c{i}"), ident), (agent, record, session)
+
+
+def test_m1_an_explicit_claim_id_never_gains_the_paseo_id(tmp_path):
+    cid = _claim(tmp_path, owner="agent-new")
+    claim = ade_claims.read_claim(cid)
+    ident = ade_claims.caller_ident(_env(ADE_CLAIM_ID="some-other-claim", CLAUDE_CODE_SESSION_ID="s", PASEO_AGENT_ID="agent-new"))
+    assert ident == "some-other-claim" and not ade_claims.is_mine(claim, ident)
+    plain = ade_claims.caller_ident(_env(PASEO_AGENT_ID="agent-new"))
+    assert ade_claims.is_mine(claim, plain)           # the pre-existing fallback
+
+
+def test_m1_a_plain_string_cannot_carry_the_paseo_id(tmp_path):
+    cid = _claim(tmp_path, owner="agent-new")
+    assert not ade_claims.is_mine(ade_claims.read_claim(cid), "agent-x")
+
+
+def test_m1_git_guard_lets_the_rebound_agent_write_on_first_launch(tmp_path, monkeypatch):
+    """End to end through the guard's own evaluate(): a git write in the rebound claim's workspace."""
+    cid = _claim(tmp_path)
+    ade_claims.rebind_owner(cid, from_agent="agent-old", to_agent="agent-new", owner_state="archived")
+    ws = ade_claims.read_claim(cid)["path"]
+    subprocess.run(["git", "init", "-q", ws], check=True)
+    def decide(paseo):
+        env = {"PASEO_AGENT_ID": paseo, "CLAUDE_CODE_SESSION_ID": "sess-first", "PATH": os.environ["PATH"]}
+        call = ade_claims.parse_git_argv(["-C", ws, "add", "-A"], ws, env)
+        return ade_claims.evaluate(call, env)
+    assert decide("agent-new").allowed
+    assert not decide("agent-intruder").allowed

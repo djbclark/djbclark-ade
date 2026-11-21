@@ -594,6 +594,32 @@ def _verified_handoff(record_path: str | os.PathLike[str], predecessor: str, cal
     return rec
 
 
+def _owned_by_agent(claim: dict[str, Any], agent: str) -> bool:
+    """The claim's owner is `agent`: owner.agent says so, or (no owner.agent) one of its owner keys does."""
+    owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
+    return bool(agent) and (owner.get("agent") == agent or (not owner.get("agent") and agent in _owner_keys(claim)))
+
+
+def active_claim_ids_of(agent: str) -> list[str]:
+    """Ids of the ACTIVE (unexpired) claims `agent` owns, exactly the set rebind_successor would take for it. ade-self-session
+    finish records this just before it archives the predecessor (M2) and compares it with what it rebound afterwards."""
+    return sorted(str(c["id"]) for c in list_claims("active") if _owned_by_agent(c, agent))
+
+
+def claim_fate(claim_id: str, ident: str) -> dict[str, str]:
+    """Where a claim stands now, for a caller that expected to own it: `mine` (is_mine for `ident`), `other` (an active claim
+    someone else owns; `owner` names it), `inactive` (released, merged or expired) or `missing`. Read-only."""
+    c = read_claim(claim_id)
+    if c is None:
+        return {"id": claim_id, "fate": "missing"}
+    if not claim_state_active(c):
+        return {"id": claim_id, "fate": "inactive", "state": shown_state(c)}
+    if is_mine(c, ident):
+        return {"id": claim_id, "fate": "mine"}
+    owner = c.get("owner") if isinstance(c.get("owner"), dict) else {}
+    return {"id": claim_id, "fate": "other", "owner": str(owner.get("record") or owner.get("agent") or owner.get("session") or "?")}
+
+
 def rebind_successor(predecessor: str, *, caller: str, record_path: str | os.PathLike[str],
                      self_session_state: Optional[Path] = None) -> list[str]:
     """Self-handoff takeover: every ACTIVE (unexpired) claim owned by `predecessor` becomes `caller`'s, same
@@ -606,8 +632,7 @@ def rebind_successor(predecessor: str, *, caller: str, record_path: str | os.Pat
     with _claims_lock():
         for c in list_claims("active"):
             owner = c["owner"]
-            keys = _owner_keys(c)
-            if not (owner.get("agent") == predecessor or (not owner.get("agent") and predecessor in keys)):
+            if not _owned_by_agent(c, predecessor):
                 continue
             new_owner = dict(owner)
             new_owner["agent"] = caller
@@ -659,7 +684,24 @@ def is_mine(claim: dict[str, Any], ident: Optional[str]) -> bool:
     if not ident:
         return False
     allow = claim.get("allow") if isinstance(claim.get("allow"), list) else []
-    return ident in owner_ids(claim) or ident in allow
+    if ident in owner_ids(claim) or ident in allow:
+        return True
+    # M1 (2026-11-21): a Claude agent's first launch after the ade-claim plugin rebound a claim to it has no ADE_CLAIM_ID and its
+    # CLAUDE_CODE_SESSION_ID is not an owner key; caller_ident then carries the PASEO_AGENT_ID as `.paseo_agent`. That id counts as
+    # the owner ONLY when it is exactly owner.record of a bind-owner-shaped claim (owner.agent == owner.record, no owner.session).
+    paseo = getattr(ident, "paseo_agent", None)
+    return bool(paseo) and _bind_owner_shape(claim) == paseo
+
+
+def _bind_owner_shape(claim: dict[str, Any]) -> Optional[str]:
+    """The Paseo agent id a claim's owner has when it is in the shape `bind-owner`, `successor-of` and `rebind-owner` write
+    (owner.agent == owner.record, no owner.session), else None. A harness label (`codex`, `pi`, ...) with the real identity in
+    owner.session is never in this shape."""
+    owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
+    agent, record = owner.get("agent"), owner.get("record")
+    if isinstance(agent, str) and agent and agent == record and not owner.get("session"):
+        return agent
+    return None
 
 
 def owner_label(claim: dict[str, Any]) -> str:
@@ -702,8 +744,24 @@ def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
     for name in IDENT_ENV:
         v = _own_claude_session_id() if own and name == "CLAUDE_CODE_SESSION_ID" else env.get(name)
         if v:
+            if name == "CLAUDE_CODE_SESSION_ID":
+                paseo = (env.get("PASEO_AGENT_ID") or "").strip()
+                if paseo:
+                    return CallerIdent(v, paseo)    # M1: is_mine also accepts it as owner.record of a bind-owner-shaped claim
             return v
     return None
+
+
+class CallerIdent(str):
+    """caller_ident's answer when a Claude session id wins and the process also has a PASEO_AGENT_ID: still equal to (and hashing as)
+    the session id, with the Paseo id riding along as `.paseo_agent` for is_mine's one narrow M1 rule. An explicit ADE_CLAIM_ID never
+    carries it: that identity is the claim's own, set on open, and no other id is added to it."""
+    paseo_agent: str
+
+    def __new__(cls, value: str, paseo_agent: str):
+        obj = super().__new__(cls, value)
+        obj.paseo_agent = paseo_agent
+        return obj
 
 
 def is_agent_env(env: Optional[dict[str, str]] = None) -> bool:
