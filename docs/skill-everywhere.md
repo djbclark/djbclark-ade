@@ -61,6 +61,32 @@ compatible with `ade-update`. Preserve foreign files/links and report conflicts.
 absent root (2026-11-06; it does not change the exit code): an absent root's
 skills are otherwise missing from the report without a word.
 
+**Foreign real directories (2026-11-21).** When a path in a TUI's skills dir already exists and is not our link, the script
+never touches it. What that means for the exit code depends on whose skill it collides with:
+
+- A name from the public, private or site root is **ours**: a foreign real dir there is a real conflict, reported
+  `real dir/file (not ours); left alone`, exit 1 (and `--check --all` exits 1), as before.
+- A name from the **chrome-use root is third-party** (we link `leeguooooo/chrome-use`'s skills as a courtesy, they are not
+  ours to enforce): a foreign real dir at that name, typically a copy another installer put there (`canvas` under
+  `~/.agents/skills`), is a **note, not an error**. Link mode prints `real dir/file (not ours); left alone (third-party
+  skill: a note, not an error)`, `--check` prints `real dir/file (not ours; third-party skill, left alone)`, and neither
+  changes the exit code. A real failure (a collision with our own name, a dangling or other link, a missing source,
+  a failed copy) keeps its exit 1. The rest of the run still links.
+
+**Paseo's own skill, linked into Hermes (2026-11-21, operator decision via djbclark-3b).** Paseo's daemon syncs its skill
+to `~/.agents/skills/paseo` (read by Codex and Pi) and `~/.claude/skills/paseo` and marks the files with
+`.paseo-managed-files.json`; Hermes reads neither. Every link-mode run (named or `--all`; not `--remove`) therefore
+makes `~/.local/share/skill-everywhere/skills/paseo` a symlink to `~/.agents/skills/paseo`, so the link follows the
+daemon's updates. Nothing under a Paseo-managed dir is ever written, copied over or deleted. The step prints a `== paseo`
+section: `linked`, then `already linked` on a rerun; a dangling or chained link is relinked; a real dir or other link at
+the target is left alone and exits 1 (it is a collision with a link we are making); a missing source
+(`~/.agents/skills/paseo/SKILL.md`) makes no link, prints `error: paseo skill source ... is missing` and exits 1.
+`--check` (named or `--all`, so `bin/ade-update` sees it) exits 1 with `error: paseo skill is missing on <tui> (<path>)`
+on stderr when `paseo` is absent from any **live** target: claude `~/.claude/skills`, codex and pi `~/.agents/skills`,
+hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it). Because
+`bin/ade-update` treats an `error:` check as a stop, a machine where Hermes lacks the link is fixed by one
+`skill-everywhere --all` run.
+
 If the skill has no directory yet, create it first: public skills in
 `~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)
 in `~/ops/site-private/skills/<name>/` plus a line in `.githooks/private-paths`
@@ -83,7 +109,7 @@ after the directory is gone: it removes only links whose target is exactly
 | Claude Code (`claude`) | `~/.claude/skills` |
 | Codex (`codex`) | `~/.agents/skills` |
 | Pi (`pi`) | `~/.agents/skills` (same shared dir as Codex; do not also link `~/.pi/agent/skills`) |
-| Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs` |
+| Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs`; `paseo` there is a link to the Paseo-managed `~/.agents/skills/paseo` (section 1) |
 | Cursor (`cursor-agent`) | already read `~/.claude/skills`; no extra link |
 | Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win, and a standing 2026-11-11 note that Grok Bot does all AI work itself unless Chief of Staff says usage is over pace; `SKILL_EVERYWHERE_GROKBOT_NOTE` adds one more banner paragraph after that; its link and the marker's `source=` name the root the skill came from, djbclark-ade, site-djbclark or site-private, since 2026-11-06), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, codex, pi and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
 | `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, Cursor `/btw`, Hermes `/btw`, Pi (see `skills/btww/SKILL.md`); none in Grok Bot. Claude cannot alias a built-in. Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). Details: `skills/btww/SKILL.md`. |
