@@ -10,10 +10,11 @@ description: >-
 
 Canonical copy: `~/src/djbclark-ade/skills/fan-out/` (edit it there, never through a TUI path).
 
-## Preferred transport (2026-11-07)
+## Preferred transport
 
-Use native Paseo `create_agent` / `paseo run` for new slices, preserving the routing, claimed
-workspaces, report and review requirements below. For another computer, select its host explicitly and
+Launch each new slice with the `ade-worker-run` line that `route_agent.py plan` prints (section 3): it wraps
+native `paseo run` and places the worker, which a bare `paseo run` or `create_agent` does not. Keep the routing,
+claimed workspaces, report and review requirements below. For another computer, select its host explicitly and
 transfer any needed files before launch; a local brief/report path is not shared storage.
 See [old way versus new way](../../docs/old-way-new-way.md), including plugin advice and the
 cross-host acceptance checks. Keep `{serverId, agentId}` together and prove receipt with an ack.
@@ -107,7 +108,7 @@ such a worker has no parent link to the lead, so `bin/ade-auto-permit` can only 
 that the watcher skipped as `outside-scope`).
 
 **Placement: at most three windows ("boxes") per lead and repo, LEAD, WORKER and OTHER; tabs go in the fitting box (operator ruling, 2026-11-14, to the tendcf lead ae1f6d65, verbatim: "Close any unneeded tabs and any unneeded workspaces you or your predecessors have made. In the future, have at most LEAD, WORKER, and OTHER workspaces and put tabs in the appropriate box. The tabs can mention the worktree they are in."; supersedes the 2026-11-13 one-WORKERS-window-per-lead, MAIN, USER names; naming and limits in `docs/workspace-layout.md`).** Window names are `<KIND> <repo> (<work>)`, KIND `LEAD` (the lead's own, was MAIN), `WORKER` (every worker and reviewer you start yourself, was WORKERS) or `OTHER` (probes, side tasks, operator-started agents you were connected to, was USER); the lead id is not in a window name.
-The env-stripped launch has no caller workspace, so each `--new-workspace` launch made its own "master" window (11 piled up; a window per `--window-middle` text then piled up one per slice, tendcf 9, djbclark-ade about 15; archiving an agent keeps its window). `bin/ade-worker-run` does the whole recipe, so use it for every worker:
+The env-stripped launch has no caller workspace, so each `--new-workspace` launch makes its own window, and archiving an agent keeps its window. `bin/ade-worker-run` does the whole recipe, so use it for every worker:
 
 ```bash
 ade-worker-run --lead LEAD --slice NAME [--window-middle "Wave 7"] [--repo NAME] [--cwd ~/src/<repo>] [--worktree <slice worktree>] [--no-footer] -- \
@@ -173,7 +174,7 @@ only extra labels and the positional brief (`paseo run` has no `--prompt-file`).
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
 lead's first launch of a run, which opens its WORKER box (above).
-As verified on 2026-11-07, agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
+For a by-hand launch only (`ade-worker-run` sets the workspace itself; pass it none of these flags): agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
 `paseo workspace ls --json` and `-C` / `--cwd`) and never emit `--new-workspace` on an ordinary launch.
 With a caller, unreadable or missing workspace metadata refuses instead of using the ambient workspace.
@@ -188,8 +189,7 @@ refuses with exit 2; give each attempt a fresh `--evidence-dir`. Never use it fo
 launcher does not check the login, it only records it. Every other agent
 runs best effort, in its provider-native unattended mode with a brief note to change nothing (launch-mode correction 2026-11-12; review brief ruling 2026-11-07).
 
-The workers-window rule (2026-11-13) replaced the operator's temporary all-tabs-with-the-lead arrangement of 2026-11-07;
-naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the WORKER box's `cwd`, while every writer's
+Naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the WORKER box's `cwd`, while every writer's
 brief names a separate claimed execution worktree and every repository tool call targets it explicitly. Never turn a
 report folder into a workspace.
 

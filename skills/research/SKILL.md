@@ -219,11 +219,11 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    is the deliverable, 2026-10-18), Fable on claude (the Fable id exactly as
    `paseo provider models claude --json` lists it, never guessed — on 2026-10-10
    a dispatch with an unlisted Fable id failed; or an Agent-tool sub-agent),
-   and the Cursor grok model. **Antigravity is no longer a research family** (2026-11-07): since the agy TUI
-   retired (2026-11-06) the router reaches Paseo's antigravity provider only through the `antigravity-argon` row,
-   frontier fallback only (planner emits that Choice when codex or claude is short of
-   frontier quota); its Flash and Claude/GPT pools are `never_route`
-   (`config/ade.toml`), so a research-kind slice there is refused. The lead merges
+   and the Cursor grok model. Antigravity reaches research only
+   through its `antigravity-argon` and `antigravity-neon` rows, as the last-resort
+   research pool behind every other one and only while codex or claude cannot
+   take the kind (`fallback_kinds`, `fallback_after` in `config/ade.toml`); its
+   Flash and Claude/GPT pools are `never_route`. The lead merges
    the three evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the lead picks among the three
    writer drafts or merges them into one `report.md`; the counter files
@@ -237,9 +237,8 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    per `feedback_quota_wait_dont_lose_work`). A Cursor slice on the xAI model that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
    1a. **GPT reviewers also go through `route_agent.py plan --kinds frontier --lead … --slice … --cwd …`
-   → that Choice's `dispatch` field as-is** (never a hand-rolled `paseo run`;
-   the `ocx-gpt-6-*` Agent-tool sub-agents and the opencodex proxy behind them
-   were uninstalled 2026-10-19). If the Codex pool is out
+   → that Choice's `dispatch` field as-is** (never a hand-rolled `paseo run`).
+   If the Codex pool is out
    (`aiuse --available --live --json`), take the next family with quota from
    the same plan, labelling the review non-independent for any slice
    that family worked on.

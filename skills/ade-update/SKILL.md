@@ -9,8 +9,8 @@ description: >-
 
 # ade-update
 
-Runs `~/src/djbclark-ade/bin/ade-update`, the one command that replaces the
-hand-run "Update (this machine)" steps in the README. It changes nothing
+Runs `~/src/djbclark-ade/bin/ade-update`, the one update command (README
+"Install and update (this machine)"). It changes nothing
 outside the documented update steps: checkout fast-forward, skill links, the canonical
 `~/.claude/helpers/graft-hooks.cjs` regular-file copy (0755) and its exclusive
 `*.bak-<UTC stamp>` backups, plus the settings, GUI bundle and state steps described
@@ -57,5 +57,5 @@ Re-run `ade-update --check` and expect exit `0`. Report the new HEAD and any
 CHANGELOG lines. If an agent TUI still lacks a new skill, start a new session;
 a present link does not prove a running TUI reloaded its catalog.
 
-Docs: README "Update (this machine)"; `bin/ade-update` (usage text at the top);
+Docs: README "Install and update (this machine)"; `bin/ade-update` (usage text at the top);
 `bin/skill-everywhere` (usage text at the top) for the link step.

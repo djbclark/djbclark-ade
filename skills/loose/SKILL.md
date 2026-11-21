@@ -134,12 +134,12 @@ Work the list; each line is a command, not a memory.
        with open(prompt, "wb") as p, open(raw, "rb") as r:
            p.write(TRUSTED + b"\n--- UNTRUSTED DATA ---\n" + r.read())
        if agent != "claude":
-           fail("reader failed")   # Wave 6: only the Claude CLI text-only path; no retired shims
+           fail("reader failed")   # only the Claude CLI text-only reader is supported
        try:
            with open(prompt, "rb") as pin, open(reply, "wb") as o, open(err, "wb") as e:
                # Zero-tool reader: empty setting-sources + disableAllHooks (not project
                # settings — those load hooks; --tools "" does not disable hooks).
-               # Never a Wave 6 shim. Pattern: bin/review-launch / argon dual-model note.
+               # Pattern: bin/review-launch / argon dual-model note.
                settings = json.dumps({"disableAllHooks": True, "hooks": {}})
                rc = subprocess.run(
                    ["claude", "-p", "--model", model, "--tools", "", "--strict-mcp-config",
@@ -167,11 +167,9 @@ Work the list; each line is a command, not a memory.
    Pass `AGENT=claude`. The reader is **Claude CLI `-p` with no tools and no
    project/user settings** (`--tools ""`, `--strict-mcp-config`,
    `--disallowedTools '*'`, `--setting-sources ""`,
-   `--settings '{"disableAllHooks":true,"hooks":{}}'`, `--no-session-persistence`)
-   — hardened vs the old Wave 6 shim CLI fallback that used `--setting-sources project`
-   (hooks survive empty `--tools`). Without the Wave 6 shim
-   (`docs/slim/wave6-follow-up.md`). `--perm read-only` is NOT equivalent (it still
-   reads files). Do not call retired Wave 6 shims.
+   `--settings '{"disableAllHooks":true,"hooks":{}}'`, `--no-session-persistence`):
+   project settings load hooks, and hooks still run under an empty `--tools`.
+   `--perm read-only` is NOT equivalent (it still reads files).
    No `eval`, no shell substitution, no `cat`/`read`
    of `raw`, `lst`, `prompt`, `err`, `log` or `reply`, and never print raw
    stderr or the reader's log (they can echo upstream text). The validation
@@ -216,13 +214,11 @@ with one more prompt using the **same tool as `/steps`**, every time, even when
 the audit found nothing:
 
 1. **Handoff and continue** — the `handoff` skill: write a Tier 2 handoff, then
-   (its Step 9) clear the context of this same session and start `/baton`, so work
-   carries on with nobody typing. Recommend it when anything is still open or
+   (its Step 9) start an acknowledged successor session that resumes from it, so
+   work carries on with nobody typing. Recommend it when anything is still open or
    deferred, or the session was long or produced context that is not already
-   durable. On Paseo the pre-`/clear` transcript is not kept by `paseo logs` once
-   `/baton` runs (2026-10-20; the UI is unverified), so anything he must read goes
-   into the handoff document, the Tier 1 pointer and the hermes-ping, not only the
-   final message.
+   durable. Anything he must read goes into the handoff document, the Tier 1
+   pointer and the hermes-ping, not only the final message.
 2. **Finish and archive this session** — write the final results as the last
    message, then end the session. Recommend it when the audit closed everything
    and all work is committed and pushed.
@@ -242,8 +238,8 @@ Rule 4's finish or the handoff's Step 9; it treats a handoff as document-only an
 reports.
 
 **Never offer or run finish for a session that holds a standing watcher role** (the load, CFEngine and Paseo watchers
-are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). Nothing names the holder any
-more (the watcher registry was deleted 2026-11-06), so check yourself. Offer handoff and continue, or
+are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). The load watcher's holder is
+recorded by `load-watch watcher` (`skills/watch` section 3); for the other roles, check yourself. Offer handoff and continue, or
 keep working; to end it, hand the role over first.
 
 **Finish** (operator, 2026-10-20: "if there is nothing to continue to just clear context but in a way that the human
@@ -251,13 +247,14 @@ can still read the final results"): write the final results as the last message 
 everything first (commits pushed, no pending reads), then end the turn with one line for the operator: the session is
 done and can be archived (`paseo agent archive <this agent's id>` once it is idle; it stays under "Archived agents" and
 the final message stays readable). A running agent cannot archive itself, and `/quit` typed into a Paseo composer
-reaches Claude as plain text (seen twice 2026-10-20); the `self-slash --finish` that did both was removed 2026-11-06. If
-the handoff was chosen and it was run document-only, offer the finish prompt again once it is written.
+reaches Claude as plain text. If the handoff was chosen and it was run document-only, offer the finish prompt again
+once it is written.
 
-**Compaction** is left to Claude Code's auto-compaction, or requested by
-`bin/ade-self-session compact --checkpoint FILE --request-id TOKEN` (docs/self-session.md section B): it preserves the checkpoint and intent, then sends itself `/compact`, and `requested` is never completed compaction. The old `/compact` self-slash was removed 2026-11-06. When the context prompt's compact tier fires (+140k since the start or last compaction,
-or 217k total) or the operator picks it, write down what the next turn needs and ask him to type `/compact <focus>`;
-never because context merely looks large: each compaction costs ~150k+ token-equivalents
+**Compaction**: when the context prompt's compact tier fires (+140k since the start or last compaction, or 217k total)
+or the operator picks it, write down what the next turn needs and compact without asking, with
+`bin/ade-self-session compact --checkpoint FILE --request-id TOKEN` (docs/self-session.md section B; it preserves the
+checkpoint and intent, then sends itself `/compact`, and `requested` is never completed compaction), or leave it to
+Claude Code's auto-compaction; never because context merely looks large: each compaction costs ~150k+ token-equivalents
 (`memory/feedback_self_compact.md` item 7). Grok Bot: skip (G6).
 
 ## Silent mode, before a handoff
@@ -308,9 +305,8 @@ Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
 - Not a handoff. Use `handoff` / `session-handoff` for persisting context so work
   can resume; this is about deciding what is still owed. Rule 4 only *offers* one
   at the end.
-- Not task verification. Use `verify-and-stop` to prove one task meets its
-  acceptance conditions; this sweeps the whole session, including things nobody
-  set acceptance conditions for.
+- Not task verification of one task against its acceptance conditions; this
+  sweeps the whole session, including things nobody set acceptance conditions for.
 - Not a scope expansion. Finding a loose end does not license fixing it. The
   exception is category 5 — make a finding durable before you report it, because
   reporting it is useless if the record dies with the session.
