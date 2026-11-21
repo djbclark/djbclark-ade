@@ -575,6 +575,9 @@ def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path)
     r = run(tmp_path, "ci", "check", str(wt))
     assert r.returncode == 1 and "no live ticket covers" in r.stderr
     assert run(tmp_path, "ci", "check", str(repo)).returncode == 0
+    # and the other way round: covered at the worktree but not at the row's own directory
+    bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(repo)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
+    assert run(tmp_path, "ci", "check", str(wt)).returncode == 1
 
 
 def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):
