@@ -304,6 +304,21 @@ with the Paseo MCP `archive_agent` (never `--force`, never a workspace archive),
 with `paseo agent inspect ID` (`Archived: true`), then re-run `bin/ade-self-session finish
 --record RECORD`; it skips the archive call once the readback shows `Archived`.
 
+### C0. The supervisor's lead file follows the successor (2026-11-21)
+`bin/ade-supervisor-scan` notifies the lead named on the first line of `$ADE_SUPERVISOR_STATE_DIR/lead` (default
+`~/.local/state/djbclark-ade/supervisor/lead`, docs/scheduling.md). Three lead takeovers on 2026-11-21 rewrote it by hand, so
+`finish` now does it once the predecessor is archived (a re-run of an already-archived record retries it): when the file
+exists, is a regular file and its first line is exactly the predecessor id, it is replaced atomically (temp file in the same
+directory, `os.replace`, mode kept) with the successor id and a newline. The outcome is `supervisor_lead` in the record and in
+`finish`'s JSON: `repointed`; `already-successor`; `unchanged-not-predecessor` (the file names another agent, for example another
+chain's lead: never touched); `unchanged-not-regular` (a symlink or other non-file: never followed); `absent` (no file: none is
+created); `error` (the reason in `supervisor_lead_error`; it never fails `finish`, the archive already happened, and a re-run
+retries). Nothing is written unless the archive is confirmed. The state dir honours `ADE_SUPERVISOR_STATE_DIR` from the
+`Service` env, then the process env (tests point it at a tmp dir).
+
+The launchd `ade-net-resume` job needs no such repoint: its pinned `--lead <id>` already follows the ledger (C0a item 2), so a stale
+pin is harmless (it only shows an old id in `launchctl print`). `ade-supervisor-scan` also follows a replaced lead through the send guard.
+
 ### C0a. Lead ids pinned elsewhere follow the successor (2026-11-14)
 A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own
 `ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it
