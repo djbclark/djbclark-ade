@@ -30,6 +30,10 @@
 # In link mode, any existing link whose realpath equals the target but whose
 # readlink differs (a leftover chain) is atomically replaced with the direct
 # link.
+# A foreign real dir at the name of a chrome-use (third-party root) skill is a note, not an error (exit code
+# unchanged); at the name of a public/private/site skill it stays exit 1. Paseo's own skill (~/.agents/skills/paseo,
+# synced by its daemon) is linked into the Hermes dir, and --check exits 1 when paseo is missing from a live target
+# (see paseo_step below and docs/skill-everywhere.md, section 1).
 # Hermes owns ~/.hermes/, so it is never edited here. Instead Hermes itself put
 # ~/.local/share/skill-everywhere/skills in its skills.external_dirs (done
 # 2026-10-03), and this script links into that dir.
@@ -293,6 +297,10 @@ for name in "$@"; do
       src="$ade_root/$name"
       for c in "${gone_srcs[@]}"; do [[ "$(greadlink "$link")" != "$c" ]] || src=$c; done
     fi
+    # A skill from the third-party root (chrome-use) yields to a foreign real dir of the same name: some other tool
+    # installed that copy (2026-11-21: `canvas` under ~/.agents/skills), it is left alone and that is a note, not
+    # an error. A collision with a public, private or site name stays an error.
+    third_party=0; [[ $src != "$chrome_root"/* ]] || third_party=1
     if [[ -L $link && "$(greadlink "$link")" == "$src" ]]; then state=linked
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
@@ -301,8 +309,13 @@ for name in "$@"; do
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
     case $mode in
-      check) printf '  %-13s %s\n' "$bin" "$state"
-        if ((all)) && [[ $state != linked ]]; then rc=1; fi ;;
+      check)
+        if ((third_party)) && [[ $state == "real dir/file (not ours)" ]]; then
+          printf '  %-13s %s\n' "$bin" "real dir/file (not ours; third-party skill, left alone)"
+        else
+          printf '  %-13s %s\n' "$bin" "$state"
+          if ((all)) && [[ $state != linked ]]; then rc=1; fi
+        fi ;;
       remove)
         if [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
@@ -322,10 +335,68 @@ for name in "$@"; do
           # path); replace it rather than preserve a dead pointer.
           act "relink $link" ln -sfn "$src" "$link"
           ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+        elif ((third_party)) && [[ $state == "real dir/file (not ours)" ]]; then
+          printf '  %-13s %s; left alone (third-party skill: a note, not an error)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
     esac
   done <<<"$targets"
 done
+
+# Paseo's own skill. The Paseo daemon syncs ~/.agents/skills/paseo (and ~/.claude/skills/paseo) and marks them with
+# .paseo-managed-files.json, so we never write, copy over or delete anything there. Hermes reads neither dir, so
+# ~/.local/share/skill-everywhere/skills/paseo is a symlink to the daemon-managed copy and follows its updates.
+# Link mode creates that one link (idempotent; a foreign real dir at the target is left alone and is an error, like a
+# collision with one of our own names; a missing source creates nothing). --check fails (exit 1, `error:` line on
+# stderr) when `paseo` is absent from any live target: claude, codex/pi or hermes, a target being live only when its
+# client is installed. --remove leaves it alone. The step prints a `== paseo` section in link mode and with --all.
+paseo_src="$HOME/.agents/skills/paseo"
+paseo_step() {
+  [[ $mode != remove ]] || return 0
+  local bin dir link state have_src=0 show=0 hint
+  [[ -f $paseo_src/SKILL.md ]] && have_src=1
+  if [[ $mode == link ]] || ((all)); then show=1; fi
+  ((!show)) || echo "== paseo (managed by Paseo)"
+  while IFS='|' read -r bin dir; do
+    [[ -z $bin ]] && continue
+    wanted "$bin" || continue
+    [[ $dir == copy\ * || $dir == via* || $dir == x* ]] && continue
+    command -v "$bin" >/dev/null || { ((!show)) || printf '  %-13s not installed\n' "$bin"; continue; }
+    dir="${dir/#\~/$HOME}"; link="$dir/paseo"
+    if [[ $bin == hermes ]]; then
+      if [[ -L $link && "$(greadlink "$link")" == "$paseo_src" && -e $link ]]; then state=linked
+      elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
+      elif [[ -L $link && -e $paseo_src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$paseo_src")" ]]; then
+        state="chained via $(greadlink "$link")"
+      elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
+      elif [[ -e $link ]]; then state="real dir/file (not ours)"
+      else state=missing; fi
+    else
+      [[ -e $link ]] && state=present || state=missing  # Paseo's own sync owns these; never touched here
+    fi
+    case $mode in
+      check)
+        ((!show)) || printf '  %-13s %s\n' "$bin" "$state"
+        if [[ $state != linked && $state != present ]]; then
+          hint="run skill-everywhere (link mode) once"; [[ $bin == hermes ]] || hint="Paseo's daemon syncs it: check the daemon and agents.skills.selection in ~/.paseo/config.json"
+          printf 'error: paseo skill is %s on %s (%s): %s\n' "$state" "$bin" "$link" "$hint" >&2
+          rc=1
+        fi ;;
+      link)
+        [[ $bin == hermes ]] || { printf '  %-13s %s (Paseo-managed; not touched)\n' "$bin" "$state"; continue; }
+        if [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"
+        elif ((!have_src)); then
+          printf '  %-13s paseo source missing (%s): no link made\n' "$bin" "$paseo_src"
+          printf 'error: paseo skill source %s/SKILL.md is missing; not linking it into %s\n' "$paseo_src" "$dir" >&2
+          rc=1
+        elif [[ $state == missing ]]; then
+          act "link $link" eval 'mkdir -p "$dir" && ln -s "$paseo_src" "$link"'; ((dry)) || printf '  %-13s linked\n' "$bin"
+        elif [[ $state == chained\ * || $state == dangling\ * ]]; then
+          act "relink $link" ln -sfn "$paseo_src" "$link"; ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+        else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
+    esac
+  done <<<"$targets"
+}
+paseo_step
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

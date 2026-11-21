@@ -86,6 +86,17 @@ def commit(repo, message, files):
     sh("git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message, cwd=repo)
 
 
+def seed_paseo_skill(home):
+    """A healthy Paseo skill state in a fake HOME: the real skill-everywhere (run by the in-process tests) fails
+    `--check` when `paseo` is missing from a live target (2026-11-21)."""
+    paseo = home / ".agents" / "skills" / "paseo"
+    paseo.mkdir(parents=True)
+    (paseo / "SKILL.md").write_text("---\nname: paseo\n---\n")
+    for d in (home / ".claude" / "skills", home / ".local" / "share" / "skill-everywhere" / "skills"):
+        d.mkdir(parents=True)
+        (d / "paseo").symlink_to(paseo, target_is_directory=True)
+
+
 class Env:
     def __init__(self, tmp):
         self.tmp = tmp
@@ -389,6 +400,7 @@ def test_non_canonical_repo_reports_skills_but_never_links(env):
 def test_a_non_canonical_repo_never_writes_the_shared_state_record(env, monkeypatch, capsys):
     """Codex pass 11 on PR 20: `--repo <other clone>` without --state wrote that clone's HEAD into the canonical
     record, so the next canonical run saw base == target and hid (or replayed) changelog entries."""
+    seed_paseo_skill(env.home)
     mod = load_module()
     other = clone(env, "other")
     for k, v in dict(HOME=str(env.home), PATH=f"{env.bin}{os.pathsep}{os.environ['PATH']}",
@@ -1044,6 +1056,7 @@ def test_a_fast_forward_that_landed_before_git_timed_out_still_counts_as_applied
     # Codex P2 on ffad15a: a post-merge hook longer than MERGE_TIMEOUT makes run() return 124 AFTER HEAD moved
     # (git ignores the hook's own exit status, so only a timeout can produce this). Run in-process so the merge
     # call can be wrapped: the real merge happens, then the wrapper reports the timeout.
+    seed_paseo_skill(env.home)
     mod = load_module()
     real_run = mod.run
 

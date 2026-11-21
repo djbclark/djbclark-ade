@@ -33,7 +33,17 @@ def catalog(tmp_path):
                SKILL_EVERYWHERE_ONLY="codex",
                PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     env.pop("ENV", None)
+    paseo_skill(home)  # a live client always has the Paseo-synced copy
     return home, public, private, env
+
+
+def paseo_skill(home):
+    """The Paseo daemon's synced copy and its marker, as in the real ~/.agents/skills/paseo."""
+    path = home / ".agents" / "skills" / "paseo"
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text("---\nname: paseo\ndescription: Paseo\n---\n")
+    (path / ".paseo-managed-files.json").write_text('{"version": 1, "files": {}}\n')
+    return path
 
 
 def skill(root, name):
@@ -59,12 +69,12 @@ def test_all_discovers_both_roots_and_linked_skills_once(catalog, tmp_path):
     (public / "helpers").mkdir()
     before = run(catalog, "--check", "--all")
     assert before.returncode == 1
-    assert not (home / ".agents").exists()
+    assert sorted(p.name for p in (home / ".agents" / "skills").iterdir()) == ["paseo"]
     applied = run(catalog, "--all")
     assert applied.returncode == 0, applied.stderr + applied.stdout
     assert applied.stdout.count("== steps\n") == 1
     links = home / ".agents" / "skills"
-    assert sorted(p.name for p in links.iterdir()) == ["1password", "linked", "steps"]
+    assert sorted(p.name for p in links.iterdir()) == ["1password", "linked", "paseo", "steps"]
     assert (links / "steps").readlink() == source
     assert (links / "1password").readlink() == private / "1password"
     assert (links / "linked" / "SKILL.md").is_file()
@@ -85,7 +95,7 @@ def test_site_root_is_a_third_root_after_public_and_private(catalog, tmp_path):
     applied = run(catalog, "--all")
     assert applied.returncode == 0, applied.stderr + applied.stdout
     links = home / ".agents" / "skills"
-    assert sorted(p.name for p in links.iterdir()) == ["report", "steps"]
+    assert sorted(p.name for p in links.iterdir()) == ["paseo", "report", "steps"]
     assert (links / "report").readlink() == moved
     assert (links / "steps").readlink() == source
     named = run(catalog, "--check", "report")
@@ -226,7 +236,7 @@ def test_all_dry_run_is_read_only(catalog):
     skill(public, "steps")
     result = run(catalog, "--dry-run", "--all")
     assert result.returncode == 0 and "would link" in result.stdout
-    assert not (home / ".agents").exists()
+    assert sorted(p.name for p in (home / ".agents" / "skills").iterdir()) == ["paseo"]
 
 
 def test_foreign_content_is_preserved_and_all_check_fails(catalog):
@@ -250,7 +260,6 @@ def test_all_repairs_chained_and_dangling_links(catalog, tmp_path):
     hub = tmp_path / "hub"
     hub.symlink_to(source, target_is_directory=True)
     links = home / ".agents" / "skills"
-    links.mkdir(parents=True)
     (links / "steps").symlink_to(hub, target_is_directory=True)
     (links / "baton").symlink_to(tmp_path / "gone")
     assert run(catalog, "--check", "--all").returncode == 1
@@ -266,7 +275,7 @@ def test_all_rejects_names_or_bulk_removal_before_writing(catalog, args):
     skill(public, "steps")
     result = run(catalog, *args)
     assert result.returncode == 2
-    assert not (home / ".agents").exists()
+    assert sorted(p.name for p in (home / ".agents" / "skills").iterdir()) == ["paseo"]
 
 
 def test_all_empty_inventory_is_not_success(catalog):
@@ -279,7 +288,7 @@ def test_unsafe_discovered_name_fails_before_any_links(catalog):
     skill(public, "unsafe name")
     result = run(catalog, "--all")
     assert result.returncode == 2 and "unsafe skill directory" in result.stderr
-    assert not (home / ".agents").exists()
+    assert sorted(p.name for p in (home / ".agents" / "skills").iterdir()) == ["paseo"]
 
 
 def _default_root_env(home: Path, tmp_path: Path) -> dict:
@@ -344,3 +353,133 @@ def test_canonical_checkout_wins_when_it_exists(tmp_path):
     r = subprocess.run([str(SCRIPT), "--check", "no-such-skill-xyz"], env=_default_root_env(home, tmp_path),
                        capture_output=True, text=True, timeout=30)
     assert str(canon / "skills") in r.stderr, r.stderr
+
+
+# --- Paseo's skill in Hermes (2026-11-21) and foreign dirs of third-party skills ---------------------------------
+
+def hermes_env(catalog, tmp_path, installed=True):
+    """Target only Hermes; a fake `hermes` binary makes it installed (a minimal PATH hides the real one)."""
+    env = catalog[3]
+    bindir = tmp_path / "bin"
+    env["SKILL_EVERYWHERE_ONLY"] = "hermes"
+    env["PATH"] = os.pathsep.join([str(bindir), "/usr/bin", "/bin"])
+    if installed:
+        fake = bindir / "hermes"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+    return catalog[0] / ".local" / "share" / "skill-everywhere" / "skills"
+
+
+def snapshot(path):
+    return {p.relative_to(path): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()}
+
+
+def test_paseo_skill_is_linked_into_hermes_and_paseo_files_are_untouched(catalog, tmp_path):
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    source = home / ".agents" / "skills" / "paseo"
+    before = snapshot(source)
+    result = run(catalog, "steps")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (hermes / "paseo").is_symlink() and (hermes / "paseo").readlink() == source
+    assert (hermes / "paseo" / "SKILL.md").is_file()
+    assert snapshot(source) == before and not source.is_symlink()
+
+
+def test_paseo_link_is_idempotent(catalog, tmp_path):
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    assert run(catalog, "steps").returncode == 0
+    again = run(catalog, "steps")
+    assert again.returncode == 0, again.stderr + again.stdout
+    assert "== paseo" in again.stdout and again.stdout.split("== paseo", 1)[1].count("already linked") == 1
+    assert "linked\n" not in again.stdout.split("== paseo", 1)[1].replace("already linked", "")
+    assert (hermes / "paseo").readlink() == home / ".agents" / "skills" / "paseo"
+
+
+def test_paseo_foreign_real_dir_at_the_hermes_target_is_left_alone(catalog, tmp_path):
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    foreign = hermes / "paseo"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("someone else's paseo")
+    result = run(catalog, "steps")
+    assert result.returncode == 1
+    assert "not ours" in result.stdout and "left alone" in result.stdout
+    assert not foreign.is_symlink() and (foreign / "SKILL.md").read_text() == "someone else's paseo"
+    assert snapshot(foreign) == {Path("SKILL.md"): b"someone else's paseo"}
+
+
+def test_paseo_missing_source_makes_no_dangling_link(catalog, tmp_path):
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    shutil.rmtree(home / ".agents" / "skills" / "paseo")
+    result = run(catalog, "steps")
+    assert result.returncode == 1
+    assert "paseo skill source" in result.stderr and "missing" in result.stderr
+    assert not os.path.lexists(hermes / "paseo")
+
+
+def test_check_fails_loudly_when_paseo_is_missing_from_a_live_target(catalog, tmp_path):
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    failed = run(catalog, "--check", "steps")
+    assert failed.returncode == 1
+    assert "error: paseo skill is missing on hermes" in failed.stderr
+    assert failed.stdout.rstrip().endswith("== end")
+    assert run(catalog, "steps").returncode == 0
+    assert run(catalog, "--check", "steps").returncode == 0
+    # a dangling link counts as missing too
+    shutil.rmtree(home / ".agents" / "skills" / "paseo")
+    dangling = run(catalog, "--check", "steps")
+    assert dangling.returncode == 1 and "dangling" in dangling.stderr
+    # the Codex/Pi target, which Paseo's own daemon fills, fails the same way
+    catalog[3]["SKILL_EVERYWHERE_ONLY"] = "codex"
+    codex = run(catalog, "--check", "steps")
+    assert codex.returncode == 1 and "error: paseo skill is missing on codex" in codex.stderr
+
+
+def test_check_ignores_paseo_for_a_client_that_is_not_installed(catalog, tmp_path):
+    hermes_env(catalog, tmp_path, installed=False)
+    skill(catalog[1], "steps")
+    result = run(catalog, "--check", "steps")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "error:" not in result.stderr
+
+
+def test_foreign_dir_of_a_third_party_skill_is_a_note_not_an_error(catalog):
+    home, public, _, env = catalog
+    chrome = Path(env["SKILL_EVERYWHERE_CHROME"])
+    skill(chrome, "canvas")
+    skill(public, "steps")
+    foreign = home / ".agents" / "skills" / "canvas"
+    foreign.mkdir()
+    (foreign / "SKILL.md").write_text("installed by another tool")
+    result = run(catalog, "--all")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "third-party skill: a note, not an error" in result.stdout
+    assert not foreign.is_symlink() and (foreign / "SKILL.md").read_text() == "installed by another tool"
+    assert (home / ".agents" / "skills" / "steps").is_symlink()  # the rest of the run still links
+    checked = run(catalog, "--check", "--all")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "not ours; third-party skill, left alone" in checked.stdout
+
+
+def test_foreign_dir_at_the_name_of_our_own_skill_stays_an_error(catalog):
+    home, public, _, env = catalog
+    chrome = Path(env["SKILL_EVERYWHERE_CHROME"])
+    skill(chrome, "canvas")
+    skill(public, "steps")
+    foreign = home / ".agents" / "skills" / "steps"
+    foreign.mkdir()
+    (foreign / "SKILL.md").write_text("foreign")
+    foreign_canvas = home / ".agents" / "skills" / "canvas"
+    foreign_canvas.mkdir()
+    result = run(catalog, "--all")
+    assert result.returncode == 1  # steps collides; canvas alone would not
+    assert (foreign / "SKILL.md").read_text() == "foreign"
