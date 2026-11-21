@@ -30,12 +30,14 @@ standard footer pasted into such a prompt is overridden by appending the read-on
 `subagent_type` is resolved as Claude Code resolves it (2.1.330): an exact match first, else the one type whose normalized name
 (NFKC, lower-case, no whitespace, dashes or `_`) equals the request's, so `explore`, `web_fetch` and `Web Fetch` count as `Explore`
 and `web-fetch`; two matches are ambiguous (Claude Code refuses the launch) and keep the standard footer. Definitions are read from
-`CLAUDE_PROJECT_DIR`, the hook's cwd and `~/.claude/agents`; one unreadable file only affects its own type.
+`CLAUDE_PROJECT_DIR` (the hook's cwd only when it is unset) and `~/.claude/agents`, regular files only and at most 64 KiB each;
+one unreadable file only affects its own type, and a FIFO, device or directory named `*.md` is skipped.
 """
 
 import json
 import os
 import re
+import stat
 import sys
 import unicodedata
 from pathlib import Path
@@ -45,7 +47,7 @@ MARK = "Delivery contract"
 # whole footer pasted in a fence or quote, is not this prompt's footer (lead review 14760b15 B3: fail closed = append ours).
 # The read-only footer's heading ("Delivery contract (read-only") is not the standard footer: a writable type whose prompt carries
 # it still gets the standard one appended (adversary r1 LOW-3).
-FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK + r"(?! \(read-only)")
+FOOTER_HEADING = re.compile(r"(?m)^ {0,3}#{1,6}[ \t]+" + MARK + r"(?!\s*\(read-only)")
 EXEMPT = {"claude-code-guide", "statusline-setup"}
 # Built-in sub-agent types that cannot deliver a report file. Explore and Plan have no Write/Edit/NotebookEdit; they keep Bash,
 # but their system prompts forbid creating files by any means (redirects and heredocs included), so a footer that says "write
@@ -56,7 +58,9 @@ WRITABLE_BUILTIN = {"general-purpose", "claude", "claude-code-guide", "statuslin
 KNOWN_BUILTIN = READONLY_BUILTIN | WRITABLE_BUILTIN
 # Unicode White_Space (what Claude Code's normalizer strips with \p{White_Space}): \t\n\v\f\r, space, NEL, NBSP, and the general spaces.
 _WHITE_SPACE = frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000") | {chr(c) for c in range(0x2000, 0x200B)}
-WRITE_TOOLS = {"Write", "Bash"}                     # either one can create the report file; Edit and NotebookEdit cannot make a new file
+WRITE_TOOLS = {"Write", "Edit", "Bash"}             # each can create the report file (Edit with an empty old_string makes a missing file, adversary r2 LOW-2); NotebookEdit cannot
+MAX_DEF_BYTES = 65536                               # a definition is read up to this many bytes: its frontmatter is at the top
+MAX_DEF_FILES = 256                                 # and at most this many `*.md` files per agents dir
 DEFAULT_LEAD = "main"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FOOTER = _REPO_ROOT / "docs" / "dispatch-footer.md"
@@ -248,25 +252,26 @@ def log_relaunch(data, tool_input, path, why):
 
 def agent_dirs(cwd):
     """Directories holding agent definitions: AGENT_FOOTER_AGENT_DIRS (os.pathsep list, for tests), else the project root
-    (`CLAUDE_PROJECT_DIR`, which Claude Code sets for hooks and which survives a `cd` into a subdirectory), the hook's cwd,
-    then the user dir. The first definition of a name wins (project before user, as Claude Code resolves them)."""
+    (`CLAUDE_PROJECT_DIR`, which Claude Code sets for hooks and which survives a `cd` into a subdirectory), then the user dir.
+    The hook's cwd is only the fallback when `CLAUDE_PROJECT_DIR` is unset: Claude Code loads definitions from the project, so a
+    checkout the session later `cd`s into must not decide a type's contract (adversary r2 LOW-4). The first definition of a name
+    wins (project before user, as Claude Code resolves them)."""
     override = os.environ.get("AGENT_FOOTER_AGENT_DIRS")
     if override is not None:
         return [Path(d) for d in override.split(os.pathsep) if d]
-    dirs = []
-    for root in (os.environ.get("CLAUDE_PROJECT_DIR"), cwd):
-        d = Path(root) / ".claude" / "agents" if root else None
-        if d is not None and d not in dirs:
-            dirs.append(d)
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+    dirs = [Path(root) / ".claude" / "agents"] if root else []
     return dirs + [Path.home() / ".claude" / "agents"]
 
 
 def _frontmatter(text):
-    """The `key: value` pairs of a leading `---` block; a value that is empty is followed by `- item` lines (a YAML list)."""
+    """(`key: value` pairs of a leading `---` block, the keys whose YAML form is not understood). A value that is empty is
+    followed by `- item` lines (a YAML list). Not understood (adversary r2 LOW-1): a folded or literal scalar (`>`, `|`), a flow
+    list that is not closed on its line, and indented continuation lines that are not `- item`."""
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
-        return {}
-    out, key = {}, None
+        return {}, set()
+    out, odd, key = {}, set(), None
     for ln in lines[1:]:
         if ln.strip() == "---":
             break
@@ -274,9 +279,31 @@ def _frontmatter(text):
         if m:
             key = m.group(1).lower()
             out[key] = m.group(2).strip()
+            if out[key][:1] in (">", "|") or (out[key].startswith("[") and "]" not in out[key]):
+                odd.add(key)
         elif key and (item := re.match(r"^[ \t]*-[ \t]+(.*)$", ln)):
             out[key] = (out[key] + "," if out[key] else "") + item.group(1).strip()
-    return out
+        elif key and ln.strip() and ln[:1] in " \t":
+            odd.add(key)
+    return out, odd
+
+
+def read_definition(path):
+    """The text of an agent definition, at most MAX_DEF_BYTES of it, or None when `path` is not a regular file (adversary r2
+    MED-1). Opened non-blocking (a FIFO named `x.md` opens at once instead of waiting for a writer) and checked with fstat
+    after the open, so a symlink to /dev/zero, a FIFO, a socket, a device or a directory is never read. Symlinks to regular
+    files are followed (the installed definitions are symlinks). A file longer than the cap is cut at its last newline."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, MAX_DEF_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_DEF_BYTES:
+        data = data[:MAX_DEF_BYTES]
+        data = data[:data.rfind(b"\n") + 1]
+    return data.decode("utf-8")
 
 
 def _tool_names(value):
@@ -300,19 +327,28 @@ def agent_definitions(cwd):
     """{type name (file stem or `name:`): (allowed, disallowed) or None} for every definition found, the first one of a name
     winning. allowed is None when the definition has no `tools:` line (all tools); the value is None when the file cannot be
     read, so that one definition (never the others, adversary r1 LOW-2) falls back to the standard footer. Plugin agents are
-    not looked up (they stay writable)."""
+    not looked up (they stay writable). A path that is not a regular file (FIFO, device, directory, a symlink to /dev/zero) is
+    skipped as if absent: Claude Code does not load one either, so the built-in classification stands and a planted file cannot
+    flip it. A definition whose `tools:` YAML is not understood gets None, the standard footer (fail open to the old behaviour:
+    a writer is never made read-only by a parse the hook cannot do)."""
     defs = {}
     for d in agent_dirs(cwd):
         try:
-            files = sorted(d.glob("*.md")) if d.is_dir() else []
+            files = sorted(d.glob("*.md"))[:MAX_DEF_FILES] if d.is_dir() else []
         except OSError:
             continue
         for f in files:
             try:
-                fm = _frontmatter(f.read_text())
+                text = read_definition(f)
+                if text is None:
+                    continue
+                fm, odd = _frontmatter(text)
                 name = (fm.get("name") or f.stem).strip("'\"")
                 tools = fm.get("tools")
-                entry = ((_tool_names(tools) if tools else None), _tool_names(fm.get("disallowedtools", "")))
+                if odd & {"tools", "disallowedtools"}:
+                    entry = None
+                else:
+                    entry = ((_tool_names(tools) if tools else None), _tool_names(fm.get("disallowedtools", "")))
             except Exception:  # noqa: BLE001 - one unreadable or undecodable file must not hide the rest
                 name, entry = f.stem, None
             defs.setdefault(name, entry)

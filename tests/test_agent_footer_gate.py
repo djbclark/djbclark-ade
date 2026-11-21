@@ -11,13 +11,13 @@ HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "agent_foot
 REPO_FOOTER = Path(__file__).resolve().parent.parent / "docs" / "dispatch-footer.md"
 
 
-def run(tool_input, tool="Agent", env=None, session="s1", cwd=None):
+def run(tool_input, tool="Agent", env=None, session="s1", cwd=None, timeout=30):
     payload = {"tool_name": tool, "tool_input": tool_input, "session_id": session}
     if cwd is not None:
         payload["cwd"] = str(cwd)
     r = subprocess.run([sys.executable, str(HOOK)],
                        input=json.dumps(payload),
-                       capture_output=True, text=True, timeout=30, env=env)
+                       capture_output=True, text=True, timeout=timeout, env=env)
     return json.loads(r.stdout)["hookSpecificOutput"] if r.stdout.strip() else None
 
 
@@ -25,6 +25,8 @@ def footer_env(tmp_path, body=None, missing=False):
     """AGENT_FOOTER_* overrides: point the hook at a fixture footer (or a missing path)."""
     env = dict(os.environ, AGENT_FOOTER_REPORT_DIR=str(tmp_path / "reports"))
     env.pop("CLAUDE_PROJECT_DIR", None)                                    # the hook reads project agents from it: keep tests hermetic
+    (tmp_path / "home").mkdir(exist_ok=True)
+    env["HOME"] = str(tmp_path / "home")                                   # never the real ~/.claude/agents (adversary r2 LOW-4 hygiene)
     path = tmp_path / "dispatch-footer.md"
     if missing:
         env["AGENT_FOOTER_FILE"] = str(tmp_path / "no-such-footer.md")
@@ -668,7 +670,7 @@ def test_the_shipped_read_only_footer_fills_and_keeps_its_heading(tmp_path):
     assert "Write no report file" in prompt and "last line of your final message is `DONE`" in prompt
 
 
-@pytest.mark.parametrize("tools", ["Read, Grep, Glob", "Read, WebFetch, WebSearch", "Read, Edit", "[Read, Grep]", '"Read, Grep"'])
+@pytest.mark.parametrize("tools", ["Read, Grep, Glob", "Read, WebFetch, WebSearch", "[Read, Grep]", '"Read, Grep"'])
 def test_a_definition_without_write_or_bash_is_read_only(tmp_path, tools):
     env = ro_env(tmp_path, {"scout": agent_def(tools)})
     out = run({"subagent_type": "x", "prompt": "find X"}, env=env)               # name: x in the frontmatter
@@ -689,7 +691,7 @@ def test_a_yaml_list_of_tools_is_read(tmp_path):
     assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
 
 
-@pytest.mark.parametrize("tools", ["Read, Grep, Glob, Bash", "Read, Write", "Bash(git:*), Read", "*"])
+@pytest.mark.parametrize("tools", ["Read, Grep, Glob, Bash", "Read, Write", "Bash(git:*), Read", "*", "Read, Edit"])   # Edit can create a file (r2 LOW-2)
 def test_a_definition_that_can_write_keeps_the_standard_footer(tmp_path, tools):
     """adversary (Read, Grep, Glob, Bash) is the real example: it writes its report with Bash."""
     env = ro_env(tmp_path, {"scribe": "---\nname: scribe\ntools: " + tools + "\n---\n"})
@@ -936,3 +938,116 @@ def test_the_read_only_footer_keeps_secret_graft_and_closing_search_rules():
     text = RO_REPO_FOOTER.read_text()
     assert "never a whole line with a credential" in text
     assert "--no-refresh" in text and "Closing search:" in text
+
+
+# r2 MED-1: a definition path that is not a regular file is never read (a symlink to /dev/zero grew the hook to 760 MB in 0.4 s,
+# a FIFO hung it); it is skipped as if absent, so the built-in classification stands. Each run has a short timeout.
+def _agents_dir(env):
+    return Path(env["AGENT_FOOTER_AGENT_DIRS"])
+
+
+def test_a_symlink_to_dev_zero_is_not_read(tmp_path):
+    env = ro_env(tmp_path)
+    (_agents_dir(env) / "notes.md").symlink_to("/dev/zero")
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Explore", "prompt": "q"}, env=env, timeout=10))
+
+
+def test_a_fifo_definition_returns_promptly(tmp_path):
+    env = ro_env(tmp_path)
+    os.mkfifo(_agents_dir(env) / "zz.md")
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Explore", "prompt": "q"}, env=env, timeout=10))
+
+
+def test_a_fifo_or_device_named_like_a_builtin_cannot_flip_it(tmp_path):
+    env = ro_env(tmp_path)
+    os.mkfifo(_agents_dir(env) / "Explore.md")
+    (_agents_dir(env) / "Plan.md").symlink_to("/dev/zero")
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Explore", "prompt": "q"}, env=env, timeout=10))
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Plan", "prompt": "q"}, env=env, timeout=10))
+
+
+def test_a_directory_named_like_a_definition_is_skipped(tmp_path):
+    env = ro_env(tmp_path)
+    (_agents_dir(env) / "x.md").mkdir()
+    assert_read_only_footer(tmp_path, run({"subagent_type": "Explore", "prompt": "q"}, env=env, timeout=10))
+
+
+def test_an_oversized_definition_is_read_only_up_to_its_cap(tmp_path):
+    big = "---\nname: big\ntools: Read, Grep\n---\n" + "x" * 5_000_000
+    env = ro_env(tmp_path, {"big": big})
+    assert_read_only_footer(tmp_path, run({"subagent_type": "big", "prompt": "q"}, env=env, timeout=10))
+    late = "---\nname: late\n" + ("pad: " + "y" * 100 + "\n") * 1000 + "tools: Read\n---\n"     # `tools:` after 64 KiB: never seen
+    env = ro_env(tmp_path, {"late": late})
+    out = run({"subagent_type": "late", "prompt": "q"}, env=env, timeout=10)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
+    flat = "---" + "y" * 5_000_000                                         # no newline inside the cap: nothing to parse, standard footer
+    env = ro_env(tmp_path, {"flat": flat})
+    out = run({"subagent_type": "flat", "prompt": "q"}, env=env, timeout=10)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
+
+
+def test_a_symlink_to_a_regular_definition_is_followed(tmp_path):
+    real = tmp_path / "real-scout.md"
+    real.write_text("---\nname: scout\ntools: Read, Grep\n---\n")
+    env = ro_env(tmp_path)
+    (_agents_dir(env) / "scout.md").symlink_to(real)
+    assert_read_only_footer(tmp_path, run({"subagent_type": "scout", "prompt": "q"}, env=env))
+
+
+def test_the_number_of_definition_files_read_is_capped(tmp_path):
+    env = ro_env(tmp_path)
+    for i in range(300):
+        (_agents_dir(env) / f"a{i:03d}.md").write_text("---\ntools: Read\n---\n")
+    (_agents_dir(env) / "zzz.md").write_text("---\ntools: Read\n---\n")         # sorts after 256 files: never read
+    out = run({"subagent_type": "zzz", "prompt": "q"}, env=env)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
+
+
+# r2 LOW-1: YAML forms the hook cannot parse keep the standard footer (a writer is never made read-only by a misparse)
+@pytest.mark.parametrize("tools_yaml", [
+    "tools: >-\n  Read, Write, Bash\n",
+    "tools: |\n  Read, Write, Bash\n",
+    "tools: [Read,\n  Write, Bash]\n",
+    "tools:\n  Read, Write\n",
+])
+def test_unparsed_tools_yaml_keeps_the_standard_footer(tmp_path, tools_yaml):
+    env = ro_env(tmp_path, {"w": "---\nname: w\n" + tools_yaml + "---\n"})
+    out = run({"subagent_type": "w", "prompt": "q"}, env=env)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"] and "read-only" not in out["updatedInput"]["prompt"]
+
+
+def test_unparsed_disallowed_tools_yaml_keeps_the_standard_footer(tmp_path):
+    env = ro_env(tmp_path, {"w": "---\nname: w\ntools: Read\ndisallowedTools: >-\n  Write\n---\n"})
+    out = run({"subagent_type": "w", "prompt": "q"}, env=env)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]
+
+
+def test_a_wrapped_description_does_not_spoil_a_parsed_tools_line(tmp_path):
+    env = ro_env(tmp_path, {"s": "---\nname: s\ndescription: >-\n  long text\ntools: Read, Grep\n---\n"})
+    assert_read_only_footer(tmp_path, run({"subagent_type": "s", "prompt": "q"}, env=env))
+
+
+# r2 LOW-3: a read-only contract pasted into a writable type's prompt does not override the standard one
+def test_the_read_only_footer_applies_only_without_write_edit_or_bash():
+    first = RO_REPO_FOOTER.read_text().split("\n")[2]
+    assert "applies only if you have none of the Write, Edit and Bash tools" in first
+
+
+def test_a_read_only_heading_without_a_space_does_not_count_as_the_standard_footer(tmp_path):
+    prompt = "do X\n\n## Delivery contract(read-only sub-agent)\n1. final message\n"
+    out = run({"subagent_type": "general-purpose", "description": "Do X", "prompt": prompt}, env=ro_env(tmp_path))
+    assert out["updatedInput"]["prompt"].count("## Delivery contract (test)") == 1
+
+
+# r2 LOW-4: with CLAUDE_PROJECT_DIR set, the hook's cwd (a checkout the session cd'd into) decides nothing
+def test_cwd_is_ignored_when_claude_project_dir_is_set(tmp_path):
+    proj, env = _proj_and_home(tmp_path, "---\nname: dup\ntools: Read, Write\n---\n", "---\nname: other\ntools: Read\n---\n")
+    clone = tmp_path / "clone"
+    (clone / ".claude" / "agents").mkdir(parents=True)
+    (clone / ".claude" / "agents" / "dup.md").write_text("---\nname: dup\ntools: Read\n---\n")
+    (clone / ".claude" / "agents" / "Explore.md").write_text("---\nname: Explore\ntools: Read, Write, Bash\n---\n")
+    env = dict(env, CLAUDE_PROJECT_DIR=str(proj))
+    out = run({"subagent_type": "Explore", "prompt": "q"}, env=env, cwd=clone)
+    assert "## Delivery contract (read-only" in out["updatedInput"]["prompt"]          # the clone's writer Explore is not used
+    out = run({"subagent_type": "dup", "prompt": "q"}, env=env, cwd=clone)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"]           # the project's writer, not the clone's reader
