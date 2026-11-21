@@ -872,11 +872,12 @@ WATCHER_HOWTO = (
     "not told, send it one line with `paseo send --no-wait --json ID \"...\"` and read `.status` (`queued` is not delivered). "
     "Load without CPU is processes stuck in state U, swap, or a pile at background priority. Never kill, stop or throttle "
     "another agent's or djbclark's work without his yes: steer future runs to CI (`load-watch ci decide`), guard a "
-    "launchd job (`load-watch guard add`), and ask djbclark before creating a CI copy of a repo. Under memory/swap "
-    "pressure, you may automatically coordinate archiving unneeded Paseo agents (`paseo ls -g --json`): archive verified "
-    "leadless closed/unneeded agents directly (`paseo agent archive ID`, never running agents or active leads) and ask "
-    "each owning LEAD via `paseo send --no-wait --json` to archive finished/unneeded workers under their chain. Close "
-    "each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
+    "launchd job (`load-watch guard add`), and ask djbclark before creating a CI copy of a repo. Only when `admit --json` "
+    "refuses on memory (`free_mem`, `swapins`, `compressor`), you may coordinate archiving idle agents (operator ruling "
+    "2026-11-21), following skills/watch/SKILL.md Step 4 exactly: never run `paseo agent archive` yourself (only "
+    "`bin/ade-tidy prune`), never touch an agent with no `ade.lead` label (list it), and ask a worker's current owning lead "
+    "(succession ledger, `paseo agent inspect ID --json` reads `Archived: false`, no pending card) to archive it, ending "
+    "`Please reply: ack <your id>`. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
 
 
 def watcher_record():
