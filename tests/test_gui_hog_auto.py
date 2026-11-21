@@ -55,8 +55,8 @@ class World:
             procs[pid] = proc(1, app / "Contents" / "MacOS" / name.replace(" ", ""), pid=pid)
         self.cli = self.apps[CODEXBAR] / "Contents" / "Helpers" / "CodexBarCLI"
         procs[101] = proc(100, self.cli, pid=101)
-        self.nm = tmp / "outside" / "nm-host"
-        self.nm.parent.mkdir()
+        self.nm = tmp / "outside" / "Host.app" / "Contents" / "MacOS" / "nm-host"   # a rule must name an executable inside an .app bundle (L4)
+        self.nm.parent.mkdir(parents=True)
         procs[501] = proc(500, self.nm, pid=501)
         self.ops = FakeOps(procs)
 
@@ -73,7 +73,8 @@ class World:
         table, rss, ttys, _s = self.ops.table()
         return {a["bundle_id"]: a for a in gh.group_apps(table, rss, ttys, self.lsapps(), exe_of=self.ops.exe, my_uid=ME, agent_clis=(), cfg=cfg)}
 
-    def step(self, cfg, now=T0, held_=None, gh_state=None, dry=False):
+    def step(self, cfg, now=T0, held_=None, gh_state=None, dry=False, st=None):
+        gh_state = st if st is not None else gh_state
         self.gh_state = gh_state if gh_state is not None else getattr(self, "gh_state", {})
         apps = list(self.group(cfg).values())
         return gf.auto_freeze_step(self.gh_state, self.state, apps, held() if held_ is None else held_, now, cfg, my_uid=ME, ops=self.ops, dry=dry)
@@ -85,6 +86,12 @@ class World:
 @pytest.fixture
 def w(tmp_path):
     return World(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _sampler_is_loaded(monkeypatch):
+    """The auto step now checks launchd's job (M1); the tests that need it unloaded say so."""
+    monkeypatch.setattr(gf, "sampler_loaded", lambda uid: True)
 
 
 def auto_cfg(order=(CODEXBAR, BEEPER, GROK), keep=True, **auto):
@@ -211,7 +218,7 @@ def test_an_out_of_bundle_native_messaging_host_makes_chrome_host_a_build_unless
 def test_the_home_directory_form_of_a_rule_expands(w, monkeypatch):
     monkeypatch.setenv("HOME", str(w.tmp))
     cfg = auto_cfg()
-    cfg["freeze"]["keep_running"][CHROME] = ["~/outside/nm-host"]
+    cfg["freeze"]["keep_running"][CHROME] = ["~/outside/Host.app/Contents/MacOS/nm-host"]
     assert not w.group(cfg)[CHROME]["hosts_build"]
 
 
@@ -419,3 +426,96 @@ def test_the_sampler_passes_auto_freeze_and_the_cli_accepts_by_auto():
     assert "auto" in gf.BY and gf.norm_entry({"id": "f-1", "state": "frozen", "app": {}, "root": {"pid": 100, "start": "s", "uid": ME, "exe": "/x"}, "members": [],
                                               "mode": "indefinite", "frozen_at": T0, "by": "auto"})["by"] == "auto"
     assert signal.SIGSTOP and os.getuid() == ME
+
+
+# ---- adversary round 1 (PR 859, head a0bedcf6): M1, L1-L5 -----------------------------------------------------------------------------------
+def test_m1_an_auto_freeze_needs_the_sampler_job_loaded(w, monkeypatch):
+    """A `load-watch sample` that launchd's job does not follow (uninstalled or unloaded) must not stop an app on a timer nothing would ever thaw."""
+    seen = []
+    monkeypatch.setattr(gf, "sampler_loaded", lambda uid: seen.append(uid) or False)
+    cfg = auto_cfg(order=(CODEXBAR, BEEPER))
+    st = {}
+    r = w.step(cfg, st=st)
+    assert r["bundle_id"] == CODEXBAR and r["refused"].startswith(f"{gf.SAMPLER}:") and w.stopped() == [] and seen == [ME]
+    assert st["auto"][CODEXBAR]["ok"] is False   # retry-wait: the next app is tried, this one after AUTO_RETRY_S
+    assert w.step(cfg, st=st, now=T0 + 20)["bundle_id"] == BEEPER and w.stopped() == []
+    monkeypatch.setattr(gf, "sampler_loaded", lambda uid: True)
+    assert w.step(cfg, st=st, now=T0 + gf.AUTO_RETRY_S + 1)["entry"] and w.stopped() == [100]
+
+
+def test_l1_ignore_one_hour_pauses_the_auto_freeze_too(w):
+    cfg = auto_cfg()
+    assert gf.auto_freeze_step({}, w.state, list(w.group(cfg).values()), held(), T0, cfg, my_uid=ME, ops=w.ops, snoozed=True) is None and w.stopped() == []
+    assert w.step(cfg)["bundle_id"] == CODEXBAR   # not snoozed: it runs
+
+
+def test_l1_the_tick_passes_the_snooze(w, monkeypatch):
+    monkeypatch.delenv("LW_GUI_HOG_AUTO", raising=False)
+    monkeypatch.delenv("LW_GUI_HOG", raising=False)
+    calls = []
+    monkeypatch.setattr(gf, "auto_freeze_step", lambda *a, **k: calls.append(k) or None)
+    (w.state / "gui-hog").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(gh, "read_snooze", lambda sd: T0 + 1800)
+    table, rss, ttys, _s = w.ops.table()
+    gh.tick({}, T0, table, rss, ttys, state_dir=w.state, my_uid=ME, cfg=auto_cfg(), lsapps=w.lsapps(), exe_of=w.ops.exe, out=lambda x: None, auto_freeze=True,
+            gui_ok=False, load_avg=(1, 2, 3), ncpu=10)
+    assert calls and calls[0]["snoozed"] is True
+
+
+@pytest.mark.parametrize("body", ['enabled = "false"', "enabled = 0", 'refreeze_s = 0', "refreeze_s = -5", 'min_cores = "x"', "min_cores = -1", "minutes = 0",
+                                  'minutes = "10"', "refreeze_s = 1e999", "minutes = 99999"])
+def test_l2_wrong_typed_or_out_of_range_auto_values_keep_the_shipped_value(tmp_path, body):
+    over = tmp_path / "gui-hog.toml"
+    over.write_text("[freeze.auto]\n" + body + "\n")
+    base = shipped()["freeze"]["auto"]
+    assert gh.load_config(local=over)["freeze"]["auto"] == base
+
+
+def test_l2_the_overlay_can_switch_auto_off_but_never_back_on(tmp_path):
+    shipped_off = tmp_path / "shipped.toml"
+    shipped_off.write_text('[freeze]\nenabled = true\n[freeze.auto]\nenabled = false\norder = ["a.b"]\n')
+    over = tmp_path / "gui-hog.toml"
+    over.write_text("[freeze.auto]\nenabled = true\n")
+    assert gh.load_config(path=shipped_off, local=over)["freeze"]["auto"]["enabled"] is False   # the repo's rollback wins
+    over.write_text("[freeze.auto]\nenabled = false\n")
+    assert gh.load_config(local=over)["freeze"]["auto"]["enabled"] is False
+    over.write_text("[freeze.auto]\nrefreeze_s = 7200\nmin_cores = 0.5\nminutes = 15\n")
+    a = gh.load_config(local=over)["freeze"]["auto"]
+    assert (a["refreeze_s"], a["min_cores"], a["minutes"]) == (7200, 0.5, 15)
+
+
+def test_l3_the_start_comes_from_the_tick_so_a_relaunched_app_is_refused(w):
+    cfg = auto_cfg(order=(CODEXBAR,))
+    apps = list(w.group(cfg).values())
+    st = {}
+    r = gf.auto_freeze_step(st, w.state, apps, held(), T0, cfg, my_uid=ME, ops=w.ops, starts={100: "start-OTHER-INSTANCE"})
+    assert r["refused"].startswith(f"{gf.IDENTITY}:") and w.stopped() == []   # the pid now belongs to another process than the one that was decided on
+    r = gf.auto_freeze_step({}, w.state, apps, held(), T0, cfg, my_uid=ME, ops=w.ops, starts={100: "start-100"})
+    assert r["entry"] and w.stopped() == [100]
+
+
+@pytest.mark.parametrize("rule", ["/", "/opt/homebrew", "/Applications", "Contents", "", "/usr/local/bin/cargo", "../x/y", "/Applications/A.app", "/Applications/A.app/Contents"])
+def test_l4_broad_or_inexact_keep_rules_are_refused(rule, tmp_path):
+    assert gh.rule_ok(rule) is False
+    over = tmp_path / "gui-hog.toml"
+    over.write_text('[freeze.keep_running]\n"com.jetbrains.intellij" = [' + json.dumps(rule) + "]\n")
+    assert "com.jetbrains.intellij" not in gh.load_config(local=over)["freeze"]["keep_running"] or gh.load_config(local=over)["freeze"]["keep_running"]["com.jetbrains.intellij"] == []
+    cfg = auto_cfg()
+    cfg["freeze"]["keep_running"]["com.jetbrains.intellij"] = [rule]
+    assert gh.keep_rules(cfg, "com.jetbrains.intellij") == []
+
+
+@pytest.mark.parametrize("rule", ["Contents/Helpers/CodexBarCLI", "/Applications/1Password.app/Contents/Library/LoginItems/H.app/Contents/MacOS/x",
+                                  "~/.local/share/chrome-use/ChromeUse.app/Contents/MacOS/chrome-use"])
+def test_l4_an_exact_executable_inside_a_bundle_is_accepted(rule):
+    assert gh.rule_ok(rule) is True
+
+
+def test_l5_an_os_error_is_recorded_as_a_refusal_and_retried_later_not_every_tick(w):
+    cfg = auto_cfg(order=(CODEXBAR, BEEPER))
+    w.ops.info_error = True   # ps timed out
+    st = {}
+    r = w.step(cfg, st=st)
+    assert r["bundle_id"] == CODEXBAR and r["refused"].startswith("error: OSError") and w.stopped() == []
+    assert st["auto"][CODEXBAR]["ok"] is False
+    assert w.step(cfg, st=st, now=T0 + 20)["bundle_id"] == BEEPER   # CodexBar waits AUTO_RETRY_S; no repeated attempt (and log line) per tick

@@ -102,22 +102,54 @@ def _read_toml(path):
         return tomllib.load(f)
 
 
-def _merge_freeze(cfg, data):
-    """Fold a `[freeze]` table (the shipped file or the user overlay) into cfg: plain keys replace, `auto` replaces key by key, `keep_running` is
-    per bundle id (a list of relative paths; the overlay adds to the shipped lists, it never removes one). Wrong types are ignored."""
+def _num(v, lo, hi):
+    """A real, finite number (never a bool or a string) within [lo, hi]."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and _fin(v) and lo <= v <= hi
+
+
+def rule_ok(r):
+    """A keep-running rule is an exact executable: relative to the bundle (two or more components, `Contents/Helpers/CodexBarCLI`) or absolute (`~`
+    expands) and then inside some `X.app` bundle, at least `X.app/<dir>/<file>`; never `/`, a broad directory such as /opt/homebrew, or a path
+    with `..` (adversary L4: such a rule would turn off the out-of-bundle build stop for a whole toolchain)."""
+    if not isinstance(r, str) or not r.strip():
+        return False
+    p = Path(os.path.expanduser(r) if r.startswith("~") else r)
+    parts = p.parts
+    if not parts or ".." in parts:
+        return False
+    if p.is_absolute():
+        return any(x.casefold().endswith(".app") and len(parts) - i - 1 >= 2 for i, x in enumerate(parts))
+    return len(parts) >= 2
+
+
+def _merge_freeze(cfg, data, overlay=False):
+    """Fold a `[freeze]` table (the shipped file or the user overlay) into cfg: plain keys replace, `auto` replaces key by key (typed: a wrong type or
+    an out-of-range number keeps the previous value; the overlay can switch `enabled` OFF but never back on, so a shipped `enabled = false` rollback
+    wins), `keep_running` is per bundle id (exact-executable rules, see `rule_ok`; the overlay adds to the shipped lists, it never removes one)."""
     for k, v in data.items():
         if k == "auto" and isinstance(v, dict):
+            au = cfg["freeze"]["auto"]
             for ak, av in v.items():
                 if ak == "order":
                     if isinstance(av, list):
-                        cfg["freeze"]["auto"]["order"] = [x for x in av if isinstance(x, str) and x.strip()]
-                elif ak in cfg["freeze"]["auto"]:
-                    cfg["freeze"]["auto"][ak] = av
+                        au["order"] = [x for x in av if isinstance(x, str) and x.strip()]
+                elif ak == "enabled":
+                    if isinstance(av, bool):
+                        au["enabled"] = (au["enabled"] and av) if overlay else av
+                elif ak == "minutes":
+                    if _num(av, 1, cfg["freeze"].get("max_minutes", 1440)):
+                        au["minutes"] = av
+                elif ak == "min_cores":
+                    if _num(av, 0, 1000):
+                        au["min_cores"] = av
+                elif ak == "refreeze_s":
+                    if _num(av, cfg["trigger"].get("hold_s", 180), 7 * 86400):   # shorter than hold_s would undo an operator's Resume on the next tick
+                        au["refreeze_s"] = av
         elif k == "keep_running" and isinstance(v, dict):
             for bid, rels in v.items():
                 if isinstance(bid, str) and isinstance(rels, list):
                     have = cfg["freeze"]["keep_running"].setdefault(bid, [])
-                    have.extend(r for r in rels if isinstance(r, str) and r not in have)
+                    have.extend(r for r in rels if rule_ok(r) and r not in have)
         elif k not in ("auto", "keep_running"):
             cfg["freeze"][k] = v
 
@@ -145,7 +177,7 @@ def load_config(path=None, local=None):
             cfg["protected"][key] = list(cfg["protected"][key]) + [x for x in add if isinstance(x, str)]
     fz = over.get("freeze") if isinstance(over, dict) else None
     if isinstance(fz, dict):   # only the auto-freeze list and the keep-running rules: the overlay cannot touch enabled, max_minutes, passes, the lock timeout
-        _merge_freeze(cfg, {k: v for k, v in fz.items() if k in ("auto", "keep_running")})
+        _merge_freeze(cfg, {k: v for k, v in fz.items() if k in ("auto", "keep_running")}, overlay=True)
     return cfg
 
 
@@ -524,8 +556,7 @@ def keep_rules(cfg, bundle_id):
     for bid, rels in table.items():
         if isinstance(bid, str) and bundle_id and bid.casefold() == str(bundle_id).casefold() and isinstance(rels, list):
             for r in rels:
-                parts = Path(r).parts if isinstance(r, str) else ()
-                if parts and ".." not in parts and r not in out:
+                if rule_ok(r) and r not in out:
                     out.append(r)
     return out
 
@@ -1315,7 +1346,12 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
     if (auto_freeze or dry) and os.environ.get("LW_GUI_HOG_AUTO", "").strip() != "0":   # LW_GUI_HOG_AUTO=0 turns only this off; the operator's auto-freeze list (B6 amended 2026-11-21): only the sampler passes auto_freeze=True; dry prints what it would do
         try:
             import gui_hog_freeze
-            r = gui_hog_freeze.auto_freeze_step(gh, state_dir, apps, held, t, cfg, my_uid=my_uid, agent_clis=agent_clis, dry=dry or not auto_freeze)
+            snz = effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"])
+            order = {str(x).casefold() for x in cfg["freeze"]["auto"].get("order", []) if isinstance(x, str)}
+            roots = [int(a["root_pid"]) for a in apps if str(a.get("bundle_id") or "").casefold() in order and str(a.get("root_pid", "")).isdigit()]
+            starts = {p: s for p in roots if (s := (start_of or proc_start)(p)) is not None}   # read here, with the table that chose the app (adversary L3)
+            r = gui_hog_freeze.auto_freeze_step(gh, state_dir, apps, held, t, cfg, my_uid=my_uid, agent_clis=agent_clis, dry=dry or not auto_freeze,
+                                                starts=starts, snoozed=snz is not None and t < snz)
             if r:
                 out(("gui-hog would auto-freeze " if r.get("dry") else "gui-hog auto-freeze ") + json.dumps(r, separators=(",", ":"), default=str))
         except Exception as e:  # noqa: BLE001 - the auto-freeze never stops a sample, the dialog or the decision

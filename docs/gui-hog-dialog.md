@@ -712,7 +712,8 @@ the caller): timed, write-ahead entry, four-field identity, every thaw path (F5)
 automatically". A refused auto-freeze is retried after 120 s. `refreeze_s` makes an operator's Resume stick: the same app is not auto-frozen again for an hour.
 **Where the list lives:** in the repo file, not the overlay: the operator named these apps for this machine, and `[protected]` already carries machine-specific
 apps. `~/.config/load-watch/gui-hog.toml` may set `[freeze.auto]` and add to `[freeze.keep_running]`; it cannot change `[freeze] enabled`, `max_minutes`,
-`passes` or the lock timeout, and it cannot remove a protected entry. Switches: `[freeze.auto] enabled = false`, `LW_GUI_HOG_AUTO=0` (this only), `LW_GUI_HOG=0`
+`passes` or the lock timeout, it can only switch `[freeze.auto] enabled` off (never back on), and it cannot remove a protected entry. "Ignore 1 h" pauses the auto-freeze
+too (P6 L1). Adversary round 1 and the costs of freezing CodexBar and Beeper: P6. Switches: `[freeze.auto] enabled = false`, `LW_GUI_HOG_AUTO=0` (this only), `LW_GUI_HOG=0`
 (everything), `[freeze] enabled = false` (all freezes). `load-watch sample --dry-run` prints "would auto-freeze" without signalling.
 
 P2. **Keep-running (CodexBar's server).** CodexBar is the main process `Contents/MacOS/CodexBar` plus a child `Contents/Helpers/CodexBarCLI serve --host 127.0.0.1
@@ -757,3 +758,44 @@ not running, Resume sticking, retry, switches, dry run, the tick wiring and kill
 step that builds the dialog; PR 849 shipped Swift that had never been compiled, so this one was. **Not done by the author:** the operator's H4 run of the new
 behaviour with the real window (two quick Freeze clicks on two rows; "frozen automatically"; "keeps running: CodexBarCLI"); no dialog bundle was installed and
 no live state file was touched.
+
+P6. **Adversary round 1 on PR 859 (BLOCK at a0bedcf6) and what each finding changed.**
+
+M1. The auto path called `freeze(check_sampler=False)` on the reasoning "the sampler is the caller", which holds only for launchd's job. A `load-watch sample` run by hand
+while the job is unloaded (or after `load-watch uninstall`) could stop an app on a timer that nothing would ever thaw. **Fixed:** `auto_freeze_step` now calls `freeze(...,
+check_sampler=True)`: one `launchctl print` per real attempt (at most one per tick), a refusal with code 8 (`SAMPLER`) stamps `retry-wait`. Test:
+`test_m1_an_auto_freeze_needs_the_sampler_job_loaded` (unloaded: nothing stopped, `retry-wait`; loaded: frozen).
+
+L1. **Ignore 1 h pauses the auto-freeze too.** The tick passes `snoozed` (the clamped `effective_snooze` is in the future) to the step, which then does nothing. An operator who
+ignores the warning wants the apps left alone.
+
+L2. **`[freeze.auto]` values are typed.** `enabled` only as a bool; the overlay combines it with the shipped value by AND (it can switch auto-freeze off, never back on, so a
+shipped `enabled = false` rollback wins). `minutes` 1..`max_minutes`, `min_cores` 0..1000, `refreeze_s` `hold_s`..7 days, all finite numbers (never a bool or a string);
+anything else keeps the previous value, so a bad overlay can no longer fail open, raise every tick, or undo an operator's Resume.
+
+L3. **The start time comes from the tick.** `tick` reads `proc_start` for the listed apps' roots right after it grouped the apps (the `start_of` hook when a caller passes
+one) and hands them to the step; `freeze()` compares them with the live process, so an app relaunched between the decision and the signal is refused (`IDENTITY`). Only a root
+the tick could not read falls back to `ops.info` just before the call.
+
+L4. **A keep-running rule is an exact executable** (`rule_ok`): relative to the bundle with two or more components (`Contents/Helpers/CodexBarCLI`), or absolute (and `~/`) inside
+some `X.app` as at least `X.app/<dir>/<file>`. `/`, `/opt/homebrew`, a bare directory and any `..` are dropped at load time and again in `keep_rules`. A broad overlay rule can
+no longer lift the out-of-bundle build stop for a whole toolchain.
+
+L5. **An `OSError` in the auto step is a refusal** (a `ps` timeout, an unreadable state directory): `auto_state` is stamped `ok: false`, so it is retried after `AUTO_RETRY_S`
+(120 s), not every 20 s tick with a log line each time.
+
+**What the two listed apps cost while frozen (M2, M3: the operator decides; both stay on the list for now).**
+
+M2. *CodexBar.* The kept `CodexBarCLI serve` keeps answering `/health` and `/usage` (the lead's live test, seconds). But its stderr (fd 2) is a **pipe whose other end is held by
+the CodexBar main process**, the one a freeze stops. Once the CLI has written more than the pipe buffer (16 to 64 KiB) to stderr, its next stderr write blocks; if it logs on the
+request path, `/health` and `/usage` hang for the rest of the freeze and aiuse's `[collectors.codexbar]` stalls. Not yet proven for a full 10-minute freeze. To prove it:
+one timed freeze with aiuse polling every 20 to 30 s, recording `lsof` SIZE/OFF on that pipe and the response times; if the pipe fills, CodexBar leaves the default order.
+CodexBar is **first** in the order, so this applies on every hold.
+
+M3. *Beeper.* Beeper Desktop's main process serves the local API at `127.0.0.1:23373` that the `beeper` MCP server uses. The root is never kept, so while Beeper is frozen
+the kernel accepts connections into the backlog and every MCP call hangs until its timeout (up to about 10 minutes, the length of a freeze). The step uses only C4 (a) and (b), not
+(c), so on a machine where agent load keeps builds held on `load` the list rotates: each app is frozen 10 minutes of every `refreeze_s` hour. Options for the operator: keep
+Beeper, move it behind Grok Bot, or drop it from the default order.
+
+*Info.* `CodexBarClaudeWatchdog` is stopped with CodexBar. A manual Freeze of Chrome stalls an agent that drives it through the kept `chrome-use` host (P3(a)). `gui-hog freeze
+--by auto` is accepted from the CLI, so "frozen automatically" can be self-claimed (`by` is self-asserted for every value, J1).

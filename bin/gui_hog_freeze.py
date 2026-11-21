@@ -708,17 +708,21 @@ def auto_candidates(apps, cfg, auto_state, now):
     return out
 
 
-def auto_freeze_step(gh_state, state_dir, apps, held, now, cfg, *, my_uid, agent_clis=(), ops=None, dry=False, freeze_fn=None):
+def auto_freeze_step(gh_state, state_dir, apps, held, now, cfg, *, my_uid, agent_clis=(), ops=None, dry=False, freeze_fn=None, starts=None, snoozed=False):
     """One sampler tick of the auto-freeze list: while a build is held by the GUI-hog trigger (`hold_active`: refused for hold_s on a gate desktop apps
     can relieve), freeze the FIRST app of `[freeze.auto] order` that is running, not protected, not part of a build, not frozen by us within refreeze_s
     and using at least min_cores. One app per tick, so the build's next admission poll can see the relief and the list stops there; it ends when the
     hold goes (no held build) or no listed app is left. Timed, like a click (`by` is "auto"; every thaw path is the same). Returns None when nothing
-    was due, else {"app", "bundle_id", "entry" | "refused", "dry"}. Needs `[freeze] enabled`, `[freeze.auto] enabled` and a non-empty order."""
+    was due, else {"app", "bundle_id", "entry" | "refused", "dry"}. Needs `[freeze] enabled`, `[freeze.auto] enabled` and a non-empty order.
+    `snoozed` (the dialog's "Ignore 1 h" is active) pauses it too: an operator who ignored the warning wants their apps left alone (adversary L1).
+    `starts` {pid: start string} is what the sampler read with the same table that chose the app (adversary L3): a relaunched app has another start,
+    so `freeze()` refuses it; without an entry for a pid the start is read from `ops.info` just before the call. The sampler must be loaded: a
+    timed auto-freeze made by a `load-watch sample` that launchd's job does not follow would never thaw (adversary M1: `check_sampler=True`)."""
     fz = cfg["freeze"]
     au = fz["auto"]
     if not fz.get("enabled", True) or not au.get("enabled", True) or not au.get("order"):
         return None
-    if not gh.hold_active(held, now, cfg)[1]:
+    if snoozed or not gh.hold_active(held, now, cfg)[1]:
         return None
     auto_state = gh_state.get("auto") if isinstance(gh_state.get("auto"), dict) else {}
     gh_state["auto"] = auto_state
@@ -732,16 +736,23 @@ def auto_freeze_step(gh_state, state_dir, apps, held, now, cfg, *, my_uid, agent
         minutes = au.get("minutes") or fz.get("default_minutes", 10)
         key = a["bundle_id"].casefold()
         try:
-            inf = ops.info([int(a["root_pid"])]).get(int(a["root_pid"]))
-            if inf is None:
-                raise Refusal(IDENTITY, "gone")
-            e = (freeze_fn or freeze)(state_dir, int(a["root_pid"]), start=inf["start"], bundle_id=a["bundle_id"], bundle_path=a["bundle_path"],
-                                      minutes=int(minutes), by="auto", ops=ops, cfg=cfg, now=now, agent_clis=agent_clis, check_sampler=False)
+            root = int(a["root_pid"])
+            start = (starts or {}).get(root)
+            if start is None:
+                inf = ops.info([root]).get(root)
+                if inf is None:
+                    raise Refusal(IDENTITY, "gone")
+                start = inf["start"]
+            e = (freeze_fn or freeze)(state_dir, root, start=start, bundle_id=a["bundle_id"], bundle_path=a["bundle_path"],
+                                      minutes=int(minutes), by="auto", ops=ops, cfg=cfg, now=now, agent_clis=agent_clis, check_sampler=True)
             auto_state[key] = {"t": now, "ok": True}
             res.update(entry=e["id"], thaw_at=e["thaw_at"], kept=e.get("kept", []))
         except Refusal as r:
             auto_state[key] = {"t": now, "ok": False}
             res["refused"] = f"{r.code}: {r.msg}"[:160]
+        except OSError as r:   # a ps timeout or an unreadable state dir: recorded like a refusal, so it is retried after AUTO_RETRY_S, not every tick (adversary L5)
+            auto_state[key] = {"t": now, "ok": False}
+            res["refused"] = f"error: {type(r).__name__}: {r}"[:160]
         return res
     return None
 

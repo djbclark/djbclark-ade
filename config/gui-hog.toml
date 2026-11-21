@@ -61,6 +61,9 @@ lock_timeout_s = 5      # flock on frozen.lock (F1)
 # of a build, or frozen by us within refreeze_s (so an operator's Resume sticks for an hour). ~/.config/load-watch/gui-hog.toml may set `[freeze.auto]`
 # (order, enabled, minutes, min_cores, refreeze_s) and add to `[freeze.keep_running]`; `LW_GUI_HOG_AUTO=0` turns only this off.
 # The list lives here, not in the overlay: the operator named these three apps for this machine, and [protected] already carries machine-specific apps.
+# The dialog's "Ignore 1 h" pauses auto-freeze too. The overlay can switch `enabled` off, never back on. Costs while frozen (docs/gui-hog-dialog.md P6, the
+# operator decides): CodexBar's CLI has a stderr pipe into the stopped main process (unproven for a full freeze); Beeper's local API (127.0.0.1:23373, the
+# `beeper` MCP server) hangs until the freeze ends.
 [freeze.auto]
 enabled = true
 order = [

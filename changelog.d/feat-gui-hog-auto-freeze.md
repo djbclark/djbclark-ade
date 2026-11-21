@@ -9,4 +9,5 @@
 
 ### Fixed
 
+- GUI-hog auto-freeze (adversary round 1): it now requires launchd's sampler job to be loaded (a hand-run `load-watch sample` could leave a timed freeze that nothing thawed), "Ignore 1 h" pauses it, `[freeze.auto]` values are type-checked (the overlay can only switch it off), the app's start time is read in the tick, keep-running rules must name an exact executable inside a bundle, and an `OSError` is a refusal retried after 120 s. (#859)
 - GUI-hog dialog: a quick second Freeze click on another row was swallowed because every redraw restarted one window-wide 0.7 s click grace. The grace is now per row, a row has its own in-flight state, freezes queue one after another, and a redraw that changes nothing is skipped. (#859)
