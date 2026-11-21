@@ -201,7 +201,7 @@ own process group, no controlling terminal, stdin `/dev/null`, stdout and stderr
 `{"run_dir", "pid", "done", "result", "launch"}` at once (after the boundary self-check, a cache hit after the first run). It is not a child of the caller's job: a SIGHUP, a job-group kill or the end of
 the caller's session no longer reaches it. Every refusal that does not need claude (usage, dirty worktree, symlinks, a missing resume
 dir, a failed boundary self-check, a run dir that already holds a detached launch) is returned by the caller immediately, exit 2, nothing started; the child repeats the self-check (a
-cache hit) and, if it still fails, is aborted or crashes, writes `RUN/result.json` and `RUN/done` (exit 2, 3 for a signal, 77 when a tripwire preceded the crash; the reason) so a waiter never hangs. It writes nothing into a dir whose launch.json names another live launcher. The run dir defaults to
+cache hit) and, if it still fails, is aborted or crashes, writes `RUN/result.json` and `RUN/done` (exit 2, 3 for a signal, 77 when a tripwire preceded the crash or a full disk; the reason) so a waiter never hangs. It writes nothing into a dir whose launch.json names another live launcher. The run dir defaults to
 `$REVIEW_LAUNCH_STATE_DIR/runs/<UTC>-<id>`. Wait with `bin/wait-file RUN/done`. A detached run is always `--json` and listens for pause
 requests. (No `ade-sched` one-shot or Paseo terminal: they add a scheduler or a UI for what one `setsid` does.)
 
