@@ -28,6 +28,13 @@ operator-facing posts.
 
 ## Part B — the `Ref:` line (script-issued)
 
+**What a Ref is.** A unique, script-issued id for ONE operator-facing post. The
+operator cites it (`CLAUDE-74 II.1`) to point at that exact post, and `ref lookup
+74` says who issued it and when. It stores no content: it is not a summary, not a
+commit hash, not a PR number and never text an agent types by hand. Format:
+`<BOT>-<base36 global counter>`, short on purpose and growing slowly: one
+character up to 35, two up to 1295, three characters from 1296 (`100`) on.
+
 1. **Every** post to the operator ends with its own last line
    `Ref: <BOT>-<id>`, including one-line answers, questions, decisions and
    acknowledgements that end a turn. Exceptions: a tapback/emoji-only post; a
@@ -38,16 +45,45 @@ operator-facing posts.
    or edit an id; re-posting an old message also needs a fresh Ref.
 3. The id comes from one global counter shared by every bot, base 36 (0-9 a-z),
    never reset, file locked with `flock`. Every issued id is logged in
-   `issued.log`; the bot prefix is normalized (uppercase, spaces/hyphens removed).
+   `issued.log` (id, bot, time, agent hint); the bot prefix is normalized
+   (uppercase, spaces/hyphens removed). `lookup` is reserved and cannot be a bot name.
 4. `ref-append` adds the Ref line to a draft and refuses if it already ends with one.
-5. `ref_audit.py` (deterministic, read-only) flags missing/wrong-prefix/duplicate
-   Refs. **Not yet wired to a transcript store on this Mac** (Paseo transcripts
-   are JSONL/daemon logs, not the reference's single SQLite message index), so the
-   audit is installed-but-skipped until a loader is written; see `docs/queue.md`.
+5. **`ref lookup ID`** (`CLAUDE-74` or `74`) prints the bot, the issue time and
+   the agent hint, read-only. Exit 1: never issued (or issued to a different bot
+   than the one named); exit 2: not an id. That is all a Ref can tell you; the
+   post's content lives in the transcript.
+6. **The check is a hook, not a promise.** The Claude Code Stop hook
+   `claude/hooks/ref_integrity_gate.py` (registered in
+   `agents/claude/settings.json.tmpl`) reads the last non-blank line of the final
+   post. When it starts with `Ref:` it must (a) read `Ref: <BOT>-<base36>`,
+   (b) name an id in `issued.log`, (c) carry the bot prefix the log recorded and
+   (d) not have ended an earlier post of the same transcript. Any failure blocks
+   the stop. A post with no Ref line gets only a non-blocking note, and none when
+   it is a short progress note (item 1). The hook never loops: it allows the stop
+   when Claude Code reports `stop_hook_active`, blocks a given message once per
+   session, skips sub-agents, makes no network call, fails open on an error and is
+   switched off with `REF_GATE_OFF=1`. Its decisions go to
+   `~/.local/state/ade/ref-gate/decisions.log`. Other TUIs (Codex, Pi, Cursor,
+   Hermes) have no such hook yet and rely on this page.
+7. **If the hook blocks you**, its reason names the problem. Run `ref <BOT>`, then
+   send the post again with its last line replaced by the exact line the script
+   printed (do not edit it, and do not fix it by hand: that is the failure the
+   hook exists to catch). A retry that is still wrong is let through once, so
+   check it yourself with `ref lookup`.
+8. **No `ref_audit.py`.** The older audit script named in earlier drafts was never
+   in this repo and ran nowhere. It is dropped, not shipped: the hook checks
+   every post when it is written, which is when a wrong Ref can still be
+   replaced, and the only transcript loader it would need is the hook's own
+   (Claude Code only). A retrospective audit over Codex, Pi and Hermes logs
+   would need a loader per format that nothing consumes today; `ref lookup` and
+   the decisions log cover the questions that come up. Write one when a second
+   TUI gets enforcement.
 
 ## Install
 
-- `bin/ref`, `bin/ref-append` — the issuing scripts. Refs directory defaults to
+- `bin/ref` (issues; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
+  The hook is linked into `~/.claude/hooks/` by `ade-update` and wired by the
+  `Stop` entry of the settings template. Refs directory defaults to
   `~/.local/state/djbclark-ade/refs/` (`REFS_DIR` or `--dir` overrides; the flag
   wins). Agent hint comes from `REF_AGENT` / `PASEO_AGENT_ID` / `AGENT_ID` /
   `CURSOR_CONVERSATION_ID`.

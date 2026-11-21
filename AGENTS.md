@@ -117,7 +117,8 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    lowercase letters (skip i), then nested lowercase Roman numerals. Separate
    labels with blank lines; no plain bullets. Question-card options stay `1.`,
    `2.`, … . End each post with a fresh script-issued `Ref: <BOT>-<id>` from
-   `ref <BOT>` or `ref-append <BOT> FILE`; never invent or reuse an id. Follow
+   `ref <BOT>` or `ref-append <BOT> FILE`; never invent or reuse an id (the Claude Code
+   Stop hook `claude/hooks/ref_integrity_gate.py` checks it; `ref lookup ID` reads one). Follow
    the document's short-progress/emoji exceptions (operator, 2026-11-17).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.

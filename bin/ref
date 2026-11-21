@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Usage: ref [--dir DIR] <BOT>
+       ref [--dir DIR] lookup <ID>
 
 Prints the next Ref line, e.g. "Ref: ADE-2s". One GLOBAL counter is shared by
 all bots, encoded in base 36 (0-9a-z) and never reset, so the id is unique
@@ -18,6 +19,13 @@ issued.log is append-only. New lines are tab-separated:
     <id>\t<BOT>\t<ISO-8601 timestamp with offset>\t<agent hint or empty>
 
 Older 2-column lines (<id>\t<BOT>) must be left as-is.
+
+`ref lookup <ID>` is the read side: ID is "CLAUDE-74" or just "74" (base 36,
+case-insensitive). It prints the bot, the issue time and the agent hint from
+issued.log (a shared flock, never creating anything) and exits 1 when the id was
+never issued or, for the "BOT-id" form, was issued to a different bot. A Ref
+stores no post content, so lookup says who and when, not what. "lookup" is
+therefore a reserved word: it cannot be a bot name.
 """
 import fcntl
 import os
@@ -30,7 +38,10 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 DEFAULT_DIR = os.path.expanduser("~/.local/state/djbclark-ade/refs")
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
-USAGE = "usage: ref [--dir DIR] <BOT>   (prints next global base-36 Ref line)"
+USAGE = (
+    "usage: ref [--dir DIR] <BOT>      (prints next global base-36 Ref line)\n"
+    "       ref [--dir DIR] lookup <ID>   (ID: CLAUDE-74 or 74; who and when it was issued)"
+)
 
 
 def normalize_bot(name: str) -> str:
@@ -46,6 +57,10 @@ def parse_args(argv):
         d, args = args[1], args[2:]
     elif args and args[0].startswith("--dir="):
         d, args = args[0].split("=", 1)[1], args[1:]
+    if args and args[0] == "lookup":
+        if len(args) != 2 or args[1].startswith("-"):
+            sys.exit(USAGE)
+        return d, ("lookup", args[1])
     if not args or args[0].startswith("-") or len(args) > 1:
         sys.exit(USAGE)
     return d, normalize_bot(args[0])
@@ -87,8 +102,71 @@ def atomic_write(path: str, data: str) -> None:
                 pass
 
 
+def split_ref_id(text: str):
+    """"CLAUDE-74" -> ("CLAUDE", "74"); "74" -> (None, "74"); None if malformed."""
+    text = text.strip()
+    if text[:4].lower() == "ref:":
+        text = text[4:].strip()
+    bot, sep, ident = text.rpartition("-")
+    if not sep:
+        bot, ident = "", text
+    ident = ident.lower()
+    if not ident or any(c not in DIGITS for c in ident):
+        return None
+    if bot and normalize_bot(bot) != bot.upper():
+        return None
+    return (normalize_bot(bot) or None), ident
+
+
+def find_issued(d: str, ident: str):
+    """The issued.log fields for `ident` as (bot, time, hint), or None. Read-only: takes a
+    shared flock on an existing .lock (so it never sees a half-written line) and creates nothing."""
+    log_path = os.path.join(d, "issued.log")
+    lock_fd = None
+    try:
+        lock_fd = os.open(os.path.join(d, ".lock"), os.O_RDONLY)
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+    except OSError:
+        lock_fd = None  # no lock file means ref never ran here: the log read below says so
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as log:
+            for line in log:
+                cols = line.rstrip("\n").split("\t")
+                if cols[0] == ident and len(cols) >= 2:
+                    return (cols[1], cols[2] if len(cols) > 2 else "", cols[3] if len(cols) > 3 else "")
+    except OSError:
+        return None
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+    return None
+
+
+def lookup(d: str, text: str) -> int:
+    parsed = split_ref_id(text)
+    if parsed is None:
+        print(f"ref lookup: {text!r} is not an id (CLAUDE-74 or 74, base 36)", file=sys.stderr)
+        return 2
+    want_bot, ident = parsed
+    hit = find_issued(d, ident)
+    if hit is None:
+        print(f"ref lookup: id {ident} was never issued in {d}", file=sys.stderr)
+        return 1
+    bot, ts, hint = hit
+    if want_bot and want_bot != bot:
+        print(f"ref lookup: id {ident} was issued to {bot}, not {want_bot}", file=sys.stderr)
+        return 1
+    print(f"Ref: {bot}-{ident}")
+    print(f"bot: {bot}")
+    print(f"issued: {ts or 'unknown (old 2-column log line)'}")
+    print(f"agent: {hint or 'none recorded'}")
+    return 0
+
+
 def main() -> None:
     d, bot = parse_args(sys.argv)
+    if isinstance(bot, tuple):
+        sys.exit(lookup(d, bot[1]))
     os.makedirs(d, exist_ok=True)
     lock_path = os.path.join(d, ".lock")
     count_path = os.path.join(d, "GLOBAL.count")
