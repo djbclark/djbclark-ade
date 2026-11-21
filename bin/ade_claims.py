@@ -1789,7 +1789,7 @@ def _foreign(claim: dict[str, Any], rule: str, alt: str) -> Decision:
     ids = sorted({v for v in (owner.get("agent"), owner.get("record"), owner.get("session")) if isinstance(v, str) and v})
     agent = owner.get("agent") if isinstance(owner.get("agent"), str) else ""
     return Decision(False, rule, alt, str(claim.get("id") or ""), owner_label(claim),
-                    detail={"owner_ids": ids, "owner_agent": agent})
+                    detail={"owner_ids": ids, "owner_agent": agent, "owner_session": bool(owner.get("session"))})
 
 
 BANG_ALT = {"shell alias": "a `!` alias runs a shell that reaches the real git past this guard; spell the git "
@@ -2714,8 +2714,16 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
         who = (f"  claim {_esc(d.claim_id)} names you (Paseo agent {_esc(paseo)}) as an owner, but the guard identified you as {me}, "
                "which is not one of its owner keys.\n")
         agent = d.detail.get("owner_agent") or ""
-        if is_paseo_agent_id(paseo) and agent in ("", paseo):    # bind-owner refuses to replace a different owner.agent
+        session = bool(d.detail.get("owner_session"))
+        # bind-owner refuses to replace a different owner.agent and never clears owner.session, which keeps both the
+        # M1 shape and the owner.agent rule of is_mine from accepting the caller: offer it only when it ends the refusal
+        if is_paseo_agent_id(paseo) and agent in ("", paseo) and not session:
             fix = f"re-bind it with `ade_claims.py bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`"
+        elif session:
+            fix = (f"release this claim (`ade_claims.py release --id {_esc(d.claim_id)}`) and make a new one for you "
+                   "(`ade_claims.py new --path DIR --owner-agent <your Paseo agent id>`): the claim is bound to a session, "
+                   "so a different session that inherits the Paseo agent id is refused on purpose and bind-owner cannot clear that "
+                   "(the owning session itself passes)")
         else:
             fix = (f"release this claim (`ade_claims.py release --id {_esc(d.claim_id)}`) and make a new one for you "
                    "(`ade_claims.py new --path DIR --owner-agent <your Paseo agent id>`): bind-owner cannot replace its owner.agent")
