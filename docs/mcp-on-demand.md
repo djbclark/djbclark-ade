@@ -538,6 +538,9 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
    until the app can be wrapped); confirm in each path that the variable is present (by length only); edit the file
    (Codex `bearer_token_env_var` / `env_http_headers`, Cursor `${env:NAME}`, OpenCode `{env:NAME}`, each syntax checked
    against the client's current docs); verify.
+   **Expected exception:** a desktop app behind the loopback shim holds the shim's per-shim client bearer as a literal
+   in its client file. That token works only against `127.0.0.1` and is not one of the three keys, so it is acceptable by
+   design; the slice records it by file and entry name, and the leak check (step 6) does not search for it.
 4. **Scratch test.** On guarded copies (common rules): replace the literal with the reference, start each CLI path under
    `sudo-secretspec run`, and check that `tools/list` answers for exa, jina and bezalel. Check that it fails cleanly
    without the wrapper, which shows the literal is gone. Then run step 8's rollback on the copy and compare the server
@@ -549,7 +552,8 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
    is ever passed to `rg` or any other command line (docs/code-review.md rule 3): with no rotation, that exposure
    would be permanent.
 7. **No rotation (operator, 2026-11-21).** The old values stay valid. The same in-process check lists, by path only, every
-   `*.bak-*` copy of these three files and any other file that still holds the values. Each is deleted only with the
+   copy that still holds the values. Its search set is exactly: the three live files, their `*.bak-*` siblings in the
+   same folders, and the slice's own scratch copies; never a scan of `~` (~/CLAUDE.md item 1). Each is deleted only with the
    operator's yes for that list; none is globbed away unseen.
 8. **Rollback.** Merge the client's server table back from its backup: the literal still works, because the key was not
    rotated. Tested in step 4.
@@ -562,12 +566,15 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
    - `--n` defaults to 3 and stops at 20.
    - It reads exactly two folders and never recurses: `DCIM/Camera` and the Screenshots folder (`DCIM/Screenshots` or
      `Pictures/Screenshots`). Other apps' media folders are never read.
-   - DEST must resolve (realpath) to a private folder that no cloud service syncs. The default is the session scratchpad;
-     the helper creates DEST with mode 700. It refuses `~/Library/Mobile Documents`, `~/Library/CloudStorage`, `~/Desktop`
+   - DEST must resolve (realpath) to a private folder that no cloud service syncs. The default is its own subfolder,
+     `~/.local/state/ade/phone-photos/` (never the session scratchpad itself); the helper creates DEST with mode 700. It refuses `~/Library/Mobile Documents`, `~/Library/CloudStorage`, `~/Desktop`
      and `~/Documents` (iCloud Desktop & Documents may sync them), and any Dropbox or Google Drive folder.
-   - It strips GPS EXIF by default (`exiftool -gps:all=`); without exiftool it refuses unless `--keep-gps` is given.
-   - Deletion: the caller removes the pulled files at the end of its task, and the helper deletes files older than 24 h
-     from its own default folder on every run.
+   - It strips location by default with `exiftool -overwrite_original -location:all=`, which covers EXIF GPS, XMP and
+     the QuickTime location tags of videos, and leaves no `<name>_original` copy (plain `-gps:all=` keeps such a copy, with
+     GPS, and misses video). Without exiftool it refuses unless `--keep-gps` is given.
+   - Deletion: the caller removes the pulled files at the end of its task. The helper records each file it pulled in a
+     manifest in DEST (mode 600) and on every run deletes only manifest entries older than 24 h; it never deletes by age
+     across a folder, and never touches a file it did not pull.
    - It never hands files to bezalel, firecrawl or any MCP or upload tool. Showing a photo to a cloud model sends it to
      that model's vendor; that is the caller's decision.
    - The device id comes from site-private config (a Tailscale address, kept out of this repo). No shell prompts, per
@@ -576,11 +583,13 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
    - the argv it receives and newest-first order;
    - the `--n` cap;
    - that a synced DEST is refused;
-   - that GPS is stripped (on a fixture JPEG);
+   - that location is stripped from a fixture JPEG and a fixture video (QuickTime `GPSCoordinates`), and that no
+     `*_original` file remains in DEST;
+   - that the 24 h cleanup deletes only manifest files, with an unrelated old file in DEST left in place;
    - exit 3 when no device answers.
 
-   Then one live read-only run lists the two folders and pulls one screenshot into the scratchpad.
-4. **Rollback.** Delete the helper. It holds no state.
+   Then one live read-only run lists the two folders and pulls one screenshot into the default DEST.
+4. **Rollback.** Delete the helper and its DEST folder (it holds only pulled files and their manifest).
 
 Suggested order: 2a; then 2b part 1, which also unblocks the Phase 1 doctor state; then 2c, one client at a time; then 2b
 part 2; the ADB helper at any point. Phase 1 (registry, `bin/mcp-find`, the doctor reading `expected`) can run in parallel
