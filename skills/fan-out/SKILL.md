@@ -153,10 +153,10 @@ ade-worker-run rename-lead --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    `LEAD <repo> (<work>)` (`rename-lead` names it; a `MAIN …` name is renamed on the first such launch), labels it
    `ade.placement=main`, and never archives it. `--placement other` puts the worker in the OTHER box (label `ade.placement=other`).
 3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--placement worker|other] [--window-middle …]
-   [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` is closed (or
+   [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` in that window is closed (or
    idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and the window is this
    lead's WORKER (or OTHER) box (current or legacy name); otherwise it lists the blockers and archives nothing (`--dry-run` to only
-   check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; a LEAD- or OTHER-placed worker in another window does not block it. A LEAD window is never archived. Extra windows a chain left behind
+   check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; no agent in another window (a LEAD- or OTHER-placed tab, a worker of the lead in a second WORKER window) blocks it. A LEAD window is never archived. Extra windows a chain left behind
    (a second WORKER window, a window named outside the scheme) are listed by `bin/ade-tidy` (section H) and archived by `--apply` when empty or finished.
 
 By hand (what the helper does; a hand-made window has no ownership record, so `archive-window` will not archive it until a helper launch adopted it while empty): the same strip, `--new-workspace` on the first launch only, the window id taken from the

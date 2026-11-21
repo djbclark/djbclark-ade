@@ -41,9 +41,9 @@ launch with --cwd the agent's Cwd is read back and a mismatch stops the fresh wo
 Strips PASEO_AGENT_ID, PASEO_AGENT_CWD and PASEO_WORKSPACE_ID from every paseo call.
 
 archive-window: `paseo workspace archive` of the lead's WORKER (or OTHER) box only when the preconditions of docs/workspace-layout.md
-hold (every live agent labelled ade.lead=<lead> is closed, or idle with --idle-handled; no other live agent in the window; the
-window is this lead's box); otherwise it lists the blockers and archives nothing. A LEAD window is never archived; a live agent in
-the LEAD window or the OTHER box is not a blocker for the WORKER box. `ade-tidy --apply` archives the extra windows a chain left.
+hold (every live agent labelled ade.lead=<lead> in that window is closed, or idle with --idle-handled; no other live agent in the
+window; the window is this lead's box); otherwise it lists the blockers and archives nothing. A LEAD window is never archived; only
+the matched window's own agents block it (an agent of the lead in the LEAD window, the OTHER box or a second WORKER window never does). `ade-tidy --apply` archives the extra windows a chain left.
 
 Exit 0: done; 1: refused or paseo failed (message on stderr; an agent already launched is named); 2: usage.
 See docs/workspace-layout.md and skills/fan-out section 3.
@@ -997,8 +997,6 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={x}"]) or []):
             if isinstance(r, dict) and isinstance(r.get("id"), str):
                 labelled.setdefault(r["id"], x)
-    in_main = {r["id"] for v in ("main", "other") for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.placement={v}"]) or [])
-               if isinstance(r, dict) and isinstance(r.get("id"), str)} & set(labelled)
     blockers = []
     for a in live_agents():
         aid, status = a["id"], a.get("status")
@@ -1018,8 +1016,8 @@ def archive_blockers(lead: str, wks: str, idle_handled: bool) -> list[str]:
         if state is None or not WKS_RE.fullmatch(str(state.get("workspaceId", ""))):
             blockers.append(f"{aid}: live ({status}) with no usable workspaceId in a state file, so its window is unknown")
             continue
-        if aid in in_main and not in_window:
-            continue  # a tab in the lead's LEAD window or its OTHER box does not depend on the window being archived
+        if not in_window:
+            continue  # only the window's own agents block it: the archive touches nothing else, whatever lead or placement they carry
         if aid in labelled:
             if status == "idle" and idle_handled:
                 continue
