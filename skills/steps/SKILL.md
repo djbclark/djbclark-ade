@@ -56,6 +56,12 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    questions, sleeping, or claiming a choice is waiting in a visible picker.
    Keep unanswered decisions pending. A preselected option or elapsed time is
    not an answer. Honor the native tool's question schema and limits.
+3a. **Antigravity under Paseo:** its `ask_question` picker does not work yet
+   (getpaseo/paseo#9355). Even after #10193 moved Paseo to `agy acp` (0.17.0-beta.1),
+   the ACP client sends `clientCapabilities: {}` without `createElicitation`, so
+   `ask_question` returns an empty `A1: ` in about 1 s. An Antigravity session hosted
+   under Paseo skips `ask_question` and goes straight to rule 4's numbered text walk
+   until ACP elicitation is wired.
 4. **No native chooser (no `AskUserQuestion`/`question`/`clarify` tool in the
    function list, and not Grok Bot, which has rule 5):** the walk falls back
    to a numbered text walk, still one

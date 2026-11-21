@@ -498,3 +498,27 @@ def test_paseo_as_a_name_runs_only_the_paseo_step(catalog, tmp_path):  # ade-upd
     assert (hermes / "paseo").readlink() == home / ".agents" / "skills" / "paseo"
     assert not (hermes / "steps").exists()  # only the paseo step ran
     assert run(catalog, "--check", "paseo").returncode == 0
+
+
+def test_remove_paseo_removes_only_our_hermes_link_and_other_removes_leave_it(catalog, tmp_path):  # PR 874 adversary low
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    source = home / ".agents" / "skills" / "paseo"
+    before = snapshot(source)
+    assert run(catalog, "steps").returncode == 0 and (hermes / "paseo").is_symlink()
+    other = run(catalog, "--remove", "steps")
+    assert other.returncode == 0 and (hermes / "paseo").is_symlink() and "== paseo" not in other.stdout
+    dry = run(catalog, "--dry-run", "--remove", "paseo")
+    assert dry.returncode == 0 and "would remove" in dry.stdout and (hermes / "paseo").is_symlink()
+    removed = run(catalog, "--remove", "paseo")
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert "removed" in removed.stdout and not os.path.lexists(hermes / "paseo")
+    assert snapshot(source) == before  # the Paseo-managed copy is never touched
+    again = run(catalog, "--remove", "paseo")
+    assert again.returncode == 0 and "left alone" in again.stdout
+    foreign = hermes / "paseo"
+    foreign.mkdir()
+    (foreign / "SKILL.md").write_text("foreign")
+    kept = run(catalog, "--remove", "paseo")
+    assert kept.returncode == 0 and "left alone" in kept.stdout and (foreign / "SKILL.md").read_text() == "foreign"

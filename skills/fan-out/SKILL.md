@@ -142,7 +142,7 @@ ade-worker-run rename-lead --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    (`-qd`); and `--no-wait` is required. It holds a per-lead lock while `paseo run --no-wait` returns, so launches and
    `archive-window` of one lead never interleave. `--lead` must be the caller's own agent id: when `PASEO_AGENT_ID` is set
    and differs, both forms refuse unless `--on-behalf-of-lead` is passed (a stale id in a brief would otherwise place, label
-   or archive another lead's workers). The brief still names the writer's claimed worktree as an absolute path. The helper
+   or archive another lead's workers). The brief still names the writer's claimed worktree as an absolute path, and `bin/ade-worker-run` checks the PROMPT ARGUMENT itself for it: a brief file that the prompt only points to does not count, and the launch is refused (2026-11-21, a lead hit this); put the absolute worktree path in the prompt text. The helper
    appends one line to the brief (the last argument): `Also follow every item of <repo root>/docs/dispatch-footer.md.`
    (skipped by `--no-footer`; refused when the last argument is not recognisably the brief). It does not replace writing
    the footer into the brief (2026-11-13: lead-written briefs omitted it and a worker pushed a changelog fragment with no

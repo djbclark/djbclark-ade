@@ -77,7 +77,7 @@ never touches it. What that means for the exit code depends on whose skill it co
 to `~/.agents/skills/paseo` (read by Codex and Pi) and `~/.claude/skills/paseo` and marks the files with
 `.paseo-managed-files.json`; Hermes reads neither. Every link-mode run (named or `--all`; not `--remove`) therefore
 makes `~/.local/share/skill-everywhere/skills/paseo` a symlink to `~/.agents/skills/paseo`, so the link follows the
-daemon's updates. Nothing under a Paseo-managed dir is ever written, copied over or deleted. The step prints a `== paseo`
+daemon's updates. Nothing under a Paseo-managed dir is ever written, copied over or deleted. The step prints a `== paseo (managed by Paseo)`
 section: `linked`, then `already linked` on a rerun; a dangling or chained link is relinked; a real dir or other link at
 the target is left alone and exits 1 (it is a collision with a link we are making); a missing source
 (`~/.agents/skills/paseo/SKILL.md`) makes no link, prints `error: paseo skill source ... is missing` and exits 1.
@@ -85,7 +85,7 @@ the target is left alone and exits 1 (it is a collision with a link we are makin
 `error: paseo skill is <state> on <tui> (<path>): <hint>` on stderr (`<state>` is `missing`, `dangling -> ...`, `other
 link -> ...` or `real dir/file (not ours)`) when `paseo` is absent from any **live** target: claude `~/.claude/skills`, codex and pi `~/.agents/skills`,
 hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it). `skill-everywhere paseo` runs just this step (`paseo` is
-not a skill directory, so no `== paseo` header or per-skill rows come with it). **`bin/ade-update` reads those stderr lines as
+not a skill directory, so the name itself adds no header or per-skill rows; the step's own `== paseo (managed by Paseo)` section is printed only in link and remove modes and with `--all`). `skill-everywhere --remove paseo` removes the Hermes link when it is ours and leaves any other entry alone; a `--remove` of other names never touches it. **`bin/ade-update` reads those stderr lines as
 rows of the pseudo-skill `paseo` (2026-11-21, after #871), not as a helper failure (exit 4)**: a missing or dangling Hermes link is a
 link gap, fixable (exit 10 on `--check`, `would run: skill-everywhere paseo`; apply runs it, so apply self-heals the link); `paseo`
 missing from the claude, codex or pi dir is a stuck row (`not synced by Paseo`), exit 10, because Paseo's daemon writes
