@@ -475,9 +475,10 @@ def review_attempt(argv: list[str]) -> int:
         result["review_launch"] = {"exit": proc.returncode, "reason": rec.get("reason"), "init": rec.get("init"),
                                    "check": rec.get("check"), "accepted_exposures": rec.get("accepted_exposures")}
         out = rec.get("structured_output")
-        if proc.returncode != 0 or not isinstance(out, dict):
+        if proc.returncode != 0 or rec.get("tainted") or not isinstance(out, dict):
             result["result"] = "failed"
-            result["reason"] = rec.get("reason") or f"review-launch exited {proc.returncode}"
+            result["reason"] = ("the run is tainted (resumed or paused): its output is never a verdict; review again fresh"
+                                if rec.get("tainted") else rec.get("reason") or f"review-launch exited {proc.returncode}")
             rc = proc.returncode if proc.returncode in (EXIT_USAGE, 77, 124) else EXIT_FAILED
         elif out.get("verdict") not in ("APPROVE", "BLOCK") or out.get("head") != head:
             result["result"] = "failed"

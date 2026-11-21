@@ -248,7 +248,7 @@ def test_symlinked_repos_default_list_and_structural_rule(tmp_path: Path) -> Non
                               env=env).stdout.strip()
 
     assert check(links) == "container"  # symlinked repos count
-    assert check(home / "s") == "container"  # ~/s is in the default list
+    assert check(home / "s") == "container"  # ~/s is listed (config/lsp-roots.toml, read by the subprocess)
     assert check(tmp_path) == "container"  # a non-project directory above $HOME
     (tmp_path / "pyrightconfig.json").write_text("{}")
     assert check(tmp_path) == "project"  # the marker makes it a project
@@ -265,3 +265,71 @@ def test_project_root_survives_a_container_only_folder_list(tmp_path: Path) -> N
     assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
     assert msg["params"]["rootPath"] == str(proj)
     assert [f["uri"] for f in msg["params"]["workspaceFolders"]] == [proj.as_uri()]
+
+
+def _initialize(params: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}
+
+
+def test_kept_root_survives_a_later_folder_reply(tmp_path: Path) -> None:
+    """#887 L1: the client answers a server's workspaceFolders request with its real list, [container] only."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    g = mod.Guard([str(home)], 3, False)
+    init = _initialize({"rootUri": proj.as_uri(), "rootPath": str(proj),
+                        "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+    out = g.from_client(b"raw", init)
+    assert out is not None and g.mode == "filter"
+    g.from_server({"method": "workspace/workspaceFolders", "id": 7})
+    reply = {"id": 7, "result": [{"uri": home.as_uri(), "name": "h"}]}
+    out = g.from_client(b"raw", reply)
+    assert out is not None
+    assert [f["uri"] for f in json.loads(out.split(b"\r\n\r\n", 1)[1])["result"]] == [proj.as_uri()]
+
+
+def test_rootpath_only_project_is_kept(tmp_path: Path) -> None:
+    """#887 L4 (mutant M6): rootPath alone names the project; rootUri is absent."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    msg = _initialize({"rootUri": None, "rootPath": str(proj), "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+    assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
+    assert msg["params"]["rootPath"] == str(proj) and msg["params"]["rootUri"] == proj.as_uri()
+
+
+def test_relative_or_missing_root_is_never_kept(tmp_path: Path, monkeypatch: Any) -> None:
+    """#887 L2: a relative rootPath used to raise inside as_uri() and fail open with the container forwarded."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    (tmp_path / "relproj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    for bad in ("relproj", str(tmp_path / "does-not-exist")):
+        msg = _initialize({"rootUri": None, "rootPath": bad, "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+        assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
+        assert msg["params"] == {"rootUri": None, "rootPath": None, "workspaceFolders": None}, bad
+    g = mod.Guard([str(home)], 3, False)  # and through the Guard: the rewritten frame carries no container
+    out = g.from_client(b"raw", _initialize({"rootPath": "relproj", "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]}))
+    assert out is not None and json.loads(out.split(b"\r\n\r\n", 1)[1])["params"]["workspaceFolders"] is None
+
+
+def test_glob_entry_and_structural_rule_in_process(tmp_path: Path) -> None:
+    """#887 L4 (mutants M1, M4): a `*` container entry, and a non-project child of `/`."""
+    mod = _guard_module()
+    cats = tmp_path / "cats"
+    (cats / "ai").mkdir(parents=True)
+    (tmp_path / "plain").mkdir()
+    assert mod.is_container(str(cats / "ai"), [str(cats / "*")], 3, False)  # matched only by the glob
+    assert not mod.is_container(str(tmp_path / "plain"), [str(cats / "*")], 3, False)
+    assert mod.is_container("/usr", [], 3, True)  # a non-project directory directly under /
+    assert not mod.is_container("/usr", [], 3, False)  # --no-heuristic means listed roots only
+
+
+def test_default_containers_match_the_config() -> None:
+    """#887 L4: the Python < 3.11 fallback list must not drift from config/lsp-roots.toml."""
+    import tomllib
+    mod = _guard_module()
+    cfg = tomllib.loads((ROOT / "config" / "lsp-roots.toml").read_text())
+    assert sorted(mod.DEFAULT_CONTAINERS) == sorted(cfg["containers"]["paths"])
