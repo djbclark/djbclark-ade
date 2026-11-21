@@ -422,3 +422,33 @@ def test_live_mode_refuses_to_move_anyone_until_the_executor_is_built(tmp_path: 
     log = (state / "supervisor.log").read_text()
     assert "re-handoff executor failed" in log
     assert not any("agent archive" in line for line in sent.read_text().splitlines())
+
+
+def test_an_empty_plan_is_never_logged(tmp_path: Path) -> None:
+    """Nothing stuck: no plan line on the first run or the hundredth (it was 288 lines a day)."""
+    bin_dir, home, state, _ = _harness(tmp_path, [])
+    for _ in range(3):
+        assert _run(bin_dir, home) == 0
+    assert _plan_lines(state) == []
+    assert not (state / "last-plan").exists()
+
+
+def test_the_plan_is_logged_only_when_it_changes(tmp_path: Path) -> None:
+    """The same plan on the next run adds no line; a changed plan and a cleared plan each add one."""
+    bin_dir, home, state, _ = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 1
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1"), _agent("b2", "anthropic")]}))
+    assert _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 2 and "b2" in _plan_lines(state)[-1]
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": []}))
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 3 and '"plan": []' in _plan_lines(state)[-1]      # the clear is news, once
+
+
+def test_the_plan_file_is_written_atomically_and_leaves_nothing_behind(tmp_path: Path) -> None:
+    """Temp alongside, then os.replace: no half-written plan, and no temp or plan file survives the run."""
+    bin_dir, home, state, _ = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0
+    assert "os.replace" in SCAN.read_text()
+    assert sorted(p.name for p in state.iterdir() if ".plan" in p.name or p.name.startswith(".notified.")) == []

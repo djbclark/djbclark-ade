@@ -71,6 +71,15 @@ bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ad
   --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
 ```
 
+**Re-handoff plan and `ADE_SUPERVISOR_REHANDOFF` (Carried 70, 2026-11-19).** For each stuck agent the scan also works out
+the re-handoff it *would* do (who, the exhausted account, the healthy alternative `ade-pi-stuck` offered, or
+`no-healthy-alternative`) and logs one `re-handoff plan (dry-run) {...}` line to `supervisor.log`, only when the plan
+differs from the last one logged (state file `last-plan`), so a quiet fleet adds no line per run. The mode comes from the
+environment of the job: unset or `dry-run` is the default and moves nothing (no archive, no relaunch). `live` is
+recognized but refused today: it calls `bin/ade-supervisor-rehandoff`, a stub that moves nothing, exits 1 and makes the
+scan log `re-handoff executor failed`. Do not set `live` in the plist until a reviewed executor exists; that executor
+alone may archive or relaunch, and only an agent the plan names whose `family` is `pi` (a non-Pi agent is never in the plan). The notices to the lead are unchanged either way.
+
 `config/launchd/com.djbclark.ade-pin-sweep.plist` (2026-11-20) re-applies the non-worker pin every 900 s: it runs
 `bin/ade-pin-sweep`, which calls `bin/ade-pin-interactive` (the `ade.interactive=1` label tag) and
 `bin/ade-pin-workspaces pin` (the native sidebar pin, driving the UI's `workspace.pin.set` RPC through the bundled

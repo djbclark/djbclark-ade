@@ -114,8 +114,8 @@ rm -f "$err"
 # the keys it already had.
 pending="$STATE_DIR/.notified.$$"
 msg="$(printf '%s' "$json" | python3 -c '
-import json, sys
-notified_path, pending_path, scan_rc, recipient = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+import json, os, sys
+notified_path, pending_path, scan_rc, recipient =sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 try:
     d = json.load(sys.stdin) if scan_rc == 0 else None
 except Exception:
@@ -166,8 +166,9 @@ else:
             else:
                 plan.append({"id": s.get("id"), "account": s.get("account"), "action": "no-healthy-alternative"})
         plan_path = pending_path + ".plan"
-        with open(plan_path, "w") as fh:
+        with open(plan_path + ".tmp", "w") as fh:       # temp alongside, then rename: a reader never sees half a plan
             json.dump({"mode": "dry-run", "acts": False, "plan": plan}, fh)
+        os.replace(plan_path + ".tmp", plan_path)
 seen = {key for key, _ in items}
 items += [(key, None) for key in carry if key not in seen]
 with open(pending_path, "w") as fh:
@@ -178,14 +179,21 @@ if new:
 ' "$NOTIFIED" "$pending" "$scan_rc" "${send_to:--}" 2>>"$LOG")"
 
 # Re-handoff stays a dry run (operator, 2026-11-19, Carried 70): log what this scan would move and where, and do
-# not archive or relaunch anything. ADE_SUPERVISOR_REHANDOFF=live is recognized but refused until a reviewed
-# live path exists, so a scan can never act on its own.
-# Re-handoff (Carried 70). The default is a dry run: the plan is logged and nothing moves. ADE_SUPERVISOR_REHANDOFF=live
-# hands the plan to ade-supervisor-rehandoff, which performs one re-handoff per stuck agent through ade-self-session and
-# never acts on an agent the plan did not name. The scan itself never archives anything; the executor owns that.
+# not archive or relaunch anything. ADE_SUPERVISOR_REHANDOFF=live is recognized but refused: today
+# ade-supervisor-rehandoff is a stub that moves nothing and exits 1, so a scan can never act on its own. The contract
+# for a future reviewed executor: it is handed the plan file, may act only on an agent the plan names, and owns every
+# archive and relaunch; the scan itself never archives anything. Documented in docs/scheduling.md and skills/watch.
+# The plan is logged only when it differs from the last one logged, so a quiet fleet adds no line per run.
 if [ -f "$pending.plan" ]; then
-    printf '%s ade-supervisor-scan: re-handoff plan (%s) %s\n' "$(now)" "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" "$(cat "$pending.plan")" >>"$LOG"
-    if [ "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" = "live" ]; then
+    plan_json="$(cat "$pending.plan")"
+    last_plan="$(cat "$STATE_DIR/last-plan" 2>/dev/null || true)"
+    plan_nonempty=0
+    python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("plan") else 1)' "$pending.plan" 2>>"$LOG" && plan_nonempty=1
+    if [ "$plan_json" != "$last_plan" ] && { [ -n "$last_plan" ] || [ "$plan_nonempty" -eq 1 ]; }; then
+        printf '%s ade-supervisor-scan: re-handoff plan (%s) %s\n' "$(now)" "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" "$plan_json" >>"$LOG"
+        printf '%s' "$plan_json" >"$STATE_DIR/.last-plan.$$" && mv -f "$STATE_DIR/.last-plan.$$" "$STATE_DIR/last-plan"
+    fi
+    if [ "${ADE_SUPERVISOR_REHANDOFF:-dry-run}" = "live" ] && [ "$plan_nonempty" -eq 1 ]; then
         rehandoff="$(cd "$(dirname "$0")" && pwd)/ade-supervisor-rehandoff"
         if [ -x "$rehandoff" ]; then
             "$rehandoff" "$pending.plan" >>"$LOG" 2>&1 || printf '%s ade-supervisor-scan: re-handoff executor failed\n' "$(now)" >>"$LOG"
