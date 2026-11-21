@@ -104,7 +104,11 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
    `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
    or `paseo run` brief (`{report}`, `{lead}`, `{done}`, `{inbox}`, `{replies}`). The Agent-tool footer hook
-   (`claude/hooks/agent_footer_gate.py`) fills it; `bin/ade-worker-run` appends one pointer line to the brief.
+   (`claude/hooks/agent_footer_gate.py`) fills it; `bin/ade-worker-run` appends one pointer line to the brief. A sub-agent type
+   that cannot write a file (Explore, Plan, web-fetch, or a definition with neither Write nor Bash in `tools:`; 2026-11-21) cannot
+   deliver a report file: the hook appends [dispatch-footer-readonly.md](dispatch-footer-readonly.md) (the final message is the
+   report; keep it under about 3,500 characters) and its `additionalContext` tells the caller to save that message and not to wait
+   for a `.done` file.
 
 On 2026-11-07 a live child launch confirmed that `paseo run --cwd DIR` alone inherited the parent's workspace
 and ignored the requested directory. A top-level run with `PASEO_WORKSPACE_ID` set also inherits that workspace.
