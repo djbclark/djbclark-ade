@@ -33,7 +33,10 @@ Steps, in order:
    crash after some rows), a requested skill with no `== name` header or with a header and no TUI rows, or a
    failing link call, is an error (exit 4; links already made stay). The script's own link-mode exit 1 ("left
    alone", empty stderr or only `warning:`/`error:` lines) is not a failure: the follow-up check decides, and
-   a stuck link is exit 10 naming the row, on the first run too. When ade-update runs from a path other than
+   a stuck link is exit 10 naming the row, on the first run too. `paseo` missing from a live target (the helper's
+   `error: paseo skill is <state> on <tui>` stderr lines, which are rows here, not a helper failure) is a row of the pseudo-skill
+   `paseo`: the Hermes link is fixable (`skill-everywhere paseo`, apply runs it), a claude/codex/pi copy is Paseo's own sync
+   to make and stays stuck, exit 10 (a host that never syncs Paseo's skill ends there by design). When ade-update runs from a path other than
    the canonical checkout it warns on stderr (its sibling skill-everywhere is the one that runs). Links are
    only changed when --repo is the canonical skills home (~/src/djbclark-ade, or the parent of
    $SKILL_EVERYWHERE_ADE when that is set): any other checkout (a pasture, a second clone) gets a
@@ -405,6 +408,27 @@ def find_skill_everywhere(repo):
     return None
 
 
+PASEO_PSEUDO = "paseo"  # `skill-everywhere paseo` runs only its paseo step (link mode) or checks only it
+PASEO_GAP = re.compile(r"^error: paseo skill is (.+) on (\S+) \((.+?)\): ")
+
+
+def paseo_gap_rows(err):
+    """([(paseo, tui, state)], remaining stderr lines): skill-everywhere --check reports `paseo` missing from a live
+    target as an `error: paseo skill is <state> on <tui> (<path>): <hint>` line (2026-11-21, #871), not as a row. The
+    Hermes link is ours to make, so its state keeps the helper's wording (`missing`, `dangling ...` are fixable by
+    `skill-everywhere paseo`); a claude/codex/pi copy is Paseo's daemon's to sync, so it is a stuck row that no
+    command of ours repairs (a host where Paseo never syncs its skill ends here, exit 10, by design)."""
+    rows, rest = [], []
+    for ln in err.splitlines():
+        m = PASEO_GAP.match(ln)
+        if m:
+            state, tui = m.group(1), m.group(2)
+            rows.append((PASEO_PSEUDO, tui, state if tui == "hermes" else f"not synced by Paseo: {state}"))
+        else:
+            rest.append(ln)
+    return rows, rest
+
+
 def parse_skill_check(out):
     """[(skill, tui, state)] from `skill-everywhere --check` output ("== name" then "  tui   state")."""
     rows, skill = [], None
@@ -452,7 +476,8 @@ def check_skills(script, repo, names, copies=True):
     rc, out, err = run([script, "--check", *names], env=env, timeout=LINK_TIMEOUT)
     # exit 1 is the script's own "warning: ..." status (e.g. a dangling Codex AGENTS.md); anything else is a crash
     # (127 for a missing greadlink on Linux) and its partial output must not be taken for a complete result.
-    warned = rc == 1 and err.strip() and all(ln.startswith("warning:") for ln in err.splitlines() if ln.strip())
+    paseo_rows, other_err = paseo_gap_rows(err)
+    warned = rc == 1 and err.strip() and all(ln.startswith("warning:") for ln in other_err if ln.strip())
     if rc != 0 and not warned:
         raise Stop(EXIT_ERROR, f"{script} --check failed (rc={rc}): {err.strip()[:300]}")
     # R5-2: --check ends with "== end"; without it the report was cut short (a crash after some rows, which the
@@ -464,6 +489,7 @@ def check_skills(script, repo, names, copies=True):
     out = "\n".join(lines[:-1])
     rows = parse_skill_check(out)
     seen = {ln[3:].strip() for ln in out.splitlines() if ln.startswith("== ")}
+    names = [n for n in names if n != PASEO_PSEUDO]  # `paseo` is no skill dir: it has no header or TUI rows, only gap lines
     absent = [n for n in names if n not in seen]
     if absent:
         raise Stop(EXIT_ERROR, f"skill-everywhere --check returned no result for: {', '.join(absent)}")
@@ -472,7 +498,7 @@ def check_skills(script, repo, names, copies=True):
     rowless = [n for n in names if not any(s == n for s, _, _ in rows)]
     if rowless:
         raise Stop(EXIT_ERROR, f"skill-everywhere --check returned no rows for: {', '.join(rowless)}")
-    return rows, err
+    return rows + paseo_rows, err
 
 
 def link_skills(script, repo, names):
@@ -979,8 +1005,13 @@ def update(rep, args, repo):
                     rep.say(f"    still not linked: {s} ({tui})")
         for s, tui, st in bad if can_link else []:
             if classify(st) == "stuck":
-                rep.say(f"    {s}/{tui} is {st}: skill-everywhere leaves it alone; inspect it, then run: "
-                        + shlex.join([script, s]))
+                if s == PASEO_PSEUDO and tui != "hermes":
+                    rep.say(f"    {s}/{tui} is {st}: Paseo's own skill sync writes that copy and skill-everywhere never "
+                            "does; enable Paseo's skill sync (docs/skill-everywhere.md section 3a). A host that never "
+                            "syncs Paseo's skill stays exit 10 here")
+                else:
+                    rep.say(f"    {s}/{tui} is {st}: skill-everywhere leaves it alone; inspect it, then run: "
+                            + shlex.join([script, s]))
         skills["missing"] = [{"skill": s, "tui": tui, "state": st} for s, tui, st in bad]
         if can_link:  # a report-only run cannot fix these, so they neither fail the run nor hold back the state record
             skills["unresolved"] = sorted({b[0] for b in bad}) if not check else []
