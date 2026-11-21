@@ -210,35 +210,34 @@ def test_status_lines_name_the_load_sources(tmp_path):
 
 MARK = "/Contents/MacOS/"
 REAL = "/Applications/Real.app" + MARK + "real-exe"   # what the kernel reports: differs from every word of the command lines below
+GONE = (lambda pid: None, lambda pid: (_ for _ in ()).throw(OSError("gone")), lambda pid: "/")   # a lookup that gives no path: nothing, raises, root
+LEAKY = ("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "/Applications/Foo.app" + MARK + "Foo -apiToken hunter2",
+         "/usr/bin/tool --path=/x" + MARK + "hunter2 -k", "/usr/bin/tool SECRET" + MARK + "hunter2", "/bin/cp Foo.app" + MARK + "hunter2 dest",
+         "API_TOKEN=hunter2",   # an empty argv[0]: `ps` prints the first environment string
+         "7 API_TOKEN=hunter2",   # an empty or blank argv[0]: `ps` prints argv[1] and the environment
+         "  7", "/Users/me/Acme Merger 2027/bin/tool 7",   # an argv[0] with a space: cut inside its path
+         "/Applications/Google Chrome.app" + MARK + "Google Chrome --type=renderer --token=hunter2", "/bin/sh -c cd /A.app" + MARK + " && ./Foo")
 
 
-def test_a_label_is_never_text_from_an_argument_with_or_without_a_kernel_path():   # adversary L1, L1r, L1r' of #872
-    for cmd, want in (("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "clang"),
-                      ("/Applications/Foo.app" + MARK + "Foo -apiToken s3cr3tvalue", "Foo"),
-                      ("/Applications/Foo.app" + MARK + "Foo /Users/me/secret/file.txt", "Foo"),
-                      ("/Applications/Foo.app" + MARK + "Foo secretword", "Foo"),
-                      ("/Applications/Google Chrome.app" + MARK + "Google Chrome --type=renderer --token=hunter2", "Google"),   # no kernel path: argv[0] only
-                      ("/usr/bin/tool --path=/x" + MARK + "hunter2 -k", "tool"),
-                      ("/usr/bin/tool SECRET" + MARK + "hunter2", "tool"),
-                      ("/usr/bin/tool a b c" + MARK + "hunter2", "tool"),
-                      ("/bin/cp Foo.app" + MARK + "hunter2 dest", "cp"),
-                      ("/usr/bin/codesign -v /Applications/Foo.app" + MARK + "Foo", "codesign"),
-                      ("/bin/sh -c cd /A.app" + MARK + " && ./Foo", "sh")):
-        for exe_of in (None, lambda pid: None, lambda pid: (_ for _ in ()).throw(OSError("gone"))):   # no lookup, a process that exited, a lookup that raises
-            label = gs._label(cmd, 7, exe_of)
-            assert label == want, (cmd, label)
-            assert not {"hunter2", "s3cr3tvalue", "secretword", "SECRET", "secret"} & set(label.replace("/", " ").split())
+def test_with_a_lookup_a_label_is_the_kernel_name_or_a_question_mark_never_command_line_text():   # adversary M1 and L1 of #875
+    for cmd in LEAKY:
+        for gone in GONE:
+            assert gs._label(cmd, 7, gone) == "?", (cmd, gone)   # unreadable: not one word of the command
+        assert gs._label(cmd, None, lambda pid: REAL) == "?"   # no pid to ask about
+        assert gs._label(cmd, 7, lambda pid: REAL) == "real-exe", cmd   # readable: the kernel name, whatever the command says
+        assert gs._label(cmd, "7", lambda pid: REAL + "/") == "real-exe"
 
 
-def test_the_kernel_executable_path_wins_over_argv_when_it_is_readable():   # kills `_label` ignoring exe_of (R1 of the #872 re-review)
-    cmd = "/usr/bin/tool SECRET" + MARK + "hunter2"
-    assert gs._label(cmd, 7, lambda pid: REAL) == "real-exe"
-    assert gs._label(cmd, "7", lambda pid: REAL + "/") == "real-exe"
-    assert gs._label(cmd, None, lambda pid: REAL) == "tool"   # no pid, no lookup
-    assert gs._label("/usr/bin/plain --x", 7, lambda pid: REAL) == "plain"   # a command without the mark never asks the kernel
+def test_the_kernel_is_asked_about_every_command_not_only_one_with_a_bundle_mark():   # kills `_label` asking only for `/Contents/MacOS/` (M1)
     asked = []
-    gs._label("/usr/bin/plain", 7, lambda pid: asked.append(pid))
-    assert asked == []
+    assert gs._label("API_TOKEN=hunter2", 7, lambda pid: asked.append(pid) or REAL) == "real-exe" and asked == [7]
+    assert gs._label("/usr/bin/plain --x", 8, lambda pid: asked.append(pid) or "/usr/bin/plain-real") == "plain-real" and asked == [7, 8]
+
+
+def test_without_a_lookup_only_a_fixture_label_is_the_first_word_and_the_sampler_always_supplies_one():
+    assert gs._label("/usr/bin/plain --x") == "plain" and gs._label("") == "?"
+    import inspect
+    assert "exe_of=exe_of" in inspect.getsource(gh.tick)   # the sampler's call to group_sources passes its lookup
 
 
 def test_group_sources_labels_system_heaviest_and_build_names_from_the_kernel_path():   # kills R3: every `_label` call site passes exe_of
@@ -256,6 +255,12 @@ def test_group_sources_labels_system_heaviest_and_build_names_from_the_kernel_pa
     assert held["build:10"]["name"] == "admit" and "hunter2" not in json.dumps(list(held.values()))
     plain = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [])}
     assert "hunter2" not in json.dumps(list(plain.values())) and "system:tool" in plain   # no lookup: argv[0], never an argument
+    leaky = {"10": (1, ME, 2.0, "API_TOKEN=hunter2"), "20": (1, ME, 1.0, "7 API_TOKEN=hunter2"), "21": (20, ME, 3.0, "/Users/me/Acme Merger 2027/bin/tool 7")}
+    lost = {s["key"]: s for s in gs.group_sources(leaky, {p: 1024 for p in leaky}, [], exe_of=lambda pid: None)}   # every process exited before the lookup
+    assert set(lost) == {"system:?"} and lost["system:?"]["heaviest"] == "?" and "hunter2" not in json.dumps(list(lost.values())) and "Acme" not in json.dumps(list(lost.values()))
+    calls = []
+    gs.group_sources(rows, {p: 1024 for p in rows}, [], exe_of=lambda pid: calls.append(pid) or REAL)
+    assert sorted(calls) == sorted(set(calls))   # one lookup per process however many labels ask
 
 
 def test_a_terminal_subtree_inside_an_app_is_named_from_the_kernel_path_too():   # kills R3c: the third `_label` call site

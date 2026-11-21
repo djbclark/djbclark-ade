@@ -1,3 +1,3 @@
 ### Fixed
 
-- GUI-hog load-source labels: when the kernel executable path is not readable (the process exited between the table read and the lookup), a label is the base name of argv[0] alone, so a later argument that holds `/Contents/MacOS/` (`tool SECRET/Contents/MacOS/hunter2`) never reaches it; the earlier changelog and docs wording "never from argv" now says "when readable". (#875)
+- GUI-hog load-source labels never carry command-line text: a process is named from the kernel's executable path, asked for every process (the first word `ps` prints can be argv[1] or an environment string when argv[0] is empty, and an argv[0] with a space is cut inside its path), and `?` when that path is unreadable because the process exited; the earlier "never from argv" wording in the docs and changelog is corrected. (#875)
