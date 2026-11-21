@@ -274,6 +274,9 @@ After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
 
+**Search fallback (operator, 2026-11-21; overrides the managed graft block above, which says "raw `grep -rn`").** For files `graft grep`
+does not index, use `rg <pattern> <path>`, never `grep -r` or `grep -rn` (`~/CLAUDE.md` item 1).
+
 ## Code review (what a reviewer checks here)
 
 Full rules: [docs/code-review.md](docs/code-review.md). Tooling and the merge gate:

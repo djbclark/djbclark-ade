@@ -116,8 +116,9 @@ alive and is not the handoff's author):
    `BLOCKED:` = blocked. Quota pauses continue in place via Paseo's
    session-guard and usage-auto-resume plugins (2026-11-06); there is no
    resume CLI to invent.
-3. If the work is unfinished and the agent id still exists, steer it with
-   `paseo send <id> --prompt "…" --behavior steer --json --no-wait` (ask for
+3. If the work is unfinished and the agent id still exists, message it with
+   `paseo send <id> --prompt "…" --json --no-wait` (never `--behavior steer`
+   on an idle agent, `~/CLAUDE.md` item 4; ask for
    `ack <your id>` when delivery matters). If the agent is gone, re-launch with
    `paseo run` under a **new** `ade.name` / brief, never a shim `resume`.
    Otherwise start any handoff-supplied waiter command as **its own
