@@ -155,6 +155,17 @@ DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
+# A pool aiuse names in `stale_pools` only because its reused reading passed that pool's SHORTER fresh limit
+# (antigravity: 600 s fresh, one query per 900 s, so a reused reading is stale ~1/3 of the time and `--live`
+# cannot refresh it inside the gate) keeps its reading when ALL of these hold (2026-11-21; adversary M1 of PR 864,
+# the 2026-11-12 burst drain): the provider is in STALE_REUSE_PROVIDERS (the gated one, not every provider with a
+# custom limit); the row's own age is within STALE_REUSE_MAX_AGE (the 900 s gate plus the 180 s sampler step,
+# rounded up); it shows at least STALE_REUSE_MIN_LEFT percent; and NO Paseo agent on that provider is live or was
+# created since the reading (`_provider_busy_since`; an unreadable agent list counts as busy). Nothing else
+# reserves pool room for a slice already dispatched, so a reading that predates a dispatch cannot be trusted.
+STALE_REUSE_MAX_AGE = 20 * 60
+STALE_REUSE_MIN_LEFT = 50.0
+STALE_REUSE_PROVIDERS = frozenset({"antigravity"})
 
 # KINDS, BURN_FIRST_* and the curated SERVICES rows are
 # loaded from effective config (see load_policy / load_effective_policy / apply_policy below).
@@ -1442,6 +1453,7 @@ def _reset_paseo_cache() -> None:
     _PASEO_USAGE_MEMO.clear()
     _PROVIDER_MODELS.clear()
     _PROVIDER_ROWS.clear()
+    _PASEO_LS_MEMO.clear()
 
 
 def _paseo_json(args: list[str]) -> tuple[Any, str]:
@@ -1771,6 +1783,69 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
+_AGENT_AGE_RE = re.compile(r"^\s*(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago\s*$")
+_AGENT_AGE_UNIT_S = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 7 * 86400,
+                     "month": 30 * 86400, "year": 365 * 86400}
+_PASEO_LS_MEMO: list[tuple[float, tuple[list[Any] | None, str]]] = []
+
+
+def _agent_age_floor_s(created: Any) -> float:
+    """The smallest age in seconds `paseo ls`'s relative `created` ("11 minutes ago") can mean; 0 when it is not that
+    shape ("just now", missing): an unreadable age counts as brand new, the cautious side."""
+    m = _AGENT_AGE_RE.match(created) if isinstance(created, str) else None
+    return float(int(m.group(1)) * _AGENT_AGE_UNIT_S[m.group(2)]) if m else 0.0
+
+
+def paseo_agent_rows() -> tuple[list[Any] | None, str]:
+    """`paseo ls -a -g --json` rows (archived included: a slice that already finished spent quota too), memoised for
+    PASEO_MEMO_TTL. ROUTE_AGENT_PASEO_LS_JSON=<path> reads canned output instead (tests; wins over ROUTE_AGENT_PASEO=off)."""
+    canned = os.environ.get("ROUTE_AGENT_PASEO_LS_JSON")
+    if canned:
+        try:
+            data = json.loads(Path(canned).read_bytes())
+        except (OSError, ValueError) as exc:
+            return None, f"ROUTE_AGENT_PASEO_LS_JSON unreadable ({exc.__class__.__name__})"
+        return (data, "canned") if isinstance(data, list) else (None, "ROUTE_AGENT_PASEO_LS_JSON: not a JSON array")
+    if _PASEO_LS_MEMO and 0 <= time.monotonic() - _PASEO_LS_MEMO[0][0] < PASEO_MEMO_TTL:
+        return _PASEO_LS_MEMO[0][1]
+    data, why = _paseo_json(["ls", "-a", "-g"])
+    result: tuple[list[Any] | None, str] = (data, why) if isinstance(data, list) else (
+        None, why if data is None else f"{why}: not a JSON array")
+    _PASEO_LS_MEMO[:] = [(time.monotonic(), result)]
+    return result
+
+
+def _provider_busy_since(provider: str, age_s: float) -> bool:
+    """Is any Paseo agent on `provider` (a segment of its `provider` path: `antigravity/..`, `pi/antigravity/..`) live, or
+    created within the last `age_s` seconds (since a reading that old was taken)? True when the list cannot be read.
+    `created` has only coarse relative units, so it is judged by its smallest possible age (a possible dispatch counts)."""
+    rows, _ = paseo_agent_rows()
+    if rows is None:
+        return True
+    for row in rows:
+        if not isinstance(row, dict):
+            return True
+        if provider not in str(row.get("provider") or "").split("/"):
+            continue
+        if row.get("status") not in ("closed", "idle") or _agent_age_floor_s(row.get("created")) <= age_s:
+            return True
+    return False
+
+
+def _reusable_stale_row(row: dict[str, Any]) -> bool:
+    """May a row aiuse blamed in `stale_pools` keep its own reading (see STALE_REUSE_MAX_AGE)?
+
+    Only a usable row of a STALE_REUSE_PROVIDERS provider with no `error`, no blocked `state` and no `reading_expired`,
+    a clean own age within STALE_REUSE_MAX_AGE, an explicit headroom of at least STALE_REUSE_MIN_LEFT, and no agent on
+    the provider live or created since the reading. Anything else stays unknown (fail closed)."""
+    age, head = _clean_age(row.get("age_seconds")), _pct(row.get("headroom_percent"))
+    return (row.get("provider") in STALE_REUSE_PROVIDERS and not row.get("error") and row.get("state") != "blocked"
+            and row.get("usable_now") is True and row.get("reading_expired") is not True
+            and age is not None and age <= STALE_REUSE_MAX_AGE
+            and head is not None and head >= STALE_REUSE_MIN_LEFT
+            and not _provider_busy_since(str(row["provider"]), age))
+
+
 def _stale_pool_keys(payload: dict[str, Any], p_age: float | None) -> set[tuple[str, Any]] | None:
     """The (provider, pool_family) rows a `fresh: false` payload blames, or None when it blames nothing usable.
 
@@ -1830,7 +1905,7 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
                     stale_keys, marked_stale = blamed, False
                     label = (f"{label} (payload fresh={payload.get('fresh')!r}: stale_pools names "
                              + ", ".join(sorted(f"{p}/{f}" if f else p for p, f in blamed))
-                             + "; those pools read unknown)")
+                             + "; those pools read unknown unless their own reading is reused)")
                 else:
                     label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
                     if p_age is None or p_age <= STALE_SOFT:
@@ -1842,14 +1917,23 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
             else:
                 try:
                     # a row without a usable age is stale, never fresh
+                    reusable = {id(row) for row in payload["available"]
+                                if (row.get("provider"), row.get("pool_family")) in stale_keys
+                                and _reusable_stale_row(row)}
                     rows = [dict(row, age_seconds=(
                         STALE_HARD + 1 if marked_stale
-                        or (row.get("provider"), row.get("pool_family")) in stale_keys
+                        or ((row.get("provider"), row.get("pool_family")) in stale_keys
+                            and id(row) not in reusable)
                         else _clean_age(row.get("age_seconds"))
                         if _clean_age(row.get("age_seconds")) is not None
                         else (p_age if p_age is not None and not stale_keys else STALE_HARD + 1)))
                         for row in payload["available"]]
                     fresh = _providers_from_available(rows, p_age)
+                    kept = sorted({f"{r_['provider']}/{r_['pool_family']}" if r_.get("pool_family") else r_["provider"]
+                                   for r_ in payload["available"] if id(r_) in reusable})
+                    if kept:
+                        label += (f"; reused reading kept for {', '.join(kept)} (age <= {STALE_REUSE_MAX_AGE // 60} min, "
+                                  f">= {STALE_REUSE_MIN_LEFT:g}% left, no agent on it since)")
                 except (ValueError, TypeError, AttributeError, OverflowError):
                     label = f"{label}: unparseable rows"
         if canned:
