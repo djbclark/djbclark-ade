@@ -184,7 +184,7 @@ def test_no_pi_pool_resolves_to_an_antigravity_model():
     for svc in router.SERVICES:
         if svc.acp_agent == "pi":
             for model in svc.models.values():
-                assert model.split()[0].partition("/")[0] not in router.PI_EXCLUDED_NAMESPACES, (svc.name, model)
+                assert not router.pi_excluded(model.split()[0]), (svc.name, model)      # the one case-insensitive check
     # the native provider rows are the antigravity pools
     assert {s.name for s in router.SERVICES if s.acp_agent == "antigravity"} == {"antigravity-argon", "antigravity-neon"}
 
