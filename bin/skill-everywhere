@@ -388,7 +388,9 @@ paseo_step() {
         fi ;;
       remove)
         if [[ $bin != hermes ]]; then printf '  %-13s %s (Paseo-managed; not touched)\n' "$bin" "$state"
-        elif [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
+        elif [[ $state == linked || ( -L $link && "$(greadlink "$link")" == "$paseo_src" ) ]]; then
+          # ours even when it dangles (Paseo's copy gone, the case a retirement follows), like the gone-skill remove above
+          act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         [[ $bin == hermes ]] || { printf '  %-13s %s (Paseo-managed; not touched)\n' "$bin" "$state"; continue; }

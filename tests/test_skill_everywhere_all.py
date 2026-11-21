@@ -522,3 +522,20 @@ def test_remove_paseo_removes_only_our_hermes_link_and_other_removes_leave_it(ca
     (foreign / "SKILL.md").write_text("foreign")
     kept = run(catalog, "--remove", "paseo")
     assert kept.returncode == 0 and "left alone" in kept.stdout and (foreign / "SKILL.md").read_text() == "foreign"
+
+
+def test_remove_paseo_removes_our_link_even_when_it_dangles(catalog, tmp_path):  # PR 878 adversary low 1
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    assert run(catalog, "steps").returncode == 0
+    shutil.rmtree(home / ".agents" / "skills" / "paseo")  # Paseo's copy is gone: the link now dangles
+    assert (hermes / "paseo").is_symlink() and not (hermes / "paseo").exists()
+    removed = run(catalog, "--remove", "paseo")
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert "removed" in removed.stdout and "left alone" not in removed.stdout
+    assert not os.path.lexists(hermes / "paseo")
+    # a dangling link that is NOT ours (another target) stays
+    (hermes / "paseo").symlink_to(tmp_path / "elsewhere")
+    kept = run(catalog, "--remove", "paseo")
+    assert kept.returncode == 0 and "left alone" in kept.stdout and (hermes / "paseo").is_symlink()
