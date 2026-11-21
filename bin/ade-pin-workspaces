@@ -1,0 +1,69 @@
+#!/usr/bin/env -S python3 -I
+"""ade-pin-workspaces: pin the workspace of every non-worker (human-interaction) agent.
+
+  ade-pin-workspaces pin [--check]
+
+Pins each non-worker agent's workspace through the daemon's own `workspace.pin.set_request` — the
+same call the Paseo UI's sidebar pin makes, and which the `paseo` CLI has no command for
+(docs/upstream-issues.md draft 23). A non-worker agent is one that is live, not background, and not
+a worker (title `worker …` or `Herald summary`): leads and operator-started agents. `--check` prints
+what would be pinned and pins nothing. Idempotent.
+
+Companion to `bin/ade-pin-interactive` (the `ade.interactive=1` label tag): the label is the durable
+query signal; this tool applies the native sidebar pin so those agents sort to the top.
+
+Exit codes: 0 pinned (or none needed), 1 error, 2 usage, 69 macOS only: the Paseo Helper binary
+(the app bundle, or PASEO_SET_MODEL_HELPER) does not exist.
+
+Runs in Paseo's bundled Electron node through bin/ade-pin-workspaces.mjs (argv list, no shell),
+the same mechanism as bin/paseo-set-model. Env: PASEO_SET_MODEL_HELPER (default the Paseo Helper
+binary in /Applications/Paseo.app), PASEO_SET_MODEL_CLI_DIST (default the bundled @getpaseo/cli dist).
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+APP = "/Applications/Paseo.app/Contents"
+DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
+DEFAULT_CLI_DIST = f"{APP}/Resources/app.asar/node_modules/@getpaseo/cli/dist"
+MJS = Path(os.path.realpath(__file__)).with_name("ade-pin-workspaces.mjs")
+
+
+def usage() -> int:
+    print("usage: ade-pin-workspaces pin [--check]", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv[0] != "pin" or any(a != "--check" for a in argv[1:]):
+        return usage()
+    args = ["pin", *[a for a in argv[1:] if a == "--check"]]
+    helper = os.environ.get("PASEO_SET_MODEL_HELPER") or DEFAULT_HELPER
+    resolved = shutil.which(helper)
+    if resolved is not None:
+        helper = resolved
+    if not os.access(helper, os.X_OK):
+        print(f"ade-pin-workspaces: macOS only: Paseo Helper not found at {helper}; install Paseo.app or "
+              "set PASEO_SET_MODEL_HELPER to a Paseo Helper (Electron node) binary", file=sys.stderr)
+        return 69
+    env = dict(os.environ)
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    env["PASEO_NODE_ENV"] = "production"
+    env["PASEO_SET_MODEL_CLI_DIST"] = os.environ.get("PASEO_SET_MODEL_CLI_DIST") or DEFAULT_CLI_DIST
+    try:
+        return subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args],
+                              env=env, check=False).returncode
+    except OSError as e:
+        print(f"ade-pin-workspaces: cannot run {helper}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

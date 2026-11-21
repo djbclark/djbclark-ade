@@ -1614,3 +1614,41 @@ e.g. `node …/graft-hooks.cjs`), and exempt `git` subcommands that take pathspe
 
 `gh search issues --repo trailhq/Trail-Code "hook script"` and `"guard"` found #866 (the repo-controlled-import finding
 this repo filed today) as the nearest thread; no issue covers the guard's false positive on pathspecs.
+
+
+## 23. paseo — workspace pin/unpin is not exposed to the CLI or the plugin SDK
+
+**Status: `already-filed` — [getpaseo/paseo#10353](https://github.com/getpaseo/paseo/issues/10353)** (filed 2026-11-20 on the operator's yes).
+
+### Observed
+
+The desktop UI pins a workspace to the top of the sidebar through the daemon RPC
+`workspace.pin.set.request` (`{workspaceId, pinned: boolean, requestId}` → `{requestId, workspaceId, accepted,
+pinnedAt, error}`), which sets the workspace's `pinnedAt` field in `projects/workspaces.json`. But:
+
+- `paseo workspace` (CLI) has `setup / create / ls / rename / archive` and no `pin`/`unpin`.
+- The plugin SDK's `PaseoWorkspaceHandle` (`@getpaseo/client`) exposes `refresh`, `setTitle`, `archive`,
+  `subscribe` — no `setPinned`/`pin`/`unpin`. (Read the installed `@getpaseo/client` `dist/index.d.ts`, ~line 101-125.)
+- The MCP surface has `rename_workspace` / `archive_workspace` but no pin.
+
+So a plugin or script cannot pin a workspace without either driving the raw websocket `workspace.pin.set` RPC itself
+(with the E2EE handshake) or editing the daemon-owned `workspaces.json` (which the daemon holds in memory).
+
+### Why it matters
+
+Automation cannot reproduce what the user does by hand: keeping "these agents need attention" pinned to the top is a
+findability feature that only the UI can perform. This repo works around it: `bin/ade-pin-interactive` tags non-worker agents `ade.interactive=1` (the durable
+query signal), and `bin/ade-pin-workspaces` drives the UI's own `workspace.pin.set` RPC through the bundled CLI client
+(the same mechanism as `bin/paseo-set-model`) to apply the real sidebar pin.
+
+### Suggested fix
+
+`paseo workspace pin <workspace-id>` / `paseo workspace unpin <workspace-id>` (CLI), a `setPinned(pinned: boolean)`
+method on `PaseoWorkspaceHandle` (plugin SDK), and the matching MCP `pin_workspace`/`unpin_workspace` tools.
+
+### Searched first (2026-11-20)
+
+Read the installed `@getpaseo/client` SDK type (`PaseoWorkspaceHandle` has no pin), the CLI help (`paseo workspace`,
+`paseo agent update`), the MCP tool list, the daemon `config.json`, and the web bundle
+(`app-dist/_expo/static/js/web/index-*.js`, which carries the `workspace.pin.set` request/response zod shapes and the
+client `setWorkspacePinned` method). No CLI/SDK/MCP pin method exists; the only writer is the web UI.

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Non-worker pin sweep, every 15 minutes: a zero-token host script that re-applies the
+     `ade.interactive=1` agent label (bin/ade-pin-interactive) and the native sidebar pin
+     (bin/ade-pin-workspaces pin, which drives the UI's workspace.pin.set RPC through the bundled
+     CLI client). Both are idempotent, so a new lead or operator-started agent is pinned shortly
+     after it appears. macOS only: the pin step runs in Paseo's bundled Electron node.
+     Inventoried in config/ade.toml [install.jobs] as `ade-pin-sweep`; install command in docs/scheduling.md.
+     Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__ and __ADMISSION__. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.ade-pin-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.ade-pin-sweep</string><string>--</string>
+    <string>__ADE__/bin/ade-pin-sweep</string>
+  </array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/pin-sweep.out</string>
+  <key>StandardErrorPath</key><string>__STATE__/pin-sweep.err</string>
+</dict>
+</plist>
