@@ -120,7 +120,7 @@ def test_every_freeze_and_thaw_is_recorded_with_by(world):
     world.freeze(minutes=1, by="dialog")
     gf.thaw_due(world.state, ops=world.ops, now=T0 + 61, by="sampler")
     ev = [(x["event"], x["by"]) for x in world.events()]
-    assert ev == [("freeze", "dialog"), ("thaw", "sampler")]
+    assert ev == [("freeze", "dialog"), ("thaw", "sampler"), ("freeze-result", "sampler")]   # Q1: the resume writes what the freeze saved
     assert world.events()[0]["app"]["bundle_id"] == "com.example.fake" and world.events()[1]["entry"] == world.events()[0]["entry"]
     assert (world.state / "gui-hog" / "events.jsonl").stat().st_mode & 0o777 == 0o600
 

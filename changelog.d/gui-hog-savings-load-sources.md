@@ -1,0 +1,12 @@
+### Added
+
+- `bin/gui-hog suggest`: reads the history of measured freezes and the dialog's would-show lines and proposes apps for the never-auto list (`[freeze.auto] skip`: a `[freeze.depends]` note such as Beeper's MCP API or CodexBar's aiuse readings, or negligible savings) and for the new always-freeze list; read-only, it prints its evidence and edits nothing. (#872)
+- GUI-hog measured savings: every freeze records the app's freeable cores and RSS and the system window just before it, and its resume writes a `freeze-result` event (load, compressor, pageins, swapins over the freeze against the window before). A SIGSTOP frees CPU, not RSS; the docs say so (`docs/gui-hog-dialog.md` Q1). (#872)
+- `[freeze.auto] always` (ships empty): apps frozen without asking, with no dialog row; Resume stays in the Frozen list and menu, the never-auto list wins, and a protected app or one hosting a build or terminal is never quiet. (#872)
+- The dialog and `gui-hog status` list the real load sources (builds and test jobs, agent sessions, apps, system processes) with cores, RSS and share, a build's tree grouped under its root and owner; display only, never a Freeze button for a build or a protected app. (#872)
+
+### Fixed
+
+- GUI-hog keep-running rules name one exact executable (matched on the kernel path, never as a prefix; an absolute directory is refused), the auto-freeze reads its start times in one batch call and only while a build is held and leaves out an app that started after the table was read, and the stale `config/gui-hog.toml` comments are corrected (the #859 adversary lows). (#872)
+- GUI-hog load sources label a process by its executable name only, never its arguments, also inside an app bundle (`clang -c a.c -DPASS=...` no longer leaks); an always-freeze app is hidden from the dialog only while it is frozen or the sampler will freeze it now, so a Resumed, refused or idle one is an ordinary row again; `gui-hog suggest` cleans bundle ids and survives a bad `[suggest]` value, and `status --json` survives a corrupt sources record (the #872 adversary review lows and notes). (#872)
+- GUI-hog load-source labels inside an app bundle come from the kernel executable path (an argument holding `/Contents/MacOS/` no longer reaches the label), and an always-freeze app is hidden only while the sampler may act (a live hold, no Ignore snooze) or it is already frozen, so `gui-hog show` lists a busy one (the #872 re-review lows). (#872)

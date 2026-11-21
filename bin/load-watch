@@ -1730,8 +1730,15 @@ def gui_hog_tick(st, t, table, load1, dry):
         st.pop("apps", None)
         st.pop("app_meta", None)
         return
+    sysread = {"load1": load1}   # the readings a freeze is judged against (gui-hog-dialog.md Q1): cumulative compressor, page-in and swap-in counters
+    try:
+        snap = vm_snapshot()
+        if snap:
+            sysread.update(compress=snap.get("compress"), pageins=snap.get("pageins"), swapins=snap.get("swapins"))
+    except Exception:  # noqa: BLE001 - a reading that cannot be taken is simply absent
+        pass
     gui_hog_mod().tick(st, t, table, {p: v[1] for p, v in PSTATE.items()}, PTTY, state_dir=STATE_DIR, my_uid=MY_UID,
-                       agent_clis=AGENT_CLIS, load1=load1, dry=dry, launch=True, auto_freeze=True)
+                       agent_clis=AGENT_CLIS, load1=load1, dry=dry, launch=True, auto_freeze=True, sysread=sysread)
 
 
 def operator_notice(st, t, key, msg):

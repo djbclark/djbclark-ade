@@ -53,9 +53,15 @@ DEFAULTS = {
     "freeze": {"enabled": True, "default_minutes": 10, "max_minutes": 1440, "passes": 3, "lock_timeout_s": 5,
                # Operator ruling 2026-11-21 (design rule B6 amended): apps listed in `order` (bundle ids, preferred first) are frozen by the sampler
                # when a build is held by the GUI-hog trigger; unlisted apps still need a click. `[protected]` and the hard floor always win.
-               "auto": {"enabled": True, "order": [], "skip": [], "minutes": None, "min_cores": 0.05, "refreeze_s": 3600},
+               # `always` (2026-11-21, Q3): apps frozen by the sampler WITHOUT asking: the dialog lists no row and counts no cores for them (the Frozen list and the menu
+               # still offer Resume). `skip` wins over `always`; a protected app is never on it.
+               "auto": {"enabled": True, "order": [], "always": [], "skip": [], "minutes": None, "min_cores": 0.05, "refreeze_s": 3600},
                # bundle id -> paths inside the bundle that a freeze never stops (matched on the kernel exe, never argv): CodexBar's HTTP server
-               "keep_running": {}},
+               "keep_running": {},
+               # bundle id -> what we depend on that a freeze of that app breaks (text for `gui-hog suggest`: the Beeper MCP port, the CodexBar quota feeder)
+               "depends": {}},
+    # `gui-hog suggest` thresholds (Q1): at least min_events freezes (or dialog sightings) over the last `days`
+    "suggest": {"min_events": 3, "negligible_cores": 0.10, "large_cores": 0.50, "days": 30},
 }
 
 # The hard floor (F6): code, not configuration. Config can add protected entries, never remove these.
@@ -109,8 +115,10 @@ def _num(v, lo, hi):
 
 def rule_ok(r):
     """A keep-running rule is an exact executable: relative to the bundle (two or more components, `Contents/Helpers/CodexBarCLI`) or absolute (`~`
-    expands) and then inside some `X.app` bundle, at least `X.app/<dir>/<file>`; never `/`, a broad directory such as /opt/homebrew, or a path
-    with `..` (adversary L4: such a rule would turn off the out-of-bundle build stop for a whole toolchain)."""
+    expands) and then inside some `X.app` bundle, at least `X.app/<dir>/<file>`; never `/`, a broad directory such as /opt/homebrew, a path
+    that is an existing directory, or a path with `..` (adversary L4: such a rule would turn off the out-of-bundle build stop for a whole toolchain).
+    It is matched against a process's kernel executable path EXACTLY (`_same_path`), never as a prefix, so even a relative rule that names a directory
+    keeps nothing (PR 859 adversary low 1)."""
     if not isinstance(r, str) or not r.strip():
         return False
     p = Path(os.path.expanduser(r) if r.startswith("~") else r)
@@ -118,8 +126,13 @@ def rule_ok(r):
     if not parts or ".." in parts:
         return False
     if p.is_absolute():
-        return any(x.casefold().endswith(".app") and len(parts) - i - 1 >= 2 for i, x in enumerate(parts))
+        return any(x.casefold().endswith(".app") and len(parts) - i - 1 >= 2 for i, x in enumerate(parts)) and not p.is_dir()   # a directory is no executable (PR 859 low 1)
     return len(parts) >= 2
+
+
+def _same_path(path, target):
+    """True when `path` is exactly `target` (casefolded, by path components): a keep-running rule names ONE executable, never a directory's contents."""
+    return Path(str(path).casefold()).parts == Path(str(target).casefold()).parts
 
 
 def _merge_freeze(cfg, data, overlay=False):
@@ -133,10 +146,14 @@ def _merge_freeze(cfg, data, overlay=False):
                 if ak == "order":
                     if isinstance(av, list):
                         au["order"] = [x for x in av if isinstance(x, str) and x.strip()]
+                elif ak == "always":   # apps frozen without asking (Q3); the overlay adds, never removes; `skip` and [protected] win at use time (always_apps)
+                    if isinstance(av, list):
+                        clean_ = [x.strip() for x in av if isinstance(x, str) and x.strip()]
+                        au["always"] = au["always"] + [x for x in clean_ if x.casefold() not in {y.casefold() for y in au["always"]}] if overlay else clean_
                 elif ak == "skip":   # apps never auto-frozen, whatever `order` says (a manual freeze stays possible); the overlay adds, never removes
                     if isinstance(av, list):
-                        clean = [x.strip() for x in av if isinstance(x, str) and x.strip()]
-                        au["skip"] = au["skip"] + [x for x in clean if x.casefold() not in {y.casefold() for y in au["skip"]}] if overlay else clean
+                        names = [x.strip() for x in av if isinstance(x, str) and x.strip()]
+                        au["skip"] = au["skip"] + [x for x in names if x.casefold() not in {y.casefold() for y in au["skip"]}] if overlay else names
                 elif ak == "enabled":
                     if isinstance(av, bool):
                         au["enabled"] = (au["enabled"] and av) if overlay else av
@@ -154,14 +171,20 @@ def _merge_freeze(cfg, data, overlay=False):
                 if isinstance(bid, str) and isinstance(rels, list):
                     have = cfg["freeze"]["keep_running"].setdefault(bid, [])
                     have.extend(r for r in rels if rule_ok(r) and r not in have)
-        elif k not in ("auto", "keep_running"):
+        elif k == "depends" and isinstance(v, dict):
+            for bid, texts in v.items():
+                if isinstance(bid, str) and isinstance(texts, list):
+                    have = cfg["freeze"]["depends"].setdefault(bid, [])
+                    have.extend(c for c in (clean(t, 120) for t in texts if isinstance(t, str) and t.strip()) if c and c not in have)
+        elif k not in ("auto", "keep_running", "depends"):
             cfg["freeze"][k] = v
 
 
 def load_config(path=None, local=None):
     """Defaults, then config/gui-hog.toml, then the user overlay (~/.config/load-watch/gui-hog.toml). The overlay can only ADD to the protected
     lists (never remove from them or from the hard floor in code); `[freeze.auto]` (the order, enabled, minutes, min_cores, refreeze_s) it may
-    set or override, and `[freeze.keep_running]` it adds to. Raises on a broken shipped file; a broken overlay is ignored."""
+    set or override, it only ADDS to `[freeze.auto] skip` and `always`, `[freeze.keep_running]` and `[freeze.depends]`, and it can switch `enabled`
+    off, never on. Raises on a broken shipped file; a broken overlay is ignored."""
     cfg = json.loads(json.dumps(DEFAULTS))
     data = _read_toml(path or DEFAULT_CONFIG) if (path or DEFAULT_CONFIG).exists() else {}
     for sec, vals in data.items():
@@ -181,7 +204,7 @@ def load_config(path=None, local=None):
             cfg["protected"][key] = list(cfg["protected"][key]) + [x for x in add if isinstance(x, str)]
     fz = over.get("freeze") if isinstance(over, dict) else None
     if isinstance(fz, dict):   # only the auto-freeze list and the keep-running rules: the overlay cannot touch enabled, max_minutes, passes, the lock timeout
-        _merge_freeze(cfg, {k: v for k, v in fz.items() if k in ("auto", "keep_running")}, overlay=True)
+        _merge_freeze(cfg, {k: v for k, v in fz.items() if k in ("auto", "keep_running", "depends")}, overlay=True)
     return cfg
 
 
@@ -224,6 +247,104 @@ def protect_reason(bundle_id, bundle_real, exe_real, uid, my_uid, cfg):
     if exe_real and any(_under(exe_real, _real(x)) for x in pr.get("exe_paths", [])):
         return "cfg:exe"
     return None
+
+
+def always_problems(cfg):
+    """[(bundle id, why)] for the entries of `[freeze.auto] always` that are ignored: on the never-auto list (`skip` wins) or protected (by bundle id or
+    prefix: a protected app is never frozen without asking; a bundle PATH rule is applied to the live app at freeze time, `vet_app`). Also the dynamic
+    refusals, an app hosting a build or terminal, which only the live process table can tell."""
+    au = cfg["freeze"]["auto"]
+    skip = {str(x).casefold() for x in au.get("skip", [])}
+    out = []
+    for bid in au.get("always", []):
+        if bid.casefold() in skip:
+            out.append((bid, "on the never-auto list (skip wins)"))
+        elif protect_reason(bid, None, None, 0, 0, cfg):
+            out.append((bid, "protected"))
+    return out
+
+
+def always_apps(cfg, effective=True):
+    """The bundle ids (casefolded) that are frozen WITHOUT asking and so get no dialog row (Q3): `[freeze.auto] always` minus the ignored entries
+    (`always_problems`). `effective` also requires that the sampler will really freeze them: `[freeze] enabled`, `[freeze.auto] enabled` and not
+    `LW_GUI_HOG_AUTO=0`; otherwise the apps are ordinary rows again, so switching the auto-freeze off never hides an app from the operator."""
+    fz, au = cfg["freeze"], cfg["freeze"]["auto"]
+    if effective and (not fz.get("enabled", True) or not au.get("enabled", True) or os.environ.get("LW_GUI_HOG_AUTO", "").strip() == "0"):
+        return frozenset()
+    bad = {b.casefold() for b, _w in always_problems(cfg)}
+    return frozenset(b.casefold() for b in au.get("always", []) if b.casefold() not in bad)
+
+
+def quiet(a, always):
+    """True for an app that is frozen without asking: its bundle id is in `always`, the set `quiet_ids` returns (or the bare `always_apps` list), and it is
+    not protected and hosts no build or terminal (such an app is an ordinary row: the operator is asked, and the sampler cannot freeze it)."""
+    return bool(always) and str(a.get("bundle_id") or "").casefold() in always and not a.get("protected") and not a.get("hosts_build")
+
+
+def quiet_ids(cfg, means, now, gh_state=None, frozen=(), act=True):
+    """The bundle ids (casefolded) that get no dialog row because they are ALREADY frozen by us or the sampler would freeze them now (Q3, adversary
+    L2 of #872): on the effective always list and either in `frozen` (bundle ids with a live frozen entry), or running, not protected, hosting no
+    build or terminal, not in the cooling-down / retry-wait window of `gh_state["auto"]` (the operator Resumed it, or a freeze was refused) and using
+    at least `min_cores` now. Anything else is an ordinary row again: an app the sampler will not freeze must never disappear from the operator's
+    sight. (Not here: `excluded` apps never reach the window, so they are no rows either; the sampler's own `kept_cores` is not known to the window,
+    so the idle test is the app's current cores, a close approximation.) `act` says the sampler is allowed to freeze right now (a live hold and no
+    Ignore snooze: `auto_freeze_step` does nothing otherwise, adversary L2r of #872); without it only the already frozen apps are quiet."""
+    always = always_apps(cfg)
+    if not always:
+        return frozenset()
+    au = cfg["freeze"]["auto"]
+    auto = gh_state.get("auto") if isinstance(gh_state, dict) and isinstance(gh_state.get("auto"), dict) else {}
+    frozen = {str(b).casefold() for b in frozen}
+    try:
+        from gui_hog_freeze import AUTO_RETRY_S as retry_s
+    except Exception:  # noqa: BLE001
+        retry_s = 120
+    live = {}
+    for a in means:
+        bid = str(a.get("bundle_id") or "").casefold()
+        if bid in always and bid not in live and a.get("present"):
+            live[bid] = a
+    out = set()
+    for bid in always:
+        a = live.get(bid)
+        if bid in frozen:
+            if a is None or not (a.get("protected") or a.get("hosts_build")):
+                out.add(bid)
+            continue
+        if not act or a is None or a.get("protected") or a.get("hosts_build"):
+            continue
+        st = auto.get(bid)
+        if isinstance(st, dict) and _fin(st.get("t")) and 0 <= now - st["t"] < (float(au.get("refreeze_s", 3600)) if st.get("ok") else retry_s):
+            continue
+        cpu = a.get("cpu_now", a.get("cores_5m", 0.0))
+        if not _fin(cpu) or cpu < float(au.get("min_cores", 0.05)):
+            continue
+        out.add(bid)
+    return frozenset(out)
+
+
+def quiet_for(cfg, means, now, state_dir, gh_state, held=None):
+    """`quiet_ids` with the frozen bundle ids read from `state_dir` and `act` taken from the same conditions `auto_freeze_step` uses (a live hold, no
+    Ignore snooze); `held` is the holds the caller already read. Never raises: a failure reads as nothing frozen and no freeze due, so every app
+    stays a row."""
+    try:
+        if not always_apps(cfg):
+            return frozenset()
+        frozen = ()
+        try:
+            import gui_hog_freeze
+            frozen = gui_hog_freeze.frozen_bundle_ids(state_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            holds = read_holds(state_dir, now, sweep=False) if held is None else held
+            snz = effective_snooze(gh_state if isinstance(gh_state, dict) else {}, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"])
+            act = bool(hold_active(holds, now, cfg)[1]) and not (snz is not None and now < snz)
+        except Exception:  # noqa: BLE001
+            act = False
+        return quiet_ids(cfg, means, now, gh_state, frozen, act=act)
+    except Exception:  # noqa: BLE001
+        return frozenset()
 
 
 # ---- process identity ----------------------------------------------------------------------------------------------
@@ -586,7 +707,7 @@ def keep_running_pids(app, table, exe, cfg):
     kept = set()
     for m in members:
         ex = exe(m)
-        if ex and any(_under(ex, t) for t in targets):
+        if ex and any(_same_path(ex, t) for t in targets):   # the exact executable: a rule naming a directory keeps nothing (PR 859 low 1)
             kept.add(m)
     grew = True
     while grew:
@@ -600,7 +721,7 @@ def keep_running_pids(app, table, exe, cfg):
 
 def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), agent_clis=(), cfg=None):
     """One record per GUI app: {id (root pid), name, bundle_id, bundle_path, root_pid, members, cores, rss_mb, hosts_build,
-    build_cores, excluded, protected}. `table` is load-watch's ps table {pid: (ppid, uid, cores, command)}; `rss_kb` {pid: KB};
+    build_cores, build_pids, excluded, protected}. `table` is load-watch's ps table {pid: (ppid, uid, cores, command)}; `rss_kb` {pid: KB};
     `ttys` the pids with a controlling terminal; `exe_of(pid)` the kernel executable path (cached by the caller).
 
     An app is the process tree under a `Foreground` or `UIElement` lsappinfo entry that owns an `.app` bundle, plus any process whose
@@ -644,7 +765,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
 
     def build_stop(pid, real):   # C4b: a shell, a pty-attached process, a held caller, `bg` or an agent CLI, or an executable outside the bundle
         ex = exe(pid)
-        outside = ex is not None and not _under(ex, real) and not any(_under(ex, t) for t in keep_out.get(real, ()))
+        outside = ex is not None and not _under(ex, real) and not any(_same_path(ex, t) for t in keep_out.get(real, ()))
         return is_shell(pid) or pid in ttys or pid in held_pids or is_agent(pid) or outside
 
     roots = {}
@@ -777,7 +898,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
                     "kept_names": sorted({clean(os.path.basename(exe(m)), 60) for m in kept if exe(m)})[:20],
                     "cores": sum(table[p][2] for p in app.members if p in table),
                     "rss_mb": sum(rss_kb.get(p, 0) for p in app.members) / 1024.0,
-                    "hosts_build": bool(app.build), "build_cores": app.build_cores, "excluded": excluded,
+                    "hosts_build": bool(app.build), "build_cores": app.build_cores, "build_pids": sorted(int(x) for x in app.build), "excluded": excluded,
                     "protected": protect_reason(app.bundle_id, app.real, rex, table[rid][1], my_uid, cfg)})
     return out
 
@@ -854,7 +975,7 @@ def hold_active(held, now, cfg):
     return old, [h for h in old if rel & set(h.get("refused", []))]
 
 
-def should_show(held, apps, now, snooze, last_shown, cfg):
+def should_show(held, apps, now, snooze, last_shown, cfg, quiet_set=None):
     """Would the dialog show now? {"show": bool, "reason": str, "sum_cores", "sum_rss_mb", "holds": [...]}. All of (C4):
     (a) some hold has been refused for hold_s or longer; (b) its refusals include a gate that desktop apps can relieve; (c) the SUM
     over non-build, non-protected apps of their 5-min mean cores is at least min_cores, or the sum of their RSS at least min_rss_mb
@@ -864,7 +985,8 @@ def should_show(held, apps, now, snooze, last_shown, cfg):
     snooze = snooze if _fin(snooze) else None
     last_shown = last_shown if _fin(last_shown) and last_shown <= now else None   # a clock set back must not silence the trigger
     old, live = hold_active(held, now, cfg)
-    pool = [a for a in apps if not a.get("protected") and not a.get("excluded")]
+    always = quiet_ids(cfg, apps, now) if quiet_set is None else quiet_set
+    pool = [a for a in apps if not a.get("protected") and not a.get("excluded") and not quiet(a, always)]   # an always-freeze app is frozen, not asked about (Q3)
     cores, rss = sum(a["cores_5m"] for a in pool), sum(a["rss_mb"] for a in pool)
     res = {"show": False, "reason": "", "sum_cores": round(cores, 2), "sum_rss_mb": int(rss), "holds": live}
     if not held:
@@ -991,10 +1113,11 @@ def gui_session(my_uid):
         return False
 
 
-def would_show_line(decision, apps, t, load1, cfg, my_uid):
+def would_show_line(decision, apps, t, load1, cfg, my_uid, quiet_set=None):
     """The dry-run record for a decision that says show. Names are cleaned text (J3); the rows are the busiest few."""
     tr = cfg["trigger"]
-    rows = [a for a in apps if not a.get("protected")
+    always = quiet_ids(cfg, apps, t) if quiet_set is None else quiet_set
+    rows = [a for a in apps if not a.get("protected") and not quiet(a, always)
             and (a["cores_5m"] >= tr["min_row_cores"] or a["rss_mb"] >= tr["min_row_rss_mb"])]
     return {"t": _iso(t), "event": "would-show", "reason": decision["reason"],
             "held": [{"caller": h["caller"], "held_s": int(t - h["refused_since"]), "refused": h["refused"]} for h in decision["holds"]],
@@ -1081,13 +1204,14 @@ def window_total(st, t, cfg):
     return sum(win) / len(win) if win else None
 
 
-def build_snapshot(means, held, now, cfg, *, load=None, ncpu=None, cpu_5m=None, starts=None, manual=False):
+def build_snapshot(means, held, now, cfg, *, load=None, ncpu=None, cpu_5m=None, starts=None, manual=False, sources=None, sources_more=0, quiet_set=None):
     """The dialog's whole input (D3, E1, E2): header numbers, one line per held build, the rows (busiest first, up to 12, then `more`) and the
     protected-hidden count. No command lines, only cleaned text. A row carries `present` (the app is in the newest sample): the dialog offers
     Quit and Force Quit on a present row that does not host a build, and nowhere else. `starts` maps a root pid to its live start string."""
     tr = cfg["trigger"]
     starts = starts or {}
-    rows = [a for a in means if not a["protected"] and (a["cores_5m"] >= tr["min_row_cores"] or a["rss_mb"] >= tr["min_row_rss_mb"])]
+    always = quiet_ids(cfg, means, now) if quiet_set is None else quiet_set
+    rows = [a for a in means if not a["protected"] and not quiet(a, always) and (a["cores_5m"] >= tr["min_row_cores"] or a["rss_mb"] >= tr["min_row_rss_mb"])]
     out = []
     for a in rows[:SNAPSHOT_MAX_ROWS]:
         pid = int(a["id"]) if str(a["id"]).isdigit() else 0
@@ -1101,6 +1225,8 @@ def build_snapshot(means, held, now, cfg, *, load=None, ncpu=None, cpu_5m=None, 
             "holds": [{"caller": h["caller"], "held_s": int(max(0, now - h["refused_since"])), "refused": h["refused"]} for h in held],
             "rows": out, "more": max(0, len(rows) - SNAPSHOT_MAX_ROWS), "protected_hidden": sum(1 for a in means if a["protected"]),
             "rss_trigger": sum(a["rss_mb"] for a in means if not a["protected"]) >= tr["min_rss_mb"],
+            # Q2: what actually uses the cores, whatever it is (builds, agents, apps, system processes); display only, a row never carries an action
+            "sources": list(sources or []), "sources_more": int(sources_more),
             "freeze": {"enabled": bool(cfg.get("freeze", {}).get("enabled", True)), "default_minutes": int(cfg.get("freeze", {}).get("default_minutes", 10))}}
 
 
@@ -1289,6 +1415,15 @@ def vet(pid, expect_start, expect_bundle_id, expect_bundle_path="", *, state_dir
 
 
 # ---- the sampler's step -------------------------------------------------------------------------------------------------------------
+def _has_frozen(state_dir):
+    """True while something is frozen (the history ring is then kept on disk so the resume can be judged); False when that cannot be read."""
+    try:
+        import gui_hog_freeze
+        return gui_hog_freeze.has_entries(state_dir)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _manual_snapshot_live(state_dir, t):
     """True while the operator's `gui-hog show` window is open on a snapshot it wrote (`manual`, under 30 min old): the sampler leaves that snapshot alone,
     so a manual test on a small app (`show --all`) is not overwritten by the next tick's thresholds."""
@@ -1309,9 +1444,31 @@ def _note_exit(state_dir, gh, t):
             gh["last_shown"] = t
 
 
+START_SLACK_S = 2   # `ps -o lstart=` has one-second resolution
+
+
+def auto_starts(roots, held, t, start_of=None):
+    """(starts, late) for the auto-freeze roots of one tick (PR 859 adversary low 2). `starts` is {pid: start string}, read in ONE batch call (or `start_of`
+    one by one) and only while a build is held, since the step does nothing without a hold: the sampler no longer spawns a `ps` per listed app on every
+    tick. `late` is the set of root pid strings whose process STARTED AFTER the table was read (`t`, more than START_SLACK_S later): that process is not
+    the instance the table showed (a relaunch, or a reused pid), so its start is not handed on and the app is left out of this tick's step. A start the
+    clock cannot parse (the Linux `proc:` form) is accepted, as `freeze()` re-checks the four identity fields against the live process anyway."""
+    if not held or not roots:
+        return {}, set()
+    got = {p: s for p in roots if (s := start_of(p)) is not None} if start_of else proc_starts(roots)
+    starts, late = {}, set()
+    for p, s in got.items():
+        epoch = parse_lstart(s)
+        if epoch is not None and epoch > t + START_SLACK_S:
+            late.add(str(p))
+        else:
+            starts[p] = s
+    return starts, late
+
+
 def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_cores=None, load1=None, dry=False,
          cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=None, launch=False, popen=subprocess.Popen,
-         load_avg=None, ncpu=None, gui_ok=None, auto_freeze=False):
+         load_avg=None, ncpu=None, gui_ok=None, auto_freeze=False, sysread=None):
     """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, keep the dialog's snapshot fresh while a hold
     is active or the dialog runs (D3), and on a `show` write the dry-run line (kept in 3b: it is the count of how often the dialog fired) and,
     with `launch`, start the dialog (C5, D6). With `dry` it prints the line and changes nothing but the window. Returns the decision dict, or None
@@ -1333,7 +1490,26 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
     window_update(st, t, apps, total_cores, cfg)
     gh = st["gui_hog"]
     means = window_means(st, t, cfg)
-    d = should_show(held, means, t, effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"], record=True), gh.get("last_shown"), cfg)
+    srows, smore = [], 0
+    try:   # Q1, Q2: the system readings a freeze is judged against, and what actually uses the cores; never stops the tick
+        import gui_hog_savings
+        import gui_hog_sources
+        if not isinstance(gh.get("hist"), list):
+            gh["hist"] = []
+        sr = sysread if isinstance(sysread, dict) else {}
+        gui_hog_savings.hist_add(gh["hist"], t, sr.get("load1", load1), sr)
+        gh["hist"] = gui_hog_savings.clean_hist(gh["hist"])
+        srcs = gui_hog_sources.group_sources(table, rss_kb, apps, held_pids=held_pids, agent_clis=agent_clis, exe_of=exe_of)
+        gui_hog_sources.window_update(gh, t, srcs, total_cores, cfg)
+        smeans = gui_hog_sources.window_means(gh, t, cfg)
+        top = [m["id"] for m in smeans if m["kind"] in ("build", "agent") and m["present"]][:6]
+        srows, smore = gui_hog_sources.snapshot_rows(smeans, cfg, where=None if dry or not (held or dialog_running(state_dir)) else gui_hog_sources.proc_cwds(top))
+        if not dry and (held or _has_frozen(state_dir)):
+            gui_hog_savings.write_hist(state_dir, gh["hist"])
+    except Exception as e:  # noqa: BLE001
+        out(f"gui-hog: load sources: {e!r}")
+    qset = quiet_for(cfg, means, t, state_dir, gh, held=held)
+    d = should_show(held, means, t, effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"], record=True), gh.get("last_shown"), cfg, quiet_set=qset)
     if not dry:
         try:
             _note_exit(state_dir, gh, t)
@@ -1344,24 +1520,26 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
                 rows = [a for a in means if a.get("present") and not a["protected"]][:SNAPSHOT_MAX_ROWS * 2]
                 la = load_avg if load_avg is not None else (os.getloadavg() if hasattr(os, "getloadavg") else None)
                 write_snapshot(state_dir, build_snapshot(means, held, t, cfg, load=la, ncpu=ncpu or os.cpu_count(), cpu_5m=window_total(st, t, cfg),
-                                                         starts=proc_starts([int(a["id"]) for a in rows if str(a["id"]).isdigit()])))
+                                                         starts=proc_starts([int(a["id"]) for a in rows if str(a["id"]).isdigit()]),
+                                                         sources=srows, sources_more=smore, quiet_set=qset))
             except Exception as e:  # noqa: BLE001
                 out(f"gui-hog: snapshot: {e!r}")
     if (auto_freeze or dry) and os.environ.get("LW_GUI_HOG_AUTO", "").strip() != "0":   # LW_GUI_HOG_AUTO=0 turns only this off; the operator's auto-freeze list (B6 amended 2026-11-21): only the sampler passes auto_freeze=True; dry prints what it would do
         try:
             import gui_hog_freeze
             snz = effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"])
-            order = {str(x).casefold() for x in cfg["freeze"]["auto"].get("order", []) if isinstance(x, str)}
+            order = {str(x).casefold() for x in list(cfg["freeze"]["auto"].get("order", [])) + list(cfg["freeze"]["auto"].get("always", [])) if isinstance(x, str)}
             roots = [int(a["root_pid"]) for a in apps if str(a.get("bundle_id") or "").casefold() in order and str(a.get("root_pid", "")).isdigit()]
-            starts = {p: s for p in roots if (s := (start_of or proc_start)(p)) is not None}   # read here, with the table that chose the app (adversary L3)
-            r = gui_hog_freeze.auto_freeze_step(gh, state_dir, apps, held, t, cfg, my_uid=my_uid, agent_clis=agent_clis, dry=dry or not auto_freeze,
+            starts, late = auto_starts(roots, held, t, start_of)
+            step_apps = [a for a in apps if str(a.get("root_pid", "")) not in late]   # a relaunch in the gap: this tick leaves that app alone (PR 859 low 2)
+            r = gui_hog_freeze.auto_freeze_step(gh, state_dir, step_apps, held, t, cfg, my_uid=my_uid, agent_clis=agent_clis, dry=dry or not auto_freeze,
                                                 starts=starts, snoozed=snz is not None and t < snz)
             if r:
                 out(("gui-hog would auto-freeze " if r.get("dry") else "gui-hog auto-freeze ") + json.dumps(r, separators=(",", ":"), default=str))
         except Exception as e:  # noqa: BLE001 - the auto-freeze never stops a sample, the dialog or the decision
             out(f"gui-hog: auto-freeze: {e!r}")
     if d["show"]:
-        line = would_show_line(d, means, t, load1, cfg, my_uid)
+        line = would_show_line(d, means, t, load1, cfg, my_uid, quiet_set=qset)
         if dry:
             out("gui-hog would show dialog: " + json.dumps(line, separators=(",", ":")))
         else:
@@ -1389,7 +1567,8 @@ def status_lines(st, state_dir, now, cfg):
     means = window_means(st, now, cfg)
     ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
     snooze, last = effective_snooze(ghs, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"]), ghs.get("last_shown")
-    d = should_show(held, means, now, snooze, last, cfg)
+    qset = quiet_for(cfg, means, now, state_dir, ghs, held=held)
+    d = should_show(held, means, now, snooze, last, cfg, quiet_set=qset)
     bstate, bdetail = bundle_state()
     lines = [f"gui-hog (PR 3b: the window is live) {'ENABLED' if enabled() else 'OFF (LW_GUI_HOG=0)'}",
              f"dialog bundle: {bstate}" + (f" ({bdetail})" if bdetail else "") + f" at {bundle_dir()}; dialog running: {'yes' if dialog_running(state_dir) else 'no'}",
@@ -1409,5 +1588,22 @@ def status_lines(st, state_dir, now, cfg):
     if len(rows) > 12:
         lines.append(f"  +{len(rows) - 12} more")
     lines.append(f"{sum(1 for a in means if a['protected'])} protected apps hidden")
+    always = always_apps(cfg)
+    if cfg["freeze"]["auto"].get("always"):
+        lines.append("always-freeze list (frozen without asking, no dialog row): " + (", ".join(sorted(always)) or "none in effect")
+                     + "".join(f"; IGNORED {b}: {w}" for b, w in always_problems(cfg)))
+    try:
+        import gui_hog_sources
+        sm = gui_hog_sources.window_means(ghs, now, cfg)
+        srows, smore = gui_hog_sources.snapshot_rows(sm, cfg, limit=12)
+        lines.append(f"load sources (what uses the cores, {tr['window_s']} s mean; shown, only apps marked can-freeze may be frozen):" + ("" if srows else " none yet"))
+        for r in srows:
+            lines.append(f"  {r['cores_5m']:5.2f} cores {r['share'] * 100:3.0f}%  {r['rss_mb']:6d} MB  {r['kind']:<6} {r['name']}"
+                         + (f" (owner: {r['owner']})" if r["owner"] else "") + (f", heaviest {r['heaviest']}" if r["heaviest"] and r["kind"] != "app" else "")
+                         + (" [waiting]" if r["waiting"] else "") + ("  can freeze" if r["can_freeze"] else f"  {r['why']}"))
+        if smore:
+            lines.append(f"  +{smore} more")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"load sources: unreadable ({e!r})")
     lines.append(f"dry-run log: {dry_run_path(state_dir)} ({count_dry_run(state_dir, 7, now)} would-show lines in the last 7 days); events: {events_path(state_dir)}")
     return lines

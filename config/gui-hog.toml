@@ -59,11 +59,12 @@ lock_timeout_s = 5      # flock on frozen.lock (F1)
 # [freeze] default_minutes) and logged `by: "auto"`; it stops when the hold ends or no listed app is left. Unlisted apps still need a click, and
 # [protected] and the hard floor always win (a protected app is never auto-frozen). An app is skipped while idle (under min_cores of freeable cores), part
 # of a build, or frozen by us within refreeze_s (so an operator's Resume sticks for an hour). ~/.config/load-watch/gui-hog.toml may set `[freeze.auto]`
-# (order, enabled, minutes, min_cores, refreeze_s) and add to `[freeze.keep_running]`; `LW_GUI_HOG_AUTO=0` turns only this off.
+# (order, enabled, minutes, min_cores, refreeze_s), ADD to `skip` and `always`, and add to `[freeze.keep_running]` and `[freeze.depends]`; it never removes an
+# entry. `LW_GUI_HOG_AUTO=0` turns only this off.
 # The list lives here, not in the overlay: the operator named these apps for this machine, and [protected] already carries machine-specific apps.
-# The dialog's "Ignore 1 h" pauses auto-freeze too. The overlay can switch `enabled` off, never back on. Costs while frozen (docs/gui-hog-dialog.md P6, the
-# operator decides): CodexBar's CLI has a stderr pipe into the stopped main process (unproven for a full freeze); Beeper's local API (127.0.0.1:23373, the
-# `beeper` MCP server) hangs until the freeze ends.
+# The dialog's "Ignore 1 h" pauses auto-freeze too. The overlay can switch `enabled` off, never back on. What a freeze costs two apps was decided by the
+# operator on 2026-11-21 (docs/gui-hog-dialog.md P6, P7): Beeper (its local API 127.0.0.1:23373 backs the `beeper` MCP server) and CodexBar (the aiuse quota
+# readings stop) are on `skip` below, so they are never auto-frozen.
 [freeze.auto]
 enabled = true
 order = [
@@ -77,15 +78,22 @@ skip = [
   "com.automattic.beeper.desktop",    # Beeper Desktop
   "com.steipete.codexbar",            # CodexBar
 ]
+# Apps frozen WITHOUT asking (operator ruling 2026-11-21, docs/gui-hog-dialog.md Q3): same trigger and same timed freeze as `order` (a held build, `by: "auto"`), tried BEFORE
+# `order`, and the dialog lists no row and counts no cores for them: nobody is asked. The Frozen list, the menu-bar item and `gui-hog resume` still offer Resume. The
+# never-auto list `skip` wins if an app is on both; a protected app is never put here (it is ignored, `gui-hog status` says so) and an app that hosts a build or terminal is
+# never frozen, so it stays an ordinary row. `gui-hog suggest` proposes entries from the measured freezes; the operator decides, nothing edits this file. Shipped empty.
+always = []
 min_cores = 0.05
 refreeze_s = 3600
 
-# Processes of an app that a freeze never stops (manual or auto), by path inside the bundle, matched on the kernel executable path (never argv alone), and
-# every descendant of one. aiuse reads CodexBar's local HTTP server (`CodexBarCLI serve --host 127.0.0.1 --port 10546`, [collectors.codexbar] http_url):
-# freezing the whole group stopped it too (events.jsonl 2026-11-21 13:03:43Z: both pids stopped, /health timed out).
+# Processes of an app that a freeze never stops (manual or auto), each rule ONE executable (a path inside the bundle, or an absolute path to a file; a directory
+# matches nothing), matched EXACTLY on the kernel executable path (never argv alone, never as a prefix), and every descendant of one. aiuse reads CodexBar's
+# local HTTP server (`CodexBarCLI serve --host 127.0.0.1 --port 10546`, [collectors.codexbar] http_url): freezing the whole group stopped it too (events.jsonl
+# 2026-11-21 13:03:43Z: both pids stopped, /health timed out).
 [freeze.keep_running]
 # (the lead's live test 2026-11-21 ~13:15Z: with only CodexBar's main pid stopped and CodexBarCLI running, /health answered 200 in 0.002 s and
-# /usage in 0.18 s with live data, so the server does not need the UI process and CodexBar is first in the auto list.)
+# /usage in 0.18 s with live data: the server does not need the UI process. CodexBar is nevertheless on `skip` above, because a freeze stops the
+# aiuse antigravity quota readings, P7.)
 "com.steipete.codexbar" = ["Contents/Helpers/CodexBarCLI"]
 # Chrome (Carried 116): the native-messaging hosts Chrome starts for extensions run from OUTSIDE its bundle, which made the whole app "host a build" (no
 # actions). They are stdio bridges, not builds: left running (a stopped Chrome simply stops reading them). Absolute paths (`~` = home) are allowed for
@@ -94,3 +102,17 @@ refreeze_s = 3600
   "/Applications/1Password.app/Contents/Library/LoginItems/1Password Browser Helper.app/Contents/MacOS/1Password-BrowserSupport",
   "~/.local/share/chrome-use/ChromeUse.app/Contents/MacOS/chrome-use",
 ]
+
+# What a freeze of an app breaks that we depend on (docs/gui-hog-dialog.md Q1): text only, read by `gui-hog suggest`, which then proposes the app for `[freeze.auto] skip`.
+# The overlay may add to it. These are the two known cases (operator rulings M3 and M2, 2026-11-21).
+[freeze.depends]
+"com.automattic.beeper.desktop" = ["its local API 127.0.0.1:23373 backs the `beeper` MCP server and hangs while the app is frozen"]
+"com.steipete.codexbar" = ["the aiuse antigravity quota readings stop while it is frozen, so routing reads the pool as stale and refuses slices"]
+
+# `gui-hog suggest` (Q1): a proposal needs at least `min_events` measured freezes (or dialog sightings, for an app never frozen) in the last `days` days. A median under `negligible_cores`
+# of the app's own cores before the freeze is "negligible"; `large_cores` or more is "large". Cores are `ps` %cpu / 100 (a decaying average), so they are comparable, not exact.
+[suggest]
+min_events = 3
+negligible_cores = 0.10
+large_cores = 0.50
+days = 30

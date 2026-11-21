@@ -41,6 +41,23 @@ struct Row {
     var frozen: Bool
 }
 
+/// One load source (docs/gui-hog-dialog.md Q2): what actually uses the cores, whatever it is. DISPLAY ONLY: no control is ever built from one, and
+/// `canFreeze` is true only for an app source (the Python core says so, and this parser refuses anything else), so a build or an agent never shows as freezable.
+struct LoadSource: Equatable {
+    var kind: String          // app, build, agent, system
+    var name: String
+    var owner: String         // the agent CLI that owns a build, or ""
+    var whereText: String     // the folder a build or agent runs in, or ""
+    var heaviest: String
+    var cores5m: Double
+    var rssMb: Int
+    var share: Double         // 0...1 of all the cores in use
+    var procs: Int
+    var waiting: Bool
+    var canFreeze: Bool
+    var why: String
+}
+
 struct Hold {
     var caller: String
     var heldS: Int
@@ -59,6 +76,8 @@ struct Snapshot {
     var rssTrigger: Bool
     var freezeEnabled = false     // [freeze] enabled (PR 3c, I3): false (or missing) hides every Freeze button
     var freezeMinutes = 10        // [freeze] default_minutes: the timed button's length
+    var sources: [LoadSource] = []   // Q2: the busiest load sources (display only)
+    var sourcesMore = 0
 }
 
 private func num(_ v: Any?) -> Double? {
@@ -89,10 +108,36 @@ func parseSnapshot(_ data: Data) -> Snapshot? {
                         cores5m: max(0, num(d["cores_5m"]) ?? 0), cpuNow: max(0, num(d["cpu_now"]) ?? 0), rssMb: max(0, int(d["rss_mb"]) ?? 0),
                         present: bool(d["present"]), hostsBuild: bool(d["hosts_build"]), frozen: bool(d["frozen"])))
     }
+    var sources: [LoadSource] = []
+    for r in (top["sources"] as? [Any] ?? []).prefix(12) {
+        guard let d = r as? [String: Any] else { continue }
+        let kind = sanitize(d["kind"] as? String ?? "system", limit: 12)
+        sources.append(LoadSource(kind: kind, name: sanitize(d["name"] as? String ?? "?", limit: 40), owner: sanitize(d["owner"] as? String ?? "", limit: 40),
+                                  whereText: sanitize(d["where"] as? String ?? "", limit: 60), heaviest: sanitize(d["heaviest"] as? String ?? "", limit: 40),
+                                  cores5m: max(0, num(d["cores_5m"]) ?? 0), rssMb: max(0, int(d["rss_mb"]) ?? 0), share: min(1, max(0, num(d["share"]) ?? 0)),
+                                  procs: max(0, int(d["procs"]) ?? 0), waiting: bool(d["waiting"]),
+                                  canFreeze: kind == "app" && bool(d["can_freeze"]),   // never a build, an agent or a system process, whatever the file says
+                                  why: sanitize(d["why"] as? String ?? "", limit: 60)))
+    }
     let fz = top["freeze"] as? [String: Any] ?? [:]
     return Snapshot(t: int(top["t"]) ?? 0, load: load, ncpu: int(header["ncpu"]), cpu5m: num(header["cpu_5m"]), holds: holds, rows: rows,
                     more: max(0, int(top["more"]) ?? 0), protectedHidden: max(0, int(top["protected_hidden"]) ?? 0), rssTrigger: bool(top["rss_trigger"]),
-                    freezeEnabled: bool(fz["enabled"]), freezeMinutes: min(1440, max(1, int(fz["default_minutes"]) ?? 10)))
+                    freezeEnabled: bool(fz["enabled"]), freezeMinutes: min(1440, max(1, int(fz["default_minutes"]) ?? 10)),
+                    sources: sources, sourcesMore: max(0, int(top["sources_more"]) ?? 0))
+}
+
+/// The one line a load source is shown as: cores, share, RAM, kind, name, who owns it and where, and whether it can be frozen. Text only.
+func sourceLine(_ s: LoadSource) -> String {
+    var parts = [fmtCores(s.cores5m) + " cores", String(format: "%.0f%%", s.share * 100), fmtRAM(s.rssMb), s.kind, s.name]
+    var detail: [String] = []
+    if !s.owner.isEmpty { detail.append("owner \(s.owner)") }
+    if !s.whereText.isEmpty { detail.append("in \(s.whereText)") }
+    if !s.heaviest.isEmpty && s.kind != "app" && s.heaviest != s.name { detail.append("heaviest \(s.heaviest)") }
+    if s.procs > 1 { detail.append("\(s.procs) processes") }
+    if s.waiting { detail.append("waiting") }
+    if !detail.isEmpty { parts.append("(" + detail.joined(separator: ", ") + ")") }
+    parts.append(s.canFreeze ? "· can freeze (see its row)" : "· shown only" + (s.why.isEmpty ? "" : ": \(s.why)"))
+    return parts.joined(separator: "  ")
 }
 
 // MARK: frozen apps (PR 3c: E2 Resume rows, E5 menu-bar item)
