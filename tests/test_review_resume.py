@@ -645,3 +645,95 @@ def test_a_resume_records_the_parents_resolved_path(world, tmp_path):
                   "--resume-from-evidence", str(link / d.name), "--evidence-dir", str(tmp_path / "new"), env=env(world))
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["parent_run"] == str(d.resolve())
+    assert json.loads((tmp_path / "new" / "launch.json").read_text())["parent_run"] == str(d.resolve())     # chain_notes follows this
+
+
+def test_a_chain_resumed_by_relative_path_still_finds_the_ancestors_notes_from_another_cwd(world, tmp_path):
+    world.passed_check()
+    dead = dead_run(world, tmp_path)
+    world.scenario(texts=["CHECKPOINT 3: third note"], no_result=True, exit=1)
+    assert world.run("--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "--json", "--resume-from-evidence",
+                     dead.name, "--evidence-dir", "mid", env=env(world), cwd=tmp_path).returncode == 3     # relative paths
+    world.scenario()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    r = world.run("--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "--json", "--resume-from-evidence",
+                  str(tmp_path / "mid"), "--evidence-dir", str(tmp_path / "last"), env=env(world), cwd=elsewhere)
+    assert r.returncode == 0, r.stderr
+    p = prompt_of(world)
+    assert "bin/x.py:12" in p and "third note" in p       # the grandparent's notes survive a relative parent_run
+
+
+# ---- the follow-up to PR 879 (adversary r3 LOWs) -------------------------------------------------------
+
+def test_a_second_detach_into_the_same_run_dir_is_refused_and_leaves_the_first_alone(world, tmp_path):
+    world.passed_check()
+    world.scenario(texts=[CP1], sleep=6)
+    d = tmp_path / "run"
+    first = world.launch("--detach", "--evidence-dir", str(d), env=env(world))
+    assert first.returncode == 0, first.stderr
+    pid = json.loads(first.stdout)["pid"]
+    again = world.launch("--detach", "--evidence-dir", str(d), env=env(world))      # before the first one's stream.jsonl exists
+    assert again.returncode == 2 and "already holds a detached launch" in again.stderr
+    doc = json.loads((d / "launch.json").read_text())
+    assert doc["pid"] == pid and doc["state"] in ("starting", "running")
+    wait_for(d / "done", 60)
+    assert (d / "done").read_text() == "exit=0\n"
+
+
+def test_a_detached_child_never_writes_a_failure_record_into_a_live_runs_dir(world, tmp_path):
+    mod = load_launcher()
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "stream.jsonl").write_text("")               # the other child already owns this dir
+    me = os.getpid()
+    mod.update_launch(d, schema=1, state="running", pid=me, pid_started=mod.proc_start(me))
+    other = subprocess.Popen(["sleep", "30"])         # the "live launcher" named in launch.json is not the child below
+    try:
+        mod.update_launch(d, pid=other.pid, pid_started=mod.proc_start(other.pid))
+        world.passed_check()
+        r = subprocess.run([sys.executable, "-I", str(LAUNCH), "--mode", "review", "-C", str(world.wt), "--schema", str(world.schema),
+                            "-p", "x", "--evidence-dir", str(d), "--json", "--detached-child"], env=env(world),
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 2 and "belongs to a live run" in r.stderr
+        assert not (d / "done").exists() and not (d / "result.json").exists()
+        assert json.loads((d / "launch.json").read_text())["state"] == "running"
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_a_sigterm_to_a_detached_child_before_claude_starts_leaves_the_record(world, tmp_path):
+    mod = load_launcher()
+    d = tmp_path / "run"
+    (d).mkdir()
+    # a stand-in launch_main that is "still starting" when the abort arrives
+    def starting(argv):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+        return 0
+
+    mod.launch_main = starting
+    old = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    try:
+        code = mod.main(["--detached-child", "--evidence-dir", str(d)])
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    assert code == 3 and (d / "done").read_text() == "exit=3\n"
+    assert "interrupted" in json.loads((d / "result.json").read_text())["reason"]
+
+
+def test_a_crash_after_a_tripwire_is_still_a_77(tmp_path):
+    mod = load_launcher()
+    d = tmp_path / "run"
+    d.mkdir()
+
+    def trips_then_crashes(argv):
+        mod._LAST_EXIT[:] = [77]
+        raise OSError("disk full")
+
+    mod.launch_main = trips_then_crashes
+    code = mod.main(["--detached-child", "--evidence-dir", str(d)])
+    assert code == 77 and (d / "done").read_text() == "exit=77\n"
+    assert "tripwire" in json.loads((d / "result.json").read_text())["reason"]

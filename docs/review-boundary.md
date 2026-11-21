@@ -198,10 +198,10 @@ needed. `--json` is required for a resume, for `--pause-on-timeout`, and is forc
 
 **C. Detached launch.** `--detach` re-executes the same launch with `--detached-child` in its own session (`start_new_session`:
 own process group, no controlling terminal, stdin `/dev/null`, stdout and stderr in `RUN/launcher.stdout` and `launcher.stderr`) and returns
-`{"run_dir", "pid", "done", "result", "launch"}` at once, so it is not a child of the caller's job: a SIGHUP, a job-group kill or the end of
+`{"run_dir", "pid", "done", "result", "launch"}` at once (after the boundary self-check, a cache hit after the first run). It is not a child of the caller's job: a SIGHUP, a job-group kill or the end of
 the caller's session no longer reaches it. Every refusal that does not need claude (usage, dirty worktree, symlinks, a missing resume
-dir, a failed boundary self-check) is returned by the caller immediately, exit 2, nothing started; the child repeats the self-check (a
-cache hit) and, if it still fails or crashes, writes `RUN/result.json` and `RUN/done` (`exit=2`, the reason) so a waiter never hangs. The run dir defaults to
+dir, a failed boundary self-check, a run dir that already holds a detached launch) is returned by the caller immediately, exit 2, nothing started; the child repeats the self-check (a
+cache hit) and, if it still fails, is aborted or crashes, writes `RUN/result.json` and `RUN/done` (exit 2, 3 for a signal, 77 when a tripwire preceded the crash; the reason) so a waiter never hangs. It writes nothing into a dir whose launch.json names another live launcher. The run dir defaults to
 `$REVIEW_LAUNCH_STATE_DIR/runs/<UTC>-<id>`. Wait with `bin/wait-file RUN/done`. A detached run is always `--json` and listens for pause
 requests. (No `ade-sched` one-shot or Paseo terminal: they add a scheduler or a UI for what one `setsid` does.)
 

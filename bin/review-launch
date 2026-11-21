@@ -283,6 +283,9 @@ SCHEMA_VERSION = 1
 _NOTES: list[str] = []      # what this process said on stderr (a detached child records it in result.json if it dies early)
 
 
+_LAST_EXIT: list[int] = []   # run.exit once claude has ended (a later crash must not hide a 77)
+
+
 def note(msg: str) -> None:
     _NOTES.append(msg)
     print(f"review-launch: {msg}", file=sys.stderr)
@@ -1652,6 +1655,7 @@ def launch_main(argv: list[str]) -> int:
                           parent_run=str(parent.resolve()) if parent else None, tainted=parent is not None, paused=0)
         run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout,
                          stall_timeout=a.stall_timeout, evidence_dir=run_dir, ctl=ctl)
+        _LAST_EXIT[:] = [run.exit]
     except OSError as e:
         note(f"cannot preserve evidence: {e}")
         return EXIT_USAGE
@@ -1698,6 +1702,14 @@ def detach(argv: list[str], a: argparse.Namespace, wt: str, mode: str) -> int:
     ordinary launch with --detached-child; every refusal above already ran here, so the caller sees them at once."""
     run_dir = a.evidence_dir.absolute()
     run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:       # one detached launch per run dir: a second (retry, double submit) must not overwrite a live run's record
+        os.close(os.open(run_dir / "detach.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        note(f"refused: {run_dir} already holds a detached launch (detach.claim); use a new --evidence-dir")
+        return EXIT_USAGE
+    except OSError as e:
+        note(f"cannot claim {run_dir}: {e}")
+        return EXIT_USAGE
     update_launch(run_dir, schema=SCHEMA_VERSION, state="starting", mode=mode, worktree=wt, head=a.head,
                   detached=True, created=utc_now())
     out = open(run_dir / "launcher.stdout", "ab")
@@ -1735,12 +1747,24 @@ def main(argv: list[str]) -> int:
     if "--detached-child" not in argv:
         return launch_main(argv)
     run_dir = child_evidence_dir(argv)
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):     # an abort before claude starts still leaves a record
+        signal.signal(sig, _on_signal)
     try:
         code = launch_main(argv)
         crash = None
     except BaseException as e:      # noqa: BLE001 - the record must be written whatever killed us
-        code, crash = EXIT_USAGE, f"{type(e).__name__}: {e}"
+        if isinstance(e, Interrupted):
+            code, crash = EXIT_NO_OUTPUT, f"interrupted ({e})"
+        else:
+            code, crash = EXIT_USAGE, f"{type(e).__name__}: {e}"
+        if _LAST_EXIT and _LAST_EXIT[0] == EXIT_TRIP:
+            code = EXIT_TRIP        # a crash after a tripwire is still "left the boundary", never a usage error
+            crash = f"tripwire (exit 77), then {crash}"
     if run_dir is not None and not (run_dir / "done").exists():
+        doc = read_json(run_dir / "launch.json") or {}
+        if isinstance(doc.get("pid"), int) and doc["pid"] != os.getpid() and launcher_alive(doc):
+            print(f"review-launch: {run_dir} belongs to a live run (pid {doc['pid']}): no failure record written", file=sys.stderr)
+            return code
         reason = crash or "; ".join(_NOTES[-3:]) or "the detached launcher ended without a run record"
         try:
             run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
