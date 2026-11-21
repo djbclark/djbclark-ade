@@ -502,6 +502,8 @@ def bind_owner(claim_id: str, *, owner_agent: Optional[str] = None,
             )
         if owner_agent is not None:
             owner["agent"] = owner_agent
+        if owner_record is None and is_paseo_agent_id(owner_agent) and not owner.get("record") and not owner.get("session"):
+            owner_record = owner_agent    # the bind-owner shape, as `new` does (claim-guard 2026-11-21)
         if owner_record is not None:
             owner["record"] = owner_record
         if owner_session is not None:
@@ -703,7 +705,17 @@ def is_mine(claim: dict[str, Any], ident: Optional[str]) -> bool:
     # CLAUDE_CODE_SESSION_ID is not an owner key; caller_ident then carries the PASEO_AGENT_ID as `.paseo_agent`. That id counts as
     # the owner ONLY when it is exactly owner.record of a bind-owner-shaped claim (owner.agent == owner.record, no owner.session).
     paseo = getattr(ident, "paseo_agent", None)
-    return bool(paseo) and _bind_owner_shape(claim) == paseo
+    if not paseo:
+        return False
+    if _bind_owner_shape(claim) == paseo:
+        return True
+    # claim-guard (2026-11-21): a lead that pre-creates a claim for a Paseo worker can only name the worker by its agent id
+    # (`bind-owner --owner-agent ID`). A caller whose own PASEO_AGENT_ID is a Paseo UUID equal to owner.agent is that owner,
+    # whatever owner.record or owner.session say; a harness label ("codex") or any non-UUID owner.agent never matches. Trust
+    # level: PASEO_AGENT_ID is self-set environment (a process that inherits it, such as an in-process sub-agent, is that
+    # agent), the same as every other owner key here: it stops accidents between cooperating agents, not forgery (docs/peer-trust.md).
+    owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
+    return is_paseo_agent_id(paseo) and owner.get("agent") == paseo
 
 
 def _bind_owner_shape(claim: dict[str, Any]) -> Optional[str]:
@@ -761,6 +773,8 @@ def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
                 paseo = (env.get("PASEO_AGENT_ID") or "").strip()
                 if paseo:
                     return CallerIdent(v, paseo)    # M1: is_mine also accepts it as owner.record of a bind-owner-shaped claim
+            elif name == "PASEO_AGENT_ID" and v.strip():
+                return CallerIdent(v, v.strip())    # claim-guard (2026-11-21): is_mine also accepts it as owner.agent of a claim
             return v
     return None
 
@@ -1769,7 +1783,9 @@ def call_workspaces(call: GitCall) -> tuple[list[Optional[Workspace]], bool]:
 
 
 def _foreign(claim: dict[str, Any], rule: str, alt: str) -> Decision:
-    return Decision(False, rule, alt, str(claim.get("id") or ""), owner_label(claim))
+    owner = claim.get("owner") if isinstance(claim.get("owner"), dict) else {}
+    ids = sorted({v for v in (owner.get("agent"), owner.get("record"), owner.get("session")) if isinstance(v, str) and v})
+    return Decision(False, rule, alt, str(claim.get("id") or ""), owner_label(claim), detail={"owner_ids": ids})
 
 
 BANG_ALT = {"shell alias": "a `!` alias runs a shell that reaches the real git past this guard; spell the git "
@@ -2606,7 +2622,7 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
     call.ws = ws_any
     if deny is None:
         return ALLOW
-    deny.detail = {"sub": sub, "cwd": str(ws_any.root if ws_any else call.cwd), "ident": ident or ""}
+    deny.detail = {**deny.detail, "sub": sub, "cwd": str(ws_any.root if ws_any else call.cwd), "ident": ident or ""}
     if OVERRIDE in approved and deny.rule != "coordination-authority-unavailable":
         deny.override = True
         deny.allowed = True
@@ -2682,16 +2698,34 @@ def log_event(decision: Decision, call: GitCall, extra: Optional[dict[str, Any]]
     append_guard_log(rec)
 
 
+def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -> tuple[str, str]:
+    """The `who` line and the `what next` line of a refusal. When the caller's own PASEO_AGENT_ID is one of the claim's owner ids
+    (the guard still refused: a stale ADE_CLAIM_ID, or a claim that names the caller by an id the guard does not read), the text
+    must not tell that owner it is somebody else or to message itself: it says the claim names the caller and how the guard
+    identified it."""
+    env = os.environ if env is None else env
+    paseo = (env.get("PASEO_AGENT_ID") or "").strip()
+    log = f"Logged in {_esc(guard_log_path())}.\n"
+    if paseo and paseo in (d.detail.get("owner_ids") or []):
+        who = (f"  claim {_esc(d.claim_id)} names you (Paseo agent {_esc(paseo)}) as an owner, but the guard identified you as {me}, "
+               "which is not one of its owner keys.\n")
+        nxt = ("  Do not message yourself. The guard reads ADE_CLAIM_ID first (it must be this claim's id: unset it when stale), then "
+               "your Claude session id, then PASEO_AGENT_ID; ask the lead that made the claim to re-bind it with `ade_claims.py "
+               f"bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`. {log}")
+        return who, nxt
+    who = (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id
+           else f"  {_esc(d.owner)}; you are {me}.\n")
+    nxt = ("  Ask the owner (a Paseo agent) with `paseo send --json --no-wait OWNER --prompt '…'`; exit 77 is an answer, "
+           f"not an obstacle to route around. {log}")
+    return who, nxt
+
+
 def refusal_text(decision: Decision, call: GitCall) -> str:
-    me = _esc(decision.detail.get("ident") or "no claim id")
-    who = (f"  claim {_esc(decision.claim_id)}: {_esc(decision.owner)}; you are {me}.\n" if decision.claim_id
-           else f"  {_esc(decision.owner)}; you are {me}.\n")
+    who, nxt = _refusal_lines(decision, _esc(decision.detail.get("ident") or "no claim id"))
     return (f"ade-git-guard: REFUSED `{_esc(call.display())}` [{_esc(decision.rule)}] in "
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
-            f"  Safe alternative: {_esc(decision.message)}.\n"
-            f"  Ask the owner (a Paseo agent) with `paseo send --json --no-wait OWNER --prompt '…'`; exit 77 is an answer, not an obstacle to route around. "
-            f"Logged in {_esc(guard_log_path())}.\n")
+            f"  Safe alternative: {_esc(decision.message)}.\n" + nxt)
 
 
 def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) -> int:
@@ -2871,13 +2905,9 @@ def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, st
     if override:
         sys.stderr.write(f"ade-git-guard: ACP_OPERATOR_APPROVED={OVERRIDE}: allowed {_esc(what)} [{_esc(rule)}] (logged)\n")
         return 0
-    me = _esc(ident or "no claim id")
+    who, nxt = _refusal_lines(d, _esc(ident or "no claim id"), env)
     sys.stderr.write(f"ade-git-guard: REFUSED {_esc(what)} [{_esc(rule)}] by the {via} hook in {_esc(cwd)}\n"
-                     + (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id else
-                        f"  {_esc(d.owner)}; you are {me}.\n")
-                     + f"  Safe alternative: {_esc(d.message)}.\n"
-                     "  Ask the owner (a Paseo agent) with `paseo send --json --no-wait OWNER --prompt '…'`; exit 77 is an answer, not an obstacle to route "
-                     f"around. Logged in {_esc(guard_log_path())}.\n")
+                     + who + f"  Safe alternative: {_esc(d.message)}.\n" + nxt)
     return EXIT_REFUSED
 
 
@@ -3147,13 +3177,13 @@ def _cli(argv: Sequence[str]) -> int:
     n.add_argument("--id", help="claim id (default: generated from the workspace name and time, so a re-claim after `release` "
                    "needs no new id from you; an id stays taken after release)")
     n.add_argument("--path", required=True)
-    n.add_argument("--branch", help="default: the branch checked out in --path (git rev-parse --abbrev-ref HEAD)")
+    n.add_argument("--branch", help="default: the branch checked out in --path (git symbolic-ref HEAD, without refs/heads/)")
     n.add_argument("--base-sha", help="default: the commit checked out in --path (git rev-parse HEAD)")
     n.add_argument("--repo-origin", default="")
     n.add_argument("--owner-record", help="default: --owner-agent when that is a Paseo agent id")
     n.add_argument("--owner-session")
     n.add_argument("--owner-agent", default="", help="default when no owner flag is given: PASEO_AGENT_ID if it is a Paseo agent id, "
-                   "else exit 2 (a claim is never created ownerless unless --ownerless)")
+                   "else exit 2 (no owner flag at all is never accepted without --ownerless)")
     n.add_argument("--ownerless", action="store_true", help="allow a claim with no owner, which `bind-owner` completes "
                    "(the ade-claim plugin's worktree.create.after hook; every other caller names an owner)")
     n.add_argument("--owner-model", default="")
@@ -3197,6 +3227,8 @@ def _cli(argv: Sequence[str]) -> int:
             branch, base_sha = worktree_defaults(a.path, a.branch, a.base_sha)
             owner_agent, owner_record = a.owner_agent, a.owner_record
             owner_session = _owner_session_arg(a.owner_session)
+            if a.ownerless and (owner_agent or owner_record is not None or owner_session):
+                raise ValueError("--ownerless excludes --owner-agent, --owner-record and --owner-session: drop one side")
             if not (owner_agent or owner_record or owner_session) and not a.ownerless:
                 env_agent = (os.environ.get("PASEO_AGENT_ID") or "").strip()
                 if not is_paseo_agent_id(env_agent):
@@ -3223,6 +3255,12 @@ def _cli(argv: Sequence[str]) -> int:
                         raise
                     continue
                 break
+            held = (os.environ.get("ADE_CLAIM_ID") or "").strip()
+            if held and held != c["id"]:
+                old = read_claim(held)
+                if old is not None and not claim_state_active(old):
+                    print(f"ade_claims: your ADE_CLAIM_ID {held} names a claim that is no longer active; export ADE_CLAIM_ID={c['id']} "
+                          "(or unset it)", file=sys.stderr)
             print(target)
         elif a.cmd == "list":
             cs = list_claims(a.state)
