@@ -210,10 +210,10 @@ class TestRouteAgentResolution:
         assert "expired 2000-01-01" in r.model_note(svc("codex"), "judgment")
 
     def test_models_command_reports_a_changed_family(self, catalog, capsys):
-        catalog({"codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"], **AGY})
+        catalog({"codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"], "cursor": ["grok-4.7"], **AGY})
         assert r.main(["models"]) == 0
         assert "CHANGED" not in capsys.readouterr().out
-        catalog({"codex": ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-luna"], **AGY})
+        catalog({"codex": ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-luna"], "cursor": ["grok-4.7"], **AGY})
         assert r.main(["models"]) == 0
         out = capsys.readouterr().out
         assert "gpt-*-astra" in out and "gpt-6.2-astra" in out
@@ -408,3 +408,54 @@ class TestNoPiToAntigravityInstruction:
         # every `antigravity/` left in E1b is the prohibition or the new-native-agent route, never a switch target
         rest = e1b.replace("never an `antigravity/*` model", "").replace("--provider antigravity/<newest gemini family id>", "")
         assert "antigravity/" not in rest, rest
+
+
+class TestCursorGrokRoute:
+    """Operator 2026-11-21 (skills/research 1b): the newest Grok on Cursor's native provider, as a family, never pinned."""
+
+    CURSOR = ["default", "grok-4.5", "grok-4.7", "grok-4.6", "grok-4.7-fast", "composer-2.5", "kimi-k3"]
+
+    def test_the_newest_grok_resolves_from_the_native_cursor_catalog(self, catalog):
+        catalog({"cursor": self.CURSOR})
+        for kind in ("research", "frontier"):
+            assert r.suggest_model(svc("cursor-grok"), kind, {}) == "grok-4.7", kind
+        catalog({"cursor": [*self.CURSOR, "grok-4.10", "grok-5"]})
+        assert r.suggest_model(svc("cursor-grok"), "research", {}) == "grok-5"          # no config edit for a release
+
+    def test_no_grok_listed_is_unresolved_not_invented(self, catalog):
+        catalog({"cursor": ["default", "composer-2.5"]})
+        res = r.resolve_family("cursor", "grok-*")
+        assert res.source == "unresolved" and res.model == "grok-*"
+
+    def test_the_service_is_the_cursor_third_party_pool_not_grok_bot(self, catalog):
+        s = svc("cursor-grok")
+        assert (s.acp_agent, s.pool, s.shares_pool) == ("cursor", None, "cursor")
+        assert set(s.good_at) == {"frontier", "research"}
+        assert not s.retired and s.max_parallel == 1
+        assert r.map_agent_to_provider("cursor", "grok-4.7") == ("cursor", "third_party")
+        for name in ("grok", "grok-bot"):
+            assert name not in r.BY_NAME
+            assert name in r.POLICY["routing"]["never_route"]
+
+    def test_it_is_a_frontier_slice_model_but_not_a_frontier_model(self, catalog):
+        assert r.is_frontier_slice_model("grok-4.7")
+        assert not r.is_frontier_model("grok-4.7")           # no frontier floor/gate on it, like Neon
+        assert not r.is_frontier_slice_model("grok-code-fast-1x-mini")
+
+    def test_adjust_does_not_refuse_it_for_frontier(self, catalog):
+        import route_adjust as ra
+        catalog({"cursor": self.CURSOR})
+        choice = r.Choice(svc("cursor-grok"), 50.0, 0.0, model="grok-4.7", kind="frontier")
+        assert ra._refusal(r, "frontier", choice, {"never_target": ["omp"]}) is None
+
+    def test_routes_for_research_and_frontier_only_when_its_pool_has_room(self, catalog):
+        catalog({"cursor": self.CURSOR})
+        reading = {"remaining": 80.0, "age_s": 0, "windows": {"weekly": 80.0}}
+        q = {s.name: {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}} for s in r.SERVICES}
+        for kind in ("research", "frontier"):
+            assert r.route(kind, quota=q) is None or r.route(kind, quota=q).service.name != "cursor-grok"
+            q["cursor-grok"] = reading
+            got = r.route(kind, quota=q)
+            assert got is not None and got.service.name == "cursor-grok", kind
+            assert got.model.split()[0] == "grok-4.7"
+            q["cursor-grok"] = {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}}

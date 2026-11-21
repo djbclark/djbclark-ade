@@ -27,7 +27,7 @@ class OperatorDisabledTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "config.toml"
             cfg.write_text('[disabled_services]\n"copilot" = "off"\n"cursor" = "grokbot"\n')
-            self.assertEqual(r.operator_disabled(cfg), {"copilot", "cursor", "cursor-cloud"})
+            self.assertEqual(r.operator_disabled(cfg), {"copilot", "cursor", "cursor-cloud", "cursor-grok"})   # shares_pool: disabling `cursor` disables both
 
     def test_missing_or_bad_config_disables_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:

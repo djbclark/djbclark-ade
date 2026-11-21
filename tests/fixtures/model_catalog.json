@@ -1,5 +1,29 @@
 {
-  "codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
-  "antigravity": ["gemini-4-neon-high", "gemini-4-neon-medium", "gemini-4-argon-high", "gemini-4-argon-low",
-                  "gemini-3.8-flash-high", "gemini-pro-orchestrator-neon"]
+  "codex": [
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol"
+  ],
+  "antigravity": [
+    "gemini-4-neon-high",
+    "gemini-4-neon-medium",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-pro-orchestrator-neon"
+  ],
+  "cursor": [
+    "default",
+    "grok-4.7",
+    "grok-4.6",
+    "grok-4.5",
+    "composer-2.5",
+    "claude-opus-5-5",
+    "gpt-5.6-sol",
+    "gemini-4-neon",
+    "kimi-k3",
+    "grok-4.7-fast"
+  ]
 }
