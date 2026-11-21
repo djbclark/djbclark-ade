@@ -187,3 +187,21 @@ def test_no_pi_pool_resolves_to_an_antigravity_model():
                 assert model.split()[0].partition("/")[0] not in router.PI_EXCLUDED_NAMESPACES, (svc.name, model)
     # the native provider rows are the antigravity pools
     assert {s.name for s in router.SERVICES if s.acp_agent == "antigravity"} == {"antigravity-argon", "antigravity-neon"}
+
+
+def test_pi_defaults_skips_a_pool_whose_model_is_antigravity_even_when_pi_lists_it(monkeypatch):
+    """PR 881 r3 LOW-1: the defensive skip in choose() is exercised, not only the config side. Case does not matter (LOW-2)."""
+    zai = next(s for s in router.SERVICES if s.name == "zai")
+    for spelled in ("antigravity/gemini-4-neon", "Antigravity/gemini-4-neon"):
+        monkeypatch.setitem(zai.models, "research", spelled)
+        quota = {"cursor": reading(10), "zai": reading(90)}
+        out = defaults.choose("research", [*MODELS, spelled], quota=quota, age=0)
+        assert out.get("service") != "zai", out
+        assert not str(out.get("model_id") or "").lower().startswith("antigravity/"), out
+
+
+def test_excluded_namespaces_match_case_insensitively():
+    assert router.pi_excluded("antigravity/gemini-4-neon")
+    assert router.pi_excluded("Antigravity/x") and router.pi_excluded("ANTIGRAVITY/x --effort high")
+    assert not router.pi_excluded("cursor/composer-2.5") and not router.pi_excluded("antigravity-like/x")
+    assert router._without_antigravity(["Antigravity/x", "zai/glm-5.3-flash"]) == ["zai/glm-5.3-flash"]

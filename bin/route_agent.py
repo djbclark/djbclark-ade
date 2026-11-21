@@ -1572,12 +1572,17 @@ def _pi_models(paseo_ids: list[str] | None) -> list[str] | None:
 PI_EXCLUDED_NAMESPACES = ("antigravity",)   # operator 2026-11-21: no antigravity/* model through Pi; Paseo's native provider only
 
 
+def pi_excluded(model: str) -> bool:
+    """Does `model` (`<namespace>/<id> ...`) sit in a namespace Pi must not route? Case-insensitive on the namespace."""
+    return model.partition("/")[0].lower() in PI_EXCLUDED_NAMESPACES
+
+
 def _without_antigravity(ids: list[str] | None) -> list[str] | None:
     """Pi's model list minus the namespaces Pi must not route (`antigravity/*`: Pi reaches Antigravity only through pre-paid
     API money; the native `antigravity` Paseo provider is the route, operator 2026-11-21)."""
     if ids is None:
         return None
-    return [m for m in ids if m.partition("/")[0] not in PI_EXCLUDED_NAMESPACES]
+    return [m for m in ids if not pi_excluded(m)]
 
 
 def provider_models(provider: str) -> list[str] | None:
