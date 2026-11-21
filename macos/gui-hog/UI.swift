@@ -1,7 +1,7 @@
 // UI.swift: the window (E1-E4). Plain NSTextField.stringValue for every untrusted string (J3), NSStackView layout, no key equivalents anywhere on the
 // main window, Return/Escape swallowed. Buttons: per row Quit and Force Quit… (a confirm sheet whose default is Cancel); bottom Wait (leftmost, the
 // initial first responder, does nothing), Ignore 1 h, Quit All… (a confirm sheet, Cancel default). PR 3c adds Freeze N min and Freeze… (indefinite,
-// a confirm sheet, Cancel default) on a row, and a Resume line per frozen app; none is ever pressed for you (B6).
+// a confirm sheet, Cancel default) on a row, and a Resume line per frozen app; none is ever pressed for you (B6: the sampler's auto-freeze list runs in Python, not here).
 import AppKit
 import Foundation
 
@@ -29,7 +29,11 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var waitButton: NSButton?
     var snap = Snapshot(t: 0, load: nil, ncpu: nil, cpu5m: nil, holds: [], rows: [], more: 0, protectedHidden: 0, rssTrigger: false)
     var rows: [Row] = []        // the rows on screen: first-seen order, never re-sorted (mergeRows)
-    var lastLayout = Date()     // when the buttons were last laid out (clickAllowed)
+    var grace = ClickGrace()    // per-control-group click grace (a row, a Frozen entry, the bottom bar): one row's change never delays another row's click
+    var busyRows: Set<String> = []     // rows with an action in flight (queued, checking, freezing): their buttons are disabled, no other row's are
+    var busyEntries: Set<String> = []  // Frozen entries being resumed
+    let freezeQueue = DispatchQueue(label: "ade.gui-hog.freeze")   // freezes run one after another (each takes frozen.lock): rapid clicks on several rows queue, none is lost
+    var renderSig = ""          // what the last rebuild drew: an identical rebuild is skipped (it would only destroy a button mid-click)
     var lastBytes = Data()
     var status: [String: String] = [:]
     var acted = false
@@ -142,7 +146,13 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return b
     }
 
+    func allowed(_ key: String) -> Bool { grace.allowed(key, now: Date().timeIntervalSince1970) }
+
     func rebuild() {
+        let sig = "\(snap)|\(rows)|\(status.sorted(by: { $0.key < $1.key }))|\(frozenEntries)|\(noHoldSince != nil)|\(busyRows.sorted())|\(busyEntries.sorted())"
+        if sig == renderSig { return }
+        renderSig = sig
+        let now = Date().timeIntervalSince1970
         for v in root.arrangedSubviews { root.removeArrangedSubview(v); v.removeFromSuperview() }
         // Everything above the rows is one fixed line, and every row has a fixed height: nothing a click could be aimed at ever moves when a build
         // is held or released (adversary round 2, finding 1). The hold lines and notices sit BELOW the rows.
@@ -154,6 +164,8 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addArrangedSubview(head)
         for (i, r) in rows.enumerated() {
             let note = rowNote(r)
+            grace.note("row:" + r.appId, sig: rowLayoutSig(r, index: i, snap), now: now)
+            let busy = busyRows.contains(r.appId)
             let dim: NSColor = note == nil ? .labelColor : .tertiaryLabelColor
             let nameBox = NSStackView(views: [label(r.name, weight: .medium, color: dim), label(r.bundleId.isEmpty ? "no bundle id" : r.bundleId, size: 10, color: .secondaryLabelColor)])
             nameBox.orientation = .vertical
@@ -165,11 +177,11 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let n = note {
                 views.append(label(n, size: 11, color: .secondaryLabelColor, width: statusWidth))
             } else {
-                views.append(button("Quit", tag: i, action: #selector(quitPressed(_:))))
-                views.append(button("Force Quit…", tag: i, action: #selector(forcePressed(_:))))
+                views.append(button("Quit", tag: i, action: #selector(quitPressed(_:)), enabled: !busy))
+                views.append(button("Force Quit…", tag: i, action: #selector(forcePressed(_:)), enabled: !busy))
                 if rowFreezeAllowed(r, snap) {
-                    views.append(button("Freeze \(snap.freezeMinutes) min", tag: i, action: #selector(freezePressed(_:))))
-                    views.append(button("Freeze…", tag: i, action: #selector(freezeIndefinitePressed(_:))))
+                    views.append(button("Freeze \(snap.freezeMinutes) min", tag: i, action: #selector(freezePressed(_:)), enabled: !busy))
+                    views.append(button("Freeze…", tag: i, action: #selector(freezeIndefinitePressed(_:)), enabled: !busy))
                 }
                 views.append(label(status[r.appId] ?? "", size: 11, color: .secondaryLabelColor, width: statusWidth))
             }
@@ -184,10 +196,11 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !frozenEntries.isEmpty {
             root.addArrangedSubview(NSBox.separator())
             root.addArrangedSubview(label("Frozen (stopped, not quit): Resume undoes it", size: 11, color: .secondaryLabelColor))
-            let now = Int(Date().timeIntervalSince1970)
             for (i, e) in frozenEntries.enumerated() {
-                let line = NSStackView(views: [label(e.name, weight: .medium, width: 250), label(e.alive ? thawText(e, now: now) : "root is gone", size: 11, color: .secondaryLabelColor, width: 200),
-                                               button("Resume", tag: i, action: #selector(resumePressed(_:)))])
+                grace.note("entry:" + e.id, sig: "\(i)|\(rows.count)", now: Double(now))
+                let line = NSStackView(views: [label(e.name, weight: .medium, width: 250), label(e.alive ? thawText(e, now: Int(now)) : "root is gone", size: 11, color: .secondaryLabelColor, width: 200),
+                                               button("Resume", tag: i, action: #selector(resumePressed(_:)), enabled: !busyEntries.contains(e.id))])
+                if let k = frozenKeptText(e) { line.addArrangedSubview(label(k, size: 11, color: .secondaryLabelColor)) }
                 if let s = status["entry:" + e.id] { line.addArrangedSubview(label(s, size: 11, color: .secondaryLabelColor)) }
                 line.spacing = 10
                 line.alignment = .centerY
@@ -223,7 +236,9 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if w.isVisible { w.setFrameTopLeftPoint(topLeft) }
         }
         if let w = waitButton, window?.isKeyWindow == true { window?.makeFirstResponder(w) }
-        lastLayout = Date()
+        let h = window?.contentView.map { Int($0.fittingSize.height) } ?? 0
+        grace.note("bottom", sig: "\(h)|\(quitAllTargets(rows).isEmpty)", now: now)   // the bottom bar moves only when the window's height changes
+        grace.keepOnly(Set(rows.map { "row:" + $0.appId } + frozenEntries.map { "entry:" + $0.id } + ["bottom"]))
     }
 
     // MARK: actions
@@ -238,7 +253,7 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func bottomPressed(_ sender: NSButton) {
         guard sender.tag >= 0 && sender.tag < bottomButtons.count else { return }
-        if bottomButtons[sender.tag].action != .wait && !clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) { return }
+        if bottomButtons[sender.tag].action != .wait && !allowed("bottom") { return }
         for e in effects(for: bottomButtons[sender.tag].action) {
             switch e {
             case .close(let c): finish(c)
@@ -259,11 +274,14 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// vet (off the main thread) -> identity re-check and terminate (main thread). `done` runs on the main thread when this row is finished.
     func quit(_ r: Row, kind: QuitKind, done: @escaping () -> Void) {
+        if busyRows.contains(r.appId) { done(); return }   // an action on this row is already in flight (a second click, or Quit All on a row being frozen)
+        busyRows.insert(r.appId)
         status[r.appId] = "checking…"
         rebuild()
         DispatchQueue.global().async {
             let v = self.runner.vet(r)
             DispatchQueue.main.async {
+                self.busyRows.remove(r.appId)
                 if v.code != 0 { self.status[r.appId] = self.refusal(v) } else {
                     let res = performQuit(r, kind: kind, demo: self.cfg.demo)
                     self.status[r.appId] = res.text
@@ -301,13 +319,19 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Freeze (off the main thread; the Python core vets everything live). `minutes` nil is indefinite. Never automatic: only a button press gets here (B6).
+    /// Freeze (off the main thread; the Python core vets everything live). `minutes` nil is indefinite. Only a button press gets here (B6: the sampler's auto-freeze list runs in Python, not through this window).
+    /// Every click is kept: the freezes of several rows run one after another on `freezeQueue` (each holds frozen.lock for its whole run, so two at once would
+    /// time out the second), the row shows "queued…" until its turn, and only THIS row's buttons are disabled meanwhile.
     func freeze(_ r: Row, minutes: Int?) {
-        status[r.appId] = "freezing…"
+        if busyRows.contains(r.appId) { return }
+        busyRows.insert(r.appId)
+        status[r.appId] = "queued…"
         rebuild()
-        DispatchQueue.global().async {
+        freezeQueue.async {
+            DispatchQueue.main.async { self.status[r.appId] = "freezing…"; self.rebuild() }
             let v = self.runner.freeze(r, minutes: minutes)
             DispatchQueue.main.async {
+                self.busyRows.remove(r.appId)
                 if v.code == 0 { self.status[r.appId] = "frozen"; self.acted = true; self.frozenRoots.insert(r.rootPid); self.rows = markFrozen(self.rows, rootPids: self.frozenRoots) } else { self.status[r.appId] = self.freezeRefusal(v) }
                 self.rebuild()
                 self.pollFrozen()
@@ -316,14 +340,14 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func freezePressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        guard sender.tag >= 0 && sender.tag < rows.count, allowed("row:" + rows[sender.tag].appId) else { return }
         let r = rows[sender.tag]
         guard rowFreezeAllowed(r, snap) else { return }
         freeze(r, minutes: snap.freezeMinutes)
     }
 
     @objc func freezeIndefinitePressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        guard sender.tag >= 0 && sender.tag < rows.count, allowed("row:" + rows[sender.tag].appId) else { return }
         let r = rows[sender.tag]
         guard rowFreezeAllowed(r, snap) else { return }
         let a = NSAlert()
@@ -338,13 +362,16 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func resumePressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < frozenEntries.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        guard sender.tag >= 0 && sender.tag < frozenEntries.count, allowed("entry:" + frozenEntries[sender.tag].id) else { return }
         let e = frozenEntries[sender.tag]
+        if busyEntries.contains(e.id) { return }
+        busyEntries.insert(e.id)
         status["entry:" + e.id] = "resuming…"
         rebuild()
         DispatchQueue.global().async {
             let ok = self.runner.resume(e.id, by: "dialog")
             DispatchQueue.main.async {
+                self.busyEntries.remove(e.id)
                 self.status["entry:" + e.id] = ok ? "resumed" : "could not resume it: run `gui-hog thaw --all`"
                 self.rebuild()
                 self.pollFrozen()
@@ -353,14 +380,14 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func quitPressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        guard sender.tag >= 0 && sender.tag < rows.count, allowed("row:" + rows[sender.tag].appId) else { return }
         let r = rows[sender.tag]
         guard rowActionsAllowed(r) else { return }
         quit(r, kind: .polite) {}
     }
 
     @objc func forcePressed(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < rows.count, clickAllowed(lastLayout: lastLayout.timeIntervalSince1970, now: Date().timeIntervalSince1970) else { return }
+        guard sender.tag >= 0 && sender.tag < rows.count, allowed("row:" + rows[sender.tag].appId) else { return }
         let r = rows[sender.tag]
         guard rowActionsAllowed(r) else { return }
         let a = NSAlert()

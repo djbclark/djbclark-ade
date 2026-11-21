@@ -105,6 +105,8 @@ struct FrozenEntry: Equatable {
     var thawAt: Int?        // nil: frozen until someone resumes it
     var members: Int
     var alive: Bool
+    var by: String = ""     // who froze it: dialog, cli, auto (the sampler's auto-freeze list), ...
+    var kept: [String] = [] // processes the keep-running rule left running (CodexBar's HTTP server): never stopped
 }
 
 /// The entries from `gui-hog frozen --json` output, or nil when it is not a version-1 object. Every text field is sanitized (J3).
@@ -115,7 +117,9 @@ func parseFrozen(_ data: Data) -> [FrozenEntry]? {
         guard let d = e as? [String: Any], let id = d["id"] as? String, !id.isEmpty else { continue }
         let app = d["app"] as? [String: Any] ?? [:]
         out.append(FrozenEntry(id: sanitize(id, limit: 40), name: sanitize(app["name"] as? String ?? "?"), state: sanitize(d["state"] as? String ?? "", limit: 20),
-                               thawAt: int(d["thaw_at"]), members: max(1, int(d["members"]) ?? 1), alive: bool(d["alive"])))
+                               thawAt: int(d["thaw_at"]), members: max(1, int(d["members"]) ?? 1), alive: bool(d["alive"]),
+                               by: sanitize(d["by"] as? String ?? "", limit: 20),
+                               kept: (d["kept"] as? [Any] ?? []).prefix(20).compactMap { ($0 as? String).map { sanitize($0, limit: 60) } }.filter { !$0.isEmpty }))
     }
     return out
 }
@@ -259,6 +263,42 @@ let maxWindowRows = 16
 /// A click that lands within this many seconds of the last layout is ignored: the buttons may have moved since the pointer was aimed.
 let clickGraceS = 0.7
 func clickAllowed(lastLayout: Double, now: Double) -> Bool { now - lastLayout >= clickGraceS }
+
+/// The grace is kept PER CONTROL GROUP (a row, a Frozen entry, the bottom bar), and a group's clock restarts only when that group's own layout signature
+/// changes (its position, its buttons, its note). 2026-11-21: with one window-wide clock, every `rebuild()` (the one a click itself causes, to show
+/// "freezing…") restarted the grace for ALL rows, so a second Freeze click within 0.7 s of the first was swallowed and only the first row was frozen.
+/// A status text changes no layout (its label has a fixed width), so it never restarts a clock. A key that was never noted is never allowed.
+struct ClickGrace {
+    private var sigs: [String: String] = [:]
+    private var stamps: [String: Double] = [:]
+
+    /// Record the current layout signature of `key`; the grace starts again only when it differs from the last one.
+    mutating func note(_ key: String, sig: String, now: Double) {
+        if sigs[key] != sig { sigs[key] = sig; stamps[key] = now }
+    }
+    /// Forget the groups that are no longer on screen.
+    mutating func keepOnly(_ keys: Set<String>) {
+        for k in Array(sigs.keys) where !keys.contains(k) { sigs[k] = nil; stamps[k] = nil }
+    }
+    func allowed(_ key: String, now: Double) -> Bool {
+        guard let t = stamps[key] else { return false }
+        return clickAllowed(lastLayout: t, now: now)
+    }
+}
+
+/// What a Frozen entry adds to its line: "frozen automatically" (the sampler's auto-freeze list froze it) and "keeps running: CodexBarCLI" (processes the
+/// keep-running rule never stopped). nil when there is nothing to say.
+func frozenKeptText(_ e: FrozenEntry) -> String? {
+    var parts: [String] = []
+    if e.by == "auto" { parts.append("frozen automatically") }
+    if !e.kept.isEmpty { parts.append("keeps running: " + e.kept.joined(separator: ", ")) }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
+/// The layout signature of one row: what decides where its buttons are and which exist (not its numbers or status text).
+func rowLayoutSig(_ r: Row, index: Int, _ s: Snapshot) -> String {
+    "\(index)|\(rowNote(r) ?? "-")|\(rowFreezeAllowed(r, s))"
+}
 
 /// Only Wait may hold keyboard focus (so Return, Space and Tab never press Ignore, Quit All or a row's Quit). A click on any button still works.
 func buttonRefusesFocus(_ a: BottomAction?) -> Bool { a != .wait }

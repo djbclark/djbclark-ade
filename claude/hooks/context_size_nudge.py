@@ -50,27 +50,48 @@ History:
   trigger, at +113k), ASK_GROWTH 140k for low floors, and the hard text says what to do
   mid-turn (finish the edit, hand off within N tool rounds) since the hook runs only at
   prompt submit.
+- 2026-11-21 (operator task): a lead on claude-opus-5-5 handed itself off at ~150k with the wall
+  at 267k. The fixed BOUNDARY_TOTAL 120k note ("At the next task completion ... run handoff
+  Step 9 yourself", ruling 2026-11-14) read as an instruction whatever room was left, and the
+  growth trigger ASK_GROWTH 140k fired the hard tier at ~175k for low floors. Now the wall is
+  computed per session (compaction_wall: min(configured window, the model's window) less
+  AUTO_COMPACT_BUFFER; CLAUDE_CODE_AUTO_COMPACT_WINDOW, `modelSettings[model]`, then
+  `autoCompactWindow`; unreadable/unknown: today's 267k, bin/context-watch imports the same
+  function) and every tier derives from it: hard = wall - ASK_HEADROOM (50k), boundary =
+  wall - BOUNDARY_HEADROOM (80k, never below BOUNDARY_FLOOR 120k, never above the hard tier),
+  paging max(400k, hard tier); the hard tier never below ASK_FLOOR 80k (a small configured window would loop handoffs). On the 267k wall that is boundary 187k (was 120k), hard 217k
+  (unchanged). 80k is about ten tool rounds ahead of the hard tier's own 50k; there a handoff
+  (a fresh session re-writes ~46k) beats the compaction that is certain to follow (~72k
+  re-written plus a summariser call, ~104k left behind), and before it a handoff only throws
+  away a cache that still has room to pay back; 120k stays the floor because compacting at
+  <=200k simulated a net loss (2026-10-18). ASK_GROWTH is gone (only the total fires the
+  hard tier). The messages print the computed wall and tokens left, keep the 2026-11-14
+  ruling (hand off yourself, never a /new for the operator) and say a finished task alone
+  is no reason to hand off below this tier. The EARLY tier is unchanged.
+  Adversary L1 (PR 862): the hard tier never sits below ASK_FLOOR 80k, and a wall at or under it has no
+  handoff tiers (NO_TIER), so a small configured window cannot make every fresh session hand itself off.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
-Tiers count GROWTH since the floor: the first usage block of the session, or of
+The early tier counts GROWTH since the floor (the hard and boundary tiers count the total): the first usage block of the session, or of
 the conversation after its latest compaction (a compact_boundary record as the newest
 record, a non-sidechain boundary appended since the previous prompt (the transcript's byte
 size is stored per session: an auto-compaction mid-turn is followed by more tool rounds, so
 the boundary is no longer the newest record), or a drop below SHRINK_RATIO of the highest
 size seen since the last reset). Baselines differ a lot (2026-10-28,
 267 sessions: median 71k, range 0-164k; a compacted one ~104k).
-An absolute backstop asks at ASK_TOTAL, 50k+ under the auto-compaction wall.
+The hard tier asks at the total ASK_HEADROOM (50k) under the session's auto-compaction wall (compaction_wall;
+217k on the 267k fallback wall); a growth trigger no longer fires it (2026-11-21).
 
 Levels: 1 = early (delegate from now on; no compaction yet);
 2+ = handoff + /new at a finished task, /compact only to continue in-context
 (auto-compaction), or, mid-turn, finish the
 current edit and hand off within a few tool rounds (_midtask_note); again every
 REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
-the hard tier fires again at ASK_TOTAL (by total, not by growth) after regrowth.
-Separately, once per session at BOUNDARY_TOTAL: prefer handoff + /new over
-/compact at the next task completion. With the wall at 267k, REPEAT_EVERY (level 3+) and the
-PAGE_* tiers are mostly unreachable before the wall (level 3 needs a floor under ~27k).
+the hard tier fires again at the ask total (by total, not by growth) after regrowth.
+Separately, once per session at the boundary tier (wall - BOUNDARY_HEADROOM, 187k on a 267k wall):
+prefer handoff + /new over /compact at the next task completion. With the wall at 267k, REPEAT_EVERY
+(level 3+) and the PAGE_* tiers are mostly unreachable before the wall.
 
 MUST always exit 0 -- never fail or delay a prompt. Python 3 stdlib only.
 Fail-fast: reads only a head window (baseline, once per session) and a tail
@@ -90,6 +111,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path
+from typing import NamedTuple
 
 try:
     import fcntl
@@ -118,24 +140,40 @@ EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compact
 # trigger is the window less the "Autocompact buffer" /context shows (~33k):
 # AUTO_COMPACT_WALL = 267k (measured 2026-10-23..28: 72 auto compactions,
 # preTokens 266k-285k, median ~268k).
-AUTO_COMPACT_WINDOW = 300_000
+AUTO_COMPACT_WINDOW = 300_000  # the FALLBACK window: used only when nothing better is known (below)
 AUTO_COMPACT_BUFFER = 33_000
-AUTO_COMPACT_WALL = AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER
+AUTO_COMPACT_WALL = AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER  # the fallback wall, 267k
+# 2026-11-21: the real wall is computed per session (compaction_wall): min(configured window, the
+# model's own window) less AUTO_COMPACT_BUFFER. Settings are read once per run from SETTINGS_PATH.
+SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+DEFAULT_MODEL_WINDOW = 200_000
+LONG_MODEL_WINDOW = 1_000_000
+MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
 # Level 2 (the hard tier) must fire with headroom before that wall: the hook runs at prompt
 # submit and, rate-limited, between tool rounds, and the agent still needs several tool rounds
 # plus the handoff itself.
 # 2026-10-28: ASK_GROWTH 200k fired at floor+200k = 235-271k (median floor 71k: past the
 # wall, never), leaving 0-20k, and ASK_TOTAL 300k sat above the wall and never fired.
 ASK_HEADROOM = 50_000
-ASK_TOTAL = AUTO_COMPACT_WALL - ASK_HEADROOM  # 217k: level 2 regardless of floor; after a
-# compaction (floor ~104k) this is what fires, at +113k, since floor + ASK_GROWTH would be 244k
-ASK_GROWTH = 140_000    # level 2 for a low floor (35-77k): sooner than ASK_TOTAL, always < it
+# A fresh session already holds ~46-71k (median floor 71k, 2026-10-28), so a hard tier below ASK_FLOOR would fire
+# at once and loop self-handoffs on a small configured window (adversary L1, PR 862). The hard and boundary tiers
+# therefore never sit below ASK_FLOOR; a wall at or under it has no handoff tiers at all (Claude Code compacts first).
+ASK_FLOOR = 80_000
+NO_TIER = 10**15  # a tier that never fires (_tiers: a wall at or under ASK_FLOOR)
+# The boundary tier ("hand off at the next task completion") fires only near the limit
+# (2026-11-21: a fixed 120k made a lead on a 267k wall hand itself off at ~150k with 117k left).
+# 80k = about ten tool rounds (TOOL_ROUND_TOKENS) before the hard tier's own 50k: the handoff
+# (a fresh session re-writes ~46k) is then cheaper than the compaction that is certain to follow
+# (~72k re-written plus a summariser call, ~104k left behind), and earlier than this a handoff
+# only discards a cache that still has room to pay back. Never below BOUNDARY_FLOOR: compacting
+# at <=200k simulated a net loss (History 2026-10-18), so a small wall keeps the old 120k.
+BOUNDARY_HEADROOM = 80_000
+BOUNDARY_FLOOR = 120_000
 TOOL_ROUND_TOKENS = 8_000    # a tool round costs 3-8k; a big file or log read costs more
 HANDOFF_RESERVE = 15_000     # what the handoff skill itself needs before the wall
-BOUNDARY_TOTAL = 120_000  # 2026-10-25: earlier handoff at completed task boundaries
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
-PAGE_GROWTH = 300_000   # Hermes ping (once per climb), whichever comes first
-PAGE_TOTAL = 400_000
+PAGE_GROWTH_MIN = 300_000  # Hermes ping (once per climb), whichever comes first; scaled by _tiers
+PAGE_TOTAL_MIN = 400_000
 SHRINK_RATIO = 0.75     # a size below this share of the last one = compacted
 COMPACTED = "compacted"  # _last_context_tokens: boundary newer than any usage
 # Unescaped quotes only: the same text inside a tool result is JSON-escaped.
@@ -473,15 +511,103 @@ def _first_context_tokens(transcript_path):
     return None
 
 
-def _level(total, growth):
-    """0 = quiet, 1 = early, 2+ = ask (one more per REPEAT_EVERY)."""
-    steps = []
-    if growth >= ASK_GROWTH:
-        steps.append((growth - ASK_GROWTH) // REPEAT_EVERY)
-    if total >= ASK_TOTAL:
-        steps.append((total - ASK_TOTAL) // REPEAT_EVERY)
-    if steps:
-        return 2 + max(steps)
+def read_settings():
+    """~/.claude/settings.json as a dict ({} when missing, unreadable or not an object)."""
+    try:
+        data = json.loads(SETTINGS_PATH.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _window(value):
+    """A usable window from a setting: a whole number above the buffer and at most MAX_WINDOW (`"auto"`, strings,
+    bools, fractions, junk, absurd sizes: None). A float such as 300000.0 counts when integral."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    ok = (isinstance(value, int) and not isinstance(value, bool)
+          and AUTO_COMPACT_BUFFER < value <= MAX_WINDOW)
+    return value if ok else None
+
+
+def model_window(model):
+    """The model's own context window when the id says so: 1M for `[1m]`, 200k for Haiku; None when unknown."""
+    name = (model or "").lower()
+    if "[1m]" in name:
+        return LONG_MODEL_WINDOW
+    return DEFAULT_MODEL_WINDOW if "haiku" in name else None
+
+
+def compaction_wall(settings=None, model=None):
+    """Tokens at which Claude Code auto-compacts this session: its window minus AUTO_COMPACT_BUFFER.
+
+    Window = min(the configured window, the model's window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of this
+    process (the hook is a child of the session, so it is the session's own), else settings
+    `modelSettings[<model>].autoCompactWindow`, else `autoCompactWindow`. With none configured: the model window
+    when the id names one; else 1M when settings `model` carries `[1m]`; else the AUTO_COMPACT_WINDOW fallback
+    (300k, today's 267k wall). Not knowable here, so not read: project-level settings, `--autocompact`, the
+    `modelSettings` key format beyond an exact model id, the window of any model but Haiku/`[1m]` ids.
+    `settings` None reads SETTINGS_PATH."""
+    if settings is None:
+        settings = read_settings()
+    configured = None
+    try:
+        configured = _window(int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")))
+    except ValueError:
+        pass
+    per_model = settings.get("modelSettings")
+    per_model = per_model.get(model) if isinstance(per_model, dict) and model else None
+    if configured is None and isinstance(per_model, dict):
+        configured = _window(per_model.get("autoCompactWindow"))
+    if configured is None:
+        configured = _window(settings.get("autoCompactWindow"))
+    known = [w for w in (configured, model_window(model)) if w]
+    if known:
+        window = min(known)
+    else:
+        default_model = settings.get("model")
+        long_model = isinstance(default_model, str) and "[1m]" in default_model.lower()
+        window = LONG_MODEL_WINDOW if long_model else AUTO_COMPACT_WINDOW
+    return window - AUTO_COMPACT_BUFFER
+
+
+class Tiers(NamedTuple):
+    wall: int
+    ask_total: int
+    boundary_total: int
+    page_total: int
+    page_growth: int
+
+
+def _tiers(wall):
+    """The Tiers for one compaction wall.
+
+    ask = wall - ASK_HEADROOM, at least ASK_FLOOR (a wall at or under it has no handoff tiers: NO_TIER). boundary = wall - BOUNDARY_HEADROOM, never below BOUNDARY_FLOOR and never
+    above ask. Paging scales: at least PAGE_TOTAL_MIN, and no earlier than the hard tier."""
+    if wall <= ASK_FLOOR:  # below a fresh session's own size: Claude Code compacts first; no handoff tiers
+        return Tiers(wall, NO_TIER, NO_TIER, NO_TIER, NO_TIER)
+    ask = max(wall - ASK_HEADROOM, ASK_FLOOR)
+    boundary = min(max(wall - BOUNDARY_HEADROOM, BOUNDARY_FLOOR), ask)
+    page_total = max(PAGE_TOTAL_MIN, ask)
+    return Tiers(wall, ask, boundary, page_total, max(PAGE_GROWTH_MIN, page_total - 100_000))
+
+
+# What a session gets when its wall cannot be learned (today's 267k behaviour): the module constants.
+_FALLBACK = _tiers(AUTO_COMPACT_WALL)
+ASK_TOTAL = _FALLBACK.ask_total            # 217k
+BOUNDARY_TOTAL = _FALLBACK.boundary_total  # 187k
+PAGE_TOTAL = _FALLBACK.page_total          # 400k
+PAGE_GROWTH = _FALLBACK.page_growth        # 300k
+
+
+def _level(total, growth, tiers=None):
+    """0 = quiet, 1 = early, 2+ = ask (one more per REPEAT_EVERY of total beyond the hard tier).
+
+    Only the TOTAL fires the hard tier (2026-11-21): a growth trigger (ASK_GROWTH 140k, from the
+    floor) fired it at ~175k on a 267k wall, 90k before the wall had anything to say."""
+    ask_total = (tiers or _FALLBACK).ask_total
+    if total >= ask_total:
+        return 2 + (total - ask_total) // REPEAT_EVERY
     return 1 if growth >= EARLY_GROWTH else 0
 
 
@@ -519,31 +645,37 @@ _SELF_HANDOFF = ("`~/src/djbclark-ade/bin/ade-self-session handoff`, an acknowle
                  "add `--thinking LEVEL` to pin the successor's thinking level")
 
 
-def _boundary_message(total, successor=None):
+def _boundary_message(total, successor=None, wall=None):
+    wall = AUTO_COMPACT_WALL if wall is None else wall
+    left = max(0, wall - total)
     return (
-        f"Context is {total:,}. At the next task completion, if the following "
+        f"Context is {total:,}: {left:,} tokens left before Claude Code compacts this session at "
+        f"{wall:,}. This is context pressure near the real limit, not a reason of its own to hand "
+        "off: below this tier a finished task alone is no reason to hand off or compact. "
+        "At the next task completion, if the following "
         f"work is not a direct continuation and work remains, run handoff Step 9 yourself "
         f"({_SELF_HANDOFF}) instead of /compact, and never hand the operator a /new "
-        "(operator ruling 2026-11-14: when there is more work, always hand off yourself): a fresh session "
+        "(operator ruling 2026-11-14: when handing off, do it yourself): a fresh session "
         "re-writes ~46k, a compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
         + _successor_note(successor)
     )
 
 
-def _midtask_note(total, in_context):
+def _midtask_note(total, in_context, wall=None):
     """Say how many tool rounds fit before the wall.
     The hook runs on prompt submit and between tool rounds (PostToolUse, rate-limited), so the
     cadence sentence is the same for both events (2026-10-28: "at the next natural boundary"
     was never reached in the 14-20k tokens that were left).
     `in_context` names the caller's way to continue in-context: each message branch has its own."""
-    left = max(0, AUTO_COMPACT_WALL - total)
+    wall = AUTO_COMPACT_WALL if wall is None else wall
+    left = max(0, wall - total)
     rounds = (left - HANDOFF_RESERVE) // TOOL_ROUND_TOKENS
     cadence = (f"this reminder runs when a prompt is submitted and between tool rounds "
                f"(at most every {POST_TOOL_CHECK_SECONDS} s). ")
     lead = (
         f"About {left:,} tokens remain before Claude Code compacts this session at "
-        f"{AUTO_COMPACT_WALL:,}; " + cadence
+        f"{wall:,}; " + cadence
         + "If this turn is mid-task: finish the current edit "
         "(never leave one half-written), then run the handoff "
     )
@@ -557,16 +689,18 @@ def _midtask_note(total, in_context):
     return lead + "right after it, with no further tool rounds" + alternative
 
 
-def _ask_message(total, growth, repeat, successor=None):
+def _ask_message(total, growth, repeat, successor=None, wall=None):
+    wall = AUTO_COMPACT_WALL if wall is None else wall
     lead = "Context is still growing" if repeat else "Context is large"
     # bin/self-slash is gone (2026-11-06, slim-down E4): there is no path to queue a /compact for the session, so
     # auto-compaction takes it (a Claude session cannot run built-in slash commands itself).
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
-        f"itself at about {AUTO_COMPACT_WALL:,} tokens "
-        f"(autoCompactWindow {AUTO_COMPACT_WINDOW:,} in ~/.claude/settings.json "
-        "less its buffer; the PreCompact hook writes the Tier 1 checkpoint "
+        f"itself at about {wall:,} tokens, {max(0, wall - total):,} from now "
+        f"(this session's compaction window {wall + AUTO_COMPACT_BUFFER:,}, the lower of "
+        "autoCompactWindow in ~/.claude/settings.json and the model's own window, "
+        f"less its {AUTO_COMPACT_BUFFER:,} buffer; the PreCompact hook writes the Tier 1 checkpoint "
         "first). Until then start no new heavy work inline: send it through "
         "/fan-out or a minimum-spec sub-agent. When the current task is "
         "finished and more work remains, same topic or not, run handoff Step 9 yourself "
@@ -574,7 +708,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "hand the operator a /new (operator ruling 2026-11-14); a fresh session "
         "re-writes ~46k. Keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "let the auto-compaction take it") + _successor_note(successor) + " "
+        + _midtask_note(total, "let the auto-compaction take it", wall) + _successor_note(successor) + " "
         + _COST_NOTE
     )
 
@@ -795,7 +929,14 @@ def _check_state(data, event, session_id, transcript_path):
     session_state["peak"] = max(total, peak or 0)
     growth = max(0, total - baseline)
 
-    level = _level(total, growth)
+    # This session's real wall (settings read once, the model from the transcript tail): every
+    # handoff/compact tier below derives from it. Anything unreadable: today's 267k fallback.
+    try:
+        wall = compaction_wall(read_settings(), _last_assistant_model(transcript_path))
+    except Exception:
+        wall = AUTO_COMPACT_WALL
+    tiers = _tiers(wall)
+    level = _level(total, growth, tiers)
     fired = session_state.get("level", 0)
     if not isinstance(fired, int):
         fired = 0
@@ -804,7 +945,7 @@ def _check_state(data, event, session_id, transcript_path):
     # dipped total is no bound: a floor-20k session fired level 2 at 160k, dips to 125k, and
     # must not print it again at 161k (round 3, F2).
     peak_total = session_state["peak"]
-    fired = min(fired, _level(peak_total, peak_total))
+    fired = min(fired, _level(peak_total, peak_total, tiers))
 
     messages = []
     if level > fired:
@@ -812,15 +953,16 @@ def _check_state(data, event, session_id, transcript_path):
             messages.append((_early_message(total, growth), "early"))
         else:
             messages.append((_ask_message(total, growth, repeat=fired >= 2,
-                                         successor=_session_successor(transcript_path)), "ask"))
+                                         successor=_session_successor(transcript_path), wall=wall), "ask"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)
 
     # Once per session id, not per compaction: a /new starts a new id.
-    if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):
+    if total >= tiers.boundary_total and not session_state.get("boundary"):
         session_state["boundary"] = True
-        messages.append((_boundary_message(total, successor=_session_successor(transcript_path)), "boundary"))
+        messages.append((_boundary_message(total, successor=_session_successor(transcript_path), wall=wall),
+                         "boundary"))
 
     if messages:
         message = "\n".join(text for text, _ in messages)
@@ -836,7 +978,7 @@ def _check_state(data, event, session_id, transcript_path):
                 # PR 108 embeds the mid-task note in every hard-tier message.
                 _log_nudge(session_id, event, level, total, growth, "midtask")
 
-    if growth >= PAGE_GROWTH or total >= PAGE_TOTAL:
+    if growth >= tiers.page_growth or total >= tiers.page_total:
         if not session_state.get("paged"):
             session_state["paged"] = True
             repo = os.path.basename((data.get("cwd") or "").rstrip("/")) or "claude"

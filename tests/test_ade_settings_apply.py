@@ -237,12 +237,12 @@ def _patched_main(tmp_path, monkeypatch, fn):
 
 
 def test_main_refuses_and_writes_nothing_when_a_live_key_would_vanish(tmp_path, monkeypatch):
-    rc, lp = _patched_main(tmp_path, monkeypatch, lambda lv, t, h, roots=None: ({"model": "opus"}, ["x"], []))
+    rc, lp = _patched_main(tmp_path, monkeypatch, lambda lv, t, h, roots=None, **kw: ({"model": "opus"}, ["x"], []))
     assert rc == 1 and json.loads(lp.read_text()) == live() and not list(tmp_path.glob("*.bak-*"))
 
 
 def test_main_aborts_when_live_changed_while_merging(tmp_path, monkeypatch):
-    def fn(lv, t, h, roots=None):
+    def fn(lv, t, h, roots=None, **kw):
         (tmp_path / "s.json").write_text('{"changed": true}')
         return dict(lv, sandbox={"x": 1}), ["/sandbox"], []
     rc, lp = _patched_main(tmp_path, monkeypatch, fn)
@@ -279,3 +279,123 @@ def test_a_secret_inside_a_list_or_a_newer_token_shape_is_refused():
     assert sa.secret_paths({"url": "https://h/mcp?api_key=abc123"}) == ["/url"]
     assert sa.secret_paths({"c": "FOO_SECRET=abc run"}) == ["/c"]
     assert sa.secret_paths({"ok": "post-edit-check --hook"}) == []
+
+
+def test_allow_env_flags_add_and_remove_only_named_keys():
+    """--allow-env-add names keys that may be added, --allow-env-remove keys that may be removed (separate, so adding
+    from an older template cannot silently remove). Everything else stays (adversary A1)."""
+    lv = {"env": {"AGENT_TEAMS": "1", "KEEP": "x"}}
+    t = {"env": {"CODE_MODE": "1", "KEEP": "x"}}
+    m, added, skipped = _merge(lv, t, HOME, ROOTS)  # nothing named: nothing added or removed
+    assert m["env"] == lv["env"]
+    rm = []
+    m, added, skipped = _merge(lv, t, HOME, ROOTS, allow_env_add={"CODE_MODE"}, allow_env_remove={"AGENT_TEAMS"}, removed=rm)
+    assert m["env"] == {"CODE_MODE": "1", "KEEP": "x"}
+    assert rm == ["/env/AGENT_TEAMS"]
+    assert any(x.startswith("/env/AGENT_TEAMS") and "removed" in x for x in added)
+    assert any(x.startswith("/env/CODE_MODE") and "absent" in x for x in added)
+    # add alone never removes; remove alone never adds
+    m, _, _ = _merge(lv, t, HOME, ROOTS, allow_env_add={"CODE_MODE", "AGENT_TEAMS"})
+    assert m["env"] == {"AGENT_TEAMS": "1", "KEEP": "x", "CODE_MODE": "1"}
+    rm = []
+    m, _, _ = _merge(lv, t, HOME, ROOTS, allow_env_remove={"AGENT_TEAMS", "CODE_MODE"}, removed=rm)
+    assert m["env"] == {"KEEP": "x"} and rm == ["/env/AGENT_TEAMS"]
+
+
+def test_a_named_removal_needs_the_template_to_have_dropped_the_key():
+    """A stale or wrong template that still carries the key removes nothing, and never changes its value."""
+    lv = {"env": {"FLAG": "0"}}
+    m, added, skipped = _merge(lv, {"env": {"FLAG": "1"}}, HOME, ROOTS, allow_env_remove={"FLAG"}, allow_env_add={"FLAG"})
+    assert m == lv and added == [] and "/env/FLAG (value differs)" in skipped
+
+
+def test_allow_env_add_with_no_live_env_block_adds_only_named_keys():
+    m, added, skipped = _merge({"model": "x"}, {"env": {"CODE_MODE": "1", "OTHER": "2"}}, HOME, ROOTS, allow_env_add={"CODE_MODE"})
+    assert m["env"] == {"CODE_MODE": "1"}
+    assert "/env/CODE_MODE (key absent from live)" in added
+    assert any(x.startswith("/env/OTHER") for x in skipped)
+    # nothing named: no env block is created (A1), and a named key the template lacks creates no empty one
+    m, _, skipped = _merge({"model": "x"}, {"env": {"CODE_MODE": "1"}}, HOME, ROOTS)
+    assert "env" not in m and any(x.startswith("/env ") for x in skipped)
+    m, _, _ = _merge({"model": "x"}, {"env": {"CODE_MODE": "1"}}, HOME, ROOTS, allow_env_add={"NOPE"})
+    assert "env" not in m
+
+
+def test_a_template_without_any_env_block_still_removes_only_the_named_key():
+    rm = []
+    m, _, _ = _merge({"env": {"A": "1", "B": "2"}}, {"model": "x"}, HOME, ROOTS, allow_env_remove={"A"}, removed=rm)
+    assert m["env"] == {"B": "2"} and rm == ["/env/A"]
+
+
+def test_refuse_if_dropped_exempts_exactly_the_named_paths():
+    lv = {"env": {"A": "1", "B": "2"}, "model": "x"}
+    assert sa.refuse_if_dropped(lv, {"env": {"B": "2"}, "model": "x"}, ["/env/A"]) == []
+    assert sa.refuse_if_dropped(lv, {"env": {"B": "2"}, "model": "x"}) == ["/env/A"]
+    # an exemption never covers a different path
+    assert sa.refuse_if_dropped(lv, {"env": {}, "model": "x"}, ["/env/A"]) == ["/env/B"]
+    assert sa.refuse_if_dropped(lv, {"env": {"A": "1", "B": "2"}}, ["/env/A"]) == ["/model"]
+
+
+SECRETISH = "sk-" + "a1b2c3d4e5f6a7b8c9d0e1f2"
+
+
+def _end_to_end(tmp_path, live_obj, tmpl_obj, *flags):
+    lp = tmp_path / "s.json"
+    lp.write_text(json.dumps(live_obj, indent=2) + "\n")
+    lp.chmod(0o640)
+    tp = tmp_path / "t.tmpl"
+    tp.write_text(json.dumps(tmpl_obj))
+    r = subprocess.run([sys.executable, str(BIN / "ade-settings-apply"), "--home", HOME, "--live", str(lp), "--template", str(tp), *flags],
+                       capture_output=True, text=True)
+    return r, lp
+
+
+def test_main_end_to_end_the_844_case_drops_agent_teams_and_adds_code_mode(tmp_path):
+    """The #844 case through the real CLI: drop AGENT_TEAMS, add CODE_MODE, keep everything else, one backup, no values printed."""
+    lv = {"model": "opus", "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": SECRETISH, "KEEP": "keepval"}}
+    t = {"model": "opus", "env": {"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "codemodeval", "KEEP": "keepval"}}
+    flags = ["--allow-env-remove", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "--allow-env-add", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE"]
+    r, lp = _end_to_end(tmp_path, lv, t, *flags)  # dry-run first: reports, writes nothing
+    assert r.returncode == 0, r.stderr
+    assert json.loads(lp.read_text()) == lv and not list(tmp_path.glob("*.bak-*"))
+    assert "/env/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in r.stdout and "/env/CLAUDE_CODE_EXPERIMENTAL_CODE_MODE" in r.stdout
+    r, lp = _end_to_end(tmp_path, lv, t, *flags, "--apply", "--json")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(lp.read_text()) == {"model": "opus", "env": {"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "codemodeval", "KEEP": "keepval"}}
+    baks = list(tmp_path.glob("s.json.bak-*"))
+    assert len(baks) == 1 and json.loads(baks[0].read_text()) == lv
+    assert stat.S_IMODE(os.stat(lp).st_mode) == 0o640 and stat.S_IMODE(os.stat(baks[0]).st_mode) == 0o640
+    rep = json.loads(r.stdout)
+    assert rep["applied"] is True and rep["dropped"] == [] and rep["removed"] == ["/env/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]
+    assert SECRETISH not in r.stdout + r.stderr and "codemodeval" not in r.stdout + r.stderr and "keepval" not in r.stdout + r.stderr
+
+
+def test_main_add_alone_leaves_the_stale_key_in_place(tmp_path):
+    lv = {"env": {"AGENT_TEAMS": "1", "KEEP": "x"}}
+    t = {"env": {"CODE_MODE": "1", "KEEP": "x"}}
+    r, lp = _end_to_end(tmp_path, lv, t, "--allow-env-add", "CODE_MODE", "--apply")
+    assert r.returncode == 0, r.stderr  # an add alone leaves AGENT_TEAMS in place, so nothing disappears
+    assert json.loads(lp.read_text())["env"] == {"AGENT_TEAMS": "1", "KEEP": "x", "CODE_MODE": "1"}
+
+
+def test_main_refuses_a_removal_with_an_older_template_that_still_has_the_key(tmp_path):
+    lv = {"env": {"AGENT_TEAMS": "1"}}
+    r, lp = _end_to_end(tmp_path, lv, {"env": {"AGENT_TEAMS": "1"}}, "--allow-env-remove", "AGENT_TEAMS", "--apply")
+    assert r.returncode == 0 and json.loads(lp.read_text()) == lv and not list(tmp_path.glob("*.bak-*"))
+
+
+def test_main_end_to_end_adds_into_a_live_file_with_no_env_block(tmp_path):
+    r, lp = _end_to_end(tmp_path, {"model": "x"}, {"model": "x", "env": {"CODE_MODE": "1", "OTHER": "2"}}, "--allow-env-add", "CODE_MODE", "--apply")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(lp.read_text()) == {"model": "x", "env": {"CODE_MODE": "1"}}
+
+
+def test_main_still_refuses_any_other_disappearing_key_even_with_a_remove_flag(tmp_path, monkeypatch):
+    lv = {"env": {"A": "1", "B": "2"}}
+    lp = tmp_path / "s.json"
+    lp.write_text(json.dumps(lv))
+    tp = tmp_path / "t.tmpl"
+    tp.write_text("{}")
+    monkeypatch.setattr(sa, "merge", lambda live, t, h, roots=None, **kw: (kw["removed"].append("/env/A") or {"env": {}}, ["x"], []))
+    rc = sa.main(["--home", HOME, "--live", str(lp), "--template", str(tp), "--apply", "--allow-env-remove", "A"])
+    assert rc == 1 and json.loads(lp.read_text()) == lv and not list(tmp_path.glob("*.bak-*"))

@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Resolve the full human-facing identity of one agent, for the "always identify an
+agent you mention" rule (docs/agent-identity.md, 2026-11-20).
+
+When an agent mentions another agent to a human, it must give: the agent id, the
+workspace name, the window (Paseo) / tab (herdr) name, and the tab (Paseo) /
+pane (herdr) name. This script gathers exactly those fields so the rule is a
+command, not a memory.
+
+    agent-id <AGENT_ID> [--json]
+
+AGENT_ID is a full UUID or a hex prefix of one (at least 4 characters); anything
+else, including anything that starts with `-`, is refused with exit 2 before a
+single subprocess runs, so a flag is never passed on to paseo or herdr.
+
+Fields are best-effort: a field that cannot be resolved prints `?`, and a missing
+`paseo` or `herdr` binary, a timeout or an unexpected JSON shape gives `?`, never a
+traceback. Where the fields come from:
+
+- Paseo workspace id: `workspaceId` in `~/.paseo/agents/<cwd-slug>/<id>.json`
+  (`paseo agent inspect --json` carries no workspace field), named through
+  `paseo workspace ls --json`. The window of a Paseo agent is that workspace name.
+- Paseo tab: the agent's `Name` from `paseo agent inspect --json` (a Paseo tab is
+  titled with the agent name, docs/workspace-layout.md).
+- herdr: workspace label, tab label and pane id of the pane whose agent session is
+  the id (herdr's tab is Paseo's window, herdr's pane is Paseo's tab).
+- A local Claude Code session found outside Paseo (a session UUID or a unique
+  prefix): `~/.claude/sessions/<pid>.json` (`sessionId`, `name`); an entry whose pid is
+  dead is stale and skipped. Its `name` (for example `src-00`) is the address
+  `ListAgents` shows and `SendMessage` takes; it prints as a fifth line / the
+  `sendmessage_name` JSON key, and only when a live session matches uniquely.
+
+Read-only: paseo workspace ls / agent inspect, herdr workspace/tab/pane list, and
+one read of the Paseo state file. Every subprocess call has a timeout.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+TIMEOUT_S = 15
+# A UUID or a hex prefix of one: hex digits and hyphens, starting with a hex digit.
+_ID_RE = re.compile(r"^[0-9A-Fa-f][0-9A-Fa-f-]{3,35}$")
+
+
+def valid_agent_id(agent_id: str) -> bool:
+    return bool(_ID_RE.match(agent_id))
+
+
+def _run(argv: list[str]) -> str | None:
+    """stdout of argv, or None on a missing binary, a timeout or a non-zero exit."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _json_argv(argv: list[str]) -> object:
+    out = _run(argv)
+    if out is None:
+        return None
+    try:
+        return json.loads(out)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _herdr_argv(argv: list[str]) -> dict:
+    """herdr prints an envelope {"result": {...}}; anything else is {}."""
+    env = _json_argv(["herdr", *argv])
+    if not isinstance(env, dict):
+        return {}
+    result = env.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _dict_list(value: object) -> list[dict]:
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
+def paseo_agents_dir() -> Path:
+    override = os.environ.get("AGENT_ID_PASEO_AGENTS_DIR")
+    return Path(override) if override else Path.home() / ".paseo" / "agents"
+
+
+def claude_sessions_dir() -> Path:
+    override = os.environ.get("AGENT_ID_CLAUDE_SESSIONS_DIR")
+    return Path(override) if override else Path.home() / ".claude" / "sessions"
+
+
+def _pid_alive(pid: object) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # PermissionError: the process exists, it is just not ours
+        return True
+    return True
+
+
+def claude_session(agent_id: str) -> dict:
+    """The one live local Claude Code session whose sessionId is agent_id (or starts with it), else {}.
+
+    Entries are ~/.claude/sessions/<pid>.json; a dead pid is a stale entry and is skipped. Two live matches
+    (an ambiguous prefix) resolve to nothing rather than a guess. Only sessionId and name are used."""
+    want = agent_id.lower()
+    found: dict[str, str] = {}
+    root = claude_sessions_dir()
+    try:
+        paths = sorted(root.glob("*.json"))
+    except OSError:
+        return {}
+    for path in paths:
+        if not path.stem.isdigit():
+            continue
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        sid, name = rec.get("sessionId"), rec.get("name")
+        if not isinstance(sid, str) or not sid.lower().startswith(want):
+            continue
+        if not _pid_alive(rec.get("pid", int(path.stem))):
+            continue
+        found[sid] = name if isinstance(name, str) and name else "?"
+    if len(found) != 1:
+        return {}
+    (sid, name), = found.items()
+    return {"sessionId": sid, "name": name}
+
+
+def paseo_state(agent_id: str) -> dict:
+    """The Paseo state record for agent_id (or the unique record whose id starts with it)."""
+    root = glob.escape(str(paseo_agents_dir()))
+    paths = glob.glob(f"{root}/*/{glob.escape(agent_id)}*.json")
+    if len(paths) != 1:  # none, or an ambiguous prefix
+        return {}
+    try:
+        rec = json.loads(Path(paths[0]).read_text())
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def paseo_workspace_name(state: dict, workspaces: object) -> str:
+    wsid = state.get("workspaceId")
+    if not isinstance(wsid, str) or not wsid:
+        return "?"
+    for w in _dict_list(workspaces):
+        if w.get("workspaceId") == wsid:
+            name = w.get("name")
+            return name if isinstance(name, str) and name else "?"
+    return "?"
+
+
+def paseo_tab_name(inspect: object) -> str:
+    name = inspect.get("Name") if isinstance(inspect, dict) else None
+    return name if isinstance(name, str) and name else "?"
+
+
+def herdr_placements(agent_id: str) -> tuple[str, str, str]:
+    """(workspace_label, tab_label, pane_id) for the pane whose agent session is agent_id."""
+    tabs = _dict_list(_herdr_argv(["tab", "list"]).get("tabs"))
+    panes = _dict_list(_herdr_argv(["pane", "list"]).get("panes"))
+    workspaces = _dict_list(_herdr_argv(["workspace", "list"]).get("workspaces"))
+    for pane in panes:
+        sess = pane.get("agent_session")
+        if not isinstance(sess, dict) or sess.get("value") != agent_id:
+            continue
+        tab_id = pane.get("tab_id")
+        ws_id = pane.get("workspace_id")
+        tab_label = next((t.get("label") or "?" for t in tabs if t.get("tab_id") == tab_id), "?")
+        ws_label = next((w.get("label") or "?" for w in workspaces if w.get("workspace_id") == ws_id), "?")
+        return str(ws_label), str(tab_label), str(pane.get("pane_id") or "?")
+    return "?", "?", "?"
+
+
+def resolve(agent_id: str) -> dict:
+    state = paseo_state(agent_id)
+    session = {} if state else claude_session(agent_id)
+    full_id = state.get("id") if isinstance(state.get("id"), str) else session.get("sessionId", agent_id)
+    inspect = _json_argv(["paseo", "agent", "inspect", full_id, "--json"])
+    workspaces = _json_argv(["paseo", "workspace", "ls", "--json"])
+    if isinstance(workspaces, dict):
+        workspaces = workspaces.get("workspaces")
+    ws_name = paseo_workspace_name(state, workspaces)
+    herdr_ws, herdr_tab, herdr_pane = herdr_placements(full_id)
+    rec = {
+        "agent_id": full_id,
+        "workspace": ws_name if ws_name != "?" else herdr_ws,
+        "window_paseo_or_tab_herdr": herdr_tab if herdr_tab != "?" else ws_name,
+        "tab_paseo_or_pane_herdr": herdr_pane if herdr_pane != "?" else paseo_tab_name(inspect),
+    }
+    if session:
+        rec["sendmessage_name"] = session["name"]
+    return rec
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    as_json = "--json" in args
+    ids = [a for a in args if a != "--json"]
+    if len(ids) != 1 or not valid_agent_id(ids[0]):
+        print("agent-id <AGENT_ID> [--json]   (AGENT_ID: a UUID or hex prefix, never a flag)", file=sys.stderr)
+        return 2
+    rec = resolve(ids[0])
+    if as_json:
+        print(json.dumps(rec, indent=1))
+    else:
+        print(f"agent  : {rec['agent_id']}")
+        print(f"workspace : {rec['workspace']}")
+        print(f"window (Paseo) / tab (herdr): {rec['window_paseo_or_tab_herdr']}")
+        print(f"tab (Paseo) / pane (herdr): {rec['tab_paseo_or_pane_herdr']}")
+        if "sendmessage_name" in rec:
+            print(f"SendMessage name (ListAgents): {rec['sendmessage_name']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

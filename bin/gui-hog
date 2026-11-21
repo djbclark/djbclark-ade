@@ -13,7 +13,7 @@
     gui-hog demo                open the window on fixture rows in a temp directory; no button touches any app (H4a)
 
     gui-hog freeze --pid P --start S [--minutes N | --indefinite] [--by dialog]
-                                (PR 3c) SIGSTOP an app's whole process tree: an operator click, never automatic; exit codes in bin/gui_hog_freeze.py
+                                (PR 3c) SIGSTOP an app's whole process tree: an operator click, or the sampler for an app on the [freeze.auto] list; exit codes in bin/gui_hog_freeze.py
     gui-hog resume --entry ID | --all      resume frozen entries
     gui-hog thaw --due [--stale] | --all [--stopped-apps [--yes]]    the sampler's tick; the escape hatch (F7)
     gui-hog frozen [--json]     the frozen entries

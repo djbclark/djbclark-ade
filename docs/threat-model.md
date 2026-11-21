@@ -166,7 +166,7 @@ What an attacker would want, in order of damage:
     bundle-id and launch-date check on the very process, then `NSRunningApplication.terminate()` or `forceTerminate()`; the snapshot (`gui-hog/snapshot.json`, mode 0600) is data and never
     a command; app names, bundle ids and caller labels are untrusted text (control, bidi, zero-width characters stripped, clipped, set as plain `stringValue`); the bundle is built
     only by `ade-gui-build` (`ade update`, never at trigger time), ad-hoc signed and stamped with the source hash, and a stale or missing bundle means no dialog; the sampler starts
-    it only when the operator owns the console. "Never automatic" is a rule plus the `events.jsonl` audit trail (`by`), not a boundary: a same-uid agent can run `gui-hog`
+    it only when the operator owns the console. "Unlisted apps need a click" (B6, amended 2026-11-21: the `[freeze.auto]` list may be frozen by the sampler) is a rule plus the `events.jsonl` audit trail (`by`), not a boundary: a same-uid agent can run `gui-hog`
     or `kill` itself.
 
 ## 4. Threats, ranked
@@ -366,7 +366,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control.** PR 3b: Quit and Force Quit pass the live `vet` (identity, protected list, build subtree) and the dialog's own pid-plus-start-time re-check, so pid reuse inside the
   300 s window cannot redirect a click to a stranger; Force Quit needs a confirm sheet whose default is Cancel; Quit All is graceful only and skips build-hosting, absent and frozen
   rows; Wait is the leftmost default and does nothing, and Return and Escape are swallowed (a stray key cannot press a button). PR 3c's controls for Freeze (docs/gui-hog-dialog.md section O): Freeze is only ever a
-  button press (never automatic, B6); `gui_hog_freeze.py` re-reads the live pid and checks four fields (pid, start time, uid, kernel executable) before every signal, applies the F6 protected list
+  button press (or, for the operator's `[freeze.auto]` list, the sampler while a build is held: B6 amended 2026-11-21; protected apps never); `gui_hog_freeze.py` re-reads the live pid and checks four fields (pid, start time, uid, kernel executable) before every signal, applies the F6 protected list
   to the root and every member (in the Python core, not the view), writes the entry **before** the first SIGSTOP, and refuses when the sampler job that would resume it is not loaded.
   Every thaw path exists: timed auto-resume (default 10 min, at most 24 h), the dialog's and the menu-bar item's Resume, the sampler's first step each tick (also with `LW_GUI_HOG=0`), crash
   recovery of a half-written entry, a reboot (the processes are gone, the entry is pruned), removal of load-watch's job, and the escape hatch `gui-hog thaw --all` (`--stopped-apps` when the state file is

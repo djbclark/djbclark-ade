@@ -24,7 +24,10 @@ Terminology clarified 2026-11-04: this section describes controlled **handoffs**
 Continuous protection against unplanned interruption is the separate, planned
 [checkpoint contract](checkpoint.md); a boundary handoff alone cannot provide it.
 
-1. At a completed task, write a handoff before beginning unrelated work. Write the
+1. At a completed task, write a handoff before beginning unrelated work, **when context is under
+   pressure near this session's real compaction wall** (the boundary tier of section 2: wall less 80k,
+   187k on the usual 267k wall). Below that tier a finished task alone is no reason to hand off or
+   compact (2026-11-21: a lead handed itself off at ~150k with 117k of room left). Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
 2. A top-level session runs the `handoff` skill; Step 9 defaults to
@@ -42,15 +45,41 @@ Continuous protection against unplanned interruption is the separate, planned
 
 ## 2. Earlier Claude nudges
 
-The Claude hook warns after 32,000 tokens of growth and recommends a handoff at
-the next completed-task boundary from 120,000 total input tokens. It still
-accounts for growth from the post-compaction floor and suppresses repeated
-warnings within a tier. These warnings do not interrupt a turn or clear context.
-The hard tier (2026-10-28) fires at +140k of growth or 217k total, whichever comes
-first: 50k below the ~267k wall where Claude Code auto-compacts (300,000 less its
-33k buffer), so a turn in progress can finish its edit and hand off. The total
-trigger also covers regrowth after a compaction (floor ~104k), where +140k would
-land 23k from the wall. The hook runs under `UserPromptSubmit` and, where the settings
+The Claude hook warns after 32,000 tokens of growth (the early tier: delegate, "Do not compact
+yet") and suppresses repeated warnings within a tier. These warnings do not interrupt a turn or
+clear context.
+
+**Tiers scale with the session's real wall (2026-11-21).** The hook computes the wall at run time
+(`compaction_wall`): min(configured window, the model's own window) less the 33k buffer. Configured:
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the hook is a child of the session, so it sees the session's own),
+else `modelSettings[<model>].autoCompactWindow`, else `autoCompactWindow` of `~/.claude/settings.json`
+(read once per run); the model comes from the transcript's newest assistant record. Model window: 1M
+for a `[1m]` id, 200k for Haiku. Settings with no window and an unknown model: 1M when settings
+`model` carries `[1m]`, else the 300k fallback, so an unreadable or unknown setup behaves as before
+(wall 267k). `bin/context-watch` imports the same function, so there is one copy. Every handoff and
+compact tier derives from that wall:
+
+| Tier | Where | On a 267k wall | On a 967k wall (`[1m]`, no window) |
+|---|---|---|---|
+| early (delegate; never compact) | +32k growth from the floor | unchanged | unchanged |
+| boundary (once per session id: "at the next task completion, if work remains, run handoff Step 9 yourself") | wall - 80k (`BOUNDARY_HEADROOM`), never below 120k, never above the hard tier | 187k (was a fixed 120k) | 887k |
+| hard / ask | wall - 50k (`ASK_HEADROOM`), by total only; again every 100k | 217k | 917k |
+| Hermes page | max(400k, hard tier) total, or +page-growth | 400k / +300k | 917k / +817k |
+
+A small configured window cannot loop handoffs (adversary L1, PR 862): the hard tier never sits below
+`ASK_FLOOR` (80k, above a fresh session's own 46-71k), and a wall at or under it (a window of 113k or
+less) has no handoff tiers at all; Claude Code compacts first.
+
+The old growth trigger for the hard tier (`ASK_GROWTH`, +140k from the floor, about 175k for a low
+floor) is gone: it told a lead to "hand off" with ~90k of room left. The 80k boundary headroom is
+about ten tool rounds ahead of the hard tier's own 50k; there a handoff (a fresh session re-writes
+~46k) beats the compaction that is certain to follow (~72k re-written plus a summariser call, ~104k
+left behind), and earlier than that a handoff only throws away a cache that still has room to pay
+back. The 120k floor stays because compacting at 200k or less simulated a net loss. The boundary
+and hard texts print the computed wall and the tokens left, keep the 2026-11-14 ruling (when handing
+off, do it yourself; never hand the operator a `/new`) and say that a finished task alone is no
+reason to hand off or compact below the boundary tier. The total-based hard tier also covers
+regrowth after a compaction (floor ~104k). The hook runs under `UserPromptSubmit` and, where the settings
 register it (2026-10-29), `PostToolUse`; its text tells the agent how many tool rounds fit
 before the wall and says it runs on prompt submit and between tool rounds (at most every
 `POST_TOOL_CHECK_SECONDS` seconds).
@@ -251,8 +280,9 @@ c7fbc11d ade-ops-pt 153k/267k (57%) boundary · wall in 114k · paseo~15%
 
 The band is `ok` / `early` / `boundary` / `hard` / `wall` (same ladder as
 `claude/hooks/context_size_nudge.py`): `wall` at or past the autoCompact ceiling; `hard` within
-`ASK_HEADROOM` (50k) of that ceiling, at the hook's `ASK_TOTAL`, or past `ASK_GROWTH` when a
-baseline is known; `boundary` from `BOUNDARY_TOTAL` (120k); `early` only when
+`ASK_HEADROOM` (50k) of that ceiling (growth no longer makes it hard, 2026-11-21); `boundary` from
+the ceiling less `BOUNDARY_HEADROOM` (80k), at least 120k (187k on a 267k ceiling), both from the
+hook's `_tiers`; `early` only when
 `~/.claude/state/context-nudges.json` has a baseline and growth past `EARLY_GROWTH` (32k).
 `paseo~N%` is what the wrong Desktop meter would show (tokens / manifest window: 200k for Haiku,
 1M otherwise), so a line that reads 90% real / `paseo~24%` is #4949 in one glance. Flags:
@@ -272,16 +302,16 @@ Titles and cwd go through `context-watch`'s `clean_text` (copied from the remove
    `compacted` (no request since); an unreadable one prints `?`. Only the last 2 MB of the transcript is
    read (the hook's limit): an agent whose newest usage block is further back (one turn of huge tool
    output) prints `?` although the transcript is fine.
-2. **Ceiling, per agent.** The agent's window minus the hook's `AUTO_COMPACT_BUFFER` (33,000,
-   imported). Window = min(configured, model window). Configured: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+2. **Ceiling, per agent.** The hook's `compaction_wall` (one copy since 2026-11-21): the agent's window
+   minus `AUTO_COMPACT_BUFFER` (33,000). Window = min(configured, model window). Configured: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
    of the `context-watch` process (assumed to beat settings), else `modelSettings[<model>].autoCompactWindow`,
    else `autoCompactWindow` of `~/.claude/settings.json` (300,000 today, so 267,000); `"auto"` counts as
    unset. Model window: 1M for a `[1m]` id, 200k for Haiku (Claude Code caps the window at the model's),
    unknown for any other id; the model comes from the provider string (`claude/<model>`), else the
    transcript's newest assistant record. With neither: 1M when settings `model` carries `[1m]`, else
-   200k (a guess). Not read, because unknowable from outside: the agent's own env, project settings,
-   `--autocompact`. The nudge hook hard-codes its own 300,000 window; only the buffer is shared, so
-   the two disagree if the setting changes.
+   the hook's 300k fallback (267k; this readout guessed 200k before 2026-11-21 and so disagreed with the
+   hook). Not read, because unknowable from outside: the agent's own env (the hook, a child of the
+   session, does see it), project settings, `--autocompact`.
 3. **Which agents.** `paseo ls -g --background --json` supplies the agent ids and titles for every `claude...`
    provider; it carries no session id, so the session is `persistence.sessionId` in
    `~/.paseo/agents/*/<agent id>.json` and the transcript is `~/.claude/projects/*/<sessionId>.jsonl`.

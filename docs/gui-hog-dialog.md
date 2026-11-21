@@ -1,6 +1,6 @@
 # GUI-hog dialog: design (2026-11-14, PR 3 of the load-gate retune)
 
-Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M). **PR 3b is built (2026-11-14): the native window, Quit / Force Quit / Quit All, the trigger live** (section N says what it does, where it departs from this text, and the operator's H4 run, which has NOT been done: 3b must not merge without it). PR 3c (Freeze) is not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design. **PR 3c's Python side is built (2026-11-14, section O): Freeze, every thaw path and the escape hatch; its Swift row buttons and menu-bar item are added on top of PR 3b.**
+Status: **PR 3a is built (2026-11-14): the data and a dry-run trigger, no window** (section M). **PR 3b is built (2026-11-14): the native window, Quit / Force Quit / Quit All, the trigger live** (section N says what it does, where it departs from this text, and the operator's H4 run, which has NOT been done: 3b must not merge without it). PR 3c (Freeze) is not started. The operator accepted K1-K7 (all recommended) on 2026-11-14. The rest of this document is the design. **PR 3c's Python side is built (2026-11-14, section O): Freeze, every thaw path and the escape hatch; its Swift row buttons and menu-bar item are added on top of PR 3b.** **2026-11-21 (section P): the operator amended B6, so apps on the `[freeze.auto]` list are frozen by the sampler while a build is held; a keep-running rule leaves CodexBar's HTTP server running; Chrome's native-messaging hosts no longer make it a build host; rapid Freeze clicks on several rows all get through.**
 Rulings come from the operator's 2026-11-13 and 2026-11-14 `/steps` answers, recorded in the lead's memory note
 `project_load_gate_retune_proposal_2026-11-13.md`. Items marked **DECIDE** are open forks. Each one has a
 recommendation, and the build slices follow the recommendation unless the operator rules otherwise.
@@ -63,15 +63,17 @@ B5. **Freeze is SIGSTOP**, with these safeguards:
 (e) a protected list: Paseo, terminals, Finder, Hermes, VPN and proxy, the build itself, WindowServer, Dock and
 loginwindow.
 
-B6. **Never automatic.** Every Quit, Force Quit or Freeze is an operator click (2026-11-13 proposal). Only *resuming* is
-ever automatic.
+B6. **Automatic only for the operator's own list (amended 2026-11-21).** Every Quit and Force Quit, and every Freeze of an app that is
+not on the list, is an operator click (2026-11-13 proposal). On 2026-11-21 the operator ruled that apps listed in `config/gui-hog.toml`
+`[freeze.auto] order` may be frozen automatically while a build is held (section P1); `[protected]` and the hard floor still win, so a protected
+app is never auto-frozen. *Resuming* is always automatic.
 
 ## C. The trigger: where it lives and how it is called
 
 C1. **Today's data is not enough.** The sampler (`load-watch sample`, launchd every 20 s,
 `launchd/com.djbclark.load-watch.plist`) keeps per-process samples **only while the load is hot**
 (`bin/load-watch` ~1478-1496: `st["samples"]` is cleared when `load1/ncpu < LW_LOAD_PER_CORE`, 5.0 since 2026-11-21, 4.0 when this was written). But a build is
-often held by `pageins`, `swapins`, churn or the free-memory floor while the load is below 4/core (2026-11-13: the only
+often held by `pageins`, `swapins`, churn or the free-memory floor while the load is below the hot line (4/core then, 5.0 since 2026-11-21) (2026-11-13: the only
 refusal measured was `pageins`). The samples also do not store RSS (`PSTATE` has it for the current sample only).
 `admit` keeps no on-disk record of who is waiting *now*: `admit_log` writes one line when a call **ends**.
 
@@ -354,7 +356,7 @@ F8. **Failure-mode table.**
 | 13 | Two dialogs | duplicate actions | single-instance `flock` in the dialog (exit 75); the sampler checks its pid file |
 | 14 | Frozen app was in a call or playing audio | call drops, audio glitches | conferencing and audio apps are protected by default; Freeze has no confirm because Resume is one lossless click (**DECIDE F8-14: confirm before an indefinite Freeze? Recommended: no**) |
 | 15 | Lock timeout or hang | no action | 5 s `flock` timeout; error shown in the row; no signal sent |
-| 16 | An agent runs `gui-hog freeze` itself | breaks "never automatic" | rule in `skills/loadwatch/SKILL.md` and this doc; every event logs `by`; accepted because same-uid processes can already `kill -STOP` (J1) |
+| 16 | An agent runs `gui-hog freeze` itself on an unlisted app | breaks "unlisted apps need a click" (B6) | rule in `skills/loadwatch/SKILL.md` and this doc; every event logs `by`; accepted because same-uid processes can already `kill -STOP` (J1) |
 | 17 | An IDE (VS Code, JetBrains, Xcode) runs a build in its terminal, through a Gradle daemon, or with an in-bundle toolchain | Freeze or Quit would stop or kill the build; its compiler would count as a GUI hog | the tree walk stops at shells, ptys, `bg`, agent CLIs, reservation holders and out-of-bundle executables (C4b); IDEs with in-bundle toolchains are protected by bundle id (F6); `vet` re-walks the tree live and refuses with exit 5 (D4); such an app is listed without actions and skipped by Quit All (E2, G4) |
 
 F9. **What freezing does not do.** SIGSTOP frees **CPU**, not RAM. A stopped app's pages only go cold, and the
@@ -456,8 +458,7 @@ H4 run before merge.
 J1. **Who can invoke it.** Any process running as the operator (uid 502) can run `bin/gui-hog freeze` or launch the
 dialog. That gives nothing new: the same uid can already `kill -STOP` or `kill -9` its own processes. There is no
 setuid, no sudo, no root helper and no listening socket. Processes of other uids are refused before any signal
-(F6a), and the kernel would refuse them anyway (`EPERM`). Agents are trusted peers here (AGENTS.md Trust). "Never
-automatic" (B6) is a rule plus an audit trail (`by`, `events.jsonl`), not a boundary.
+(F6a), and the kernel would refuse them anyway (`EPERM`). Agents are trusted peers here (AGENTS.md Trust). "Unlisted apps need a click" (B6) is a rule plus an audit trail (`by`, `events.jsonl`), not a boundary.
 
 J2. **No shell anywhere.** Swift uses `Process` with an `arguments` array. Python uses `subprocess` argv lists. No
 `osascript` is used, and no name, bundle id or path is ever put into a command string.
@@ -692,3 +693,146 @@ or a minute without an answer. The sampler starts it (`gui_hog_freeze.ensure_sta
 (e) `by` gained `menubar`. Self-test (`bin/ade-gui-build --self-test`): the Freeze buttons' conditions (absent row, build host, frozen row, disabled), the argv lists, the frozen list and its sanitizing.
 
 O5. **Not done by the author.** The operator's H4 run (f), (g) with the real window and a real freeze is **not done**; the PR must not merge without it. The runbook is in the PR body (its test app is a harmless third-party one such as Syncthing or Contexts: TextEdit is under /System/Applications, protected by the hard floor, and never listed; the first H4 run, 2026-11-14, showed that).
+
+## P. Auto-freeze list, keep-running rule, Chrome and button handling (2026-11-21)
+
+Operator request (2026-11-21, verbatim): "Add a config file or config file stanza that lists, in order of preferred first to last, what can automatically be
+freezed by the 'A build is waiting' system. For us, we can always freeze CodexBar (as long as I am correct that doing so won't disrupt aiuse operations - eg
+that that is just the UI and the http server will keep running), Beeper, and Grok Bot. Make sure we are still on the path to making Chrome freezable. Also, I
+think we need better button handling; if I quickly hit freeze for multiple rows, only the first button press gets through."
+
+P1. **The auto-freeze list (B6 amended).** `config/gui-hog.toml` `[freeze.auto]`: `order` (bundle ids, preferred first; shipped: Grok Bot `com.anysphere.sand` only, after the
+operator rulings M2 and M3 of 2026-11-21: CodexBar and Beeper are on `[freeze.auto] skip`, P7), `enabled`, `minutes` (default `[freeze] default_minutes`), `min_cores` 0.05, `refreeze_s` 3600.
+The sampler's tick (`gui_hog.tick(auto_freeze=True)`, only `load-watch` passes it) calls `gui_hog_freeze.auto_freeze_step`: when `hold_active` says a build
+has been refused for `hold_s` on a gate desktop apps can relieve (the first two conditions of C4, shared with the dialog), it freezes the **first** listed app
+that is running, not protected, not part of a build, not hosting one, not frozen by us within `refreeze_s`, and using at least `min_cores` of *freeable*
+cores (a kept helper's cores do not count). **One app per tick** (20 s), so the build's next admission poll sees the relief before the next app goes; the
+list ends when the hold ends or no listed app is left. The freeze is the same call as a click (`freeze(... by="auto", check_sampler=False)`: the sampler is
+the caller): timed, write-ahead entry, four-field identity, every thaw path (F5), the menu-bar item. Events carry `by: "auto"`; the Frozen list says "frozen
+automatically". A refused auto-freeze is retried after 120 s. `refreeze_s` makes an operator's Resume stick: the same app is not auto-frozen again for an hour.
+**Where the list lives:** in the repo file, not the overlay: the operator named these apps for this machine, and `[protected]` already carries machine-specific
+apps. `~/.config/load-watch/gui-hog.toml` may set `[freeze.auto]` and add to `[freeze.keep_running]`; it cannot change `[freeze] enabled`, `max_minutes`,
+`passes` or the lock timeout, it can only switch `[freeze.auto] enabled` off (never back on), and it cannot remove a protected entry. "Ignore 1 h" pauses the auto-freeze
+too (P6 L1). Adversary round 1 and the costs of freezing CodexBar and Beeper: P6. Switches: `[freeze.auto] enabled = false`, `LW_GUI_HOG_AUTO=0` (this only), `LW_GUI_HOG=0`
+(everything), `[freeze] enabled = false` (all freezes). `load-watch sample --dry-run` prints "would auto-freeze" without signalling.
+
+P2. **Keep-running (CodexBar's server).** CodexBar is the main process `Contents/MacOS/CodexBar` plus a child `Contents/Helpers/CodexBarCLI serve --host 127.0.0.1
+--port 10546` (aiuse's `[collectors.codexbar] http_url`). Until now `group_apps` made the helper a member, so a freeze stopped the server too (`events.jsonl`
+2026-11-21 13:03:43Z: both pids stopped, `/health` timed out). `[freeze.keep_running]` maps a bundle id to paths that a freeze never stops; a path is relative to the
+bundle (`Contents/Helpers/CodexBarCLI`) or absolute (`~` is the home directory). `group_apps` matches a member's **kernel executable** path (never argv: a process
+sets its own), keeps the matching processes and every descendant of one, never the root, and ignores a rule with a `..`. The kept pids leave `member_pids`, so
+`vet_app`, the rescan and the signals never see them; the entry records their names (`kept`), `gui-hog frozen --json` and the freeze result report them, the
+event log lists them, and the dialog's Frozen line says "keeps running: CodexBarCLI". Applies to manual and auto freezes alike. **Measured (the lead, 2026-11-21
+~13:15Z, live):** with only CodexBar's main pid SIGSTOPped and the helper running, `/health` answered 200 in 0.002 s and `/usage?provider=clinepass` 200 in 0.18 s
+with live data: the server does not need the UI process, so CodexBar was first in the list until the M2 ruling (P7: now on `skip`). (A freeze still stops `CodexBarClaudeWatchdog`, a second helper
+not named by the rule; add it if it must run.)
+
+P3. **Chrome (Carried 116).** `bin/gui-hog status` showed "Google Chrome ... has a build or terminal inside: no actions". The probe (read-only, 2026-11-21):
+`hosts_build` came from **three children of the Chrome main process whose kernel executable is outside Chrome's bundle**: two
+`/Applications/1Password.app/.../1Password-BrowserSupport` and `~/.local/share/chrome-use/ChromeUse.app/.../chrome-use __nm-host chrome-extension://...`. They
+are **native-messaging hosts** (stdio bridges Chrome starts for extensions), not builds; stop (5) of C4b ("a descendant whose executable lies outside the app's
+bundle") flagged them. **Done:** an absolute keep-running path lifts exactly that stop for exactly that process (`config/gui-hog.toml`
+`[freeze.keep_running] "com.google.Chrome"`), the process is left running (a stopped Chrome simply stops reading its stdio) and Chrome reads `hosts_build: false`
+with 30 members and 3 kept. A pty, a shell or a held caller on that very process is still a build (tested). **Not done, on purpose:** Chrome is not on the auto
+list, and a freeze of it has **not been exercised live** (nothing live was signalled). Remaining path: (a) the operator clicks Freeze on Chrome once (H4 run) and
+checks that the windows come back on Resume and that an agent using `chrome-use` waits, not fails; (b) a Chrome that really hosts a terminal or a
+Playwright-for-Testing child stays a build host, as it should; (c) only then consider listing it. Other apps that start helpers from outside their bundle
+(Velja and OnlySwitch run `/usr/bin/shortcuts`) take the same rule if the operator wants them freezable.
+
+P4. **Button handling.** Cause (Swift, `UI.swift`): `freeze()` called `rebuild()` at once to show "freezing...", and every `rebuild()` set one window-wide
+`lastLayout`; every click is ignored for 0.7 s after it (`clickAllowed`, N7 a: a button must not move under the pointer). So the click on row 1 itself restarted
+the grace of rows 2 and 3, and a second Freeze within 0.7 s was swallowed. Two smaller faults sat behind it: a rebuild that changed nothing still destroyed
+every button (a click straddling it was lost), and two freezes at once would contend for `frozen.lock` (5 s timeout). **Fix:** (a) `ClickGrace` keeps the
+grace **per control group** (a row, a Frozen entry, the bottom bar) and restarts it only when that group's own layout signature changes (its index, its
+note, which buttons exist; for the bottom bar the window's height): a status text has a fixed-width label and changes no layout, so one row's change never
+delays another row's click. The protection of N7 stays for every real layout change. (b) Each row has its own in-flight state: while an action on it is queued,
+checking or freezing its four buttons are disabled and a repeat click is ignored; other rows are not touched. (c) Freezes run **one after another** on a serial
+queue (the row says "queued..." until its turn, then "freezing..."), so none is lost to the lock timeout. (d) `rebuild()` is skipped when what it would draw
+is identical to the last draw. Self-test cases cover the per-row grace, an unchanged layout, a changed layout, a forgotten group, the signature and the new
+`kept` and `by` fields.
+
+P5. **Verification.** Python: `tests/test_gui_hog_auto.py` (config and overlay, the keep rule on kernel paths, the helper never signalled, Chrome with and
+without the rule and the build cases that stay builds, the auto step: order, one per tick, hold conditions, protected and hard floor, hosted build, idle,
+not running, Resume sticking, retry, switches, dry run, the tick wiring and kill switches). Swift: **compiled locally**
+(`bin/ade-gui-build --self-test` through `bgrun`: `swiftc` build plus `ade-gui-hog --self-test`), because Linux CI has no AppKit and the macOS CI leg has no
+step that builds the dialog; PR 849 shipped Swift that had never been compiled, so this one was. **Not done by the author:** the operator's H4 run of the new
+behaviour with the real window (two quick Freeze clicks on two rows; "frozen automatically"; "keeps running: CodexBarCLI"); no dialog bundle was installed and
+no live state file was touched.
+
+P6. **Adversary round 1 on PR 859 (BLOCK at a0bedcf6) and what each finding changed.**
+
+M1. The auto path called `freeze(check_sampler=False)` on the reasoning "the sampler is the caller", which holds only for launchd's job. A `load-watch sample` run by hand
+while the job is unloaded (or after `load-watch uninstall`) could stop an app on a timer that nothing would ever thaw. **Fixed:** `auto_freeze_step` now calls `freeze(...,
+check_sampler=True)`: one `launchctl print` per real attempt (at most one per tick), a refusal with code 8 (`SAMPLER`) stamps `retry-wait`. Test:
+`test_m1_an_auto_freeze_needs_the_sampler_job_loaded` (unloaded: nothing stopped, `retry-wait`; loaded: frozen).
+
+L1. **Ignore 1 h pauses the auto-freeze too.** The tick passes `snoozed` (the clamped `effective_snooze` is in the future) to the step, which then does nothing. An operator who
+ignores the warning wants the apps left alone.
+
+L2. **`[freeze.auto]` values are typed.** `enabled` only as a bool; the overlay combines it with the shipped value by AND (it can switch auto-freeze off, never back on, so a
+shipped `enabled = false` rollback wins). `minutes` 1..`max_minutes`, `min_cores` 0..1000, `refreeze_s` `hold_s`..7 days, all finite numbers (never a bool or a string);
+anything else keeps the previous value, so a bad overlay can no longer fail open, raise every tick, or undo an operator's Resume.
+
+L3. **The start time comes from the tick.** `tick` reads `proc_start` for the listed apps' roots right after it grouped the apps (the `start_of` hook when a caller passes
+one) and hands them to the step; `freeze()` compares them with the live process, so an app relaunched between the decision and the signal is refused (`IDENTITY`). Only a root
+the tick could not read falls back to `ops.info` just before the call.
+
+L4. **A keep-running rule is an exact executable** (`rule_ok`): relative to the bundle with two or more components (`Contents/Helpers/CodexBarCLI`), or absolute (and `~/`) inside
+some `X.app` as at least `X.app/<dir>/<file>`. `/`, `/opt/homebrew`, a bare directory and any `..` are dropped at load time and again in `keep_rules`. A broad overlay rule can
+no longer lift the out-of-bundle build stop for a whole toolchain.
+
+L5. **An `OSError` in the auto step is a refusal** (a `ps` timeout, an unreadable state directory): `auto_state` is stamped `ok: false`, so it is retried after `AUTO_RETRY_S`
+(120 s), not every 20 s tick with a log line each time.
+
+**What the two listed apps cost while frozen (M2, M3: the operator decides; both stay on the list for now).**
+
+M2. *CodexBar.* The kept `CodexBarCLI serve` keeps answering `/health` and `/usage` (the lead's live test, seconds). But its stderr (fd 2) is a **pipe whose other end is held by
+the CodexBar main process**, the one a freeze stops. Once the CLI has written more than the pipe buffer (16 to 64 KiB) to stderr, its next stderr write blocks; if it logs on the
+request path, `/health` and `/usage` hang for the rest of the freeze and aiuse's `[collectors.codexbar]` stalls. Not yet proven for a full 10-minute freeze. To prove it:
+one timed freeze with aiuse polling every 20 to 30 s, recording `lsof` SIZE/OFF on that pipe and the response times; if the pipe fills, CodexBar leaves the default order.
+CodexBar is **first** in the order, so this applies on every hold.
+
+M3. *Beeper.* Beeper Desktop's main process serves the local API at `127.0.0.1:23373` that the `beeper` MCP server uses. The root is never kept, so while Beeper is frozen
+the kernel accepts connections into the backlog and every MCP call hangs until its timeout (up to about 10 minutes, the length of a freeze). The step uses only C4 (a) and (b), not
+(c), so on a machine where agent load keeps builds held on `load` the list rotates: each app is frozen 10 minutes of every `refreeze_s` hour. Options for the operator: keep
+Beeper, move it behind Grok Bot, or drop it from the default order.
+
+*Info.* `CodexBarClaudeWatchdog` is stopped with CodexBar. A manual Freeze of Chrome stalls an agent that drives it through the kept `chrome-use` host (P3(a)). `gui-hog freeze
+--by auto` is accepted from the CLI, so "frozen automatically" can be self-claimed (`by` is self-asserted for every value, J1).
+
+P7. **The never-auto list (operator rulings M3 and M2, 2026-11-21; supersedes the order in P1, P2 and P6).** `config/gui-hog.toml` `[freeze.auto] skip` lists apps that are
+**never frozen automatically**, even if they are also in `order` (`auto_candidates` reports `never-auto`, matched on the bundle id, case-insensitively). A manual Freeze from
+the dialog stays possible (with the keep-running rules of P2 as before). The shipped list: Beeper Desktop (`com.automattic.beeper.desktop`) and CodexBar
+(`com.steipete.codexbar`); `order` is now Grok Bot (`com.anysphere.sand`) only. The overlay may add to `skip`, never remove from it; the shipped file replaces it.
+
+*Beeper (M3).* Evidence, as reported by the lead from `~/.local/state/load-watch/gui-hog/dry-run.jsonl` (13 of 14 would-show events; not re-run by the author of this change):
+Beeper used 0.00 to 0.02 cores (0.19 once) and at most 456 MB. A SIGSTOP frees no resident memory, so the freeze buys almost no CPU and no RAM, while each freeze hangs the local
+API behind the `beeper` MCP server (`127.0.0.1:23373`) for up to 10 minutes. Not worth suspending.
+
+*CodexBar (M2).* Freezing it stops the aiuse antigravity quota readings, so the router reads the pool as stale and refuses slices (the operator's ruling; this also settles the
+open stderr-pipe question of P6 M2 by not freezing it automatically).
+
+P8. **Deep freeze (open question; a proposal, nothing is implemented).** The operator asked whether a frozen app's memory could be swapped to disk for a while. What is
+known, with sources (XNU `main` of apple-oss-distributions, read 2026-11-21; not the exact tag of this Mac's Darwin 27.2.0):
+
+1. *macOS has no supported way to page out another process.* `madvise(2)` runs on `current_map()` (the caller's own address space; `bsd/kern/kern_mman.c`). XNU defines
+`MADV_PAGEOUT` as "internal only" (`bsd/sys/mman.h`), and the code under it returns `ENOTSUP` unless `MACH_ASSERT` is set (`bsd/kern/kern_mman.c`; that shipped kernels build
+without `MACH_ASSERT` is inferred, not observed); the Mach counterpart `VM_BEHAVIOR_PAGEOUT` is "development only" (`osfmk/mach/vm_behavior.h`, handled under `#if MACH_ASSERT` in
+`osfmk/vm/vm_map.c`). `mach_vm_behavior_set` does take a target task (`osfmk/mach/mach_vm.defs`), but its only page-out behavior is that development one, and getting a task port for
+another process needs root or the same uid plus the SIP/entitlement checks (`task_for_pid_posix_check` in `bsd/kern/kern_proc.c`; the MAC/SIP layer was not read). Neither
+`purge` ("does not affect anonymous memory", purge(8)), `memory_pressure` (system-wide only) nor `taskpolicy` (no page-out; its `-m` and `-P` are limits and actions the system
+applies on resource exhaustion) pages out a chosen process. The embedded-only freezer ("compresses and swaps out all of their dirty memory", `doc/vm/freezer.md`) is kernel-initiated
+and iOS-family only. Nothing equivalent was found for macOS; absence is "not found", not proof.
+2. *Linux has it, which is why the idea comes up.* `process_madvise(2)` (Linux 5.10; needs `CAP_SYS_NICE` and ptrace read access) accepts `MADV_PAGEOUT` on another process
+(https://man7.org/linux/man-pages/man2/process_madvise.2.html; `MADV_PAGEOUT` since Linux 5.4, https://man7.org/linux/man-pages/man2/madvise.2.html), and cgroup v2 has
+`memory.reclaim` ("a simple interface to trigger memory reclaim in the target cgroup", https://docs.kernel.org/admin-guide/cgroup-v2.html). There is no macOS counterpart of either.
+3. *A stopped process's pages already take the normal path under pressure.* SIGSTOP stops execution; it does not free or move pages. Pages not touched move from the active
+to the inactive list, and when free pages run short the pageout thread evicts inactive pages, dirty anonymous ones into the compressor (`doc/vm/pageout_scan.md`; Apple's
+"About the Virtual Memory System", https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/AboutMemory.html; Activity Monitor:
+"inactive apps in memory are compressed", https://support.apple.com/guide/activity-monitor/view-memory-usage-actmntr1004/mac). So a frozen app is the first thing the compressor and swap
+take under pressure anyway; no Apple source says anything specific about SIGSTOP, that step is inference. A deep freeze would only make that happen *without* pressure.
+4. *The alternative that really frees memory is quit and relaunch* (what the dialog's Quit already does): it returns the whole resident set and the compressed pages, at the cost
+of the app's state and a cold start. A freeze is the right tool for CPU, not RAM (this section, and P7).
+
+Open: whether a supported route exists is unproven; the only candidate is a Mach task port with `vm_behavior_set`, and it exposes only the development-only page-out. Recommendation:
+do not build a deep freeze; if memory is the problem, Quit; if CPU is, Freeze.

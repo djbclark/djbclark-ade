@@ -22,6 +22,10 @@ def box(tmp_path, monkeypatch, capsys):
     hook = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hook)
     monkeypatch.setattr(hook, "STATE_PATH", tmp_path / "state.json")
+    # The hook reads the compaction window from settings/env (2026-11-21): a scratch 300k one, never the host's.
+    monkeypatch.delenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", raising=False)
+    (tmp_path / "settings.json").write_text(json.dumps({"autoCompactWindow": 300_000}))
+    monkeypatch.setattr(hook, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(hook, "_session_successor", lambda _: None)
     monkeypatch.setattr(hook, "LOG_PATH", tmp_path / "log.jsonl", raising=False)
     monkeypatch.setattr(hook, "_send_ping", lambda *args: None)
@@ -54,14 +58,15 @@ def box(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("total,kinds,level", [
-    (90_000, ["early"], 1), (125_000, ["early", "boundary"], 1),
-    (300_000, ["ask", "midtask", "boundary"], 3), (400_000, ["ask", "midtask", "boundary"], 4),
-    (120_000, ["boundary"], 0),
+    (90_000, ["early"], 1), (125_000, ["early"], 1), (190_000, ["early", "boundary"], 1),
+    (300_000, ["ask", "midtask", "boundary"], 2), (400_000, ["ask", "midtask", "boundary"], 3),
+    (190_000, ["boundary"], 0),
 ])
 def test_emitted_nudges_are_logged(box, total, kinds, level):
     # Boundary-only case: seed its floor high enough to avoid early growth.
-    if total == 120_000:
-        box.hook.STATE_PATH.write_text(json.dumps({"session-1": {"baseline": 110_000}}))
+    seeded = kinds == ["boundary"]
+    if seeded:
+        box.hook.STATE_PATH.write_text(json.dumps({"session-1": {"baseline": 180_000}}))
     assert box(total)
     records = box.records()
     assert [r["kind"] for r in records] == kinds
@@ -71,7 +76,7 @@ def test_emitted_nudges_are_logged(box, total, kinds, level):
         assert record["event"] == "UserPromptSubmit"
         assert record["level"] == level
         assert record["total"] == total
-        assert record["growth"] == total - (110_000 if total == 120_000 else 50_000)
+        assert record["growth"] == total - (180_000 if seeded else 50_000)
         assert datetime.fromisoformat(record["ts"].replace("Z", "+00:00")).utcoffset().total_seconds() == 0
 
 
@@ -409,7 +414,7 @@ def test_interleaved_runs_preserve_other_session_flags(box, monkeypatch):
             b.join(2)
     assert not a.is_alive() and not b.is_alive() and not failures
     state = json.loads(box.hook.STATE_PATH.read_text())
-    assert state["writer-a"]["level"] == 4
+    assert state["writer-a"]["level"] == 3  # 2 + (400k - 217k) // 100k; growth no longer counts (2026-11-21)
     assert state["writer-a"]["boundary"] is True
     assert state["writer-a"]["paged"] is True
     assert state["writer-b"]["level"] == 1

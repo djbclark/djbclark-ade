@@ -151,6 +151,12 @@ healthy alternative, and tell the new agent to continue) is a separate gated
 action — the supervisor agent owns it, not `ade-pi-stuck` (read-only), and only for an entry whose
 `family` is `pi`.
 
+The periodic `bin/ade-supervisor-scan` (every 300 s) also logs a dry-run re-handoff plan to
+`~/.local/state/djbclark-ade/supervisor/supervisor.log`: one `re-handoff plan (dry-run) {...}` line, only when the plan
+changes. `ADE_SUPERVISOR_REHANDOFF` picks the mode: unset or `dry-run` (default) moves nothing; `live` is recognized but
+refused today (`bin/ade-supervisor-rehandoff` is a stub: it moves nothing and exits 1, and the log says
+`re-handoff executor failed`), so a scan never relaunches an agent on its own. See docs/scheduling.md.
+
 ## 6. Paseo fork releases (`/watch paseo`)
 
 Zero-token terminal status (no model, app launch or daemon restart):

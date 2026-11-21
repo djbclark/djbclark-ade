@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/route_agent.py plan` no longer refuses research as "no pool has room" for about a third of every quarter hour while Gemini is at 100%: an antigravity pool aiuse lists in `stale_pools` only because its reused reading passed the 600 s fresh limit (the pool is queried at most every 900 s and `--live` cannot beat that gate) keeps its reading when the row is at most 20 minutes old, shows at least 50% headroom and no Paseo agent on antigravity is live or was created since the reading, so a dispatched wave cannot reuse a reading that predates it (`STALE_REUSE_*`, `ROUTE_AGENT_PASEO_LS_JSON`; `docs/model-routing.md` D1). Every other stale, low, expired or unverifiable reading still reads unknown. (#864)
