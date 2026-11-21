@@ -34,6 +34,8 @@ import tempfile
 import time
 import tomllib
 import unittest
+from collections.abc import Callable
+from typing import Any, ClassVar, override
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -64,14 +66,14 @@ TERMINAL_CONTEXT = {"TERM": "xterm-256color", "COLORTERM": "truecolor", "TMUX": 
 SYNTHETIC_SECRETS = {"ZZ_SYNTHETIC_SECRET": "s3", "OPENAI_API_KEY": "k1", "GITHUB_TOKEN": "t1"}
 
 
-def rendered(home: str) -> dict:
+def rendered(home: str) -> dict[str, Any]:
     """The template with every {{ }} tag filled (each sits in a quoted scalar) and parsed."""
     text = TEMPLATE.read_text()
     text = text.replace("{{ .home }}", home).replace("{{ .codex_browser_client_sha256s }}", "DIGESTS")
     return tomllib.loads(re.sub(r"\{\{.*?\}\}", "x", text))
 
 
-def policy_toml(policy: dict) -> str:
+def policy_toml(policy: dict[str, Any]) -> str:
     out = ["[shell_environment_policy]"]
     for k, v in policy.items():
         if k != "set":
@@ -84,7 +86,11 @@ def policy_toml(policy: dict) -> str:
 class Policy(unittest.TestCase):
     """Layer 1: what the rendered template says."""
 
+    home: ClassVar[str]
+    p: ClassVar[dict[str, Any]]
+
     @classmethod
+    @override
     def setUpClass(cls) -> None:
         cls.home = "/h"
         cls.p = rendered(cls.home)["shell_environment_policy"]
@@ -116,30 +122,34 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
 
     A throwaway CODEX_HOME holds only `policy_text`; `env` is the whole environment of the app-server process (the
     stand-in for the Codex process inside its pane). No model is called."""
+    codex = CODEX
+    assert codex is not None, "codex is not installed"  # callers skip without it
     with tempfile.TemporaryDirectory(prefix="cxpol-") as home:
-        pathlib.Path(home, "config.toml").write_text(policy_text)
+        _ = pathlib.Path(home, "config.toml").write_text(policy_text)
         full = {**env, "CODEX_HOME": home}
-        proc = subprocess.Popen([CODEX, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, env=full, text=True, cwd=home, start_new_session=True)
+        stdin, stdout = proc.stdin, proc.stdout  # PIPE was requested for both
+        assert stdin is not None and stdout is not None
         n = [0]
 
-        def send(method: str, params: dict | None = None, notify: bool = False) -> int:
-            msg: dict = {"method": method}
+        def send(method: str, params: dict[str, Any] | None = None, notify: bool = False) -> int:
+            msg: dict[str, Any] = {"method": method}
             if params is not None:
                 msg["params"] = params
             if not notify:
                 n[0] += 1
                 msg["id"] = n[0]
-            proc.stdin.write(json.dumps(msg) + "\n")
-            proc.stdin.flush()
+            _ = stdin.write(json.dumps(msg) + "\n")
+            stdin.flush()
             return n[0]
 
-        def wait_for(pred) -> dict:
+        def wait_for(pred: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
             end = time.time() + timeout
             while time.time() < end:
-                if not select.select([proc.stdout], [], [], 1)[0]:
+                if not select.select([stdout], [], [], 1)[0]:
                     continue
-                line = proc.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     break
                 msg = json.loads(line)
@@ -149,11 +159,11 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
 
         try:
             i = send("initialize", {"clientInfo": {"name": "env-policy-test", "version": "0"}})
-            wait_for(lambda m: m.get("id") == i)
-            send("initialized", notify=True)
+            _ = wait_for(lambda m: m.get("id") == i)
+            _ = send("initialized", notify=True)
             i = send("thread/start", {"cwd": home})
             tid = wait_for(lambda m: m.get("id") == i)["result"]["thread"]["id"]
-            send("thread/shellCommand", {"threadId": tid, "command": "/usr/bin/env -0"})
+            _ = send("thread/shellCommand", {"threadId": tid, "command": "/usr/bin/env -0"})
             done = wait_for(lambda m: m.get("method") == "item/completed"
                             and m["params"]["item"].get("type") == "commandExecution")
             out = done["params"]["item"]["aggregatedOutput"]
@@ -162,7 +172,7 @@ def tool_env(policy_text: str, env: dict[str, str], timeout: float = 90.0) -> di
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            proc.wait()
+            _ = proc.wait()
     return dict(x.split("=", 1) for x in out.split("\0") if "=" in x)
 
 
