@@ -24,6 +24,7 @@ Each doc carries its own summary.
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
 | [docs/dynamic-model-effort.md](docs/dynamic-model-effort.md) | design (2026-11-10): measured token efficiency → route/effort policy; gates; no live auto-route / no Jev nudge / no Pi acceptance writes (queue #24) |
+| [docs/dated-quota-overrides.md](docs/dated-quota-overrides.md) | design (2026-11-21): which agy models share a Google quota window (on Ultra 20x: one Gemini pool, one Claude/GPT pool, no per-model window, so the Argon row has no reading); operator-entered dated price/menu/floor changes in a proposed `config/dated-changes.toml` with a separate-pool guard; Claude 5.5 via agy as a relief pool (proposal); no live wiring |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, report classes, messaging, the stagger rule |
 | [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (the three shims and the gate tools `bin/wave6-delete-check` and `bin/wave6-mac-proof-capture` were deleted 2026-11-14) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
