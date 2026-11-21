@@ -283,7 +283,7 @@ SCHEMA_VERSION = 1
 _NOTES: list[str] = []      # what this process said on stderr (a detached child records it in result.json if it dies early)
 
 
-_LAST_EXIT: list[int] = []   # run.exit once claude has ended (a later crash must not hide a 77)
+_TRIPPED: list[bool] = []    # a tripwire fired in this process (set where it fires, so a later crash or a full disk cannot hide a 77)
 
 
 def note(msg: str) -> None:
@@ -783,6 +783,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                keep_raw: bool = False, stall_timeout: float = 0, evidence_dir: Path | None = None,
                ctl: PauseCtl | None = None) -> Run:
     run = Run()
+    _TRIPPED.clear()
     allowed = set(TOOLS[mode]) | {"StructuredOutput"}
     trusted = mode == TRUSTED_MODE    # YOLO: no read tripwire, hooks recorded not fatal; tools, init and cwd still proven
     path_trip = path_trip and not trusted
@@ -802,11 +803,6 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         err.close()
         run.reason = f"cannot start claude: {e}"
         return run
-    if evidence_dir is not None:
-        try:
-            update_launch(evidence_dir, child_pgid=proc.pid, child_started=proc_start(proc.pid))
-        except OSError:
-            pass
     lines: queue.Queue = queue.Queue()
 
     def reader() -> None:
@@ -814,18 +810,30 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             lines.put(raw)
         lines.put(None)
 
-    threading.Thread(target=reader, daemon=True).start()
+    try:    # a signal in here (main()'s handler raises Interrupted) must not leave claude running with nobody watching
+        if evidence_dir is not None:
+            try:
+                update_launch(evidence_dir, child_pgid=proc.pid, child_started=proc_start(proc.pid))
+            except OSError:
+                pass
+        threading.Thread(target=reader, daemon=True).start()
+    except BaseException:
+        kill_all(proc, {})
+        if evidence:
+            evidence.close()
+        err.close()
+        raise
     tracked: dict[int, str] = {}
     deadline = time.monotonic() + timeout
     last_ps = 0.0
     last_output = time.monotonic()
-    old = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     raw_parts: list[str] = []
     exited_at: float | None = None
     result_at: float | None = None
 
     def trip(why: str) -> None:
         run.exit, run.reason = EXIT_TRIP, f"tripwire: {why}"
+        _TRIPPED[:] = [True]
 
     def handle(raw: bytes) -> bool:
         """Process one stream line (evidence, init proof, tripwire, results); True ends the run."""
@@ -977,6 +985,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             extend = 0.0
         return extend if math.isfinite(extend) and extend > 0 else 0.0
 
+    old = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     try:
         while True:
             now = time.monotonic()
@@ -1072,6 +1081,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         return run
     if run.init is None:
         run.exit, run.reason = EXIT_TRIP, "tripwire: the stream had no init event, so the boundary is unproven"
+        _TRIPPED[:] = [True]
         return run
     res = run.result
     if res is None:
@@ -1655,10 +1665,9 @@ def launch_main(argv: list[str]) -> int:
                           parent_run=str(parent.resolve()) if parent else None, tainted=parent is not None, paused=0)
         run = run_claude(build_argv(binary, profile, schema, prompt, a.model, a.max_turns), wt, profile, a.timeout,
                          stall_timeout=a.stall_timeout, evidence_dir=run_dir, ctl=ctl)
-        _LAST_EXIT[:] = [run.exit]
     except OSError as e:
         note(f"cannot preserve evidence: {e}")
-        return EXIT_USAGE
+        return EXIT_TRIP if _TRIPPED else EXIT_USAGE     # a tripwire that fired before the disk filled is still a 77
     if run.reason:
         note(run.reason)
     init = run.init or {}
@@ -1757,7 +1766,7 @@ def main(argv: list[str]) -> int:
             code, crash = EXIT_NO_OUTPUT, f"interrupted ({e})"
         else:
             code, crash = EXIT_USAGE, f"{type(e).__name__}: {e}"
-        if _LAST_EXIT and _LAST_EXIT[0] == EXIT_TRIP:
+        if _TRIPPED:
             code = EXIT_TRIP        # a crash after a tripwire is still "left the boundary", never a usage error
             crash = f"tripwire (exit 77), then {crash}"
     if run_dir is not None and not (run_dir / "done").exists():

@@ -273,6 +273,9 @@ def test_a_detached_review_survives_the_end_of_its_parent(world, tmp_path):
     rec = json.loads((d / "result.json").read_text())
     assert rec["exit"] == 0 and (d / "done").read_text() == "exit=0\n"
     assert json.loads((d / "launch.json").read_text())["detached"] is True
+    end = time.monotonic() + 15                                                 # done is written just before the exit
+    while pid_alive(first["pid"]) and time.monotonic() < end:
+        time.sleep(0.1)
     assert not pid_alive(first["pid"])
 
 
@@ -730,10 +733,86 @@ def test_a_crash_after_a_tripwire_is_still_a_77(tmp_path):
     d.mkdir()
 
     def trips_then_crashes(argv):
-        mod._LAST_EXIT[:] = [77]
+        mod._TRIPPED[:] = [True]
         raise OSError("disk full")
 
     mod.launch_main = trips_then_crashes
     code = mod.main(["--detached-child", "--evidence-dir", str(d)])
     assert code == 77 and (d / "done").read_text() == "exit=77\n"
     assert "tripwire" in json.loads((d / "result.json").read_text())["reason"]
+
+
+# ---- the follow-up to PR 906 (adversary LOWs A-C) ----------------------------------------------------
+
+@pytest.fixture
+def kept_signals():
+    old = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    yield
+    for s, h in old.items():
+        signal.signal(s, h)
+
+
+def test_a_tripwire_followed_by_a_full_disk_in_the_cleanup_is_still_a_77(world, tmp_path, monkeypatch, kept_signals):
+    world.passed_check()
+    world.scenario(tool_uses=[{"name": "Read", "input": {"file_path": "/etc/hosts"}}])        # a real out-of-scope read
+    for k, v in world.env().items():
+        monkeypatch.setenv(k, v)
+    mod = load_launcher()
+    real = mod.write_private
+
+    def full_disk(path, text):
+        if Path(path).name == "stderr.txt":
+            raise OSError(28, "No space left on device")
+        return real(path, text)
+
+    monkeypatch.setattr(mod, "write_private", full_disk)
+    d = tmp_path / "run"
+    code = mod.main(["--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "-p", "x", "--json",
+                     "--evidence-dir", str(d), "--detached-child"])
+    assert code == 77 and (d / "done").read_text() == "exit=77\n"
+    assert "cannot preserve evidence" in json.loads((d / "result.json").read_text())["reason"]
+
+
+def test_a_failing_child_of_its_own_run_writes_the_record(tmp_path, kept_signals):
+    # In a real --detach the parent records pid=<the child> in launch.json long before a late failure: the child must
+    # still write its record (the ownership check is for ANOTHER live launcher, never for itself).
+    mod = load_launcher()
+    d = tmp_path / "run"
+    d.mkdir()
+    me = os.getpid()
+    mod.update_launch(d, schema=1, state="running", pid=me, pid_started=mod.proc_start(me))
+    mod.launch_main = lambda argv: 2
+    assert mod.main(["--detached-child", "--evidence-dir", str(d)]) == 2
+    assert (d / "done").read_text() == "exit=2\n"
+
+
+def test_a_signal_right_after_claude_starts_does_not_leave_it_running(world, tmp_path, monkeypatch, kept_signals):
+    mod = load_launcher()
+    started = []
+    real_popen = subprocess.Popen
+
+    class Recording(real_popen):
+        def __init__(self, argv, *a, **k):
+            super().__init__(argv, *a, **k)
+            if "stub-claude.py" in " ".join(map(str, argv)):
+                started.append(self)
+
+    def interrupted(d, **kw):
+        if "child_pgid" in kw:
+            raise mod.Interrupted("signal 15")          # what main()'s handler raises when abort lands here
+
+    monkeypatch.setattr(mod.subprocess, "Popen", Recording)
+    monkeypatch.setattr(mod, "update_launch", interrupted)
+    argv = stub_claude(tmp_path, world.wt, [], tail=60)
+    try:
+        with pytest.raises(mod.Interrupted):
+            mod.run_claude(argv, os.path.realpath(world.wt), "review", 30.0, evidence_dir=tmp_path / "ev")
+        (proc,) = started
+        end = time.monotonic() + 10
+        while proc.poll() is None and time.monotonic() < end:
+            time.sleep(0.1)
+        assert proc.poll() is not None, "claude was left running"
+    finally:
+        for p_ in started:
+            if p_.poll() is None:
+                os.killpg(p_.pid, signal.SIGKILL)
