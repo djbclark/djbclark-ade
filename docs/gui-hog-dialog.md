@@ -701,8 +701,8 @@ freezed by the 'A build is waiting' system. For us, we can always freeze CodexBa
 that that is just the UI and the http server will keep running), Beeper, and Grok Bot. Make sure we are still on the path to making Chrome freezable. Also, I
 think we need better button handling; if I quickly hit freeze for multiple rows, only the first button press gets through."
 
-P1. **The auto-freeze list (B6 amended).** `config/gui-hog.toml` `[freeze.auto]`: `order` (bundle ids, preferred first: CodexBar `com.steipete.codexbar`, Beeper
-`com.automattic.beeper.desktop`, Grok Bot `com.anysphere.sand`), `enabled`, `minutes` (default `[freeze] default_minutes`), `min_cores` 0.05, `refreeze_s` 3600.
+P1. **The auto-freeze list (B6 amended).** `config/gui-hog.toml` `[freeze.auto]`: `order` (bundle ids, preferred first; shipped: Grok Bot `com.anysphere.sand` only, after the
+operator rulings M2 and M3 of 2026-11-21: CodexBar and Beeper are on `[freeze.auto] skip`, P7), `enabled`, `minutes` (default `[freeze] default_minutes`), `min_cores` 0.05, `refreeze_s` 3600.
 The sampler's tick (`gui_hog.tick(auto_freeze=True)`, only `load-watch` passes it) calls `gui_hog_freeze.auto_freeze_step`: when `hold_active` says a build
 has been refused for `hold_s` on a gate desktop apps can relieve (the first two conditions of C4, shared with the dialog), it freezes the **first** listed app
 that is running, not protected, not part of a build, not hosting one, not frozen by us within `refreeze_s`, and using at least `min_cores` of *freeable*
@@ -724,7 +724,7 @@ sets its own), keeps the matching processes and every descendant of one, never t
 `vet_app`, the rescan and the signals never see them; the entry records their names (`kept`), `gui-hog frozen --json` and the freeze result report them, the
 event log lists them, and the dialog's Frozen line says "keeps running: CodexBarCLI". Applies to manual and auto freezes alike. **Measured (the lead, 2026-11-21
 ~13:15Z, live):** with only CodexBar's main pid SIGSTOPped and the helper running, `/health` answered 200 in 0.002 s and `/usage?provider=clinepass` 200 in 0.18 s
-with live data: the server does not need the UI process, so CodexBar is first in the default list. (A freeze still stops `CodexBarClaudeWatchdog`, a second helper
+with live data: the server does not need the UI process, so CodexBar was first in the list until the M2 ruling (P7: now on `skip`). (A freeze still stops `CodexBarClaudeWatchdog`, a second helper
 not named by the rule; add it if it must run.)
 
 P3. **Chrome (Carried 116).** `bin/gui-hog status` showed "Google Chrome ... has a build or terminal inside: no actions". The probe (read-only, 2026-11-21):
@@ -799,3 +799,40 @@ Beeper, move it behind Grok Bot, or drop it from the default order.
 
 *Info.* `CodexBarClaudeWatchdog` is stopped with CodexBar. A manual Freeze of Chrome stalls an agent that drives it through the kept `chrome-use` host (P3(a)). `gui-hog freeze
 --by auto` is accepted from the CLI, so "frozen automatically" can be self-claimed (`by` is self-asserted for every value, J1).
+
+P7. **The never-auto list (operator rulings M3 and M2, 2026-11-21; supersedes the order in P1, P2 and P6).** `config/gui-hog.toml` `[freeze.auto] skip` lists apps that are
+**never frozen automatically**, even if they are also in `order` (`auto_candidates` reports `never-auto`, matched on the bundle id, case-insensitively). A manual Freeze from
+the dialog stays possible (with the keep-running rules of P2 as before). The shipped list: Beeper Desktop (`com.automattic.beeper.desktop`) and CodexBar
+(`com.steipete.codexbar`); `order` is now Grok Bot (`com.anysphere.sand`) only. The overlay may add to `skip`, never remove from it; the shipped file replaces it.
+
+*Beeper (M3).* Evidence, as reported by the lead from `~/.local/state/load-watch/gui-hog/dry-run.jsonl` (13 of 14 would-show events; not re-run by the author of this change):
+Beeper used 0.00 to 0.02 cores (0.19 once) and at most 456 MB. A SIGSTOP frees no resident memory, so the freeze buys almost no CPU and no RAM, while each freeze hangs the local
+API behind the `beeper` MCP server (`127.0.0.1:23373`) for up to 10 minutes. Not worth suspending.
+
+*CodexBar (M2).* Freezing it stops the aiuse antigravity quota readings, so the router reads the pool as stale and refuses slices (the operator's ruling; this also settles the
+open stderr-pipe question of P6 M2 by not freezing it automatically).
+
+P8. **Deep freeze (open question; a proposal, nothing is implemented).** The operator asked whether a frozen app's memory could be swapped to disk for a while. What is
+known, with sources (XNU `main` of apple-oss-distributions, read 2026-11-21; not the exact tag of this Mac's Darwin 27.2.0):
+
+1. *macOS has no supported way to page out another process.* `madvise(2)` runs on `current_map()` (the caller's own address space; `bsd/kern/kern_mman.c`). XNU defines
+`MADV_PAGEOUT` as "internal only" (`bsd/sys/mman.h`), and the code under it returns `ENOTSUP` unless `MACH_ASSERT` is set (`bsd/kern/kern_mman.c`; that shipped kernels build
+without `MACH_ASSERT` is inferred, not observed); the Mach counterpart `VM_BEHAVIOR_PAGEOUT` is "development only" (`osfmk/mach/vm_behavior.h`, handled under `#if MACH_ASSERT` in
+`osfmk/vm/vm_map.c`). `mach_vm_behavior_set` does take a target task (`osfmk/mach/mach_vm.defs`), but its only page-out behavior is that development one, and getting a task port for
+another process needs root or the same uid plus the SIP/entitlement checks (`task_for_pid_posix_check` in `bsd/kern/kern_proc.c`; the MAC/SIP layer was not read). Neither
+`purge` ("does not affect anonymous memory", purge(8)), `memory_pressure` (system-wide only) nor `taskpolicy` (no page-out; its `-m` and `-P` are limits and actions the system
+applies on resource exhaustion) pages out a chosen process. The embedded-only freezer ("compresses and swaps out all of their dirty memory", `doc/vm/freezer.md`) is kernel-initiated
+and iOS-family only. Nothing equivalent was found for macOS; absence is "not found", not proof.
+2. *Linux has it, which is why the idea comes up.* `process_madvise(2)` (Linux 5.10; needs `CAP_SYS_NICE` and ptrace read access) accepts `MADV_PAGEOUT` on another process
+(https://man7.org/linux/man-pages/man2/process_madvise.2.html; `MADV_PAGEOUT` since Linux 5.4, https://man7.org/linux/man-pages/man2/madvise.2.html), and cgroup v2 has
+`memory.reclaim` ("a simple interface to trigger memory reclaim in the target cgroup", https://docs.kernel.org/admin-guide/cgroup-v2.html). There is no macOS counterpart of either.
+3. *A stopped process's pages already take the normal path under pressure.* SIGSTOP stops execution; it does not free or move pages. Pages not touched move from the active
+to the inactive list, and when free pages run short the pageout thread evicts inactive pages, dirty anonymous ones into the compressor (`doc/vm/pageout_scan.md`; Apple's
+"About the Virtual Memory System", https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/AboutMemory.html; Activity Monitor:
+"inactive apps in memory are compressed", https://support.apple.com/guide/activity-monitor/view-memory-usage-actmntr1004/mac). So a frozen app is the first thing the compressor and swap
+take under pressure anyway; no Apple source says anything specific about SIGSTOP, that step is inference. A deep freeze would only make that happen *without* pressure.
+4. *The alternative that really frees memory is quit and relaunch* (what the dialog's Quit already does): it returns the whole resident set and the compressed pages, at the cost
+of the app's state and a cold start. A freeze is the right tool for CPU, not RAM (this section, and P7).
+
+Open: whether a supported route exists is unproven; the only candidate is a Mach task port with `vm_behavior_set`, and it exposes only the development-only page-out. Recommendation:
+do not build a deep freeze; if memory is the problem, Quit; if CPU is, Freeze.

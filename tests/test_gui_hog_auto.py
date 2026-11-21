@@ -94,18 +94,19 @@ def _sampler_is_loaded(monkeypatch):
     monkeypatch.setattr(gf, "sampler_loaded", lambda uid: True)
 
 
-def auto_cfg(order=(CODEXBAR, BEEPER, GROK), keep=True, **auto):
+def auto_cfg(order=(CODEXBAR, BEEPER, GROK), keep=True, skip=(), **auto):
     c = gh.load_config(path=NOLOCAL, local=NOLOCAL)
-    c["freeze"]["auto"].update(enabled=True, order=list(order), **auto)
+    c["freeze"]["auto"].update(enabled=True, order=list(order), skip=list(skip), **auto)
     if keep:
         c["freeze"]["keep_running"] = {CODEXBAR: ["Contents/Helpers/CodexBarCLI"]}
     return c
 
 
 # ---- the shipped config and the overlay (1) -------------------------------------------------------------------------------------------------
-def test_the_shipped_config_lists_codexbar_beeper_and_grok_bot_in_that_order():
+def test_the_shipped_config_lists_grok_bot_and_skips_beeper_and_codexbar():
     c = shipped()
-    assert c["freeze"]["auto"]["order"] == [CODEXBAR, BEEPER, GROK] and c["freeze"]["auto"]["enabled"] is True
+    assert c["freeze"]["auto"]["order"] == [GROK] and c["freeze"]["auto"]["enabled"] is True
+    assert c["freeze"]["auto"]["skip"] == [BEEPER, CODEXBAR]   # operator rulings M3 and M2, 2026-11-21 (P7)
     assert c["freeze"]["keep_running"][CODEXBAR] == ["Contents/Helpers/CodexBarCLI"]
     assert c["freeze"]["enabled"] is True and c["freeze"]["default_minutes"] == 10   # the nested tables did not wipe the plain keys
 
@@ -134,7 +135,7 @@ def test_the_overlay_cannot_turn_freeze_off_or_change_its_limits_and_a_broken_on
     assert c["freeze"]["enabled"] is True and c["freeze"]["max_minutes"] == 1440 and c["freeze"]["passes"] == 3
     assert c["freeze"]["auto"]["enabled"] is False   # the operator may switch the auto list off (the overlay is theirs)
     over.write_text("this is [not toml")
-    assert gh.load_config(local=over)["freeze"]["auto"]["order"] == [CODEXBAR, BEEPER, GROK]
+    assert gh.load_config(local=over)["freeze"]["auto"]["order"] == [GROK]
 
 
 def test_the_overlay_cannot_remove_a_protected_entry(tmp_path):
@@ -519,3 +520,50 @@ def test_l5_an_os_error_is_recorded_as_a_refusal_and_retried_later_not_every_tic
     assert r["bundle_id"] == CODEXBAR and r["refused"].startswith("error: OSError") and w.stopped() == []
     assert st["auto"][CODEXBAR]["ok"] is False
     assert w.step(cfg, st=st, now=T0 + 20)["bundle_id"] == BEEPER   # CodexBar waits AUTO_RETRY_S; no repeated attempt (and log line) per tick
+
+
+# ---- operator rulings 2026-11-21 (M3, M2): the never-auto `skip` list ------------------------------------------------------------------------
+def test_an_app_on_skip_is_never_auto_frozen_even_when_listed_in_order(w):
+    cfg = shipped()
+    cfg["freeze"]["auto"]["order"] = [CODEXBAR, BEEPER, GROK]
+    assert dict((a.get("bundle_id"), why) for a, why in gf.auto_candidates(list(w.group(cfg).values()), cfg, {}, T0)) == {CODEXBAR: "never-auto", BEEPER: "never-auto", GROK: ""}
+    assert w.step(cfg)["bundle_id"] == GROK and w.stopped() == [300]
+    assert w.step(cfg, now=T0 + 20) is None and w.stopped() == [300]   # Beeper and CodexBar are never touched, however long the hold
+
+
+def test_skip_matches_the_bundle_id_case_insensitively_and_wins_over_a_running_busy_app(w):
+    cfg = auto_cfg(order=(CODEXBAR,), skip=(CODEXBAR.upper(),))
+    assert w.step(cfg) is None and w.stopped() == []
+
+
+def test_a_manual_freeze_of_a_skipped_app_stays_possible(w):
+    cfg = shipped()
+    e = gf.freeze(w.state, 100, start="start-100", ops=w.ops, cfg=cfg, now=T0, check_sampler=False, agent_clis=(), minutes=10, by="cli")
+    assert e["by"] == "cli" and w.stopped() == [100] and w.ops.sent_to(101) == []   # the dialog's own Freeze, with CodexBarCLI still kept running
+
+
+def test_the_overlay_adds_to_skip_and_can_never_remove_from_it(tmp_path):
+    over = tmp_path / "gui-hog.toml"
+    over.write_text('[freeze.auto]\nskip = ["com.example.y", "", 5, "COM.EXAMPLE.Y"]\n')
+    assert gh.load_config(local=over)["freeze"]["auto"]["skip"][:3] == [BEEPER, CODEXBAR, "com.example.y"]
+    over.write_text("[freeze.auto]\nskip = []\n")
+    assert gh.load_config(local=over)["freeze"]["auto"]["skip"] == [BEEPER, CODEXBAR]
+    over.write_text('[freeze.auto]\nskip = "x"\n')
+    assert gh.load_config(local=over)["freeze"]["auto"]["skip"] == [BEEPER, CODEXBAR]
+
+
+def test_the_shipped_file_replaces_skip(tmp_path):
+    f = tmp_path / "shipped.toml"
+    f.write_text('[freeze.auto]\nskip = ["a.b"]\norder = ["c.d"]\n')
+    assert gh.load_config(path=f, local=NOLOCAL)["freeze"]["auto"]["skip"] == ["a.b"]
+
+
+def test_the_overlay_skip_never_duplicates_a_shipped_entry(tmp_path):
+    over = tmp_path / "gui-hog.toml"
+    over.write_text('[freeze.auto]\nskip = ["COM.AUTOMATTIC.BEEPER.DESKTOP", "com.example.z"]\n')
+    assert gh.load_config(local=over)["freeze"]["auto"]["skip"] == [BEEPER, CODEXBAR, "com.example.z"]
+
+
+def test_skip_matches_when_the_order_entry_has_another_case(w):
+    cfg = auto_cfg(order=(CODEXBAR.upper(),), skip=(CODEXBAR,))
+    assert w.step(cfg) is None and w.stopped() == []

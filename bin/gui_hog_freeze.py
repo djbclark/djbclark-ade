@@ -681,11 +681,15 @@ AUTO_RETRY_S = 120   # after a refused auto-freeze the same app is not retried f
 def auto_candidates(apps, cfg, auto_state, now):
     """[(app_record, why_not)] for the bundle ids of `[freeze.auto] order`, preferred first. The app is the first running record of that bundle id;
     `why_not` is "" when it may be auto-frozen now, else the reason it is skipped: not-running, protected, excluded (part of a build), hosts-build,
-    cooling-down (frozen by us within refreeze_s: an operator's Resume sticks), retry-wait, or idle (its freeable cores, those of the processes a
+    never-auto (on `[freeze.auto] skip`), cooling-down (frozen by us within refreeze_s: an operator's Resume sticks), retry-wait, or idle (its freeable cores, those of the processes a
     freeze would stop, are under `min_cores`: a freeze would free nothing). `[protected]` and the hard floor always win: a protected app is never a candidate."""
     au = cfg["freeze"]["auto"]
     out = []
+    skip = {str(x).casefold() for x in au.get("skip", []) if isinstance(x, str)}
     for bid in au.get("order", []):
+        if bid.casefold() in skip:   # operator ruling 2026-11-21: not worth suspending (P7); wins over `order`
+            out.append(({"bundle_id": bid}, "never-auto"))
+            continue
         a = next((x for x in apps if x.get("bundle_id") and str(x["bundle_id"]).casefold() == bid.casefold()), None)
         if a is None:
             out.append(({"bundle_id": bid}, "not-running"))

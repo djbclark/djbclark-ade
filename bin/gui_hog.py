@@ -53,7 +53,7 @@ DEFAULTS = {
     "freeze": {"enabled": True, "default_minutes": 10, "max_minutes": 1440, "passes": 3, "lock_timeout_s": 5,
                # Operator ruling 2026-11-21 (design rule B6 amended): apps listed in `order` (bundle ids, preferred first) are frozen by the sampler
                # when a build is held by the GUI-hog trigger; unlisted apps still need a click. `[protected]` and the hard floor always win.
-               "auto": {"enabled": True, "order": [], "minutes": None, "min_cores": 0.05, "refreeze_s": 3600},
+               "auto": {"enabled": True, "order": [], "skip": [], "minutes": None, "min_cores": 0.05, "refreeze_s": 3600},
                # bundle id -> paths inside the bundle that a freeze never stops (matched on the kernel exe, never argv): CodexBar's HTTP server
                "keep_running": {}},
 }
@@ -133,6 +133,10 @@ def _merge_freeze(cfg, data, overlay=False):
                 if ak == "order":
                     if isinstance(av, list):
                         au["order"] = [x for x in av if isinstance(x, str) and x.strip()]
+                elif ak == "skip":   # apps never auto-frozen, whatever `order` says (a manual freeze stays possible); the overlay adds, never removes
+                    if isinstance(av, list):
+                        clean = [x.strip() for x in av if isinstance(x, str) and x.strip()]
+                        au["skip"] = au["skip"] + [x for x in clean if x.casefold() not in {y.casefold() for y in au["skip"]}] if overlay else clean
                 elif ak == "enabled":
                     if isinstance(av, bool):
                         au["enabled"] = (au["enabled"] and av) if overlay else av
