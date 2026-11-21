@@ -878,7 +878,10 @@ WATCHER_HOWTO = (
     "`bin/ade-tidy prune`), never touch an agent with no `ade.lead` label (list it), and ask a worker's current owning lead "
     "(succession ledger; `paseo agent inspect ID --json` reads `Archived: false`, `Status` idle, no pending card; at most one "
     "message per lead per hour) to archive it, ending `Please reply: ack <your id>`. Send (to a blamed agent or a lead) only "
-    "from a Paseo session with `$PASEO_AGENT_ID` set, plain `--no-wait`, never `--behavior`: a sourceless send interrupts. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
+    "from a Paseo session with `$PASEO_AGENT_ID` set, plain `--no-wait`, never `--behavior`: a sourceless send interrupts, and "
+    "any send to a running agent can replace its turn (steer falls back to interrupt) while every sourced message clears pending "
+    "permissions, so send only when a fresh `paseo agent inspect ID --json` reads `Status` idle, `Archived: false` and no pending "
+    "permissions; a running blamed agent is listed for djbclark, not messaged. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
 
 
 def watcher_record():

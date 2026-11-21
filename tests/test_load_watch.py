@@ -1086,9 +1086,33 @@ def test_watch_step4_sends_only_sourced_idle_plain_and_rate_limited():
     assert s4.count("--behavior") == 1
 
 
+def test_watch_step4_item1_sends_only_to_an_idle_blamed_agent():
+    """PR 888 round 3 MED 1: a sourced send is not safe to a running agent (steer falls back to replacing the turn, and every
+    sourced message clears pending permissions), so item 1 carries the same idle/no-card gate as item 3."""
+    s4 = _step4()
+    item1 = s4[s4.index("1. **Steer future heavy runs"):s4.index("2. **Guard a misbehaving")]
+    assert 'Status == "idle"' in item1 and "Archived: false" in item1 and "PendingPermissions == []" in item1
+    assert "A blamed agent that is running is not messaged" in item1
+    rules = s4[s4.index("**Send rules"):s4.index("1. **Steer future")]
+    assert "steer falls back to interrupt" in rules and "every sourced agent-message clears pending permissions" in rules
+    assert "defaults to interrupt and clears pending permissions" not in rules
+    assert "send only to an idle agent with no card" in rules
+
+
+def test_watch_step4_describes_prune_orphan_stop_and_unlocked_rate_record():
+    """PR 888 round 3 LOW 1 and LOW 2."""
+    s4 = _step4()
+    assert "stops orphan provider processes of already-archived agents" in s4 and "--max-kills" in s4
+    assert "not locked" in s4 and "only one session at a time sends these messages" in s4
+
+
 def test_watcher_howto_carries_the_send_rules():
     lw = load_module()
     h = lw.WATCHER_HOWTO
     assert "$PASEO_AGENT_ID" in h and "never `--behavior`" in h and "sourceless send interrupts" in h
     assert "`Status` idle" in h and "at most one message per lead per hour" in h
     assert "never run `paseo agent archive` yourself" in h
+    # round 3 MED 1: a running blamed agent is listed, not messaged; any send to a running agent can replace its turn
+    assert "any send to a running agent can replace its turn" in h and "clears pending permissions" in h
+    assert "a running blamed agent is listed for djbclark, not messaged" in h
+    assert "reads `Status` idle, `Archived: false` and no pending permissions" in h
