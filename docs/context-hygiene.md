@@ -206,7 +206,10 @@ requests just to test a guard. Live Claude nudge tests remain the current path.
 Local focused tests use the full `bg` path. Record the explicit decision first. Recording `local` or `pending` needs djbclark's
 approval (operator ruling 2026-11-15; `bg` runs both here, so `pending` is gated exactly like `local`): `load-watch ci decide DIR local "why"` opens the `sudo-ask` Allow dialog and Touch ID, the same
 fresh authentication as `bg approve-local`, and records nothing when it is denied, cancelled or cannot be shown (no GUI session,
-`~/.local/bin/sudo-ask` missing). Each answer is logged in `~/.local/state/bg/approvals.log`. `ci` decisions, reads and
+`~/.local/bin/sudo-ask` missing). Each answer is logged in `~/.local/state/bg/approvals.log`. A live any-command `bgrun approve-local` ticket
+(`bgrun approve-local --for 7h`, one Touch ID; operator ruling 2026-11-21: one fingerprint good for N hours) covering the directory stands in for the dialog
+for `local` only: `load-watch ci decide` asks `bgrun approve-local check DIR` first, and on exit 0 records the row as `[ticket ID] why`, logs `lw-local-ticket` with `ticket=ID` and prints the ticket id and expiry. Such a row lasts only as long as the ticket: `ci check` treats it as undecided as soon as `bgrun approve-local check DIR` no longer covers the directory (expired or revoked), and changing its note needs the dialog. A ticket never overwrites a `ci` decision and never records a `DIR/*` glob row.
+A ticket narrowed to one command, no ticket (exit 1), a missing directory (exit 2), a timeout or a missing bgrun fall back to the dialog; `pending` always asks. `ci` decisions, reads and
 an existing row of the same mode (a new reason or note) stay ungated; `ci` over `local` or `pending` is ungated too. Try `ci` first; ask djbclark for `local`:
 
 ```bash
