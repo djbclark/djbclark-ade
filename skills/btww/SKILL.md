@@ -28,7 +28,7 @@ question. It names the native command for the TUI you are running in.
 5. TUI not in the table: say it is not covered and that no native side-question
    command is known there.
 
-## Table (verified 2026-11-09)
+## Table (verified 2026-11-09; Pi-only third-party TUI, queue item 36)
 
 | TUI | Native command | Notes |
 |---|---|---|
