@@ -287,7 +287,9 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    Worker check: `bin/completion-notice --check-ack <done-path> [--msg-id <uuid>]`.
 6. **A local Claude Code session outside Paseo is a peer too (2026-11-14).** A session started in a plain terminal
    (not by Paseo) has no Paseo id, but Claude Code's own `ListAgents` tool lists it by name (for example `codexbar-d7`)
-   and `SendMessage` reaches it directly. Message it that way. Never route a message through the operator's
+   and `SendMessage` reaches it directly. Message it that way. Know only its session UUID (a transcript, a herdr pane)?
+   `bin/agent-id <SESSION_ID or unique prefix>` prints the `ListAgents` name from `~/.claude/sessions/<pid>.json`,
+   skipping a dead pid (docs/agent-identity.md). Never route a message through the operator's
    clipboard or ask the operator to paste it (2026-11-14: a lead handed the operator a clipboard prompt for the
    `~/src/CodexBar` session while that session sat in `ListAgents`). Rules for this route (Claude Code 2.1.325;
    re-probe the `ListAgents` tool description on a newer version):
