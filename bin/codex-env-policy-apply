@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically.
 
-    codex-env-policy-apply TEMPLATE TARGET [--write]
+    codex-env-policy-apply TEMPLATE TARGET [--write] [--allow-set-keys KEY[,KEY...]]
 
 Dry run by default: prints a unified diff of the policy span ONLY (the policy tables and the comment block above
 them, old against new), never a line of any neighbouring table. Only the template's own exact lines, table headers and
@@ -11,7 +11,10 @@ assignment line (including its key), operator comment and continuation line is h
 the merged text equals the file (no backup, no temp file, mtime unchanged); otherwise it refuses if TARGET changed
 since it was read (Codex rewrites it), creates TARGET.bak-<UTC time>-env-policy with mode 0600 (O_EXCL), writes a
 sibling temp file (mode of TARGET) and os.replace()s it onto the realpath. The result must parse, keep every
-non-policy table equal and keep the explicit `set` values. Diagnostics name files and `set` keys, never values; a TOML
+non-policy table equal and keep the explicit `set` values. By default the merge may not add, drop or change any key of the explicit
+`set`; `--allow-set-keys` (operator ruling 2026-11-21, so a deliberate template change such as swapping one Claude Code env flag can
+reach the live file) permits a change to exactly the keys it names and still refuses any other. The machine's browser digest key is never
+allowable. Diagnostics name files and `set` keys, never values; a TOML
 parse error is reduced to its line and column (tomllib's own text can quote characters).
 
 Exit: 0 done or nothing to do, 1 refused or failed, 2 bad arguments."""
@@ -106,7 +109,11 @@ def main(argv):
     ap.add_argument("template", help="agents/codex/config.toml.tmpl")
     ap.add_argument("target", help="the live config.toml")
     ap.add_argument("--write", action="store_true", help="apply (default: dry run, print the diff)")
+    ap.add_argument("--allow-set-keys", default="", metavar="KEY[,KEY...]", help="explicit-set keys the merge may add, drop or change (default: none)")
     a = ap.parse_args(argv)
+    allowed = {k.strip() for k in a.allow_set_keys.split(",") if k.strip()}
+    if "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S" in allowed:
+        fail("refusing: the browser digest key is machine-specific and cannot be allowed")
     target = os.path.realpath(a.target)
     tmpl = read(a.template, "template").decode("utf-8")
     raw = read(target, "target")
@@ -129,9 +136,10 @@ def main(argv):
     if rest(merged) != rest(live):
         fail("refusing: the merge would change content outside the policy tables")
     oset, nset = live[POLICY].get("set", {}), merged[POLICY].get("set", {})
-    if oset != nset:
-        diff = sorted(k for k in set(oset) | set(nset) if oset.get(k) != nset.get(k))
-        fail(f"refusing: the merge would change the explicit set (keys: {', '.join(diff)}); values not shown")
+    diff = sorted(k for k in set(oset) | set(nset) if oset.get(k) != nset.get(k))
+    if diff and not set(diff) <= allowed:
+        hint = "" if not allowed else f"; allowed: {', '.join(sorted(allowed))}"
+        fail(f"refusing: the merge would change the explicit set (keys: {', '.join(diff)}); values not shown{hint}")
     if new == old:
         print("already applied: nothing to do")
         return 0
