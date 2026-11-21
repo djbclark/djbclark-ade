@@ -1118,6 +1118,7 @@ class Service:
                 return record
             deadline = self.clock() + timeout
             refused_running = 0
+            self.snapshot_claims(record, target)
 
             def guarded(call, *args):
                 """A failure inside the wait or a re-check is recorded as the `native_error` (replacing an AGENT_RUNNING one)."""
@@ -1172,6 +1173,7 @@ class Service:
                         'may be deleted or a background workspace; archive resolves ids from that listing and can fall back to a partial title '
                         'match, getpaseo/paseo#9668); nothing archived; archive by exact id via the Paseo MCP '
                         'archive_agent, verify with `paseo agent inspect`, then re-run finish')
+                self.snapshot_claims(record, target)  # M2: the last look before the archive the ade-claim plugin may react to
                 record['status'] = 'archive-unknown'
                 self.save(target, record)
                 try:
@@ -1237,9 +1239,58 @@ class Service:
             earlier = record.get('rebound_claims')
             record['rebound_claims'] = sorted(set(ids) | set(earlier if isinstance(earlier, list) else []))
             record.pop('claims_rebind_error', None)
+            self.reconcile_claims(record, ade_claims)
         except Exception as error:  # noqa: BLE001 - recorded, never raised
             record['claims_rebind_error'] = bounded(f'{type(error).__name__}: {error}', MESSAGE_LIMIT)
         self.save(target, record)
+
+    def snapshot_claims(self, record, target):
+        """M2: the predecessor's active claim ids, recorded as `predecessor_claims` while it is still alive (the last call
+        before the archive wins). The ade-claim plugin rebinds an archived owner's claim to the next agent created in its workspace,
+        which can happen between the archive and `rebind_claims`; this list is what lets `reconcile_claims` see it. Best effort:
+        a failure keeps the previous snapshot (or none) and never blocks finish."""
+        try:
+            import ade_claims
+            ids = ade_claims.active_claim_ids_of(record['predecessor'])
+        except Exception:  # noqa: BLE001 - advisory
+            return
+        earlier = record.get('predecessor_claims')
+        merged = sorted(set(ids) | {i for i in (earlier if isinstance(earlier, list) else []) if isinstance(i, str)})
+        if earlier != merged:    # merged, never replaced: a claim the plugin gave away since the last look must stay listed
+            record['predecessor_claims'] = merged
+            if target is not None:
+                self.save(target, record)
+
+    def reconcile_claims(self, record, ade_claims):
+        """M2: compare `predecessor_claims` with what `rebind_successor` took. A claim in the snapshot that is neither rebound nor
+        already the successor's is owned by someone else meanwhile (the plugin rebound it to an agent created in its workspace). It is not taken back (that would move a claim off a live agent) and not silently dropped: it is recorded as
+        `claims_not_rebound` (id, fate `other`, owner) and announced, so the successor resolves it (release + new, or ask the owner).
+        Nothing is rebound twice: `rebind_successor` only takes claims the predecessor still owns."""
+        snapshot = record.get('predecessor_claims')
+        snapshot = [i for i in snapshot if isinstance(i, str)] if isinstance(snapshot, list) else []
+        # also the claims whose own history says the plugin rebound them away from the predecessor: no snapshot is needed for these,
+        # so an archive done before finish started, or a re-run after `archive-unknown`, still reports them
+        snapshot = sorted(set(snapshot) | set(ade_claims.claim_ids_rebound_from(record['predecessor'])))
+        if not snapshot:
+            record.pop('claims_not_rebound', None)
+            return
+        taken = set(record.get('rebound_claims') or [])
+        gone = []
+        for cid in snapshot:
+            if not isinstance(cid, str) or cid in taken:
+                continue
+            fate = ade_claims.claim_fate(cid, self.actor())
+            if fate.get('fate') == 'other':    # released, merged, expired or deleted claims are normal endings, not a loss
+                gone.append(fate)
+        gone = gone[:50]
+        if gone:
+            if record.get('claims_not_rebound') != gone:
+                self.progress('claim(s) the predecessor owned before its archive are not the successor\'s: '
+                              + '; '.join(f"{g['id']} -> {g.get('owner')}" for g in gone[:8])
+                              + ' (record claims_not_rebound): resolve them before writing there')
+            record['claims_not_rebound'] = gone
+        else:
+            record.pop('claims_not_rebound', None)
 
     @staticmethod
     def archive_other_agent(error, predecessor):

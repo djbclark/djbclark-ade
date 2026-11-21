@@ -392,7 +392,7 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
 /**
  * Q4 (operator ruling 2026-11-20): an active claim whose owner agent is archived (or gone) passes to the next
  * agent created in its workspace, so a reused workspace whose every agent was archived does not leave the new agent
- * without a write identity (a Claude-provider agent still needs a re-open, or an exported ADE_CLAIM_ID, before its first write: agent.open.before ran before the rebind). Fails closed: the owner must be PROVEN archived or gone by one
+ * without a write identity (agent.open.before ran before the rebind, so a Claude-provider agent has no ADE_CLAIM_ID on its first launch; ade_claims.is_mine accepts its PASEO_AGENT_ID as owner.record of this claim shape instead, M1). Fails closed: the owner must be PROVEN archived or gone by one
  * `paseo agent inspect` (`classifyOwnerAgent`); a live owner, a failed lookup and any odd answer leave the claim
  * alone. The swap is `ade_claims.py rebind-owner`, a compare-and-swap on the exact owner that was inspected, on an
  * ACTIVE claim only (a released or expired claim is never revived). No handoff record is read, so nothing stale
