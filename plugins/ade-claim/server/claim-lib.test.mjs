@@ -105,6 +105,13 @@ test("buildAdeClaimsNewArgv maps hook fields to ade_claims.py new", () => {
   ]);
 });
 
+test("buildAdeClaimsNewArgv marks a claim with no owner --ownerless (bind-owner completes it)", () => {
+  const base = { adeClaimsScript: "/opt/ade/bin/ade_claims.py", baseSha: "deadbeef" };
+  assert.ok(buildAdeClaimsNewArgv(FIXTURE, base).argv.includes("--ownerless"));
+  assert.ok(!buildAdeClaimsNewArgv(FIXTURE, { ...base, ownerRecord: "rec-1" }).argv.includes("--ownerless"));
+  assert.ok(!buildAdeClaimsNewArgv(FIXTURE, { ...base, ownerAgent: "a" }).argv.includes("--ownerless"));
+});
+
 test("resolveClaimTtlHours defaults to 72 and reads ADE_CLAIM_TTL", () => {
   assert.equal(resolveClaimTtlHours({}), DEFAULT_CLAIM_TTL_HOURS);
   assert.equal(resolveClaimTtlHours({ ADE_CLAIM_TTL: "24" }), 24);
