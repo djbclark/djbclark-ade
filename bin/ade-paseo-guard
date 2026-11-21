@@ -19,8 +19,10 @@ A pass-through is `os.execv`, so the exit code, signals, stdin and stdout are th
 hook: anything unexpected (an error here, no real paseo found for the probe) runs the real paseo unchanged. Only a refusal
 stops a command. The inspect probe calls the real paseo by its absolute path, so it never re-enters the shim.
 
-Environment: ADE_REAL_PASEO (the real paseo; the shim passes it to this helper alone, which pops it before it runs anything), ADE_ALLOW_ARCHIVED_SEND=<id> and ADE_ALLOW_REPLACED_SEND=<id>
-(overrides, read through `ade_send_guard.guard`), ADE_SEND_GUARD_LOG (where a replaced-send override is logged).
+Environment: ADE_REAL_PASEO (the real paseo; the shim passes it to this helper alone, which pops it before it runs anything),
+PASEO_AGENT_ID (the sender: an archived worker it (or a lead it replaced) launched is resumed by a send without asking
+anyone, operator ruling 2026-11-21), ADE_ALLOW_ARCHIVED_SEND=<id> and ADE_ALLOW_REPLACED_SEND=<id> (operator only), all read through
+`ade_send_guard.guard`, ADE_SEND_GUARD_LOG (where a replaced-send override and every resume of an owned archived worker are logged).
 """
 from __future__ import annotations
 
@@ -84,9 +86,10 @@ def run(argv: list[str], env=None) -> int:
             d = sg.guard(target, paseo=real, env=env)
             if d.action == sg.REFUSE:
                 print(f"ade-paseo-guard: refused, nothing was sent: {d.reason}.", file=sys.stderr)
-                print(f"ade-paseo-guard: only the operator overrides, naming the agent: {sg.ALLOW_ENV}=<its full id> resumes an "
-                      f"archived one, {sg.ALLOW_REPLACED_ENV}=<its full id> sends to a replaced one that is still live; neither "
-                      f"covers a cyclic ledger.", file=sys.stderr)
+                print(f"ade-paseo-guard: your own archived worker (launched by you or a lead you replaced) is resumed by a send without "
+                      f"asking anyone (ruling 2026-11-21); any other needs the operator, naming the agent: {sg.ALLOW_ENV}=<its full id> "
+                      f"resumes an archived one, {sg.ALLOW_REPLACED_ENV}=<its full id> sends to a replaced one that is still live; "
+                      f"neither covers a cyclic ledger.", file=sys.stderr)
                 return EXIT_REFUSED
             if d.action == sg.REDIRECT and d.target == (env.get("PASEO_AGENT_ID") or "").strip():
                 print(f"ade-paseo-guard: refused, nothing was sent: {target} was replaced by {d.target}, which is the caller itself; "

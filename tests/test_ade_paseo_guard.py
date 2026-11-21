@@ -40,10 +40,18 @@ agents = json.load(open(os.environ["FAKE_AGENTS"]))
 if a[:2] == ["agent", "inspect"]:
     hit = [k for k in agents if k == a[2]] or [k for k in agents if k.startswith(a[2])]  # an exact id, else a unique prefix
     if len(hit) == 1:
-        print(json.dumps({"Id": hit[0], "Archived": agents[hit[0]]}))
+        v = agents[hit[0]]
+        print(json.dumps({"Id": hit[0], "ParentAgentId": None, **(v if isinstance(v, dict) else {"Archived": v})}))
         sys.exit(0)
     sys.stderr.write("Agent not found: %s\\n" % a[2:3])
     sys.exit(1)
+if a[:1] == ["ls"] and "--label" in a:  # the server-side label filter: FAKE_LABELS maps "K=V" to agent ids
+    if os.environ.get("FAKE_LS_FAIL"):
+        sys.stderr.write("daemon down\\n")
+        sys.exit(1)
+    labels = json.load(open(os.environ["FAKE_LABELS"])) if os.environ.get("FAKE_LABELS") else {}
+    print(json.dumps([{"id": i, "status": "closed"} for i in labels.get(a[a.index("--label") + 1], [])]))
+    sys.exit(0)
 print("real paseo ran: " + " ".join(a))
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
 """
@@ -62,7 +70,8 @@ def sw(world, tmp_path):  # noqa: F811
     world.override_log = tmp_path / "state" / "overrides.jsonl"
     world.env = {**world.env, "PATH": f"{AGENT_BIN}:{world.bindir}:{os.environ['PATH']}", "FAKE_LOG": str(world.log),
                  "ADE_SEND_GUARD_LOG": str(world.override_log), "ADE_PYTHON": sys.executable}
-    for k in (guard.ALLOW_ENV, guard.ALLOW_REPLACED_ENV, "ADE_REAL_PASEO", "BASH_ENV", "ENV"):  # a startup file may rewrite PATH
+    for k in (guard.ALLOW_ENV, guard.ALLOW_REPLACED_ENV, guard.SENDER_ENV, "FAKE_LABELS", "FAKE_LS_FAIL",
+              "ADE_REAL_PASEO", "BASH_ENV", "ENV"):  # a startup file may rewrite PATH
         world.env.pop(k, None)
     world.live()
 
@@ -138,6 +147,7 @@ def test_an_archived_target_is_refused_with_exit_4_and_nothing_is_sent(sw):
     p = sw.run("send", "--no-wait", A, "hi")
     assert p.returncode == 4 and sw.sends() == []
     assert "archived" in p.stderr and guard.ALLOW_ENV in p.stderr and "nothing was sent" in p.stderr
+    assert "your own archived worker" in p.stderr and "2026-11-21" in p.stderr
 
 
 def test_an_archived_successor_and_a_cyclic_ledger_are_refused(sw):
@@ -192,11 +202,44 @@ def test_the_guard_reuses_the_hooks_parser_not_a_copy():
 
 # --- the overrides ---------------------------------------------------------------------------------------------------
 
-def test_the_archived_override_still_resumes_an_archived_agent_on_purpose(sw):
+def test_the_operator_archived_override_resumes_an_archived_agent_naming_it(sw):
     sw.live(**{A: True})
-    assert sw.run("send", A, "hi", env={guard.ALLOW_ENV: A}).returncode == 0 and sw.sends() == [["send", A, "hi"]]
+    p = sw.run("send", A, "hi", env={guard.ALLOW_ENV: A})
+    assert p.returncode == 0 and sw.sends() == [["send", A, "hi"]]
     sw.log.unlink()
-    assert sw.run("send", A, "hi", env={guard.ALLOW_ENV: "1"}).returncode == 4
+    assert sw.run("send", A, "hi", env={guard.ALLOW_ENV: "1"}).returncode == 4  # `1` names nobody
+
+
+def test_a_lead_resumes_its_own_archived_worker_by_a_plain_send_and_it_is_logged(sw):
+    sw.live(**{A: True, B: False})  # the sender B is a live agent
+    sw.label({f"ade.lead={B}": [A]})
+    p = sw.run("send", "--no-wait", A, "continue", env={guard.SENDER_ENV: B})
+    assert p.returncode == 0 and sw.sends() == [["send", "--no-wait", A, "continue"]]
+    line = json.loads(sw.override_log.read_text())
+    assert (line["override"], line["sender"], line["target"], line["proof"]) == ("owner", B, A, f"label:ade.lead={B}")
+
+
+def test_another_agents_or_no_sender_archived_worker_is_refused_at_the_shim(sw):
+    sw.live(**{A: True})
+    sw.label({f"ade.lead={B}": [A]})
+    for env in ({guard.SENDER_ENV: C}, {}):
+        p = sw.run("send", A, "hi", env=env)
+        assert p.returncode == 4 and sw.sends() == [] and not sw.override_log.exists()
+
+
+def test_the_shim_fails_closed_for_ownership_when_the_label_listing_fails(sw):
+    sw.live(**{A: True})
+    sw.label({f"ade.lead={B}": [A]})
+    p = sw.run("send", A, "hi", env={guard.SENDER_ENV: B, "FAKE_LS_FAIL": "1"})
+    assert p.returncode == 4 and sw.sends() == []
+
+
+def test_an_owned_worker_a_handoff_replaced_is_redirected_by_the_shim_not_resumed(sw):
+    write_link(sw.state, sw.home, A, D)
+    sw.live(**{A: True, D: False})
+    sw.label({f"ade.lead={B}": [A]})
+    p = sw.run("send", A, "hi", env={guard.SENDER_ENV: B})
+    assert p.returncode == 0 and sw.sends() == [["send", D, "hi"]] and not sw.override_log.exists()
 
 
 def test_the_replaced_override_sends_to_a_live_replaced_agent_and_logs_one_line(sw):

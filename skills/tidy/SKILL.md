@@ -74,7 +74,7 @@ current-work text; `--json` prints the machine form. Sections of the output:
    rename or relabel of a finished tab moves `lastActivityAt` too and then blocks the archive (archive by hand); apply re-runs this whole verdict right before each `paseo agent archive`. A `closed` worker alone is **not** archived: Paseo marks every
    interrupted agent `closed` at a daemon restart, so it is listed as `D#u` (resume or re-task it). Operator agents
    are only listed. A running agent is never archived (`paseo agent archive` runs without `--force`; Paseo unarchives an agent when it is resumed, but
-   treat an archive as final). An empty window is archived only when all of these hold: not LEAD (or a `MAIN` window), `isolation` is `local` (archiving a
+   treat an archive as final: a lead resumes its own archived worker by a send only when keeping its context is cheaper than a fresh worker, ruling 2026-11-21, docs/archived-send-guard.md). An empty window is archived only when all of these hold: not LEAD (or a `MAIN` window), `isolation` is `local` (archiving a
    worktree window deletes its worktree and any uncommitted work), no unarchived agent record names it (background
    and internal agents included), no terminal, and it is provably this lead's (every agent ever recorded in it carries
    `ade.lead=<lead or a predecessor of its self-handoff chain>`, or it is in the window record of one of them, or it is a legacy `workers … <lead id>` window). Other empty windows are listed (`G#n`) for the

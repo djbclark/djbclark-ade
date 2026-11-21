@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import time
@@ -22,8 +23,17 @@ FAKE = """#!/usr/bin/env python3
 import json, os, sys
 agents = json.load(open(os.environ["FAKE_AGENTS"]))
 a = sys.argv[1:]
+def rec(i):  # an agent is `Archived` (bool) or a dict that may carry ParentAgentId
+    v = agents[i]
+    return {"Id": i, "ParentAgentId": None, **(v if isinstance(v, dict) else {"Archived": v})}
 if a[:2] == ["agent", "inspect"] and a[2] in agents:
-    print(json.dumps({"Id": a[2], "Archived": agents[a[2]]}))
+    print(json.dumps(rec(a[2])))
+elif a[:1] == ["ls"] and "--label" in a:  # the server-side label filter: FAKE_LABELS maps "K=V" to agent ids
+    if os.environ.get("FAKE_LS_FAIL"):
+        sys.stderr.write("daemon down\\n")
+        sys.exit(1)
+    labels = json.load(open(os.environ["FAKE_LABELS"])) if os.environ.get("FAKE_LABELS") else {}
+    print(json.dumps([{"id": i, "status": "closed"} for i in labels.get(a[a.index("--label") + 1], [])]))
 else:
     sys.stderr.write("Agent not found: %s\\n" % a[2:3])
     sys.exit(1)
@@ -49,7 +59,14 @@ def world(tmp_path):
     w.live = live
     w.env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_AGENTS": str(agents),
              "ADE_SELF_SESSION_STATE": str(state), "PASEO_HOME": str(home)}
-    w.env.pop(guard.ALLOW_ENV, None)
+    for k in (guard.ALLOW_ENV, guard.SENDER_ENV, "FAKE_LABELS", "FAKE_LS_FAIL"):  # a developer's own agent id is no sender here
+        w.env.pop(k, None)
+    labels = tmp_path / "labels.json"
+
+    def label(by_label: dict):  # {"ade.lead=<lead id>": [agent ids]}: what `paseo ls -a -g --label K=V` lists
+        labels.write_text(json.dumps(by_label))
+        w.env["FAKE_LABELS"] = str(labels)
+    w.label = label
     return w
 
 
@@ -57,7 +74,8 @@ def inspector(agents: dict):
     def inspect(ident):
         if ident not in agents:
             raise LookupError(ident)
-        return {"Id": ident, "Archived": agents[ident]}
+        v = agents[ident]
+        return {"Id": ident, "ParentAgentId": None, **(v if isinstance(v, dict) else {"Archived": v})}
     return inspect
 
 
@@ -77,10 +95,12 @@ def test_a_live_target_passes(world):
 def test_an_archived_target_without_a_successor_is_refused(world):
     d = decide(world, A, {A: True})
     assert d.action == guard.REFUSE and "archived" in d.reason and guard.ALLOW_ENV in d.reason
+    assert "own archived worker" in d.reason and "operator's explicit" in d.reason  # says what would pass, and who overrides
 
 
 def test_the_operator_override_resumes_an_archived_target_on_purpose(world):
-    assert decide(world, A, {A: True}, allow_archived=True).action == guard.PASS
+    d = decide(world, A, {A: True}, allow_archived=True)
+    assert (d.action, d.resumed) == (guard.PASS, "")  # an override is no ownership: nothing logged as an owner resume
 
 
 def test_a_replaced_lead_is_redirected_to_the_end_of_a_three_step_chain(world):
@@ -804,3 +824,273 @@ def test_a_not_found_answer_is_cached_within_one_decision(world):
         with pytest.raises(LookupError):
             cached("nope")
     assert calls == ["nope"]
+
+
+# --- self-service resume of an archived agent (operator ruling 2026-11-21) -------------------------------------------
+
+LEAD = B  # the sender in this section: a live lead whose worker A is archived
+
+
+def owned_by_label(*pairs):
+    """An `ls_label` that lists the given agent ids under the given label: `owned_by_label(("ade.lead=<id>", [A]))`."""
+    table = {k: v for k, v in pairs}
+
+    def ls_label(label):
+        return [{"id": i, "status": "closed"} for i in table.get(label, [])]
+    return ls_label
+
+
+def decide_as(w, sender, target, agents, ls_label=None, **kw):
+    if isinstance(sender, str) and sender not in agents:
+        agents = {**agents, sender: False}  # the sender is a live agent unless a test says otherwise
+    return guard.decide(target, inspector(agents), state_dir=w.state, home=w.home, sender=sender, ls_label=ls_label, **kw)
+
+
+def test_a_lead_resumes_its_own_archived_worker_found_by_the_ade_lead_label(world):
+    d = decide_as(world, LEAD, A, {A: True}, owned_by_label((f"ade.lead={LEAD}", [A])))
+    assert (d.action, d.resumed, d.proof) == (guard.PASS, "owner", f"label:ade.lead={LEAD}")
+
+
+def test_another_leads_archived_worker_is_not_mine(world):
+    ls = owned_by_label((f"ade.lead={STRANGER}", [A]))
+    d = decide_as(world, LEAD, A, {A: True}, ls)
+    assert d.action == guard.REFUSE and not d.resumed and "not provably yours" in d.reason
+
+
+def test_a_worker_the_lead_never_launched_is_refused_even_when_it_has_a_label_listing(world):
+    d = decide_as(world, LEAD, A, {A: True}, owned_by_label((f"ade.lead={LEAD}", [C])))  # the lead's worker is C, not A
+    assert d.action == guard.REFUSE
+
+
+def test_a_worker_launched_by_a_lead_i_replaced_is_mine_too(world):
+    write_link(world.state, world.home, C, LEAD)  # C handed off to LEAD (completed): C's workers are LEAD's
+    d = decide_as(world, LEAD, A, {A: True, C: True}, owned_by_label((f"ade.lead={C}", [A])))
+    assert (d.action, d.proof) == (guard.PASS, f"label:ade.lead={C}")
+
+
+def test_a_worker_of_a_lead_that_replaced_me_is_not_mine(world):
+    write_link(world.state, world.home, LEAD, C)  # LEAD handed off to C: C's lineage holds LEAD, but LEAD's does not hold C
+    assert decide_as(world, LEAD, A, {A: True, C: False}, owned_by_label((f"ade.lead={C}", [A]))).action == guard.REFUSE
+
+
+def test_a_natively_started_worker_is_owned_through_its_paseo_parent_chain(world):
+    mid = "55555555-0000-4000-8000-000000000005"
+    agents = {A: {"Archived": True, "ParentAgentId": mid}, mid: {"Archived": False, "ParentAgentId": LEAD}, LEAD: False}
+    d = decide_as(world, LEAD, A, agents)
+    assert (d.action, d.resumed, d.proof) == (guard.PASS, "owner", f"parent:{LEAD}")
+
+
+def test_the_parent_chain_is_cut_at_the_hop_cap_and_survives_a_cycle(world):
+    ids = [f"{n:08x}-0000-4000-8000-00000000{n:04x}" for n in range(100, 100 + guard.MAX_PARENT_HOPS + 2)]
+    agents = {A: {"Archived": True, "ParentAgentId": ids[0]}}
+    for i, x in enumerate(ids):
+        agents[x] = {"Archived": False, "ParentAgentId": ids[i + 1] if i + 1 < len(ids) else LEAD}
+    assert decide_as(world, LEAD, A, agents).action == guard.REFUSE  # LEAD is too many hops up
+    loop = {A: {"Archived": True, "ParentAgentId": ids[0]}, ids[0]: {"Archived": False, "ParentAgentId": ids[1]},
+            ids[1]: {"Archived": False, "ParentAgentId": ids[0]}}
+    assert decide_as(world, LEAD, A, loop).action == guard.REFUSE
+
+
+@pytest.mark.parametrize("sender", [None, "", "1", "not-an-id", A.upper(), B[:8]])
+def test_ownership_needs_a_full_agent_id_as_the_sender(world, sender):
+    ls = owned_by_label((f"ade.lead={sender}", [A]), (f"ade.lead={LEAD}", [A]))
+    assert decide_as(world, sender, A, {A: True}, ls).action == guard.REFUSE
+
+
+def test_an_archived_agent_is_not_its_own_owner(world):
+    assert decide_as(world, A, A, {A: True}, owned_by_label((f"ade.lead={A}", [A]))).action == guard.REFUSE
+
+
+def test_ownership_fails_closed_when_the_listing_cannot_be_read(world):
+    def broken(_label):
+        raise OSError("daemon down")
+    assert decide_as(world, LEAD, A, {A: True}, broken).action == guard.REFUSE
+    assert decide_as(world, LEAD, A, {A: True}, None).action == guard.REFUSE  # no way to read labels: nothing proven
+
+
+def test_ownership_fails_closed_on_a_cyclic_ledger(world):
+    write_link(world.state, world.home, C, LEAD)
+    write_link(world.state, world.home, LEAD, C)
+    assert decide_as(world, LEAD, A, {A: True}, owned_by_label((f"ade.lead={LEAD}", [A]))).action == guard.REFUSE
+
+
+def test_an_own_worker_a_handoff_replaced_is_still_redirected_not_resumed(world):
+    write_link(world.state, world.home, A, D)  # the worker handed off itself: its successor D is the one to message
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    d = decide_as(world, LEAD, A, {A: True, D: False}, ls)
+    assert (d.action, d.target, d.resumed) == (guard.REDIRECT, D, "")
+    d = decide_as(world, LEAD, A, {A: True, D: True}, ls)  # successor archived too: refused, never resumed through ownership
+    assert d.action == guard.REFUSE and not d.resumed
+
+
+def test_a_live_own_worker_is_a_plain_pass_with_no_resume(world):
+    d = decide_as(world, LEAD, A, {A: False}, owned_by_label((f"ade.lead={LEAD}", [A])))
+    assert (d.action, d.resumed) == (guard.PASS, "")
+
+
+def test_an_owner_who_also_names_the_operator_override_passes_by_the_override(world):
+    d = decide_as(world, LEAD, A, {A: True}, owned_by_label((f"ade.lead={LEAD}", [A])), allow_archived=A)
+    assert (d.action, d.resumed) == (guard.PASS, "")  # the override came first: no ownership lookup, no owner log line
+
+
+def read_log(path):
+    return [json.loads(x) for x in Path(path).read_text().splitlines()]
+
+
+def use_fake(world, monkeypatch):
+    """`guard()` runs the fake paseo it is given with this process's own environment: hand it the fixture's files."""
+    monkeypatch.setenv("FAKE_AGENTS", str(world.agents))
+    monkeypatch.setenv("FAKE_LABELS", world.env["FAKE_LABELS"])
+    monkeypatch.delenv("FAKE_LS_FAIL", raising=False)
+
+
+def test_guard_logs_an_owner_resume_and_nothing_for_an_override_or_a_refusal(world, tmp_path, monkeypatch):
+    world.label({f"ade.lead={LEAD}": [A]})
+    world.live(**{A: True, C: True, LEAD: False})
+    use_fake(world, monkeypatch)
+    log = tmp_path / "state" / "log.jsonl"
+    kw = {"paseo": str(world.bindir / "paseo"), "log_path": log, "state_dir": world.state, "home": world.home}
+    d = guard.guard(A, env={guard.SENDER_ENV: LEAD}, **kw)  # own worker
+    assert (d.action, d.resumed) == (guard.PASS, "owner")
+    d = guard.guard(C, env={guard.SENDER_ENV: LEAD, guard.ALLOW_ENV: C}, **kw)  # not mine: the operator's override
+    assert (d.action, d.resumed) == (guard.PASS, "")
+    assert guard.guard(C, env={guard.SENDER_ENV: LEAD}, **kw).action == guard.REFUSE  # not mine, no override
+    lines = read_log(log)
+    assert len(lines) == 1
+    assert (lines[0]["override"], lines[0]["sender"], lines[0]["target"], lines[0]["proof"]) == ("owner", LEAD, A, f"label:ade.lead={LEAD}")
+    assert all(x["ts"].endswith("Z") and x["source"] == "send" for x in lines)
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_guard_reads_ownership_through_the_cli_and_fails_closed_when_ls_fails(world, tmp_path, monkeypatch):
+    world.label({f"ade.lead={LEAD}": [A]})
+    world.live(**{A: True, LEAD: False})
+    use_fake(world, monkeypatch)
+    kw = {"paseo": str(world.bindir / "paseo"), "log_path": tmp_path / "l.jsonl", "state_dir": world.state, "home": world.home}
+    assert guard.guard(A, env={guard.SENDER_ENV: LEAD}, **kw).resumed == "owner"
+    monkeypatch.setenv("FAKE_LS_FAIL", "1")
+    assert guard.guard(A, env={guard.SENDER_ENV: LEAD}, **kw).action == guard.REFUSE
+
+
+def test_hook_lets_a_lead_send_to_its_own_archived_worker_and_denies_anyone_else(world):
+    world.label({f"ade.lead={LEAD}": [A]})
+    world.live(**{A: True, LEAD: False})
+    cmd = {"command": f"paseo send --no-wait -- {A} hi"}
+    log = world.state.parent / "hook-log.jsonl"
+    env_lead = {**world.env, guard.SENDER_ENV: LEAD, "ADE_SEND_GUARD_LOG": str(log)}
+    assert run_hook(world, "Bash", cmd, env=env_lead) is None
+    assert read_log(log)[0]["source"] == "hook-precheck" and read_log(log)[0]["override"] == "owner"
+    reason = denial(run_hook(world, "Bash", cmd, env={**world.env, guard.SENDER_ENV: STRANGER, "ADE_SEND_GUARD_LOG": str(log)}))
+    assert "own archived worker" in reason and "operator's explicit" in reason
+    assert denial(run_hook(world, "Bash", cmd))  # no sender at all (the operator's shell, a script): not proven
+
+
+def test_the_redirect_and_the_replaced_override_stay_operator_only(world):
+    """A sender who owns the replaced worker, and who names both overrides, still gets the redirect: ownership and the archived
+    override never open a handoff-replaced agent, and ADE_ALLOW_REPLACED_SEND only applies to a live one."""
+    write_link(world.state, world.home, A, D)
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    d = decide_as(world, LEAD, A, {A: True, D: False}, ls, allow_archived=A, allow_replaced=A)
+    assert (d.action, d.target) == (guard.REDIRECT, D)
+
+
+# --- the sender must hold its role (PR 907 review, MED-1) and the label listing must be trustworthy (LOW-1) -----------
+
+def test_a_lead_that_handed_off_cannot_resume_its_old_workers(world):
+    write_link(world.state, world.home, LEAD, C)  # completed handoff LEAD -> C: A is now C's worker
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    d = decide_as(world, LEAD, A, {A: True, C: False}, ls)
+    assert d.action == guard.REFUSE and not d.resumed
+
+
+def test_a_lead_that_is_handing_off_right_now_cannot_resume_its_old_workers(world):
+    write_link(world.state, world.home, LEAD, C, status="acknowledged", acknowledged_at=stamp())
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    d = decide_as(world, LEAD, A, {A: True, C: False}, ls)
+    assert d.action == guard.REFUSE and not d.resumed
+
+
+def test_an_archived_or_unknown_sender_cannot_resume_a_worker(world):
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    assert decide_as(world, LEAD, A, {A: True, LEAD: True}, ls).action == guard.REFUSE  # archived sender
+    unknown = guard.decide(A, inspector({A: True}), state_dir=world.state, home=world.home, sender=LEAD, ls_label=ls)
+    assert unknown.action == guard.REFUSE  # the sender is not known to Paseo
+
+
+def test_the_live_successor_resumes_the_workers_of_the_lead_it_replaced(world):
+    write_link(world.state, world.home, LEAD, C)  # the predecessor's workers are the successor's: C passes, LEAD does not
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    d = decide_as(world, C, A, {A: True, C: False, LEAD: True}, ls)
+    assert (d.action, d.resumed, d.proof) == (guard.PASS, "owner", f"label:ade.lead={LEAD}")
+    assert decide_as(world, LEAD, A, {A: True, C: False, LEAD: False}, ls).action == guard.REFUSE
+
+
+def test_an_unreadable_ledger_or_sender_record_refuses(world, monkeypatch):
+    ls = owned_by_label((f"ade.lead={LEAD}", [A]))
+    assert decide_as(world, LEAD, A, {A: True}, ls).resumed == "owner"
+
+    for name in ("effective_lead", "successor_of", "recent_lineage"):
+        real = getattr(guard.succ, name)
+
+        def boom(who, *a, _real=real, **k):  # only the sender's own lookup fails: the target's succession reads still work
+            if who == LEAD:
+                raise OSError("ledger unreadable")
+            return _real(who, *a, **k)
+        with monkeypatch.context() as m:
+            m.setattr(guard.succ, name, boom)
+            assert decide_as(world, LEAD, A, {A: True}, ls).action == guard.REFUSE, name
+
+    def broken_inspect(ident):
+        if ident == LEAD:
+            raise OSError("daemon down")
+        return {"Id": ident, "Archived": True, "ParentAgentId": None}
+    d = guard.decide(A, broken_inspect, state_dir=world.state, home=world.home, sender=LEAD, ls_label=ls)
+    assert d.action == guard.REFUSE
+
+
+def test_a_listing_that_ignores_the_label_filter_is_no_evidence(world):
+    """LOW-1: a Paseo that stops honouring --label lists every agent for any value: the canary (an unknown lead) must list nothing."""
+    def lists_everything(_label):
+        return [{"id": A, "status": "closed"}]
+    assert decide_as(world, LEAD, A, {A: True}, lists_everything).action == guard.REFUSE
+
+
+def test_a_canary_that_cannot_be_read_is_no_evidence(world):
+    def ls(label):
+        if label != f"ade.lead={LEAD}":
+            raise OSError("daemon hiccup on the canary")
+        return [{"id": A}]
+    assert decide_as(world, LEAD, A, {A: True}, ls).action == guard.REFUSE
+
+
+def test_the_label_value_is_always_a_full_id_and_the_canary_is_asked_once(world):
+    asked = []
+
+    def ls(label):
+        asked.append(label)
+        return [{"id": A}] if label == f"ade.lead={LEAD}" else []
+    assert decide_as(world, LEAD, A, {A: True}, ls).resumed == "owner"
+    assert len(asked) == 2 and asked[-1] == f"ade.lead={LEAD}" and asked[0] != asked[-1]
+    assert all(guard.succ.UUID_RE.fullmatch(x.split("=", 1)[1]) for x in asked)
+
+
+def test_a_non_id_lineage_member_is_never_sent_to_paseo(world, monkeypatch):
+    monkeypatch.setattr(guard.succ, "recent_lineage", lambda *a, **k: [LEAD, "ade.kind"])
+    asked = []
+
+    def ls(label):
+        asked.append(label)
+        return [{"id": A}] if label == "ade.lead=ade.kind" else []
+    assert decide_as(world, LEAD, A, {A: True}, ls).action == guard.REFUSE
+    assert "ade.lead=ade.kind" not in asked
+
+
+def test_the_hook_reads_the_sender_from_its_environment_never_from_the_command_text(world):
+    """LOW-2: `PASEO_AGENT_ID=<owner> paseo send ...` written in the command does not make the hook believe it."""
+    world.label({f"ade.lead={LEAD}": [A]})
+    world.live(**{A: True, LEAD: False, STRANGER: False})
+    cmd = {"command": f"PASEO_AGENT_ID={LEAD} paseo send --no-wait -- {A} hi"}
+    assert denial(run_hook(world, "Bash", cmd, env={**world.env, guard.SENDER_ENV: STRANGER}))  # a stranger's session
+    assert denial(run_hook(world, "Bash", cmd))  # no sender in the hook's own environment
+    own = run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}, env={**world.env, guard.SENDER_ENV: LEAD})
+    assert own is None  # the same send from the owner's own environment passes

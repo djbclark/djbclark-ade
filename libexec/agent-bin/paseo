@@ -39,8 +39,9 @@
 # Exit codes: 4 refused (nothing sent); 127 no real paseo found, or re-entered more than 8 times (an exec chain) or through more than 32 hops;
 # every other code is the real paseo's. (127 also: the total passed 256 inside one 10-minute window.)
 # Environment: ADE_REAL_PASEO (the real paseo; skips the PATH search; the shim passes it only to its helper), ADE_PYTHON (default python3),
-# ADE_ALLOW_ARCHIVED_SEND=<full id> (operator: resume one archived agent), ADE_ALLOW_REPLACED_SEND=<full id> (operator: send to
-# a replaced agent that is still live), ADE_SEND_GUARD_LOG (override log; default ~/.local/state/djbclark-ade/send-guard-overrides.jsonl).
+# ADE_ALLOW_ARCHIVED_SEND=<full id> (operator: resume one archived agent; the sender's own archived worker needs no override, ruling
+# 2026-11-21), ADE_ALLOW_REPLACED_SEND=<full id> (operator: send to a replaced agent that is still live), ADE_SEND_GUARD_LOG (override
+# and own-worker resume log; default ~/.local/state/djbclark-ade/send-guard-overrides.jsonl).
 set -u
 
 self="$0"
