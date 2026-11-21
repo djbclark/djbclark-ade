@@ -116,12 +116,12 @@ and security sequencing in the older plan; other unfinished planning stays intac
         pr-radar, claude-code-entrypoint-env, session-janitor, session-recovery. The ones not chosen are recorded too
         (zerosub, usage-auto-resume, plan-auto), so `doctor` can tell "not chosen" from "missing".
       - **The operator's own Paseo plugins and forks**, each as a Paseo plugin component:
-        - **paseo-runner** (`djbclark/paseo-runner`): script packs as tabs of buttons on desktop, web and phone, stage 1
+        - **paseo-runner** (`frdminc/paseo-runner`): script packs as tabs of buttons on desktop, web and phone, stage 1
           (server core, no UI yet, 2026-11-07). Its `scripts/sync-plugins.mjs` installs, disabled, every plugin one
           daemon has onto the daemons that lack it, which is how `just update` keeps the Mac and vps-primary in step.
           An earlier draft of this plan listed it as a consumer of djbclark-ade; that was wrong, corrected 2026-11-07.
         - `frdminc/paseo-plugin-questions-please` (above) and `frdminc/paseo-plugin-dann-workspace-accent`.
-        - The forks `frdminc/paseo-baton`, `frdminc/paseo-plugins-gpambrozio` and `djbclark/paseo-transcript-search`: install
+        - The forks `frdminc/paseo-baton`, `frdminc/paseo-plugins-omercnet` (PR Radar), `frdminc/paseo-plugins-gpambrozio` and `frdminc/paseo-transcript-search`: install
           the upstream unless the fork carries a change not yet upstreamed (standing order 8), and record which one in
           `[install]`. The baton fork was pushed on 2026-11-07, while the J6 set names upstream baton (dennyferra):
           decide which one at build time.

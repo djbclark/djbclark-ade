@@ -150,7 +150,7 @@ Adopting an upstream replacement remains a separate contract review.
    (dual `{ id, setup, server }` export, `ctx.tool.hook("execute.before")`,
    delegating to `rtk hook opencode`), is MERGEABLE and in maintainer review;
    maintainers close duplicates in its favour (#4470, #4311, #3899). Our patch
-   is verified and pushed to `djbclark/rtk`, branch
+   is verified and pushed to `frdminc/rtk`, branch
    `fix/opencode-v2-setup-export` (commit `b11bf398`), so a PR is one command
    away if wanted. The recommended next step is a comment on #4187.
 3. **`rtk rewrite` vs `rtk hook opencode` — a permissions caveat.** Released rtk
