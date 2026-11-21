@@ -389,3 +389,149 @@ bezalel stays denied in Claude Code (2026-10-18: ~1.5k instruction tokens per se
 it has 0 calls in Claude and Codex transcripts (Hermes, where it is enabled, was not counted). The open site-private todo (trim its token's scopes, re-measure `/context`, re-enable
 only if under ~1k tokens) is still the right test. The registry gives it the capability tags in 2.1, so `bin/mcp-find
 finance` answers "bezalel: Codex and Hermes; denied in Claude" without anyone enabling it. Its Codex bearer is a literal (1.4).
+
+## 9. Operator decisions (2026-11-21, relayed by the lead 3152a605)
+
+1. **2a: approved.** Remove the `graft` MCP server from Claude Code and Codex user config.
+2. **2b: approved, both parts.** chrome-devtools on demand with the `bin/ade-worker-run --mcp` launch flag **and** the
+   lazy stdio wrapper (Phase 3 is pulled forward into 2b).
+3. **2c: approved without rotation.** Move the exa, jina and bezalel keys to sudo-secretspec; **do not rotate** them. So
+   the old values stay valid: every backup and old `*.bak-*` copy holding them stays sensitive (11.4).
+4. **Photos:** the ADB pull route for recent photos.
+5. The operator: "I swear bezalel or some other MCP service has access to google photos". Checked read-only in section 10.
+
+## 10. Which configured MCP servers reach Google Photos (read-only check, 2026-11-21)
+
+Method: `initialize` + `tools/list` (paginated) against every configured HTTP server, with each client's own headers.
+Tool names, descriptions and server instructions were matched against `photo|gphoto|picker|google photos|media item|album`;
+no tool was called and no secret was printed. Stdio servers were not started (two of them would open Chrome's dialog or
+spawn more copies); their tool sets are known from this session and the docs.
+
+| Server | Result |
+|---|---|
+| firecrawl (30 tools), paper-search (57), arxiv (19), basic-memory (12), jina (12), hermes (11), crawl4ai (4), parallel-search (3) | listed; **no photo tool** |
+| beeper, siyuan | app not running (connection refused); chat bridge and notes app, no Photos surface in their documented tools |
+| exa, warpbuild | 403 to a raw client (exa's Cursor key or OAuth needed); web search and CI runners |
+| **bezalel** | 400 to a raw client (Codex and Hermes still connect). Its 80 tool names, taken from Claude transcripts recorded before the 2026-10-18 deny, include **no photo tool**, but `connectors__list_connections` / `connectors__list_tools` / `connectors__execute` run third-party toolkits, and its **`googlephotos` connection was ACTIVE** on 2026-10-17 (site-private `reference_phone_screenshots_via_adb.md`) |
+| stdio: graft, chrome-devtools, extrabar, ghost-os, cua-driver, cow, node_repl, aws-mcp | no Photos API. chrome-devtools (and `chrome-use`, a CLI) could open photos.google.com in the operator's logged-in Chrome: that is browser automation (section 4 route 6), not an API |
+| claude.ai connectors | Gmail and Context7 active, no Photos. Google Drive is denied, and Drive has had no Photos folder since Google ended the Drive–Photos sync in 2019 (not re-checked this session) |
+
+**Answer: the operator is right that bezalel has Google Photos access.** It is the `googlephotos` connection, reached
+through `connectors__execute`, and no other server has any. That access goes through the Library API, so since
+2025-03-31 it sees only items that bezalel's own app uploaded. That is why `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` returned
+nothing on 2026-10-17. Not done (it would need a call the lead did not approve): `connectors__list_tools` for the
+`googlephotos` toolkit, which would show whether bezalel's provider also offers a Picker-session tool. That call returns
+tool metadata, not photos, so it can be the first step if the operator wants to know for sure.
+
+## 11. Implementation plan per phase (for the lead's build slices; nothing live is changed by this page)
+
+Common rules for every slice. Work in its own worktree off `origin/master`. Make scratch copies with `install -m 600`
+under the slice's scratchpad and delete them at the end of the slice: copies of `~/.claude.json` and
+`~/.codex/config.toml` hold account data and literal keys. Point the clients at the copies with
+`CLAUDE_CONFIG_DIR=<scratch>/claude` (Claude Code then reads `<scratch>/claude/.claude.json`) and
+`CODEX_HOME=<scratch>/codex`. Run tests through `bgrun bin/pytest`. A live step happens only with the decision in
+section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-MM-DD-mcp-on-demand`, mode 600.
+
+### 11.1 Phase 2a: remove graft MCP (Claude, Codex)
+
+1. **Scratch test.** Copy both configs. `CLAUDE_CONFIG_DIR=… claude mcp remove graft -s user`, then `claude mcp get graft`
+   reports not found. `CODEX_HOME=… codex mcp remove graft`, then `codex mcp list` has no graft. Then the rollback on the
+   copies: `claude mcp add --scope user graft -- graft mcp` and `codex mcp add graft -- graft mcp`. Parse both files and
+   assert that `mcpServers` / `mcp_servers` equal the originals key for key: this proves the rollback.
+2. **Find the re-adder before going live.** Something wrote graft back after the 2026-10-18/20 removals (mcp-servers.md says
+   graft's SessionStart reconcile did it once). The slice reads graft's own options (`graft --help` and its docs; graft is
+   not a live service) for a switch that stops it registering MCP, and checks why Hermes' `check-graft-wiring-invariants.sh`
+   did not fire. Without a fix, the doctor's `expected = absent` row (Phase 1) is the alarm.
+3. **Live.** Back up, then run the two `remove` commands.
+4. **Verify.** A fresh `claude -p "reply ok"` from a scratch dir has no `graft mcp` child (`ps -axo ppid,command`);
+   `graft ask … --no-refresh` still works; `codex mcp list` has no graft; `ade-install doctor` agrees.
+5. **Rollback (tested in 1).** The two `add` commands, or copy the backup back. Running sessions keep their copies until they
+   end; nothing is killed.
+
+### 11.2 Phase 2b, part 1: the `bin/ade-worker-run --mcp NAME` launch flag
+
+1. **Code.** A repeatable flag. It reads the server entry from the registry (Phase 1; until then from a small
+   `config/mcp-on-demand.toml` holding `chrome-devtools` only) and adds, per provider: Claude, `--mcp-config <generated
+   json>` (written mode 600 under the run dir, no secrets); Codex, `-c mcp_servers.<name>.enabled=true`. Check first
+   that `paseo run` can pass provider arguments. If it cannot, use one Paseo provider profile per MCP set, and file the
+   missing passthrough upstream as a getpaseo/paseo Discussion (feature). If the server is already present in user
+   scope (after part 2 it is the lazy wrapper), the flag adds nothing and says so: two entries under one name would
+   conflict.
+2. **Tests.** argv generation per provider; unknown name exits 2; the generated JSON has no `env` values; the conflict rule.
+3. **Scratch test.** With a fixture stdio MCP server (a 30-line echo server, no Chrome) and `CLAUDE_CONFIG_DIR` and
+   `CODEX_HOME` pointing at copies that have chrome-devtools removed: a run with `--mcp fixture` has the child, a run without
+   it does not. One attended check with the real chrome-devtools (Chrome's Allow dialog needs the operator present).
+4. **Live.** Back up. `claude mcp remove chrome-devtools -s user`; Codex `enabled = false`. Update
+   `config/mcp-clients.toml` (on-demand state, or the doctor warns `missing`) and mcp-servers.md "Setup" in the same PR.
+5. **Verify.** A fresh session has no `chrome-devtools-mcp` child; a `--mcp chrome-devtools` worker's `list_pages` answers.
+6. **Rollback.** The exact `claude mcp add --scope user chrome-devtools -- npx -y chrome-devtools-mcp@latest …` line in
+   mcp-servers.md Setup; Codex `enabled = true`; or the backup. Tested on the scratch copies in step 3.
+
+### 11.3 Phase 2b, part 2: the lazy stdio wrapper (`bin/mcp-lazy`)
+
+1. **Build or adopt.** Read WEBGRS/mcp-lazy (MIT, Python, 0 stars) first. Adopt it after a source review and an
+   adversary pass, or write about 200 lines in this repo using it as prior art, and upstream any fix (order 8). Behaviour:
+   - It answers `initialize`, `tools/list`, `prompts/list` and `resources/list` from a cache
+     (`~/.cache/ade/mcp-lazy/<id>.json`, mode 600, holding the last real responses).
+   - On the first other request it spawns the real command, replays `initialize` and forwards.
+   - It reaps the child after `--idle 600` seconds with no in-flight request, no unanswered server-to-client request and no
+     open subscription, and respawns it on the next call.
+   - It sends `notifications/tools/list_changed` when a fresh `tools/list` differs from the cache.
+   - With no cache it starts the child once to fill the cache, then reaps it.
+   - It passes `env` and `cwd` through unchanged.
+2. **Tests (fixture server).**
+   - The handshake is answered from the cache with no child started (assert the pid).
+   - The first `tools/call` spawns the child.
+   - The idle reap fires with `--idle 2`, and never while a call is in flight.
+   - When the child crashes mid-call, the wrapper returns a JSON-RPC error and the next call respawns it.
+   - `list_changed` is sent when the tool list changes.
+   - stdout carries only JSON-RPC (nothing else reaches the client).
+3. **Scratch test.** `claude -p --strict-mcp-config --mcp-config <wrapper-around-fixture.json>` under a scratch
+   `CLAUDE_CONFIG_DIR`. Then one attended run around the real chrome-devtools: no `chrome-devtools-mcp` child until the first
+   call, Chrome's dialog only at that call, and the child gone after the idle time. Measure the wrapper's footprint (Python is
+   expected near 10–15 MB, against 119 MB).
+4. **Live.** Back up. Add the user-scope entry with `claude mcp add --scope user chrome-devtools -- <repo>/bin/mcp-lazy
+   --id chrome-devtools --idle 600 -- npx -y chrome-devtools-mcp@latest …`, and the same `command`/`args` in Codex with
+   `enabled = true`. Registry `expected = user (lazy)`.
+5. **Verify.** As in step 3, in a fresh real session; `ade-install doctor` reads the wrapper command as expected.
+6. **Rollback.** Remove the entry (back to part 1's on-demand state) or restore the backup. Tested in step 3.
+
+### 11.4 Phase 2c: keys to sudo-secretspec, no rotation
+
+1. **Names.** `MCP_BEZALEL_API_KEY` (Hermes' existing reference), `MCP_EXA_API_KEY` and `MCP_JINA_API_KEY` (the slice
+   checks the store for existing names first, through the `sudo-secretspec` skill). Each value is set from the current
+   file through stdin inside one Python process, never echoed. The slice checks that the value read back matches by
+   comparing hashes in that process.
+2. **Wiring.** Each client gets a reference instead of the literal: Codex `bearer_token_env_var = "MCP_BEZALEL_API_KEY"`
+   and `env_http_headers` for exa and jina; Cursor `${env:NAME}` in `headers`; OpenCode `{env:NAME}`. The slice checks
+   each syntax against the client's current docs before use. Each client process then needs the variable in its
+   environment: wrap the provider command as `sudo-secretspec run --keys … -- <client>` (Paseo provider profile, or a
+   terminal alias). Fall back to the loopback shim of 5.4 item 1 (with its Origin/Host checks and client bearer, and a
+   port claimed in `registry/ports.yml`) only for a client that has no reference syntax or cannot be wrapped.
+3. **Scratch test.** On copies: replace the literal with the reference, start the client under `sudo-secretspec run` with
+   `CODEX_HOME` / a scratch Cursor/OpenCode config dir, and check that `tools/list` answers for exa, jina and bezalel. Then
+   check that it fails cleanly without the wrapper, which shows the literal is really gone.
+4. **Live.** Back up. Edit one client at a time and verify it before the next.
+5. **Verify.** Each server answers `tools/list` from the real client. `rg -c` for the old key values (in one Python process
+   that holds them, printing only counts) finds 0 hits in the three live files.
+6. **No rotation (operator, 2026-11-21).** The old values stay valid. The slice lists, by path only, every
+   `*.bak-*` copy of these three files and any other file that still holds the values (same in-process count). Each is
+   deleted only with the operator's yes for that list; none is globbed away unseen.
+7. **Rollback.** Restore the client's backup: the literal still works, because the key was not rotated. Tested by step 3's
+   copies.
+
+### 11.5 Photos: the ADB route
+
+1. **No config change.** The registry `photos` capability points to the ADB route, and `bin/mcp-find photos` prints it
+   with the bezalel caveat (section 10).
+2. **Optional helper** `bin/phone-latest-photo [--n 3] [--kind camera|screenshots] DEST`. It runs `adb -s <device> shell
+   ls -t` on the DCIM and Pictures folders, then `adb pull` of the newest N into DEST. The device id comes from
+   site-private config (a Tailscale address; kept out of this repo). No shell prompts, per site-private
+   `feedback_adb_shell_never_prompt`.
+3. **Test.** A fixture `adb` stub on PATH: argv, newest-first order, and exit 3 when no device answers. One live read-only
+   run that lists the folders and pulls one screenshot into a scratch dir.
+4. **Rollback.** Delete the helper. It holds no state.
+
+Suggested order: 2a; then 2b part 1, which also unblocks the Phase 1 doctor state; then 2c, one client at a time; then 2b
+part 2; the ADB helper at any point. Phase 1 (registry, `bin/mcp-find`, the doctor reading `expected`) can run in parallel
+with 2a.
