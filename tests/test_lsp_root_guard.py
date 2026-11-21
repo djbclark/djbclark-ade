@@ -203,3 +203,30 @@ def test_server_exit_ends_guard_and_sigterm_kills_child(tmp_path: Path) -> None:
     except ProcessLookupError:
         alive = False
     assert not alive
+
+
+def _guard_module() -> Any:
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("lsp_root_guard_t", str(TOOL))
+    spec = importlib.util.spec_from_loader("lsp_root_guard_t", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_parse_predicates_do_not_skip_a_folder_reply(tmp_path: Path) -> None:
+    mod = _guard_module()
+    g = mod.Guard([str(tmp_path)], 3, False)
+    assert not g.server_wants(b'{"method":"workspace\\/workspaceFolders","id":1}')  # no mode yet: nothing to track
+    g.mode = "strip"
+    assert g.server_wants(b'{"method":"workspace\\/workspaceFolders","id":1}')  # JSON-escaped slash
+    g.from_server({"method": "workspace/workspaceFolders", "id": 5})
+    reply = b'{"id":5,"result":[{"uri":"file:///x","name":"method"}]}'  # a folder named "method"
+    assert g.client_wants(reply)
+    out = g.from_client(reply, {"id": 5, "result": [{"uri": "file:///x", "name": "method"}]})
+    assert out is not None and b'"result":null' in out
+    g.from_server({"method": "workspace/workspaceFolders", "id": 6})
+    err = {"id": 6, "error": {"code": -1, "message": "no"}}
+    assert g.from_client(b"raw", err) == b"raw" and 6 not in g.folder_request_ids  # an error reply clears the id

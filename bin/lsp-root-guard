@@ -224,10 +224,10 @@ class Guard:
     def client_wants(self, body: bytes) -> bool:
         if b'"initialize"' in body or b"didChangeWorkspaceFolders" in body:
             return True
-        return bool(self.folder_request_ids) and b'"method"' not in body
+        return bool(self.folder_request_ids)  # a reply may be any frame: parse them all while a request is pending
 
     def server_wants(self, body: bytes) -> bool:
-        return self.mode is not None and b"workspace/workspaceFolders" in body
+        return self.mode is not None and b"workspaceFolders" in body
 
     def from_client(self, raw: bytes, msg: dict[str, Any] | None) -> bytes | None:
         """Bytes to forward to the server, or None to drop the message. Any guard error forwards the original."""
@@ -263,9 +263,11 @@ class Guard:
                     return None
                 return frame(msg)
             return raw
-        if "method" not in msg and msg.get("id") in self.folder_request_ids and "error" not in msg:
+        if "method" not in msg and msg.get("id") in self.folder_request_ids:
             with self.lock:
                 self.folder_request_ids.discard(msg.get("id"))
+            if "error" in msg:
+                return raw
             if self.mode == "strip":
                 msg["result"] = None
             elif isinstance(msg.get("result"), list):
@@ -353,7 +355,11 @@ def run(argv: list[str], stdin: BinaryIO, stdout: BinaryIO, containers: list[str
             child.kill()
             rc = child.wait()
     t.join(timeout=2)
-    return _exit_code(rc)
+    try:
+        stdout.flush()
+    except OSError:
+        pass
+    os._exit(_exit_code(rc))  # a pump thread stuck on a closed client pipe must not abort interpreter shutdown
 
 
 def main(argv: list[str]) -> int:
