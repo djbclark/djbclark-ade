@@ -65,6 +65,7 @@ import unicodedata
 from typing import NamedTuple
 
 import ade_claims
+import ade_mcp_on_demand as mcpod
 import ade_lead_succession as succ  # bin/ is sys.path[0] for a script run by path or through a symlink
 import ade_ws_names as wsn
 
@@ -788,6 +789,10 @@ def launch(opts, rest: list[str]) -> int:
     check_names(lead, name)
     check_caller(lead, opts.on_behalf_of_lead)
     passthrough_check(rest)
+    try:
+        rest = mcpod.apply(rest, list(opts.mcp or []), lambda: paseo_json(["provider", "ls", "--json"]))
+    except mcpod.McpError as e:
+        raise Refused(str(e))
     bi = brief_index(rest)  # before the footer line: the footer names paths of its own
     brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
     if not opts.no_footer:
@@ -1123,7 +1128,18 @@ def main(argv: list[str]) -> int:
                        help="alias for --placement lead: a worker the operator asked for interactively")
         p.add_argument("--other", action="store_const", const="other", dest="placement", help="alias for --placement other")
         p.add_argument("--on-behalf-of-lead", action="store_true")
+        p.add_argument("--mcp", action="append", default=[], metavar="NAME",
+                       help="give this worker the on-demand MCP server NAME (config/mcp-on-demand.toml; repeatable): the launch "
+                       "uses the Paseo provider profile <provider>-mcp-NAME, docs/mcp-on-demand.md 11.2")
         opts = p.parse_args(argv)
+        if opts.mcp:  # an unknown name or a bad registry is a usage error (exit 2) before anything is launched
+            try:
+                known = mcpod.load_registry()
+            except mcpod.McpError as e:
+                p.error(str(e))
+            for n in opts.mcp:
+                if n not in known:
+                    p.error(f"unknown --mcp name {n!r}; known: {', '.join(sorted(known)) or 'none'}")
         run = lambda o: launch(o, rest)  # noqa: E731
     try:
         return run(opts)

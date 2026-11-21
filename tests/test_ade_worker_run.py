@@ -2019,7 +2019,7 @@ def test_the_footer_path_never_names_the_worktree(env, tmp_path):
     main, wt = make_repo(tmp_path)
     for rel in ("bin", "docs"):
         (wt / rel).mkdir(exist_ok=True)
-    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py", "ade_claims.py"):
+    for f in ("ade-worker-run", "ade_ws_names.py", "ade_lead_succession.py", "ade_claims.py", "ade_mcp_on_demand.py"):
         (wt / "bin" / f).write_text((ROOT / "bin" / f).read_text())
     (wt / "bin/ade-worker-run").chmod(0o755)
     (wt / "docs/dispatch-footer.md").write_text("footer\n")
@@ -2658,3 +2658,24 @@ def test_a_brief_that_already_names_the_footer_gets_the_line_after_its_own_foote
     got = placed(env)[0][-1]
     assert got == f"{brief}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
     assert got.count("dispatch-footer.md") == 1
+
+
+def test_mcp_flag_launches_under_the_profile_and_refuses_without_one(env, monkeypatch):
+    """898 review MED 1: the one line that wires --mcp into launch() had no test; HOME and the state dir are the temp dir."""
+    monkeypatch.setenv("HOME", str(env.tmp / "home"))
+    monkeypatch.setenv("ADE_STATE_DIR", str(env.tmp / "ade-state"))
+    env.data["providers"] = [{"provider": "claude-mcp-chrome-devtools", "enabled": True, "status": "ready"}]
+    r = launch(env, "alpha", "--mcp", "chrome-devtools")
+    assert r.returncode == 0, r.stderr
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert run[run.index("--provider") + 1] == "claude-mcp-chrome-devtools/sonnet" and run[-1].startswith("BRIEF TEXT")
+    env.calls_path.unlink()
+    env.data["providers"] = []
+    r = launch(env, "beta", "--mcp", "chrome-devtools")
+    assert r.returncode == 1 and "claude-mcp-chrome-devtools" in r.stderr and "--mcp-config" in r.stderr, r.stderr
+    assert not any(c["argv"][0] == "run" for c in env.calls())  # refused before anything was launched
+    assert (env.tmp / "ade-state" / "mcp" / "chrome-devtools.json").is_file()
+    r = launch(env, "gamma")  # without --mcp the provider is passed through untouched
+    assert r.returncode == 0, r.stderr
+    run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
+    assert run[run.index("--provider") + 1] == "claude/sonnet"

@@ -1,0 +1,6 @@
+# MCP servers a worker can be given on demand: `bin/ade-worker-run --mcp NAME` (docs/mcp-on-demand.md 11.2, queue 89).
+# command and args only: an `env` key is refused, so no secret can reach a generated config. Same command line as
+# the user-scope entry it replaces (docs/mcp-servers.md "Setup").
+[servers.chrome-devtools]
+command = "npx"
+args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics", "--no-performance-crux", "--redact-network-headers"]
