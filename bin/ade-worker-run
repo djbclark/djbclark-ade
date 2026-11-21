@@ -57,9 +57,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from typing import NamedTuple
 
 import ade_claims
@@ -629,28 +631,51 @@ def rename_main(opts) -> int:
         lock.close()
 
 
+def brief_index(rest: list[str]) -> int | None:
+    """Index of the brief in the `paseo run` arguments, or None when the last argument cannot be told to be one: the brief is the last
+    argument, after every flag (it follows a boolean flag, a `--flag=value`, or the value of a value flag)."""
+    if not rest or rest[-1].startswith("-"):
+        return None
+    prev = rest[-2] if len(rest) > 1 else ""
+    after_flag = (prev in BOOL_FLAGS and not (len(rest) > 2 and rest[-3] in VALUE_FLAGS)) or (prev.startswith("-") and "=" in prev) or \
+        (not prev.startswith("-") and len(rest) > 2 and rest[-3] in VALUE_FLAGS)  # `--provider X BRIEF`
+    return len(rest) - 1 if after_flag else None
+
+
 def add_footer(rest: list[str]) -> list[str]:
     """Append the delivery-footer pointer to the brief, the last `paseo run` argument."""
     if not FOOTER.is_file():
         raise Refused(f"{FOOTER} does not exist; pass --no-footer to launch without the footer line")
-    last, prev = rest[-1], (rest[-2] if len(rest) > 1 else "")
-    after_flag = (prev in BOOL_FLAGS and not (len(rest) > 2 and rest[-3] in VALUE_FLAGS)) or (prev.startswith("-") and "=" in prev) or \
-        (not prev.startswith("-") and len(rest) > 2 and rest[-3] in VALUE_FLAGS)  # `--provider X BRIEF`
-    if last.startswith("-") or not after_flag:
+    if brief_index(rest) is None:
         raise Refused("cannot tell which argument is the brief (the last one must be the brief, after every flag): "
                       "put it last, or pass --no-footer and carry the footer line yourself")
+    last = rest[-1]
     if str(FOOTER) in last:
         return rest
     return [*rest[:-1], f"{last}\n\nAlso follow every item of {FOOTER}."]
 
 
-def add_cwd_line(rest: list[str], eff_cwd: str, cwd: str) -> list[str]:
-    """Tell the worker, in its brief, that its session starts in `eff_cwd` (the window's primary checkout) while the work belongs in `cwd`.
-    The line goes before the delivery-footer pointer, so the footer stays last. A last argument that is a flag is no brief: left alone."""
-    if not rest or rest[-1].startswith("-"):
+def has_control_char(p: str) -> bool:
+    """True when the path holds a control character (a newline would split the brief line that names it)."""
+    return any(unicodedata.category(c) == "Cc" for c in p)
+
+
+def add_cwd_line(rest: list[str], eff_cwd: str, cwd: str, explicit: bool) -> list[str]:
+    """Tell the worker, in its brief, that its session starts in `eff_cwd` (the window's primary checkout, where nothing may be edited).
+    `explicit` (the caller passed --cwd): the work belongs in `cwd`, and the line says to run every command there. Not explicit: `cwd`
+    is only where the lead stands, usually its own claimed worktree, so the line names no work directory (the brief names the worker's).
+    The line goes before the footer pointer ade-worker-run added (after the brief's own footer text when the brief already names
+    docs/dispatch-footer.md: then no pointer is added). Paths are shell-quoted so a `cd` of them is safe to paste. When the last argument
+    is not the brief (a flag value under --no-footer) the arguments are left alone and a warning says so."""
+    if brief_index(rest) is None:
+        sys.stderr.write("ade-worker-run: warning: cannot tell which argument is the brief, so it carries no note on where the session starts\n")
         return rest
-    line = (f"Your session starts in {eff_cwd}; run every command from {cwd} (cd there or git -C); "
-            f"never edit or commit in {eff_cwd}.")
+    if explicit:
+        line = (f"Your session starts in {shlex.quote(eff_cwd)}; run every command from {shlex.quote(cwd)} (cd there or git -C); "
+                f"never edit or commit in {shlex.quote(eff_cwd)}.")
+    else:
+        line = (f"Your session starts in {shlex.quote(eff_cwd)}, the shared primary checkout: never edit or commit there; "
+                "work only in the worktree your brief names.")
     last, tail = rest[-1], f"\n\nAlso follow every item of {FOOTER}."
     if last.endswith(tail):
         return [*rest[:-1], f"{last[:-len(tail)]}\n\n{line}{tail}"]
@@ -763,7 +788,8 @@ def launch(opts, rest: list[str]) -> int:
     check_names(lead, name)
     check_caller(lead, opts.on_behalf_of_lead)
     passthrough_check(rest)
-    brief = rest[-1] if rest else ""  # before the footer line: the footer names paths of its own
+    bi = brief_index(rest)  # before the footer line: the footer names paths of its own
+    brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
     if not opts.no_footer:
         rest = add_footer(rest)
     rest = preflight_mode(rest)
@@ -821,6 +847,9 @@ def launch(opts, rest: list[str]) -> int:
         # The caller asked for a directory (--cwd) or is standing in a linked worktree (no --cwd): the worker still starts in
         # eff_cwd, so the same checks and reports apply to both (2026-11-14, lead review of #709: the implicit case was silent).
         requested = bool(opts.cwd) or (win is None and not main_place and moved and wsn.linked_worktree(cwd))
+        if moved and requested and (has_control_char(eff_cwd) or has_control_char(cwd)):  # both go into the worker's brief
+            raise Refused(f"a directory name holds a control character (a newline would split the brief line that names it): "
+                          f"{eff_cwd!r}, {cwd!r}")
         if moved and requested and not main_place:
             top = wsn._git(cwd, "rev-parse", "--show-toplevel")  # --cwd may be a subdirectory of the worktree the brief names
             if not names_path(brief, [cwd, os.path.abspath(os.path.expanduser(opts.cwd or cwd)), os.path.realpath(top) if top else ""]):
@@ -851,7 +880,7 @@ def launch(opts, rest: list[str]) -> int:
             sys.stderr.write(f"ade-worker-run: the worker starts in {eff_cwd} (the window's primary checkout), not {cwd}; "
                              "the brief carries the worktree\n")
         if moved and requested:  # the worker itself is told too: the stderr note above reaches only the launcher
-            rest = add_cwd_line(rest, eff_cwd, cwd)
+            rest = add_cwd_line(rest, eff_cwd, cwd, bool(opts.cwd))
         place = ["--workspace", row_wks(win), "--cwd", eff_cwd] if win else ["--new-workspace", "local", "--cwd", eff_cwd]
         linked = win is None and not moved and wsn.linked_worktree(eff_cwd)
         if linked:
