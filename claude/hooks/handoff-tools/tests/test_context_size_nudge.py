@@ -104,6 +104,10 @@ def test_constants_match_the_300k_window():
 @pytest.mark.parametrize("wall, ask, boundary, page_total, page_growth", [
     (267_000, 217_000, 187_000, 400_000, 300_000),
     (967_000, 917_000, 887_000, 917_000, 817_000),     # a [1m] model with no autoCompactWindow
+    (117_000, 80_000, 80_000, 400_000, 300_000),      # ASK_FLOOR: a small window never asks below 80k
+    (80_000, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER),  # at the floor: no handoff tiers
+    (67_000, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER),
+    (17_000, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER, nudge.NO_TIER),
     (167_000, 117_000, 117_000, 400_000, 300_000),     # 200k window: 120k floor, capped at the hard tier
     (217_000, 167_000, 137_000, 400_000, 300_000),
     (200_000, 150_000, 120_000, 400_000, 300_000),     # wall - 80k = 120k exactly
@@ -902,3 +906,23 @@ def test_messages_never_print_the_constant_when_the_wall_differs(hook, tmp_path,
     out, _ = hook("s-217", _transcript(tmp_path, 100_000, 170_000))
     assert "by itself at about 217,000 tokens" in out and "267,000" not in out
     assert "About 47,000 tokens remain before Claude Code compacts this session at 217,000" in out
+
+
+@pytest.mark.parametrize("window", [50_000, 100_000, 150_000])
+def test_a_small_configured_window_never_loops_handoffs_on_a_fresh_session(hook, tmp_path, settings_file, window):
+    """Adversary L1 (PR 862): a window under ~150k put the hard/boundary tiers below a fresh session's own
+    size (46-71k), so every new session self-handed-off at once. Now nothing fires below ASK_FLOOR."""
+    _write_settings(settings_file, autoCompactWindow=window)
+    for floor in (46_000, 71_000):
+        out, pings = hook(f"s-small-{window}-{floor}", _transcript(tmp_path, floor, name=f"t{window}{floor}.jsonl"))
+        assert out == "" and pings == []
+        assert "handoff Step 9" not in out
+
+
+def test_an_unreadable_settings_helper_falls_back_to_the_267k_wall(hook, tmp_path, monkeypatch):
+    """N1 (PR 862): the except branch in _check_state; read_settings raising must not stop a nudge."""
+    def boom():
+        raise RuntimeError("settings exploded")
+    monkeypatch.setattr(nudge, "read_settings", boom)
+    out, _ = hook("s-boom", _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL))
+    assert "At the next task completion" in out and "267,000" in out

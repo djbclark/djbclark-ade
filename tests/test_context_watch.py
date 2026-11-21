@@ -117,7 +117,7 @@ def test_ceiling_follows_autocompactwindow_minus_33k(box):
     box.settings(autoCompactWindow=100000)
     box.agent(ID_A, "x", SESS_A)
     box.transcript(SESS_A, [assistant(1000, 50000, 0)])
-    assert box.run().stdout.splitlines() == ["aaaaaaaa x 51k/67k (76%) hard · wall in 16k · paseo~5%"]
+    assert box.run().stdout.splitlines() == ["aaaaaaaa x 51k/67k (76%) ok · wall in 16k · paseo~5%"]
 
 
 def test_without_settings_falls_back_to_the_model_window(box):
@@ -523,7 +523,9 @@ def test_nudge_band_ladder_matches_the_hook_against_the_real_ceiling():
     assert cw.nudge_band(119_999, 200_000) == "ok"
     assert cw.nudge_band(120_000, 200_000) == "boundary"
     assert cw.nudge_band(270_000, 267_000) == "wall"
-    assert cw.nudge_band(20_000, 67_000) == "hard"  # within ASK_HEADROOM of a small wall
+    assert cw.nudge_band(20_000, 67_000) == "ok"  # a fresh session is not hard on a tiny wall (ASK_FLOOR)
+    assert cw.nudge_band(66_999, 67_000) == "ok" and cw.nudge_band(67_000, 67_000) == "wall"
+    assert cw.nudge_band(79_999, 117_000) == "ok" and cw.nudge_band(80_000, 117_000) == "hard"
 
 
 def test_paseo_meter_window_is_the_manifest_not_autocompact():

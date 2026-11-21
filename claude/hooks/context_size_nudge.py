@@ -59,7 +59,7 @@ History:
   `autoCompactWindow`; unreadable/unknown: today's 267k, bin/context-watch imports the same
   function) and every tier derives from it: hard = wall - ASK_HEADROOM (50k), boundary =
   wall - BOUNDARY_HEADROOM (80k, never below BOUNDARY_FLOOR 120k, never above the hard tier),
-  paging max(400k, hard tier). On the 267k wall that is boundary 187k (was 120k), hard 217k
+  paging max(400k, hard tier); the hard tier never below ASK_FLOOR 80k (a small configured window would loop handoffs). On the 267k wall that is boundary 187k (was 120k), hard 217k
   (unchanged). 80k is about ten tool rounds ahead of the hard tier's own 50k; there a handoff
   (a fresh session re-writes ~46k) beats the compaction that is certain to follow (~72k
   re-written plus a summariser call, ~104k left behind), and before it a handoff only throws
@@ -68,6 +68,8 @@ History:
   hard tier). The messages print the computed wall and tokens left, keep the 2026-11-14
   ruling (hand off yourself, never a /new for the operator) and say a finished task alone
   is no reason to hand off below this tier. The EARLY tier is unchanged.
+  Adversary L1 (PR 862): the hard tier never sits below ASK_FLOOR 80k, and a wall at or under it has no
+  handoff tiers (NO_TIER), so a small configured window cannot make every fresh session hand itself off.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
@@ -153,6 +155,11 @@ MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unse
 # 2026-10-28: ASK_GROWTH 200k fired at floor+200k = 235-271k (median floor 71k: past the
 # wall, never), leaving 0-20k, and ASK_TOTAL 300k sat above the wall and never fired.
 ASK_HEADROOM = 50_000
+# A fresh session already holds ~46-71k (median floor 71k, 2026-10-28), so a hard tier below ASK_FLOOR would fire
+# at once and loop self-handoffs on a small configured window (adversary L1, PR 862). The hard and boundary tiers
+# therefore never sit below ASK_FLOOR; a wall at or under it has no handoff tiers at all (Claude Code compacts first).
+ASK_FLOOR = 80_000
+NO_TIER = 10**15  # a tier that never fires (_tiers: a wall at or under ASK_FLOOR)
 # The boundary tier ("hand off at the next task completion") fires only near the limit
 # (2026-11-21: a fixed 120k made a lead on a 267k wall hand itself off at ~150k with 117k left).
 # 80k = about ten tool rounds (TOOL_ROUND_TOKENS) before the hard tier's own 50k: the handoff
@@ -575,9 +582,11 @@ class Tiers(NamedTuple):
 def _tiers(wall):
     """The Tiers for one compaction wall.
 
-    ask = wall - ASK_HEADROOM. boundary = wall - BOUNDARY_HEADROOM, never below BOUNDARY_FLOOR and never
+    ask = wall - ASK_HEADROOM, at least ASK_FLOOR (a wall at or under it has no handoff tiers: NO_TIER). boundary = wall - BOUNDARY_HEADROOM, never below BOUNDARY_FLOOR and never
     above ask. Paging scales: at least PAGE_TOTAL_MIN, and no earlier than the hard tier."""
-    ask = wall - ASK_HEADROOM
+    if wall <= ASK_FLOOR:  # below a fresh session's own size: Claude Code compacts first; no handoff tiers
+        return Tiers(wall, NO_TIER, NO_TIER, NO_TIER, NO_TIER)
+    ask = max(wall - ASK_HEADROOM, ASK_FLOOR)
     boundary = min(max(wall - BOUNDARY_HEADROOM, BOUNDARY_FLOOR), ask)
     page_total = max(PAGE_TOTAL_MIN, ask)
     return Tiers(wall, ask, boundary, page_total, max(PAGE_GROWTH_MIN, page_total - 100_000))

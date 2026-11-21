@@ -66,6 +66,10 @@ compact tier derives from that wall:
 | hard / ask | wall - 50k (`ASK_HEADROOM`), by total only; again every 100k | 217k | 917k |
 | Hermes page | max(400k, hard tier) total, or +page-growth | 400k / +300k | 917k / +817k |
 
+A small configured window cannot loop handoffs (adversary L1, PR 862): the hard tier never sits below
+`ASK_FLOOR` (80k, above a fresh session's own 46-71k), and a wall at or under it (a window of 113k or
+less) has no handoff tiers at all; Claude Code compacts first.
+
 The old growth trigger for the hard tier (`ASK_GROWTH`, +140k from the floor, about 175k for a low
 floor) is gone: it told a lead to "hand off" with ~90k of room left. The 80k boundary headroom is
 about ten tool rounds ahead of the hard tier's own 50k; there a handoff (a fresh session re-writes
