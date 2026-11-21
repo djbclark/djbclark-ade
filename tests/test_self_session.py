@@ -171,6 +171,12 @@ def isolated_claims(tmp_path, monkeypatch):
     monkeypatch.setenv('ADE_STATE_DIR', str(tmp_path / 'ade-state'))
 
 
+@pytest.fixture(autouse=True)
+def isolated_supervisor(tmp_path, monkeypatch):
+    """finish repoints the supervisor's lead file: never the live one."""
+    monkeypatch.setenv('ADE_SUPERVISOR_STATE_DIR', str(tmp_path / 'supervisor'))
+
+
 @pytest.fixture
 def setup(tmp_path):
     cwd = tmp_path / 'work tree'
@@ -2748,3 +2754,75 @@ def test_post_ack_timestamp_cutoff_cannot_resurrect_historical_failure(setup):
     assert path.read_bytes() == before and len(native.calls) == calls_before
     assert pending['attempts'] == [] and pending['excluded_pools'] == []
     assert native.created == 1 and native.archived == 0
+
+
+def _lead_file(tmp_path, text):
+    d = tmp_path / 'supervisor'
+    d.mkdir(exist_ok=True)
+    f = d / 'lead'
+    if text is not None:
+        f.write_text(text)
+        f.chmod(0o644)
+    return f
+
+
+def test_finish_repoints_the_supervisor_lead_file_to_the_successor(setup, tmp_path):
+    lead = _lead_file(tmp_path, PRED + '\n')
+    service, native, path = finished_up_to_archive(setup)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['supervisor_lead'] == 'repointed' and 'supervisor_lead_error' not in out
+    assert lead.read_text() == SUCC + '\n' and (lead.stat().st_mode & 0o777) == 0o644
+    assert [p.name for p in lead.parent.iterdir()] == ['lead']  # no temp file left behind
+    assert json.loads(path.read_text())['supervisor_lead'] == 'repointed'
+    again = service.finish(path)  # a re-run keeps the outcome and the file
+    assert again['supervisor_lead'] == 'repointed' and lead.read_text() == SUCC + '\n'
+
+
+def test_finish_leaves_another_chains_lead_alone(setup, tmp_path):
+    lead = _lead_file(tmp_path, OTHER + '\n')
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['supervisor_lead'] == 'unchanged-not-predecessor'
+    assert lead.read_text() == OTHER + '\n'
+
+
+def test_finish_without_a_supervisor_lead_file_creates_none(setup, tmp_path):
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['supervisor_lead'] == 'absent'
+    assert not (tmp_path / 'supervisor' / 'lead').exists()
+
+
+def test_finish_does_not_follow_a_symlinked_lead_file(setup, tmp_path):
+    real = tmp_path / 'elsewhere'
+    real.write_text(PRED + '\n')
+    (tmp_path / 'supervisor').mkdir()
+    (tmp_path / 'supervisor' / 'lead').symlink_to(real)
+    service, native, path = finished_up_to_archive(setup)
+    assert service.finish(path)['supervisor_lead'] == 'unchanged-not-regular'
+    assert real.read_text() == PRED + '\n' and (tmp_path / 'supervisor' / 'lead').is_symlink()
+
+
+def test_a_failed_archive_never_touches_the_supervisor_lead_file(setup, tmp_path):
+    lead = _lead_file(tmp_path, PRED + '\n')
+    service, native, path = finished_up_to_archive(setup)
+    native.archive_result = (1, '', envelope('ARCHIVE_FAILED', 'agent is busy'))
+    with pytest.raises(ss.NativeError):
+        service.finish(path)
+    assert lead.read_text() == PRED + '\n' and 'supervisor_lead' not in json.loads(path.read_text())
+
+
+def test_a_write_failure_is_recorded_and_a_rerun_retries_it(setup, tmp_path, monkeypatch):
+    lead = _lead_file(tmp_path, PRED + '\n')
+    service, native, path = finished_up_to_archive(setup)
+    real = ss.write_atomic
+
+    def failing(file, data):  # the record saves go through write_atomic too: fail only the lead file
+        if Path(file).name == 'lead':
+            raise OSError('disk full')
+        return real(file, data)
+    monkeypatch.setattr(ss, 'write_atomic', failing)
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['supervisor_lead'] == 'error' and 'disk full' in out['supervisor_lead_error']
+    assert lead.read_text() == PRED + '\n'
+    monkeypatch.setattr(ss, 'write_atomic', real)
+    out = service.finish(path)
+    assert out['supervisor_lead'] == 'repointed' and 'supervisor_lead_error' not in out and lead.read_text() == SUCC + '\n'

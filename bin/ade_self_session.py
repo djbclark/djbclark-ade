@@ -79,6 +79,7 @@ WAIT_CODES = (AGENT_RUNNING, 'PREDECESSOR_NOT_IDLE')  # kept equal to ade_lead_s
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
+SUPERVISOR_STATE_ENV = 'ADE_SUPERVISOR_STATE_DIR'  # bin/ade-supervisor-scan's state dir; its `lead` file names the lead
 STDERR_CAP = 64 * 1024
 _KEYWORDS = (r'(?:token|secret|password|passwd|authorization|bearer|api[_-]?key|access[_-]?key|private[_-]?key'
              r'|credential)\w*')
@@ -1123,6 +1124,7 @@ class Service:
                 raise SessionError('recorded successor acknowledgement required before retirement')
             if record['status'] == 'archived':
                 self.rebind_claims(record, target)  # idempotent: a re-run after a failed rebind retries it
+                self.repoint_supervisor_lead(record, target)  # idempotent: a re-run after a failed write retries it
                 return record
             deadline = self.clock() + timeout
             refused_running = 0
@@ -1235,7 +1237,55 @@ class Service:
             self.resolve_native_error(record)
             self.save(target, record)
             self.rebind_claims(record, target)
+            self.repoint_supervisor_lead(record, target)
             return record
+
+    def supervisor_lead_file(self):
+        """The file `bin/ade-supervisor-scan` reads its lead from: `$ADE_SUPERVISOR_STATE_DIR/lead`, default
+        `~/.local/state/djbclark-ade/supervisor/lead` (the scan's own default; the Service env first, then the process
+        env, so a test's tmp dir wins and never reaches the live file)."""
+        base = self.env.get(SUPERVISOR_STATE_ENV) or os.environ.get(SUPERVISOR_STATE_ENV)
+        return (Path(base) if base else Path.home() / '.local/state/djbclark-ade/supervisor') / 'lead'
+
+    def repoint_supervisor_lead(self, record, target):
+        """A finished handoff moves the supervisor's lead id to the successor (2026-11-21: three lead takeovers rewrote it by hand).
+
+        Only when the file exists, is a regular file and its first line is exactly the archived predecessor: a file naming
+        another agent (another chain's lead) or the successor already is left alone. The write is atomic (temp file in the
+        same directory, then `os.replace`). Outcome in the record and in finish's JSON as `supervisor_lead`: `repointed`,
+        `already-successor`, `unchanged-not-predecessor`, `unchanged-not-regular`, `absent` or `error` (reason in
+        `supervisor_lead_error`). Never fails finish: the archive already happened, and a re-run retries it."""
+        outcome, error = 'absent', None
+        try:
+            successor, predecessor = record.get('successor'), record.get('predecessor')
+            path = self.supervisor_lead_file()
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                outcome = 'unchanged-not-regular'
+            elif path.exists():
+                text = read_regular(path, 4096).decode('utf-8', 'replace')
+                lines = text.splitlines()
+                first = lines[0].strip() if lines else ''
+                if first == successor:
+                    outcome = 'repointed' if record.get('supervisor_lead') == 'repointed' else 'already-successor'
+                elif first != predecessor:
+                    outcome = 'unchanged-not-predecessor'
+                elif not (isinstance(successor, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]*', successor)):
+                    outcome, error = 'error', 'successor id is not a usable agent id'  # the scan would reject it
+                else:
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                    write_atomic(path, (successor + '\n').encode())
+                    os.chmod(path, mode)  # mkstemp makes 0600; keep what the file had
+                    outcome = 'repointed'
+        except Exception as exc:  # noqa: BLE001 - recorded, never raised
+            outcome, error = 'error', bounded(f'{type(exc).__name__}: {exc}', MESSAGE_LIMIT)
+        if outcome == 'repointed' and record.get('supervisor_lead') != 'repointed':
+            self.progress(f'supervisor lead file {self.supervisor_lead_file()} now names the successor {record["successor"]}')
+        record['supervisor_lead'] = outcome
+        if error:
+            record['supervisor_lead_error'] = error
+        else:
+            record.pop('supervisor_lead_error', None)
+        self.save(target, record)
 
     def rebind_claims(self, record, target):
         """cl-succ: the archived predecessor's active ade_claims claims become the successor's (same ids, history
