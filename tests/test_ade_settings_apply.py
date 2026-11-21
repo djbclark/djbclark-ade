@@ -237,12 +237,12 @@ def _patched_main(tmp_path, monkeypatch, fn):
 
 
 def test_main_refuses_and_writes_nothing_when_a_live_key_would_vanish(tmp_path, monkeypatch):
-    rc, lp = _patched_main(tmp_path, monkeypatch, lambda lv, t, h, roots=None: ({"model": "opus"}, ["x"], []))
+    rc, lp = _patched_main(tmp_path, monkeypatch, lambda lv, t, h, roots=None, allow_env_keys=frozenset(): ({"model": "opus"}, ["x"], []))
     assert rc == 1 and json.loads(lp.read_text()) == live() and not list(tmp_path.glob("*.bak-*"))
 
 
 def test_main_aborts_when_live_changed_while_merging(tmp_path, monkeypatch):
-    def fn(lv, t, h, roots=None):
+    def fn(lv, t, h, roots=None, allow_env_keys=frozenset()):
         (tmp_path / "s.json").write_text('{"changed": true}')
         return dict(lv, sandbox={"x": 1}), ["/sandbox"], []
     rc, lp = _patched_main(tmp_path, monkeypatch, fn)
@@ -279,3 +279,18 @@ def test_a_secret_inside_a_list_or_a_newer_token_shape_is_refused():
     assert sa.secret_paths({"url": "https://h/mcp?api_key=abc123"}) == ["/url"]
     assert sa.secret_paths({"c": "FOO_SECRET=abc run"}) == ["/c"]
     assert sa.secret_paths({"ok": "post-edit-check --hook"}) == []
+
+
+def test_allow_env_key_adds_and_removes_only_named_keys():
+    """An env key named by --allow-env-key may be added (absent from live) or removed (absent from template).
+    Everything else stays: the opt-in is narrow, never a blanket env add (adversary A1)."""
+    lv = {"env": {"AGENT_TEAMS": "1", "KEEP": "x"}}
+    t = {"env": {"CODE_MODE": "1", "KEEP": "x"}}
+    # not allowed: nothing added or removed
+    m, added, skipped = _merge(lv, t, HOME, ROOTS)
+    assert m["env"] == lv["env"]
+    # allowed: AGENT_TEAMS removed (absent from template), CODE_MODE added (absent from live), KEEP untouched
+    m, added, skipped = _merge(lv, t, HOME, ROOTS, allow_env_keys={"AGENT_TEAMS", "CODE_MODE"})
+    assert m["env"] == {"CODE_MODE": "1", "KEEP": "x"}
+    assert any(x.startswith("/env/AGENT_TEAMS") and "removed" in x for x in added)
+    assert any(x.startswith("/env/CODE_MODE") and "absent" in x for x in added)
