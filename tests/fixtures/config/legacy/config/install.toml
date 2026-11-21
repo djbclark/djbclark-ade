@@ -530,7 +530,7 @@ install = "paseo plugin install baton (UNKNOWN exact id)"
 update = "UNKNOWN"
 probe = "UNKNOWN"
 platforms = ["mac", "linux"]
-notes = "Fork djbclark/paseo-baton only while it carries unmerged changes (order 8)"
+notes = "Fork frdminc/paseo-baton only while it carries unmerged changes (order 8)"
 
 [[component]]
 id = "paseo-plugin-asks"
@@ -547,8 +547,8 @@ platforms = ["mac", "linux"]
 id = "paseo-plugin-questions-please"
 class = "offered"
 chosen = true
-summary = "J6: djbclark/paseo-plugin-questions-please"
-source = "https://github.com/djbclark/paseo-plugin-questions-please"
+summary = "J6: frdminc/paseo-plugin-questions-please"
+source = "https://github.com/frdminc/paseo-plugin-questions-please"
 install = "UNKNOWN"
 update = "UNKNOWN"
 probe = "UNKNOWN"

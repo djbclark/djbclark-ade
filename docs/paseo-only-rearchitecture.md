@@ -68,7 +68,7 @@ no longer describes today's tree. Where a phase below says what will be built, d
    built in its own herdr tab:
    1. **`herdr4paseo`** (tab `herdr4paseo-t`): Herdr attaches to running Paseo agents, as an **attach
       client** that shows and drives an agent Paseo hosts. A modified tuios may do the same.
-   2. **`paseo4herdr`** (tab `paseo4herdr-t`; fork https://github.com/djbclark/paseo4herdr, checkout
+   2. **`paseo4herdr`** (tab `paseo4herdr-t`; fork https://github.com/frdminc/paseo4herdr, checkout
       `~/src/paseo4herdr`; formerly the `paseo-herdr` plugin, installed disabled today as `herdr-harness`):
       Paseo reaches terminals that Herdr hosts.
 
