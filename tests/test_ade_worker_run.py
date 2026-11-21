@@ -2520,3 +2520,53 @@ def test_cleanup_error_preserves_launch_failure(env):
     assert r.returncode == 1
     assert "cleanup of wks_abc123 failed" in r.stderr
     assert "paseo run failed" in r.stderr
+
+
+# --- the worker is told where its session starts (2026-11-21): the stderr note reaches only the launcher -------------------------
+
+def cwd_line(eff, cwd):
+    return f"Your session starts in {eff}; run every command from {cwd} (cd there or git -C); never edit or commit in {eff}."
+
+
+def test_a_moved_worker_brief_carries_the_cwd_line_before_the_footer(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
+    assert r.returncode == 0, r.stderr
+    eff, want = os.path.realpath(main), os.path.realpath(wt)
+    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(eff, want)}\n\n{FOOTER_LINE}"  # exact paths, footer still last
+    assert json.loads(r.stdout)["requestedCwd"] == want  # the same condition as the JSON fields and the stderr note
+
+
+def test_a_moved_worker_brief_without_the_footer_ends_with_the_cwd_line(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt), "--no-footer", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
+
+
+def test_a_redirect_into_the_primary_checkout_window_carries_the_cwd_line(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    own_window_at(env, os.path.realpath(main))
+    env.data["inspect_cwd"] = os.path.realpath(main)
+    r = env.run("--lead", LEAD, "--slice", "s2", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    assert cwd_line(os.path.realpath(main), os.path.realpath(wt)) in placed(env)[0][-1]
+
+
+def test_an_unmoved_worker_brief_has_no_cwd_line(env, tmp_path):
+    main, _wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(main), "--", "--no-wait", "just do the work")
+    assert r.returncode == 0, r.stderr
+    assert "requestedCwd" not in json.loads(r.stdout)
+    assert placed(env)[0][-1] == f"just do the work\n\n{FOOTER_LINE}"
+
+
+def test_a_case_variant_of_the_primary_checkout_is_not_a_move_so_no_cwd_line(env, tmp_path):
+    if not case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem is case-sensitive: a differently-cased path is another directory")
+    main, _wt = make_repo(tmp_path)
+    variant = os.path.join(os.path.dirname(os.path.realpath(main)), "LIBNTECH")
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", variant, "--", "--no-wait", "just do the work")
+    assert r.returncode == 0, r.stderr
+    assert "requestedCwd" not in json.loads(r.stdout)
+    assert "Your session starts in" not in placed(env)[0][-1]

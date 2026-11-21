@@ -644,6 +644,19 @@ def add_footer(rest: list[str]) -> list[str]:
     return [*rest[:-1], f"{last}\n\nAlso follow every item of {FOOTER}."]
 
 
+def add_cwd_line(rest: list[str], eff_cwd: str, cwd: str) -> list[str]:
+    """Tell the worker, in its brief, that its session starts in `eff_cwd` (the window's primary checkout) while the work belongs in `cwd`.
+    The line goes before the delivery-footer pointer, so the footer stays last. A last argument that is a flag is no brief: left alone."""
+    if not rest or rest[-1].startswith("-"):
+        return rest
+    line = (f"Your session starts in {eff_cwd}; run every command from {cwd} (cd there or git -C); "
+            f"never edit or commit in {eff_cwd}.")
+    last, tail = rest[-1], f"\n\nAlso follow every item of {FOOTER}."
+    if last.endswith(tail):
+        return [*rest[:-1], f"{last[:-len(tail)]}\n\n{line}{tail}"]
+    return [*rest[:-1], f"{last}\n\n{line}"]
+
+
 def same_dir(a: str, b: str) -> bool:
     """True when `a` and `b` name the same directory: the one comparator, `ade_claims.same_path` (samefile, so a symlink, a trailing
     slash and, on macOS's case-insensitive volume, a case-differing spelling all match; a missing path falls back to the textual
@@ -837,6 +850,8 @@ def launch(opts, rest: list[str]) -> int:
         if moved and requested:
             sys.stderr.write(f"ade-worker-run: the worker starts in {eff_cwd} (the window's primary checkout), not {cwd}; "
                              "the brief carries the worktree\n")
+        if moved and requested:  # the worker itself is told too: the stderr note above reaches only the launcher
+            rest = add_cwd_line(rest, eff_cwd, cwd)
         place = ["--workspace", row_wks(win), "--cwd", eff_cwd] if win else ["--new-workspace", "local", "--cwd", eff_cwd]
         linked = win is None and not moved and wsn.linked_worktree(eff_cwd)
         if linked:
