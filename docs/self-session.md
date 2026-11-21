@@ -152,7 +152,12 @@ Once the predecessor is archived, `finish` rebinds every active, unexpired `ade_
 
 `finish` samples `agent inspect` of the predecessor every `--poll` seconds (default 5) and archives only after
 it has been `idle` with `PendingPermissions == []` in every sample for `--stable` seconds (default 45; any busy
-sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). One idle sample
+sample restarts the window), all inside one overall `--wait-timeout` (default 1500 s = 25 min). A predecessor whose
+`Status` is `error` (out of quota, a crashed provider) is archived at once, without the stable-idle window and
+whatever its `PendingPermissions` (operator ruling 2026-11-21: "We should always close out errored (out of quota)
+tabs after successfully taking a handoff from them; we do not need to wait for them to be in idle state."); the
+successor's acknowledgement is still required first, and if a message wakes it before the archive call Paseo answers
+`AGENT_RUNNING` and `finish` goes back to the stable-idle wait. One idle sample
 is never enough: peer messages wake a handed-off lead, and a single sample was stale by the time `agent archive`
 ran (2026-11-14 21:02Z: Paseo answered `AGENT_RUNNING`, `finish` failed with `archive-unknown`). The wait is
 read-only: it never forces, never archives a workspace and never sends the predecessor anything, and it holds the
