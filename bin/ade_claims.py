@@ -2715,15 +2715,16 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
                "which is not one of its owner keys.\n")
         agent = d.detail.get("owner_agent") or ""
         session = bool(d.detail.get("owner_session"))
-        # bind-owner refuses to replace a different owner.agent and never clears owner.session, which keeps both the
+        # bind-owner refuses to replace a different owner.agent and does not clear owner.session unless --owner-session '' is passed (never advised), which keeps both the
         # M1 shape and the owner.agent rule of is_mine from accepting the caller: offer it only when it ends the refusal
         if is_paseo_agent_id(paseo) and agent in ("", paseo) and not session:
             fix = f"re-bind it with `ade_claims.py bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`"
         elif session:
             fix = (f"release this claim (`ade_claims.py release --id {_esc(d.claim_id)}`) and make a new one for you "
                    "(`ade_claims.py new --path DIR --owner-agent <your Paseo agent id>`): the claim is bound to a session, "
-                   "so a different session that inherits the Paseo agent id is refused on purpose and bind-owner cannot clear that "
-                   "(the owning session itself passes)")
+                   "so a different session that inherits the Paseo agent id is refused on purpose, and a plain bind-owner does not clear that; "
+                   "release only if the owning session (owner.session) has finished: while it is live, this refusal is the guard "
+                   "working and the other session should not write here (the owning session itself passes)")
         else:
             fix = (f"release this claim (`ade_claims.py release --id {_esc(d.claim_id)}`) and make a new one for you "
                    "(`ade_claims.py new --path DIR --owner-agent <your Paseo agent id>`): bind-owner cannot replace its owner.agent")
