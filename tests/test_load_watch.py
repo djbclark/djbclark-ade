@@ -448,6 +448,7 @@ def ticket_module(tmp_path, monkeypatch, bgrun_rc=None, ask_rc=0, **kw):
     """load-watch with HOME, SUDO_ASK and BGRUN_BIN all in tmp_path; returns (module, bgrun calls file, sudo-ask calls file)."""
     lw = load_module()
     monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    monkeypatch.setattr(lw, "REGISTRY", tmp_path / "ci-only.tsv")  # never the real registry
     ask_calls = stub_sudo_ask(tmp_path, ask_rc)
     monkeypatch.setattr(lw, "SUDO_ASK", tmp_path / "home" / ".local" / "bin" / "sudo-ask")
     bg = tmp_path / "bin" / "bgrun"
@@ -457,13 +458,14 @@ def ticket_module(tmp_path, monkeypatch, bgrun_rc=None, ask_rc=0, **kw):
 
 
 def test_live_ticket_covers_a_local_decision_without_the_dialog(tmp_path, monkeypatch, capsys):
-    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until 2026-11-22 02:10 EST")
-    assert lw.approve_local_decision("/some/repo", "why") is True
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="7f3a9c01 until 2026-11-22 02:10 EST")
+    assert lw.approve_local_decision("/some/repo", "why") == "7f3a9c01"  # the ticket id, not just True
     assert bg_calls.read_text().splitlines() == ["approve-local check /some/repo"]
     assert not ask_calls.exists()
     err = capsys.readouterr().err
-    assert "tk-7f3a until 2026-11-22 02:10 EST" in err and "no dialog" in err
+    assert "7f3a9c01 until 2026-11-22 02:10 EST" in err and "no dialog" in err
     assert [row[1] for row in approvals_log(tmp_path)] == ["lw-local-ticket"]
+    assert approvals_log(tmp_path)[0][-1] == "ticket=7f3a9c01"  # the audit trail names the ticket
 
 
 def test_no_live_ticket_falls_through_to_the_dialog(tmp_path, monkeypatch):
@@ -475,6 +477,9 @@ def test_no_live_ticket_falls_through_to_the_dialog(tmp_path, monkeypatch):
     assert {row[1] for row in approvals_log(tmp_path)} == {"lw-local-approved"}
     lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 1, ask_rc=1)
     assert lw.approve_local_decision("/some/repo", "why") is False  # a refused dialog is still a refusal
+    ask_calls.unlink(missing_ok=True)
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until later")  # exit 0 but no 8-hex id to name: not trusted
+    assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
 
 
 def test_ticket_check_missing_broken_or_slow_falls_through(tmp_path, monkeypatch):
@@ -487,14 +492,14 @@ def test_ticket_check_missing_broken_or_slow_falls_through(tmp_path, monkeypatch
     bad.chmod(0o755)
     assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
     ask_calls.unlink()
-    stub_bgrun(bad, 0, out="tk until later", sleep=30)  # would cover, but only after the bound
+    stub_bgrun(bad, 0, out="7f3a9c01 until later", sleep=30)  # would cover, but only after the bound
     monkeypatch.setattr(lw, "TICKET_CHECK_TIMEOUT_S", 0.5)
     assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
     assert {row[1] for row in approvals_log(tmp_path)} == {"lw-local-approved"}
 
 
 def test_ticket_never_covers_other_modes(tmp_path, monkeypatch):
-    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until 2026-11-22 02:10 EST")
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="7f3a9c01 until 2026-11-22 02:10 EST")
     assert lw.approve_local_decision("/some/repo", "why", "pending") is True  # asked (the stub allows), not covered
     assert lw.approve_local_decision("/some/repo", "why", "ci") is True
     assert not bg_calls.exists()  # bgrun never even consulted
@@ -505,13 +510,35 @@ def test_ticket_never_covers_other_modes(tmp_path, monkeypatch):
 def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path):
     repo = _repo(tmp_path)
     ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
-    bg_calls = stub_bgrun(tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun", 0, out="tk-1 until 2026-11-22 02:10 EST")
+    bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    bg_calls = stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
     r = run(tmp_path, "ci", "decide", str(repo), "local", "offline focused tests")
     assert r.returncode == 0 and rows(tmp_path)[0][:2] == [os.path.realpath(repo), "local"]
+    assert rows(tmp_path)[0][2] == "[ticket 0badc0de] offline focused tests"  # recorded as ticket-bound
     assert not ask_calls.exists() and bg_calls.read_text().splitlines() == [f"approve-local check {os.path.realpath(repo)}"]
-    assert "tk-1 until" in r.stderr
+    assert "0badc0de until" in r.stderr
+    top = os.path.realpath(repo)
+    assert run(tmp_path, "ci", "check", str(repo)).stdout.startswith("local\t[ticket 0badc0de] ")  # live: honoured
+    stub_bgrun(bgrun, 1)  # ticket expired or revoked: the row no longer counts
+    r = run(tmp_path, "ci", "check", str(repo))
+    assert r.returncode == 1 and r.stdout == "" and "no longer covers" in r.stderr
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "new note")  # a ticket row's note cannot be changed into a permanent row without the dialog
+    assert r.returncode == 1 and rows(tmp_path)[0][2].startswith("[ticket ")
+    stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
     r = run(tmp_path, "ci", "decide", str(repo), "pending", "note")  # a ticket is not a pending approval: the (denying) dialog decides
     assert r.returncode == 1
+
+
+def test_a_ticket_never_overwrites_a_ci_decision_or_records_a_glob(tmp_path):
+    repo = _repo(tmp_path)
+    ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
+    bg_calls = stub_bgrun(tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun", 0, out="0badc0de until 2026-11-22 02:10 EST")
+    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "flip")  # live ticket, but a recorded `ci` decision: asks (and is denied)
+    assert r.returncode == 1 and rows(tmp_path)[0][1] == "ci" and ask_calls.exists() and not bg_calls.exists()
+    g = run(tmp_path, "ci", "decide", str(tmp_path) + "/*", "local", "everywhere")  # a glob row: asks too, ticket or no ticket
+    assert g.returncode == 1 and all(r[0] != str(tmp_path) + "/*" for r in rows(tmp_path))
+    assert not bg_calls.exists()
 
 
 def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):
