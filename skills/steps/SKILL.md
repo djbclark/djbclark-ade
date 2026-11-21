@@ -232,9 +232,11 @@ The card has no header chip, no per-option description, no `helpText` and no
    inside the session's scope. Confirm it in one line ("Done: pushed `abc123`"),
    then ask the next one. A pick authorizes only the action its label names: a
    daemon restart, live-boundary swap, change outside the repo's grant or other
-   hard-to-reverse step still needs its own explicit option or ask (2d.5 says
-   the same for Grok Bot); standing permissions (pushes, a lead's merge of an
-   approved green PR) need none.
+   hard-to-reverse step still needs its own explicit option or ask; only a
+   standing permission your own repo's instructions grant you (for example its
+   push-unasked rule) needs none, on that rule's own conditions. 2d.5 is
+   stricter for Grok Bot: it has no standing permissions, so a push, send, post
+   or merge there always needs an option naming it.
 2. **Queue anything bigger** (a long build, a multi-file change, an agent
    dispatch). Say it is queued and do the queue right after the last item.
 3. **If an answer or its result changes a later item**, re-rank that item's
