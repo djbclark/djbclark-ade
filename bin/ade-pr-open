@@ -16,16 +16,25 @@ and commits and pushes that one file with `bin/git-commit-own`. Nothing else is 
   --existing N   the PR already exists (a rerun after exit 4): skip `gh pr create`, use N.
   --message MSG  the fill-in commit message (default: "docs: fill changelog fragment PR number (#N)").
   gh args        pass --title and --body/--body-file (or --fill) yourself; gh cannot prompt here.
+                 -R/--repo is refused: the PR must be on this checkout's origin repo.
+
+gh runs through libexec/agent-bin/gh (the adversary-marker shim, docs/adversary-gh-shim.md) by path,
+whatever PATH is, so a PR body is judged for a live APPROVE marker like any other `gh` write. Before
+any fragment edit the PR number is verified with `gh pr view N`: its head branch must be this branch
+and its repo the owner/repo of remote.origin.url, so a number from another repo or branch is never written.
 
 Run it from the worktree of the branch, with the fragment committed and pushed (the PR needs the
 branch on the remote) and clean in the tree.
 
 exit codes: 0 done (also when the fragment holds no placeholder: the PR is opened and the check run);
-2 usage or preflight refusal, nothing created; 3 `gh pr create` failed (its exit code and output
-are shown, no PR number to fill); 4 the PR exists but filling, checking or pushing the fragment
-failed (the URL and the repair command are printed; rerun with --existing N).
+2 usage or preflight refusal, nothing created; 3 `gh pr create` failed with no PR URL on stdout (its
+exit code and output are shown; a "pull request already exists" URL is named with the --existing hint);
+4 the PR exists but something after creation failed: the number could not be verified, the fill, the
+check or the push failed, the fill commit is still local, `gh pr create` timed out (check
+`gh pr list --head BRANCH`), or gh exited nonzero after printing the PR URL (labels, reviewers); the
+URL and the repair command are printed; rerun with --existing N.
 """
-import argparse
+import json
 import os
 import re
 import subprocess
@@ -37,6 +46,13 @@ EXIT_OK, EXIT_USAGE, EXIT_GH, EXIT_FOLLOWUP = 0, 2, 3, 4
 PLACEHOLDER = re.compile(r"\(#PR\)(\.?)[ \t]*$", re.MULTILINE)
 PR_URL = re.compile(r"^https?://\S+/pull/(\d+)\s*$", re.MULTILINE)
 HERE = Path(__file__).resolve().parent
+# The adversary-marker shim, by path: found and run whatever PATH is (docs/adversary-gh-shim.md).
+GH = str(HERE.parent / "libexec" / "agent-bin" / "gh")
+ORIGIN_REPO = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
+PR_PAGE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)$")
+
+
+GH_TIMEOUT = int(os.environ.get("ADE_PR_OPEN_GH_TIMEOUT", "900"))  # seconds for `gh pr create`; tests shorten it
 
 
 def run(argv, cwd, timeout=900, **kw):
@@ -73,6 +89,77 @@ def write_atomic(path: Path, text: str):
         raise
 
 
+def has_repo_flag(args):
+    return any(a in ("-R", "--repo") or a.startswith(("--repo=", "-R")) for a in args)
+
+
+def verify(number, branch, root):
+    """None when PR `number` is on this branch and origin's repo; else the reason it is not."""
+    origin = run(["git", "-C", str(root), "config", "--get", "remote.origin.url"], root).stdout.strip()
+    want = ORIGIN_REPO.search(origin)
+    if not want:
+        return f"cannot read a github.com owner/repo from remote.origin.url ({origin!r})"
+    try:
+        r = run([GH, "pr", "view", str(number), "--json", "number,headRefName,url"], root, timeout=120)
+    except subprocess.TimeoutExpired:
+        return f"gh pr view {number} timed out"
+    if r.returncode:
+        return f"gh pr view {number} exited {r.returncode}: {r.stderr.strip()[:200]}"
+    try:
+        info = json.loads(r.stdout)
+        page = PR_PAGE.match(info["url"])
+        got = (info["number"], info["headRefName"], page.group(1).lower(), page.group(2).lower())
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return f"gh pr view {number} printed no readable number/headRefName/url"
+    if got[0] != number or got[1] != branch:
+        return f"PR #{number} is number {got[0]} with head branch {got[1]!r}, not this branch {branch!r}"
+    if got[2:] != (want.group(1).lower(), want.group(2).lower()):
+        return f"PR #{number} is in {got[2]}/{got[3]}, not origin's {want.group(1)}/{want.group(2)}"
+    return None
+
+
+def follow_up(number, label, branch, root, fragment, rel, message, existing):
+    """Fill, check, commit and push the fragment of verified PR `number`; an exit code."""
+    repair = f"repair: bin/ade-pr-open --existing {number} (from {root})"
+    try:
+        text = fragment.read_text(encoding="utf-8")
+        new, count = fill(text, number)
+        if count:
+            write_atomic(fragment, new)
+        check = run([sys.executable, str(HERE / "changelog-fold"), "--repo", str(root), "--check"], root)
+        if check.returncode:
+            sys.stderr.write(check.stdout + check.stderr)
+            return fail(EXIT_FOLLOWUP, f"{label} is open but changelog-fold --check exited {check.returncode} "
+                        f"(fragment {'filled but not committed' if count else 'unchanged'}); fix {rel}, then {repair}")
+        pending = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", rel], root).stdout.strip())
+        if not count and not pending:
+            if existing:
+                # A rerun after a failed push: the fill commit may exist only locally.
+                head = run(["git", "-C", str(root), "rev-parse", "HEAD"], root).stdout.strip()
+                ref = f"refs/heads/{branch}"
+                remote = run(["git", "-C", str(root), "ls-remote", "--heads", "--", "origin", ref], root, timeout=300)
+                if remote.returncode:
+                    return fail(EXIT_FOLLOWUP, f"{label}: cannot read origin's {branch}: {remote.stderr.strip()[:200]}")
+                sha = remote.stdout.split()[0] if remote.stdout.split() else ""
+                if sha != head:
+                    return fail(EXIT_FOLLOWUP, f"{label}: {rel} is filled and committed locally, but origin's {branch} is "
+                                f"{sha[:8] or 'missing'}, not HEAD {head[:8]}: the fill commit is local; push it "
+                                f"(git -C {root} push origin HEAD:{ref}) once the push problem is fixed")
+            print(f"ade-pr-open: {label}: {rel} has no `(#PR)` placeholder and is clean; fragment check passed, nothing to commit")
+            return EXIT_OK
+        msg = message or f"docs: fill changelog fragment PR number (#{number})"
+        done = run([str(HERE / "git-commit-own"), "--", msg, rel], root)
+        sys.stdout.write(done.stdout)
+        sys.stderr.write(done.stderr)
+        if done.returncode:
+            return fail(EXIT_FOLLOWUP, f"{label} is open, fragment filled, but git-commit-own exited "
+                        f"{done.returncode}; the fill commit may be local only: resolve that, then {repair}")
+    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        return fail(EXIT_FOLLOWUP, f"{label} is open but filling {rel} failed: {exc}; {repair}")
+    print(f"ade-pr-open: {label}: filled {count} placeholder(s) in {rel} (or committed an earlier fill), checked, committed and pushed")
+    return EXIT_OK
+
+
 def main(argv):
     # Our own options come first; the first other word (or `--`) starts gh's arguments verbatim,
     # so `--title`, `--body` and the rest reach gh untouched.
@@ -92,9 +179,12 @@ def main(argv):
         else:
             return fail(EXIT_USAGE, f"--existing needs a PR number, not {value!r}")
     gh_args = rest[1:] if rest[:1] == ["--"] else rest
-    ns = argparse.Namespace(existing=existing, message=message)
-    if ns.existing is None and not gh_args:
+    if existing is None and not gh_args:
         return fail(EXIT_USAGE, "give the `gh pr create` arguments (or --existing N)")
+    if has_repo_flag(gh_args):
+        return fail(EXIT_USAGE, "-R/--repo is refused: the PR must be on this checkout's origin repo; nothing was created")
+    if not os.access(GH, os.X_OK):
+        return fail(EXIT_USAGE, f"the gh shim {GH} is missing or not executable; nothing was created")
 
     cwd = Path.cwd()
     top = run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"], cwd)
@@ -110,54 +200,42 @@ def main(argv):
         return fail(EXIT_USAGE, f"no fragment {rel} for branch {branch}: write it (with `(#PR)` on each "
                     "bullet) and push it before opening the PR; nothing was created")
     dirty = run(["git", "-C", str(root), "status", "--porcelain", "--", rel], root).stdout.strip()
-    if dirty and ns.existing is None:
+    if dirty and existing is None:
         return fail(EXIT_USAGE, f"{rel} has uncommitted changes ({dirty[:2].strip()}); commit and push it "
                     "first; nothing was created")
 
-    if ns.existing is not None:
-        number = ns.existing
-        url = f"PR #{number}"
+    partial = 0  # gh's nonzero exit after it printed the PR URL
+    if existing is not None:
+        number = existing
     else:
-        gh = run(["gh", "pr", "create", *gh_args], root)
+        try:
+            gh = run([GH, "pr", "create", *gh_args], root, timeout=GH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return fail(EXIT_FOLLOWUP, f"gh pr create timed out; the PR may exist: check `gh pr list --head {branch}`, "
+                        "then run bin/ade-pr-open --existing N")
         sys.stderr.write(gh.stderr)
-        if gh.returncode:
-            sys.stdout.write(gh.stdout)
-            return fail(EXIT_GH, f"gh pr create exited {gh.returncode}; no PR number to fill")
         sys.stdout.write(gh.stdout)
         # gh prints the URL on a line of its own, then (newer gh) hint lines: take the URL line.
         found = PR_URL.findall(gh.stdout)
+        if gh.returncode and not found:
+            said = PR_URL.findall(gh.stderr)
+            hint = (f"; its stderr names PR #{said[0]} (already exists?): bin/ade-pr-open --existing {said[0]} "
+                    "verifies the branch and fills the fragment" if said else "")
+            return fail(EXIT_GH, f"gh pr create exited {gh.returncode}; no PR number to fill{hint}")
         if not found:
             return fail(EXIT_FOLLOWUP, "gh pr create printed no PR URL line I can read; find the number "
                         "and run: bin/ade-pr-open --existing N")
-        number = int(found[0])
-        url = f"PR #{number}"
-
-    repair = f"repair: bin/ade-pr-open --existing {number} (from {root})"
-    try:
-        text = fragment.read_text(encoding="utf-8")
-        new, count = fill(text, number)
-        if count:
-            write_atomic(fragment, new)
-        check = run([sys.executable, str(HERE / "changelog-fold"), "--repo", str(root), "--check"], root)
-        if check.returncode:
-            sys.stderr.write(check.stdout + check.stderr)
-            return fail(EXIT_FOLLOWUP, f"{url} is open but changelog-fold --check exited {check.returncode} "
-                        f"(fragment {'filled but not committed' if count else 'unchanged'}); fix {rel}, then {repair}")
-        pending = bool(run(["git", "-C", str(root), "status", "--porcelain", "--", rel], root).stdout.strip())
-        if not count and not pending:
-            print(f"ade-pr-open: {url}: {rel} has no `(#PR)` placeholder and is clean; fragment check passed, nothing to commit")
-            return EXIT_OK
-        msg = ns.message or f"docs: fill changelog fragment PR number (#{number})"
-        done = run([str(HERE / "git-commit-own"), msg, rel], root)
-        sys.stdout.write(done.stdout)
-        sys.stderr.write(done.stderr)
-        if done.returncode:
-            return fail(EXIT_FOLLOWUP, f"{url} is open, fragment filled, but git-commit-own exited "
-                        f"{done.returncode}; resolve that, then publish {rel}")
-    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
-        return fail(EXIT_FOLLOWUP, f"{url} is open but filling {rel} failed: {exc}; {repair}")
-    print(f"ade-pr-open: {url}: filled {count} placeholder(s) in {rel} (or committed an earlier fill), checked, committed and pushed")
-    return EXIT_OK
+        number, partial = int(found[0]), gh.returncode
+    label = f"PR #{number}"
+    problem = verify(number, branch, root)
+    if problem:
+        return fail(EXIT_FOLLOWUP, f"{label} exists but was not verified, so {rel} is untouched: {problem}; "
+                    f"fix that, then bin/ade-pr-open --existing {number}")
+    code = follow_up(number, label, branch, root, fragment, rel, message, existing is not None)
+    if code == EXIT_OK and partial:
+        return fail(EXIT_FOLLOWUP, f"{label} was created and {rel} is filled, but gh pr create exited {partial} "
+                    "after creating it (labels, reviewers, assignees or an upload?): check the PR page")
+    return code
 
 
 if __name__ == "__main__":
