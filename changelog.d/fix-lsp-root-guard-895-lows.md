@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/lsp-root-guard` (queue 89, the four LOWs of the #895 review): `/Library`, `/home`, `/nix`, `/mnt`, `/srv` and `/Network` join the container list (`--no-heuristic` turns the structural rule off, so the list must name them); a `file:` URI with a relative path is no root, and a multi-root folder must be an absolute existing directory like a kept root; a folder reply that was empty stays empty, and a folder the client removed leaves the kept list; docs/mcp-on-demand.md names the site-djbclark PRs in full and says the fallback is fail-open; the config-match test skips on Python < 3.11 (#PR)

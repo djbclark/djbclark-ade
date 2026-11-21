@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "bin" / "lsp-root-guard"
 
@@ -329,7 +331,57 @@ def test_glob_entry_and_structural_rule_in_process(tmp_path: Path) -> None:
 
 def test_default_containers_match_the_config() -> None:
     """#887 L4: the Python < 3.11 fallback list must not drift from config/lsp-roots.toml."""
-    import tomllib
+    tomllib = pytest.importorskip("tomllib")
     mod = _guard_module()
     cfg = tomllib.loads((ROOT / "config" / "lsp-roots.toml").read_text())
     assert sorted(mod.DEFAULT_CONTAINERS) == sorted(cfg["containers"]["paths"])
+
+
+def test_top_level_trees_stay_containers_under_no_heuristic() -> None:
+    """#895 L1: the structural rule is off under --no-heuristic, so the list itself must name these trees."""
+    mod = _guard_module()
+    for tree in ("/Library", "/home", "/nix", "/mnt", "/srv", "/Network"):
+        assert tree in mod.DEFAULT_CONTAINERS
+    assert mod.is_container("/Library", list(mod.DEFAULT_CONTAINERS), 3, False)
+
+
+def test_relative_file_uri_and_missing_folder_are_never_kept(tmp_path: Path, monkeypatch: Any) -> None:
+    """#895 L2: the multi-root path had no absolute/existing gate: file:relproj2 or a missing folder became the root."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (tmp_path / "relproj2").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert mod.uri_to_path("file:relproj2") is None and mod.uri_to_path("file:///abs/x") == "/abs/x"
+    folders = [{"uri": home.as_uri(), "name": "h"}, {"uri": "file:relproj2", "name": "r"},
+               {"uri": (tmp_path / "missing").as_uri(), "name": "m"}, {"uri": proj.as_uri(), "name": "p"}]
+    msg = _initialize({"rootUri": home.as_uri(), "rootPath": str(home), "workspaceFolders": folders})
+    assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
+    assert [f["uri"] for f in msg["params"]["workspaceFolders"]] == [proj.as_uri()]
+    assert msg["params"]["rootUri"] == proj.as_uri()
+
+
+def test_kept_folder_is_not_resurrected_by_an_empty_reply_or_after_removal(tmp_path: Path) -> None:
+    """#895 L3: an empty client reply stays empty; a folder the client removed leaves `kept`."""
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    puri = proj.as_uri()
+    g = mod.Guard([str(home)], 3, False)
+    init = _initialize({"rootUri": puri, "rootPath": str(proj), "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]})
+    assert g.from_client(b"raw", init) is not None and g.kept[0]["uri"] == puri
+
+    def reply(rid: int, result: list[dict[str, str]]) -> Any:
+        g.from_server({"method": "workspace/workspaceFolders", "id": rid})
+        out = g.from_client(b"raw", {"id": rid, "result": result})
+        assert out is not None
+        return json.loads(out.split(b"\r\n\r\n", 1)[1])["result"]
+
+    assert reply(1, []) == []  # the client really has no folders
+    assert [f["uri"] for f in reply(2, [{"uri": home.as_uri(), "name": "h"}])] == [puri]
+    change = {"method": "workspace/didChangeWorkspaceFolders",
+              "params": {"event": {"added": [{"uri": home.as_uri(), "name": "h"}], "removed": [{"uri": puri, "name": "p"}]}}}
+    assert g.from_client(b"raw", change) is not None
+    assert reply(3, [{"uri": home.as_uri(), "name": "h"}]) == []  # proj was closed: not re-added
