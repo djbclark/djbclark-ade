@@ -111,7 +111,7 @@ Test those on a throwaway target before depending on them, and say so in a repor
    use the viewer's **key bar** buttons (reported 2026-10-30, not tested; the buttons exist in the plugin's
    client/screen.tsx at the pin).
 
-## Safety rules (they bind every agent)
+## Plugin safety rules (history: they bind again only if the operator re-enables the plugin; headless Playwright checks follow "Safety rules that still apply" above)
 
 0. **Before the first `screen.*` RPC in a stretch, including a frame request**, give the operator about 30 seconds
    notice; no approval question is needed. After the last RPC, explicitly say **done using the screen**. This notice

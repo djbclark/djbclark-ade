@@ -10,8 +10,7 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
-**Provider scope (2026-10-25; Pi-only 2026-11-08).** Compaction (Claude/Pi auto-compaction or an archived OpenCode
-`ade_compact`) continues an existing session; it does not start a new baton. Only resume a fresh session after the
+**Provider scope.** Compaction (Claude/Pi auto-compaction) continues an existing session; it does not start a new baton. Only resume a fresh session after the
 owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never
 clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
 
@@ -109,7 +108,7 @@ alive and is not the handoff's author):
 2. If a Paseo agent id is known, wait with `paseo wait <id> --json` (or
    `paseo ls -a -g --json` filtered on your `ade.*` labels) until the agent is
    idle, then classify by the report / `.done` artifacts — the same meanings
-   `skills/fan-out` Collect / the retired `report_finished` contract use: last
+   `skills/fan-out` Collect uses: last
    non-blank line `DONE`, **or** `DONE` followed by one `AC_DONE:` verdict line
    = delivered; report present but unfinished / still running = wait again;
    missing report or a last line `NO-REPORT: …` = no-report; first line
@@ -148,7 +147,3 @@ that loads this skill, next to its own built-in `/resume` session picker).
 
 Do not duplicate the reader protocol's steps here — if they ever change,
 they change in exactly one place (`session-handoff`'s SKILL.md), not two.
-
-**Archived (OpenCode):** the native `ade_compact` tool was OpenCode V2 Go's manual compaction path; it is not a
-live client under Pi-only (2026-11-08). See `docs/context-hygiene.md` §3 (archive). Write the checkpoint first and
-require the normal host identity/acknowledgment checks for a lifecycle cycle.

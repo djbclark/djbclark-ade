@@ -156,7 +156,7 @@ with:
 
 Durable machine facts belong in the curated layer, not a handoff: an
 operator-verified fact goes to `docs/` or the relevant skill; model-mined
-leads used to land in `~/basic-memory/mined/` via `~/ops/site-djbclark/bin/mine_sessions.py`. That folder was moved to `~/ops/site-private/memory/basic-memory/mined/` (frozen since 2026-08-24, to be archived per queue ruling 5); nothing writes to it now, so the lead has no home yet. A
+leads have no curated home, so leave them out. A
 handoff that carries them becomes a second canon that nobody updates.
 
 ## Step 4 — Write the file
@@ -295,9 +295,9 @@ unless the operator named it by hand:
 paseo agent update "$PASEO_AGENT_ID" --name "<short title>"
 ```
 
-Naming rules (`<name>-pt` tabs, `<topic>-pw` workspaces, at most 17 characters): `docs/workspace-layout.md`. Outside
-Paseo, or with no `$PASEO_AGENT_ID`, skip it silently. Add its one-line result to the report. (The `autorename` skill
-that did this was removed 2026-11-06, slim-down E4.)
+Keep the title short and identifiable (`docs/workspace-layout.md`, Naming item 3); the successor keeps this title by
+default (`docs/self-session.md` C-id). Outside Paseo, or with no `$PASEO_AGENT_ID`, skip it silently. Add its one-line
+result to the report.
 
 ## Step 9 — Start and verify your successor
 
@@ -362,7 +362,3 @@ this step), not only into the final message.
 "doc only" or otherwise asks for the document without a restart, or when you are a sub-agent or a dispatched slice
 (above). `loose` Rule 4 option 1 wants this step to run: it does not make a handoff document-only. Say in the report
 that Step 9 was skipped and why.
-
-**Archived (OpenCode, not a live TUI):** OpenCode V2 Go sessions used the native `ade_compact` tool for manual
-compaction (`docs/context-hygiene.md` §3); that path is archive-only under the Pi-only ruling. Write the checkpoint
-first; current clients use auto-compaction and handoff, not `ade_compact`.

@@ -10,7 +10,7 @@ description: >-
 
 # ingest-web-ai — web-chat → memory (design + offline stub)
 
-Carried queue **#23**. Full design: [`docs/ingest-web-ai.md`](../../docs/ingest-web-ai.md).
+Carried queue item "Ingest web-interface AI conversations" (`docs/queue.md`). Full design: [`docs/ingest-web-ai.md`](../../docs/ingest-web-ai.md).
 
 ## When to use
 
@@ -56,4 +56,4 @@ or an operator inspecting the file outside an agent turn).
 
 - Memory landscape: [`docs/history/ai-memory-landscape.md`](../../docs/history/ai-memory-landscape.md)
 - Threat model (untrusted web input): [`docs/threat-model.md`](../../docs/threat-model.md)
-- Queue cite: [`docs/queue.md`](../../docs/queue.md) Carried #23
+- Queue cite: [`docs/queue.md`](../../docs/queue.md) Carried, "Ingest web-interface AI conversations"

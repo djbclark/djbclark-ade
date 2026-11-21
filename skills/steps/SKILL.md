@@ -32,7 +32,7 @@ Grok Bot is not such a runtime: it has a question widget, rule 5.)
 
 Use the native chooser your runtime actually has. Do not invent a second UX.
 
-1. **Claude Code, Copilot, Cursor, Pi, and any agent with
+1. **Claude Code, Cursor, Pi, and any agent with
    `AskUserQuestion`:** the native arrow-key chooser (`AskUserQuestion` on
    Claude-class agents). Keep using it even if you also have something else.
    Pi is the sole third-party TUI (2026-11-08, queue item 36); it has no
@@ -66,7 +66,7 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    an empty `A1: ` in about 1 s. An Antigravity session hosted under Paseo skips
    `ask_question` and goes straight to rule 4's numbered text walk until ACP
    elicitation is wired.
-4. **No native chooser (no `AskUserQuestion`/`question`/`clarify` tool in the
+4. **No native chooser (no `AskUserQuestion`/`clarify` tool in the
    function list, or Antigravity under Paseo, rule 3a, whose `ask_question` returns
    empty; and not Grok Bot, which has rule 5):** the walk falls back
    to a numbered text walk, still one
@@ -85,7 +85,7 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
       every turn.
    4. This fallback is for runtimes **without a working** picker only (rule 3a
       counts). Any agent that
-      HAS `AskUserQuestion` / `question` / `clarify` keeps using it (rules
+      HAS `AskUserQuestion` / `clarify` keeps using it (rules
       1–3 above) and never drops to this text fallback; Grok Bot keeps its
       widget (rule 5).
 5. **Grok Bot** (djbclark's cloud assistant on its own Linux box, 2026-10-23):
@@ -227,9 +227,12 @@ The card has no header chip, no per-option description, no `helpText` and no
 4. On `stop`, stop. Report what was decided and what is still open.
 5. **If he picks `/compact`** (or the context prompt's compact tier, +140k since
    the start or last compaction or 217k total, fires mid-walk; never compact earlier,
-   it costs more than it saves, 2026-10-10): an agent requests its own compaction with `bin/ade-self-session compact` (docs/self-session.md section B; `requested` is not completed), so note the remaining queue
-   and ask him to type `/compact <focus: the open items>`; with nobody at the keyboard,
-   auto-compaction takes it. Grok Bot: does not apply (2d.6).
+   it costs more than it saves, 2026-10-10): write the remaining queue into a
+   checkpoint file, request the compaction yourself with
+   `~/src/djbclark-ade/bin/ade-self-session compact --checkpoint ABSOLUTE_FILE --request-id TOKEN`
+   (docs/self-session.md section B; top-level session only, dispatch footer rule 15: a sub-agent leaves compaction to
+   auto-compaction), and end the turn; a `requested` result is not a
+   completed compaction, so resume the walk from the checkpoint. Grok Bot: does not apply (2d.6).
 
 ## 4. Keep going until nothing is left
 

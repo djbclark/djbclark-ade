@@ -9,12 +9,12 @@ description: >-
 
 # Tidy — reconnect, unblock, name and clean one repo's agents and windows
 
-Operator request, 2026-11-13: reconnect agents we lost contact with, make sure no worker waits on us, rename the
-windows to the MAIN / WORKERS naming, put tabs where they belong (with a USER window for what the operator started),
-tidy everything. Revised by the operator ruling of 2026-11-14 (to the tendcf lead ae1f6d65, verbatim): "Close any unneeded tabs and
-any unneeded workspaces you or your predecessors have made. In the future, have at most LEAD, WORKER, and OTHER workspaces and put
-tabs in the appropriate box. The tabs can mention the worktree they are in." The kinds are now LEAD, WORKER and OTHER (the 2026-11-13
-MAIN, WORKERS and USER are renamed to them), and at most three windows per lead and repo remain. The mechanics are `bin/ade-tidy` (observe-only by default). Run it from a **top-level lead session**:
+Goal: reconnect agents we lost contact with, make sure no worker waits on us, name the windows LEAD, WORKER and OTHER,
+put tabs in the fitting box, and close unneeded tabs and windows this lead or its predecessors made. Operator ruling,
+2026-11-14 (verbatim): "Close any unneeded tabs and any unneeded workspaces you or your predecessors have made. In the
+future, have at most LEAD, WORKER, and OTHER workspaces and put tabs in the appropriate box. The tabs can mention the
+worktree they are in." At most three windows per lead and repo. Legacy MAIN, WORKERS and USER names are migrated (section E).
+The mechanics are `bin/ade-tidy` (observe-only by default). Run it from a **top-level lead session**:
 a sub-agent inherits the parent's agent id and its lifecycle actions would hit the parent (dispatch footer rule 15).
 
 ## Window naming (authoritative)
