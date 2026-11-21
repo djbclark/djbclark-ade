@@ -7,8 +7,8 @@ schema_version = 1
 
 [hardening]
 # Owners scanned for uncovered repos (E1.1). Empty skips inventory.
-# Known gap (org move, 2026-11-21): repos that moved to the frdminc org (82 repos, 34 of them
-# non-forks) are not scanned: adding "frdminc" would make every unlisted non-fork read as
+# Known gap (org move, 2026-11-21): repos that moved to the frdminc org (82 repos, 35 of them
+# non-forks on 2026-11-21; Carried 110 holds the decision) are not scanned: adding "frdminc" would make every unlisted non-fork read as
 # uncovered and turn the daily harden-check red until each gets a [[hardening.repo]] row.
 # Operator call; the moved forks lost their implicit [hardening.forks] cover meanwhile.
 owners = ["djbclark"]

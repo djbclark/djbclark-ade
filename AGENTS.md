@@ -205,10 +205,12 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
     me, automatically run /steps unless our upcoming alternative non-blocking universal questions system is being used").
     Whenever you would end a turn or a post with questions or decisions for djbclark, load
     [skills/steps/SKILL.md](skills/steps/SKILL.md) and walk them one at a time, recommendation first; never ask whether
-    to run it. A worker or sub-agent sends its question to its lead (order 10), and the lead runs `/steps`. The one
-    exception is the central, non-blocking questions system of queue 67
-    ([docs/central-questions-plan.md](docs/central-questions-plan.md)): not live as of 2026-11-21; once it is and the
-    agent is enrolled, the question goes there and independent work continues. Detail:
+    to run it. A worker or sub-agent sends its question to its lead (order 10); the lead answers what it can and
+    runs `/steps` only on what needs djbclark. A pick authorizes only the action its label names: a restart, merge, push,
+    send or live-boundary swap needs its own explicit option, in every runtime. The one exception is the central,
+    non-blocking questions system of queue 67 ([docs/central-questions-plan.md](docs/central-questions-plan.md)): it is
+    live only once the operator amends this order to say so, and "enrolled" means that amendment lists the agent; until
+    then, `/steps`; after it, an enrolled agent's question goes there and independent work continues. Detail:
     `site-private/memory/feedback_questions_run_steps.md`; home rules item 46.
 
 ## Machine context

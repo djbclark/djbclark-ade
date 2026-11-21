@@ -220,8 +220,10 @@ def test_grokbot_check_removes_mktemp_when_render_fails(catalog, tmp_path):  # P
         f"#!/bin/sh\nd=$({real_mktemp} -d)\nprintf '%s\\n' \"$d\" >>{mktemp_log}\nprintf '%s\\n' \"$d\"\n"
     )
     (bindir / "mktemp").chmod(0o755)
-    (bindir / "gawk").write_text("#!/bin/sh\nexit 1\n")  # render_copy fails after cp
-    (bindir / "gawk").chmod(0o755)
+    # render_copy must fail after cp. A fake gawk on PATH does not do it on a Mac: bin/skill-everywhere prepends /opt/homebrew/bin,
+    # so the real Homebrew gawk wins and the render succeeds (the Linux CI has no such directory). A directory named SKILL.md.new in
+    # the source makes the script's own `>"$2/SKILL.md.new"` redirect fail, on any platform and for root too.
+    (public / "steps" / "SKILL.md.new").mkdir()
     env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
     result = run(catalog, "--check", "steps")
     # Named --check stays exit 0 for a stale/failed render (only --all raises rc); the leak fix is the mktemp rm.

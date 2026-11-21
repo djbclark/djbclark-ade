@@ -657,8 +657,9 @@ def add_footer(rest: list[str]) -> list[str]:
 
 
 def has_control_char(p: str) -> bool:
-    """True when the path holds a control character (a newline would split the brief line that names it)."""
-    return any(unicodedata.category(c) == "Cc" for c in p)
+    """True when the path holds a control, format or line/paragraph-separator character (a newline, U+2028 or U+2029 would split the
+    brief line that names it; U+202E reverses how the rest of the path reads)."""
+    return any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in p)
 
 
 def add_cwd_line(rest: list[str], eff_cwd: str, cwd: str, explicit: bool) -> list[str]:
@@ -885,7 +886,9 @@ def launch(opts, rest: list[str]) -> int:
             sys.stderr.write(f"ade-worker-run: the worker starts in {eff_cwd} (the window's primary checkout), not {cwd}; "
                              "the brief carries the worktree\n")
         if moved and requested:  # the worker itself is told too: the stderr note above reaches only the launcher
-            rest = add_cwd_line(rest, eff_cwd, cwd, bool(opts.cwd))
+            # the explicit form tells the worker to run every command from `cwd`: only right when that is a linked worktree, never a
+            # --cwd inside the shared primary checkout (it would send the worker into the checkout the same line forbids editing)
+            rest = add_cwd_line(rest, eff_cwd, cwd, bool(opts.cwd) and wsn.linked_worktree(cwd))
         place = ["--workspace", row_wks(win), "--cwd", eff_cwd] if win else ["--new-workspace", "local", "--cwd", eff_cwd]
         linked = win is None and not moved and wsn.linked_worktree(eff_cwd)
         if linked:

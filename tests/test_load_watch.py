@@ -1304,11 +1304,31 @@ def test_watch_step4_item3_lead_gate_and_consistent_scope():
     assert "that send can queue or fail" in item1
 
 
+def test_watch_step4_and_howto_pin_each_send_gate_with_its_condition():
+    """PR 888 round 5 LOW 1: the send gates were pinned by the presence of words, so inverting one (`idle` to `running`,
+    `only when` to `even when`) left the suite green. Pin each gate phrase whole, condition included."""
+    s4 = _step4()
+    item1 = s4[s4.index("1. **Steer future heavy runs"):s4.index("2. **Guard a misbehaving")]
+    assert "only when a fresh `paseo agent inspect ID --json` reads `Status == \"idle\"`, `Archived: false` and `PendingPermissions == []`" in item1
+    assert "Never ask it to stop its current step." in item1
+    rules = s4[s4.index("**Send rules"):s4.index("1. **Steer future")]
+    assert "a fresh `paseo agent inspect ID --json` must read `Status == \"idle\"`, `Archived: false` and `PendingPermissions == []` right before the send" in rules
+    assert "otherwise list the agent for djbclark and retry at the next incident" in rules
+    assert "and none while an earlier one is unacked and under 6 hours old" in s4
+    assert "(observe first; `--apply` only from the watcher's own top-level session, never from a sub-agent)" in s4
+    assert "An agent whose report was never read is paid work and is never a target." in s4
+    assert "only one session at a time sends these messages (the standing watcher when one runs; any other `/watch load` session lists the lead for djbclark and sends nothing)" in s4
+    h = load_module().WATCHER_HOWTO
+    assert "so send only when a fresh `paseo agent inspect ID --json` reads `Status` idle, `Archived: false` and no pending permissions" in h
+    assert "(succession ledger; `paseo agent inspect ID --json` reads `Archived: false`, `Status` idle, no pending card;" in h
+
+
 def test_watcher_howto_pins_the_round1_rules_and_has_no_unconditional_send():
     """PR 888 round 4 MED 1 (HOWTO side) and LOW 1: every send in the prompt is idle-gated, including the older 'send it one line'."""
     h = load_module().WATCHER_HOWTO
     assert "Only when `admit --json` refuses on memory (`free_mem`, `swapins`, `compressor`)" in h
-    assert "never touch an agent with no `ade.lead` label (list it)" in h
+    assert "never archive, or ask about archiving, an agent with no `ade.lead` label (list it)" in h
+    assert "never touch an agent with no" not in h  # #888 r5 LOW 2: wider than Step 4 (item 1 may message an idle LEAD)
     assert "never run `paseo agent archive` yourself (only `bin/ade-tidy prune`)" in h
     assert "following skills/watch/SKILL.md Step 4 exactly" in h
     # LOW 1: the "send it one line" clause carries the idle gate right in front of it
