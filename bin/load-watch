@@ -876,8 +876,9 @@ WATCHER_HOWTO = (
     "refuses on memory (`free_mem`, `swapins`, `compressor`), you may coordinate archiving idle agents (operator ruling "
     "2026-11-21), following skills/watch/SKILL.md Step 4 exactly: never run `paseo agent archive` yourself (only "
     "`bin/ade-tidy prune`), never touch an agent with no `ade.lead` label (list it), and ask a worker's current owning lead "
-    "(succession ledger, `paseo agent inspect ID --json` reads `Archived: false`, no pending card) to archive it, ending "
-    "`Please reply: ack <your id>`. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
+    "(succession ledger; `paseo agent inspect ID --json` reads `Archived: false`, `Status` idle, no pending card; at most one "
+    "message per lead per hour) to archive it, ending `Please reply: ack <your id>`. Send (to a blamed agent or a lead) only "
+    "from a Paseo session with `$PASEO_AGENT_ID` set, plain `--no-wait`, never `--behavior`: a sourceless send interrupts. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
 
 
 def watcher_record():

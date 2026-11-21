@@ -1061,3 +1061,34 @@ def test_registry_lock_waits_for_a_release_and_ignores_a_bad_timeout(tmp_path):
     assert r.returncode == 0, r.stderr
     assert [x[1] for x in rows(tmp_path)] == ["ci"]
     assert run(tmp_path, "ci", "list", LW_REGISTRY_LOCK_TIMEOUT_S="abc").returncode == 0
+
+
+SKILL = Path(__file__).resolve().parent.parent / "skills" / "watch" / "SKILL.md"
+
+
+def _step4():
+    text = SKILL.read_text()
+    return text[text.index("### Step 4"):text.index("## 3. Standing Watcher Mode")]
+
+
+def test_watch_step4_sends_only_sourced_idle_plain_and_rate_limited():
+    """PR 888 round 2: a sourceless `paseo send` interrupts a running turn, so every send Step 4 adds needs a Paseo session,
+    an idle lead, no --behavior flag, a once-per-hour cap and a label source that exists (inspect has no labels)."""
+    s4 = _step4()
+    assert "$PASEO_AGENT_ID" in s4 and "sourceless" in s4 and "sends nothing" in s4
+    assert "never a `--behavior` flag" in s4 and "--behavior steer" not in s4
+    assert "paseo send --no-wait --json" in s4
+    assert 'Status == "idle"' in s4
+    assert "one such message per lead per hour" in s4 and "archive-asks.jsonl" in s4
+    assert "SuccessionError" in s4 and "Archived: true" in s4 and "No current holder" in s4
+    assert "carry no role or label" in s4 and 'labels["ade.lead"]' in s4 and "--label ade.lead=" in s4
+    # every `paseo send` in Step 4 is the plain no-wait form: no steer, no other behavior
+    assert s4.count("--behavior") == 1
+
+
+def test_watcher_howto_carries_the_send_rules():
+    lw = load_module()
+    h = lw.WATCHER_HOWTO
+    assert "$PASEO_AGENT_ID" in h and "never `--behavior`" in h and "sourceless send interrupts" in h
+    assert "`Status` idle" in h and "at most one message per lead per hour" in h
+    assert "never run `paseo agent archive` yourself" in h
