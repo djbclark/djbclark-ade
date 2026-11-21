@@ -1,0 +1,3 @@
+### Fixed
+
+- `load-watch ci decide DIR local` under a live bgrun ticket (follow-ups from the round-2 review of #901): a `ci` decision recorded while the ticket was being checked is no longer overwritten (the dialog decides); a `[ticket ID]` row applies to a directory only while a live ticket covers the directory being run (a linked worktree outside the ticket's scope no longer inherits it) as well as the row's own directory; the docs say that any live covering ticket keeps such a row alive, not only the one it names; a non-zero `bgrun approve-local check` exit with an id-shaped line is pinned as not a ticket.
