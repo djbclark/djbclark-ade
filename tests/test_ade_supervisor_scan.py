@@ -59,6 +59,8 @@ def _run(bin_dir: Path, home: Path, lead: str | None = LEAD) -> int:
     state = home / ".local" / "state" / "djbclark-ade" / "supervisor"
     env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}")
     env.pop("ADE_SUPERVISOR_LEAD", None)
+    env.pop("BASH_ENV", None)                       # bash would source ~/.bashrc, which puts the REAL paseo and
+    env.pop("ENV", None)                            # hermes-ping ahead of the test's fakes (tests/test_ade_paseo_guard.py)
     env["ADE_SUPERVISOR_STATE_DIR"] = str(state)
     if lead is not None:
         env["ADE_SUPERVISOR_LEAD"] = lead
@@ -115,10 +117,32 @@ def test_cleared_agent_leaves_the_state_and_is_noticed_again_later(tmp_path: Pat
 
 
 def test_closed_and_archived_agents_are_ignored(tmp_path: Path) -> None:
-    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived"),
-                                                    _agent("c3", status="error")])
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived")])
     assert _run(bin_dir, home) == 0
     assert _messages(sent) == [] and json.loads((state / "notified").read_text()) == []
+
+
+def test_a_pi_agent_in_error_is_noticed_with_its_pi_alternative(tmp_path: Path) -> None:
+    """The scan used to drop every `error` entry: a Pi agent a 402 left in error (queue item 82) was never told."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("p1", "xai-oauth", status="error")])
+    assert _run(bin_dir, home) == 0
+    msgs = _messages(sent)
+    assert len(msgs) == 1 and "p1" in msgs[0] and "(in error)" in msgs[0] and "pi/opencode-go-t-e/deepseek-v4-pro" in msgs[0]
+    assert json.loads((state / "notified").read_text()) == [_key("p1", "xai-oauth")]
+
+
+def test_an_errored_codex_agent_is_noticed_without_a_pi_alternative(tmp_path: Path) -> None:
+    """A Codex or Claude agent in error is told as a notice; the message never offers it a Pi/DeepSeek alternative,
+    even if a stale or hostile feed carries one, and it is noticed once, not every run."""
+    entry = {"id": "k1", "name": "forks", "account": "codex", "model": "codex/gpt-6-astra", "family": "codex",
+             "status": "error", "stuck": True, "headroom_percent": None, "quota_stale": None,
+             "alternative": "pi/opencode-go-t-e/deepseek-v4-pro"}               # a stale feed: the scan must not relay it
+    bin_dir, home, state, sent = _harness(tmp_path, [entry])
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    msgs = _messages(sent)
+    assert len(msgs) == 1 and "k1" in msgs[0] and "codex agent in error" in msgs[0]
+    assert "no Pi alternative" in msgs[0] and "pi/" not in msgs[0] and "deepseek" not in msgs[0]
+    assert json.loads((state / "notified").read_text()) == [_key("k1", "codex")]
 
 
 def test_an_undelivered_send_keeps_the_notice_for_the_next_run(tmp_path: Path) -> None:
@@ -391,3 +415,80 @@ def test_a_refused_lead_and_a_failed_send_are_separate_causes(tmp_path: Path) ->
     assert len(pings) == 2                                          # one per cause, same outage
     assert (state / ".lead-unreachable.refused").exists()
     assert (state / ".lead-unreachable.send-failed").exists()
+
+
+def _plan_lines(state: Path) -> list[str]:
+    return [line for line in (state / "supervisor.log").read_text().splitlines() if "re-handoff plan" in line]
+
+
+def test_a_stuck_agent_is_planned_for_rehandoff_but_not_moved_by_default(tmp_path: Path) -> None:
+    """The default scan logs the re-handoff it would do and never archives or relaunches (Carried 70, dry run)."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0
+    plan = _plan_lines(state)
+    assert len(plan) == 1 and "dry-run" in plan[0]
+    assert "would-rehandoff" in plan[0] and "a1" in plan[0]
+    assert not any("agent archive" in line for line in sent.read_text().splitlines())
+
+
+def test_live_mode_refuses_to_move_anyone_until_the_executor_is_built(tmp_path: Path) -> None:
+    """ADE_SUPERVISOR_REHANDOFF=live calls the executor, which is not built yet and must move nothing."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")])
+    (bin_dir / "ade-supervisor-rehandoff").write_text(
+        "#!/bin/sh\necho \"ade-supervisor-rehandoff: live re-handoff is not built; left where they are\"\nexit 1\n")
+    (bin_dir / "ade-supervisor-rehandoff").chmod(0o755)
+    env_home = home
+    import os, subprocess
+    env = dict(os.environ, HOME=str(env_home), PATH=f"{bin_dir}:{os.environ['PATH']}",
+               ADE_SUPERVISOR_STATE_DIR=str(state), ADE_SUPERVISOR_LEAD=LEAD,
+               ADE_SUPERVISOR_REHANDOFF="live")
+    env.pop("BASH_ENV", None)                       # see _run: bash must not source ~/.bashrc and reach the real paseo
+    env.pop("ENV", None)
+    assert subprocess.run([str(bin_dir / "ade-supervisor-scan")], env=env, capture_output=True, text=True).returncode == 0
+    log = (state / "supervisor.log").read_text()
+    assert "re-handoff executor failed" in log
+    assert not any("agent archive" in line for line in sent.read_text().splitlines())
+
+
+def test_an_empty_plan_is_never_logged(tmp_path: Path) -> None:
+    """Nothing stuck: no plan line on the first run or the hundredth (it was 288 lines a day)."""
+    bin_dir, home, state, _ = _harness(tmp_path, [])
+    for _ in range(3):
+        assert _run(bin_dir, home) == 0
+    assert _plan_lines(state) == []
+    assert not (state / "last-plan").exists()
+
+
+def test_the_plan_is_logged_only_when_it_changes(tmp_path: Path) -> None:
+    """The same plan on the next run adds no line; a changed plan and a cleared plan each add one."""
+    bin_dir, home, state, _ = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 1
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1"), _agent("b2", "anthropic")]}))
+    assert _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 2 and "b2" in _plan_lines(state)[-1]
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": []}))
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    assert len(_plan_lines(state)) == 3 and '"plan": []' in _plan_lines(state)[-1]      # the clear is news, once
+
+
+def test_the_plan_file_is_written_atomically_and_leaves_nothing_behind(tmp_path: Path) -> None:
+    """Temp alongside, then os.replace: no half-written plan, and no temp or plan file survives the run."""
+    bin_dir, home, state, _ = _harness(tmp_path, [_agent("a1")])
+    assert _run(bin_dir, home) == 0
+    assert "os.replace" in SCAN.read_text()
+    assert sorted(p.name for p in state.iterdir() if ".plan" in p.name or p.name.startswith(".notified.")) == []
+
+
+def test_the_plan_names_only_pi_agents_and_carries_their_family(tmp_path: Path) -> None:
+    """An errored Codex agent is told as a notice but is never in the re-handoff plan, so a future executor that
+    acts on "the plan names it" cannot touch a non-Pi agent; every plan entry carries `family`."""
+    codex = {"id": "k1", "name": "forks", "account": "codex", "model": "codex/gpt-6-astra", "family": "codex",
+             "status": "error", "stuck": True, "headroom_percent": None, "quota_stale": None, "alternative": None}
+    pi = dict(_agent("p1"), family="pi")
+    bin_dir, home, state, sent = _harness(tmp_path, [codex, pi])
+    assert _run(bin_dir, home) == 0
+    assert len(_messages(sent)) == 1 and "k1" in _messages(sent)[0]          # the notice names both
+    plan = json.loads(_plan_lines(state)[0].split("(dry-run) ", 1)[1])["plan"]
+    assert [e["id"] for e in plan] == ["p1"] and plan[0]["family"] == "pi"
+    assert "k1" not in (state / "supervisor.log").read_text().split("re-handoff plan", 1)[1].split("\n", 1)[0]
