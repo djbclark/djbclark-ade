@@ -59,6 +59,11 @@ No quota was spent by this slice: the per-model calls above were aiuse-79's, and
 | Claude Sonnet 5.5 | `google:claude_gpt` | 12:13Z call moved Claude/GPT 5-hour 0 → 5.2 (on Pro) | high for the pool (made before the plan change) |
 | GPT-OSS 120B (Medium) | `google:claude_gpt` | same call | high; **removed 2026-11-30** |
 
+Caveat on all of the above: every measured reading is CodexBar's view of agy. A third-party summary
+([UsageBox](https://usagebox.com/articles/google-antigravity-pricing-limits-2026), 2026-10-20, untrusted) says agy's own
+`/usage` (alias `/quota`) "Model Quotas panel" shows what is left per model. Reading that panel spends no quota and
+is the cheapest cross-check that Ultra has no hidden per-model cap (question 7).
+
 Neither Google pool is Anthropic's. aiuse keeps `google:claude_gpt` apart from `anthropic:subscription`
 (`antigravity-pools.md`, "Two different Claude products"). No measurement here proves that an Opus call through agy
 leaves the Anthropic windows unmoved. Google's billing and aiuse's model say it does.
@@ -285,6 +290,10 @@ judgment stay on Anthropic Opus under the routing policy. It is not a frontier p
    credits. It must be `Never` before any automatic routing (question 6).
 4. **Quality drift:** the same model id through Google may differ in thinking budget, context window and tool
    behaviour. A pilot should compare a few slices before ranks are trusted.
+5. **Terms:** Google's FAQ, as the UsageBox summary quotes it, says that using an Antigravity login inside
+   third-party tools (Claude Code, OpenCode, …) breaks the Terms of Service and can get the account suspended. Paseo's
+   antigravity provider runs Google's own `agy`, which matches `access = "cli-only"`. A Pi community OAuth route to
+   the same login (the `config/ade.toml` comment on line 33) must never carry this row.
 
 **Pilot shape (if approved):** add the row with `fallback_after = ["claude"]` first, so it is used only when the
 Anthropic pool is short. After a week of reports, consider lowering it to a normal rank for `code`/`research`. Each
@@ -305,9 +314,10 @@ step is a config PR.
 6. For section 3: is Google's Claude/GPT pool acceptable as a Claude Sonnet/Opus 5.5 relief pool for your own repos
    (`code`, `research`; never judgment or adversary)? And can you confirm that agy's **AI Credit Overages** setting
    is `Never`?
-7. Should the per-model share test (one call per Gemini 4 model, a 15-minute-gated read between each) be run, to
-   show whether Carbon spends more of the shared pool per call than Neon? aiuse-79 lists it as optional, and it
-   would spend a little Ultra quota.
+7. Could you open agy's `/usage` (`/quota`) Model Quotas panel once and say whether it shows anything per model
+   beyond the two Gemini and Claude/GPT meters? It spends no quota. After that, should the per-model share test run
+   (one call per Gemini 4 model, with a 15-minute-gated read between calls), to show whether Carbon spends more of
+   the shared pool per call than Neon? aiuse-79 lists it as optional, and it would spend a little Ultra quota.
 
 ## 5. Prior art and sources
 
