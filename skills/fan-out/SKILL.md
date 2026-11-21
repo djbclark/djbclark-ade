@@ -194,10 +194,13 @@ brief names a separate claimed execution worktree and every repository tool call
 report folder into a workspace.
 
 Claiming a worktree for a worker (2026-11-21, queue 87): from inside its worktree, one line is enough,
-`~/src/djbclark-ade/bin/ade_claims.py new --path <worktree> --owner-agent <worker Paseo id>` (with no owner flag it takes `$PASEO_AGENT_ID` when that is a Paseo id, else exits 2; it never makes an ownerless claim. An in-process sub-agent inherits its parent's id, so it passes its own `--owner-agent`). A Paseo agent id as
+`~/src/djbclark-ade/bin/ade_claims.py new --path <worktree> --owner-agent <worker Paseo id>` (with no owner flag it takes `$PASEO_AGENT_ID` when that is a Paseo id, else exits 2; an ownerless claim needs `--ownerless`. An in-process sub-agent inherits its parent's id, so it passes its own `--owner-agent`). A Paseo agent id as
 `--owner-agent` also becomes `--owner-record`; `--branch` and `--base-sha` come from the worktree's `HEAD`; `--id` is
 generated (the printed claim file's name without `.json`; pass that to `release --id`), so a re-claim after `release` needs nothing new from you (a released claim keeps its id, and an explicit
 `--id` that exists exits 3 telling you to omit it). Running it again for the same worker and path supersedes that worker's own active claim (the older is released). Exit 2 means the path is not a git worktree: pass `--branch` and `--base-sha`.
+A lead that makes the claim before the worker exists runs `new --path <worktree> --ownerless`, launches the worker, then
+`bind-owner --id <claim id> --owner-agent <worker id>`: the guard accepts a caller whose `PASEO_AGENT_ID` is the claim's
+`owner.agent` (no `ADE_CLAIM_ID` export needed, and it survives a resume). If the worker has `ADE_CLAIM_ID` set, it must name its current claim.
 
 ## 4. Collect
 
