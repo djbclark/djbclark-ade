@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -85,3 +86,78 @@ def test_unguarded_log_text_and_absent_file_and_no_roots(tmp_path: Path) -> None
     assert "UNGUARDED" not in plain.stdout and "unguarded starts" not in plain.stdout
     assert "_unguarded_log" not in _run(tmp_path)
 
+
+UNAVAILABLE = "lsp-guard: lsp-root-guard unavailable; marksman starts UNGUARDED\n"
+NONE = "none.json"
+
+
+def _text(tmp: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    f = tmp / "ps.txt"
+    _ = f.write_text(PS)
+    e = {k: v for k, v in os.environ.items() if k != "ADE_LSP_ROOT_GUARD"} | (env or {})
+    return subprocess.run([sys.executable, str(TOOL), "--ps-file", str(f), *args], capture_output=True, text=True, env=e,
+                          timeout=30)
+
+
+def test_an_impossible_date_a_bad_byte_and_a_control_char_do_not_break_the_census(tmp_path: Path) -> None:
+    log = tmp_path / "unguarded.log"
+    _ = log.write_bytes(
+        b"2026-13-01T00:00:00Z " + UNAVAILABLE.encode()  # matches the pattern, is no date (strptime ValueError)
+        + b"\xff\xfe not utf-8\n"
+        + b"2999-01-01T00:00:00Z " + UNAVAILABLE.encode()
+        + b"2999-02-01T00:00:00Z lsp-guard: \x1b[31mlsp-root-guard unavailable; marksman starts UNGUARDED\n"
+    )
+    args = ["--roots", "--unguarded-log", str(log), "--claude-settings", str(tmp_path / NONE)]
+    r = _text(tmp_path, *args)
+    assert r.returncode == 0, r.stderr
+    assert "UNGUARDED starts, last 7 days: 2 (marksman 2)" in r.stdout
+    assert "newest: 2999-02-01" in r.stdout and "\x1b" not in r.stdout
+    got = json.loads(_text(tmp_path, "--json", *args).stdout)["_unguarded_log"]
+    assert got["total"] == 2 and "\x1b" not in got["newest"]
+
+
+def test_a_directory_or_fifo_as_the_log_counts_nothing_and_does_not_hang(tmp_path: Path) -> None:
+    d = tmp_path / "adir"
+    d.mkdir()
+    r = _text(tmp_path, "--json", "--roots", "--unguarded-log", str(d), "--claude-settings", str(tmp_path / NONE))
+    assert r.returncode == 0 and json.loads(r.stdout)["_unguarded_log"]["total"] == 0
+    fifo = tmp_path / "fifo.log"
+    os.mkfifo(fifo)  # opening it for reading would block forever
+    r = _text(tmp_path, "--json", "--roots", "--unguarded-log", str(fifo), "--claude-settings", str(tmp_path / NONE))
+    assert r.returncode == 0 and json.loads(r.stdout)["_unguarded_log"]["total"] == 0
+
+
+def test_only_the_tail_of_a_huge_log_is_read(tmp_path: Path) -> None:
+    log = tmp_path / "unguarded.log"
+    filler = "2999-01-01T00:00:00Z " + UNAVAILABLE
+    _ = log.write_text(filler * 20000 + "2999-03-03T03:03:03Z " + UNAVAILABLE)  # ~1.8 MiB, more than the 1 MiB tail
+    got = json.loads(_text(tmp_path, "--json", "--roots", "--unguarded-log", str(log),
+                           "--claude-settings", str(tmp_path / NONE)).stdout)["_unguarded_log"]
+    assert 0 < got["total"] < 20001 and got["newest"].startswith("2999-03-03T03:03:03Z")
+
+
+def test_a_negative_days_is_a_usage_error(tmp_path: Path) -> None:
+    r = _text(tmp_path, "--roots", "--days", "-1")
+    assert r.returncode == 2 and "--days" in r.stderr
+
+
+def test_log_options_without_roots_are_flagged_on_stderr(tmp_path: Path) -> None:
+    r = _text(tmp_path, "--days", "3")
+    assert r.returncode == 0 and "only apply with --roots" in r.stderr
+
+
+def test_roots_reports_the_off_switch_from_settings_and_from_the_environment(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    base = ["--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings", str(settings)]
+    _ = settings.write_text(json.dumps({"env": {"ADE_LSP_ROOT_GUARD": "off"}}))
+    r = _text(tmp_path, *base)
+    assert "ADE_LSP_ROOT_GUARD=off is set in settings.json env" in r.stdout and "not off" not in r.stdout
+    assert json.loads(_text(tmp_path, "--json", *base).stdout)["_unguarded_log"]["switch"] == {"settings": "off", "env": None}
+    _ = settings.write_text(json.dumps({"env": {"ADE_LSP_ROOT_GUARD": "on"}}))
+    r = _text(tmp_path, *base, env={"ADE_LSP_ROOT_GUARD": "off"})
+    assert "set in this process's environment" in r.stdout and "settings.json env" not in r.stdout
+    _ = settings.write_text("{not json")  # unreadable settings never break the census
+    r = _text(tmp_path, *base)
+    assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout
+    r = _text(tmp_path, *base[:-1], str(tmp_path / "missing.json"))
+    assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout

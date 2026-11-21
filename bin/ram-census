@@ -8,11 +8,16 @@ compressed and swapped pages that `ps rss` leaves out; slow for hundreds of proc
 directory of each LSP server's parent, which is the workspace root Claude Code passes to it, and flags container
 roots with the `lsp-root-guard --check` rule, and reports the unguarded-start log of the site-public-djbclark `local-lsp`
 plugin (`~/.local/state/lsp-guard/unguarded.log`, one line each time a guarded entry fell back to the plain server because
-the guard was missing or failed `--check /`; a deliberate `ADE_LSP_ROOT_GUARD=off` is not logged): the count per server
-over the last `--days` (default 7) and the newest line, so a silent loss of the RAM relief shows up here.
+the guard was missing or failed `--check /`): the count per server over the last `--days` (default 7) and the newest
+line, so a silent loss of the RAM relief shows up here. From local-lsp 1.0.7 a deliberate `ADE_LSP_ROOT_GUARD=off` is not
+logged (1.0.6 logged it with the text "off, broken or not on PATH", and this tool counts those lines too), so `--roots`
+also says whether that switch is set in `~/.claude/settings.json` `env` (`--claude-settings FILE`) or in this process's
+environment. Only that one key is read; its value is not a secret. The log is read from its last 1 MiB, and only if it is a
+regular file.
 
 Usage:  bin/ram-census [--json] [--footprint] [--roots] [--ps-file FILE] [--unguarded-log FILE] [--days N]
-Exit:   0 ok, 2 bad arguments. It starts nothing, kills nothing, and prints no command line, only class names,
+                       [--claude-settings FILE]
+Exit:   0 ok, 2 bad arguments (a negative --days included). It starts nothing, kills nothing, and prints no command line, only class names,
         counts, megabytes and root directories.
 """
 from __future__ import annotations
@@ -23,6 +28,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -115,7 +121,41 @@ def census(rows: list[tuple[int, int, int, str]], want_fp: bool, want_roots: boo
 
 
 DEFAULT_UNGUARDED_LOG = "~/.local/state/lsp-guard/unguarded.log"
+DEFAULT_CLAUDE_SETTINGS = "~/.claude/settings.json"
+SWITCH = "ADE_LSP_ROOT_GUARD"
+TAIL_BYTES = 1 << 20  # far more than any --days window of ~110-byte lines
 UNGUARDED_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z lsp-guard: .*?; (\S+) starts UNGUARDED$")
+
+
+def _tail_text(path: str) -> str:
+    """The last TAIL_BYTES of a regular file as text (undecodable bytes replaced); "" for anything else or on any OS error
+    (a FIFO or /dev/zero must not hang or bloat the census)."""
+    p = os.path.expanduser(path)
+    try:
+        if not stat.S_ISREG(os.stat(p).st_mode):
+            return ""
+        with open(p, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            start = max(0, size - TAIL_BYTES)
+            _ = f.seek(start)
+            raw = f.read()
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    return text.split("\n", 1)[1] if start and "\n" in text else text  # drop the line the cut may have split
+
+
+def guard_switch(settings_path: str) -> dict[str, Any]:
+    """Where `ADE_LSP_ROOT_GUARD` is set: the `env` of Claude's settings.json and this process's environment (key and value of
+    this one variable only; None when unset or unreadable)."""
+    value: Any = None
+    try:
+        data = json.loads(Path(os.path.expanduser(settings_path)).read_text(errors="replace"))
+        env = data.get("env") if isinstance(data, dict) else None
+        value = env.get(SWITCH) if isinstance(env, dict) else None
+    except (OSError, ValueError):
+        pass
+    return {"settings": value if isinstance(value, str) else None, "env": os.environ.get(SWITCH)}
 
 
 def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str, Any]:
@@ -128,19 +168,18 @@ def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str
         cutoff = datetime.min.replace(tzinfo=timezone.utc)
     by_server: dict[str, int] = {}
     newest = ""
-    try:
-        text = Path(os.path.expanduser(path)).read_text(errors="replace")
-    except OSError:
-        text = ""
-    for line in text.splitlines():
+    for line in _tail_text(path).splitlines():
         m = UNGUARDED_LINE.match(line)
         if m is None:
             continue
-        when = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        try:
+            when = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:  # 2026-13-01 or :60 matches the pattern but is no date
+            continue
         if when < cutoff:
             continue
         by_server[m.group(2)] = by_server.get(m.group(2), 0) + 1
-        newest = line
+        newest = "".join(ch for ch in line if ch.isprintable())  # no escape sequence reaches the terminal
     return {"path": path, "days": days, "total": sum(by_server.values()), "by_server": by_server, "newest": newest}
 
 
@@ -152,7 +191,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--ps-file")
     ap.add_argument("--unguarded-log", default=DEFAULT_UNGUARDED_LOG)
     ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--claude-settings", default=DEFAULT_CLAUDE_SETTINGS)
     a = ap.parse_args(argv)
+    if a.days < 0:
+        ap.error("--days must not be negative")
+    if not a.roots and (a.days != 7 or a.unguarded_log != DEFAULT_UNGUARDED_LOG or a.claude_settings != DEFAULT_CLAUDE_SETTINGS):
+        sys.stderr.write("ram-census: --days, --unguarded-log and --claude-settings only apply with --roots\n")
     if a.ps_file:
         try:
             text = Path(a.ps_file).read_text()
@@ -162,7 +206,7 @@ def main(argv: list[str]) -> int:
     else:
         text = subprocess.run(["ps", "-axo", "pid,ppid,rss,command"], capture_output=True, text=True, check=True).stdout
     res = census(parse_ps(text), a.footprint, a.roots)
-    log = unguarded_log(a.unguarded_log, a.days) if a.roots else None
+    log = {**unguarded_log(a.unguarded_log, a.days), "switch": guard_switch(a.claude_settings)} if a.roots else None
     if a.json:
         print(json.dumps({**res, "_unguarded_log": log} if log is not None else res, indent=1, sort_keys=True))
         return 0
@@ -178,6 +222,13 @@ def main(argv: list[str]) -> int:
             print(f"    the RAM relief was off for those servers; see {log['path']}")
         else:
             print(f"unguarded starts, last {log['days']} days: none ({log['path']})")
+        sw = cast(dict[str, Any], log["switch"])
+        where = [w for w, v in (("settings.json env", sw["settings"]), ("this process's environment", sw["env"])) if v == "off"]
+        if where:
+            print(f"{SWITCH}=off is set in {' and '.join(where)}: the guard is skipped at every LSP start and nothing is logged "
+                  f"(deliberate; unset it and restart sessions to restore the RAM relief)")
+        else:
+            print(f"{SWITCH}: not off")
     return 0
 
 
