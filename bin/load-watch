@@ -37,7 +37,7 @@ stayturgid-agent already build only on CI (free GitHub runners since 2026-10-18,
 candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
-the 1-minute load per core is at least LW_LOAD_PER_CORE (4.0; was 2.0 until 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
+the 1-minute load per core is at least LW_LOAD_PER_CORE (5.0 since 2026-11-21, operator ruling: admit and steer agree at load 50 on this 10-core Mac; 4.0 from 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
 continuously hot samples it attributes the mean CPU of the samples in that window to Paseo agents (`paseo ls -g
 --background --json`, slim-down E5, 2026-11-06; it carries no pid and no session id, so the join is by working directory: a process
 belongs to the one agent whose cwd equals its own cwd or its nearest ancestor's (`/proc/PID/cwd` on Linux, `lsof` on
@@ -120,7 +120,7 @@ covers every repo under that directory. Older 3-column rows (repo, CI command, d
 Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate a launcher calls before it
 starts an agent (the dispatch shim that called it with `--load-wait` / `--no-load-gate` was deleted 2026-11-14). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
-5.0 since 2026-11-21, was 2.0, 1.5 until 2026-11-13; `bg`'s own base is 5.0 since 2026-11-21 (3.0 from 2026-11-14, 2.5 from 2026-11-01) and it passes that; the 5.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
+5.0 since 2026-11-21, was 2.0, 1.5 until 2026-11-13; env LW_ADMIT_PER_CORE sets it, 0.01 or more; `bg` passes its own BG_MAX_LOAD_PER_CORE base: 3.0 from 2026-11-14 (2.5 from 2026-11-01), 5.0 once site-public-djbclark's 2026-11-21 bgrun change is installed, so the boost below only matters to a caller whose base is lower than 5.0; LW_LOAD_PER_CORE (5.0 since 2026-11-21) is this watcher's blame and steer line, equal to the admit base so a launch the gate lets in is not steered for it), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
@@ -229,7 +229,7 @@ HERMES_PING = HOME / ".local/bin/hermes-ping"
 SUDO_ASK_TIMEOUT_S = 900  # sudo-ask itself gives up after 600 s of an unanswered dialog; this is the outer bound
 SUDO_ASK = HOME / ".local/bin/sudo-ask"  # djbclark's Allow dialog + Touch ID (the helper `bg approve-local` uses)
 
-LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "4.0"))  # was 2.0 until 2026-11-01 (operator: 3.5 per core is not too bad)
+LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "5.0"))  # 5.0 since 2026-11-21 (operator ruling, equal to the admit base); 4.0 from 2026-11-01, 2.0 before
 SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuous hot load
 MAX_GAP_S = 900  # a longer gap between samples is a sleep, not load
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
@@ -2058,7 +2058,7 @@ def _env_float(name, default, lo=0.0):
     return v if math.isfinite(v) and v >= lo else default
 
 
-ADMIT_PER_CORE = _env_float("LW_ADMIT_PER_CORE", 5.0)  # admit's own default base (5.0 since 2026-11-21, operator: "mac is still perfectly usable at 50 on bigmac's 10 cores"; was 2.0, 1.5 until 2026-11-13); `bg` passes its own (5.0 since 2026-11-21, 3.0 from 2026-11-14). LOAD_PER_CORE (4.0) is only the blame step
+ADMIT_PER_CORE = _env_float("LW_ADMIT_PER_CORE", 5.0, 0.01)  # admit's own default base (5.0 since 2026-11-21, operator: "mac is still perfectly usable at 50 on bigmac's 10 cores"; was 2.0, 1.5 until 2026-11-13); `bg` passes its own (3.0 from 2026-11-14; 5.0 once site-public-djbclark's 2026-11-21 bgrun change is installed). LW_ADMIT_PER_CORE below 0.01 is ignored (0 would make every default call a usage error). LOAD_PER_CORE (5.0 since 2026-11-21, was 4.0) is the blame and steer step, equal to the admit base
 
 
 # Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
@@ -2156,6 +2156,9 @@ ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' 
 # memory above the floor, pageins under their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot
 # reading, by `admit` or by the 20 s sampler, resets the clock (calm.json in the state dir). The boost line now
 # equals the compressor limit: churn between 20k and 25k used to boost and is now refused outright.
+# 2026-11-21 (operator: "mac is still perfectly usable at 50"): the boost line rose from 4.0 to 5.0, equal to the new default base
+# (ADMIT_PER_CORE 5.0), so at the default base the boost and its 600 s hysteresis change nothing. They act only for a caller that
+# passes a lower --max-per-core (bg's 3.0 until its own 5.0 change is installed).
 ADMIT_BOOST_PER_CORE = 5.0
 ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
@@ -3247,7 +3250,7 @@ def main(supervise=False):
     p.add_argument("id", metavar="RESERVATION", help="the `reservation` id an `admit --max-agents --json` printed")
     p = sub.add_parser("admit")
     p.add_argument("--max-per-core", type=float, default=ADMIT_PER_CORE, metavar="N",
-                   help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
+                   help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g}; env LW_ADMIT_PER_CORE, 0.01 or more)")
     p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
                    help=f"and compressor churn (pages compressed + decompressed per second, sampled over ~{ADMIT_MEM_WINDOW_S:g} s) "
                         f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; 20000 from 2026-11-01 to 2026-11-13, 60000 before)")

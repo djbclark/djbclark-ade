@@ -70,8 +70,19 @@ def test_admit_default_limit_is_five_per_core(tmp_path):
     """5.0 per core since 2026-11-21 (operator: load 50 is usable on bigmac's 10 cores); was 2.0, 1.5 before."""
     assert admit(tmp_path, load1=CORES * 4.9).returncode == 0
     assert admit(tmp_path, load1=CORES * 5.1).returncode == 75
-    # the base alone, not the watcher's blame step: a faked load without a measured churn never boosts
+    # the base alone, not the watcher's blame step (LW_LOAD_PER_CORE, 5.0 since 2026-11-21): the two lines agree
+    assert admit(tmp_path, load1=CORES * 4.5).returncode == 0
     assert admit(tmp_path, load1=CORES * 5.5).returncode == 75
+    # a lower explicit base (bg's 3.0): a faked load without a measured churn never boosts to 5.0
+    assert admit(tmp_path, "--max-per-core", "3.0", load1=CORES * 4.0).returncode == 75
+
+
+def test_admit_default_limit_env_override_and_floor(tmp_path):
+    """LW_ADMIT_PER_CORE moves the default base; a value under the 0.01 floor is ignored (0 would make every default call exit 2)."""
+    assert admit(tmp_path, load1=CORES * 2.5, LW_ADMIT_PER_CORE="2.0").returncode == 75
+    assert admit(tmp_path, load1=CORES * 1.5, LW_ADMIT_PER_CORE="2.0").returncode == 0
+    for bad in ("0", "-1", "nan", "abc"):
+        assert admit(tmp_path, load1=CORES * 4.9, LW_ADMIT_PER_CORE=bad).returncode == 0, bad
 
 
 def test_admit_max_per_core_override(tmp_path):
@@ -223,14 +234,16 @@ def test_admit_waits_out_a_churn_spike(tmp_path):
 
 
 def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
-    """2026-11-21: the base and boost are both 5.0 per core (was 2.0 base and 4.0 boost); while the compressor is calm the limit is the boost."""
+    """2026-11-21: the boost line is 5.0 per core, equal to the default base (was 2.0 base, 4.0 boost), so only a caller
+    that passes a lower base (bg's 3.0, 2.5 from 2026-11-01) sees it: while the compressor is calm its limit is the boost."""
     calm = {"LW_FAKE_CHURN": "10000"}
-    assert admit(tmp_path, load1=CORES * 4.9, **calm).returncode == 0
-    rec = json.loads(admit(tmp_path, "--json", load1=CORES * 4.9, **calm).stdout)
+    assert admit(tmp_path, "--max-per-core", "3.0", load1=CORES * 4.9, **calm).returncode == 0
+    rec = json.loads(admit(tmp_path, "--json", "--max-per-core", "3.0", load1=CORES * 4.9, **calm).stdout)
     assert rec["status"] == "ok" and rec["max_per_core"] == 5.0
-    assert admit(tmp_path, load1=CORES * 5.1, **calm).returncode == 75  # still above the boosted limit
-    # a caller that passes a lower base explicitly still gets the boost
+    assert admit(tmp_path, "--max-per-core", "3.0", load1=CORES * 5.1, **calm).returncode == 75  # still above the boosted limit
     assert admit(tmp_path, "--max-per-core", "2.5", load1=CORES * 4.9, **calm).returncode == 0
+    # at the default base the boost changes nothing
+    assert json.loads(admit(tmp_path, "--json", load1=CORES * 4.9, **calm).stdout)["max_per_core"] == 5.0
 
 
 def test_a_load_below_the_base_is_admitted_regardless_of_churn(tmp_path):
