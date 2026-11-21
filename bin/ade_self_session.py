@@ -280,9 +280,11 @@ def read_regular(path: Path, limit: int) -> bytes:
     return data
 
 
-def write_atomic(path: Path, data: bytes) -> None:
+def write_atomic(path: Path, data: bytes, mode=None) -> None:
     fd, temp = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
     try:
+        if mode is not None:
+            os.fchmod(fd, mode)  # on the temp file before the replace: no path-following chmod afterwards
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
             stream.flush()
@@ -1273,8 +1275,7 @@ class Service:
                     outcome, error = 'error', 'successor id is not a usable agent id'  # the scan would reject it
                 else:
                     mode = stat.S_IMODE(path.stat().st_mode)
-                    write_atomic(path, (successor + '\n').encode())
-                    os.chmod(path, mode)  # mkstemp makes 0600; keep what the file had
+                    write_atomic(path, (successor + '\n').encode(), mode)  # mkstemp makes 0600; keep what the file had
                     outcome = 'repointed'
         except Exception as exc:  # noqa: BLE001 - recorded, never raised
             outcome, error = 'error', bounded(f'{type(exc).__name__}: {exc}', MESSAGE_LIMIT)

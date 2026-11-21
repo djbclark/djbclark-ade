@@ -2815,10 +2815,10 @@ def test_a_write_failure_is_recorded_and_a_rerun_retries_it(setup, tmp_path, mon
     service, native, path = finished_up_to_archive(setup)
     real = ss.write_atomic
 
-    def failing(file, data):  # the record saves go through write_atomic too: fail only the lead file
+    def failing(file, data, mode=None):  # the record saves go through write_atomic too: fail only the lead file
         if Path(file).name == 'lead':
             raise OSError('disk full')
-        return real(file, data)
+        return real(file, data, mode)
     monkeypatch.setattr(ss, 'write_atomic', failing)
     out = service.finish(path)
     assert out['status'] == 'archived' and out['supervisor_lead'] == 'error' and 'disk full' in out['supervisor_lead_error']
