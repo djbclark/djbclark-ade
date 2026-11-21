@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""mcp-usage: count MCP tool calls per server from agent transcripts (read-only).
+
+PROPOSED, UNWIRED (docs/mcp-on-demand.md, 2026-11-21). It reads transcript files and
+nothing else: it never opens an MCP config, never starts or contacts a server, and
+never prints tool arguments or results (they can carry secrets and page text).
+
+Sources:
+  claude  ~/.claude/projects/**/*.jsonl   assistant tool_use blocks named mcp__<server>__<tool>
+                                          (sub-agent transcripts under */subagents/ included)
+  codex   ~/.codex/sessions/**/*.jsonl    items {"type": "McpToolCall", "server": ..., "tool": ...}
+
+Pi has no MCP servers configured here (docs/mcp-on-demand.md section 2.1), so it has no source yet.
+
+Calls are de-duplicated by tool-call id (a resumed or forked transcript repeats
+earlier lines). A file whose mtime is older than the window is skipped unread.
+
+Usage:
+  bin/mcp-usage [--days 30] [--json] [--source claude|codex|all]
+                [--claude-root DIR] [--codex-root DIR]
+Exit: 0 ok, 2 bad arguments or an unreadable root.
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def parse_ts(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def iter_files(root: Path, cutoff_epoch: float):
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            path = Path(dirpath) / name
+            try:
+                if path.stat().st_mtime < cutoff_epoch:
+                    continue
+            except OSError:
+                continue
+            yield path
+
+
+class Tally:
+    def __init__(self) -> None:
+        self.calls: collections.Counter[str] = collections.Counter()
+        self.tools: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+        self.sessions: dict[str, set[str]] = collections.defaultdict(set)
+        self.last: dict[str, str] = {}
+        self.seen: set[str] = set()
+        self.files = 0
+        self.all_sessions: set[str] = set()
+
+    def add(self, server: str, tool: str, session: str, ts: dt.datetime, call_id: str | None) -> None:
+        key = call_id or f"{session}:{ts.isoformat()}:{server}:{tool}"
+        if key in self.seen:
+            return
+        self.seen.add(key)
+        self.calls[server] += 1
+        self.tools[server][tool] += 1
+        self.sessions[server].add(session)
+        stamp = ts.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        if stamp > self.last.get(server, ""):
+            self.last[server] = stamp
+
+
+def scan_claude(root: Path, cutoff: dt.datetime, tally: Tally) -> None:
+    for path in iter_files(root, cutoff.timestamp()):
+        tally.files += 1
+        session = path.stem
+        try:
+            fh = path.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                ts = parse_ts(rec.get("timestamp"))
+                if ts is None or ts < cutoff:
+                    continue
+                tally.all_sessions.add(rec.get("sessionId") or session)
+                msg = rec.get("message")
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name") or ""
+                    if not name.startswith("mcp__"):
+                        continue
+                    parts = name.split("__", 2)
+                    if len(parts) < 3:
+                        continue
+                    tally.add(parts[1], parts[2], rec.get("sessionId") or session, ts, block.get("id"))
+
+
+def scan_codex(root: Path, cutoff: dt.datetime, tally: Tally) -> None:
+    for path in iter_files(root, cutoff.timestamp()):
+        tally.files += 1
+        session = path.stem
+        try:
+            fh = path.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"McpToolCall"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                ts = parse_ts(rec.get("timestamp"))
+                if ts is None or ts < cutoff:
+                    continue
+                tally.all_sessions.add(session)
+                stack = [rec]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, dict):
+                        if node.get("type") == "McpToolCall" and isinstance(node.get("server"), str):
+                            tally.add(node["server"], str(node.get("tool") or "?"), session, ts, node.get("id"))
+                            continue
+                        stack.extend(v for v in node.values() if isinstance(v, (dict, list)))
+                    elif isinstance(node, list):
+                        stack.extend(v for v in node if isinstance(v, (dict, list)))
+
+
+def report(name: str, tally: Tally) -> dict:
+    servers = []
+    for server, n in tally.calls.most_common():
+        servers.append({
+            "server": server,
+            "calls": n,
+            "sessions": len(tally.sessions[server]),
+            "last_call_utc": tally.last.get(server),
+            "top_tools": tally.tools[server].most_common(5),
+        })
+    return {"source": name, "files_scanned": tally.files,
+            "sessions_with_tool_use": len(tally.all_sessions), "servers": servers}
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--source", choices=["claude", "codex", "all"], default="all")
+    ap.add_argument("--claude-root", type=Path, default=Path.home() / ".claude" / "projects")
+    ap.add_argument("--codex-root", type=Path, default=Path.home() / ".codex" / "sessions")
+    args = ap.parse_args(argv)
+    if args.days <= 0:
+        print("mcp-usage: --days must be positive", file=sys.stderr)
+        return 2
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=args.days)
+    out = {"window_days": args.days, "since_utc": cutoff.strftime("%Y-%m-%dT%H:%MZ"), "sources": []}
+    plan = []
+    if args.source in ("claude", "all"):
+        plan.append(("claude", args.claude_root, scan_claude))
+    if args.source in ("codex", "all"):
+        plan.append(("codex", args.codex_root, scan_codex))
+    for name, root, scan in plan:
+        if not root.is_dir():
+            print(f"mcp-usage: {name} root not a directory: {root}", file=sys.stderr)
+            return 2
+        tally = Tally()
+        scan(root, cutoff, tally)
+        out["sources"].append(report(name, tally))
+    if args.json:
+        json.dump(out, sys.stdout, indent=1)
+        print()
+        return 0
+    print(f"MCP tool calls since {out['since_utc']} ({args.days} days)")
+    for src in out["sources"]:
+        print(f"\n[{src['source']}] files={src['files_scanned']} sessions-with-tool-use={src['sessions_with_tool_use']}")
+        print(f"  {'server':28} {'calls':>7} {'sessions':>8}  last call (UTC)    top tools")
+        for s in src["servers"]:
+            tops = ", ".join(f"{t}={c}" for t, c in s["top_tools"][:3])
+            print(f"  {s['server']:28} {s['calls']:>7} {s['sessions']:>8}  {s['last_call_utc'] or '-':17}  {tops}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
