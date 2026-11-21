@@ -302,6 +302,72 @@ def test_an_always_only_config_still_runs_the_auto_step(w):
     assert w.step(auto_cfg(order=(), always=[OTHER]))["bundle_id"] == OTHER
 
 
+def test_suggest_cleans_a_hand_edited_bundle_id_and_survives_a_bad_threshold():   # adversary N4 of #872
+    c = shipped()
+    c["suggest"] = {"min_events": "three", "negligible_cores": None, "large_cores": [1]}
+    evil = "com.evil\x1b]0;pwned\x07.app"
+    results = [{"bundle_id": evil, "name": "Evil", "cores_before": 2.0, "held_s": 300, "rss_mb": 10, "delta": {}} for _ in range(5)]
+    sug = sv.suggest(c, results, [])
+    text = json.dumps(sug) + "\n".join(sv.suggest_lines(sug, 30))
+    assert "\\u001b" not in text and "\x1b" not in text and "\x07" not in text and "\\u0007" not in text
+
+
+# ---- an always app is quiet only when frozen or about to be (adversary L2 of #872) ----------------------------------------------------------
+def _means(**kw):
+    rec = {"id": "400", "name": "Other", "bundle_id": OTHER, "cores_5m": 3.0, "rss_mb": 500, "protected": False, "hosts_build": False, "excluded": None,
+           "present": True, "cpu_now": 3.0, "bundle_path": "/x"}
+    rec.update(kw)
+    return [rec]
+
+
+def _cfg():
+    c = auto_cfg(order=())
+    c["freeze"]["auto"]["always"] = [OTHER]
+    return c
+
+
+def test_an_always_app_the_sampler_will_not_freeze_is_a_dialog_row_again():
+    c, key = _cfg(), OTHER.casefold()
+    assert gh.quiet_ids(c, _means(), T0) == frozenset({key})   # active, no state: the sampler freezes it next hold tick
+    assert gh.quiet_ids(c, _means(cpu_now=0.0), T0) == frozenset()   # idle: a freeze would free nothing, it is not asked about but also not "dealt with"
+    assert gh.quiet_ids(c, _means(present=False), T0) == frozenset()
+    assert gh.quiet_ids(c, _means(hosts_build=True), T0) == frozenset()
+    assert gh.quiet_ids(c, _means(protected=True), T0) == frozenset()
+    for state, now, want in (({"t": T0 - 100, "ok": True}, T0, False),    # the operator Resumed it: cooling-down for refreeze_s
+                             ({"t": T0 - 100, "ok": False}, T0, False),   # a refused freeze: retry-wait
+                             ({"t": T0 - 100, "ok": False}, T0 + 100, True),   # retry window over
+                             ({"t": T0 - 4000, "ok": True}, T0, True)):   # cooldown over (refreeze_s 3600)
+        got = gh.quiet_ids(c, _means(), now, {"auto": {key: state}})
+        assert (got == frozenset({key})) is want, (state, now)
+
+
+def test_a_frozen_always_app_stays_quiet_but_a_resumed_one_shows_again(w):
+    c = _cfg()
+    hold = held()
+    assert w.step(c)["bundle_id"] == OTHER and w.stopped() == [400]
+    means = _means()
+    assert gh.quiet_for(c, means, T0 + 1, w.state, w.gh_state) == frozenset({OTHER.casefold()})   # frozen by us: no row, no trigger sum
+    assert not gh.should_show(hold, means, T0 + 1, None, None, c, quiet_set=gh.quiet_for(c, means, T0 + 1, w.state, w.gh_state))["show"]
+    gf.thaw_all(w.state, ops=w.ops, now=T0 + 30)   # the operator pressed Resume
+    assert w.stopped() == []
+    q = gh.quiet_for(c, means, T0 + 31, w.state, w.gh_state)
+    assert q == frozenset()   # cooling-down: the sampler will not refreeze it, so it must not hide
+    assert gh.should_show(hold, means, T0 + 31, None, None, c, quiet_set=q)["show"]
+    assert [r["name"] for r in gh.build_snapshot(means, hold, T0 + 31, c, quiet_set=q)["rows"]] == ["Other"]
+    assert gh.would_show_line({"reason": "show", "holds": [], "sum_cores": 0, "sum_rss_mb": 0}, means, T0 + 31, 1.0, c, 1, quiet_set=q)["apps"][0]["name"] == "Other"
+
+
+def test_an_unreadable_state_never_hides_an_always_app(tmp_path):
+    c = _cfg()
+    assert gf.frozen_bundle_ids(tmp_path / "nowhere") == set()
+    bad = tmp_path / "state"
+    (bad / "gui-hog").mkdir(parents=True)
+    (bad / "gui-hog" / "frozen.json").write_text("{not json")
+    assert gf.frozen_bundle_ids(bad) == set()
+    # no frozen entry readable and an idle app: still a row
+    assert gh.quiet_for(c, _means(cpu_now=0.0), T0, bad, {}) == frozenset()
+
+
 @pytest.fixture
 def w(tmp_path):
     return World(tmp_path)

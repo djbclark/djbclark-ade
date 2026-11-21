@@ -206,3 +206,18 @@ def test_status_lines_name_the_load_sources(tmp_path):
     state.mkdir(mode=0o700)
     text = "\n".join(gh.status_lines(st, state, T0 + 20, c))
     assert "load sources" in text and "bgrun (owner: claude), heaviest rustc" in text and "a build or test job" in text and "can freeze" in text   # Slack
+
+
+def test_no_argument_leaks_into_a_label_even_inside_an_app_bundle():   # adversary L1 of #872: the label is the executable name, never its arguments
+    import gui_hog_sources as gs
+    for cmd, want in (("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "clang"),
+                      ("/Applications/Foo.app/Contents/MacOS/Foo -apiToken s3cr3tvalue", "Foo"),
+                      ("/Applications/Foo.app/Contents/MacOS/Foo /Users/me/secret/file.txt", "Foo"),
+                      ("/Applications/Foo.app/Contents/MacOS/Foo secretword", "Foo"),
+                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --type=renderer --token=hunter2", "Google Chrome"),
+                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
+                      ("/Applications/Ghostty.app/Contents/MacOS/ghostty -e hunter2", "ghostty"),
+                      ("/Applications/Foo.app/Contents/MacOS/other-exe -x hunter2", "other-exe")):
+        label = gs._label(cmd)
+        assert label == want, (cmd, label)
+        assert "hunter2" not in label and "s3cr3t" not in label and "secret" not in label

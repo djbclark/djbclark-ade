@@ -881,11 +881,11 @@ process and a protected app each get a stated reason ("a build or test job", "an
 kill or stop path exists in this change.
 
 Q3. **The always-freeze list.** `[freeze.auto] always` (shipped **empty**: the operator names the apps) lists bundle ids that are frozen **without asking**. `quiet(app, always)` is the one test:
-an app that is on the effective list, not protected and hosting no build or terminal gets **no dialog row**, does not count toward the dialog's trigger sum (`should_show`), and is not in
+an app that is on the effective list, not protected, hosting no build or terminal, and **already frozen by us or about to be frozen by the sampler** (`quiet_ids`: not in the cooling-down or retry-wait window of `gh_state["auto"]`, so not Resumed by the operator or refused lately, and using at least `min_cores` now) gets **no dialog row**, does not count toward the dialog's trigger sum (`should_show`), and is not in
 the snapshot rows or the dry-run `would-show` apps; the sampler freezes it first in each tick of a hold (`auto_candidates` takes `always` before `order`, one app per tick, same
 timed freeze, same thaw paths, `by: "auto"`). **Unfreeze stays in the UI:** the app appears in the dialog's Frozen list and the menu-bar item with its Resume button like any frozen app. **The
 never-auto list wins** if an app is on both (`always_problems` says so, `status` prints it, the sampler skips it). **A protected app, and an app that hosts a build or terminal, is never
-quiet**: `always_problems` drops a protected entry from the effective list, and a host stays an ordinary row, so the operator is asked (and the sampler cannot freeze it). The list is effective only while
+quiet**: `always_problems` drops a protected entry from the effective list, and a host stays an ordinary row, so the operator is asked (and the sampler cannot freeze it). **An always app the sampler will not freeze is a row again** (adversary L2 of #872: an app the operator Resumed, a refused freeze, an idle app): it never vanishes while it is neither frozen nor about to be. The list is effective only while
 `[freeze] enabled`, `[freeze.auto] enabled` and `LW_GUI_HOG_AUTO` allow the sampler to freeze, so switching the auto-freeze off never hides an app from the operator. The overlay
 `~/.config/load-watch/gui-hog.toml` may **add** to `always` and to `depends` (cleaned text), never remove from them.
 

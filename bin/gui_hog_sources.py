@@ -36,7 +36,19 @@ MAX_SOURCES = 40   # per sample, after sorting by cores
 def _label(cmd):
     """A cleaned program name for an unclaimed process: the executable's base name (a bundle's executable may contain spaces), never its arguments."""
     cmd = str(cmd)
-    first = cmd.split(" --")[0] if ".app/" in cmd else (cmd.split() or [""])[0]
+    mark = "/Contents/MacOS/"
+    if mark in cmd:
+        # A bundle's executable may contain spaces ("Google Chrome Helper (Renderer)"), and the arguments follow it: take the executable name
+        # only when it matches the bundle's own name (its length bounds the cut, so no argument can ride along), else the first word after it.
+        head, rest = cmd.split(mark, 1)
+        bundle = os.path.basename(head.rstrip("/"))
+        bundle = bundle[:-4] if bundle.endswith(".app") else bundle
+        if bundle and rest[:len(bundle)].casefold() == bundle.casefold() and (len(rest) == len(bundle) or rest[len(bundle)] in " \t"):
+            name = rest[:len(bundle)]
+        else:
+            name = (rest.split() or [""])[0]
+        return gh.clean(name or "?", 40)
+    first = (cmd.split() or [""])[0]
     return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
 
 

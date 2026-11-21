@@ -173,6 +173,7 @@ def collect(results, shows):
     per = {}
 
     def slot(bid, name):
+        bid = gh.clean(bid, 80)   # a hand-edited events file must not put terminal text into the output (adversary N4 of #872)
         return per.setdefault(bid.casefold(), {"bundle_id": bid, "name": name or bid, "freezes": [], "rss": [], "held": [], "load_delta": [], "shows": [],
                                                   "show_rss": [], "hosts_build": 0})
     for r in results:
@@ -206,7 +207,10 @@ def suggest(cfg, results, shows, my_uid=None):
     always (`[freeze.auto] always`) when it is on neither list, nothing we know depends on it, it never hosted a build and is not protected, and
     at least `min_events` freezes (or sightings) show a median of `large_cores` or more."""
     sg = cfg.get("suggest", {})
-    min_n, neg, large = int(sg.get("min_events", 3)), float(sg.get("negligible_cores", 0.10)), float(sg.get("large_cores", 0.50))
+    def num(key, default, kind):   # a bad `[suggest]` value falls back to its default instead of raising (adversary N4 of #872)
+        v = sg.get(key, default)
+        return kind(v) if gh._fin(v) and not isinstance(v, bool) else default
+    min_n, neg, large = num("min_events", 3, int), num("negligible_cores", 0.10, float), num("large_cores", 0.50, float)
     au = cfg["freeze"]["auto"]
     skip = {x.casefold() for x in au.get("skip", [])}
     always = {x.casefold() for x in au.get("always", [])}

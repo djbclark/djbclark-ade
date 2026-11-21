@@ -8,3 +8,4 @@
 ### Fixed
 
 - GUI-hog keep-running rules name one exact executable (matched on the kernel path, never as a prefix; an absolute directory is refused), the auto-freeze reads its start times in one batch call and only while a build is held and leaves out an app that started after the table was read, and the stale `config/gui-hog.toml` comments are corrected (the #859 adversary lows). (#872)
+- GUI-hog load sources label a process by its executable name only, never its arguments, also inside an app bundle (`clang -c a.c -DPASS=...` no longer leaks); an always-freeze app is hidden from the dialog only while it is frozen or the sampler will freeze it now, so a Resumed, refused or idle one is an ordinary row again; `gui-hog suggest` cleans bundle ids and survives a bad `[suggest]` value, and `status --json` survives a corrupt sources record (the #872 adversary review lows and notes). (#872)

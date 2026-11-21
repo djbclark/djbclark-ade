@@ -950,6 +950,21 @@ def has_entries(state_dir):
         return False
 
 
+def frozen_bundle_ids(state_dir):
+    """Casefolded bundle ids of the entries that are frozen (or being frozen) now: the apps the always-freeze list has already dealt with (Q3). Never
+    raises: an unreadable state reads as none, so every app stays a dialog row."""
+    try:
+        dfd = open_state(state_dir, create=False)
+        if dfd is None:
+            return set()
+        try:
+            return {str(e["app"]["bundle_id"]).casefold() for e in load_entries(dfd)[0] if e["state"] in ("frozen", "freezing") and e["app"]["bundle_id"]}
+        finally:
+            os.close(dfd)
+    except (Refusal, OSError, KeyError, TypeError):
+        return set()
+
+
 def ensure_status_item(state_dir, *, popen=None, gui_ok=True, bundle=None):
     """The menu-bar item of E5: while something is frozen, keep `ADE GUI Hog.app --status-only` running (one instance, its own flock
     gui-hog/status.lock). Called by the sampler after `thaw_due`. Returns (started, why); never raises, never waits, never builds the bundle
