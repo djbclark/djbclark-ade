@@ -69,7 +69,9 @@ The provider loaded and the task succeeded despite the warning; it was neither
 suppressed nor fixed by editing the installed package. Keep optional search and
 image resources disabled unless separately chosen.
 
-Grok remains a manual service path. Antigravity is accepted for automatic routing
+2026-11-21 (operator): Antigravity is off Pi. "I think we need to keep the antigravity paseo provider/agy, Pi only seems to work with agy API pre-paid money or something. For now we should remove antigravity from pi and route to the native antigravity adapter in paseo." `[pools.antigravity] accepted = false` in `config/pi-pool-acceptance.toml`, `route_agent.provider_models("pi")` drops every `antigravity/*` id (`PI_EXCLUDED_NAMESPACES`), `bin/pi_defaults.py` skips one, and no Pi `[[service]]` names one; all Antigravity routing is the `antigravity-neon` and `antigravity-argon` services on Paseo's native `antigravity` provider (`docs/model-routing.md` B7, B7a). The paragraph below is the 2026-11-19 evidence, kept as history.
+
+Grok remains a manual service path. Antigravity was accepted for automatic routing
 since 2026-11-19 (`config/pi-pool-acceptance.toml`), on this evidence: a fresh
 `aiuse sample --force` antigravity reading (Gemini 5-hour 4.8 %, weekly 3.4 %), model
 identity confirmed in both `pi --list-models` and `paseo provider models pi`

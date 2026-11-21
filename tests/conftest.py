@@ -51,6 +51,11 @@ if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1")
 # 2026-11-07, slim-down E7). Off in tests so the suite never depends on, or spawns, the host's real Paseo daemon;
 # test_route_agent.py turns it on per test against tests/fakes/paseo or a canned ROUTE_AGENT_PASEO_USAGE_JSON.
 os.environ.setdefault("ROUTE_AGENT_PASEO", "off")
+# route_agent resolves a model FAMILY in config/ade.toml (`gpt-*-astra`) to the newest id its Paseo provider lists
+# (bin/model_family.py, 2026-11-21). The suite reads a canned catalog of the ids the old pinned config named, never the host's
+# Paseo, and records resolutions into a throwaway state file. tests/test_model_family.py sets its own per test.
+os.environ["ROUTE_AGENT_MODEL_CATALOG_JSON"] = str(Path(__file__).parent / "fixtures" / "model_catalog.json")
+os.environ["ROUTE_AGENT_MODEL_STATE"] = str(_SCHED_ROOT / "route-model-resolved.json")
 # fleet.LINKS_FILE (who has messaged whom, and who ever acked; the old relay.py wrote it, fleet.py list reads it, 2026-10-25): never the
 # operator's real ledger. Unconditional. (The old relay.py's RELAY_DEFER_DIR queue went with it, 2026-11-06, docs/slim E3; this goes with
 # fleet.py in E3b.)

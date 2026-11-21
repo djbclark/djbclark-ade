@@ -28,7 +28,7 @@ def isolate(monkeypatch, tmp_path):
 
 
 def select(quota, **kwargs):
-    return defaults.choose("code", MODELS, quota=quota, age=0, **kwargs)
+    return defaults.choose("research", MODELS, quota=quota, age=0, **kwargs)
 
 
 def test_capacity_changes_the_choice_without_changing_profiles():
@@ -49,9 +49,9 @@ def test_disabled_pi_transport_is_not_a_qualified_default(monkeypatch):
 
 def test_missing_or_explicitly_excluded_model_cannot_be_selected():
     quota = {"cursor": reading(95), "zai": reading(80)}
-    assert defaults.choose("code", [MODELS[0]], quota=quota)["service"] == "zai"
+    assert defaults.choose("research", [MODELS[0]], quota=quota)["service"] == "zai"
     assert select(quota, excluded={"cursor"})["service"] == "zai"
-    assert defaults.choose("code", [], quota=quota)["service"] is None
+    assert defaults.choose("research", [], quota=quota)["service"] is None
 
 
 @pytest.mark.parametrize("info", [
@@ -64,7 +64,7 @@ def test_missing_or_explicitly_excluded_model_cannot_be_selected():
     reading(0), reading(5),
 ])
 def test_unmeasured_stale_reserved_or_exhausted_capacity_fails_closed(info):
-    assert defaults.choose("code", MODELS, quota={"cursor": info, "zai": info})["service"] is None
+    assert defaults.choose("research", MODELS, quota={"cursor": info, "zai": info})["service"] is None
 
 
 def test_quality_and_judgment_gates_are_not_bypassed_for_pi():
@@ -128,7 +128,7 @@ def test_failure_mode_accepts_only_declared_pi_pools():
 def test_cli_selection_and_failure_operations_are_separate(monkeypatch, capsys):
     monkeypatch.setattr(router, "load_snapshot", lambda **_: ({"zai": reading(80)}, 0))
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(MODELS)))
-    assert defaults.main(["--models-json", "-", "--native-tools"]) == 0
+    assert defaults.main(["--models-json", "-", "--native-tools", "--kind", "research"]) == 0
     assert json.loads(capsys.readouterr().out)["model_id"] == MODELS[0]
     assert defaults.main(["--block-service", "zai", "--reason", "billing"]) == 0
     assert json.loads(capsys.readouterr().out)["blocked"] is True
@@ -171,3 +171,19 @@ def test_pi_dispatch_is_a_native_paseo_launch(service, model, thinking):
         expected += ["--thinking", thinking]
     expected += ["--label", "ade.kind=code", "--no-wait"]
     assert shlex.split(choice.dispatch) == expected
+
+
+def test_no_pi_pool_resolves_to_an_antigravity_model():
+    """Operator 2026-11-21: antigravity work goes only through Paseo's native `antigravity` provider, never Pi."""
+    models = [*MODELS, "antigravity/gemini-4-neon", "antigravity/gemini-4-argon"]
+    quota = {"cursor": reading(90), "zai": reading(80), "antigravity-neon": reading(99), "antigravity-argon": reading(99)}
+    for kind in router.KINDS:
+        out = defaults.choose(kind, models, quota=quota, age=0)
+        assert not str(out.get("model_id") or "").startswith("antigravity/"), (kind, out)
+        assert out.get("service") not in {"antigravity-neon", "antigravity-argon"}, (kind, out)
+    for svc in router.SERVICES:
+        if svc.acp_agent == "pi":
+            for model in svc.models.values():
+                assert model.split()[0].partition("/")[0] not in router.PI_EXCLUDED_NAMESPACES, (svc.name, model)
+    # the native provider rows are the antigravity pools
+    assert {s.name for s in router.SERVICES if s.acp_agent == "antigravity"} == {"antigravity-argon", "antigravity-neon"}

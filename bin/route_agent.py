@@ -106,6 +106,7 @@ Usage:
     route_agent.py show             # cache age, headroom, pace, expected waste, source per pool
     route_agent.py services [--check-models]   # the roster; --check-models: every suggested model in its
                                     # provider's `paseo provider models` list (exit 1 when one is not)
+    route_agent.py models [--json]  # every model family in the roster (`gpt-*-astra`) with its newest catalog id, holds, changes
     route_agent.py calibrate [--since DAYS] [--json] [--min N]
     route_agent.py adjust --kinds code,bulk [--dry-run] [--json]   # plan with hold/restore hysteresis (W8)
 """
@@ -135,6 +136,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import ade_config  # versioned config and isolated legacy routing override
     import ade_gates  # the frontier gate: config/gates.toml [frontier], docs/gates.md
+    import model_family as _family  # model families (gpt-*-astra) → the newest catalog id
     import model_tiers as _model_tiers  # config/model-tiers.toml roles → ids
 except ImportError as _ade_missing:
     # Not optional: routing is these modules plus config/ (a copy of this file alone, such as pr-radar's
@@ -144,11 +146,11 @@ except ImportError as _ade_missing:
     # is a bug and surfaces with its traceback.
     _here = Path(__file__).resolve().parent
     if (__name__ != "__main__" or not isinstance(_ade_missing, ModuleNotFoundError)
-            or _ade_missing.name not in ("ade_config", "ade_gates", "model_tiers")
+            or _ade_missing.name not in ("ade_config", "ade_gates", "model_family", "model_tiers")
             or (_here / f"{_ade_missing.name}.py").is_file()):
         raise
     sys.stderr.write("route_agent.py: cannot route standalone, the djbclark-ade modules (ade_config, ade_gates, "
-                     f"model_tiers) and config/ are not beside this file ({_ade_missing})\n")
+                     f"model_family, model_tiers) and config/ are not beside this file ({_ade_missing})\n")
     raise SystemExit(2) from None
 
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
@@ -1454,6 +1456,7 @@ def _reset_paseo_cache() -> None:
     _PROVIDER_MODELS.clear()
     _PROVIDER_ROWS.clear()
     _PASEO_LS_MEMO.clear()
+    MODEL_RESOLUTIONS.clear()
 
 
 def _paseo_json(args: list[str]) -> tuple[Any, str]:
@@ -1563,6 +1566,17 @@ def _pi_models(paseo_ids: list[str] | None) -> list[str] | None:
             + [m for m in pi_ids if m.partition("/")[0] in refreshed])
 
 
+PI_EXCLUDED_NAMESPACES = ("antigravity",)   # operator 2026-11-21: no antigravity/* model through Pi; Paseo's native provider only
+
+
+def _without_antigravity(ids: list[str] | None) -> list[str] | None:
+    """Pi's model list minus the namespaces Pi must not route (`antigravity/*`: Pi reaches Antigravity only through pre-paid
+    API money; the native `antigravity` Paseo provider is the route, operator 2026-11-21)."""
+    if ids is None:
+        return None
+    return [m for m in ids if m.partition("/")[0] not in PI_EXCLUDED_NAMESPACES]
+
+
 def provider_models(provider: str) -> list[str] | None:
     """Model ids `paseo provider models <provider> --json` lists, or None when Paseo cannot say. Cached per process.
     The Pi provider's list is corrected by Pi's own catalog (`_pi_models`): Paseo's copy goes stale."""
@@ -1572,8 +1586,52 @@ def provider_models(provider: str) -> list[str] | None:
         if isinstance(data, list):
             ids = [str(m.get("id") or m.get("model")) for m in data
                    if isinstance(m, dict) and (m.get("id") or m.get("model"))]
-        _PROVIDER_MODELS[provider] = _pi_models(ids) if provider == "pi" else ids
+        _PROVIDER_MODELS[provider] = _without_antigravity(_pi_models(ids)) if provider == "pi" else ids
     return _PROVIDER_MODELS[provider]
+
+
+MODEL_RESOLUTIONS: dict[tuple[str, str], _family.Resolution] = {}   # (provider, family) -> resolved this process
+
+
+def family_catalog(provider: str) -> list[str] | None:
+    """The ids a model family resolves against: `ROUTE_AGENT_MODEL_CATALOG_JSON=<path>` (a JSON object {provider: [ids]};
+    tests, wins over ROUTE_AGENT_PASEO=off) or `provider_models`. None when the catalog cannot be read."""
+    canned = os.environ.get("ROUTE_AGENT_MODEL_CATALOG_JSON")
+    if canned:
+        try:
+            ids = json.loads(Path(canned).read_text()).get(provider)
+        except (OSError, ValueError, AttributeError):
+            return None
+        return [str(i) for i in ids] if isinstance(ids, list) else None
+    return provider_models(provider)
+
+
+def model_holds() -> dict[str, _family.Hold]:
+    """`[routing.model_holds]`: per-family hold {model, until, reason}; empty (the default) means no hold anywhere."""
+    return _family.parse_holds((POLICY.get("routing") or {}).get("model_holds"))
+
+
+def resolve_family(provider: str, family: str) -> _family.Resolution:
+    """The newest catalog id of `family` for `provider` (operator 2026-11-21: newest version always, no eval gate), once per
+    process. A readable catalog's newest id is recorded in state so a change is reported (`route_agent.py models`);
+    an unreadable one falls back to the last recorded id and says so."""
+    key = (provider, family)
+    if key not in MODEL_RESOLUTIONS:
+        ids = family_catalog(provider)
+        res = _family.resolve(family, ids, holds=model_holds(), last=_family.last_id(provider, family))
+        if res.newest:
+            _family.record(provider, family, res.newest)
+        MODEL_RESOLUTIONS[key] = res
+    return MODEL_RESOLUTIONS[key]
+
+
+def resolve_spec(provider: str, spec: str) -> tuple[str, _family.Resolution | None]:
+    """`spec` ("<model> [--effort L]") with a family in the model slot replaced by its newest id; (spec, None) for a literal id."""
+    parts = spec.split(None, 1)
+    if not parts or not _family.is_family(parts[0]):
+        return spec, None
+    res = resolve_family(provider, parts[0])
+    return " ".join([res.model, *parts[1:]]), res
 
 
 def paseo_usage(bypass_memo: bool = False) -> tuple[list[Any] | None, str]:
@@ -2200,6 +2258,7 @@ class Choice:
     kind: str = ""                  # recorded as --label ade.kind=… on paseo run
     placement: Placement | None = None   # set by `plan` / `adjust`; None (the single-slice `route`) = a bare launch template
     skipped: list[str] = field(default_factory=list)   # pools passed over for lacking a model profile for `kind` (rt-bulk)
+    model_note: str = ""            # how a model family resolved (hold, state fallback, unresolved); empty for a literal id
 
     @property
     def dispatch_warnings(self) -> list[str]:
@@ -2212,6 +2271,9 @@ class Choice:
                     f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
                     "or the worker lands in the caller's own workspace (`paseo run --cwd` is ignored, getpaseo/paseo#9699)"]
         out = []
+        if _family.is_family(self.model.split()[0] if self.model.split() else ""):
+            out.append(f"model family {self.model.split()[0]} did not resolve (catalog unreadable and no id in state): "
+                       f"replace it with an id from `paseo provider models {self.service.acp_agent}`")
         if not self.model.split():
             out.append(f"no model profile for {self.kind or 'this kind'} on {self.service.acp_agent}: replace the quoted "
                        f"--provider placeholder with an id from `paseo provider models {self.service.acp_agent}`")
@@ -2312,7 +2374,15 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
         from go_model_policy import classification
         if classification(model.split()[0]) != "routine":
             raise ValueError("routine Go routing requires a classified routine model")
-    return model
+    return resolve_spec(svc.acp_agent, model)[0]
+
+
+def model_note(svc: Service, kind: str) -> str:
+    """One line when `kind`'s model on `svc` is a family: what it resolved to and from where (empty for a literal id)."""
+    res = resolve_spec(svc.acp_agent, svc.models.get(kind, ""))[1]
+    if res is None:
+        return ""
+    return res.note or f"{res.family} -> {res.model} (newest in `paseo provider models {svc.acp_agent}`)"
 
 
 def quality_best(kind: str, services: list[Service],
@@ -2532,7 +2602,10 @@ def frontier_model_tokens() -> list[str]:
 def is_frontier_model(model: str | None) -> bool:
     """A frontier token (dispatch list ∪ model-tiers frontier spellings) is a substring of the model."""
     low = (model or "").lower()
-    return bool(low) and any(str(tok).lower() in low for tok in frontier_model_tokens())
+    # A token with a wildcard names a family (`gpt-*-astra`): it matches a model that contains an id of that family, so a
+    # newer release (gpt-6.2-astra) is frontier the day it resolves, with no list edit.
+    return bool(low) and any((_family.family_regex(str(tok).lower()).search(low) if _family.is_family(str(tok))
+                              else str(tok).lower() in low) for tok in frontier_model_tokens())
 
 
 def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:
@@ -2852,7 +2925,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind, skipped=skipped)
+                  kind=kind, skipped=skipped, model_note=model_note(best, kind))
 
 
 def canary_pool(svc: Service) -> str | None:
@@ -3681,6 +3754,58 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     return ADJUST_EXIT_REFUSED if refused else 0
 
 
+def model_family_rows() -> list[dict[str, Any]]:
+    """One row per (provider, family) the roster's `models` name, resolved now: the newest catalog id, its source, and the
+    recorded change (previous id and when). Literal ids are not families and have no row."""
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    for svc in SERVICES:
+        if svc.retired or svc.acp_agent == "cursor-cloud":
+            continue
+        for kind, spec in sorted(svc.models.items()):
+            parts = spec.split()
+            if not parts or not _family.is_family(parts[0]):
+                continue
+            key = (svc.acp_agent, parts[0])
+            row = seen.setdefault(key, {"provider": svc.acp_agent, "family": parts[0], "uses": []})
+            row["uses"].append(f"{svc.name}:{kind}")
+    for (provider, family), row in seen.items():
+        res = resolve_family(provider, family)
+        rec = _family.load_state().get(_family.state_key(provider, family)) or {}
+        row.update(model=res.model, source=res.source, newest=res.newest, note=res.note,
+                   previous=rec.get("previous"), changed_at=rec.get("changed_at"))
+    return sorted(seen.values(), key=lambda r: (r["provider"], r["family"]))
+
+
+def model_family_lines(changed_only: bool = False) -> list[str]:
+    """Text for `models` (every family) and `show` (changed families, held ones and trouble only: a quiet roster prints nothing)."""
+    out = []
+    for r in model_family_rows():
+        changed = bool(r["previous"])
+        trouble = r["source"] in ("state", "unresolved", "hold")
+        if changed_only and not (changed or trouble):
+            continue
+        line = f"  model family {r['family']:24} -> {r['model']}  [{r['source']}, {r['provider']}]"
+        if changed:
+            line += f"  CHANGED from {r['previous']} at {r['changed_at']}"
+        if r["note"]:
+            line += f"  ({r['note']})"
+        out.append(line)
+    return out
+
+
+def _models_command(args: argparse.Namespace) -> int:
+    rows = model_family_rows()
+    if args.json:
+        print(json.dumps({"families": rows, "holds": {k: {"model": h.model, "until": h.until.isoformat(), "reason": h.reason}
+                                                       for k, h in model_holds().items()}}, indent=1))
+    else:
+        lines = model_family_lines()
+        print("\n".join(lines) if lines else "no model family in the roster (every model is a pinned id)")
+        for fam, h in sorted(model_holds().items()):
+            print(f"  hold {fam}: {h.model} until {h.until.isoformat()} {h.reason}".rstrip())
+    return 1 if any(r["source"] == "unresolved" for r in rows) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -3714,6 +3839,8 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--status", action="store_true", help="print the saved holds and exit")
     add_placement_args(ad)
     sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
+    mo = sub.add_parser("models", help="every model family the roster names, its newest catalog id, and any change")
+    mo.add_argument("--json", action="store_true")
     sv = sub.add_parser("services", help="every service discovered right now, with its Paseo provider's status")
     sv.add_argument("--check-models", action="store_true",
                     help="check every curated model suggestion against `paseo provider models <provider> --json`; "
@@ -3755,6 +3882,9 @@ def main(argv: list[str] | None = None) -> int:
             print(format_calibrate_table(report))
         return 0
 
+    if args.command == "models":
+        return _models_command(args)
+
     quota, age = load_snapshot()
 
     if args.command == "plan":
@@ -3784,6 +3914,7 @@ def main(argv: list[str] | None = None) -> int:
                             "dispatch": c.dispatch if c else None,
                             "dispatch_warnings": c.dispatch_warnings if c else [],
                             "skipped": c.skipped if c else [],
+                            "model_note": c.model_note if c else "",
                             "remaining": c.remaining if c else None,
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
@@ -3809,6 +3940,8 @@ def main(argv: list[str] | None = None) -> int:
                           f"  {c.dispatch}")
                     for note in c.skipped:
                         print(f"   skipped {note}")
+                    if c.model_note:
+                        print(f"   model: {c.model_note}")
         return 0
 
     if args.command == "adjust":
@@ -3824,6 +3957,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"paseo usage: {QuotaSource.paseo or 'not read'}")
         print(f"age: {'absent' if age is None else f'{age / 60:.1f} min'}"
               f"  (refreshed by launchd com.djbclark.aiuse every 15 min)")
+        for line in model_family_lines(changed_only=True):
+            print(line)
         for name, info in sorted(quota.items(),
                                  key=lambda kv: (kv[1].get("remaining") is None,
                                                  kv[1].get("remaining") or 0)):
@@ -3935,6 +4070,14 @@ def main(argv: list[str] | None = None) -> int:
             listed = provider_models(svc.acp_agent)
             for kind, spec in sorted(svc.models.items()):
                 model = spec.split()[0]
+                if _family.is_family(model):
+                    if listed is not None and _family.newest(model, listed) is None:
+                        print(f"  MISSING {svc.name} {kind}: no id in `paseo provider models {svc.acp_agent}` matches family {model}")
+                        missing = True
+                    elif listed is None:
+                        print(f"  ? {svc.name} {kind}: {model} (paseo provider models {svc.acp_agent} unreadable)")
+                        unreadable = True
+                    continue
                 if listed is None:
                     print(f"  ? {svc.name} {kind}: {model} (paseo provider models {svc.acp_agent} unreadable)")
                     unreadable = True
@@ -3961,12 +4104,15 @@ def main(argv: list[str] | None = None) -> int:
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "skipped": choice.skipped,
+            "model_note": choice.model_note,
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),
         }, indent=2))
     else:
         print(f"{choice.service.cli}   — {choice.why}")
         print(f"  dispatch: {choice.dispatch}")
+        if choice.model_note:
+            print(f"  model: {choice.model_note}")
         if choice.alternatives:
             print(f"  alternatives: {', '.join(choice.alternatives)}")
     return 0
