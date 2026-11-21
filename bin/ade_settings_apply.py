@@ -2,6 +2,7 @@
 """ade-settings-apply: narrow merge of agents/claude/settings.json.tmpl into the live ~/.claude/settings.json.
 
     ade-settings-apply [--apply] [--template PATH] [--live PATH] [--home DIR] [--json]
+                       [--allow-env-add NAME]... [--allow-env-remove NAME]...
     ade-settings-apply --render-template [--template PATH] [--live PATH]   # print the merged result as a template
 
 Only ADE-owned parts are applied (operator ruling 2026-11-15, queue "st-apply"):
@@ -14,9 +15,16 @@ Only ADE-owned parts are applied (operator ruling 2026-11-15, queue "st-apply"):
   R2. everything else: live wins and is never removed or overwritten. A key the template has and live lacks is
       added (lead ruling 2026-11-15, proposed to cover the sandbox block and model settings); a differing value
       (model, deniedMcpServers) is only listed ("template differs, not applied"), and so are non-ADE hooks.
+  R2b. ``env`` is never auto-added or removed. The caller names the keys, one flag per direction: ``--allow-env-add
+      NAME`` adds NAME when the template has it and live lacks it (also when live has no ``env`` block at all);
+      ``--allow-env-remove NAME`` removes NAME from live only when the template no longer has it (the template
+      dropped it on purpose; a stale or wrong template that still carries it removes nothing). An existing value is
+      never changed (a flag flipping from "0" to "1" is still only listed as "value differs"). ``ade update``
+      passes neither flag.
   R3. dry-run by default (key-path diff, never values). ``--apply`` copies the live file to
       ``settings.json.bak-<UTC stamp>`` (mode kept), then writes a temp file beside and ``os.replace``s it onto the
-      realpath. It refuses (exit 1, nothing written) if any live key path would disappear.
+      realpath. It refuses (exit 1, nothing written) if any live key path would disappear, except exactly the
+      ``/env/NAME`` paths that R2b removed (named with ``--allow-env-remove`` and reported by ``merge``).
 
 Exit 0 ok (including "nothing to do"), 1 refused, 2 usage or unreadable input. The whole live file is read, but no value is printed
 except the `/sandbox` block a dry-run would add; `--render-template` refuses a secret-shaped key or value (key paths only in the message).
@@ -34,6 +42,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 HOME_TAG = "{{ .home }}"
 # A command's script is found under the checkout or ~/.claude hooks/helpers (the dedupe key); it is ADE-OWNED, and only then added, when it
@@ -135,8 +144,18 @@ def secret_paths(d, p="") -> list:
     return out
 
 
-def merge(live: dict, tmpl: dict, home: str, roots=None):
-    """Return (merged, added, not_applied): added/not_applied are lists of key-path strings."""
+def merge(live: dict, tmpl: dict, home: str, roots=None, allow_env_add: Iterable[str] = (),
+          allow_env_remove: Iterable[str] = (), removed: list | None = None):
+    """Return (merged, added, not_applied): added/not_applied are lists of key-path strings.
+
+    allow_env_add names env keys that may be added (in the template, absent from live, also when live has no env block);
+    allow_env_remove names env keys that may be removed (in live, absent from the template). Both empty by default:
+    auto-adding or dropping an env key is exactly the adversary A1 concern ADD_ABSENT avoids, so each is a narrow,
+    caller-named opt-in (mirrors codex-env-policy-apply --allow-set-keys). A removal is also appended to ``added`` as
+    a path string, and its path is appended to ``removed`` when a list is given, so the caller can exempt exactly
+    those paths from the "live key would disappear" refusal. Values are never changed or reported.
+    """
+    allow_add, allow_remove = frozenset(allow_env_add), frozenset(allow_env_remove)
     roots = default_roots(home) if roots is None else roots
     merged = copy.deepcopy(live)
     added, skipped = [], []
@@ -183,11 +202,27 @@ def merge(live: dict, tmpl: dict, home: str, roots=None):
                     walk(a[k], b[k], m[k], f"{p}/{k}")
                 elif k in b:
                     path = f"{p}/{k}"
-                    if any(path == r or path.startswith(r + "/") or p == r for r in ADD_ABSENT):
+                    if any(path == r or path.startswith(r + "/") or p == r for r in ADD_ABSENT) or (p == "/env" and k in allow_add):
                         m[k] = copy.deepcopy(b[k])
                         added.append(f"{path} (key absent from live)")
+                    elif path == "/env" and allow_add and isinstance(b[k], dict):
+                        # live has no env block: build one holding only the named keys (an empty result is dropped again)
+                        m[k] = {}
+                        walk({}, b[k], m[k], path)
+                        if not m[k]:
+                            del m[k]
+                            skipped.append(f"{path} (template only; not on the add list)")
                     else:
                         skipped.append(f"{path} (template only; not on the add list)")
+                elif k in a:
+                    path = f"{p}/{k}"
+                    if path == "/env" and allow_remove and isinstance(a[k], dict):
+                        walk(a[k], {}, m[k], path)  # the template dropped its whole env block: only the named keys go
+                    elif p == "/env" and k in allow_remove:
+                        del m[k]
+                        added.append(f"{path} (key removed from live; --allow-env-remove)")
+                        if removed is not None:
+                            removed.append(path)
         elif a != b:
             skipped.append(f"{p} (value differs)")
     walk(live, tmpl, merged, "")
@@ -223,11 +258,15 @@ def _lost(a, b, p, out):
         out.append(p + " (value)")
 
 
-def refuse_if_dropped(live: dict, merged: dict) -> list:
-    """Key paths, list elements or values of live that merged lacks or changed (never expected)."""
+def refuse_if_dropped(live: dict, merged: dict, allowed: Iterable[str] = ()) -> list:
+    """Key paths, list elements or values of live that merged lacks or changed (never expected).
+
+    ``allowed`` are exact key paths ``merge`` reported as removed on purpose (``/env/NAME``); they, and anything
+    below them, are not counted. Nothing else is exempt."""
     out: list = []
     _lost(live, merged, "", out)
-    return sorted(out)
+    ok = tuple(allowed)
+    return sorted(x for x in out if not any(x == r or x.startswith(r + "/") or x.startswith(r + " (") for r in ok))
 
 
 def backup_path(live: Path) -> Path:
@@ -274,6 +313,11 @@ def main(argv=None) -> int:
     ap.add_argument("--home", default=str(Path.home()))
     ap.add_argument("--live")
     ap.add_argument("--template")
+    ap.add_argument("--allow-env-add", action="append", default=[], metavar="NAME",
+                    help="env key the apply may ADD (in the template, absent from live, also with no live env block); repeatable; none by default")
+    ap.add_argument("--allow-env-remove", action="append", default=[], metavar="NAME",
+                    help="env key the apply may REMOVE (in live, no longer in the template); repeatable; none by default; "
+                         "a key the template still has is never removed, and no value is ever changed")
     a = ap.parse_args(argv)
     home = a.home
     live_p = Path(a.live or Path(home) / ".claude" / "settings.json")
@@ -285,7 +329,8 @@ def main(argv=None) -> int:
     except (OSError, ValueError) as e:
         print(f"ade-settings-apply: cannot read inputs: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
-    merged, added, skipped = merge(live, tmpl, home)
+    removed: list = []
+    merged, added, skipped = merge(live, tmpl, home, allow_env_add=a.allow_env_add, allow_env_remove=a.allow_env_remove, removed=removed)
     if a.render_template:
         bad = secret_paths(merged)
         if bad:
@@ -293,8 +338,8 @@ def main(argv=None) -> int:
             return 1
         print(unrender(json.dumps(merged, indent=2, ensure_ascii=False), home))
         return 0
-    dropped = refuse_if_dropped(live, merged)
-    rep = {"live": str(live_p), "added": added, "not_applied": skipped, "dropped": dropped, "applied": False, "backup": None,
+    dropped = refuse_if_dropped(live, merged, removed)
+    rep = {"live": str(live_p), "added": added, "removed": removed, "not_applied": skipped, "dropped": dropped, "applied": False, "backup": None,
            "sandbox_added": merged.get("sandbox") if "sandbox" not in live else None}
     rc = 0
     if dropped:

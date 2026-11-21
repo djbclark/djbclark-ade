@@ -12,7 +12,14 @@ when the template and the live file exist. Operator ruling 2026-11-15; lead ruli
 2. **`permissions.deny`** is a union; no live entry is removed.
 3. **Everything else:** a template key path absent from live is added only under `/sandbox`, `/modelSettings` and `/skillOverrides`
    (the `ADD_ABSENT` tuple; `env`, plugins, marketplaces, helpers and the rest are listed, never auto-added, so a deliberate absence
-   or an injected template key cannot reach every session). `sandbox.filesystem.denyRead` is a union like `permissions.deny`. An
+   or an injected template key cannot reach every session). The one opt-in is per key and per direction, named by the caller:
+   `--allow-env-add NAME` adds NAME to live's `env` when the template has it and live lacks it (a live file with no `env` block
+   gets one holding only the named keys); `--allow-env-remove NAME` removes NAME from live only when the template no longer has
+   it (a template that still carries the key removes nothing, so a wrong `--template` cannot drop a live key). Neither changes
+   an existing value (a flag flipping `"0"` to `"1"` stays "value differs"); both are repeatable, empty by default, and
+   `ade update` passes neither. The `--apply` refusal for a vanishing live key exempts exactly the `/env/NAME` paths that
+   `--allow-env-remove` removed. Key names only are printed, never values; the added value is the committed template's, and
+   `--apply` does not run the secret scan on it (the template is tracked and reviewed). `sandbox.filesystem.denyRead` is a union like `permissions.deny`. An
    existing live value is never overwritten or removed. A differing scalar (`model`, `deniedMcpServers`) is only listed as
    "template differs, not applied". One branch (`walk` in `merge`) to drop if the add-absent rule is withdrawn.
 4. **Dry-run by default**, key paths only (never values), except the full `/sandbox` block when it would be added (it changes Bash
