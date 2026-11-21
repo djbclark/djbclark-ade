@@ -4,7 +4,7 @@ Thin daemon plugin for [wave4-E8 F4](https://github.com/djbclark/djbclark-ade/bl
 
 | Wave | Hook | Behaviour |
 |---|---|---|
-| W2 | `worktree.create.after` | Run `python3 …/bin/ade_claims.py new --ttl <hours>` (default 72; `ADE_CLAIM_TTL` overrides) so every Paseo-created worktree gets a registry claim; then run trusted `ade-git-guard install <path>` (soft-fails on 73/78). Observe mode logs the planned argv and skips both steps. |
+| W2 | `worktree.create.after` | Run `python3 …/bin/ade_claims.py new --ttl <hours>` (with `--ownerless` when no owner is known yet: `new` otherwise refuses an ownerless claim, and W3 `bind-owner` completes this one) (default 72; `ADE_CLAIM_TTL` overrides) so every Paseo-created worktree gets a registry claim; then run trusted `ade-git-guard install <path>` (soft-fails on 73/78). Observe mode logs the planned argv and skips both steps. |
 | W2 follow-up | `workspace.archive.after` | Mark the active claim for `workspace.cwd` `released` via `ade_claims.py release` (notification; worktree teardown can still be pending). |
 | W3 | `agent.open.before` | If a claim exists for the agent's cwd, merge `ADE_CLAIM_ID=<claim id>` into the launch env. |
 | W3 | `agent.create.after` | Bind `owner.agent` / `owner.record` to the new agent id via `ade_claims.py bind-owner`. |

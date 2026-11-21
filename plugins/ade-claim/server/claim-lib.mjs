@@ -783,6 +783,8 @@ export function buildAdeClaimsNewArgv(worktree, opts) {
   if (repoOrigin) argv.push("--repo-origin", repoOrigin);
   if (ownerRecord) argv.push("--owner-record", ownerRecord);
   if (ownerAgent) argv.push("--owner-agent", ownerAgent);
+  // ade_claims.py new refuses a claim with no owner; this one is completed by bind-owner at agent.create.after.
+  if (!ownerRecord && !ownerAgent) argv.push("--ownerless");
   if (ttlHours !== undefined) argv.push("--ttl", String(ttlHours));
   return { python: "python3", script: adeClaimsScript, argv };
 }

@@ -1,0 +1,3 @@
+### Changed
+
+- `ade_claims.py new`: `--id` is now optional (generated, so a re-claim after `release` needs no new id; an explicit existing id exits 3 with a hint to omit it; `--id ''` still exits 2), `--owner-record` defaults to `--owner-agent` when that is a Paseo agent id, `--branch` / `--base-sha` default from the worktree's own `HEAD` (branch from `symbolic-ref`, `GIT_DIR` and friends ignored; exit 2 naming the flag when the path is not a git worktree), and a call with no owner flag takes `$PASEO_AGENT_ID` when that is a Paseo agent id or exits 2: a claim is never ownerless unless `--ownerless` (what the ade-claim plugin's W2 hook now passes). `skills/fan-out` and `docs/git-guard.md` show the one-line worker form (#877)

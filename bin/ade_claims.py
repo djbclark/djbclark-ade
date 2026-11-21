@@ -150,8 +150,8 @@ CLI (also the bash-facing API; every subcommand exits 0 ok, 2 usage, 3 id exists
 active claim, 77 refused; `install` also 73 and 78, above). Trimmed 2026-11-06 (slim-down E8, D9): `show`, `find` and
 generic `set-state` had no caller and are gone (the library functions `read_claim`, `find_claim` and `set_state` stay);
 `release` returned 2026-11-09 for the ade-claim archive hook (E8 F4):
-    ade_claims.py new --id ID --path DIR --branch B --base-sha S [--repo-origin U] [--ttl HOURS]
-        [--owner-record R] [--owner-session S] [--owner-agent A] [--owner-model M] [--lead L]
+    ade_claims.py new --path DIR [--id ID] [--branch B] [--base-sha S] [--repo-origin U] [--ttl HOURS]
+        [--owner-record R] [--owner-session S] [--owner-agent A | --ownerless] [--owner-model M] [--lead L]
         [--allow ID]... [--role lead|worker|builder] [--purpose T] [--created-by X]
         [--inherited-dirt-patch P] [--no-pointer]     writes the claim and the pointer; prints the claim file
     ade_claims.py list [--state S] [--json] one line per claim (id, state, branch, owner, path, expires_at), or a
@@ -3080,6 +3080,58 @@ def _hook_cli(argv: Sequence[str]) -> int:
     return 2
 
 
+PASEO_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def is_paseo_agent_id(value: Any) -> bool:
+    """A Paseo agent id (a lowercase UUID), as opposed to a harness label such as `codex` or `pi`."""
+    return isinstance(value, str) and bool(PASEO_ID_RE.match(value))
+
+
+def generate_claim_id(path: str | os.PathLike[str]) -> str:
+    """A fresh claim id for `new` without --id: `<workspace dir name>-<UTC time>-<4 hex>`. A released claim keeps its id
+    (the file stays in the registry), so a re-claim of the same workspace needs a new one; this makes it."""
+    import secrets
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(path).resolve().name).strip("-._")[:80] or "ws"
+    return f"{slug}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(2)}"
+
+
+# Variables that make git look at another repository than `-C PATH` names (git exports GIT_DIR and friends to hooks).
+_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES")
+
+
+def _path_git(path: str | os.PathLike[str], *args: str) -> tuple[int, str]:
+    """The real git in PATH's own repository, whatever GIT_DIR and the like the caller inherited."""
+    return _run_git(["-C", str(path), *args], env_extra={k: None for k in _GIT_LOCATION_ENV})
+
+
+def worktree_defaults(path: str | os.PathLike[str], branch: Optional[str], base_sha: Optional[str]) -> tuple[str, str]:
+    """`new`'s --branch and --base-sha when omitted: the branch (`symbolic-ref HEAD` without `refs/heads/`, so a tag of the same
+    name never turns it into `heads/<name>`) and commit (`rev-parse HEAD`) checked out in the git worktree at PATH, read with
+    the GIT_DIR family of variables removed. ValueError (exit 2) when PATH is not a git worktree, HEAD is detached
+    or has no commit, naming the flag to pass instead."""
+    if branch is not None and base_sha is not None:
+        return branch, base_sha
+    if not Path(path).is_dir():
+        raise ValueError(f"{path} is not a directory: cannot default --branch/--base-sha from it (pass both)")
+    rc, inside = _path_git(path, "rev-parse", "--is-inside-work-tree")
+    if rc != 0 or inside.strip() != "true":
+        raise ValueError(f"{path} is not a git worktree: cannot default --branch/--base-sha from it (pass both)")
+    if branch is None:
+        rc, ref = _path_git(path, "symbolic-ref", "-q", "HEAD")
+        ref = ref.strip()
+        if rc != 0 or not ref.startswith("refs/heads/") or len(ref) == len("refs/heads/"):
+            raise ValueError(f"{path} has a detached HEAD: pass --branch")
+        branch = ref[len("refs/heads/"):]
+    if base_sha is None:
+        rc, out = _path_git(path, "rev-parse", "HEAD")
+        base_sha = out.strip() if rc == 0 else ""
+        if not base_sha:
+            raise ValueError(f"{path} has no commit at HEAD (unborn branch): pass --base-sha")
+    return branch, base_sha
+
+
 def _cli(argv: Sequence[str]) -> int:
     if argv and argv[0] == "guard":
         rest = list(argv[1:])
@@ -3092,14 +3144,18 @@ def _cli(argv: Sequence[str]) -> int:
     p = argparse.ArgumentParser(prog="ade_claims.py", description=__doc__.split("\n\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
     n = sp.add_parser("new", help="create a claim and its pointer; exit 3 id exists, 4 path owned by another owner")
-    n.add_argument("--id", required=True)
+    n.add_argument("--id", help="claim id (default: generated from the workspace name and time, so a re-claim after `release` "
+                   "needs no new id from you; an id stays taken after release)")
     n.add_argument("--path", required=True)
-    n.add_argument("--branch", required=True)
-    n.add_argument("--base-sha", required=True)
+    n.add_argument("--branch", help="default: the branch checked out in --path (git rev-parse --abbrev-ref HEAD)")
+    n.add_argument("--base-sha", help="default: the commit checked out in --path (git rev-parse HEAD)")
     n.add_argument("--repo-origin", default="")
-    n.add_argument("--owner-record")
+    n.add_argument("--owner-record", help="default: --owner-agent when that is a Paseo agent id")
     n.add_argument("--owner-session")
-    n.add_argument("--owner-agent", default="")
+    n.add_argument("--owner-agent", default="", help="default when no owner flag is given: PASEO_AGENT_ID if it is a Paseo agent id, "
+                   "else exit 2 (a claim is never created ownerless unless --ownerless)")
+    n.add_argument("--ownerless", action="store_true", help="allow a claim with no owner, which `bind-owner` completes "
+                   "(the ade-claim plugin's worktree.create.after hook; every other caller names an owner)")
     n.add_argument("--owner-model", default="")
     n.add_argument("--lead")
     n.add_argument("--allow", action="append", default=[])
@@ -3138,13 +3194,35 @@ def _cli(argv: Sequence[str]) -> int:
     a = p.parse_args(list(argv))
     try:
         if a.cmd == "new":
-            c = make_claim(id=a.id, path=a.path, branch=a.branch, base_sha=a.base_sha, repo_origin=a.repo_origin,
-                           owner_record=a.owner_record, owner_session=_owner_session_arg(a.owner_session), owner_agent=a.owner_agent,
-                           owner_model=a.owner_model, lead=a.lead, allow=a.allow, role=a.role, purpose=a.purpose,
-                           created_by=a.created_by, inherited_dirt_patch=a.inherited_dirt_patch, ttl_hours=a.ttl)
+            branch, base_sha = worktree_defaults(a.path, a.branch, a.base_sha)
+            owner_agent, owner_record = a.owner_agent, a.owner_record
+            owner_session = _owner_session_arg(a.owner_session)
+            if not (owner_agent or owner_record or owner_session) and not a.ownerless:
+                env_agent = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+                if not is_paseo_agent_id(env_agent):
+                    raise ValueError("no owner: pass --owner-agent (a Paseo agent id; PASEO_AGENT_ID is not set to one here), "
+                                     "--owner-record or --owner-session; --ownerless is for a claim bind-owner completes later")
+                owner_agent = env_agent
+                print(f"ade_claims: no owner given: owner.agent is PASEO_AGENT_ID {env_agent}", file=sys.stderr)
+            if owner_record is None and is_paseo_agent_id(owner_agent):
+                owner_record = owner_agent    # the bind-owner shape (owner.agent == owner.record)
             if not a.no_pointer and find_workspace(a.path) is None:
                 raise ValueError(f"{a.path} is not inside a git workspace")
-            target = create_claim(c, pointer_for=None if a.no_pointer else a.path)
+            for attempt in range(4):
+                claim_id = a.id if a.id is not None else generate_claim_id(a.path)
+                c = make_claim(id=claim_id, path=a.path, branch=branch, base_sha=base_sha, repo_origin=a.repo_origin,
+                               owner_record=owner_record, owner_session=owner_session, owner_agent=owner_agent,
+                               owner_model=a.owner_model, lead=a.lead, allow=a.allow, role=a.role, purpose=a.purpose,
+                               created_by=a.created_by, inherited_dirt_patch=a.inherited_dirt_patch, ttl_hours=a.ttl)
+                try:
+                    target = create_claim(c, pointer_for=None if a.no_pointer else a.path)
+                except ClaimExists as e:
+                    if a.id is not None:
+                        raise ClaimExists(f"{e}; a released claim keeps its id: omit --id to generate a fresh one") from None
+                    if attempt == 3:
+                        raise
+                    continue
+                break
             print(target)
         elif a.cmd == "list":
             cs = list_claims(a.state)

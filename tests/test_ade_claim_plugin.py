@@ -157,6 +157,7 @@ def test_bind_owner_merges_owner_on_active_claim(tmp_path: Path, monkeypatch: py
             "--base-sha",
             "deadbeef",
             "--no-pointer",
+            "--ownerless",
             "--ttl",
             "1",
         ],
