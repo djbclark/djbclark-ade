@@ -159,6 +159,9 @@ Rules:
    entry with no `ends_at`. An introductory price that ends is an entry with `ends_at`, and the base price comes
    from the row.
 3. Unknown fields, unknown targets, duplicate ids and `starts_at >= ends_at` are load errors in the file's CI lint.
+   A service target must name a `[[service]]`; a `pool_id` target must be one aiuse's `semantics.pool_id_map` lists
+   (for example `google:claude_gpt`), whether or not a service claims it; `{ pool_id, model }` is legal only for
+   `available`.
    At routing time a malformed entry is dropped with a warning in `show` and `plan --json` (`dated.warnings`), and
    routing goes on without it. The lint keeps a malformed entry from landing, so a calendar date can never break
    routing.
@@ -167,9 +170,9 @@ Rules:
 
 | field | applies to | effect in `route_agent.py` | gated |
 |---|---|---|---|
-| `available` | a service, or one model of a service | only `false` is accepted (`true` is a load error): that service (or that kind's model) is ineligible; the refusal names the change id. It can only remove a candidate, so it never overrides `never_route`, `[disabled_services]`, operator-disabled pools, Pi pool acceptance, `fallback_after`/`fallback_kinds` or any other gate | no |
+| `available` | a service; one model of a service; or one model of a `pool_id` (`{ pool_id, model }`: a menu fact about a pool, applied to every service that claims that pool now or later, and recorded and printed while none does) | only `false` is accepted (`true` is a load error): that service (or that kind's model) is ineligible; the refusal names the change id. It can only remove a candidate, so it never overrides `never_route`, `[disabled_services]`, operator-disabled pools, Pi pool acceptance, `fallback_after`/`fallback_kinds` or any other gate | no |
 | `price_per_mtok` | a service billed per token (`billing = "prepaid"`, an API key, AI credits) | recorded on the service and printed in `policy --md` and `plan --json`. **No rank effect today**: `route()` ranks on `good_at` rank, headroom pressure, pace and burn-first, with no cost term (question 2) | no (inert) |
-| `floor_percent` | a `pool_id` aiuse reports as its own pool (`quota_scope = "pool"`, not a model sublimit) | **tighten only**: the effective floor is the maximum of the dated value and every existing floor (`min_headroom`, the service's `reserve_floor`, repo and kind floors, `plenty_min` where it applies, and aiuse's `floor_percent` once shipped). A dated value below them changes nothing; there is no loosening path | no |
+| `floor_percent` | a `pool_id` aiuse reports as its own pool (`quota_scope = "pool"`, not a model sublimit) | **tighten only**: the effective floor is the maximum of the dated value and every existing floor (`min_headroom`, the service's `reserve_floor`, repo and kind floors, and aiuse's `floor_percent` once shipped; `pool_fits` today takes `max(min_headroom, reserve_floor)`). `[routing].plenty_min` is not a floor: it only gates `plenty_kinds` and effort, and the dated floor neither reads nor changes it. A dated value below them changes nothing; there is no loosening path | no |
 | `good_at` | a service, per kind | replaces the listed kinds' ranks during the period | yes: needs `operator_approved` **and** `ends_at` (a rank change is always for a bounded period) |
 
 **Separate-pool guard.** This is the brief's "applied only where the model truly is a separate pool", made
@@ -232,7 +235,8 @@ mechanical:
 
 1. Parse: a naive or date-only time is refused; so are `starts_at >= ends_at`, an unknown field, an unknown service or
    `pool_id`, a duplicate id, two entries with equal `starts_at` for one (target, field), `good_at` without
-   `operator_approved` or without `ends_at`, and `available = true` (or any non-false value).
+   `operator_approved` or without `ends_at`, `available = true` (or any non-false value), a `{ pool_id, model }` target
+   on any field but `available`, and a `pool_id` aiuse does not list. The GPT-OSS example passes.
 2. Boundaries with an injected `now`: one second before `starts_at` inactive, at `starts_at` active, at `ends_at`
    inactive; an entry across a DST change keys on its explicit offset.
 3. A later `starts_at` wins over an earlier open-ended entry.
@@ -254,9 +258,9 @@ mechanical:
 
 ### 2.9 Build order (later slices; each needs its own yes where marked)
 
-1. `bin/ade_dated.py` with tests 1–3 and 9–10, and the file with the two entries above (Carbon's API price, GPT-OSS
-   leaving). Carbon has no `[[service]]` row today, so its entry is held back (not committed) until one exists: an
-   unknown target is a load error (2.3 rule 3).
+1. `bin/ade_dated.py` with tests 1–3 and 9–10, and the file with one entry: GPT-OSS leaving (a `{ pool_id, model }`
+   target, legal for `available` under 2.3 rule 3). The Carbon price entry is held back (not committed) until a
+   Carbon `[[service]]` row exists: an unknown service target is a load error.
 2. Wiring into `route()` and `plan()`, `--at`, `policy --md`, the batch-reminder line (tests 4–8 and 11).
 3. Only after question 2: a cost term for per-token pools.
 
