@@ -1964,7 +1964,7 @@ def approve_local_decision(top, text, mode="local"):
         local_approval_log("lw-local-ticket", top, text, mode)
         print(f"load-watch: a `local` decision for {top} is covered by a live bgrun approval ticket ({ticket}); no dialog was shown.", file=sys.stderr)
         return True
-    msg =f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
+    msg = f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
     if not (SUDO_ASK.is_file() and os.access(SUDO_ASK, os.X_OK)):
         local_approval_log(f"lw-{mode}-unavailable", top, text, mode)
         print(f"load-watch: recording a `{mode}` decision needs djbclark's approval (Allow dialog and Touch ID), and {SUDO_ASK} is missing or "
