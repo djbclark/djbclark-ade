@@ -18,7 +18,7 @@ import gui_hog as gh  # noqa: E402
 import gui_hog_freeze as gf  # noqa: E402
 import gui_hog_savings as sv  # noqa: E402
 from test_gui_hog_auto import BEEPER, GROK, OTHER, World, auto_cfg, held  # noqa: E402
-from test_gui_hog_freeze import T0, world  # noqa: E402,F401,F811 (a fixture imported by name)
+from test_gui_hog_freeze import ME, T0, world  # noqa: E402,F401,F811 (a fixture imported by name)
 
 REPO = Path(__file__).resolve().parent.parent
 NOLOCAL = Path("/nonexistent")
@@ -355,6 +355,49 @@ def test_a_frozen_always_app_stays_quiet_but_a_resumed_one_shows_again(w):
     assert gh.should_show(hold, means, T0 + 31, None, None, c, quiet_set=q)["show"]
     assert [r["name"] for r in gh.build_snapshot(means, hold, T0 + 31, c, quiet_set=q)["rows"]] == ["Other"]
     assert gh.would_show_line({"reason": "show", "holds": [], "sum_cores": 0, "sum_rss_mb": 0}, means, T0 + 31, 1.0, c, 1, quiet_set=q)["apps"][0]["name"] == "Other"
+
+
+def test_an_always_app_is_hidden_only_while_the_sampler_may_act_a_hold_and_no_snooze():   # adversary L2r of #872
+    c, key = _cfg(), OTHER.casefold()
+    assert gh.quiet_ids(c, _means(), T0, act=False) == frozenset()   # no live hold: `gui-hog show` must list a busy app the sampler will not freeze
+    assert gh.quiet_ids(c, _means(), T0, frozen={OTHER}, act=False) == frozenset({key})   # frozen already: still dealt with
+    assert gh.quiet_ids(c, _means(), T0, act=True) == frozenset({key})
+
+
+def test_quiet_for_reads_the_hold_and_the_ignore_snooze(tmp_path):
+    c, key = _cfg(), OTHER.casefold()
+    state = tmp_path / "state"
+    state.mkdir()
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=[]) == frozenset()   # no hold at all
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=held(age=5)) == frozenset()   # a hold younger than hold_s: the sampler waits
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=held()) == frozenset({key})
+    gh.write_snooze(state, T0, 60)   # "Ignore 1 h": the sampler leaves the apps alone, so the busy app must show
+    assert gh.quiet_for(c, _means(), T0, state, {}, held=held()) == frozenset()
+    assert gh.quiet_for(c, _means(), T0 + 4000, state, {}, held=held()) == frozenset({key})   # the snooze is over
+
+
+def test_the_tick_and_status_hand_the_quiet_set_to_the_decision_the_snapshot_and_the_line(w, monkeypatch):   # a mutant that drops `quiet_set=` must die
+    c = _cfg()
+    assert w.step(c)["bundle_id"] == OTHER   # frozen by us: its bundle id is quiet whatever the window says
+    want, seen = frozenset({OTHER.casefold()}), {}
+
+    def spy(name):
+        orig = getattr(gh, name)
+
+        def f(*a, **k):
+            seen.setdefault(name, []).append(k.get("quiet_set"))
+            return orig(*a, **k)
+        monkeypatch.setattr(gh, name, f)
+    for n in ("should_show", "build_snapshot", "would_show_line"):
+        spy(n)
+    monkeypatch.setattr(gh, "read_holds", lambda *a, **k: held())
+    table, rss, ttys, _s = w.ops.table()
+    gh.tick({}, T0 + 5, table, rss, ttys, state_dir=w.state, my_uid=ME, cfg=c, lsapps=w.lsapps(), exe_of=w.ops.exe, out=lambda x: None, auto_freeze=False,
+            gui_ok=False, load_avg=(1, 2, 3), ncpu=10)
+    assert seen["should_show"] == [want] and seen["build_snapshot"] == [want]
+    seen.clear()
+    gh.status_lines({}, w.state, T0 + 5, c)
+    assert seen["should_show"] == [want]
 
 
 def test_an_unreadable_state_never_hides_an_always_app(tmp_path):

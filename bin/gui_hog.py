@@ -281,13 +281,14 @@ def quiet(a, always):
     return bool(always) and str(a.get("bundle_id") or "").casefold() in always and not a.get("protected") and not a.get("hosts_build")
 
 
-def quiet_ids(cfg, means, now, gh_state=None, frozen=()):
+def quiet_ids(cfg, means, now, gh_state=None, frozen=(), act=True):
     """The bundle ids (casefolded) that get no dialog row because they are ALREADY frozen by us or the sampler would freeze them now (Q3, adversary
     L2 of #872): on the effective always list and either in `frozen` (bundle ids with a live frozen entry), or running, not protected, hosting no
     build or terminal, not in the cooling-down / retry-wait window of `gh_state["auto"]` (the operator Resumed it, or a freeze was refused) and using
     at least `min_cores` now. Anything else is an ordinary row again: an app the sampler will not freeze must never disappear from the operator's
     sight. (Not here: `excluded` apps never reach the window, so they are no rows either; the sampler's own `kept_cores` is not known to the window,
-    so the idle test is the app's current cores, a close approximation.)"""
+    so the idle test is the app's current cores, a close approximation.) `act` says the sampler is allowed to freeze right now (a live hold and no
+    Ignore snooze: `auto_freeze_step` does nothing otherwise, adversary L2r of #872); without it only the already frozen apps are quiet."""
     always = always_apps(cfg)
     if not always:
         return frozenset()
@@ -310,7 +311,7 @@ def quiet_ids(cfg, means, now, gh_state=None, frozen=()):
             if a is None or not (a.get("protected") or a.get("hosts_build")):
                 out.add(bid)
             continue
-        if a is None or a.get("protected") or a.get("hosts_build"):
+        if not act or a is None or a.get("protected") or a.get("hosts_build"):
             continue
         st = auto.get(bid)
         if isinstance(st, dict) and _fin(st.get("t")) and 0 <= now - st["t"] < (float(au.get("refreeze_s", 3600)) if st.get("ok") else retry_s):
@@ -322,8 +323,10 @@ def quiet_ids(cfg, means, now, gh_state=None, frozen=()):
     return frozenset(out)
 
 
-def quiet_for(cfg, means, now, state_dir, gh_state):
-    """`quiet_ids` with the frozen bundle ids read from `state_dir`; never raises (a failure reads as nothing frozen, so every app stays a row)."""
+def quiet_for(cfg, means, now, state_dir, gh_state, held=None):
+    """`quiet_ids` with the frozen bundle ids read from `state_dir` and `act` taken from the same conditions `auto_freeze_step` uses (a live hold, no
+    Ignore snooze); `held` is the holds the caller already read. Never raises: a failure reads as nothing frozen and no freeze due, so every app
+    stays a row."""
     try:
         if not always_apps(cfg):
             return frozenset()
@@ -333,7 +336,13 @@ def quiet_for(cfg, means, now, state_dir, gh_state):
             frozen = gui_hog_freeze.frozen_bundle_ids(state_dir)
         except Exception:  # noqa: BLE001
             pass
-        return quiet_ids(cfg, means, now, gh_state, frozen)
+        try:
+            holds = read_holds(state_dir, now, sweep=False) if held is None else held
+            snz = effective_snooze(gh_state if isinstance(gh_state, dict) else {}, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"])
+            act = bool(hold_active(holds, now, cfg)[1]) and not (snz is not None and now < snz)
+        except Exception:  # noqa: BLE001
+            act = False
+        return quiet_ids(cfg, means, now, gh_state, frozen, act=act)
     except Exception:  # noqa: BLE001
         return frozenset()
 
@@ -1490,7 +1499,7 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
         sr = sysread if isinstance(sysread, dict) else {}
         gui_hog_savings.hist_add(gh["hist"], t, sr.get("load1", load1), sr)
         gh["hist"] = gui_hog_savings.clean_hist(gh["hist"])
-        srcs = gui_hog_sources.group_sources(table, rss_kb, apps, held_pids=held_pids, agent_clis=agent_clis)
+        srcs = gui_hog_sources.group_sources(table, rss_kb, apps, held_pids=held_pids, agent_clis=agent_clis, exe_of=exe_of)
         gui_hog_sources.window_update(gh, t, srcs, total_cores, cfg)
         smeans = gui_hog_sources.window_means(gh, t, cfg)
         top = [m["id"] for m in smeans if m["kind"] in ("build", "agent") and m["present"]][:6]
@@ -1499,7 +1508,7 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
             gui_hog_savings.write_hist(state_dir, gh["hist"])
     except Exception as e:  # noqa: BLE001
         out(f"gui-hog: load sources: {e!r}")
-    qset = quiet_for(cfg, means, t, state_dir, gh)
+    qset = quiet_for(cfg, means, t, state_dir, gh, held=held)
     d = should_show(held, means, t, effective_snooze(gh, read_snooze(state_dir), t, cfg["trigger"]["snooze_s"], record=True), gh.get("last_shown"), cfg, quiet_set=qset)
     if not dry:
         try:
@@ -1558,7 +1567,7 @@ def status_lines(st, state_dir, now, cfg):
     means = window_means(st, now, cfg)
     ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
     snooze, last = effective_snooze(ghs, read_snooze(state_dir), now, cfg["trigger"]["snooze_s"]), ghs.get("last_shown")
-    qset = quiet_for(cfg, means, now, state_dir, ghs)
+    qset = quiet_for(cfg, means, now, state_dir, ghs, held=held)
     d = should_show(held, means, now, snooze, last, cfg, quiet_set=qset)
     bstate, bdetail = bundle_state()
     lines = [f"gui-hog (PR 3b: the window is live) {'ENABLED' if enabled() else 'OFF (LW_GUI_HOG=0)'}",

@@ -221,3 +221,15 @@ def test_no_argument_leaks_into_a_label_even_inside_an_app_bundle():   # adversa
         label = gs._label(cmd)
         assert label == want, (cmd, label)
         assert "hunter2" not in label and "s3cr3t" not in label and "secret" not in label
+
+
+def test_a_label_comes_from_the_kernel_executable_not_from_an_argument_that_holds_the_bundle_mark():   # adversary L1r of #872
+    mark = "tool --path=/x/Contents/MacOS/hunter2 -k"
+    assert gs._label("/usr/bin/" + mark, 7, lambda pid: "/usr/bin/tool") == "tool"   # the kernel path wins over argv
+    assert gs._label("/usr/bin/" + mark) == "tool"   # no kernel path: the fallback refuses a mark that sits inside an argument
+    assert gs._label("/usr/bin/codesign -v /Applications/Foo.app/Contents/MacOS/Foo") == "codesign"
+    assert gs._label("/bin/sh -c cd /A.app/Contents/MacOS/ && ./Foo") == "sh"
+    assert gs._label("/Applications/Foo.app/Contents/MacOS/Foo -x", 7, lambda pid: None) == "Foo"   # an unreadable kernel path falls back to the parse
+    table = {"10": (1, 501, 2.0, "/usr/bin/" + mark)}
+    out = gs.group_sources(table, {"10": 1024}, [], exe_of=lambda pid: "/usr/bin/tool")
+    assert [r["name"] for r in out] == ["tool"] and "hunter2" not in json.dumps(out)

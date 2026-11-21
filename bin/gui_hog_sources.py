@@ -33,21 +33,33 @@ GRADLE_MARKS = ("org.gradle", "GradleDaemon", "GradleWorkerMain", "gradle-launch
 MAX_SOURCES = 40   # per sample, after sorting by cores
 
 
-def _label(cmd):
-    """A cleaned program name for an unclaimed process: the executable's base name (a bundle's executable may contain spaces), never its arguments."""
+def _label(cmd, pid=None, exe_of=None):
+    """A cleaned program name for an unclaimed process, never any of its arguments. Only a command containing an app bundle's `/Contents/MacOS/` is hard
+    to cut (the executable may contain spaces, and an ARGUMENT may contain the mark too), so for it the name comes from the kernel's executable path
+    (`exe_of(pid)`, never argv), and only without one from the command line, accepted when the text before the mark looks like one path with no option
+    or `=` word in it (adversary L1r of #872: `tool --path=/x/Contents/MacOS/hunter2` must label `tool`)."""
     cmd = str(cmd)
     mark = "/Contents/MacOS/"
     if mark in cmd:
-        # A bundle's executable may contain spaces ("Google Chrome Helper (Renderer)"), and the arguments follow it: take the executable name
-        # only when it matches the bundle's own name (its length bounds the cut, so no argument can ride along), else the first word after it.
+        exe = None
+        if exe_of is not None and pid is not None:
+            try:
+                exe = exe_of(int(pid))
+            except Exception:  # noqa: BLE001
+                exe = None
+        if exe:
+            return gh.clean(os.path.basename(str(exe).rstrip("/")) or "?", 40)
         head, rest = cmd.split(mark, 1)
-        bundle = os.path.basename(head.rstrip("/"))
-        bundle = bundle[:-4] if bundle.endswith(".app") else bundle
-        if bundle and rest[:len(bundle)].casefold() == bundle.casefold() and (len(rest) == len(bundle) or rest[len(bundle)] in " \t"):
-            name = rest[:len(bundle)]
-        else:
-            name = (rest.split() or [""])[0]
-        return gh.clean(name or "?", 40)
+        if head.startswith("/") and not any(w[:1] in ("-", "/") or "=" in w for w in head.split()[1:]):
+            # a bundle's executable may contain spaces ("Google Chrome Helper (Renderer)") and the arguments follow it: the executable name is taken
+            # only when it matches the bundle's own name (its length bounds the cut, so no argument rides along), else the first word after the mark
+            bundle = os.path.basename(head.rstrip("/"))
+            bundle = bundle[:-4] if bundle.endswith(".app") else bundle
+            if bundle and rest[:len(bundle)].casefold() == bundle.casefold() and (len(rest) == len(bundle) or rest[len(bundle)] in " \t"):
+                name = rest[:len(bundle)]
+            else:
+                name = (rest.split() or [""])[0]
+            return gh.clean(name or "?", 40)
     first = (cmd.split() or [""])[0]
     return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
 
@@ -62,11 +74,11 @@ def _build_head(cmd):
     return None
 
 
-def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=()):
+def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=None):
     """[{key, kind, id, name, cores, rss_mb, procs, heaviest, heaviest_cores, owner, waiting, bundle_id, protected, excluded, hosts_build}] for every
     source with cores or memory worth keeping, busiest first (at most MAX_SOURCES). `table` is {pid str: (ppid, uid, cores, command)}, `rss_kb`
     {pid: KB}, `apps` the records of `gui_hog.group_apps` (their `member_pids`, `kept_pids` and `build_pids` say which process is whose),
-    `held_pids` the pids of waiting `admit` callers. Reads only: the result is data about processes, never a handle to signal one."""
+    `held_pids` the pids of waiting `admit` callers, `exe_of` the kernel executable lookup the labels use. Reads only: the result is data about processes, never a handle to signal one."""
     held = {str(p) for p in held_pids}
     agents = set(agent_clis) - {"bg"}   # `bg` is a build here, an exclusion marker in group_apps
     app_of, inbuild, app_by_id = {}, set(), {}
@@ -111,7 +123,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=()):
             elif r == "build":
                 key = base if base and base[0] == "build" else ("build", p)
             else:
-                key = base if base else ("system", _label(table[p][3]))
+                key = base if base else ("system", _label(table[p][3], p, exe_of))
             memo[p] = key
             base = key
         return memo[pid]
@@ -124,7 +136,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=()):
         g["rss_kb"] += rss_kb.get(pid, 0)
         g["procs"] += 1
         if cores >= g["heavy"][1]:
-            g["heavy"] = (_label(cmd), cores)
+            g["heavy"] = (_label(cmd, pid, exe_of), cores)
 
     def owner_of(pid):
         cur, hops = str(table[pid][0]), 0
@@ -147,7 +159,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=()):
                        hosts_build=bool(a["hosts_build"]), id=str(a["id"]))
         elif kind == "build":
             head = _build_head(table[ident][3]) or ("admit" if waiting else None)
-            rec["name"] = gh.clean(head or _label(table[ident][3]), 40)
+            rec["name"] = gh.clean(head or _label(table[ident][3], ident, exe_of), 40)
             if ident in inbuild and not head:
                 rec["name"] = "terminal session (" + rec["name"] + ")"
             rec["owner"], rec["owner_pid"] = owner_of(ident)
