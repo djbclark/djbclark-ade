@@ -46,7 +46,7 @@ SET_KEYS = {
     "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "DIGESTS",
     "BASH_ENV": "HOME/.bashrc",
     "ENABLE_PROMPT_CACHING_1H": "1",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1",
     "MCP_TIMEOUT": "300000",
     "CLAUDE_CODE_HARBOR_KITE": "1",
     "GRAFT_NO_GITIGNORE": "1",
@@ -299,7 +299,7 @@ inherit = "core"
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123"
 BASH_ENV = "{home}/.bashrc"
 ENABLE_PROMPT_CACHING_1H = "1"
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
+CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1"
 MCP_TIMEOUT = "300000"
 CLAUDE_CODE_HARBOR_KITE = "1"
 GRAFT_NO_GITIGNORE = "1"
@@ -515,7 +515,7 @@ ignore_default_excludes = true
         # adversary MSG 4: the old policy may spell its explicit set inline under [shell_environment_policy].
         def live(d: str, timeout: str) -> str:
             inline = ('set = { NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123", BASH_ENV = "%s/.bashrc", ENABLE_PROMPT_CACHING_1H = "1", '
-                      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1" }' % (d, timeout))
+                      'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1" }' % (d, timeout))
             return f'model = "m"\n\n[projects."/x"]\ntrust_level = "trusted"\n\n[shell_environment_policy]\ninherit = "core"\n{inline}\n\n[hooks.state."/y"]\ntrusted_hash = "SECRET-AFTER-8"\n'
         secrets = ("SECRETDIGEST-0123", "SECRET-INLINE-7", "SECRET-AFTER-8")
         with tempfile.TemporaryDirectory() as d:
