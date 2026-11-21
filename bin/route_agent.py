@@ -2621,9 +2621,20 @@ def is_frontier_slice_model(model: str | None) -> bool:
     """May `model` take a `frontier` slice? A frontier model (`is_frontier_model`) or a `[dispatch].frontier_slice_models` family.
     Neon is frontier r3 (operator 2026-11-21) but stays out of `frontier_models`, which also floors every slice of a matching
     model, Neon judgment included; `adjust` asks this, so its never-downgrade rule does not refuse a Neon frontier route."""
-    low = (model or "").lower()
     toks = list((POLICY.get("dispatch") or {}).get("frontier_slice_models") or [])
-    return is_frontier_model(model) or (bool(low) and any(_token_matches(str(t), low) for t in toks))
+    return is_frontier_model(model) or any(_slice_token_matches(str(t), model) for t in toks)
+
+
+def _slice_token_matches(tok: str, model: str | None) -> bool:
+    """Does the id in `model` (its first word; the effort flag is not part of the id) BE the whole slice-model `tok`, a literal
+    or a family? Unlike `_token_matches` it is anchored: `grok-*` is `grok-4.7`, not `grok-4.7-fast`, `grok-3-mini` or `cursor/grok-4`
+    (adversary PR 899 LOW-2, 2026-11-21). An unresolved family string is its own glob text and matches itself."""
+    words = (model or "").lower().split()
+    tok = tok.lower()
+    if not words or not tok:
+        return False
+    mid = words[0]
+    return mid == tok or (_family.is_family(tok) and bool(_family.family_regex(tok).fullmatch(mid)))
 
 
 def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:
@@ -2872,6 +2883,10 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             pressure = (100.0 - remaining) * weight / 10.0
         rank = svc.rank_for(kind) + pressure
         tags: list[str] = []
+        # A frontier slice is not spent to burn idle quota on a pool outside `frontier_models` (Neon r3, cursor-grok r4): the
+        # bonus (4.0) would lift it above the Astra/Fable tier the policy calls frontier (adversary PR 899 MED-1, 2026-11-21)
+        fmodel = svc.models.get("frontier", "") if kind == "frontier" else ""
+        burn_bonus_ok = not (fmodel and not is_frontier_model(fmodel))
         waste = expected_waste(remaining, info.get("pace_ratio"),
                                info.get("resets_at"), info.get("window_minutes"))
         grant = False
@@ -2882,14 +2897,14 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             # Reserves keep their floor gate; never boost them to burn unused
             # quota (2026-10-18 review finding 6c).
             # A fallback (Argon) never outranks a usable pool it sits behind: no bonus either (adversary N1, 2026-11-01).
-            if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor and not svc.fallback_after:
+            if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor and not svc.fallback_after and burn_bonus_ok:
                 rank -= BURN_FIRST_BONUS
                 if grant:
                     tags.append(f"burn before reset: {waste:.0f}% of the grant is ahead "
                                 "of an even spend and expires unspent otherwise")
                 else:
                     tags.append(f"would waste {waste:.0f}% at reset")
-        elif svc.burn_first and not svc.fallback_after and remaining is not None and remaining >= BURN_FIRST_MIN:
+        elif svc.burn_first and not svc.fallback_after and burn_bonus_ok and remaining is not None and remaining >= BURN_FIRST_MIN:
             # Static TOML fallback only when waste cannot be computed.
             rank -= BURN_FIRST_BONUS
         pace = info.get("pace_ratio")

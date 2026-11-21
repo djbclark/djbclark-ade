@@ -442,6 +442,46 @@ class TestCursorGrokRoute:
         assert not r.is_frontier_model("grok-4.7")           # no frontier floor/gate on it, like Neon
         assert not r.is_frontier_slice_model("grok-code-fast-1x-mini")
 
+    def test_slice_tokens_match_the_whole_model_id(self, catalog):
+        """Adversary PR 899 LOW-2: `grok-*` must not make a fast or mini Grok, or a namespaced one, a frontier-slice model."""
+        for model in ("grok-4.7", "grok-4.10", "grok-5 --effort high", "grok-*"):          # the id family, the unresolved glob
+            assert r.is_frontier_slice_model(model), model
+        for model in ("grok-4.7-fast", "grok-3-mini", "cursor/grok-4", "xgrok-4", "grok-4-mini --effort high", "grok-bot"):
+            assert not r.is_frontier_slice_model(model), model
+        for model in ("gemini-4-neon-high", "gemini-4.1-neon-high --effort high", "gemini-*-neon-high"):
+            assert r.is_frontier_slice_model(model), model
+        for model in ("gemini-4-neon-xhigh", "gemini-4-neon", "antigravity/gemini-4-neon-high"):
+            assert not r.is_frontier_slice_model(model), model
+
+    def test_an_underspent_cursor_pool_does_not_lift_grok_to_the_first_frontier_pick(self, catalog):
+        """Adversary PR 899 MED-1: the burn-first bonus (4.0) used to put cursor-grok (r4) ahead of Astra/Fable r1/r2 on a month of
+        unspent Cursor quota; a frontier slice is not spent to burn quota on a pool outside `frontier_models`."""
+        from datetime import UTC, datetime, timedelta
+        catalog({"cursor": self.CURSOR, "codex": CODEX})
+        resets = (datetime.now(UTC) + timedelta(days=20)).isoformat()
+        month = 30 * 24 * 60
+        q = {s.name: {"remaining": 70.0, "age_s": 0, "windows": {"weekly": 70.0}} for s in r.SERVICES}
+        q["cursor-grok"] = {"remaining": 85.0, "age_s": 0, "windows": {"monthly": 85.0}, "pace_ratio": 0.3,
+                            "resets_at": resets, "window_minutes": month}
+        assert r.expected_waste(85.0, 0.3, resets, month) >= r.BURN_FIRST_WASTE_MIN       # the bonus WOULD have applied
+        got = r.route("frontier", quota=q)
+        assert got is not None and got.service.name in {"codex", "claude"}, got and got.service.name
+        # still reachable by rank when the better frontier pools have no room
+        for name in ("codex", "claude"):
+            q[name] = {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}}
+        names = {r.route("frontier", quota=q).service.name}
+        assert names <= {"antigravity-neon", "cursor-grok"}, names
+
+    def test_the_static_burn_first_flag_does_not_lift_a_non_frontier_model_either(self, catalog, monkeypatch):
+        catalog({"cursor": self.CURSOR, "codex": CODEX})
+        import dataclasses
+        grok = dataclasses.replace(svc("cursor-grok"), burn_first=True)
+        monkeypatch.setattr(r, "SERVICES", tuple(grok if s.name == "cursor-grok" else s for s in r.SERVICES))
+        q = {s.name: {"remaining": 70.0, "age_s": 0, "windows": {"weekly": 70.0}} for s in r.SERVICES}
+        q["cursor-grok"] = {"remaining": 95.0, "age_s": 0, "windows": {"weekly": 95.0}}
+        got = r.route("frontier", quota=q)
+        assert got is not None and got.service.name != "cursor-grok", got.service.name
+
     def test_adjust_does_not_refuse_it_for_frontier(self, catalog):
         import route_adjust as ra
         catalog({"cursor": self.CURSOR})

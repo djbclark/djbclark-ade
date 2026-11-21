@@ -157,11 +157,12 @@ fable_gated_efforts = ["xhigh", "max"]
 # gpt-6-astra and Fable, through Paseo's antigravity provider (the `antigravity-argon` service).
 # A token with `*` is a family (`gpt-*-astra` matches gpt-6-astra and gpt-6.2-astra alike, 2026-11-21).
 frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
-# Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3); the cursor-grok service's newest Grok likewise).
+# Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3); the cursor-grok service's newest Grok likewise.
 # `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
 # estimate floor, and a Neon judgment/code slice is not a frontier model; the per-wave frontier cap still counts a Neon
-# `frontier` slice, because it is keyed on the kind and the pool, not on the model.
-frontier_slice_models = ["gemini-*-neon", "grok-*"]
+# `frontier` slice, because it is keyed on the kind and the pool, not on the model. A token matches the WHOLE model id (`grok-*` is
+# grok-4.7, not grok-4.7-fast or grok-3-mini), so it is written as the id family, effort word included.
+frontier_slice_models = ["gemini-*-neon-high", "grok-*"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
 # reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
