@@ -683,7 +683,7 @@ for building the aggregator.
    item in 12.1 and the place to try it. The official `pyright-lsp` plugin (`pyright-langserver`, installed at `/opt/homebrew/bin`, enabled) and
    `typescript-lsp` entries duplicate `local-lsp` and would root at the home directory unguarded if Claude Code ever preferred
    them (2026-11-21: `local-lsp` wins per extension, 0 `pyright-langserver` against 12 `basedpyright-langserver` processes; the
-   precedence is not documented). Disabling them is the operator's call (`enabledPlugins`). Since site-djbclark [#290](https://github.com/djbclark/site-djbclark/pull/290) the guarded entries fall back to the plain server when `lsp-root-guard` is missing (fail-open: no guard, the server roots at the session cwd), and [#292](https://github.com/djbclark/site-djbclark/pull/292) makes them say so on stderr and honour `ADE_LSP_ROOT_GUARD=off`.
+   precedence is not documented). Disabling them is the operator's call (`enabledPlugins`). Since site-djbclark [#290](https://github.com/djbclark/site-djbclark/pull/290) the guarded entries fall back to the plain server when `lsp-root-guard` is missing (fail-open: no guard, the server roots at the session cwd), [#292](https://github.com/djbclark/site-djbclark/pull/292) (merged 2026-11-21, plugin 1.0.5) made them say so on stderr and honour `ADE_LSP_ROOT_GUARD=off`, and [#293](https://github.com/djbclark/site-djbclark/pull/293) (1.0.6, open as of 2026-11-21) also appends the line to `~/.local/state/lsp-guard/unguarded.log`, falls back when `lsp-root-guard --check /` fails (a broken guard) and reads the switch as a plain `$ADE_LSP_ROOT_GUARD`, because Claude Code expands `${VAR:-default}` itself before `sh` runs.
 
 ### 12.4 Estimated saving
 
