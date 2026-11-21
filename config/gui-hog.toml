@@ -44,8 +44,8 @@ bundle_paths = [
 ]
 exe_paths = []
 
-# Freeze (PR 3c, docs/gui-hog-dialog.md section F). SIGSTOP of an app's whole process tree, only on an operator click (B6); only
-# resuming is automatic. `enabled = false` hides the Freeze buttons and makes `gui-hog freeze` refuse (exit 6): the rollback of I3.
+# Freeze (PR 3c, docs/gui-hog-dialog.md section F). SIGSTOP of an app's whole process tree, on an operator click or, for the apps listed in
+# [freeze.auto] below, by the sampler while a build is held (B6 amended 2026-11-21); resuming is always automatic. `enabled = false` hides the Freeze buttons and makes `gui-hog freeze` refuse (exit 6): the rollback of I3.
 # It does not touch `gui-hog thaw`, which keeps working so nothing can be left stopped.
 [freeze]
 enabled = true
@@ -53,3 +53,35 @@ default_minutes = 10    # a timed freeze resumes by itself (the sampler's tick r
 max_minutes = 1440      # the longest timed freeze `--minutes` accepts
 passes = 3              # rescans for helpers forked mid-freeze (F4d)
 lock_timeout_s = 5      # flock on frozen.lock (F1)
+
+# Auto-freeze list (operator ruling 2026-11-21, B6 amended): when a build is held by the GUI-hog trigger (refused for hold_s on a gate desktop apps can
+# relieve), the sampler freezes the FIRST running app of `order` (bundle ids, preferred first), one per 20 s tick, timed like a click (`minutes`, default
+# [freeze] default_minutes) and logged `by: "auto"`; it stops when the hold ends or no listed app is left. Unlisted apps still need a click, and
+# [protected] and the hard floor always win (a protected app is never auto-frozen). An app is skipped while idle (under min_cores of freeable cores), part
+# of a build, or frozen by us within refreeze_s (so an operator's Resume sticks for an hour). ~/.config/load-watch/gui-hog.toml may set `[freeze.auto]`
+# (order, enabled, minutes, min_cores, refreeze_s) and add to `[freeze.keep_running]`; `LW_GUI_HOG_AUTO=0` turns only this off.
+# The list lives here, not in the overlay: the operator named these three apps for this machine, and [protected] already carries machine-specific apps.
+[freeze.auto]
+enabled = true
+order = [
+  "com.steipete.codexbar",            # CodexBar: a menu-bar UI; its HTTP server (the CodexBarCLI helper) keeps running (keep_running below)
+  "com.automattic.beeper.desktop",    # Beeper Desktop
+  "com.anysphere.sand",               # Grok Bot
+]
+min_cores = 0.05
+refreeze_s = 3600
+
+# Processes of an app that a freeze never stops (manual or auto), by path inside the bundle, matched on the kernel executable path (never argv alone), and
+# every descendant of one. aiuse reads CodexBar's local HTTP server (`CodexBarCLI serve --host 127.0.0.1 --port 10546`, [collectors.codexbar] http_url):
+# freezing the whole group stopped it too (events.jsonl 2026-11-21 13:03:43Z: both pids stopped, /health timed out).
+[freeze.keep_running]
+# (the lead's live test 2026-11-21 ~13:15Z: with only CodexBar's main pid stopped and CodexBarCLI running, /health answered 200 in 0.002 s and
+# /usage in 0.18 s with live data, so the server does not need the UI process and CodexBar is first in the auto list.)
+"com.steipete.codexbar" = ["Contents/Helpers/CodexBarCLI"]
+# Chrome (Carried 116): the native-messaging hosts Chrome starts for extensions run from OUTSIDE its bundle, which made the whole app "host a build" (no
+# actions). They are stdio bridges, not builds: left running (a stopped Chrome simply stops reading them). Absolute paths (`~` = home) are allowed for
+# this. Chrome is NOT in the auto list: a click still freezes it, and the freeze has not been exercised live on it yet (docs/gui-hog-dialog.md O6).
+"com.google.Chrome" = [
+  "/Applications/1Password.app/Contents/Library/LoginItems/1Password Browser Helper.app/Contents/MacOS/1Password-BrowserSupport",
+  "~/.local/share/chrome-use/ChromeUse.app/Contents/MacOS/chrome-use",
+]

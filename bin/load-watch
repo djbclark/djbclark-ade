@@ -1731,7 +1731,7 @@ def gui_hog_tick(st, t, table, load1, dry):
         st.pop("app_meta", None)
         return
     gui_hog_mod().tick(st, t, table, {p: v[1] for p, v in PSTATE.items()}, PTTY, state_dir=STATE_DIR, my_uid=MY_UID,
-                       agent_clis=AGENT_CLIS, load1=load1, dry=dry, launch=True)
+                       agent_clis=AGENT_CLIS, load1=load1, dry=dry, launch=True, auto_freeze=True)
 
 
 def operator_notice(st, t, key, msg):

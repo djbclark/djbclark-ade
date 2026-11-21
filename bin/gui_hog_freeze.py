@@ -1,7 +1,8 @@
 """gui_hog_freeze: Freeze for the GUI-hog dialog (docs/gui-hog-dialog.md sections F and I3, PR 3c).
 
 Stdlib only. It imports `gui_hog` (grouping, the protected list, process identity) and never `load-watch`, so a broken sampler
-cannot block a thaw. Nothing here ever runs by itself except `thaw_due`, which only RESUMES (B6: freezing is an operator click).
+cannot block a thaw. Nothing here ever runs by itself except `thaw_due`, which only RESUMES, and `auto_freeze_step`, which the sampler calls for the apps
+of `[freeze.auto] order` only (B6 as amended 2026-11-21: any other freeze is an operator click).
 
     freeze(...)         vet the app (F6, F3, C4b), write the entry as `freezing` BEFORE any SIGSTOP (F2), stop the root first,
                         then its helpers, rescan up to 3 times (F4), then write the entry as `frozen`
@@ -60,7 +61,7 @@ def clock_text(ts, now, zone=CLOCK_ZONE):
     text = f"{t.hour % 12 or 12}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}{mark}"
     return text if t.date() == n.date() else f"{_DAYS[t.weekday()]} {text}"
 STATES = ("freezing", "frozen", "thawing")
-BY = ("dialog", "cli", "sampler", "uninstall", "recovery", "menubar")
+BY = ("dialog", "cli", "sampler", "uninstall", "recovery", "menubar", "auto")
 EVENTS_MAX_BYTES = 1024 * 1024
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")   # never starts with "-": an id is never read as an option
 # load-watch's AGENT_CLIS (tests/test_gui_hog_freeze.py pins that they are the same): a process under one of these is a build.
@@ -340,6 +341,10 @@ def norm_entry(e):
                "updated": float(e["updated"]) if _num(e.get("updated")) else frozen_at}
         if type(e.get("kept_running")) is int and 0 <= e["kept_running"] < 100000:
             out["kept_running"] = e["kept_running"]
+        if isinstance(e.get("kept"), list):   # names of the processes the keep-running rule left running (informational: never signalled, never trusted)
+            names = [gh.clean(x, 60) for x in e["kept"][:20] if isinstance(x, str)]
+            if names:
+                out["kept"] = names
         return out
     except Exception:  # noqa: BLE001 - the file is data; nothing in it may raise
         return None
@@ -486,7 +491,7 @@ def vet_app(pid, ops, cfg, state_dir, *, start=None, bundle_id=None, bundle_path
             continue
         members.append({"pid": p, "start": mi["start"], "uid": mi["uid"], "exe": mexe, "stopped": is_stopped(mi)})
     return {"app": {"name": gh.clean(app["name"]), "bundle_id": gh.clean(live_id or "", 80), "bundle_path": gh.clean(bpath, 200)},
-            "root": root, "members": members}
+            "root": root, "members": members, "kept": list(app.get("kept_names") or [])}
 
 
 # ---- signals --------------------------------------------------------------------------------------------------------------------
@@ -614,6 +619,8 @@ def _freeze_locked(dfd, entries, v, ops, cfg, state_dir, by, now, minutes, agent
              "members": [{k: m[k] for k in ("pid", "start", "uid", "exe")} for m in todo],
              "mode": "timed" if minutes else "indefinite", "frozen_at": now, "thaw_at": now + minutes * 60 if minutes else None,
              "by": by, "updated": now}
+    if v.get("kept"):
+        entry["kept"] = list(v["kept"])   # the keep-running rule's processes (CodexBar's HTTP server): never stopped, shown in the dialog
     entries.append(entry)
     save_entries(dfd, entries)   # F2: the write-ahead record names everything we are about to stop, BEFORE the first SIGSTOP
     try:
@@ -649,7 +656,7 @@ def _freeze_locked(dfd, entries, v, ops, cfg, state_dir, by, now, minutes, agent
         event(dfd, "refuse", by, now=now, pid=root["pid"], code=REFUSED, why=f"{type(e).__name__}: {e}")
         raise Refusal(REFUSED, f"freeze failed and was rolled back: {type(e).__name__}: {e}") from e
     event(dfd, "freeze", by, now=now, entry=entry["id"], app=entry["app"], mode=entry["mode"], thaw_at=entry["thaw_at"],
-          root=root["pid"], members=len(entry["members"]), kept_running=entry.get("kept_running", 0))
+          root=root["pid"], members=len(entry["members"]), kept_running=entry.get("kept_running", 0), kept=entry.get("kept", []))
     return entry
 
 
@@ -665,6 +672,78 @@ def _stop(dfd, ops, entry, recs, by, now, is_root=False):
             entry["members"] = [m for m in entry["members"] if m["pid"] != rec["pid"]]
             event(dfd, "drop", by, now=now, entry=entry["id"], pid=rec["pid"], why=res)
     return ok
+
+
+# ---- the auto-freeze list (operator ruling 2026-11-21: B6 amended) ---------------------------------------------------------------
+AUTO_RETRY_S = 120   # after a refused auto-freeze the same app is not retried for this long (a hosted build or a protected newcomer may clear)
+
+
+def auto_candidates(apps, cfg, auto_state, now):
+    """[(app_record, why_not)] for the bundle ids of `[freeze.auto] order`, preferred first. The app is the first running record of that bundle id;
+    `why_not` is "" when it may be auto-frozen now, else the reason it is skipped: not-running, protected, excluded (part of a build), hosts-build,
+    cooling-down (frozen by us within refreeze_s: an operator's Resume sticks), retry-wait, or idle (its freeable cores, those of the processes a
+    freeze would stop, are under `min_cores`: a freeze would free nothing). `[protected]` and the hard floor always win: a protected app is never a candidate."""
+    au = cfg["freeze"]["auto"]
+    out = []
+    for bid in au.get("order", []):
+        a = next((x for x in apps if x.get("bundle_id") and str(x["bundle_id"]).casefold() == bid.casefold()), None)
+        if a is None:
+            out.append(({"bundle_id": bid}, "not-running"))
+            continue
+        st = auto_state.get(bid.casefold()) if isinstance(auto_state.get(bid.casefold()), dict) else None
+        free = a["cores"] - a.get("kept_cores", 0.0)
+        if a["protected"]:
+            why = "protected"
+        elif a["excluded"]:
+            why = "excluded"
+        elif a["hosts_build"]:
+            why = "hosts-build"
+        elif st and gh._fin(st.get("t")) and 0 <= now - st["t"] < (float(au.get("refreeze_s", 3600)) if st.get("ok") else AUTO_RETRY_S):
+            why = "cooling-down" if st.get("ok") else "retry-wait"
+        elif free < float(au.get("min_cores", 0.05)):
+            why = "idle"
+        else:
+            why = ""
+        out.append((a, why))
+    return out
+
+
+def auto_freeze_step(gh_state, state_dir, apps, held, now, cfg, *, my_uid, agent_clis=(), ops=None, dry=False, freeze_fn=None):
+    """One sampler tick of the auto-freeze list: while a build is held by the GUI-hog trigger (`hold_active`: refused for hold_s on a gate desktop apps
+    can relieve), freeze the FIRST app of `[freeze.auto] order` that is running, not protected, not part of a build, not frozen by us within refreeze_s
+    and using at least min_cores. One app per tick, so the build's next admission poll can see the relief and the list stops there; it ends when the
+    hold goes (no held build) or no listed app is left. Timed, like a click (`by` is "auto"; every thaw path is the same). Returns None when nothing
+    was due, else {"app", "bundle_id", "entry" | "refused", "dry"}. Needs `[freeze] enabled`, `[freeze.auto] enabled` and a non-empty order."""
+    fz = cfg["freeze"]
+    au = fz["auto"]
+    if not fz.get("enabled", True) or not au.get("enabled", True) or not au.get("order"):
+        return None
+    if not gh.hold_active(held, now, cfg)[1]:
+        return None
+    auto_state = gh_state.get("auto") if isinstance(gh_state.get("auto"), dict) else {}
+    gh_state["auto"] = auto_state
+    for a, why in auto_candidates(apps, cfg, auto_state, now):
+        if why:
+            continue
+        res = {"app": a["name"], "bundle_id": a["bundle_id"], "dry": bool(dry)}
+        if dry:
+            return res
+        ops = ops or Ops(my_uid)
+        minutes = au.get("minutes") or fz.get("default_minutes", 10)
+        key = a["bundle_id"].casefold()
+        try:
+            inf = ops.info([int(a["root_pid"])]).get(int(a["root_pid"]))
+            if inf is None:
+                raise Refusal(IDENTITY, "gone")
+            e = (freeze_fn or freeze)(state_dir, int(a["root_pid"]), start=inf["start"], bundle_id=a["bundle_id"], bundle_path=a["bundle_path"],
+                                      minutes=int(minutes), by="auto", ops=ops, cfg=cfg, now=now, agent_clis=agent_clis, check_sampler=False)
+            auto_state[key] = {"t": now, "ok": True}
+            res.update(entry=e["id"], thaw_at=e["thaw_at"], kept=e.get("kept", []))
+        except Refusal as r:
+            auto_state[key] = {"t": now, "ok": False}
+            res["refused"] = f"{r.code}: {r.msg}"[:160]
+        return res
+    return None
 
 
 # ---- thaw paths (F5, F7) ----------------------------------------------------------------------------------------------------------
@@ -807,7 +886,8 @@ def frozen_view(state_dir, ops=None, now=None):
     for e in entries:
         out.append({"id": e["id"], "state": e["state"], "app": e["app"], "mode": e["mode"], "by": e["by"], "frozen_at": e["frozen_at"],
                     "thaw_at": e["thaw_at"], "root_pid": e["root"]["pid"], "members": len(e["members"]) + 1,
-                    "alive": mismatch(e["root"], infos.get(e["root"]["pid"]), ops.my_uid, need_exe=False) is None, "kept_running": e.get("kept_running", 0)})
+                    "alive": mismatch(e["root"], infos.get(e["root"]["pid"]), ops.my_uid, need_exe=False) is None, "kept_running": e.get("kept_running", 0),
+                    "kept": e.get("kept", [])})
     return {"v": 1, "entries": out, "notes": notes}
 
 
@@ -840,7 +920,7 @@ def ensure_status_item(state_dir, *, popen=None, gui_ok=True, bundle=None):
 
 # ---- the CLI (called from bin/gui-hog) -----------------------------------------------------------------------------------------------
 def add_subcommands(sub):
-    p = sub.add_parser("freeze", help="SIGSTOP an app's whole process tree (an operator click: never automatic)")
+    p = sub.add_parser("freeze", help="SIGSTOP an app's whole process tree (an operator click, or the sampler for an app on the [freeze.auto] list)")
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--start", required=True, help="expected start time of the pid (the snapshot's value); a mismatch refuses")
     p.add_argument("--bundle-id", default=None, help="expected bundle id (the live one decides)")
@@ -911,7 +991,7 @@ def cmd_freeze(a, state_dir):
     except Exception as ex:  # noqa: BLE001 - the app is already stopped and recorded; the exit code must say so
         why = f"error: {ex!r}"[:120]
     print(json.dumps({"ok": True, "entry": e["id"], "state": e["state"], "mode": e["mode"], "thaw_at": e["thaw_at"], "members": len(e["members"]) + 1,
-                      "kept_running": e.get("kept_running", 0), "status_item": why}))
+                      "kept_running": e.get("kept_running", 0), "kept": e.get("kept", []), "status_item": why}))
     return OK
 
 

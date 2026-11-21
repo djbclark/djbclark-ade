@@ -177,6 +177,29 @@ func runSelfTest() -> Int32 {
     check(!identityMatches(noEpoch, ok).ok, "a row without a start epoch never matches")
     check(liveStartEpoch(Int(getpid())) != nil, "proc_pidinfo reads this process's start time")
 
+    // Button handling (2026-11-21): rapid Freeze clicks on several rows. One window-wide grace clock swallowed every click after the first (the click's own
+    // rebuild restarted it); the grace is now per control group and restarts only when that group's own layout changes.
+    var g = ClickGrace()
+    let snap0 = Snapshot(t: 0, load: nil, ncpu: nil, cpu5m: nil, holds: [], rows: [], more: 0, protectedHidden: 0, rssTrigger: false)
+    for (i, id) in ["a", "b", "c"].enumerated() { g.note("row:" + id, sig: "\(i)|-|true", now: 100.0) }
+    check(!g.allowed("row:a", now: 100.3) && !g.allowed("row:b", now: 100.3), "a click right after the first layout is ignored, per row")
+    check(g.allowed("row:a", now: 100.8) && g.allowed("row:b", now: 100.8) && g.allowed("row:c", now: 100.8), "after the grace every row accepts a click")
+    g.note("row:a", sig: "0|-|true", now: 101.0)   // row a's click made the window redraw "freezing…": the same layout
+    check(g.allowed("row:b", now: 101.1) && g.allowed("row:c", now: 101.1) && g.allowed("row:a", now: 101.1), "a redraw with the same layout restarts nobody's grace: the second and third Freeze clicks get through")
+    g.note("row:a", sig: "0|frozen: use Resume below|false", now: 102.0)   // row a became frozen: its buttons are gone, its layout changed
+    check(!g.allowed("row:a", now: 102.2) && g.allowed("row:b", now: 102.2), "a row whose own layout changed has a fresh grace; the other rows are unaffected")
+    check(!g.allowed("row:never-drawn", now: 200.0), "a key that was never laid out is never allowed")
+    g.keepOnly(["row:b"])
+    check(g.allowed("row:b", now: 200.0) && !g.allowed("row:a", now: 200.0), "a group that left the screen is forgotten")
+    check(rowLayoutSig(row, index: 2, snap0) == rowLayoutSig(row, index: 2, snap0) && rowLayoutSig(row, index: 2, snap0) != rowLayoutSig(row, index: 3, snap0), "a row's layout signature changes with its position")
+    let keptJson = """
+    {"v":1,"entries":[{"id":"k1","state":"frozen","app":{"name":"CodexBar"},"mode":"timed","by":"auto","thaw_at":1000,"root_pid":5,"members":1,"alive":true,"kept":["CodexBarCLI","x\\u202ey"]},
+                      {"id":"k2","state":"frozen","app":{"name":"Plain"},"mode":"timed","by":"dialog","thaw_at":1000,"root_pid":6,"members":1,"alive":true}]}
+    """
+    let ke = parseFrozen(Data(keptJson.utf8))
+    check(ke?.first?.by == "auto" && ke?.first?.kept == ["CodexBarCLI", "xy"], "the frozen list carries who froze it and the processes the keep-running rule left running (sanitized)")
+    check(ke.flatMap { frozenKeptText($0[0]) } == "frozen automatically · keeps running: CodexBarCLI, xy" && ke.flatMap { frozenKeptText($0[1]) } == nil, "the Frozen line says so, and says nothing for a plain click freeze")
+
     if failed.isEmpty { print("ade-gui-hog self-test: ok (\(n) checks)"); return 0 }
     for f in failed { print("FAIL: \(f)") }
     print("ade-gui-hog self-test: \(failed.count) of \(n) failed")

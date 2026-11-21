@@ -50,7 +50,12 @@ DEFAULTS = {
                 "relievable": ["load", "compressor", "free_mem", "pageins", "swapins"]},
     "protected": {"bundle_ids": [], "bundle_id_prefixes": [], "bundle_paths": [], "exe_paths": []},
     # PR 3c (section F): Freeze. Only the shipped config can turn it off; `enabled = false` hides the buttons and refuses `gui-hog freeze`.
-    "freeze": {"enabled": True, "default_minutes": 10, "max_minutes": 1440, "passes": 3, "lock_timeout_s": 5},
+    "freeze": {"enabled": True, "default_minutes": 10, "max_minutes": 1440, "passes": 3, "lock_timeout_s": 5,
+               # Operator ruling 2026-11-21 (design rule B6 amended): apps listed in `order` (bundle ids, preferred first) are frozen by the sampler
+               # when a build is held by the GUI-hog trigger; unlisted apps still need a click. `[protected]` and the hard floor always win.
+               "auto": {"enabled": True, "order": [], "minutes": None, "min_cores": 0.05, "refreeze_s": 3600},
+               # bundle id -> paths inside the bundle that a freeze never stops (matched on the kernel exe, never argv): CodexBar's HTTP server
+               "keep_running": {}},
 }
 
 # The hard floor (F6): code, not configuration. Config can add protected entries, never remove these.
@@ -97,23 +102,50 @@ def _read_toml(path):
         return tomllib.load(f)
 
 
+def _merge_freeze(cfg, data):
+    """Fold a `[freeze]` table (the shipped file or the user overlay) into cfg: plain keys replace, `auto` replaces key by key, `keep_running` is
+    per bundle id (a list of relative paths; the overlay adds to the shipped lists, it never removes one). Wrong types are ignored."""
+    for k, v in data.items():
+        if k == "auto" and isinstance(v, dict):
+            for ak, av in v.items():
+                if ak == "order":
+                    if isinstance(av, list):
+                        cfg["freeze"]["auto"]["order"] = [x for x in av if isinstance(x, str) and x.strip()]
+                elif ak in cfg["freeze"]["auto"]:
+                    cfg["freeze"]["auto"][ak] = av
+        elif k == "keep_running" and isinstance(v, dict):
+            for bid, rels in v.items():
+                if isinstance(bid, str) and isinstance(rels, list):
+                    have = cfg["freeze"]["keep_running"].setdefault(bid, [])
+                    have.extend(r for r in rels if isinstance(r, str) and r not in have)
+        elif k not in ("auto", "keep_running"):
+            cfg["freeze"][k] = v
+
+
 def load_config(path=None, local=None):
-    """Defaults, then config/gui-hog.toml, then the local file's protected lists (it can only ADD to them). Raises on a broken
-    shipped file; a broken local file is ignored (it can only add)."""
+    """Defaults, then config/gui-hog.toml, then the user overlay (~/.config/load-watch/gui-hog.toml). The overlay can only ADD to the protected
+    lists (never remove from them or from the hard floor in code); `[freeze.auto]` (the order, enabled, minutes, min_cores, refreeze_s) it may
+    set or override, and `[freeze.keep_running]` it adds to. Raises on a broken shipped file; a broken overlay is ignored."""
     cfg = json.loads(json.dumps(DEFAULTS))
     data = _read_toml(path or DEFAULT_CONFIG) if (path or DEFAULT_CONFIG).exists() else {}
     for sec, vals in data.items():
-        if sec in cfg and isinstance(vals, dict):
+        if sec == "freeze" and isinstance(vals, dict):
+            _merge_freeze(cfg, vals)
+        elif sec in cfg and isinstance(vals, dict):
             cfg[sec].update(vals)
     loc = local if local is not None else LOCAL_CONFIG
     try:
-        extra = _read_toml(loc).get("protected", {}) if loc.exists() else {}
-    except Exception:  # noqa: BLE001 - local additions are optional
-        extra = {}
+        over = _read_toml(loc) if loc.exists() else {}
+    except Exception:  # noqa: BLE001 - the overlay is optional
+        over = {}
+    extra = over.get("protected", {}) if isinstance(over, dict) else {}
     for key in cfg["protected"]:
         add = extra.get(key, []) if isinstance(extra, dict) else []
         if isinstance(add, list):
             cfg["protected"][key] = list(cfg["protected"][key]) + [x for x in add if isinstance(x, str)]
+    fz = over.get("freeze") if isinstance(over, dict) else None
+    if isinstance(fz, dict):   # only the auto-freeze list and the keep-running rules: the overlay cannot touch enabled, max_minutes, passes, the lock timeout
+        _merge_freeze(cfg, {k: v for k, v in fz.items() if k in ("auto", "keep_running")})
     return cfg
 
 
@@ -483,6 +515,54 @@ def _plist_id(bundle_path):
         return None
 
 
+def keep_rules(cfg, bundle_id):
+    """The paths that a freeze of `bundle_id` never stops (`[freeze.keep_running]`, matched on the bundle id, case-insensitively). A rule is a path
+    inside the bundle (`Contents/Helpers/CodexBarCLI`) or an absolute path (`~` is the home directory) for a process the app spawns from OUTSIDE its
+    bundle, such as Chrome's native-messaging hosts. A rule with a `..` component is ignored (it can never point somewhere it does not name)."""
+    table = (cfg.get("freeze") or {}).get("keep_running") or {}
+    out = []
+    for bid, rels in table.items():
+        if isinstance(bid, str) and bundle_id and bid.casefold() == str(bundle_id).casefold() and isinstance(rels, list):
+            for r in rels:
+                parts = Path(r).parts if isinstance(r, str) else ()
+                if parts and ".." not in parts and r not in out:
+                    out.append(r)
+    return out
+
+
+def keep_targets(bundle_real, rules):
+    """The rules as real paths: relative ones under the bundle, absolute (or `~/`) ones as they are."""
+    out = []
+    for r in rules:
+        r = os.path.expanduser(r) if r.startswith("~") else r
+        out.append(Path(_real(r)) if os.path.isabs(r) else Path(bundle_real, r))
+    return out
+
+
+def keep_running_pids(app, table, exe, cfg):
+    """The members of `app` that a freeze must not stop: a process whose KERNEL executable path is a keep-running path of its bundle (never argv
+    alone: a process sets its own argv), and every descendant of one inside the app. The root is never kept (an app whose main binary is
+    kept would freeze nothing). `exe(pid)` is group_apps' cached realpath of the kernel executable."""
+    rules = keep_rules(cfg, app.bundle_id)
+    if not rules:
+        return set()
+    targets = keep_targets(app.real, rules)
+    members = [m for m in app.members if m != app.id]
+    kept = set()
+    for m in members:
+        ex = exe(m)
+        if ex and any(_under(ex, t) for t in targets):
+            kept.add(m)
+    grew = True
+    while grew:
+        grew = False
+        for m in members:
+            if m not in kept and str(table[m][0]) in kept:
+                kept.add(m)
+                grew = True
+    return kept
+
+
 def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), agent_clis=(), cfg=None):
     """One record per GUI app: {id (root pid), name, bundle_id, bundle_path, root_pid, members, cores, rss_mb, hosts_build,
     build_cores, excluded, protected}. `table` is load-watch's ps table {pid: (ppid, uid, cores, command)}; `rss_kb` {pid: KB};
@@ -525,9 +605,12 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
         words = table[pid][3].split() if pid in table else []
         return bool(SHELLS & {pname(pid).lstrip("-"), os.path.basename(words[0]).lstrip("-") if words else ""})
 
+    keep_out = {}   # bundle realpath -> the absolute keep-running paths of its app (Chrome's native-messaging hosts): outside the bundle, but not a build
+
     def build_stop(pid, real):   # C4b: a shell, a pty-attached process, a held caller, `bg` or an agent CLI, or an executable outside the bundle
         ex = exe(pid)
-        return is_shell(pid) or pid in ttys or pid in held_pids or is_agent(pid) or (ex is not None and not _under(ex, real))
+        outside = ex is not None and not _under(ex, real) and not any(_under(ex, t) for t in keep_out.get(real, ()))
+        return is_shell(pid) or pid in ttys or pid in held_pids or is_agent(pid) or outside
 
     roots = {}
     for e in lsapps:
@@ -567,6 +650,8 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
                 break
             anc, hops = str(table[anc][0]), hops + 1
     apps = {pid: _App(pid, r) for pid, r in roots.items()}
+    for app in apps.values():
+        keep_out[app.real] = [t for t in keep_targets(app.real, keep_rules(cfg, app.bundle_id)) if not _under(t, app.real)]
     owner = {pid: pid for pid in apps}
 
     def subtree(pid, seen):
@@ -639,6 +724,7 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
                 break
     out = []
     for rid, app in apps.items():
+        kept = keep_running_pids(app, table, exe, cfg)
         anc, hops, excluded = str(table[rid][0]), 0, None
         if rid in held_pids:
             excluded = "held-caller"
@@ -650,7 +736,10 @@ def group_apps(table, rss_kb, ttys, lsapps, *, exe_of, my_uid, held_pids=(), age
             anc, hops = str(table[anc][0]), hops + 1
         rex = exe(rid)
         out.append({"id": rid, "name": app.name, "bundle_id": app.bundle_id, "bundle_path": app.bundle_path,
-                    "root_pid": app.root_pid, "members": len(app.members), "member_pids": [int(m) for m in app.members],
+                    "root_pid": app.root_pid, "members": len(app.members), "member_pids": [int(m) for m in app.members if m not in kept],
+                    "kept_pids": sorted(int(m) for m in kept), "kept_rules": keep_rules(cfg, app.bundle_id),
+                    "kept_cores": sum(table[p][2] for p in kept if p in table),
+                    "kept_names": sorted({clean(os.path.basename(exe(m)), 60) for m in kept if exe(m)})[:20],
                     "cores": sum(table[p][2] for p in app.members if p in table),
                     "rss_mb": sum(rss_kb.get(p, 0) for p in app.members) / 1024.0,
                     "hosts_build": bool(app.build), "build_cores": app.build_cores, "excluded": excluded,
@@ -720,6 +809,16 @@ def window_means(st, t, cfg):
     return out
 
 
+def hold_active(held, now, cfg):
+    """(old, live): the holds refused for hold_s or longer, and those of them whose refusals include a gate that quitting a desktop app can relieve
+    (C4a, C4b). `live` non-empty is the "a build is waiting because of desktop apps" condition that both the dialog and the auto-freeze list (B6,
+    amended 2026-11-21) start from."""
+    tr = cfg["trigger"]
+    rel = set(tr["relievable"])
+    old = [h for h in held if now - h["refused_since"] >= tr["hold_s"]]
+    return old, [h for h in old if rel & set(h.get("refused", []))]
+
+
 def should_show(held, apps, now, snooze, last_shown, cfg):
     """Would the dialog show now? {"show": bool, "reason": str, "sum_cores", "sum_rss_mb", "holds": [...]}. All of (C4):
     (a) some hold has been refused for hold_s or longer; (b) its refusals include a gate that desktop apps can relieve; (c) the SUM
@@ -729,9 +828,7 @@ def should_show(held, apps, now, snooze, last_shown, cfg):
     tr = cfg["trigger"]
     snooze = snooze if _fin(snooze) else None
     last_shown = last_shown if _fin(last_shown) and last_shown <= now else None   # a clock set back must not silence the trigger
-    rel = set(tr["relievable"])
-    old = [h for h in held if now - h["refused_since"] >= tr["hold_s"]]
-    live = [h for h in old if rel & set(h.get("refused", []))]
+    old, live = hold_active(held, now, cfg)
     pool = [a for a in apps if not a.get("protected") and not a.get("excluded")]
     cores, rss = sum(a["cores_5m"] for a in pool), sum(a["rss_mb"] for a in pool)
     res = {"show": False, "reason": "", "sum_cores": round(cores, 2), "sum_rss_mb": int(rss), "holds": live}
@@ -1179,7 +1276,7 @@ def _note_exit(state_dir, gh, t):
 
 def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_cores=None, load1=None, dry=False,
          cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=None, launch=False, popen=subprocess.Popen,
-         load_avg=None, ncpu=None, gui_ok=None):
+         load_avg=None, ncpu=None, gui_ok=None, auto_freeze=False):
     """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, keep the dialog's snapshot fresh while a hold
     is active or the dialog runs (D3), and on a `show` write the dry-run line (kept in 3b: it is the count of how often the dialog fired) and,
     with `launch`, start the dialog (C5, D6). With `dry` it prints the line and changes nothing but the window. Returns the decision dict, or None
@@ -1215,6 +1312,14 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
                                                          starts=proc_starts([int(a["id"]) for a in rows if str(a["id"]).isdigit()])))
             except Exception as e:  # noqa: BLE001
                 out(f"gui-hog: snapshot: {e!r}")
+    if (auto_freeze or dry) and os.environ.get("LW_GUI_HOG_AUTO", "").strip() != "0":   # LW_GUI_HOG_AUTO=0 turns only this off; the operator's auto-freeze list (B6 amended 2026-11-21): only the sampler passes auto_freeze=True; dry prints what it would do
+        try:
+            import gui_hog_freeze
+            r = gui_hog_freeze.auto_freeze_step(gh, state_dir, apps, held, t, cfg, my_uid=my_uid, agent_clis=agent_clis, dry=dry or not auto_freeze)
+            if r:
+                out(("gui-hog would auto-freeze " if r.get("dry") else "gui-hog auto-freeze ") + json.dumps(r, separators=(",", ":"), default=str))
+        except Exception as e:  # noqa: BLE001 - the auto-freeze never stops a sample, the dialog or the decision
+            out(f"gui-hog: auto-freeze: {e!r}")
     if d["show"]:
         line = would_show_line(d, means, t, load1, cfg, my_uid)
         if dry:
