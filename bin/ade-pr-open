@@ -35,7 +35,7 @@ from pathlib import Path
 
 EXIT_OK, EXIT_USAGE, EXIT_GH, EXIT_FOLLOWUP = 0, 2, 3, 4
 PLACEHOLDER = re.compile(r"\(#PR\)(\.?)[ \t]*$", re.MULTILINE)
-PR_URL = re.compile(r"/pull/(\d+)\s*$")
+PR_URL = re.compile(r"^https?://\S+/pull/(\d+)\s*$", re.MULTILINE)
 HERE = Path(__file__).resolve().parent
 
 
@@ -124,12 +124,13 @@ def main(argv):
             sys.stdout.write(gh.stdout)
             return fail(EXIT_GH, f"gh pr create exited {gh.returncode}; no PR number to fill")
         sys.stdout.write(gh.stdout)
-        url = gh.stdout.strip().splitlines()[-1] if gh.stdout.strip() else ""
-        m = PR_URL.search(url)
-        if not m:
-            return fail(EXIT_FOLLOWUP, f"gh pr create printed no PR URL I can read ({url!r}); find the number "
-                        f"and run: bin/ade-pr-open --existing N")
-        number = int(m.group(1))
+        # gh prints the URL on a line of its own, then (newer gh) hint lines: take the URL line.
+        found = PR_URL.findall(gh.stdout)
+        if not found:
+            return fail(EXIT_FOLLOWUP, "gh pr create printed no PR URL line I can read; find the number "
+                        "and run: bin/ade-pr-open --existing N")
+        number = int(found[0])
+        url = f"PR #{number}"
 
     repair = f"repair: bin/ade-pr-open --existing {number} (from {root})"
     try:

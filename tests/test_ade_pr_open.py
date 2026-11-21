@@ -43,7 +43,9 @@ def env(tmp_path):
     gh.write_text(f'#!/bin/sh\necho "$@" >> {log}\n'
                   'if [ -n "$FAKE_GH_FAIL" ]; then echo "gh: boom" >&2; exit 1; fi\n'
                   'echo "Creating pull request"\n'
-                  'echo "https://github.com/djbclark/djbclark-ade/pull/${FAKE_PR:-901}"\n')
+                  'echo "https://github.com/djbclark/djbclark-ade/pull/${FAKE_PR:-901}"\n'
+                  'echo "hint: wait with gh event listen --resource https://github.com/o/r/pull/5"\n'
+                  'echo "  - It prints the first event as a JSON line and exits"\n')
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     e = {**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
     return repo, remote, log, e
