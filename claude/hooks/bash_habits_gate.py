@@ -746,21 +746,30 @@ def _join_continuations(c: str) -> str:
     return "\n".join(out)
 
 
-def _drop_heredocs(c: str) -> str:
-    """The command without heredoc bodies (their text is data, not commands)."""
-    out, lines, i, state = [], c.split("\n"), 0, None
+def _split_heredocs(c: str) -> tuple[str, list[str]]:
+    """(the command without heredoc bodies, the bodies whose delimiter is unquoted). A body is data, not commands, but the
+    shell expands `$...` in an unquoted-delimiter body before whatever reads it runs; `<<'EOF'` and `<<"EOF"` keep it literal."""
+    out, bodies, lines, i, state = [], [], c.split("\n"), 0, None
     offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
         matches, state = _heredoc_introducers(lines[i], state, c, offsets[i])
         for m in matches:
             i += 1
+            first = i
             while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
+            if not m.group(2):
+                bodies.append("\n".join(lines[first:i]))
             if i < len(lines):
                 out.append(lines[i])  # recursive substitutions still need their verified delimiter
         i += 1
-    return "\n".join(out)
+    return "\n".join(out), bodies
+
+
+def _drop_heredocs(c: str) -> str:
+    """The command without heredoc bodies (their text is data, not commands)."""
+    return _split_heredocs(c)[0]
 
 
 def _drop_redirections(stage: str) -> list[str]:
@@ -1007,41 +1016,75 @@ ZSH_MODIFIER_REASON = (
     "zsh (this Mac's Bash-tool shell) applies history modifiers to a bare `{word}`: `$C:r` strips an extension, so "
     "`git push origin $C:refs/heads/x` pushed `<sha>efs/heads/x` (2026-11-21), and `\"$h:c...\"` ate the `:c`; refspecs, "
     "`scp host:path` and rsync targets are hit the same way. Write `${{NAME}}:...` instead (braced forms, single quotes and "
-    "`\\$` are safe).")
-# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21): a A c e h l P q Q r s t u &, and g or w
-# before one of them (`:gs/a/b/`, `:gr`). Not modifiers there, so left alone: p S x f F 0-9, `::`, `:-`, `:/`.
-ZSH_MODIFIER = re.compile(r"\$(?:[A-Za-z_]\w*|\d+|[@*#?$!-]):[gw]?[aAcehlPqQrstu&]")
+    "`\\$` are safe). An unquoted heredoc body (`<<EOF`) is expanded too: quote its delimiter (`<<'EOF'`) or use `${{NAME}}`.")
+# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21): a A c e h l P q Q r s t u &, and before one of them any
+# prefixes f, g, w, `F` or `F:expr:` (`:gs/a/b/`, `:gr`, `:fr`, `:F:2:r`, `:Fr`). Not modifiers there, so left alone: p S x, 0-9,
+# `::`, `:-`, `:/`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and the name: parameter flags `= ~ ^ + #`
+# (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob, not a subscript).
+ZSH_MODIFIER = re.compile(
+    r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]*\])?|\d+|[#?$!-])"
+    r":(?:[fgw]|F:[^:\s]*:|F)*[aAcehlPqQrstu&]")
+ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
 
 
-def zsh_modifier_word(text: str) -> str | None:
+def zsh_modifier_word(text: str, bodies: list[str] | tuple[str, ...] = ()) -> str | None:
     """The first `$NAME:x` in `text` (heredoc bodies already dropped) that zsh reads as a history modifier, found outside
     single quotes, comments and backslash escapes; a double-quoted `$NAME:x` counts (zsh expands it too). `${NAME}:x` never
-    matches because the pattern needs the name to follow `$` directly."""
-    i, n, dq = 0, len(text), False
-    while i < n:
+    matches because the pattern needs the name to follow `$` directly. `$(...)` and backtick bodies are scanned as fresh
+    command text, also inside double quotes (a quote in there is a real quote). `bodies` are the unquoted-delimiter heredoc
+    bodies (`_split_heredocs`): there only a backslash and `$` are special, quotes and `#` are literal."""
+    hit = _zsh_modifier_scan(text, 0, len(text), "cmd", 0)
+    for body in bodies:
+        hit = hit or _zsh_modifier_scan(body, 0, len(body), "body", 0)
+    return hit
+
+
+def _zsh_modifier_scan(text: str, i: int, end: int, mode: str, depth: int) -> str | None:
+    """Scan text[i:end]; mode is "cmd" (unquoted), "dq" (inside double quotes) or "body" (unquoted heredoc body)."""
+    start, dq, body = i, mode == "dq", mode == "body"
+    while i < end:
         ch = text[i]
         if ch == "\\":
             i += 2
-        elif ch == "#" and not dq and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif ch == "'" and not dq:
+        elif ch == "#" and not body and not dq and (i == start or text[i - 1].isspace() or text[i - 1] in ";&|("):
+            j = text.find("\n", i, end)
+            i = end if j < 0 else j
+        elif ch == "'" and not body and not dq:
             j = i + 1
             if i and text[i - 1] == "$":                 # $'...': a backslash escapes the next character
-                while j < n and text[j] != "'":
+                while j < end and text[j] != "'":
                     j += 2 if text[j] == "\\" else 1
             else:
-                k = text.find("'", j)
-                j = n if k < 0 else k
+                k = text.find("'", j, end)
+                j = end if k < 0 else k
             i = j + 1
-        elif ch == '"':
+        elif ch == '"' and not body:
             dq = not dq
             i += 1
+        elif ch == "`" and depth < ZSH_SCAN_DEPTH:
+            j, inner = i + 1, []
+            while j < end and text[j] != "`":
+                if text[j] == "\\" and j + 1 < end and text[j + 1] in ("\\$`\"" if dq else "\\$`"):
+                    j += 1
+                inner.append(text[j])
+                j += 1
+            code = "".join(inner)
+            hit = _zsh_modifier_scan(code, 0, len(code), "cmd", depth + 1)
+            if hit:
+                return hit
+            i = j + 1
         elif ch == "$":
-            m = ZSH_MODIFIER.match(text, i)
+            if text.startswith("$(", i) and depth < ZSH_SCAN_DEPTH:      # `$((` too: its body is read as plain text anyway
+                close = min(_closing_paren(text, i + 2), end)
+                hit = _zsh_modifier_scan(text, i + 2, close, "cmd", depth + 1)
+                if hit:
+                    return hit
+                i = close + 1
+                continue
+            m = ZSH_MODIFIER.match(text, i, end)
             if m:
                 return m.group(0)
-            i += 1
+            i += 2 if text[i + 1:i + 2] == "$" else 1    # `$$` is the pid: the name after it is plain text
         else:
             i += 1
     return None
@@ -1348,7 +1391,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     send = risky_send_reason(cmd)
     if send:
         return send, None
-    zmod = zsh_modifier_word(_drop_heredocs(cmd))
+    stripped, heredoc_bodies = _split_heredocs(cmd)
+    zmod = zsh_modifier_word(stripped, heredoc_bodies)
     if zmod:
         return ZSH_MODIFIER_REASON.format(word=zmod), None
     plain = strip_literals(cmd)
