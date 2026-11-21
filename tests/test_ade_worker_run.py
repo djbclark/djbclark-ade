@@ -1735,12 +1735,12 @@ def git(*args, cwd):
                    env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"})
 
 
-def make_repo(tmp_path, name="libntech"):
+def make_repo(tmp_path, name="libntech", wt_name=None):
     main = tmp_path / name
     main.mkdir()
     git("init", "-q", "-b", "master", cwd=main)
     git("commit", "-q", "--allow-empty", "-m", "i", cwd=main)
-    wt = tmp_path / f"{name}-strictjson-wt"
+    wt = tmp_path / (wt_name or f"{name}-strictjson-wt")
     git("worktree", "add", "-q", "-b", "sj", str(wt), cwd=main)
     return main, wt
 
@@ -2646,6 +2646,59 @@ def test_a_directory_name_with_a_newline_is_refused_before_the_launch(env, tmp_p
     main, wt = make_repo(tmp_path, name="lib\nntech")
     r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 1 and "control character" in r.stderr
+    assert not placed(env)
+
+
+# --- repair of #893 round 2 (adversary, head 83262b0c): the LOWs ----------------------------------------------------------------
+
+def test_an_explicit_cwd_inside_the_primary_checkout_gets_the_neutral_line(env, tmp_path):
+    """r2 LOW-1: `--cwd <primary>/sub` must not be told to run every command in the checkout the same line forbids editing."""
+    main, _wt = make_repo(tmp_path)
+    sub = main / "sub"
+    sub.mkdir()
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(sub), "--", "--no-wait", f"work in {sub}")
+    assert r.returncode == 0, r.stderr
+    got = placed(env)[0][-1]
+    assert "run every command from" not in got and "cd there" not in got
+    assert f"Your session starts in {os.path.realpath(main)}, the shared primary checkout: never edit or commit there;" in got
+
+
+def test_an_explicit_cwd_in_a_subdirectory_of_a_linked_worktree_keeps_the_explicit_line(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    sub = wt / "sub"
+    sub.mkdir()
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(sub), "--", "--no-wait", f"work in {sub}")
+    assert r.returncode == 0, r.stderr
+    assert cwd_line(os.path.realpath(main), os.path.realpath(sub)) in placed(env)[0][-1]
+
+
+def test_has_control_char_covers_cc_cf_and_the_unicode_line_separators(monkeypatch):
+    """r2 LOW-2 and LOW-3 (mutant h: Cc narrowed to a newline)."""
+    mod = load_script(monkeypatch)
+    for bad in ("a\nb", "a\tb", "a\u2028b", "a\u2029b", "a\u202eb", "a\x00b"):
+        assert mod.has_control_char(bad), repr(bad)
+    for ok in ("/a b/libntech-wt", "/tmp/caf\u00e9", "/tmp/\u65e5\u672c"):
+        assert not mod.has_control_char(ok), repr(ok)
+
+
+def _refused_for_dir_names(env, tmp_path, name, wt_name):
+    try:
+        main, wt = make_repo(tmp_path, name=name, wt_name=wt_name)
+    except (OSError, subprocess.CalledProcessError) as e:
+        pytest.skip(f"this filesystem refuses the directory name: {e}")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    return r
+
+
+@pytest.mark.parametrize("name,wt_name", [
+    ("libntech", "wt\tx"),          # only the worktree (`cwd`) holds the control character: mutant a (drop has_control_char(cwd))
+    ("lib\tntech", "plain-wt"),     # only the primary checkout (`eff_cwd`) holds it: mutant g (drop has_control_char(eff_cwd))
+    ("libntech", "wt\u2028x"),      # a Unicode line separator, category Zl
+    ("libntech", "wt\u202ex"),      # right-to-left override, category Cf
+])
+def test_a_control_character_in_either_directory_is_refused_before_the_launch(env, tmp_path, name, wt_name):
+    r = _refused_for_dir_names(env, tmp_path, name, wt_name)
+    assert r.returncode == 1 and "control character" in r.stderr, r.stderr
     assert not placed(env)
 
 

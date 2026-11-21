@@ -8,8 +8,9 @@ description: >-
   a topic), /steps plan (interview before writing a plan), "step me through it",
   "one at a time", "walk me through" a list of items or pending decisions.
   Also run it unasked whenever you have questions or decisions for the
-  operator (operator rule 2026-11-21), unless the central questions system of
-  djbclark-ade queue 67 is live and carries them.
+  operator (operator rule 2026-11-21), unless the operator has amended
+  djbclark-ade AGENTS.md order 13 to put the queue 67 central questions system
+  live for you.
 ---
 
 # steps — one open item at a time, recommendation first
@@ -23,9 +24,10 @@ target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 202
 **Run it unasked** (operator rule 2026-11-21, universal: "When an agent has questions for me, automatically run
 /steps unless our upcoming alternative non-blocking universal questions system is being used"). Any turn or post
 that would end with questions or decisions for djbclark runs this skill on them instead; never ask "shall I run
-/steps?". A worker sends its question to its lead, which runs `/steps`. Exception: once the central questions system
-(djbclark-ade queue 67, `docs/central-questions-plan.md`; not live as of 2026-11-21) is live and the agent is enrolled,
-the question goes there. Detail: `site-private/memory/feedback_questions_run_steps.md`.
+/steps?". A worker sends its question to its lead (order 10); the lead decides what the orders and its standing
+permissions already cover and runs `/steps` on the rest. Exception: the central questions system (djbclark-ade queue 67, `docs/central-questions-plan.md`)
+is live only once the operator amends AGENTS.md order 13 to say so, and an agent is "enrolled" when that amendment
+names it by role or repo (ids change at every launch and handoff); until then, `/steps` (not live as of 2026-11-21). After it, an enrolled agent's question goes there. Detail: `site-private/memory/feedback_questions_run_steps.md`.
 
 He is choosing, not reading. Give him one decision per prompt, pre-ranked, and
 do what he picked before asking the next one. Same motive as
@@ -228,7 +230,13 @@ The card has no header chip, no per-option description, no `helpText` and no
 
 1. **Do what he picked before you ask the next question**, if it is small and
    inside the session's scope. Confirm it in one line ("Done: pushed `abc123`"),
-   then ask the next one.
+   then ask the next one. A pick authorizes only the action its label names: a
+   daemon restart, live-boundary swap, change outside the repo's grant or other
+   hard-to-reverse step still needs its own explicit option or ask; only a
+   standing permission your own repo's instructions grant you (for example its
+   push-unasked rule) needs none, on that rule's own conditions. 2d.5 is
+   stricter for Grok Bot: it has no standing permissions, so a push, send, post
+   or merge there always needs an option naming it.
 2. **Queue anything bigger** (a long build, a multi-file change, an agent
    dispatch). Say it is queued and do the queue right after the last item.
 3. **If an answer or its result changes a later item**, re-rank that item's
