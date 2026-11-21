@@ -4,7 +4,7 @@
 The interim "ade update" (docs/queue.md "Keep every machine current", proposal 4.4 item 9,
 acceptance test T8). It automates README "Update (this machine)":
 
-    ade-update                  apply: pull, relink missing skills, check symlinks, print the changelog delta
+    ade-update                  apply: pull, relink missing skills, link repo tools onto PATH, check symlinks, print the changelog delta
     ade-update --check          report only ("would" wording); changes nothing in the tree, links or state
     ade-update --json           the same report as one JSON object on stdout
     ade-update --repo PATH      the checkout (default ~/src/djbclark-ade); must be the top of its work tree
@@ -63,6 +63,17 @@ Steps, in order:
 3b. (macOS, canonical checkout, GUI-hog 3b, docs/gui-hog-dialog.md D2) `ade-gui-build --if-stale` beside this script compiles the dialog bundle when it is missing or older than
    `macos/gui-hog` (`--check` only says it would). Fails open: no swiftc, a failed or slow build is a note, never a problem or an exit code (the sampler shows no dialog without
    a fresh bundle). `ADE_GUI_BUILD=0` skips it.
+3d. (canonical checkout) PATH links for repo tools: every name in `BIN_LINKS` (below the imports; git-commit-own, load-watch,
+   agent-id) is linked as `~/.local/bin/<name> -> <canonical checkout>/bin/<name>` (absolute, never a worktree: the
+   canonical checkout is the one ade-update treats as canonical, `canonical_repo()`). A missing link is created. A link
+   that points elsewhere is repaired (temp symlink beside, `os.replace`) ONLY when it is a symlink to `<root>/bin/<name>`
+   with a djbclark-ade checkout or worktree as `<root>` (a directory holding `bin/ade-update` and `skills/`, or, when it
+   is gone, a path with a component starting `djbclark-ade`): a stale link to a removed worktree is the usual case. A
+   regular file or directory, or a symlink to anywhere else, is never touched: it is reported with a fix to run by hand and
+   is unresolved (exit 10), like a skill link the helper leaves alone. A listed tool with no executable `bin/<name>` in
+   the checkout (agent-id before PR 842 lands) is skipped with an info line, never an error; `--check` on a checkout
+   that is behind says the tool is new upstream. `--check` writes nothing (missing and stale links count as exit 10, like
+   a missing ~/.claude link); a non-canonical --repo is report-only and never links, because the links would point at it.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
    new), or every Unreleased entry when nothing is recorded; plus the entries of `changelog.d/` fragments
@@ -78,7 +89,8 @@ Steps, in order:
    state file (temp file beside, `os.replace`), unless a skill link stayed unresolved.
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
-~/.claude link or graft helper copy is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
+~/.claude link or graft helper copy is missing/unresolved, or a ~/.local/bin tool link (3d) is missing/stale (--check) or
+unresolved (a regular file, a foreign symlink, a failed link; apply creates and repairs the rest and exits 0), 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
 or the graft helper install/check or state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch or merge error
 or timeout, any other `git merge --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
@@ -109,6 +121,11 @@ LINK_TIMEOUT = 300  # skill-everywhere link mode nudges the Hermes gateway (up t
 CLAUDE_KINDS = ("commands", "agents", "hooks")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OK_LINK_STATES = ("linked", "not installed")
+# Repo tools that must be on PATH as ~/.local/bin/<name> -> <canonical checkout>/bin/<name> (step 3d). Extend this tuple:
+# nothing else needs to change. It lives here, not in config/ade.toml, because ade-update is stdlib-only and must run
+# before (and without) any config parse, and a name here is a promise that bin/<name> exists (or is skipped with a note).
+BIN_LINKS = ("git-commit-own", "load-watch", "agent-id")
+BIN_LINK_DIR = "~/.local/bin"
 CHECK_SENTINEL = "== end"  # last line of `skill-everywhere --check`
 SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch: `$` would admit a trailing newline
 # Repository-location variables that would make git act on another repo than --repo.
@@ -630,6 +647,90 @@ def check_claude_links(repo, upstream_rev=None):
     return {"ok": ok, "problems": problems, "new_upstream": new_upstream}
 
 
+# --- PATH links for repo tools ------------------------------------------------------------
+
+def ade_link_root(dest):
+    """The djbclark-ade checkout/worktree a symlink `dest` points into as `<root>/bin/<dest.name>`, else None. A live
+    root must hold bin/ade-update and skills/; a root that no longer exists (a removed worktree, the usual stale link)
+    counts only when a path component starts with `djbclark-ade`. A symlink to a symlink is judged by its own first hop."""
+    raw = os.readlink(dest)
+    t = Path(os.path.normpath(raw if os.path.isabs(raw) else os.path.join(dest.parent, raw)))
+    if t.name != dest.name or t.parent.name != "bin":
+        return None
+    root = t.parent.parent
+    if root.is_dir():
+        return root if (root / "bin" / "ade-update").is_file() and (root / "skills").is_dir() else None
+    return root if any(part.startswith("djbclark-ade") for part in root.parts) else None
+
+
+def make_bin_link(src, dest, replace):
+    """Create `dest -> src`; replace=True swaps an existing symlink atomically (temp symlink beside, os.replace)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not replace:
+        os.symlink(src, dest)  # FileExistsError if something appeared since the check: never overwrite
+        return
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    os.symlink(src, tmp)
+    try:
+        os.replace(tmp, dest)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def check_bin_links(repo, check, upstream_rev=None):
+    """Step 3d for the canonical checkout `repo`: link or repair each BIN_LINKS tool, or (check) say what would be done.
+    Rows: linked_now / repaired_now (done, or would be done under --check), ok, skipped (no executable bin/<name>),
+    new_upstream (absent here, present at `upstream_rev`), problems (counted: --check's would-do rows and every
+    unresolved one). Never overwrites a regular file or a symlink that is not into a djbclark-ade checkout."""
+    bin_dir = Path(os.path.expanduser(BIN_LINK_DIR))
+    d = {"dir": str(bin_dir), "mode": "check" if check else "apply", "ok": [], "linked_now": [], "repaired_now": [],
+         "skipped": [], "new_upstream": [], "problems": []}
+    for name in BIN_LINKS:
+        src, dest = Path(repo) / "bin" / name, bin_dir / name
+        if not (src.is_file() and os.access(src, os.X_OK)):
+            if upstream_rev and git(repo, "cat-file", "-e", f"{upstream_rev}:bin/{name}")[0] == 0:
+                d["new_upstream"].append(name)
+            else:
+                d["skipped"].append(name)
+            continue
+        ln = shlex.join(["ln", "-sfn", str(src), str(dest)])
+        replace = False
+        if dest.is_symlink():
+            if os.path.normpath(os.readlink(dest)) == str(src) or (dest.exists() and dest.resolve() == src.resolve()):
+                d["ok"].append(name)
+                continue
+            root = ade_link_root(dest)
+            if root is None:
+                d["problems"].append({"tool": name, "path": str(dest), "state": f"a symlink to {os.readlink(dest)}, not a djbclark-ade checkout",
+                                      "fix": f"inspect it, then: {ln}", "unresolved": True})
+                continue
+            replace = True
+        elif os.path.lexists(dest):
+            kind = "a directory" if dest.is_dir() else "a regular file"
+            d["problems"].append({"tool": name, "path": str(dest), "state": f"{kind} (not ours)",
+                                  "fix": f"inspect {shlex.quote(str(dest))}, move it aside, then: {ln}", "unresolved": True})
+            continue
+        row = {"tool": name, "path": str(dest), "target": str(src), "fix": ln,
+               "state": f"stale: points to {os.readlink(dest)}" if replace else "missing"}
+        if check:
+            d["repaired_now" if replace else "linked_now"].append(name)
+            d["problems"].append(row)  # would-do rows count, like a missing ~/.claude link
+            continue
+        try:
+            make_bin_link(src, dest, replace)
+        except OSError as e:
+            row.update(state=f"cannot link: {e}", unresolved=True)
+            d["problems"].append(row)
+            continue
+        d["repaired_now" if replace else "linked_now"].append(name)
+    return d
+
+
 # --- report -------------------------------------------------------------------------------
 
 class Report:
@@ -893,6 +994,30 @@ def update(rep, args, repo):
             p.pop("fix", None)
         rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
 
+    # 3d. PATH links for repo tools (BIN_LINKS): canonical checkout only, since every link points at <canonical>/bin/<name>.
+    if can_link:
+        bl = check_bin_links(repo, check, target if check and behind else None)
+        d["bin_links"] = bl
+        rep.say(f"~/.local/bin tool links ({', '.join(BIN_LINKS)}): {len(bl['ok'])} ok, {len(bl['linked_now'])} "
+                f"{'to link' if check else 'linked'}, {len(bl['repaired_now'])} {'to repair' if check else 'repaired'}, "
+                f"{sum(1 for p in bl['problems'] if p.get('unresolved'))} unresolved")
+        for name in bl["linked_now"]:
+            rep.say(f"  {'would link' if check else 'linked'}: {name} -> {Path(repo) / 'bin' / name}")
+        for name in bl["repaired_now"]:
+            rep.say(f"  {'would repair' if check else 'repaired'}: {name} -> {Path(repo) / 'bin' / name}")
+        for p in bl["problems"]:
+            if p.get("unresolved"):
+                rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
+        if bl["skipped"]:
+            rep.say(f"  info: no executable bin/ file in this checkout for: {', '.join(bl['skipped'])}; skipped")
+        if bl["new_upstream"]:
+            rep.say(f"  info: new upstream tools, linked after the pull: {', '.join(bl['new_upstream'])}")
+        if bl["problems"]:
+            problems.append("bin links")
+    else:
+        d["bin_links"] = {"mode": "report-only"}
+        rep.say("~/.local/bin tool links: report-only: not the canonical checkout; the links point at its bin/, never here")
+
     # 3a. installed graft hook copy, separate from the report-only symlink inventory.
     helper = install_graft_helper(repo, check, can_link, target,
                                   branch == "master" and upstream == "origin/master" and target == up)
@@ -1009,7 +1134,7 @@ def update(rep, args, repo):
         d["state_written"] = True
 
     d["problems"] = problems
-    notes = [] if can_link else ["report-only: skill and ~/.claude links not verified (not the canonical checkout)"]
+    notes = [] if can_link else ["report-only: skill, ~/.claude and ~/.local/bin links not verified (not the canonical checkout)"]
     if no_helper:
         notes.append("skill-everywhere: no trusted helper (none beside ade-update outside this checkout)")
     d["notes"] = notes
@@ -1022,7 +1147,7 @@ def update(rep, args, repo):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current; install the canonical graft helper copy.",
-                                 epilog="Exit: 0 current, 10 behind/missing links/helper drift (--check) or unresolved, 2 dirty tree, "
+                                 epilog="Exit: 0 current, 10 behind/missing links (skill, ~/.claude, ~/.local/bin tool)/helper drift (--check) or unresolved, 2 dirty tree, "
                                         "3 diverged (git's explicit non-fast-forward refusal), 4 git, network, "
                                         "skill-everywhere (not found, failed or incomplete), graft helper or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")

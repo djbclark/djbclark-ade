@@ -1774,3 +1774,115 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
     assert r.returncode == 4, r.stdout + r.stderr
     assert "injected Git operational failure" in json.loads(r.stdout)["error"]
     assert helper_snapshot(live.parent) == saved
+
+
+# --- ~/.local/bin tool links (step 3d, 2026-11-21) ------------------------------------------------------------
+
+def bin_tools(env, *names):
+    """Executable bin/<name> files in the canonical `machine` clone (untracked: no pull happens in these tests)."""
+    (env.machine / "bin").mkdir(exist_ok=True)
+    for n in names:
+        f = env.machine / "bin" / n
+        f.write_text("#!/bin/sh\nexit 0\n")
+        f.chmod(0o755)
+
+
+def bin_dir(env):
+    return env.home / ".local" / "bin"
+
+
+def test_missing_bin_link_is_created_pointing_at_the_canonical_checkout(env):
+    bin_tools(env, "git-commit-own", "load-watch")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    for n in ("git-commit-own", "load-watch"):
+        link = bin_dir(env) / n
+        assert link.is_symlink() and os.readlink(link) == str(env.machine.resolve() / "bin" / n)
+    assert "2 linked" in r.stdout
+    assert "agent-id" in r.stdout and "skipped" in r.stdout  # absent tool: an info line, not a problem
+    assert env.run().returncode == 0  # idempotent, second run finds them ok
+    assert "2 ok" in env.run().stdout
+
+
+def test_stale_link_into_a_djbclark_ade_worktree_is_repaired(env):
+    bin_tools(env, "load-watch")
+    gone = env.tmp / "djbclark-ade-old-wt"  # a removed worktree: the link dangles
+    live = env.tmp / "src" / "djbclark-ade-other-wt"  # a live one: has bin/ade-update and skills/
+    (live / "bin").mkdir(parents=True)
+    (live / "skills").mkdir()
+    (live / "bin" / "ade-update").write_text("")
+    (live / "bin" / "load-watch").write_text("")
+    bin_dir(env).mkdir(parents=True)
+    for stale, name in ((gone, "load-watch"), (live, "git-commit-own")):
+        os.symlink(stale / "bin" / name, bin_dir(env) / name)
+    bin_tools(env, "git-commit-own")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    for n in ("load-watch", "git-commit-own"):
+        assert os.readlink(bin_dir(env) / n) == str(env.machine.resolve() / "bin" / n)
+    assert "2 repaired" in r.stdout
+    assert [p.name for p in bin_dir(env).iterdir() if p.name.startswith(".")] == []  # no temp symlink left
+
+
+def test_regular_file_and_foreign_symlink_are_untouched_and_reported(env):
+    bin_tools(env, "git-commit-own", "load-watch")
+    bin_dir(env).mkdir(parents=True)
+    (bin_dir(env) / "git-commit-own").write_text("my own script\n")
+    elsewhere = env.tmp / "elsewhere" / "bin"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "load-watch").write_text("")
+    os.symlink(elsewhere / "load-watch", bin_dir(env) / "load-watch")
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert (bin_dir(env) / "git-commit-own").read_text() == "my own script\n"
+    assert not (bin_dir(env) / "git-commit-own").is_symlink()
+    assert os.readlink(bin_dir(env) / "load-watch") == str(elsewhere / "load-watch")
+    assert "a regular file (not ours)" in r.stdout and "not a djbclark-ade checkout" in r.stdout
+    assert "2 unresolved" in r.stdout and "bin links" in r.stdout
+    out = json.loads(env.run("--json").stdout)
+    assert {p["tool"] for p in out["bin_links"]["problems"]} == {"git-commit-own", "load-watch"}
+
+
+def test_absent_bin_tool_is_skipped_quietly_with_exit_0(env):
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "info: no executable bin/ file in this checkout for: git-commit-own, load-watch, agent-id; skipped" in r.stdout
+    assert not bin_dir(env).exists()
+    (env.machine / "bin").mkdir()
+    (env.machine / "bin" / "load-watch").write_text("not executable\n")  # a non-executable file is not a tool either
+    assert env.run().returncode == 0
+    assert not bin_dir(env).exists()
+
+
+def test_check_writes_no_bin_link_and_reports_exit_10(env):
+    bin_tools(env, "load-watch")
+    gone = env.tmp / "djbclark-ade-old-wt"
+    bin_dir(env).mkdir(parents=True)
+    os.symlink(gone / "bin" / "git-commit-own", bin_dir(env) / "git-commit-own")
+    bin_tools(env, "git-commit-own")
+    r = env.run("--check")
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert "would link: load-watch" in r.stdout and "would repair: git-commit-own" in r.stdout
+    assert not (bin_dir(env) / "load-watch").exists() and not (bin_dir(env) / "load-watch").is_symlink()
+    assert os.readlink(bin_dir(env) / "git-commit-own") == str(gone / "bin" / "git-commit-own")  # untouched
+    assert sorted(p.name for p in bin_dir(env).iterdir()) == ["git-commit-own"]
+
+
+def test_non_canonical_repo_never_links_bin_tools(env):
+    other = clone(env, "other")
+    (other / "bin").mkdir()
+    (other / "bin" / "load-watch").write_text("")
+    (other / "bin" / "load-watch").chmod(0o755)
+    for flags in (("--check",), ()):
+        r = env.run(*flags, repo=other)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "tool links: report-only" in r.stdout
+    assert not bin_dir(env).exists()
+
+
+def test_new_upstream_bin_tool_is_info_only_under_check(env):
+    env.publish({"bin/agent-id": "#!/bin/sh\n"})
+    r = env.run("--check")
+    assert r.returncode == 10, r.stdout + r.stderr  # behind, nothing else
+    assert "new upstream tools, linked after the pull: agent-id" in r.stdout
+    assert "bin links" not in json.loads(env.run("--check", "--json").stdout)["problems"]

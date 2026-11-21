@@ -24,10 +24,13 @@ source prevent installation. Node validates syntax without executing the helper.
    for a machine-readable report). It fetches and changes nothing else.
 2. Apply: `~/src/djbclark-ade/bin/ade-update`. It pulls with `--ff-only` of the
    commit it checked, relinks missing skills with `skill-everywhere`,
+   creates or repairs the `~/.local/bin/<tool>` links of `BIN_LINKS` (`git-commit-own`, `load-watch`,
+   `agent-id`; only a missing link or a stale one into a djbclark-ade checkout, never a regular file or a
+   foreign symlink),
    installs the validated helper copy atomically with a backup, and prints
    the CHANGELOG entries new since `~/.local/state/ade/applied`.
 3. Read the exit code and the report, not the prose: `0` current, `10` behind
-   (under `--check`) or a skill, `CLAUDE.md` or `~/.claude` link still wrong, helper copy drift or refused helper source,
+   (under `--check`) or a skill, `CLAUDE.md`, `~/.claude` or `~/.local/bin` tool link still wrong, helper copy drift or refused helper source,
    `2` usage or a local modification blocks the pull, `3` the branch cannot
    fast-forward, `4` git, network, skill-everywhere, the helper validation tool or file I/O, or the state file failed.
 4. Run it yourself, in the background when a fetch may be slow
@@ -39,6 +42,8 @@ source prevent installation. Node validates syntax without executing the helper.
 - `10` with skill rows: `~/src/djbclark-ade/bin/skill-everywhere --check NAME`
   shows the missing client; a row the script leaves alone is a real directory or
   another installer's link, so report it and do not overwrite it.
+- `10` with a bin-link row: a regular file or foreign symlink sits at `~/.local/bin/<tool>`; report
+  it with the printed fix, never overwrite it. A tool listed as skipped is not in this checkout yet.
 - `2` or `3`: a local modification or diverged branch is the operator's work.
   Say which path or branch, and do not stash, reset or merge it. Ask the owner.
 - `4`: fix the cause the message names, then re-run `--check`.
