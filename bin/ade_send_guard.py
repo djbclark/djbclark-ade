@@ -37,6 +37,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_lead_succession as succ  # noqa: E402
@@ -160,9 +161,16 @@ def owner_proof(ident: str, sender, inspect, ls_label, state_dir: Path | None = 
     sender = sender.strip() if isinstance(sender, str) else ""
     if not succ.UUID_RE.fullmatch(sender) or sender == ident:
         return ""
-    try:
+    try:  # the sender must itself hold its role: a predecessor's old workers are its successor's (PR 907 review MED-1)
+        if succ.effective_lead(sender, state_dir, home) != sender:
+            return ""  # replaced by a completed handoff (or an enrolled role holder)
+        if succ.successor_of(sender, state_dir, home, statuses=succ.ACKNOWLEDGED) is not None:
+            return ""  # handing off right now: the successor owns them
+        me = _record(inspect, sender)
+        if me is None or me.get("Archived") is not False:
+            return ""  # an archived (or unknown) sender is no live owner
         lineage = succ.recent_lineage(sender, state_dir, home)
-    except Exception:  # noqa: BLE001 - a cyclic or unreadable ledger: ownership unknown
+    except Exception:  # noqa: BLE001 - a cyclic or unreadable ledger, or an unreadable sender: ownership unknown
         return ""
     members = set(lineage)
     try:  # the parent chain first: it needs only inspect reads
@@ -178,7 +186,14 @@ def owner_proof(ident: str, sender, inspect, ls_label, state_dir: Path | None = 
         pass
     if ls_label is None:
         return ""
+    try:  # canary (PR 907 review LOW-1): a Paseo that ignores the filter lists everything, so an unknown lead must list nothing
+        if ls_label(f"ade.lead={uuid.uuid4()}") != []:
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
     for lead in lineage:
+        if not succ.UUID_RE.fullmatch(lead):  # never hand Paseo a label value that is not a full lowercase id
+            continue
         try:
             rows = ls_label(f"ade.lead={lead}")
         except Exception:  # noqa: BLE001 - this lead's listing is unreadable: no evidence from it

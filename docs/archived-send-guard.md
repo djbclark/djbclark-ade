@@ -62,8 +62,16 @@ a. **The sender's own worker passes** (`ade_send_guard.owner_proof`). The sender
       The installed `inspect` and `ls` rows carry no labels, which is why the server-side filter is the reader (as in `ade-auto-permit`).
    2. `parent:<x>`: the target's `ParentAgentId` chain (at most 8 hops, cycle-safe, each hop read from `paseo agent inspect`) reaches
       a lineage member: a worker started natively (`paseo run`, `create_agent`) from the sender's session.
+   **The sender must itself hold its role** (PR 907 review MED-1): a worker the previous incarnation launched is the successor's, so
+   a sender that a completed handoff or an enrolled role holder replaced, one that has an `acknowledged` handoff in flight, or one
+   that is archived or unknown to `paseo agent inspect`, resumes nothing; the live successor does (its lineage holds the
+   predecessor). The ledger and the sender's record are read first, and an unreadable one is a refusal.
+   **Label trust** (LOW-1): before reading a lineage member's listing, `owner_proof` asks once for `ade.lead=<random uuid>` and
+   trusts no listing unless that returns `[]` (a Paseo that stops honouring `--label` lists everything); a lineage member that is
+   not a full lowercase id is never sent to Paseo.
    **Fails closed** (no pass, the refusal applies): no `PASEO_AGENT_ID` (the operator's shell, a script); a sender that is not a
-   full lowercase agent id; the sender is the target; a cyclic or unreadable succession ledger for the sender; `ls` failing, timing
+   full lowercase agent id; a sender that was replaced, is handing off, or is archived or unknown; the canary listing not empty or
+   unreadable; the sender is the target; a cyclic or unreadable succession ledger for the sender; `ls` failing, timing
    out or not returning a list; an `inspect` that fails on the way up the chain (the label proof still stands on its own); a worker of
    another lead (its label names someone outside the lineage), of a lead the sender's lineage does not hold (a successor's worker is
    not a predecessor's), or of a sibling; a chain longer than 8 hops. A label can be set by whoever launches an agent, so this is an
@@ -202,7 +210,9 @@ Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to 
 with the shim directory first on PATH, the `BASH_ENV` case (kept on purpose, with the documented result), two shim copies on one PATH,
 the re-entry cap, option placement, the recursion probe, fail-open and both overrides). The 2026-11-21 own-worker tests
 (each fails with its branch reverted): the label proof, a predecessor's label, a parent chain and its hop cap, every fail-closed
-case above, the log lines, the hook's reading of the sender (never a value written in the command), and that ownership never
-opens a replaced agent.
+case above, the log lines, the hook's reading of the sender (`test_the_hook_reads_the_sender_from_its_environment_never_from_the_command_text`:
+a `PASEO_AGENT_ID=<owner>` written in the command is denied for a stranger's or an absent sender), that ownership never opens a
+replaced agent, and the sender-role cases (a handed-off, handing-off or archived sender is refused, the live successor resumes, an
+unreadable ledger refuses) and the canary.
 
 One decision reads each agent's `paseo agent inspect` once (memoised inside `decide`, sr-43 e).

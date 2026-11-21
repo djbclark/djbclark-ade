@@ -211,7 +211,7 @@ def test_the_operator_archived_override_resumes_an_archived_agent_naming_it(sw):
 
 
 def test_a_lead_resumes_its_own_archived_worker_by_a_plain_send_and_it_is_logged(sw):
-    sw.live(**{A: True})
+    sw.live(**{A: True, B: False})  # the sender B is a live agent
     sw.label({f"ade.lead={B}": [A]})
     p = sw.run("send", "--no-wait", A, "continue", env={guard.SENDER_ENV: B})
     assert p.returncode == 0 and sw.sends() == [["send", "--no-wait", A, "continue"]]
