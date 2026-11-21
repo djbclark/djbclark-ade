@@ -99,6 +99,17 @@ If load, memory, or churn is genuinely abnormal:
    - Ask the operator before killing, stopping, or throttling any work.
    - Offer to acknowledge the incident with `load-watch ack <ID> "..."`.
 
+### Step 4: Automatic Load-Reduction Actions (Standing Operator Grant)
+
+Without waiting for per-instance operator approval, `/watch load` and the standing load watcher may automatically take these non-destructive actions to reduce load and memory pressure:
+
+1. **Steer heavy local runs to CI or `bg`**: Message the blamed Paseo agent via `paseo send --no-wait --json` to finish its current step and route future builds/tests to CI (`load-watch ci decide`) or through `~/ops/site-private-djbclark/bin/bg`.
+2. **Guard a misbehaving launchd job**: Register it with `load-watch guard add`.
+3. **Coordinate archiving unneeded Paseo agents** (operator ruling, 2026-11-21): Under memory/swap pressure or high resident agent counts, inspect `paseo ls -g --json` (and live OS processes) to prune agents that are no longer needed:
+   - **Leadless agents**: Verify via `paseo agent inspect ID` (and recent logs if ambiguous) that the agent is `closed` or finished, has no owning LEAD, is not `running`, and is not an active LEAD itself; then archive it directly with `paseo agent archive ID`.
+   - **Agents with an owning LEAD**: Do **not** archive another LEAD's workers unilaterally. Group idle/closed workers by their owning active LEAD and send each LEAD a single coordination message (`paseo send --no-wait --json`, requesting an `ack` and archive/keep counts) asking it to archive finished/unneeded workers under its chain.
+   - **Hard boundaries**: Never archive a `running` agent or an active LEAD, never kill/SIGSTOP/throttle active work without operator approval, and never message an already-archived agent (which un-archives it).
+
 ---
 
 ## 3. Standing Watcher Mode (Optional)
