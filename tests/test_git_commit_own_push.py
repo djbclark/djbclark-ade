@@ -398,18 +398,20 @@ def _shim_env(tmp_path, remote, url, with_forgejo):
         f'exec {real_git} "$@"\n')
     if with_forgejo:
         (bindir / "git-forgejo").write_text(
-            f'#!/bin/sh\necho "forgejo $*" >> {log}\nexec {real_git} {rewrite} "$@"\n')
+            f'#!/bin/sh\necho "forgejo host=${{FORGEJO_HOST:-unset}} $*" >> {log}\nexec {real_git} {rewrite} "$@"\n')
     for f in bindir.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IXUSR)
-    dirs = [str(bindir)]
-    for tool in ("python3", "bash", "pre-commit"):
+    # Symlink only what the script needs, never whole directories: ~/.local/bin holds both python3
+    # and the real git-forgejo on this Mac.
+    for tool in ("python3", "bash"):
         found = shutil.which(tool)
-        if found and os.path.dirname(found) not in dirs:
-            dirs.append(os.path.dirname(found))
-    dirs += ["/usr/bin", "/bin"]
-    # Another git-forgejo on a system dir would defeat the "missing" case.
+        assert found, tool
+        (bindir / tool).symlink_to(found)
+    dirs = [str(bindir), "/usr/bin", "/bin"]
     assert not any((Path(d) / "git-forgejo").exists() for d in dirs[1:]), "git-forgejo on base PATH"
-    return {**os.environ, "PATH": os.pathsep.join(dirs)}, log
+    # BASH_ENV (~/.bashrc) would put ~/.local/bin, with the real git-forgejo, back in front of the shims.
+    clean = {k: v for k, v in os.environ.items() if k not in ("BASH_ENV", "ENV", "GIT_ASKPASS", "FORGEJO_HOST")}
+    return {**clean, "PATH": os.pathsep.join(dirs)}, log
 
 
 def _commit_env(repo, env):
@@ -429,7 +431,7 @@ def test_forgejo_remote_publishes_through_git_forgejo(published, tmp_path):
     assert result.returncode == 0, result.stderr
     assert git(remote, "rev-parse", "topic") == git(repo, "rev-parse", "HEAD")
     calls = log.read_text().splitlines()
-    assert any(c.startswith("forgejo -C ") and " push -- origin HEAD:refs/heads/topic" in c
+    assert any(c.startswith("forgejo host=forgejo.mit.edu -C ") and " push -- origin HEAD:refs/heads/topic" in c
                for c in calls), calls
     assert not any(c.startswith("plain ") for c in calls), calls
 
@@ -468,6 +470,9 @@ def test_forgejo_remote_without_git_forgejo_exits_3_naming_it(published, tmp_pat
 
 
 @pytest.mark.parametrize("url", ["git@forgejo.mit.edu:djbclark/example.git",
+                                 "ssh://git@forgejo.mit.edu/djbclark/example.git",
+                                 "http://forgejo.mit.edu/djbclark/example.git",
+                                 "https://forgejo.mit.edu@evil.example.com/o/r.git",
                                  "https://notforgejo.mit.edu.example.com/o/r.git"])
 def test_non_https_or_lookalike_hosts_stay_on_plain_git(published, tmp_path, url):
     repo, remote = published
@@ -478,3 +483,17 @@ def test_non_https_or_lookalike_hosts_stay_on_plain_git(published, tmp_path, url
 
     assert result.returncode == 0, result.stderr
     assert not any(c.startswith("forgejo ") for c in log.read_text().splitlines())
+
+
+def test_exported_forgejo_host_is_pinned_to_the_remote_host(published, tmp_path):
+    repo, remote = published
+    url = "https://forgejo.mit.edu/djbclark/example.git"
+    git(repo, "remote", "set-url", "origin", url)
+    env, log = _shim_env(tmp_path, remote, url, with_forgejo=True)
+    env["FORGEJO_HOST"] = "other.example.org"
+
+    result = _commit_env(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert calls and all(c.startswith("forgejo host=forgejo.mit.edu ") for c in calls), calls

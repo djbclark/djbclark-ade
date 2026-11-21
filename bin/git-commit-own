@@ -17,10 +17,13 @@
 #
 # Forgejo remotes (2026-11-21): the publish step's network git calls (ls-remote, fetch, push)
 # go through `git-forgejo` (sipb-agent-skills forgejo skill, token from sudo-secretspec via
-# GIT_ASKPASS) when the remote's http(s) URL host is in FORGEJO_HOSTS below; plain git fails
+# GIT_ASKPASS) when the remote's https URL host is in FORGEJO_HOSTS below; plain git fails
 # there with "could not read Username". Only forgejo.mit.edu is listed because git-forgejo
-# defaults to that host (another host needs FORGEJO_HOST and its own token), and ssh URLs
-# use keys, not the askpass token, so they stay on plain git. No git-forgejo on PATH: exit 3.
+# defaults to that host (another host needs FORGEJO_HOST and its own token); the call pins
+# FORGEJO_HOST to the remote's host, so an exported value for another host cannot send that
+# host's token here. Only https URLs match: git-forgejo authenticates over https with a token
+# through GIT_ASKPASS and does nothing for ssh (keys), and on plain http the token could go out
+# in cleartext, so ssh, scp-style and http remotes stay on plain git. No git-forgejo on PATH: exit 3.
 set -euo pipefail
 
 usage() { echo "usage: git-commit-own [--no-push] [--staged] \"<message>\" [<path>...] (pushRef, matching upstream, or origin/current-branch; forgejo.mit.edu https remotes publish via git-forgejo; publish failure exits 3)" >&2; exit 2; }
@@ -69,6 +72,7 @@ fi
 
 # Keep publishing subprocesses as argv lists and inspect their real exit codes.
 python3 - "$root" "$0" <<'PY'
+import os
 import runpy
 import shutil
 import subprocess
@@ -84,18 +88,20 @@ FORGEJO_HOSTS = frozenset({"forgejo.mit.edu"})
 
 
 def forgejo_host(url):
-    """The Forgejo host of an http(s) remote URL, or None (ssh and scp-style URLs use keys)."""
+    """The Forgejo host of an https remote URL, or None (ssh and scp-style URLs use keys; plain http would send the token in cleartext)."""
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
     except ValueError:
         return None
-    return host if parts.scheme in ("http", "https") and host in FORGEJO_HOSTS else None
+    return host if parts.scheme == "https" and host in FORGEJO_HOSTS else None
 
 
-def git(*args, optional=False, cwd=root, tool="git"):
+def git(*args, optional=False, cwd=root, tool="git", host=None):
+    # git-forgejo picks its token variable from FORGEJO_HOST: pin it to this remote's host.
+    env = {**os.environ, "FORGEJO_HOST": host} if host else None
     result = subprocess.run([tool, "-C", cwd, *args], capture_output=True,
-                            text=True, timeout=300)
+                            text=True, timeout=300, env=env)
     if result.returncode and not (optional and result.returncode == 1):
         raise RuntimeError(result.stderr.strip() or result.stdout.strip()
                            or f"{tool} {args[0]} exited {result.returncode}")
@@ -171,9 +177,9 @@ try:
                                "on PATH. Install it, or use --no-push and publish with git-forgejo")
         tool = "git-forgejo"
     # A missing target is normal on a first push; other lookup failures are fatal.
-    exists = git("ls-remote", "--heads", "--", remote, ref, tool=tool)
+    exists = git("ls-remote", "--heads", "--", remote, ref, tool=tool, host=host)
     if exists:
-        git("fetch", "--no-tags", "--", remote, ref, tool=tool)
+        git("fetch", "--no-tags", "--", remote, ref, tool=tool, host=host)
         target = git("rev-parse", "FETCH_HEAD")
         ancestor = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor",
                                    target, "HEAD"], capture_output=True, text=True, timeout=300)
@@ -218,7 +224,7 @@ try:
             git("reset", "--keep", new_head)
         elif ancestor.returncode:
             raise RuntimeError(ancestor.stderr.strip() or "merge-base failed")
-    output = git("push", "--", remote, f"HEAD:{ref}", tool=tool)
+    output = git("push", "--", remote, f"HEAD:{ref}", tool=tool, host=host)
     print(f"git-commit-own: published HEAD to {remote} {ref}")
     if output:
         print(output)
