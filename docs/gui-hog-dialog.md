@@ -836,3 +836,71 @@ of the app's state and a cold start. A freeze is the right tool for CPU, not RAM
 
 Open: whether a supported route exists is unproven; the only candidate is a Mach task port with `vm_behavior_set`, and it exposes only the development-only page-out. Recommendation:
 do not build a deep freeze; if memory is the problem, Quit; if CPU is, Freeze.
+
+## Q. Measured savings, suggestions, the always-freeze list and the load sources (2026-11-21)
+
+Operator request 1 (2026-11-21, verbatim): "We should actually keep track of actual savings and have djbclark-ade suggest apps that should go in the various lists. We should
+also have a list in the toml of apps that can always be frozen without asking the user (unfreeze should still be an option in the UI)."
+
+Operator request 2 (2026-11-21, verbatim): "The actual things causing the load do not appear in 'A build is waiting'. Even if they are not things we can stop, we should still show
+what they are, eg we should list running builds and how much load they are causing."
+
+Q1. **Measured savings.** What a freeze buys is **CPU and pressure, not memory**: a SIGSTOP stops execution and frees no resident memory (P8 item 3), so the figure recorded for RSS is
+what the app *holds*, and `rss_freed_mb` is written as a constant 0 so nobody reads it as a saving. For each freeze `gui_hog_freeze.freeze` stores in the entry (`measure`, validated again
+by `norm_entry`: `frozen.json` is data) the app's **freeable cores** (the processes the freeze stops, minus the kept ones) and RSS read just before the signal, and the system window just
+before it. The sampler's 20 s tick appends one reading `[t, load1, compressor, pageins, swapins]` to a ring in `gui-hog/sys-hist.json` (180 rows, one hour; written only while a build is
+held or an entry is frozen, never in a dry run); the counters are cumulative `vm_stat` values from `vm_snapshot()`, so any window gives a rate. The window before is the freeze's own
+planned length (2 to 30 minutes; 10 when indefinite). When the entry is resumed (every thaw path goes through `_resume`), the resume computes the same figures over the freeze window
+and writes a `freeze-result` event: `cores_before`, `cores_freed_est`, `rss_mb`, `rss_freed_mb` (0), `held_s`, `window_s`, `before`, `during` (`n`, `span_s`, mean `load`, `compress_s`,
+`pageins_s`, `swapins_s`) and `delta` (during minus before, only for figures present in both). A pair of readings more than 120 s apart counts toward no rate (a sleep or a stall), a
+counter that went backwards (a reboot) gives no rate, and nothing is smoothed or filled in. A failure to measure never undoes a freeze or fails a resume (the signals go first).
+**Limits, stated so the numbers are not over-read:** `ps` %cpu is a decaying average, so cores are comparable, not exact; the load delta is **confounded**, because the freeze exists to let
+a held build start, and the build's own load is in the "during" window; nothing here probes an app's port or tests that a service still answers (the dependency notes below are written by
+a person, from evidence).
+
+Q1a. **`bin/gui-hog suggest [--days N] [--json]`** (read-only: it reads `events.jsonl`, `dry-run.jsonl` and the config, and edits nothing; a test hashes the state directory and
+`config/gui-hog.toml` before and after). It prints its evidence and two proposal lists, using the `[suggest]` thresholds (`min_events` 3, `negligible_cores` 0.10, `large_cores` 0.50, `days` 30):
+**never-auto** (`[freeze.auto] skip`) for an app that is not on it yet and either has a `[freeze.depends]` note (freezing it breaks something we depend on) or whose median freeable cores
+over at least `min_events` freezes (dialog sightings from the `would-show` lines when it was never frozen) are under `negligible_cores`; **always** (`[freeze.auto] always`) for an app on
+neither list, with no dependency note, no sighting that hosted a build and not protected, whose median is at least `large_cores`. A freeze held under 60 s (an immediate Resume, a
+rollback) says nothing and is ignored. Notes report conflicts (an `always` entry that is protected, on `skip` or has a dependency). `[freeze.depends]` ships with the two known cases:
+Beeper (its local API at `127.0.0.1:23373` backs the `beeper` MCP server and hangs while the app is frozen, P7) and CodexBar (the aiuse antigravity quota readings stop, P7).
+
+Q2. **The load sources.** "A build is waiting" showed only desktop apps, so the usual cause of the load, the builds and agent sessions themselves, was missing. `bin/gui_hog_sources.py`
+(`group_sources`) groups the whole process table into **sources**: kind `app` (the apps of `group_apps`, with their cores and RSS), `build` (a build or test tool tree: `BUILD_HEADS` and
+the Gradle daemon marks, matched on the cleaned program name; a build under a build merges into the outer one; a build under an agent CLI is its own source with the owner found by
+walking up to the nearest agent CLI; a terminal or build subtree inside an app becomes its own build source, so a terminal app no longer hides its builds in the app's row), `agent` (an agent
+TUI/CLI session) and `system` (what is left, grouped by program name). Every source carries `cores` (summed %cpu), `rss_mb`, process count, the heaviest process, the owner when known and
+`waiting` (a held `admit`). A short mean over the sampler's ticks (`window_update`, `window_means`) gives `cores_5m` and the share of the load, and `proc_cwds` adds the working directory
+of a build's root (one bounded `lsof -a -d cwd` call, only when a hold or the dialog exists, never in a dry run). **No command line is ever emitted**, only the cleaned program names (J3).
+The snapshot gets `sources` (up to 10) and `sources_more`; `gui-hog status` prints a "load sources" section and `--json` the same fields. `can_freeze(rec, cfg)` is the one place that decides
+whether Freeze may be offered, and it answers True only for an unprotected `app` source that is neither part of a build nor hosting one, with freezing enabled: a build, an agent, a system
+process and a protected app each get a stated reason ("a build or test job", "an agent session", "a system process", "protected app: never frozen"). The Swift dialog
+(`LoadSource` in `Model.swift`, the block "What is using the CPU now" in `UI.swift`) draws these as **labels only**: no button is created for a source, and Swift derives `canFreeze` as
+`kind == "app" && can_freeze`, so a snapshot that claims a build can be frozen is still shown without one. The Freeze buttons stay on the app rows above, unchanged. Reading only: no new
+kill or stop path exists in this change.
+
+Q3. **The always-freeze list.** `[freeze.auto] always` (shipped **empty**: the operator names the apps) lists bundle ids that are frozen **without asking**. `quiet(app, always)` is the one test:
+an app that is on the effective list, not protected and hosting no build or terminal gets **no dialog row**, does not count toward the dialog's trigger sum (`should_show`), and is not in
+the snapshot rows or the dry-run `would-show` apps; the sampler freezes it first in each tick of a hold (`auto_candidates` takes `always` before `order`, one app per tick, same
+timed freeze, same thaw paths, `by: "auto"`). **Unfreeze stays in the UI:** the app appears in the dialog's Frozen list and the menu-bar item with its Resume button like any frozen app. **The
+never-auto list wins** if an app is on both (`always_problems` says so, `status` prints it, the sampler skips it). **A protected app, and an app that hosts a build or terminal, is never
+quiet**: `always_problems` drops a protected entry from the effective list, and a host stays an ordinary row, so the operator is asked (and the sampler cannot freeze it). The list is effective only while
+`[freeze] enabled`, `[freeze.auto] enabled` and `LW_GUI_HOG_AUTO` allow the sampler to freeze, so switching the auto-freeze off never hides an app from the operator. The overlay
+`~/.config/load-watch/gui-hog.toml` may **add** to `always` and to `depends` (cleaned text), never remove from them.
+
+Q4. **Verification.** Python: `tests/test_gui_hog_savings.py` (the ring, the window figures, the freeze to resume `freeze-result` event, a failure to measure, a hand-edited `measure`, a symlinked
+history file, every suggest rule, the read-only `suggest` command, the always list in the config, the dialog and the sampler) and `tests/test_gui_hog_sources.py` (grouping, owners, the terminal inside
+a protected app, no command line in any field, `can_freeze` verdicts, the window means, `proc_cwds`, the tick wiring and its failure isolation, `status`). Swift: **compiled locally**
+(`bgrun bin/ade-gui-build --self-test`, as P5): the self-test covers the source parsing, the sanitizing, the never-freezable build and the share clamp. **Not done:** the operator's H4 run with the
+real window (the sources block), a live `gui-hog suggest` on real history (the history starts with this change: `freeze-result` events exist only after it ships), no dialog bundle was installed
+and no live state file was touched.
+
+DECIDED (the author, for the operator to overturn): (1) `always` ships empty and `depends` ships with Beeper and CodexBar only; the operator picks the apps after reading `gui-hog suggest`. (2) `rss_freed_mb` is a
+constant 0 rather than a measured value, because there is no honest way to measure RSS freed by a signal that frees none. (3) The load sources are display only: giving the operator a
+button for a build is a different ruling.
+
+Q5. **Prior art and docs checked (2026-11-21).** App Tamer (St. Clair Software; [product page](http://www.stclairsoft.com/AppTamer/), [FAQ](https://www.stclairsoft.com/AppTamer/faq.html)) slows or pauses a chosen app by
+CPU limits and per-app rules; it keeps no record of what a pause saved and proposes nothing, so measured savings and a suggestion step are ours. The cgroup v2 freezer and `process_madvise` (P8
+item 2) confirm the model: freezing stops CPU use and does not return memory. `top`, `btop` and Activity Monitor list single processes; none groups a build's process tree under its root with the
+owning agent, which is Q2.

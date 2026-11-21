@@ -42,6 +42,27 @@ func runSelfTest() -> Int32 {
         check(headerLine(s) == "Load 9.8 / 10.4 / 11.2 (10 cores) · CPU 5-min avg 7.9 cores", "header line")
         check(holdLine(s.holds[0]) == "bg, held 4 min for pageins, swapins", "hold line")
     }
+    // load sources (Q2): display-only text, never a Freeze for a build, an agent or a system process, whatever the file says
+    let srcJson = """
+    {"v":1,"rows":[],"sources_more":2,"sources":[
+      {"key":"build:41","kind":"build","name":"car\\u202ego","owner":"claude","where":"src/djbclark-ade-wt","heaviest":"rustc","cores_5m":3.2,"rss_mb":2048,"share":0.41,"procs":9,"waiting":false,"can_freeze":true,"why":"a build or test job"},
+      {"key":"app:7","kind":"app","name":"Slack","cores_5m":1.1,"rss_mb":900,"share":0.1,"procs":12,"waiting":false,"can_freeze":true,"why":""},
+      {"key":"app:8","kind":"app","name":"Ghostty","cores_5m":0.6,"rss_mb":300,"share":0.05,"procs":3,"waiting":false,"can_freeze":false,"why":"protected app: never frozen"},
+      {"key":"system:kernel_task","kind":"system","name":"kernel_task","cores_5m":0.5,"rss_mb":0,"share":9,"procs":1,"waiting":false,"can_freeze":true,"why":""}]}
+    """
+    if let ss = parseSnapshot(Data(srcJson.utf8)) {
+        check(ss.sources.count == 4 && ss.sourcesMore == 2, "load sources parse")
+        check(ss.sources[0].name == "cargo", "a source name is sanitized")
+        check(!ss.sources[0].canFreeze && !ss.sources[3].canFreeze, "a build or system source is never freezable, even if the file says so")
+        check(ss.sources[1].canFreeze && !ss.sources[2].canFreeze, "only an unprotected app source can be freezable")
+        check(ss.sources[3].share == 1, "a share is clamped to 0...1")
+        check(sourceLine(ss.sources[0]) == "3.20 cores  41%  2.0 GB  build  cargo  (owner claude, in src/djbclark-ade-wt, heaviest rustc, 9 processes)  · shown only: a build or test job",
+              "a build line names the owner, folder and heaviest process")
+        check(sourceLine(ss.sources[1]).hasSuffix("· can freeze (see its row)") && sourceLine(ss.sources[2]).hasSuffix("· shown only: protected app: never frozen"), "source line verdicts")
+    } else {
+        check(false, "a snapshot with load sources parses")
+    }
+    check(parseSnapshot(Data("{\"v\":1,\"rows\":[]}".utf8))?.sources.isEmpty == true, "a snapshot without sources has none")
     check(parseSnapshot(Data("{\"v\":2}".utf8)) == nil, "another version is refused")
     check(parseSnapshot(Data("nonsense".utf8)) == nil, "garbage is refused")
     check(parseSnapshot(Data("{\"v\":1,\"rows\":[{\"root_pid\":\"x\"}]}".utf8))?.rows.isEmpty == true, "a row without a numeric pid is dropped")

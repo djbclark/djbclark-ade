@@ -207,6 +207,12 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 root.addArrangedSubview(line)
             }
         }
+        if !snap.sources.isEmpty {   // Q2: what really uses the cores. Text rows only: this block builds no control, so nothing here can be frozen, quit or stopped
+            root.addArrangedSubview(NSBox.separator())
+            root.addArrangedSubview(label("What is using the CPU now (shown only; Freeze is offered on the app rows above)", size: 11, color: .secondaryLabelColor, width: rowAreaWidth))
+            for src in snap.sources.prefix(8) { root.addArrangedSubview(label(sourceLine(src), size: 11, width: rowAreaWidth)) }
+            if snap.sources.count > 8 || snap.sourcesMore > 0 { root.addArrangedSubview(label("+\(max(0, snap.sources.count - 8) + snap.sourcesMore) more sources", size: 11, color: .secondaryLabelColor, width: rowAreaWidth)) }
+        }
         var foot: [String] = []
         if snap.more > 0 { foot.append("+\(snap.more) more") }
         if snap.protectedHidden > 0 { foot.append("\(snap.protectedHidden) protected apps hidden") }

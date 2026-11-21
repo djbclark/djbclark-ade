@@ -17,6 +17,8 @@
     gui-hog resume --entry ID | --all      resume frozen entries
     gui-hog thaw --due [--stale] | --all [--stopped-apps [--yes]]    the sampler's tick; the escape hatch (F7)
     gui-hog frozen [--json]     the frozen entries
+    gui-hog suggest [--days N] [--json]   (Q1) read the history (freeze-result events, would-show lines) and PROPOSE apps for the never-auto list
+                                ([freeze.auto] skip) and the always-freeze list ([freeze.auto] always), with the evidence; read-only, edits nothing
 
 `status`, `vet`, `show` and `demo` signal nothing. The Swift dialog quits and force-quits through NSRunningApplication, only after `vet` exits 0 and its own
 identity re-check. Reads and writes ~/.local/state/load-watch/ (LW_STATE_DIR) and reads config/gui-hog.toml.
@@ -32,6 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gui_hog  # noqa: E402
 import gui_hog_freeze  # noqa: E402
+import gui_hog_savings  # noqa: E402
+import gui_hog_sources  # noqa: E402
 
 STATE_DIR = Path(os.environ.get("LW_STATE_DIR", Path.home() / ".local/state/load-watch"))
 
@@ -83,6 +87,9 @@ def main(argv=None):
     p = sub.add_parser("show", help="open the window now from the sampler's current data")
     p.add_argument("--all", action="store_true", help="list every unprotected app in the window, however small (for a manual test on a harmless third-party app such as Syncthing or Contexts; TextEdit is protected and never listed)")
     sub.add_parser("demo", help="open the window on fixture rows; no button touches any app")
+    p = sub.add_parser("suggest", help="propose never-auto and always-freeze apps from the measured history (read-only)")
+    p.add_argument("--days", type=int, default=None, help="how far back to read (default [suggest] days)")
+    p.add_argument("--json", action="store_true")
     gui_hog_freeze.add_subcommands(sub)   # freeze, resume, thaw, frozen (PR 3c)
     a = ap.parse_args(argv)
     if hasattr(a, "func"):
@@ -97,10 +104,17 @@ def main(argv=None):
             ghs = st.get("gui_hog") if isinstance(st.get("gui_hog"), dict) else {}
             snooze = gui_hog.effective_snooze(ghs, gui_hog.read_snooze(STATE_DIR), now, cfg["trigger"]["snooze_s"])
             d = gui_hog.should_show(held, means, now, snooze, ghs.get("last_shown"), cfg)
+            srows, smore = gui_hog_sources.snapshot_rows(gui_hog_sources.window_means(ghs, now, cfg), cfg, limit=12)
             print(json.dumps({"enabled": gui_hog.enabled(), "decision": d, "holds": held, "apps": means, "bundle": gui_hog.bundle_state()[0],
-                              "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now)}, indent=1))
+                              "dry_run_7d": gui_hog.count_dry_run(STATE_DIR, 7, now), "sources": srows, "sources_more": smore,
+                              "always": sorted(gui_hog.always_apps(cfg)), "always_ignored": gui_hog.always_problems(cfg)}, indent=1))
         else:
             print("\n".join(gui_hog.status_lines(st, STATE_DIR, now, cfg)))
+        return 0
+    if a.cmd == "suggest":
+        days = max(1, min(a.days if a.days is not None else int(cfg["suggest"].get("days", 30)), 365))
+        sug = gui_hog_savings.suggest(cfg, gui_hog_savings.read_events(STATE_DIR, days, now), gui_hog_savings.read_would_show(STATE_DIR, days, now))
+        print(json.dumps(sug, indent=1) if a.json else "\n".join(gui_hog_savings.suggest_lines(sug, days)))
         return 0
     if a.cmd == "vet":
         code, why, info = gui_hog.vet(a.pid, a.start, a.bundle_id, a.bundle_path, state_dir=STATE_DIR, my_uid=os.getuid(), cfg=cfg)

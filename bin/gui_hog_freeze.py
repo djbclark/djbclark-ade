@@ -34,9 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gui_hog as gh  # noqa: E402
+import gui_hog_savings as sv  # noqa: E402
 
 LABEL = "com.djbclark.load-watch"
 FROZEN, LOCK, EVENTS = "frozen.json", "frozen.lock", "events.jsonl"
+HIST = sv.HIST_FILE   # the sampler's ring of system readings (docs/gui-hog-dialog.md Q1)
 MAX_PID = 2 ** 31
 MAX_TIMED_S = 24 * 3600
 CLOCK_ZONE = "America/New_York"
@@ -341,6 +343,9 @@ def norm_entry(e):
                "updated": float(e["updated"]) if _num(e.get("updated")) else frozen_at}
         if type(e.get("kept_running")) is int and 0 <= e["kept_running"] < 100000:
             out["kept_running"] = e["kept_running"]
+        meas = sv.norm_measure(e.get("measure"))
+        if meas:   # what the freeze is judged against when it ends (Q1): recorded at the freeze, informational, never trusted for a signal
+            out["measure"] = meas
         if isinstance(e.get("kept"), list):   # names of the processes the keep-running rule left running (informational: never signalled, never trusted)
             names = [gh.clean(x, 60) for x in e["kept"][:20] if isinstance(x, str)]
             if names:
@@ -400,6 +405,15 @@ def event(dfd, ev, by, **kw):
             os.close(fd)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _hist_at(dfd):
+    """The sampler's ring of system readings, read through the state directory fd (O_NOFOLLOW); [] when missing or unreadable."""
+    try:
+        obj = json.loads(_read_at(dfd, HIST))
+        return sv.clean_hist(obj.get("rows")) if isinstance(obj, dict) and obj.get("v") == 1 else []
+    except Exception:  # noqa: BLE001 - a missing or hostile file is no history
+        return []
 
 
 # ---- vet (F3, F4a, F6, C4b) ------------------------------------------------------------------------------------------------------
@@ -491,7 +505,9 @@ def vet_app(pid, ops, cfg, state_dir, *, start=None, bundle_id=None, bundle_path
             continue
         members.append({"pid": p, "start": mi["start"], "uid": mi["uid"], "exe": mexe, "stopped": is_stopped(mi)})
     return {"app": {"name": gh.clean(app["name"]), "bundle_id": gh.clean(live_id or "", 80), "bundle_path": gh.clean(bpath, 200)},
-            "root": root, "members": members, "kept": list(app.get("kept_names") or [])}
+            "root": root, "members": members, "kept": list(app.get("kept_names") or []),
+            # what a freeze takes off the CPU: the cores of the processes it stops (a kept helper's cores stay); RSS is only what the app holds (Q1)
+            "cores": max(0.0, app["cores"] - app.get("kept_cores", 0.0)), "rss_mb": app["rss_mb"]}
 
 
 # ---- signals --------------------------------------------------------------------------------------------------------------------
@@ -556,6 +572,11 @@ def _resume(dfd, entries, entry, ops, by, now, deadline=None):
     except OSError as e:   # everything is resumed; the stale record only gives `not-stopped` lines at the next tick
         notes.append(f"state not written: {e.strerror or e}")
     event(dfd, "thaw", by, now=now, entry=entry["id"], app=entry["app"], pids=[r["pid"] for r in order], notes=notes[:200])
+    if entry.get("measure"):
+        try:   # Q1: what the freeze saved, for `gui-hog suggest`; a measuring fault never fails a resume (the signals went first)
+            event(dfd, "freeze-result", by, now=now, **sv.result(entry, _hist_at(dfd), now))
+        except Exception:  # noqa: BLE001
+            pass
     return True, notes
 
 
@@ -643,6 +664,10 @@ def _freeze_locked(dfd, entries, v, ops, cfg, state_dir, by, now, minutes, agent
             entry["members"].extend({k: m[k] for k in ("pid", "start", "uid", "exe")} for m in new)
             save_entries(dfd, entries)   # recorded before they are stopped
             _stop(dfd, ops, entry, [{k: m[k] for k in ("pid", "start", "uid", "exe")} for m in new], by, now)
+        try:   # Q1: judged at the resume against this; a failure to measure never undoes a freeze
+            entry["measure"] = sv.before_measure(_hist_at(dfd), now, minutes * 60 if minutes else None, v["cores"], v["rss_mb"])
+        except Exception:  # noqa: BLE001
+            entry.pop("measure", None)
         entry["state"], entry["updated"] = "frozen", now
         save_entries(dfd, entries)
     except Exception as e:  # noqa: BLE001 - roll back: nothing we stopped stays stopped without a record, and nothing is left half-frozen
@@ -686,7 +711,12 @@ def auto_candidates(apps, cfg, auto_state, now):
     au = cfg["freeze"]["auto"]
     out = []
     skip = {str(x).casefold() for x in au.get("skip", []) if isinstance(x, str)}
-    for bid in au.get("order", []):
+    listed, seen = [], set()
+    for bid in list(au.get("always", [])) + list(au.get("order", [])):   # the always-freeze list first (Q3), then the preference order; one entry per app
+        if isinstance(bid, str) and bid.casefold() not in seen:
+            seen.add(bid.casefold())
+            listed.append(bid)
+    for bid in listed:
         if bid.casefold() in skip:   # operator ruling 2026-11-21: not worth suspending (P7); wins over `order`
             out.append(({"bundle_id": bid}, "never-auto"))
             continue
@@ -724,7 +754,7 @@ def auto_freeze_step(gh_state, state_dir, apps, held, now, cfg, *, my_uid, agent
     timed auto-freeze made by a `load-watch sample` that launchd's job does not follow would never thaw (adversary M1: `check_sampler=True`)."""
     fz = cfg["freeze"]
     au = fz["auto"]
-    if not fz.get("enabled", True) or not au.get("enabled", True) or not au.get("order"):
+    if not fz.get("enabled", True) or not au.get("enabled", True) or not (au.get("order") or au.get("always")):
         return None
     if snoozed or not gh.hold_active(held, now, cfg)[1]:
         return None
