@@ -1003,6 +1003,50 @@ def zsh_equals_word(view: str) -> str | None:
     return None
 
 
+ZSH_MODIFIER_REASON = (
+    "zsh (this Mac's Bash-tool shell) applies history modifiers to a bare `{word}`: `$C:r` strips an extension, so "
+    "`git push origin $C:refs/heads/x` pushed `<sha>efs/heads/x` (2026-11-21), and `\"$h:c...\"` ate the `:c`; refspecs, "
+    "`scp host:path` and rsync targets are hit the same way. Write `${{NAME}}:...` instead (braced forms, single quotes and "
+    "`\\$` are safe).")
+# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21): a A c e h l P q Q r s t u &, and g or w
+# before one of them (`:gs/a/b/`, `:gr`). Not modifiers there, so left alone: p S x f F 0-9, `::`, `:-`, `:/`.
+ZSH_MODIFIER = re.compile(r"\$(?:[A-Za-z_]\w*|\d+|[@*#?$!-]):[gw]?[aAcehlPqQrstu&]")
+
+
+def zsh_modifier_word(text: str) -> str | None:
+    """The first `$NAME:x` in `text` (heredoc bodies already dropped) that zsh reads as a history modifier, found outside
+    single quotes, comments and backslash escapes; a double-quoted `$NAME:x` counts (zsh expands it too). `${NAME}:x` never
+    matches because the pattern needs the name to follow `$` directly."""
+    i, n, dq = 0, len(text), False
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+        elif ch == "#" and not dq and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif ch == "'" and not dq:
+            j = i + 1
+            if i and text[i - 1] == "$":                 # $'...': a backslash escapes the next character
+                while j < n and text[j] != "'":
+                    j += 2 if text[j] == "\\" else 1
+            else:
+                k = text.find("'", j)
+                j = n if k < 0 else k
+            i = j + 1
+        elif ch == '"':
+            dq = not dq
+            i += 1
+        elif ch == "$":
+            m = ZSH_MODIFIER.match(text, i)
+            if m:
+                return m.group(0)
+            i += 1
+        else:
+            i += 1
+    return None
+
+
 def _skip_dollar_paren(s: str, j: int) -> int:
     """Index just past the `)` that closes the `$(` whose `(` is at s[j - 1]; len(s) when it never closes."""
     depth, n = 1, len(s)
@@ -1304,6 +1348,9 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     send = risky_send_reason(cmd)
     if send:
         return send, None
+    zmod = zsh_modifier_word(_drop_heredocs(cmd))
+    if zmod:
+        return ZSH_MODIFIER_REASON.format(word=zmod), None
     plain = strip_literals(cmd)
     warn = None
     fanout = False

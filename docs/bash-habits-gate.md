@@ -40,6 +40,14 @@ Passes: a lone `=`, `=(cmd)` (process substitution), quoted words (`'==='`), `\=
 assignment value, rare), `--x=y`, `-d=`, heredoc bodies, comments, and the inside of `[[ ... ]]`, `(( ... ))` and `$(( ... ))`
 (write `[ a = b ]` or `[[ a == b ]]`). Use `---` as a separator.
 
+**`$NAME:x` history modifiers (2026-11-21).** zsh applies a modifier to a bare `$NAME` (also `$1`, `$@`, `$#`, `$?`) followed by `:` and a
+modifier letter, unquoted or double-quoted: `C=<sha>; git push origin $C:refs/heads/ci/x` pushed `<sha>efs/heads/ci/x` (`$C:r`), and
+`git show "$h:c..."` ate the `:c`; refspecs, `scp host:path` and rsync targets are all exposed. Modifier set probed with `/bin/zsh -f`:
+`a A c e h l P q Q r s t u &`, plus `g` or `w` before one (`:gs/a/b/`, `:gr`). Denied: an unescaped, unquoted or double-quoted `$NAME:` + one
+of those. The rule runs for every TUI the gate serves (Bash tool, Codex, Cursor): all use this Mac's zsh, and the hook cannot tell the shell.
+Passes: `${NAME}:x` (write this), single quotes, `\$C:r`, comments, heredoc bodies, `${C:-d}` / `${C:t}` parameter expansions, and
+colon forms zsh leaves alone (`$C::`, `$C:-`, `$C:/`, `$C:p`, `$C:x`, `$C:S`, `$C:f`, digits), so `scp $HOST:path .` is not denied (`:p` is not applied).
+
 **Backtick or `$(` in a double-quoted `paseo send` argument (2026-11-14, gs-02).** The shell runs that text before paseo starts:
 a worker's `"... the `foo` call ..."` ran `foo` and the message arrived with a hole in it. Denied for `paseo [opts] send` and
 `paseo agent send` (`paseo` must be the command word, after `VAR=x` assignments, a shell keyword (`if`, `then`, `do`) or a known wrapper such as `env -u X`, `timeout`, `gtimeout`, `bg`, `sudo`, `deadline run --`, `ssh host`, `flock F`, `watch -n N`, `direnv exec .`, `op run --` (the `SEND_WRAPPERS` set), a `case` command or a case-arm pattern word (`x) paseo send ...`; gs-03, 2026-11-15) or `{paseo` (no space after the brace); a `paseo` that is data for another command, `ls paseo send "$(date)"`, is not a send, and a `{}` placeholder is a word, not a group brace), when any double-quoted word after the
