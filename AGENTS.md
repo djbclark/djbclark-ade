@@ -48,7 +48,7 @@ Each doc carries its own summary.
 | [docs/checkpoint.md](docs/checkpoint.md) | checkpoint and interruption recovery (2026-11-04, planned) |
 | [docs/paseo-host-ram-plugins.md](docs/paseo-host-ram-plugins.md) | macOS host RAM: `zedobaia/resources` not vitals; app update ≠ `paseo plugin update` (2026-11-10) |
 | [docs/ingest-web-ai.md](docs/ingest-web-ai.md) | Carried #23 design/spike (2026-11-10): Gemini/Grok web chats → ADE memory (sources, S1 sink, trust, gates); offline stub only |
-| [docs/gui-hog-dialog.md](docs/gui-hog-dialog.md) | design (2026-11-14, PR 3 of the load-gate retune): the GUI-hog dialog, a native Swift window shown when a held build waits on desktop apps; trigger, Freeze safety (SIGSTOP state file, thaw paths), phasing; PR 3a (2026-11-14) shipped the data and a dry-run trigger (`bin/gui_hog.py`, `bin/gui-hog status`, no window); the window is PR 3b |
+| [docs/gui-hog-dialog.md](docs/gui-hog-dialog.md) | design (2026-11-14, PR 3 of the load-gate retune): the GUI-hog dialog, a native Swift window shown when a held build waits on desktop apps; trigger, Freeze safety (SIGSTOP state file, thaw paths), phasing; PR 3a (2026-11-14) shipped the data and a dry-run trigger (`bin/gui_hog.py`, `bin/gui-hog status`, no window); PR 3b (the window) and PR 3c (Freeze) are merged |
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/claude-denyread-trial.md](docs/claude-denyread-trial.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; Claude `sandbox.filesystem.denyRead` operator trial (no live `~/.claude` apply); who may open PRs on djbclark's repositories |
 | [docs/dispatch-footer.md](docs/dispatch-footer.md) | the delivery footer every brief carries (`bin/ade-worker-run` and the Agent-tool footer hook append it) |
@@ -56,7 +56,7 @@ Each doc carries its own summary.
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
 | [docs/upstream-issues.md](docs/upstream-issues.md), [docs/tui-lessons-learned.md](docs/tui-lessons-learned.md) | unfiled bug drafts for third-party projects; what each retired TUI was for and taught |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
-| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the WORKER box of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; Paseo's own `paseo-handoff` once installed |
+| [skills/handoff/](skills/handoff/SKILL.md) | tab lifecycle: the successor (a new lead, not a worker: its own placement, not the WORKER box of `docs/workspace-layout.md`) starts top-level (`env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`), archives its predecessor once it answers, and tells every sibling the new id; `skills/handoff/` is a compatibility alias for the acknowledged self-handoff |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | DEPRECATED 2026-11-13 (plugin disabled, "super-buggy"): headless Playwright against the daemon web UI `http://127.0.0.1:7263/` is the route for Paseo GUI checks; safety rules |
 | [skills/tidy/](skills/tidy/SKILL.md) | `bin/ade-tidy` (2026-11-13): one repo's agents and windows: reconnect agents with no proven contact, list workers waiting on the lead and the operator, rename windows to `LEAD\|WORKER\|OTHER <repo> (<work>)`, report misplaced tabs (Paseo cannot move an agent) and windows beyond the three boxes (section H), archive finished workers and empty or extra windows of the lead's chain; observe-only unless `--apply` |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere (`fleet-watch`, the launchd fleet notices to Hermes, is site-djbclark's `bin/fleet-watch`; vendor/README.md lists it) |
@@ -153,8 +153,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    **Transitional, `~/ops` only**: until the ops-promotion pilot passes, the `~/ops` plain-`master` practice of `~/CLAUDE.md`
    item 21 stands (deployments read that checkout). **Enforcement**: `ade-git-guard` (the PATH shim) and the ref hooks refuse
    writes into a workspace another owner has claimed; a claim records its owner and expires (`ade_claims.py new --ttl`,
-   default 72 h; `ade-git-guard claim ls`); nothing creates claims automatically yet (a Paseo `worktree.create.after` hook
-   is the planned wiring, docs/git-guard.md), so this is the rule, not yet a guard. CHANGELOG fragments (review rule 10)
+   default 72 h; `ade-git-guard claim ls`); the `plugins/ade-claim/` hook implements automatic claim creation but is observe-only and not installed yet (docs/git-guard.md), so this is the rule, not yet a guard. CHANGELOG fragments (review rule 10)
    ended the shared-file conflicts. Another session's uncommitted edits in a shared checkout are migrated by their owner
    (message it, order 10), never stashed or reset by you. **Never `git stash` in any worktree**: a repo's worktrees share
    one stash stack, so a pop can apply another writer's WIP (2026-11-12: two workers swapped uncommitted edits); set work
@@ -217,7 +216,7 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
 
 When asked for an ELI5 or a plain-language explanation, load [skills/eli5/SKILL.md](skills/eli5/SKILL.md) and follow it:
 STE-based rules (not full STE), short active sentences, one everyday analogy with its limits, then the real terms,
-checked against the real system. Standing order 5 still applies: label headings and items (`A.`, `A1`).
+checked against the real system. Standing order 5 still applies: Roman sections, bold-italic item labels, script-issued `Ref:` line (docs/ref-labels.md).
 
 ## Graft files in git (operator, 2026-11-14; every repo except forks)
 

@@ -58,7 +58,6 @@ For a small question, use one paragraph: core idea, analogy, and where it breaks
 
 ## Reply format for the operator
 
-Standing order 5 still applies. When the answer has headings or lists, label them `A.`, `A1`, `A2`, `B.`, and so
-on. The first four parts above become headings `A.` to `D.`. The optional last line has no heading.
+Standing order 5 still applies: Roman sections, bold-italic item labels, script-issued `Ref:` line (docs/ref-labels.md). When the answer has sections, the first four parts above become **I.** to **IV.**; the optional last line has no heading.
 
 Sources and prior art: [docs/eli5-sources.md](../../docs/eli5-sources.md).

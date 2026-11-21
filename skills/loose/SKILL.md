@@ -254,8 +254,8 @@ the final message stays readable). A running agent cannot archive itself, and `/
 reaches Claude as plain text (seen twice 2026-10-20); the `self-slash --finish` that did both was removed 2026-11-06. If
 the handoff was chosen and it was run document-only, offer the finish prompt again once it is written.
 
-**Compaction** is left to Claude Code's auto-compaction: an agent cannot run `/compact` on itself (the `self-slash` that
-typed it was removed 2026-11-06). When the context prompt's compact tier fires (+140k since the start or last compaction,
+**Compaction** is left to Claude Code's auto-compaction, or requested by
+`bin/ade-self-session compact --checkpoint FILE --request-id TOKEN` (docs/self-session.md section B): it preserves the checkpoint and intent, then sends itself `/compact`, and `requested` is never completed compaction. The old `/compact` self-slash was removed 2026-11-06. When the context prompt's compact tier fires (+140k since the start or last compaction,
 or 217k total) or the operator picks it, write down what the next turn needs and ask him to type `/compact <focus>`;
 never because context merely looks large: each compaction costs ~150k+ token-equivalents
 (`memory/feedback_self_compact.md` item 7). Grok Bot: skip (G6).
