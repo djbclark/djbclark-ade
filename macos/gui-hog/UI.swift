@@ -108,6 +108,12 @@ final class Dialog: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if (force || data != lastBytes), let s = parseSnapshot(data) { snap = s; rows = mergeRows(old: rows, new: s.rows); rows = markFrozen(rows, rootPids: frozenRoots); lastBytes = data; rebuild() }
         }
         pollFrozen()
+        // The title bar must agree with the body: it was set once at launch to "A build is waiting" and never
+        // updated, so after the last hold cleared the title still said a build was waiting while the body said
+        // "No build is waiting now." (operator, 2026-11-21).
+        window.title = cfg.demo ? "ADE GUI Hog (demo)" : (snap.holds.isEmpty
+            ? (cfg.manual ? "Opened by hand: no build is waiting." : "No build is waiting now.")
+            : "A build is waiting: desktop apps are busy")
         if snap.holds.isEmpty && !cfg.manual && !cfg.demo {
             if noHoldSince == nil { noHoldSince = Date(); rebuild() }
             if let t = noHoldSince, Date().timeIntervalSince(t) >= autoCloseS { finish(0) }
