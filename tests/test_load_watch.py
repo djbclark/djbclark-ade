@@ -1116,3 +1116,57 @@ def test_watcher_howto_carries_the_send_rules():
     assert "any send to a running agent can replace its turn" in h and "clears pending permissions" in h
     assert "a running blamed agent is listed for djbclark, not messaged" in h
     assert "reads `Status` idle, `Archived: false` and no pending permissions" in h
+
+
+def test_watch_step4_pins_the_round1_archive_safety_rules():
+    """PR 888 round 4 MED 1: the round-1 HIGH fix (the watcher never archives leads or operator agents, never archives by
+    itself, and only a memory refusal starts item 3) lived in prose no test read, so seven of eight mutants survived."""
+    s4 = _step4()
+    # the one trigger, and what is not a trigger
+    assert "refuses on a memory reason (`free_mem`, `swapins` or `compressor`)" in s4
+    assert "never starts item 3" in s4 and "reports anything" not in s4
+    # the watcher has no archive authority of its own
+    assert "The watcher never runs `paseo agent archive` itself." in s4
+    assert "may run `paseo agent archive`" not in s4
+    assert "`~/src/djbclark-ade/bin/ade-tidy prune`" in s4
+    # an agent with no ade.lead label (every LEAD, operator agents) is only listed
+    assert "**No `ade.lead` label**" in s4
+    assert "list it for djbclark in one line; never archive it and never message it about archiving" in s4
+    # `closed` is not proof of finished work
+    assert "`closed` alone proves nothing finished" in s4
+    assert "is finished and may be archived" not in s4
+    # the hard boundaries
+    assert "never archive a `running` agent, a LEAD, an agent with a pending permission or question" in s4
+    assert "archive any agent" not in s4
+    assert "when in doubt, do not archive" in s4
+
+
+def test_watch_step4_item3_lead_gate_and_consistent_scope():
+    """PR 888 round 4 MED 1 (item 3 lead gate) and LOW 2 (item 1 reason; closed workers not named)."""
+    s4 = _step4()
+    gate = s4[s4.index("**Has `ade.lead=<L>`"):s4.index("**Rate limit:**")]
+    assert "the owning lead decides, never the watcher" in gate
+    assert "`Archived: false`" in gate and 'Status == "idle"' in gate and "PendingPermissions == []" in gate
+    assert "`paseo permit ls`" in gate and "never message an agent waiting on a card or an archived one" in gate
+    # LOW 2: item 3 targets live idle processes only, and the lead message names idle workers only
+    assert "targets live idle provider processes only" in s4
+    assert "its idle workers (closed ones hold little RAM and are not named)" in gate
+    assert "idle or closed workers" not in s4
+    # LOW 2: the item 1 reason no longer claims the incident brief always reached the agent
+    item1 = s4[s4.index("1. **Steer future heavy runs"):s4.index("2. **Guard a misbehaving")]
+    assert "has already reached it" not in item1
+    assert "that send can queue or fail" in item1
+
+
+def test_watcher_howto_pins_the_round1_rules_and_has_no_unconditional_send():
+    """PR 888 round 4 MED 1 (HOWTO side) and LOW 1: every send in the prompt is idle-gated, including the older 'send it one line'."""
+    h = load_module().WATCHER_HOWTO
+    assert "Only when `admit --json` refuses on memory (`free_mem`, `swapins`, `compressor`)" in h
+    assert "never touch an agent with no `ade.lead` label (list it)" in h
+    assert "never run `paseo agent archive` yourself (only `bin/ade-tidy prune`)" in h
+    assert "following skills/watch/SKILL.md Step 4 exactly" in h
+    # LOW 1: the "send it one line" clause carries the idle gate right in front of it
+    assert "if it was not told, send it one line" not in h
+    pos = h.index("send it one line")
+    assert "reads `Status` idle, `Archived: false` and no pending permissions" in h[max(0, pos - 160):pos]
+    assert "a running one is listed for djbclark, not messaged" in h
