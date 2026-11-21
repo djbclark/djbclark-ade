@@ -1,0 +1,3 @@
+### Fixed
+
+- `bin/lsp-root-guard`: container roots now include `~/s` and `~/s/*`, `/Volumes`, `/Applications`, `/private`, `/Users/Shared`, `/System`, `/usr` and `/etc`, any non-project directory directly under `/` or above `$HOME`, and a directory whose child repositories are symlinks; a project `rootUri` survives a `workspaceFolders` list that holds only a container; more project markers (`pyrightconfig.json`, `requirements.txt`, `setup.cfg`, `deno.json`, `flake.nix`). The local-lsp plugin patch moved into the repo at `docs/proposals/`, so the apply step no longer points at a worker's temporary state directory. (#PR)

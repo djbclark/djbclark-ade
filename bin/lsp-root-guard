@@ -26,6 +26,7 @@ does not change are forwarded as received. Exit: the child's exit code; 127 comm
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
@@ -43,9 +44,11 @@ except ModuleNotFoundError:  # Python < 3.11: the built-in container list below 
     tomllib = None  # type: ignore[assignment]
 
 PROJECT_MARKERS = (".git", ".jj", ".hg", "pyproject.toml", "setup.py", "package.json", "Cargo.toml", "go.mod",
-                   "Package.swift", "tsconfig.json", "Makefile", "Gemfile", ".lsp-root-guard-project")
-DEFAULT_CONTAINERS = ("~", "~/src", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
-                      "/opt", "/tmp", "/private/tmp", "/var", "/private/var")
+                   "Package.swift", "tsconfig.json", "Makefile", "Gemfile", "pyrightconfig.json", "requirements.txt", "setup.cfg",
+                   "deno.json", "flake.nix", ".lsp-root-guard-project")
+DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
+                      "/Users", "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp",
+                      "/private", "/private/tmp", "/var", "/private/var")
 HEURISTIC_SCAN_LIMIT = 400
 
 
@@ -102,11 +105,20 @@ def is_container(root: str, containers: list[str], min_repo_children: int, heuri
         real = _real(root)
     except ValueError:  # a NUL byte in the path
         return False
-    if real in {_real(c) for c in containers} or any(_same_dir(real, c) for c in containers):
+    listed: list[str] = []
+    for c in containers:  # an entry may be a glob (`~/s/*`: category folders of links to repos)
+        listed += glob.glob(os.path.expanduser(c)) if "*" in c else [c]
+    if real in {_real(c) for c in listed} or any(_same_dir(real, c) for c in listed):
         return True
-    if not heuristic or not os.path.isdir(real):
+    if not os.path.isdir(real):
         return False
     if any(os.path.exists(os.path.join(real, m)) for m in PROJECT_MARKERS):
+        return False
+    # structural rule: a non-project directory directly under / or above $HOME is a container whatever the list says
+    home = _real("~")
+    if os.path.dirname(real) == "/" or home.startswith(real.rstrip(os.sep) + os.sep):
+        return True
+    if not heuristic:
         return False
     repos = 0
     try:
@@ -115,7 +127,8 @@ def is_container(root: str, containers: list[str], min_repo_children: int, heuri
                 if n >= HEURISTIC_SCAN_LIMIT:
                     break
                 try:
-                    if entry.is_dir(follow_symlinks=False) and os.path.exists(os.path.join(entry.path, ".git")):
+                    if entry.is_dir() and os.path.exists(  # follows symlinks: ~/s-like folders hold links to repos
+                            os.path.join(entry.path, ".git")):
                         repos += 1
                         if repos >= min_repo_children:
                             return True
@@ -164,9 +177,17 @@ def guard_initialize(msg: dict[str, Any], containers: list[str], min_children: i
         params["rootUri"] = good_folders[0]["uri"]
         params["rootPath"] = uri_to_path(good_folders[0]["uri"])
     else:
-        params["rootUri"] = None
-        params["rootPath"] = None
-        params["workspaceFolders"] = None
+        keep = next((r for r in (uri_to_path(params["rootUri"]) if isinstance(params.get("rootUri"), str) else None,
+                                 params.get("rootPath") if isinstance(params.get("rootPath"), str) else None)
+                     if r and r not in bad and not is_container(r, containers, min_children, heuristic)), None)
+        if keep is not None:  # a project root with a container-only folder list: the root wins
+            params["rootUri"] = Path(keep).as_uri()
+            params["rootPath"] = keep
+            params["workspaceFolders"] = [{"uri": Path(keep).as_uri(), "name": Path(keep).name}]
+        else:
+            params["rootUri"] = None
+            params["rootPath"] = None
+            params["workspaceFolders"] = None
     return bad[0]
 
 

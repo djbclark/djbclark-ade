@@ -230,3 +230,38 @@ def test_parse_predicates_do_not_skip_a_folder_reply(tmp_path: Path) -> None:
     g.from_server({"method": "workspace/workspaceFolders", "id": 6})
     err = {"id": 6, "error": {"code": -1, "message": "no"}}
     assert g.from_client(b"raw", err) == b"raw" and 6 not in g.folder_request_ids  # an error reply clears the id
+
+
+def test_symlinked_repos_default_list_and_structural_rule(tmp_path: Path) -> None:
+    home = _mk(tmp_path)
+    env = dict(os.environ, HOME=str(home))
+    repos = tmp_path / "elsewhere"
+    links = home / "cats"
+    links.mkdir()
+    for n in "abc":
+        (repos / n / ".git").mkdir(parents=True)
+        (links / n).symlink_to(repos / n)
+    (home / "s").mkdir()
+
+    def check(p: Path) -> str:
+        return subprocess.run([sys.executable, str(TOOL), "--check", str(p)], capture_output=True, text=True,
+                              env=env).stdout.strip()
+
+    assert check(links) == "container"  # symlinked repos count
+    assert check(home / "s") == "container"  # ~/s is in the default list
+    assert check(tmp_path) == "container"  # a non-project directory above $HOME
+    (tmp_path / "pyrightconfig.json").write_text("{}")
+    assert check(tmp_path) == "project"  # the marker makes it a project
+    assert check(repos / "a") == "project"
+
+
+def test_project_root_survives_a_container_only_folder_list(tmp_path: Path) -> None:
+    mod = _guard_module()
+    home = _mk(tmp_path)
+    proj = home / "src" / "proj"
+    (proj / ".git").mkdir(parents=True)
+    msg: dict[str, Any] = {"params": {"rootUri": proj.as_uri(), "rootPath": str(proj),
+                                      "workspaceFolders": [{"uri": home.as_uri(), "name": "h"}]}}
+    assert mod.guard_initialize(msg, [str(home)], 3, False) == str(home)
+    assert msg["params"]["rootPath"] == str(proj)
+    assert [f["uri"] for f in msg["params"]["workspaceFolders"]] == [proj.as_uri()]

@@ -653,9 +653,10 @@ for building the aggregator.
    fix sits between the client and the server.
 2. **`bin/lsp-root-guard [--container PATH] [--no-heuristic] -- CMD ARGS`** is a stdio proxy. On `initialize` it checks
    each named root. A container (realpath in `config/lsp-roots.toml`, in `ADE_LSP_CONTAINER_ROOTS`, or a directory that
-   is not a project and has at least 3 child repositories) gets `rootUri`, `rootPath` and `workspaceFolders` set to null,
+   is not a project and has at least 3 child repositories, symlinked ones counted, or is a non-project directory directly under `/` or above `$HOME`) gets `rootUri`, `rootPath` and `workspaceFolders` set to null,
    so the server serves only the files the client opens and walks nothing. It also answers a server's
-   `workspace/workspaceFolders` request with null and drops `didChangeWorkspaceFolders`, so the root cannot come back. A
+   `workspace/workspaceFolders` request with null and drops `didChangeWorkspaceFolders` (strip mode; in a multi-root session it
+   filters both lists instead), so the root cannot come back. A
    project root, and every other message in both directions, passes through byte for byte. It never uses a shell and it
    writes one line to stderr when it strips a root. `--check ROOT` prints `container` or `project`. Tests:
    `tests/test_lsp_root_guard.py` (fixture server that echoes the `initialize` it received).
@@ -672,7 +673,7 @@ for building the aggregator.
    server** (0 of 7 basedpyright, 0 of 8 marksman, 3 typescript servers in project roots), so the guard saves nothing at
    this moment and keeps the next `cd ~ && claude` from costing 1-3 GB. Rooted at a project the guard changes nothing
    (209 MB plain against 224 MB guarded on `~/src/djbclark-ade`, the extra being the proxy's Python).
-6. **Proposal, other repo (not applied):** `ram-relief-89-local-lsp-guard.patch` in the lead's report directory wraps
+6. **Proposal, other repo (not applied):** [proposals/ram-relief-89-local-lsp-guard.patch](proposals/ram-relief-89-local-lsp-guard.patch) wraps
    `basedpyright`, `marksman` and `typescript` in `lsp-root-guard` in site-public-djbclark's `local-lsp` plugin and adds
    `"maxTsServerMemory": 2048` to the typescript `initializationOptions`. `typescript-language-server` reads
    `initializationOptions.maxTsServerMemory` and passes it to tsserver as `--max-old-space-size` (the same ask is open as
@@ -703,7 +704,7 @@ the compressed tsserver and basedpyright pages; this item removes the avoidable 
 1. After the PR merges: `~/src/djbclark-ade/bin/ade-update` links `~/.local/bin/lsp-root-guard`; check with
    `lsp-root-guard --check ~` (prints `container`).
 2. Apply the proposal patch in a site-public-djbclark workspace (`git -C <worktree> apply
-   ~/.local/state/agent-reports/cad27907-8a41-4216-bd80-7851fb86aca6/ram-relief-89-local-lsp-guard.patch`), bump the plugin
+   ~/src/djbclark-ade/docs/proposals/ram-relief-89-local-lsp-guard.patch`), bump the plugin
    version in `plugin.json` and `marketplace.json`, merge, and `claude plugin update local-lsp@local`. New sessions use it;
    running ones keep their servers. Rollback: revert the commit and update again.
 3. Verify in a fresh session started in `~`: `bin/ram-census --roots` lists the basedpyright and marksman roots as
