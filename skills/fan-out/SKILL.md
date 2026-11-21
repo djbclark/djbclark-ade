@@ -193,6 +193,12 @@ naming, limits and `cwd` are in `docs/workspace-layout.md`. Session cwd is the W
 brief names a separate claimed execution worktree and every repository tool call targets it explicitly. Never turn a
 report folder into a workspace.
 
+Claiming a worktree for a worker (2026-11-21, queue 87): from inside its worktree, one line is enough,
+`~/src/djbclark-ade/bin/ade_claims.py new --path <worktree> --owner-agent <worker Paseo id>`. A Paseo agent id as
+`--owner-agent` also becomes `--owner-record`; `--branch` and `--base-sha` come from the worktree's `HEAD`; `--id` is
+generated, so a re-claim after `release` needs nothing new from you (a released claim keeps its id, and an explicit
+`--id` that exists exits 3 telling you to omit it). Exit 2 means the path is not a git worktree: pass `--branch` and `--base-sha`.
+
 ## 4. Collect
 
 - **Re-tasking a worker whose round is finished:** rename its `<report>.done` to `<report>.done.rN` before the `paseo send`
