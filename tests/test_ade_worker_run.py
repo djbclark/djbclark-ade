@@ -2520,3 +2520,123 @@ def test_cleanup_error_preserves_launch_failure(env):
     assert r.returncode == 1
     assert "cleanup of wks_abc123 failed" in r.stderr
     assert "paseo run failed" in r.stderr
+
+
+# --- the worker is told where its session starts (2026-11-21): the stderr note reaches only the launcher -------------------------
+
+def cwd_line(eff, cwd):
+    return f"Your session starts in {eff}; run every command from {cwd} (cd there or git -C); never edit or commit in {eff}."
+
+
+def test_a_moved_worker_brief_carries_the_cwd_line_before_the_footer(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = mint(env, wt)
+    assert r.returncode == 0, r.stderr
+    eff, want = os.path.realpath(main), os.path.realpath(wt)
+    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(eff, want)}\n\n{FOOTER_LINE}"  # exact paths, footer still last
+    assert json.loads(r.stdout)["requestedCwd"] == want  # the same condition as the JSON fields and the stderr note
+
+
+def test_a_moved_worker_brief_without_the_footer_ends_with_the_cwd_line(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt), "--no-footer", "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
+
+
+def test_a_redirect_into_the_primary_checkout_window_carries_the_cwd_line(env, tmp_path):
+    main, wt = make_repo(tmp_path)
+    own_window_at(env, os.path.realpath(main))
+    env.data["inspect_cwd"] = os.path.realpath(main)
+    r = env.run("--lead", LEAD, "--slice", "s2", "--repo", "repo", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 0, r.stderr
+    assert cwd_line(os.path.realpath(main), os.path.realpath(wt)) in placed(env)[0][-1]
+
+
+def test_an_unmoved_worker_brief_has_no_cwd_line(env, tmp_path):
+    main, _wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(main), "--", "--no-wait", "just do the work")
+    assert r.returncode == 0, r.stderr
+    assert "requestedCwd" not in json.loads(r.stdout)
+    assert placed(env)[0][-1] == f"just do the work\n\n{FOOTER_LINE}"
+
+
+def test_a_case_variant_of_the_primary_checkout_is_not_a_move_so_no_cwd_line(env, tmp_path):
+    if not case_insensitive(tmp_path):
+        pytest.skip("this temporary filesystem is case-sensitive: a differently-cased path is another directory")
+    main, _wt = make_repo(tmp_path)
+    variant = os.path.join(os.path.dirname(os.path.realpath(main)), "LIBNTECH")
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", variant, "--", "--no-wait", "just do the work")
+    assert r.returncode == 0, r.stderr
+    assert "requestedCwd" not in json.loads(r.stdout)
+    assert "Your session starts in" not in placed(env)[0][-1]
+
+
+# --- repair of #893 (adversary, head f117b33e): the line never names a workspace the worker does not own --------------------------
+
+def load_script(monkeypatch):
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_cwd_t", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ade_worker_run_cwd_t", loader))
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    return mod
+
+
+def test_the_implicit_case_brief_never_sends_the_worker_to_the_leads_worktree(env, tmp_path):
+    """MED-1: no --cwd, the lead stands in its own claimed worktree and its brief names that worktree only to forbid it."""
+    main, wt = make_repo(tmp_path)
+    brief = f"Your own worktree is {tmp_path}/libntech-s1-wt; the lead works in {wt}, do not touch it."
+    r = run_in(env, wt, "--window-middle", "strictjson", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    got = placed(env)[0][-1]
+    eff = os.path.realpath(main)
+    assert f"Your session starts in {eff}, the shared primary checkout: never edit or commit there; work only in the worktree your brief names." in got
+    assert "run every command from" not in got and "cd there" not in got
+    tail = got[len(brief):]  # what the tool added: it names no directory but the primary checkout
+    assert os.path.realpath(wt) not in tail and str(wt) not in tail
+    assert got.endswith(FOOTER_LINE)  # the footer stays last
+
+
+def test_with_no_footer_a_trailing_flag_value_never_gets_the_line_and_the_launch_is_refused(env, tmp_path):
+    """LOW-1: the last argument is the value of --env, not the brief; it must not be rewritten (and no brief means no worktree named)."""
+    main, wt = make_repo(tmp_path)
+    r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(wt), "--no-footer", "--",
+                "--no-wait", "do the work", "--env", f"WT={wt}")
+    assert r.returncode == 1 and not placed(env)
+    assert "brief" in r.stderr
+
+
+def test_add_cwd_line_leaves_alone_arguments_whose_last_item_is_no_brief(monkeypatch, capsys):
+    mod = load_script(monkeypatch)
+    for rest in (["--no-wait", "brief", "--env", "WT=/w"], ["--no-wait", "brief", "--title", "t"], ["--no-wait", "--json"], []):
+        assert mod.add_cwd_line(list(rest), "/p", "/w", True) == rest
+    assert "cannot tell which argument is the brief" in capsys.readouterr().err
+    assert mod.add_cwd_line(["--no-wait", "--title", "t", "brief"], "/p", "/w", True)[-1].startswith("brief\n\nYour session starts in /p;")
+
+
+def test_the_cwd_line_shell_quotes_the_paths(monkeypatch):
+    """LOW-2: a space or a backtick in a path must not break the `cd` the worker pastes."""
+    mod = load_script(monkeypatch)
+    got = mod.add_cwd_line(["--no-wait", "brief"], "/a b/primary", "/a b/wt`id`", True)[-1]
+    assert "Your session starts in '/a b/primary'; run every command from '/a b/wt`id`' (cd there or git -C); never edit or commit in '/a b/primary'." in got
+    assert "'/a b/primary', the shared primary checkout" in mod.add_cwd_line(["--no-wait", "brief"], "/a b/primary", "/x", False)[-1]
+
+
+def test_a_directory_name_with_a_newline_is_refused_before_the_launch(env, tmp_path):
+    """LOW-2: a newline in a directory name would split the brief line that names it."""
+    main, wt = make_repo(tmp_path, name="lib\nntech")
+    r = env.run("--lead", LEAD, "--slice", "s", "--repo", "libntech", "--window-middle", "strictjson", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
+    assert r.returncode == 1 and "control character" in r.stderr
+    assert not placed(env)
+
+
+def test_a_brief_that_already_names_the_footer_gets_the_line_after_its_own_footer_text(env, tmp_path):
+    """LOW-3: no pointer is added then, so the line ends the brief (docs/workspace-layout.md item 6 says so)."""
+    main, wt = make_repo(tmp_path)
+    brief = f"work in {wt}\n\nAlso follow every item of {ROOT}/docs/dispatch-footer.md; my own words."
+    r = mint(env, wt, brief=brief)
+    assert r.returncode == 0, r.stderr
+    got = placed(env)[0][-1]
+    assert got == f"{brief}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
+    assert got.count("dispatch-footer.md") == 1
