@@ -589,9 +589,10 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
 
 
 @lru_cache(maxsize=1024)
-def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
-    """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
-    n = len(text)
+def _closing_paren(text: str, i: int, arithmetic: bool = False, limit: int | None = None) -> int:
+    """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed. With `limit`, the text
+    is read only up to there (a caller that scans a region of its own) and `limit` stands for an unclosed one."""
+    n = len(text) if limit is None else min(limit, len(text))
     # Explicit call frames keep deeply nested substitutions off Python's call
     # stack. Results are pure offsets, including the arithmetic trial parse.
     results = {}
@@ -1018,14 +1019,24 @@ ZSH_MODIFIER_REASON = (
     "`scp host:path` and rsync targets are hit the same way. Write `${{NAME}}:...` instead (braced forms, single quotes and "
     "`\\$` are safe). An unquoted heredoc body (`<<EOF`) is expanded too: quote its delimiter (`<<'EOF'`) or use `${{NAME}}`.")
 # Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21; zsh manual, Expansion: Modifiers): a A c e h l P q Q r s t u &,
-# and before one of them any prefixes f, g, w, a bare `F`, `F` or `W` with an argument in a delimiter pair (`:F:2:r`, `:W:/:t`, also
-# `/x/`, `,x,`, `(x)`, `[x]`, `{x}`; other delimiters are not followed) (`:gs/a/b/`, `:gr`, `:fr`, `:Fr`). Not modifiers there, so left
-# alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and
-# the name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
-_ZSH_MODIFIER_ARG = r"[FW](?::[^:\s]*:|/[^/\s]*/|,[^,\s]*,|\([^)\s]*\)|\[[^\]\s]*\]|\{[^}\s]*\})"
+# and before one of them any prefixes f, g, w, `F` or `W` with a delimited argument and a bare `F` (`:F:2:r`, `:W:/:t`, `:gs/a/b/`, `:gr`,
+# `:fr`, `:Fr`). The delimiter is any character, read as the opener and closed by its next copy (`:F-2-r`, `:W.x.t`, `:Wrxrt`); `( [ { <`
+# close with `) ] } >` and no other copy of themselves. A bare `F` is only a prefix when no closing delimiter follows: `:Feature` and
+# `:Ftest` are plain text (`e`/`t` is the delimiter, no modifier follows its closer), while `:Fr` is `F` then `r`. Not followed: a delimiter
+# that is whitespace, `\ ' " $` or a backtick (zsh reads those as a math error or text), and whitespace inside the argument (a word ends
+# there outside double quotes). Not modifiers there, so left alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix
+# with no modifier after it (`:f`, `:F:r`). Between `$` and the name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name:
+# one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
+def _zsh_delimited(group: str) -> str:
+    return (r"(?:\([^)\s]*\)|\[[^\]\s]*\]|\{[^}\s]*\}|<[^>\s]*>"
+            rf"|(?P<{group}>[^\s\\'\"`$(\[{{<])(?:(?!(?P={group}))\S)*(?P={group}))")
+
+
+_ZSH_MODIFIER_ARG = r"[FW]" + _zsh_delimited("d")
+_ZSH_BARE_F = r"F(?!" + _zsh_delimited("e") + r")"
 ZSH_MODIFIER = re.compile(
     r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]*\])?|\d+|[#?$!-])"
-    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + r"|F)*[aAcehlPqQrstu&]")
+    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + "|" + _ZSH_BARE_F + r")*[aAcehlPqQrstu&]")
 ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
 
 
@@ -1077,7 +1088,7 @@ def _zsh_modifier_scan(text: str, i: int, end: int, mode: str, depth: int) -> st
             i = j + 1
         elif ch == "$":
             if text.startswith("$(", i) and depth < ZSH_SCAN_DEPTH:      # `$((` too: its body is read as plain text anyway
-                close = min(_closing_paren(text, i + 2), end)
+                close = _closing_paren(text, i + 2, limit=end)    # reads to `end` only: a read to len(text) per `$(` is quadratic
                 hit = _zsh_modifier_scan(text, i + 2, close, "cmd", depth + 1)
                 if hit:
                     return hit

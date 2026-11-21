@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1242,6 +1243,17 @@ def test_zsh_modifier_prefixes_f_g_w_and_F_are_denied(command):
     _assert_zsh_modifier_denied(command)
 
 
+@pytest.mark.parametrize("command", [                 # zsh reads the character after F or W as the delimiter (PR 918 review L-A)
+    "echo $C:F-2-r", "echo $C:F.2.r", "echo $C:F_2_r", "echo $C:F@2@r", "echo $C:F%2%r", "echo $C:F=2=r", "echo $C:F+2+r",
+    "echo $C:Fx2xr", "echo $C:W.x.t", "echo $C:Wrxrt", "echo $C:Wxxt", "echo $C:F323r", "echo $C:F<2>r", "echo $C:W<x>t",
+    "echo $C:F)2)r", "echo $C:F]2]r", "echo $C:F}2}r", "echo $C:F>2>r",         # a closing bracket is an ordinary delimiter
+    "echo \"$C:F|2|r\"", "echo \"$C:F;2;r\"", "echo \"$C:F#2#r\"", "echo \"$C:F!2!r\"", "echo \"$C:F*2*r\"",
+    "echo $C:F-1-W.x.t", "echo $C:FW.x.t", "echo $C:Fre",                       # prefixes chain; `F` with no closer is bare
+])
+def test_zsh_modifier_any_delimiter_after_f_and_w_is_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
 @pytest.mark.parametrize("command", [
     "echo $C[1]:r", "echo $C[1,3]:u", "echo $C[-1]:l", "echo $C[(r)B]:r", "echo $@[1]:t", 'echo "$C[1]:r"',
     "echo $=C:t", "echo $~C:t", "echo $^C:t", "echo $^^C:t", "echo $+C:t", "echo $#C:t",
@@ -1313,6 +1325,7 @@ def test_zsh_modifier_follows_command_substitution_inside_double_quotes(command)
     "echo $C::x $C:/y $C:-x $C:x $C:p $C:S $C:1 $a:b:c",
     "echo $C:f $C:F $C:ff $C:g $C:gp $C:Fx $C:FZ $C:F:r $C:F:2 $C:fx",    # a prefix with no modifier after it is plain
     "echo $C:Fxt $C:F2t $C:Wr $C:W:x $C:W:x: $C:g:o:r $C:g:e:r",
+    "echo $C:Feature $C:Ftest $C:F-2- $C:Wxx $C:F(2(r $C:W(x]t $C:F[2}r",       # `e`/`t` is a delimiter whose closer is followed by no modifier
     "echo \\$C:r",
     "echo \"${C}:r\" \"x:$C\"",
     "echo $PATH:/usr/bin $HOST:8080 scp $HOST:path .",
@@ -1340,6 +1353,7 @@ def test_zsh_modifier_follows_command_substitution_inside_double_quotes(command)
     'echo "`echo \'$C:r\'`"',
     'echo "$(echo "$(echo \'$C:r\')")"',
     "echo \"a `echo '$C:r'` b\"",
+    'cat <<EOF\n"`echo \\"\'$C:r\'\\"`"\nEOF',                    # in a heredoc body `"` is literal: this `$C:r` stays inside single quotes (L-B)
 ])
 def test_zsh_modifier_lookalikes_and_safe_forms_pass(command):
     assert not denied(command), command
@@ -1353,6 +1367,17 @@ def test_zsh_modifier_lookalikes_and_safe_forms_pass(command):
     "echo '" + "\\" * 10001,
     "cat <<EOF\n" + "$(" * 3000 + "\nEOF",
     "echo " + "$(echo $C) " * 3000,
+    "echo " + '$(echo "$(" ) ' * 500,
 ])
 def test_zsh_modifier_scan_survives_pathological_input(command):
     run(command)                                      # `run` asserts exit 0 and a 30 s ceiling; the verdict may be either
+
+
+def test_zsh_modifier_scan_is_linear_on_unbalanced_substitutions_in_quotes():
+    """PR 918 review M-A: an unbalanced `$(` inside double quotes, repeated in sibling `$(...)`, made `_closing_paren` read to
+    the end of the command each time (quadratic: 68 s at 140 KB, past the 60 s hook timeout, so the gate failed open)."""
+    command = "echo " + '$(echo "$(" ) ' * 10000      # about 140 KB
+    assert len(command) > 130_000
+    started = time.monotonic()
+    run(command)
+    assert time.monotonic() - started < 5, "the zsh modifier scan is no longer linear"
