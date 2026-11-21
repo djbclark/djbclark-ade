@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Periodic Pi-stuck scan. Runs bin/ade-pi-stuck; when a live Pi agent is stuck on an
-# exhausted account (or an account is thin, or the scan cannot read quota), it sends
+# exhausted account, any agent (Pi or not) sits in `error` (a notice only; a non-Pi one gets no alternative), an
+# account is thin, or the scan cannot read quota, it sends
 # at most one message per run naming every new finding to the lead named in
 # ADE_SUPERVISOR_LEAD, or failing that in $STATE_DIR/lead (one Paseo agent id). The
 # plist and its config/ade.toml inventory row carry no lead at all, so `ade-sched
@@ -153,11 +154,19 @@ else:
         carry = sorted(told)
     else:
         for s in stuck:
-            if s.get("status") in ("closed", "archived", "error"):      # ade-pi-stuck already filters these
+            if s.get("status") in ("closed", "archived"):               # nothing to re-hand; `error` IS reported
                 continue
-            items.append((recipient + "|%s|%s" % (s.get("id"), s.get("account")),
-                          "id=%s account=%s model=%s -> %s" % (s.get("id"), s.get("account"), s.get("model"),
-                                                               s.get("alternative") or "no healthy alternative")))
+            family = s.get("family") or "pi"                            # an entry from an older ade-pi-stuck is a Pi one
+            if family != "pi":
+                # An errored Codex/Claude/other agent: told as a notice only. ade-pi-stuck offers it no alternative (a
+                # Pi/DeepSeek one would be a downgrade and a cross-vendor move), and nothing here acts on it.
+                text = "id=%s %s agent in error (model=%s) -> restart or re-handoff within %s; no Pi alternative" % (
+                    s.get("id"), family, s.get("model"), family)
+            else:
+                text = "id=%s account=%s model=%s%s -> %s" % (
+                    s.get("id"), s.get("account"), s.get("model"), " (in error)" if s.get("status") == "error" else "",
+                    s.get("alternative") or "no healthy alternative")
+            items.append((recipient + "|%s|%s" % (s.get("id"), s.get("account")), text))
 seen = {key for key, _ in items}
 items += [(key, None) for key in carry if key not in seen]
 with open(pending_path, "w") as fh:

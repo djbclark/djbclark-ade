@@ -201,13 +201,55 @@ def test_a_stale_zero_reading_is_never_offered_as_an_alternative(tmp_path: Path)
     assert stuck and not (stuck[0]["alternative"] or "").startswith("pi/opencode-go-t-e/")
 
 
-def test_closed_archived_and_errored_agents_are_not_flagged(tmp_path: Path) -> None:
-    """`error` is dead for ade-progress, so it is not "stuck on an exhausted account" either."""
+def test_closed_and_archived_agents_are_not_flagged_but_an_errored_one_is(tmp_path: Path) -> None:
+    """Closed and archived agents have nothing to re-hand. A hard `error` is stuck, Pi included (queue item 82)."""
     agents = [{"id": "x1", "provider": "pi/openai/gpt-6.1-sol", "status": "error"},
               {"id": "x2", "provider": "pi/openai/gpt-6.1-sol", "status": "archived"},
               {"id": "x3", "provider": "pi/openai/gpt-6.1-sol", "status": "closed"}]
     report = _run(tmp_path, _pools(**{"openai:openai_api": (0.0, True, False)}), agents=agents)
-    assert report["stuck"] == []
+    assert _stuck_ids(report) == ["x1"]
+
+
+def test_a_pi_agent_in_error_on_a_healthy_account_is_stuck_with_a_pi_alternative(tmp_path: Path) -> None:
+    """Queue item 82: a Pi agent on xai-oauth/grok-4.7 that a 402 left in `error` was invisible. It is flagged, and
+    its alternative stays inside the Pi family."""
+    agents = [{"id": "p1", "name": "grok lead", "provider": "pi/xai-oauth/grok-4.7", "status": "error"},
+              {"id": "p2", "provider": "pi/xai-oauth/grok-4.7", "status": "running"}]
+    report = _run(tmp_path, _pools(**{"opencode:go": (80.0, True, False)}), agents=agents)
+    assert _stuck_ids(report) == ["p1"]
+    stuck = report["stuck"][0]
+    assert stuck["family"] == "pi" and stuck["status"] == "error"
+    assert stuck["alternative"] == "pi/opencode-go-t-e/deepseek-v4-pro"
+
+
+def test_an_errored_codex_or_claude_agent_gets_no_pi_alternative(tmp_path: Path) -> None:
+    """The Pi candidates are DeepSeek models on other vendors' accounts: never offered to a Codex or Claude agent,
+    even when plenty of Pi headroom exists (a quality downgrade and a cross-vendor data move)."""
+    agents = [{"id": "c1", "provider": "codex/gpt-6-astra", "status": "error"},
+              {"id": "c2", "provider": "claude/opus-5-5", "status": "error"},
+              {"id": "c3", "provider": "pi/openai/gpt-6.1-sol", "status": "error"}]
+    pools = _pools(**{"openai:openai_api": (0.0, True, False), "opencode:go": (90.0, True, False)})
+    report = _run(tmp_path, pools, agents=agents)
+    by_id = {s["id"]: s for s in report["stuck"]}
+    assert set(by_id) == {"c1", "c2", "c3"}
+    assert by_id["c1"]["alternative"] is None and by_id["c1"]["family"] == "codex"
+    assert by_id["c2"]["alternative"] is None and by_id["c2"]["family"] == "claude"
+    assert by_id["c3"]["alternative"] == "pi/opencode-go-t-e/deepseek-v4-pro"      # a Pi agent keeps its Pi alternative
+
+
+def test_the_human_table_says_a_non_pi_agent_has_no_pi_alternative(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    agents = [{"id": "c1", "provider": "codex/gpt-6-astra", "status": "error"}]
+    (bin_dir / "paseo").write_text("#!/bin/sh\ncat <<'JSON'\n%s\nJSON\n" % json.dumps(agents))
+    (bin_dir / "paseo").chmod(0o755)
+    (bin_dir / "aiuse").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "aiuse").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    r = subprocess.run([str(CLI)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "STUCK" in r.stdout and "codex agent in error: no Pi alternative" in r.stdout
+    assert "switch to" not in r.stdout and "1 stuck (1 in error, any provider)" in r.stdout
 
 
 def test_an_account_without_a_quota_mapping_is_reported(tmp_path: Path) -> None:
@@ -254,3 +296,4 @@ def test_an_errored_non_pi_agent_is_stuck_but_a_healthy_one_is_not(tmp_path: Pat
     assert stuck == {"e1"}
     assert "e2" not in {o["id"] for o in report["all_pi"]}
     assert "e3" not in {o["id"] for o in report["all_pi"]}
+    assert [o["alternative"] for o in report["stuck"]] == [None]            # never a Pi alternative for a Codex agent

@@ -115,10 +115,32 @@ def test_cleared_agent_leaves_the_state_and_is_noticed_again_later(tmp_path: Pat
 
 
 def test_closed_and_archived_agents_are_ignored(tmp_path: Path) -> None:
-    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived"),
-                                                    _agent("c3", status="error")])
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1", status="closed"), _agent("b2", status="archived")])
     assert _run(bin_dir, home) == 0
     assert _messages(sent) == [] and json.loads((state / "notified").read_text()) == []
+
+
+def test_a_pi_agent_in_error_is_noticed_with_its_pi_alternative(tmp_path: Path) -> None:
+    """The scan used to drop every `error` entry: a Pi agent a 402 left in error (queue item 82) was never told."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("p1", "xai-oauth", status="error")])
+    assert _run(bin_dir, home) == 0
+    msgs = _messages(sent)
+    assert len(msgs) == 1 and "p1" in msgs[0] and "(in error)" in msgs[0] and "pi/opencode-go-t-e/deepseek-v4-pro" in msgs[0]
+    assert json.loads((state / "notified").read_text()) == [_key("p1", "xai-oauth")]
+
+
+def test_an_errored_codex_agent_is_noticed_without_a_pi_alternative(tmp_path: Path) -> None:
+    """A Codex or Claude agent in error is told as a notice; the message never offers it a Pi/DeepSeek alternative,
+    even if a stale or hostile feed carries one, and it is noticed once, not every run."""
+    entry = {"id": "k1", "name": "forks", "account": "codex", "model": "codex/gpt-6-astra", "family": "codex",
+             "status": "error", "stuck": True, "headroom_percent": None, "quota_stale": None,
+             "alternative": "pi/opencode-go-t-e/deepseek-v4-pro"}               # a stale feed: the scan must not relay it
+    bin_dir, home, state, sent = _harness(tmp_path, [entry])
+    assert _run(bin_dir, home) == 0 and _run(bin_dir, home) == 0
+    msgs = _messages(sent)
+    assert len(msgs) == 1 and "k1" in msgs[0] and "codex agent in error" in msgs[0]
+    assert "no Pi alternative" in msgs[0] and "pi/" not in msgs[0] and "deepseek" not in msgs[0]
+    assert json.loads((state / "notified").read_text()) == [_key("k1", "codex")]
 
 
 def test_an_undelivered_send_keeps_the_notice_for_the_next_run(tmp_path: Path) -> None:
