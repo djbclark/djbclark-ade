@@ -307,11 +307,16 @@ So the 12 GB in 1.2 is in exactly the two servers a single shared process cannot
 1. Keys never sit in a client file. Today's literals (1.4) move to sudo-secretspec. Clients that expand environment
    references get `${NAME}` (Codex `bearer_token_env_var` / `env_http_headers`, Hermes already does it). For clients
    that cannot, a local HTTP shim reads the key from sudo-secretspec at start and adds the header, so the client sees
-   only a loopback URL. Rotating the exposed keys is the operator's call, since they have sat in plain files.
+   only a loopback URL. Such a shim turns a loopback port into a key-holding service, so it must do what the MCP
+   streamable-HTTP transport spec requires of local servers: bind `127.0.0.1` only, reject any request whose `Origin`
+   header is present and not on an explicit allow list, and reject a `Host` other than `127.0.0.1:<port>` /
+   `localhost:<port>` (DNS-rebinding defence). Otherwise any web page open in the operator's browser can POST to it and
+   spend the key. It also needs a per-shim bearer that only registered clients hold. Rotating the exposed keys is the operator's call, since they have sat in plain files.
 2. A per-session launcher (5.3 item 2) passes no secret: chrome-devtools has none; a future keyed stdio server gets
    its key through `sudo-secretspec run` in the generated command, never in the JSON.
 3. If (a) is ever adopted, the aggregator listens on loopback only, runs as the operator, gets each backend's secrets
-   from sudo-secretspec at backend spawn, and is never published through Tailscale Funnel. The operator accepts that any local
+   from sudo-secretspec at backend spawn, and is never published through Tailscale Funnel. It applies the same `Origin`/`Host`
+   checks and client bearer as the shim in item 1 (a browser page must not be able to reach it). The operator accepts that any local
    process can call it, the same trust as today's shared ports (AGENTS.md Trust).
 4. `bin/review-launch`'s `--strict-mcp-config` boundary stays as it is: review sessions get no user MCP servers in any option.
 
@@ -329,8 +334,11 @@ So the 12 GB in 1.2 is in exactly the two servers a single shared process cannot
 ## 6. Phased rollout
 
 Every live step below changes a client config or a service, so each waits for the operator's explicit yes for that step
-(standing orders 11 and 12). Each step is taken on a backup copy first, `<file>.bak-<date>-mcp-on-demand`, written next
-to the file before the edit, and is verified as listed. Running sessions keep their copies until they end, so the
+(standing orders 11 and 12). Each step first writes a backup, `<file>.bak-<date>-mcp-on-demand`, next to the file
+(`install -m 600`, since `~/.codex/config.toml`, `~/.cursor/mcp.json` and `opencode.json` hold literal keys today), and is
+verified as listed. A backup is deleted once its step has been verified for 7 days. For 2c, the backups and every older
+`*.bak-*` copy of these files hold the old literal keys, so 2c ends with rotating those keys (the operator's step) and
+deleting those copies; until rotation, a backup is a plaintext key on disk. Running sessions keep their copies until they end, so the
 saving lands as sessions cycle; no step restarts the Paseo daemon or kills a session.
 
 | Phase | What | Live? | Operator approval | Verify | Rollback (tested how) |
