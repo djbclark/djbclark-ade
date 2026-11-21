@@ -2478,16 +2478,25 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertIn("stale_pools", r.quota_source_info()["detail"])
 
     # -- a reused reading inside the pool's own query gate keeps its value (2026-11-21) --------
+    # Only for the gated provider, only with no agent on it live or created since the reading (adversary M1, PR 864).
 
-    def stale_argon_quota(self, **row_extra):
-        """Load a payload whose only stale pool is the Argon one (aiuse's 600 s limit, 900 s gate)."""
-        stale = [{"provider": "antigravity", "account": None, "pool_family": "gemini_argon",
+    def stale_argon_quota(self, agents=(), provider="antigravity", pool_family="gemini_argon", ls_env=None, **row_extra):
+        """Load a payload whose only stale pool is one antigravity row (aiuse's 600 s limit, 900 s gate);
+        `agents` is the canned `paseo ls -a -g --json` list."""
+        stale = [{"provider": provider, "account": None, "pool_family": pool_family,
                   "age_seconds": row_extra.get("age_seconds", 700.0)}]
+        row = {**self.argon_row(), "provider": provider, "pool_family": pool_family, "headroom_percent": 100.0, "age_seconds": 700.0, **row_extra}
         path = self.write("reuse.json", self.payload(
-            [dict(self.GOOD_ROW, age_seconds=20), {**self.argon_row(), "headroom_percent": 100.0, **row_extra}],
-            fresh=False, age_seconds=700.0, stale_pools=stale))
-        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+            [dict(self.GOOD_ROW, age_seconds=20), row], fresh=False, age_seconds=700.0, stale_pools=stale))
+        ls = self.write("ls.json", list(agents))
+        env = {"ROUTE_AGENT_AIUSE_JSON": str(path), "ROUTE_AGENT_PASEO_LS_JSON": str(ls)}
+        env.update(ls_env or {})
+        quota, _, _ = self.load(env)
         return quota
+
+    @staticmethod
+    def agent(provider="antigravity/gemini-4-argon-high", created="3 hours ago", status="closed"):
+        return {"id": "a1", "provider": provider, "created": created, "status": status}
 
     def test_a_stale_pool_inside_the_query_gate_keeps_its_reading(self):
         quota = self.stale_argon_quota(age_seconds=700.0)
@@ -2502,18 +2511,60 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         spent["antigravity-argon"] = quota["antigravity-argon"]
         self.assertEqual(r.route("research", quota=spent).service.name, "antigravity-argon")
 
+    def test_the_reuse_bounds_are_inclusive(self):
+        for extra in ({"age_seconds": r.STALE_REUSE_MAX_AGE}, {"headroom_percent": r.STALE_REUSE_MIN_LEFT}):
+            quota = self.stale_argon_quota(**extra)
+            self.assertIsNotNone(quota["antigravity-argon"]["remaining"], extra)
+
     def test_a_stale_pool_past_the_reuse_age_stays_unknown(self):
         quota = self.stale_argon_quota(age_seconds=r.STALE_REUSE_MAX_AGE + 1)
         self.assertIsNone(quota["antigravity-argon"]["remaining"])
 
     def test_a_stale_pool_below_the_reuse_floor_stays_unknown(self):
-        quota = self.stale_argon_quota(age_seconds=700.0, headroom_percent=r.STALE_REUSE_MIN_LEFT - 1)
+        quota = self.stale_argon_quota(age_seconds=700.0, headroom_percent=r.STALE_REUSE_MIN_LEFT - 0.1)
         self.assertIsNone(quota["antigravity-argon"]["remaining"])
 
-    def test_a_stale_pool_with_an_expired_reading_or_no_headroom_stays_unknown(self):
+    def test_a_stale_pool_with_an_expired_or_unmeasured_or_errored_reading_stays_unknown(self):
         for extra in ({"reading_expired": True}, {"headroom_percent": None}):
             quota = self.stale_argon_quota(age_seconds=700.0, **extra)
             self.assertIsNone(quota["antigravity-argon"]["remaining"], extra)
+        quota = self.stale_argon_quota(age_seconds=700.0, error="agy failed")
+        self.assertNotIn("reused reading kept", r.quota_source_info()["detail"])      # N1: no false claim
+        quota = self.stale_argon_quota(age_seconds=700.0, state="blocked")
+        self.assertNotIn("reused reading kept", r.quota_source_info()["detail"])
+        self.assertEqual(quota["antigravity-argon"]["remaining"], 0.0)
+
+    def test_only_the_gated_provider_reuses_a_stale_reading(self):
+        quota = self.stale_argon_quota(provider="codex", pool_family="openai_api")
+        self.assertIsNone(quota["codex"]["remaining"])
+
+    def test_a_live_or_just_created_agent_on_the_provider_blocks_the_reuse(self):
+        for name, agents in {
+                "running-long-ago": [self.agent(status="running", created="2 days ago")],
+                "initializing": [self.agent(status="initializing", created="2 days ago")],
+                "closed-5-min-ago": [self.agent(created="5 minutes ago")],
+                "idle-just-created": [self.agent(status="idle", created="just now")],
+                "pi-route": [self.agent(provider="pi/antigravity/gemini-4-argon", created="2 minutes ago")],
+                "floor-is-inside-the-reading": [self.agent(created="11 minutes ago")]}.items():    # 660 s <= 700 s
+            quota = self.stale_argon_quota(age_seconds=700.0, agents=agents)
+            self.assertIsNone(quota["antigravity-argon"]["remaining"], name)
+        # the floor equal to the reading's age still counts (12 minutes = 720 s)
+        quota = self.stale_argon_quota(age_seconds=720.0, agents=[self.agent(created="12 minutes ago")])
+        self.assertIsNone(quota["antigravity-argon"]["remaining"])
+
+    def test_agents_that_cannot_have_spent_the_reading_do_not_block_the_reuse(self):
+        agents = [self.agent(created="12 minutes ago"),                      # 720 s > 700 s: before the reading
+                  self.agent(status="idle", created="3 days ago"),
+                  self.agent(provider="codex/gpt-6-astra", status="running", created="just now"),
+                  self.agent(provider="cursor/composer-2.5", created="1 minute ago")]
+        quota = self.stale_argon_quota(age_seconds=700.0, agents=agents)
+        self.assertEqual(quota["antigravity-argon"]["remaining"], 100.0)
+
+    def test_an_unreadable_agent_list_fails_closed(self):
+        for env in ({"ROUTE_AGENT_PASEO_LS_JSON": "/nonexistent/ls.json"}, {"ROUTE_AGENT_PASEO_LS_JSON": ""}):
+            with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}):
+                quota = self.stale_argon_quota(age_seconds=700.0, ls_env=env)
+            self.assertIsNone(quota["antigravity-argon"]["remaining"], env)
 
     def test_a_listed_pool_is_unknown_and_a_pool_absent_from_a_young_payload_still_reads_spent(self):
         stale = [{"provider": "omp", "pool_family": None}]

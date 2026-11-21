@@ -108,12 +108,19 @@ D0. **Family matching (2026-11-12):** quota rows and snapshot windows count only
 
 D1. `aiuse --available --json` stays the primary reading (it applies the operator's credits override, Admin API
 readings and grant expiry at read time; 20 s timeout, memoised 30 s; the snapshot file is the fallback).
-When the payload is `fresh: false` and `stale_pools` names only some rows, just those rows are re-judged: a row keeps its own
-reading when it is a usable row at most 20 minutes old (`STALE_REUSE_MAX_AGE`: antigravity's 900 s query gate plus one 180 s
-sampler step) showing at least 50% headroom (`STALE_REUSE_MIN_LEFT`) and no `reading_expired`; otherwise it reads unknown, as
-before. Why: aiuse's antigravity fresh limit is 600 s but the pool is queried at most every 900 s (agy answers fast probes with
-429s) and `aiuse --live` cannot beat that gate, so a healthy reused reading was stale about a third of the time and `plan`
-refused research with Gemini at 100% (2026-11-21, twice). The plan's quota source line says `reused reading kept for ...`.
+When the payload is `fresh: false` and `stale_pools` names only some rows, just those rows are re-judged, and a row keeps its
+own reading only when all of these hold: its provider is `antigravity` (`STALE_REUSE_PROVIDERS`, the one pool whose aiuse fresh
+limit sits below its query gate); it is a usable row with no `error`, blocked `state` or `reading_expired`; its own age is at
+most 20 minutes (`STALE_REUSE_MAX_AGE`: the 900 s gate plus one 180 s sampler step) and its headroom at least 50%
+(`STALE_REUSE_MIN_LEFT`); and **no Paseo agent on that provider is live or was created since the reading**
+(`paseo ls -a -g --json`, any `provider` path segment equal to it, so `pi/antigravity/...` counts; `created` has only coarse
+relative units, so its smallest possible age is used; an unreadable list counts as busy; `ROUTE_AGENT_PASEO_LS_JSON` feeds
+canned output in tests). The last condition is the 2026-11-12 burst-drain guard: nothing reserves pool room for a slice already
+dispatched, so a reading that predates a dispatch is not trusted, and a wave's second `plan` reads the pool unknown again. Any
+other row reads unknown, as before. Why the reuse exists: aiuse's antigravity fresh limit is 600 s but the pool is queried at most
+every 900 s (agy answers fast probes with 429s) and `aiuse --live` cannot beat that gate, so a healthy reused reading was stale
+about a third of the time and `plan` refused research with Gemini at 100% (2026-11-21, twice). The plan's quota source line says
+`reused reading kept for ...`.
 D2. `paseo usage ls --json` is the second source: one report per `sourceId`. A report whose `report.status` is
 `available` gives its windows (`remainingPct`, else 100 − `usedPct`; `resetsAt`) and `balances` (`remaining`/`limit` as a
 percentage), a window naming Fable being the Claude Fable cap; any other status (`unavailable` with a `problem`, `error`),
