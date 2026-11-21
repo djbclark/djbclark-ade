@@ -6,7 +6,9 @@ could act as a stale lead). This hook checks the target of a Bash `paseo send` /
 `send_agent_prompt` with `bin/ade_send_guard.py` (which reads `ade-self-session`'s completed-handoff records, #669):
 
   replaced by a completed handoff (or an acknowledged one still finishing, rq-38)   deny, naming the successor (a hook cannot safely rewrite the target; re-send to it)
-  archived, nothing replaced it     deny; `ADE_ALLOW_ARCHIVED_SEND=<its full id> paseo send ...` resumes it on purpose
+  archived, nothing replaced it     allow when the sender launched it (its own worker: `ade.lead=<sender's lineage>` label or the sender
+                                    as Paseo parent; operator ruling 2026-11-21, logged); else deny; `ADE_ALLOW_ARCHIVED_SEND=<its
+                                    full id> paseo send ...` (the operator's) resumes it on purpose
   replaced but still live           `ADE_ALLOW_REPLACED_SEND=<its full id> paseo send ...` sends to it anyway (logged)
   live, unknown to Paseo, anything this hook cannot parse or reach   allow silently (fails open)
 
@@ -429,7 +431,9 @@ def judge(target: str, allow: str | None, backstop: bool = False, replaced: str 
         return None
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
-    env = {k: v for k, v in ((guard.ALLOW_ENV, allow), (guard.ALLOW_REPLACED_ENV, replaced)) if v}
+    # the overrides count only as assignments written before the command; the sender is this hook's own agent (PASEO_AGENT_ID)
+    env = {k: v for k, v in ((guard.ALLOW_ENV, allow), (guard.ALLOW_REPLACED_ENV, replaced),
+                             (guard.SENDER_ENV, os.environ.get(guard.SENDER_ENV))) if v}
     d = guard.guard(target, env=env, source="hook-precheck")
     if d.action not in (guard.REDIRECT, guard.REFUSE):
         return None

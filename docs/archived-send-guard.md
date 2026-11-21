@@ -36,16 +36,54 @@ record's successor chain) or refused, and never resurrect it.
    the `paseo` shim, the `archived_send_gate` hook, `bin/fable-wait`, `bin/deadline` and `bin/completion-notice`. The caller
    being the successor itself (it messaging its predecessor) is refused by the shim and by the hook as a message to oneself;
    only the operator sends to the live predecessor, with `ADE_ALLOW_REPLACED_SEND=<predecessor's full id>`.
-3. `refuse`: the target is archived and nothing replaced it; or its replacement is archived too; or the ledger is cyclic. The
-   reason names what to do.
+3. `refuse`: the target is archived, nothing replaced it, and the sender neither owns it nor named the override; or its replacement
+   is archived too; or the ledger is cyclic. The reason says the sender's own worker would have passed and this one is not provably
+   its own. A plain archived target (nothing replaced it) is let through in two cases only: the sender's own worker (logged, below)
+   and the operator's `ADE_ALLOW_ARCHIVED_SEND=<its full id>`.
+
+### Own archived workers (operator ruling, 2026-11-21)
+
+Operator ruling (djbclark, relayed by the stayturgid lead): "agents may un-archive their own archived workers WITHOUT asking the
+operator whenever they judge that resuming the archived worker (with its context) is cheaper in the long run than routing a fresh
+one." Until then every send to an archived agent needed the operator's explicit instruction. Now an archived agent the sender itself
+launched is let through; every other archived agent stays refused (the override below is still the operator's). When resuming is
+cheaper than a fresh route: the worker's context (its workspace, claim, files read, rulings) is what the next round needs and a
+fresh worker would pay to rebuild it (a repair round, a re-review of the same diff, a follow-up on the same PR); a fresh route
+is cheaper when the task is unrelated, the worker's context is stale or large, or it needs another model or effort. A resume is
+a new round: new `.done.rN`, re-read its workspace and claim.
+
+a. **The sender's own worker passes** (`ade_send_guard.owner_proof`). The sender is `PASEO_AGENT_ID` (the shim and the in-repo
+   senders read their own environment; the hook reads its own, never a value written in the command). Ownership is proven from what
+   Paseo records, never from a name, a title or message text, by the first that holds:
+   1. `label:ade.lead=<x>`: the target is in the server-side listing `paseo ls -a -g --json --label ade.lead=<x>` for `x` in the
+      sender's lineage (the sender plus up to 8 leads it replaced through completed self-handoffs, `ade_lead_succession.recent_lineage`:
+      a worker the previous incarnation launched is the successor's). This is the proof for every ADE worker: `bin/ade-worker-run`
+      strips `PASEO_AGENT_ID`, so the worker is top-level with `ParentAgentId` null and the label is the only record of whose it is.
+      The installed `inspect` and `ls` rows carry no labels, which is why the server-side filter is the reader (as in `ade-auto-permit`).
+   2. `parent:<x>`: the target's `ParentAgentId` chain (at most 8 hops, cycle-safe, each hop read from `paseo agent inspect`) reaches
+      a lineage member: a worker started natively (`paseo run`, `create_agent`) from the sender's session.
+   **Fails closed** (no pass, the refusal applies): no `PASEO_AGENT_ID` (the operator's shell, a script); a sender that is not a
+   full lowercase agent id; the sender is the target; a cyclic or unreadable succession ledger for the sender; `ls` failing, timing
+   out or not returning a list; an `inspect` that fails on the way up the chain (the label proof still stands on its own); a worker of
+   another lead (its label names someone outside the lineage), of a lead the sender's lineage does not hold (a successor's worker is
+   not a predecessor's), or of a sibling; a chain longer than 8 hops. A label can be set by whoever launches an agent, so this is an
+   accident guard under the 2026-11-07 internal-trust ruling, not a sandbox. It never opens a **replaced** agent: the redirect and
+   the archived-successor refusal come first, so a worker that handed itself off is messaged through its successor, never resumed.
+b. **Log** (`log_resume`): every owner resume appends one JSON line (UTC `ts`, `sender`, `target`, `override` = `owner`, `proof`,
+   `source`, `pid`, `ppid`, `argv0`; no message text) to the same file as the replaced override, `$ADE_SEND_GUARD_LOG`, else
+   `~/.local/state/djbclark-ade/send-guard-overrides.jsonl` (one `O_APPEND` write, 0700/0600, never follows a symlink, never blocks
+   the send: an unwritable log is skipped). The hook logs with `source: hook-precheck` before the command runs and cannot know it was
+   sent, so a send seen by both the hook and the shim logs twice.
+c. **Unchanged, operator-only**: `ADE_ALLOW_REPLACED_SEND` (below), the redirect for a handed-off agent, the refusal for a cyclic
+   ledger, and the refusal for every archived agent the sender does not own: an agent a self-handoff replaced, a replaced lead above
+   all, is never un-archived by a send, ownership or no ownership.
 
 `ADE_ALLOW_ARCHIVED_SEND=<the agent's full id>` in the command's environment (`ADE_ALLOW_ARCHIVED_SEND=<id> paseo send ...<id>`)
-is the deliberate override that resumes one archived agent on purpose: it names the agent, so a blanket `=1` (or one exported
-earlier) never covers another send. The refusal text does not hand it over as a remedy: resuming needs the operator's
-explicit instruction. It never overrides a redirect or a cycle, so an agent a handoff replaced cannot be messaged through a
-guarded path at all (message its successor). Only an agent that was
+is the operator's deliberate override that resumes one archived agent that is not the sender's own: it names the agent, so a blanket
+`=1` (or one exported earlier) never covers another send. It never overrides a redirect or a
+cycle, so an agent a handoff replaced cannot be messaged through a guarded path at all (message its successor). Only an agent that was
 **handed off** has a successor; a finished worker that `ade-tidy` archived is plain archived, so a send to it is refused
-until the override is given (it is a resurrection, which the operator must mean).
+unless the sender launched it or the operator gives the override (otherwise it is a resurrection of someone else's agent).
 
 `ADE_ALLOW_REPLACED_SEND=<the agent's full id>` (ls-06, 2026-11-14) is the second, narrower override: for an agent a self-handoff
 replaced that is **still live**, it turns the `redirect` into a `pass`, so the operator can message the replaced agent itself.
@@ -94,7 +132,7 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    (`archived_send_gate.locate_send`, imported, not copied; global options `--json`, `-o/--format X`, `-qo X`, `-q`, `--no-headers`,
    `--no-color` may stand before `agent`, after it and after `send`; an explicit `--host`/`--home` is not judged). Then: `pass` execs the real paseo with the argv as
    given; `redirect` rewrites only the target word to the successor (the shim owns the argv, so unlike the hook it can), prints
-   `ade-paseo-guard: X was replaced by Y; sending to Y` and execs; `refuse` prints the reason and the override names and exits 4
+   `ade-paseo-guard: X was replaced by Y; sending to Y` and execs; `refuse` prints the reason and what only the operator can do (`ADE_ALLOW_ARCHIVED_SEND`, `ADE_ALLOW_REPLACED_SEND`; an own archived worker needs neither) and exits 4
    without sending (also a redirect that would be a send to the caller itself, `PASEO_AGENT_ID`: a successor's goodbye to its predecessor
    would queue a turn to itself). A pass-through is `os.execv`, so exit codes, signals and stdio are the real paseo's. The probe
    `paseo agent inspect` is made with the real paseo's absolute path, so it never re-enters the shim. **Fails open**: no python3,
@@ -162,6 +200,9 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
 Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`) and
 `tests/test_ade_paseo_guard.py` (the shim and helper end to end, including a Python `subprocess.run(["paseo", "send", ...])`
 with the shim directory first on PATH, the `BASH_ENV` case (kept on purpose, with the documented result), two shim copies on one PATH,
-the re-entry cap, option placement, the recursion probe, fail-open and both overrides).
+the re-entry cap, option placement, the recursion probe, fail-open and both overrides). The 2026-11-21 own-worker tests
+(each fails with its branch reverted): the label proof, a predecessor's label, a parent chain and its hop cap, every fail-closed
+case above, the log lines, the hook's reading of the sender (never a value written in the command), and that ownership never
+opens a replaced agent.
 
 One decision reads each agent's `paseo agent inspect` once (memoised inside `decide`, sr-43 e).

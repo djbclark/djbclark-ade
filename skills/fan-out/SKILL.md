@@ -206,6 +206,14 @@ A lead that makes the claim before the worker exists runs `new --path <worktree>
 
 - **Re-tasking a worker whose round is finished:** rename its `<report>.done` to `<report>.done.rN` before the `paseo send`
   (`skills/tidy` archives a worker only on a current `.done`; a re-task it cannot see could be archived mid-round).
+- **Re-tasking an ARCHIVED worker of yours (operator ruling 2026-11-21, no operator yes needed):** when resuming it with its
+  context is cheaper than routing a fresh worker, `paseo send` to its full id: the guard (docs/archived-send-guard.md) lets a
+  send from the lead that launched it (its `ade.lead=<you or a lead you replaced>` label, or you as its Paseo parent) through
+  and logs it; the send un-archives it, so treat it as a new round (new `.done.rN`, re-read its workspace and claim). Any
+  other archived agent stays refused (only the operator's `ADE_ALLOW_ARCHIVED_SEND=<its full id>` resumes it). Resume when the worker's
+  context (workspace, claim, files read, rulings) is what the next round needs; route fresh when the task is unrelated, its context
+  is stale or large, or it needs another model or effort.
+  A handed-off (replaced) agent is never resumed: send to its successor.
 - `paseo wait <id> --json` blocks until the agent is idle; classify by the report / `.done` artifacts
   (same meanings as orchestration-practices §5): 0 DONE, 1 unfinished / still running, 3 no report,
   4 BLOCKED (or a pending permission), 124 timed out. Poll with short `paseo wait` / `paseo ls` looks when
