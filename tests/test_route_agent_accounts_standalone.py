@@ -31,10 +31,10 @@ def _fable(left, resets_at):
 
 
 ACCOUNT_A = {"provider": "claude", "age_seconds": 60,
-             "windows": [_window("weekly", 20, "2026-11-20T00:00:00+00:00"), _fable(0, "2026-11-18T00:00:00+00:00")]}
+             "windows": [_window("weekly", 20, "2099-01-02T00:00:00+00:00"), _fable(0, "2099-01-01T00:00:00+00:00")]}
 ACCOUNT_B = {"provider": "claude", "age_seconds": 60,
-             "windows": [_window("weekly", 70, "2026-11-21T00:00:00+00:00"), _window("session", 60),
-                         _fable(30, "2026-11-19T00:00:00+00:00")]}
+             "windows": [_window("weekly", 70, "2099-01-03T00:00:00+00:00"), _window("session", 60),
+                         _fable(30, "2099-01-02T00:00:00+00:00")]}
 
 
 @pytest.mark.parametrize("order", list(itertools.permutations([ACCOUNT_A, ACCOUNT_B])))
@@ -44,7 +44,7 @@ def test_several_accounts_keep_every_window_sublimit_and_reset(order):
     assert pool["windows"]["weekly"] == 20                           # per window the tighter reading, not the last account's
     assert pool["windows"]["session"] == 60                          # a window only the other account reports survives
     assert pool["sublimits"]["fable"] == 0                           # a cap never loosens by account order
-    assert pool["sublimit_resets"]["fable"] == "2026-11-19T00:00:00+00:00"   # the later reset, for the wait message
+    assert pool["sublimit_resets"]["fable"] == "2099-01-02T00:00:00+00:00"   # the later reset, for the wait message
 
 
 def test_codex_prepaid_credits_are_a_separate_pool_from_subscription():
@@ -78,14 +78,14 @@ def test_one_account_is_unchanged_by_the_merge():
     pool = r._providers_from_accounts([ACCOUNT_B], 60)["claude"]
     assert pool["remaining"] == 60 and pool["windows"]["weekly"] == 70 and pool["windows"]["session"] == 60
     assert pool["sublimits"] == {"fable": 30}
-    assert pool["sublimit_resets"] == {"fable": "2026-11-19T00:00:00+00:00"}
+    assert pool["sublimit_resets"] == {"fable": "2099-01-02T00:00:00+00:00"}
 
 
 def test_a_later_account_without_sublimits_does_not_drop_the_earlier_ones():
     bare = {"provider": "claude", "age_seconds": 60, "windows": [_window("weekly", 90)]}
     pool = r._providers_from_accounts([ACCOUNT_A, bare], 60)["claude"]
     assert pool["sublimits"] == {"fable": 0}
-    assert pool["sublimit_resets"] == {"fable": "2026-11-18T00:00:00+00:00"}
+    assert pool["sublimit_resets"] == {"fable": "2099-01-01T00:00:00+00:00"}
 
 
 KNOWN = {"provider": "claude", "age_seconds": 60,
