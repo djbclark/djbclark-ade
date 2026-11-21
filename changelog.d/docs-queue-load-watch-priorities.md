@@ -1,3 +1,3 @@
 ### Changed
 
-- `docs/queue.md`: the load watcher's approved RAM-relief directives are prioritized (89 shared MCP and LSP daemons first, 91 auto-hibernate idle agent processes second, 90 zero-subprocess daemon polling third), with new items 96 (archive idle agents sooner) and 97 (a supported revive of archived agents), and the review follow-ups still living only in PR bodies are queued as 98-101 (PRs 862, 868, 867, 864). (#PR)
+- `docs/queue.md`: the load watcher's approved RAM-relief directives are prioritized (89 shared MCP and LSP daemons first, 91 auto-hibernate idle agent processes second, 90 zero-subprocess daemon polling third), with new items 96 (archive idle agents sooner) and 97 (a supported revive of archived agents), and the review follow-ups still living only in PR bodies are queued as 98-101 (PRs 862, 868, 867, 864). (#869)
