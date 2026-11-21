@@ -740,6 +740,24 @@ def test_archive_still_blocks_on_a_main_labelled_agent_inside_the_workers_window
     assert r.returncode == 1 and "m2" in r.stderr
 
 
+def test_archive_blockers_are_scoped_to_the_target_window_not_the_lead_label(window):
+    """A busy worker of the same lead in another WORKER window never blocks this one; a busy one inside it still does."""
+    window.data["workspaces"].append({"workspaceId": "wks_winB", "name": "WORKER repo (Other work)", "cwd": "/repo"})
+    own(LEAD, "wks_win1", "wks_winB")
+    window.data["agents"] = [{"id": "a1", "status": "idle", "labels": {"ade.lead": LEAD}},
+                             {"id": "b1", "status": "running", "labels": {"ade.lead": LEAD}}]
+    window.state("a1", "wks_win1", {"ade.lead": LEAD})
+    window.state("b1", "wks_winB", {"ade.lead": LEAD})
+    r = archive(window, "--idle-handled")
+    assert r.returncode == 0, r.stderr
+    assert "b1" not in r.stderr and json.loads(r.stdout)["blockers"] == []
+    assert ["workspace", "archive", "wks_win1"] in [c["argv"] for c in window.calls()]
+    window.data["agents"].append({"id": "a2", "status": "running", "labels": {"ade.lead": LEAD}})
+    window.state("a2", "wks_win1", {"ade.lead": LEAD})
+    r = archive(window, "--idle-handled")
+    assert r.returncode == 1 and "a2" in r.stderr and "b1" not in r.stderr and "a1" not in r.stderr
+
+
 @pytest.fixture
 def main_env(env):
     env.state(LEAD, LEAD_WKS)
