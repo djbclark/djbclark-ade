@@ -421,6 +421,7 @@ def test_approval_log_escapes_the_directory_and_uses_bgs_timestamp(tmp_path, mon
 def test_local_decision_helper_timeout_or_crash_is_a_refusal(tmp_path, monkeypatch):
     lw = load_module()
     monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    monkeypatch.setattr(lw, "BGRUN_BIN", tmp_path / "no-bgrun")  # never the real bgrun (and so never a real ticket)
     slow = tmp_path / "sudo-ask"
     slow.write_text("#!/bin/sh\nsleep 30\nexit 0\n")  # would approve, but only after the outer bound
     slow.chmod(0o755)
@@ -432,6 +433,85 @@ def test_local_decision_helper_timeout_or_crash_is_a_refusal(tmp_path, monkeypat
     bad.chmod(0o755)
     monkeypatch.setattr(lw, "SUDO_ASK", bad)
     assert lw.approve_local_decision("/some/repo", "why") is False
+
+
+def stub_bgrun(path, rc, out="", sleep=0):
+    """A fake `bgrun`: records its argv (one line per call) next to itself, prints `out`, exits `rc`. Never the real one, so no real ticket is read."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    calls = path.parent / (path.name + "-calls")
+    path.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{calls}"\nsleep {sleep}\nprintf \'%s\\n\' "{out}"\nexit {rc}\n')
+    path.chmod(0o755)
+    return calls
+
+
+def ticket_module(tmp_path, monkeypatch, bgrun_rc=None, ask_rc=0, **kw):
+    """load-watch with HOME, SUDO_ASK and BGRUN_BIN all in tmp_path; returns (module, bgrun calls file, sudo-ask calls file)."""
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", tmp_path / "home")
+    ask_calls = stub_sudo_ask(tmp_path, ask_rc)
+    monkeypatch.setattr(lw, "SUDO_ASK", tmp_path / "home" / ".local" / "bin" / "sudo-ask")
+    bg = tmp_path / "bin" / "bgrun"
+    monkeypatch.setattr(lw, "BGRUN_BIN", bg)
+    bg_calls = stub_bgrun(bg, bgrun_rc, **kw) if bgrun_rc is not None else bg.parent / "bgrun-calls"
+    return lw, bg_calls, ask_calls
+
+
+def test_live_ticket_covers_a_local_decision_without_the_dialog(tmp_path, monkeypatch, capsys):
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until 2026-11-22 02:10 EST")
+    assert lw.approve_local_decision("/some/repo", "why") is True
+    assert bg_calls.read_text().splitlines() == ["approve-local check /some/repo"]
+    assert not ask_calls.exists()
+    err = capsys.readouterr().err
+    assert "tk-7f3a until 2026-11-22 02:10 EST" in err and "no dialog" in err
+    assert [row[1] for row in approvals_log(tmp_path)] == ["lw-local-ticket"]
+
+
+def test_no_live_ticket_falls_through_to_the_dialog(tmp_path, monkeypatch):
+    for rc in (1, 2, 127):  # no ticket / narrowed to one command, missing directory, anything else
+        lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, rc)
+        assert lw.approve_local_decision("/some/repo", "why") is True  # the stub sudo-ask allows
+        assert ask_calls.read_text().count("\n") == 1
+        ask_calls.unlink()
+    assert {row[1] for row in approvals_log(tmp_path)} == {"lw-local-approved"}
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 1, ask_rc=1)
+    assert lw.approve_local_decision("/some/repo", "why") is False  # a refused dialog is still a refusal
+
+
+def test_ticket_check_missing_broken_or_slow_falls_through(tmp_path, monkeypatch):
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch)  # no bgrun file at all
+    assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
+    ask_calls.unlink()
+    bad = tmp_path / "bin" / "bgrun"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("not an executable script\n")  # exec format error: OSError
+    bad.chmod(0o755)
+    assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
+    ask_calls.unlink()
+    stub_bgrun(bad, 0, out="tk until later", sleep=30)  # would cover, but only after the bound
+    monkeypatch.setattr(lw, "TICKET_CHECK_TIMEOUT_S", 0.5)
+    assert lw.approve_local_decision("/some/repo", "why") is True and ask_calls.read_text().count("\n") == 1
+    assert {row[1] for row in approvals_log(tmp_path)} == {"lw-local-approved"}
+
+
+def test_ticket_never_covers_other_modes(tmp_path, monkeypatch):
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="tk-7f3a until 2026-11-22 02:10 EST")
+    assert lw.approve_local_decision("/some/repo", "why", "pending") is True  # asked (the stub allows), not covered
+    assert lw.approve_local_decision("/some/repo", "why", "ci") is True
+    assert not bg_calls.exists()  # bgrun never even consulted
+    assert ask_calls.read_text().count("\n") == 2
+    assert {row[1] for row in approvals_log(tmp_path)} == {"lw-pending-approved", "lw-ci-approved"}
+
+
+def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path):
+    repo = _repo(tmp_path)
+    ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
+    bg_calls = stub_bgrun(tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun", 0, out="tk-1 until 2026-11-22 02:10 EST")
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "offline focused tests")
+    assert r.returncode == 0 and rows(tmp_path)[0][:2] == [os.path.realpath(repo), "local"]
+    assert not ask_calls.exists() and bg_calls.read_text().splitlines() == [f"approve-local check {os.path.realpath(repo)}"]
+    assert "tk-1 until" in r.stderr
+    r = run(tmp_path, "ci", "decide", str(repo), "pending", "note")  # a ticket is not a pending approval: the (denying) dialog decides
+    assert r.returncode == 1
 
 
 def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):

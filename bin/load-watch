@@ -111,7 +111,8 @@ State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, bri
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
 through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...); recording one needs djbclark's fresh
-approval (operator, 2026-11-15: `sudo-ask` Allow dialog + Touch ID, as `bg approve-local`; fails closed; logged in ~/.local/state/bg/approvals.log).
+approval (operator, 2026-11-15: `sudo-ask` Allow dialog + Touch ID, as `bg approve-local`; fails closed; logged in ~/.local/state/bg/approvals.log);
+a live any-command `bgrun approve-local` ticket covering the directory (`bgrun approve-local check DIR` exits 0) stands in for the dialog for `local` only (operator, 2026-11-21; logged `lw-local-ticket`).
 `pending`: runs here but `bg` reminds the agent to investigate (repos seeded from 7 days of `bg` use); recording one is gated exactly like `local`
 (operator, 2026-11-15; an existing row of the same mode only changes its note; `ci` is never gated).
 No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
@@ -228,6 +229,8 @@ LABEL = "com.djbclark.load-watch"
 HERMES_PING = HOME / ".local/bin/hermes-ping"
 SUDO_ASK_TIMEOUT_S = 900  # sudo-ask itself gives up after 600 s of an unanswered dialog; this is the outer bound
 SUDO_ASK = HOME / ".local/bin/sudo-ask"  # djbclark's Allow dialog + Touch ID (the helper `bg approve-local` uses)
+BGRUN_BIN = HOME / "ops/site-private-djbclark/bin/bgrun"  # `bgrun approve-local check DIR`: is a live any-command Touch-ID ticket covering DIR
+TICKET_CHECK_TIMEOUT_S = 10
 
 LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "5.0"))  # 5.0 since 2026-11-21 (operator ruling, equal to the admit base); 4.0 from 2026-11-01, 2.0 before
 SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuous hot load
@@ -1933,13 +1936,35 @@ def helper_env():
     return env
 
 
+def live_bgrun_ticket(top):
+    """The `<id> until <time>` line of a live any-command `bgrun approve-local` ticket covering `top`, or None. Only exit 0 counts: exit 1 (no
+    ticket, or one narrowed to a command), 2 (missing directory), a timeout, a missing or broken bgrun all mean None, so the caller asks djbclark."""
+    try:
+        if not (BGRUN_BIN.is_file() and os.access(BGRUN_BIN, os.X_OK)):
+            return None
+        r = subprocess.run([str(BGRUN_BIN), "approve-local", "check", top], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=TICKET_CHECK_TIMEOUT_S, env=helper_env())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    line = "".join(c for c in (r.stdout.splitlines() or [""])[0] if c.isprintable()).strip()[:200]
+    return line or "ticket (no details printed)"
+
+
 def approve_local_decision(top, text, mode="local"):
     """Recording `pending` is gated exactly like `local` (operator, 2026-11-15; lead adversary, PR 744 B2): `bg` runs both here, so an ungated `pending` was a
     way round the dialog (replace a `ci` row, or plant a `/*` glob). Recording `local` skips the CI-first rule for every later build here, so djbclark must approve it afresh (operator, 2026-11-15):
     `sudo-ask -k` shows an Allow dialog (command and directory, mouse click only), then sudo asks for Touch ID or the password; `-k` ignores
     any cached sudo credential. Guards honest mistakes, not evasion, as in `bg`: $HOME picks the helper, LW_REGISTRY the registry, and a
-    user-owned file can be edited. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no."""
-    msg = f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
+    user-owned file can be edited. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no.
+    A live any-command `bgrun approve-local` ticket covering `top` (one Touch ID good for N hours; operator, 2026-11-21) stands in for the dialog, for
+    `local` only: a ticket is bgrun's approval of local runs, and `pending` is a reminder row, not that approval. No ticket or any doubt: ask as before."""
+    if mode == "local" and (ticket := live_bgrun_ticket(top)) is not None:
+        local_approval_log("lw-local-ticket", top, text, mode)
+        print(f"load-watch: a `local` decision for {top} is covered by a live bgrun approval ticket ({ticket}); no dialog was shown.", file=sys.stderr)
+        return True
+    msg =f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
     if not (SUDO_ASK.is_file() and os.access(SUDO_ASK, os.X_OK)):
         local_approval_log(f"lw-{mode}-unavailable", top, text, mode)
         print(f"load-watch: recording a `{mode}` decision needs djbclark's approval (Allow dialog and Touch ID), and {SUDO_ASK} is missing or "
