@@ -869,11 +869,20 @@ WATCHER_HOWTO = (
     "| head -20` and `/usr/bin/top -l 2 -s 5 -o cpu -n 20` by full path, since some agent shells shadow ps and top; "
     "`~/src/djbclark-ade/bin/load-watch status`, `incidents -n 5`, and `admit --json` for memory churn and free memory). "
     "Map a heavy process to its Paseo agent by working directory (`paseo ls -g --background --json`, `paseo agent inspect ID`); if it was "
-    "not told, send it one line with `paseo send --no-wait --json ID \"...\"` and read `.status` (`queued` is not delivered). "
+    "not told and a fresh `paseo agent inspect ID --json` reads `Status` idle, `Archived: false` and no pending permissions, send it one line with `paseo send --no-wait --json ID \"...\"` and read `.status` (`queued` is not delivered); "
+    "a running one is listed for djbclark, not messaged. "
     "Load without CPU is processes stuck in state U, swap, or a pile at background priority. Never kill, stop or throttle "
     "another agent's or djbclark's work without his yes: steer future runs to CI (`load-watch ci decide`), guard a "
-    "launchd job (`load-watch guard add`), and ask djbclark before creating a CI copy of a repo. Close each incident with "
-    "`load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
+    "launchd job (`load-watch guard add`), and ask djbclark before creating a CI copy of a repo. Only when `admit --json` "
+    "refuses on memory (`free_mem`, `swapins`, `compressor`), you may coordinate archiving idle agents (operator ruling "
+    "2026-11-21), following skills/watch/SKILL.md Step 4 exactly: never run `paseo agent archive` yourself (only "
+    "`bin/ade-tidy prune`), never touch an agent with no `ade.lead` label (list it), and ask a worker's current owning lead "
+    "(succession ledger; `paseo agent inspect ID --json` reads `Archived: false`, `Status` idle, no pending card; at most one "
+    "message per lead per hour) to archive it, ending `Please reply: ack <your id>`. Send (to a blamed agent or a lead) only "
+    "from a Paseo session with `$PASEO_AGENT_ID` set, plain `--no-wait`, never `--behavior`: a sourceless send interrupts, and "
+    "any send to a running agent can replace its turn (steer falls back to interrupt) while every sourced message clears pending "
+    "permissions, so send only when a fresh `paseo agent inspect ID --json` reads `Status` idle, `Archived: false` and no pending "
+    "permissions; a running blamed agent is listed for djbclark, not messaged. Close each incident with `load-watch ack ID \"what you found and did\"`, then tell djbclark in one line (`~/.local/bin/hermes-ping`).")
 
 
 def watcher_record():
