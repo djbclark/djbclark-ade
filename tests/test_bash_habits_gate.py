@@ -1190,3 +1190,40 @@ def test_specific_reason_wins_over_background_deny():
 def test_background_reason_names_timeout_and_long_job_routes():
     reason = run("sleep 5 &")["permissionDecisionReason"]
     assert "7200000" in reason and "bin/ade-sched" in reason
+
+
+# zsh reads `$NAME:x` as a history modifier (2026-11-21: `$C:refs/heads/x` pushed `<sha>efs/heads/x`)
+@pytest.mark.parametrize("command", [
+    "C=abc1234; git push origin $C:refs/heads/ci/x",
+    'git show "$h:c..."',
+    "scp $HOST:tmp/x .",                    # `$HOST:t` strips to the tail; `:path` is NOT a modifier (p is not applied)
+    "echo $x:t",
+    'echo "$C:r"',
+    "echo $1:h $@:t",
+    "echo $C:gs/a/b/ $C:s/a/b/ $C:& $C:u $C:e",
+    "echo ok; echo \"a $x:t\" 'b'",
+    "cat <<EOF >/dev/null\nplain\nEOF\necho $C:r",
+])
+def test_zsh_history_modifier_on_bare_variable_is_denied(command):
+    out = run(command)
+    assert out and out["permissionDecision"] == "deny", command
+    assert "${NAME}:" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin ${C}:refs/heads/x",
+    "echo '$C:r'",
+    "echo ${C:-def} ${C:t} ${C:1:2}",
+    "echo $C/:r",
+    'echo "$C" :r',
+    "echo $C:",
+    "echo $C::x $C:/y $C:-x $C:x $C:p $C:f $C:1 $a:b:c",
+    "echo \\$C:r",
+    "echo \"${C}:r\" \"x:$C\"",
+    "echo $PATH:/usr/bin $HOST:8080 scp $HOST:path .",
+    "echo ok # $C:r",
+    "cat <<'EOF'\n$C:r\nEOF",
+    "cat <<'EOF' > f\ngit push origin $C:refs/heads/x\nEOF",
+])
+def test_zsh_modifier_lookalikes_and_safe_forms_pass(command):
+    assert not denied(command), command
