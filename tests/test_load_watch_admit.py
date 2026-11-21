@@ -21,7 +21,8 @@ def admit(tmp_path, *args, load1=None, **env):
              LW_MIN_FREE_MB="1000")  # the default floor scales with the host's RAM since 2026-11-14 (tests/test_load_watch_pr2.py): pin it here
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS", "LW_MIN_FREE_MB",
               "LW_MAX_COMPRESSOR_S", "LW_MAX_COMPRESSOR_HARD_S", "LW_CHURN_THRASH_PER_CORE", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS",
-              "LW_FAKE_SWAPINS", "LW_MAX_SWAPINS_S", "LW_SWAPINS_CORROBORATED_S", "LW_STARVE_SOFT_S", "LW_STARVE_MIN_GAP_S"):
+              "LW_FAKE_SWAPINS", "LW_MAX_SWAPINS_S", "LW_SWAPINS_CORROBORATED_S", "LW_STARVE_SOFT_S", "LW_STARVE_MIN_GAP_S",
+              "LW_ADMIT_PER_CORE", "LW_LOAD_PER_CORE"):
         if k != "LW_MIN_FREE_MB":
             e.pop(k, None)
     if load1 is not None:
@@ -31,7 +32,8 @@ def admit(tmp_path, *args, load1=None, **env):
                           timeout=30)
 
 
-LIMIT_ENV = ("LW_MAX_COMPRESSOR_S", "LW_MIN_FREE_MB", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS", "LW_BOOST_CALM_S", "LW_RESERVE_S")
+LIMIT_ENV = ("LW_MAX_COMPRESSOR_S", "LW_MIN_FREE_MB", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS", "LW_BOOST_CALM_S", "LW_RESERVE_S",
+             "LW_ADMIT_PER_CORE", "LW_LOAD_PER_CORE")
 
 
 def load_module():
@@ -246,11 +248,12 @@ def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
     assert json.loads(admit(tmp_path, "--json", load1=CORES * 4.9, **calm).stdout)["max_per_core"] == 5.0
 
 
-def test_a_load_below_the_base_is_admitted_regardless_of_churn(tmp_path):
-    """2026-11-21: the base is 5.0 per core. Moderate churn (below the hard compressor line) no longer matters,
-    because the boost equals the base; only churn above the hard line still refuses on its own."""
+def test_a_load_below_the_base_is_admitted_at_churn_under_the_limit(tmp_path):
+    """2026-11-21: the base is 5.0 per core. Churn up to the 30000 limit does not matter, because the boost equals the base;
+    above it the corroborated-churn gate refuses (load over LW_CHURN_THRASH_PER_CORE, 1.5), well below the 60000 hard line."""
     assert admit(tmp_path, load1=CORES * 4.5, LW_FAKE_CHURN="10000").returncode == 0
     assert admit(tmp_path, load1=CORES * 4.5, LW_FAKE_CHURN="29999").returncode == 0   # moderate churn: base holds, no boost gate
+    assert admit(tmp_path, load1=CORES * 4.5, LW_FAKE_CHURN="30001").returncode == 75   # corroborated churn over the limit
     assert admit(tmp_path, load1=CORES * 5.1, LW_FAKE_CHURN="10000").returncode == 75   # above the base
 
 
