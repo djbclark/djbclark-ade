@@ -248,13 +248,15 @@ conversation, don't pad.
 per the 2026-08-23 operator decision retiring `just ops-memory-sync`; that
 target's release-gating precondition was failing for site-djbclark):**
 
-1. `cd ~/ops/site-private && git pull --rebase` — another agent may have
+1. `git -C ~/ops/site-private pull --rebase` — another agent may have
    written to `memory/` since you started. **If it refuses because another
    agent has unstaged edits** (common in site-private), never stash, add or
    `--autostash` them: skip the pull, do step 2, then `git fetch` and push
    only if `git status -sb` shows ahead and not behind; if behind, ask.
-2. `git add memory/handoffs/<repo>/<filename> && git commit -m "memory: handoff <repo>/<filename>"`
-   — memory-only commit of your own file; NOTHING else staged (other
+2. `genv -C ~/ops/site-private git-commit-own "memory: handoff <repo>/<filename>" memory/handoffs/<repo>/<filename>`
+   — never bare `git commit` (`~/CLAUDE.md` items 1 and 21); `git-commit-own`
+   rejects absolute paths outside its cwd repo, so pass the path relative to
+   that repo. A memory-only commit of your own file; NOTHING else staged (other
    agents' files under `memory/handoffs/` may be untracked or modified).
 3. `git push` immediately. Leave your own changes clean.
 
@@ -263,10 +265,11 @@ target's release-gating precondition was failing for site-djbclark):**
 0. If the repo's `.pre-commit-config.yaml` runs prettier, run `npx --no-install
    prettier --write <handoff file>` first: its check hook rejects the commit
    otherwise (2026-10-13, aiuse).
-1. `cd <repo-root> && git add docs/handoffs/ && git commit -m "docs: handoff <slug>"`
-   — handoff-only commit; nothing else staged.
+1. `genv -C <repo-root> git-commit-own "docs: handoff <slug>" docs/handoffs/<file>`
+   — never bare `git commit`; `<repo-root>` is the repo or worktree you are
+   in, and the path is relative to it. Handoff-only commit; nothing else staged.
 2. Push that commit to a remote he owns (his fork or his repo) without
-   asking. `git-commit-own` from that repo is the publish path when the
+   asking. `git-commit-own` from that repo is also the publish path when the
    branch publishes to his remote. Do not push an upstream remote he does
    not own. If that is the only remote, leave the commit local and name it.
 

@@ -252,8 +252,8 @@ hotspots), no LLM, no key.
   `covers:` file:line spans and edit straight from `--source`. For
   exhaustive tasks ("every occurrence / every caller of this pattern"), ranked
   results are top-N, not complete — run `graft grep "<literal>"` instead
-  (exhaustive over indexed files, grouped by enclosing symbol), falling back
-  to raw `grep -rn` only for unindexed files.
+  (exhaustive over indexed files, grouped by enclosing symbol), then
+  `rg <pattern> <path>` for unindexed files (never `grep -r`, `~/CLAUDE.md` item 1).
 - `graft skeleton <file>` → every definition's signature + span, ~10× cheaper
   than reading the file; use it to skim an API surface.
 - `graft callers <symbol>` gives precomputed, exact edges — who calls this.
