@@ -15,7 +15,8 @@ Usage in an LSP plugin entry:   "command": "lsp-root-guard", "args": ["--", "bas
 
 A root is a container when its realpath is in `config/lsp-roots.toml` [containers].paths (`~` expanded), in
 `--container`, or in `ADE_LSP_CONTAINER_ROOTS` (colon list); or, unless --no-heuristic, when it is not itself a project
-(no .git, pyproject.toml, package.json, Cargo.toml, go.mod, Package.swift, tsconfig.json) and at least `min_repo_children`
+(no .git, .jj, .hg, pyproject.toml, setup.py, package.json, Cargo.toml, go.mod, Package.swift, tsconfig.json, Makefile,
+Gemfile or an empty `.lsp-root-guard-project` file, the opt-out) and at least `min_repo_children`
 (default 3) of its first 400 children hold a `.git`.
 
   --check ROOT   print `container` or `project` for ROOT and exit 0 (no server is started)
@@ -28,19 +29,21 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any, BinaryIO
-from urllib.parse import unquote, urlparse
+from typing import Any, BinaryIO, Callable
+from urllib.parse import unquote
 
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11: the built-in container list below still applies
     tomllib = None  # type: ignore[assignment]
 
-PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Package.swift", "tsconfig.json")
+PROJECT_MARKERS = (".git", ".jj", ".hg", "pyproject.toml", "setup.py", "package.json", "Cargo.toml", "go.mod",
+                   "Package.swift", "tsconfig.json", "Makefile", "Gemfile", ".lsp-root-guard-project")
 DEFAULT_CONTAINERS = ("~", "~/src", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
                       "/opt", "/tmp", "/private/tmp", "/var", "/private/var")
 HEURISTIC_SCAN_LIMIT = 400
@@ -59,7 +62,7 @@ def load_policy() -> tuple[list[str], int]:
             data = tomllib.loads(cfg.read_text(encoding="utf-8"))
             paths = [str(p) for p in data.get("containers", {}).get("paths", paths)]
             min_children = int(data.get("containers", {}).get("min_repo_children", min_children))
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError, AttributeError):
             pass  # a bad config falls back to the built-in list: the guard must never block a server
     extra = os.environ.get("ADE_LSP_CONTAINER_ROOTS", "")
     paths += [p for p in extra.split(":") if p]
@@ -71,19 +74,35 @@ def _real(p: str) -> str:
 
 
 def uri_to_path(uri_or_path: str) -> str | None:
-    if uri_or_path.startswith("file://"):
-        u = urlparse(uri_or_path)
-        if u.netloc not in ("", "localhost"):
-            return None
-        return unquote(u.path)
+    """Path of a file: URI or plain path; None for a remote or non-file URI. `#` and `?` stay in the path (an
+    unencoded one in a directory name must not truncate the root)."""
+    if uri_or_path.startswith("file:"):
+        rest = uri_or_path[5:]
+        if rest.startswith("//"):
+            rest = rest[2:]
+            if rest.startswith("localhost/"):
+                rest = rest[len("localhost"):]
+            elif not rest.startswith("/"):
+                return None
+        return unquote(rest)
     if "://" in uri_or_path:
         return None
     return uri_or_path
 
 
+def _same_dir(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, os.path.expanduser(b))
+    except (OSError, ValueError):
+        return False
+
+
 def is_container(root: str, containers: list[str], min_repo_children: int, heuristic: bool = True) -> bool:
-    real = _real(root)
-    if real in {_real(c) for c in containers}:
+    try:
+        real = _real(root)
+    except ValueError:  # a NUL byte in the path
+        return False
+    if real in {_real(c) for c in containers} or any(_same_dir(real, c) for c in containers):
         return True
     if not heuristic or not os.path.isdir(real):
         return False
@@ -151,8 +170,9 @@ def guard_initialize(msg: dict[str, Any], containers: list[str], min_children: i
     return bad[0]
 
 
-def read_message(stream: BinaryIO) -> tuple[bytes, dict[str, Any] | None] | None:
-    """One LSP frame: (raw bytes incl. headers, parsed JSON object or None). None at EOF."""
+def read_message(stream: BinaryIO, want: Callable[[bytes], bool] | None = None) -> tuple[bytes, dict[str, Any] | None] | None:
+    """One LSP frame: (raw bytes incl. headers, parsed JSON object or None). None at EOF. The body is parsed only when
+    `want(body)` is true (default: always), so the large frames the guard has no use for are never decoded."""
     headers = b""
     length = -1
     while True:
@@ -173,6 +193,8 @@ def read_message(stream: BinaryIO) -> tuple[bytes, dict[str, Any] | None] | None
     body = stream.read(length)
     if len(body) < length:
         return None
+    if want is not None and not want(body):
+        return headers + body, None
     try:
         obj = json.loads(body)
     except ValueError:
@@ -181,54 +203,84 @@ def read_message(stream: BinaryIO) -> tuple[bytes, dict[str, Any] | None] | None
 
 
 def frame(obj: dict[str, Any]) -> bytes:
-    body = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    body = json.dumps(obj, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     return b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
 
 
 class Guard:
+    """mode None: root untouched. "strip": every root was a container, folders are answered null. "filter": a
+    multi-root client kept its project folders, so folder lists are filtered, never nulled."""
+
     def __init__(self, containers: list[str], min_children: int, heuristic: bool) -> None:
         self.containers, self.min_children, self.heuristic = containers, min_children, heuristic
-        self.denied: str | None = None
+        self.mode: str | None = None
         self.folder_request_ids: set[Any] = set()
         self.lock = threading.Lock()
 
+    def _bad(self, uri: Any) -> bool:
+        p = uri_to_path(uri) if isinstance(uri, str) else None
+        return p is not None and is_container(p, self.containers, self.min_children, self.heuristic)
+
+    def client_wants(self, body: bytes) -> bool:
+        if b'"initialize"' in body or b"didChangeWorkspaceFolders" in body:
+            return True
+        return bool(self.folder_request_ids) and b'"method"' not in body
+
+    def server_wants(self, body: bytes) -> bool:
+        return self.mode is not None and b"workspace/workspaceFolders" in body
+
     def from_client(self, raw: bytes, msg: dict[str, Any] | None) -> bytes | None:
-        """Bytes to forward to the server, or None to drop the message."""
+        """Bytes to forward to the server, or None to drop the message. Any guard error forwards the original."""
+        try:
+            return self._from_client(raw, msg)
+        except Exception as e:  # the guard must never stop a server from starting
+            sys.stderr.write(f"lsp-root-guard: passing a message through unchanged ({type(e).__name__})\n")
+            return raw
+
+    def _from_client(self, raw: bytes, msg: dict[str, Any] | None) -> bytes | None:
         if msg is None:
             return raw
         method = msg.get("method")
         if method == "initialize" and "id" in msg:
+            before = json.dumps(msg.get("params"), sort_keys=True)
             denied = guard_initialize(msg, self.containers, self.min_children, self.heuristic)
-            if denied is not None:
-                self.denied = denied
-                sys.stderr.write(f"lsp-root-guard: workspace root {denied} is a container, started with no root\n")
+            if denied is None:
+                return raw
+            kept = bool((msg.get("params") or {}).get("workspaceFolders"))
+            self.mode = "filter" if kept else "strip"
+            sys.stderr.write(f"lsp-root-guard: workspace root {denied} is a container, "
+                             f"{'its folder dropped' if kept else 'started with no root'}\n")
+            return frame(msg) if json.dumps(msg.get("params"), sort_keys=True) != before else raw
+        if self.mode is None:
+            return raw
+        if method == "workspace/didChangeWorkspaceFolders":
+            if self.mode == "strip":
+                return None
+            event = (msg.get("params") or {}).get("event")
+            if isinstance(event, dict) and isinstance(event.get("added"), list):
+                event["added"] = [f for f in event["added"] if not (isinstance(f, dict) and self._bad(f.get("uri")))]
+                if not event["added"] and not event.get("removed"):
+                    return None
                 return frame(msg)
             return raw
-        if self.denied is not None:
-            if method == "workspace/didChangeWorkspaceFolders":
-                return None
-            if "method" not in msg and msg.get("id") in self.folder_request_ids:
-                with self.lock:
-                    self.folder_request_ids.discard(msg.get("id"))
+        if "method" not in msg and msg.get("id") in self.folder_request_ids and "error" not in msg:
+            with self.lock:
+                self.folder_request_ids.discard(msg.get("id"))
+            if self.mode == "strip":
                 msg["result"] = None
-                return frame(msg)
+            elif isinstance(msg.get("result"), list):
+                msg["result"] = [f for f in msg["result"] if not (isinstance(f, dict) and self._bad(f.get("uri")))]
+            return frame(msg)
         return raw
 
     def from_server(self, msg: dict[str, Any] | None) -> None:
-        if self.denied is not None and msg is not None and msg.get("method") == "workspace/workspaceFolders" and "id" in msg:
+        if self.mode is not None and msg is not None and msg.get("method") == "workspace/workspaceFolders" and "id" in msg:
             with self.lock:
                 self.folder_request_ids.add(msg["id"])
 
 
-def _pump_server_out(child_out: BinaryIO, out: BinaryIO, guard: Guard) -> None:
-    while True:
-        got = read_message(child_out)
-        if got is None:
-            break
-        raw, msg = got
-        guard.from_server(msg)
-        out.write(raw)
-        out.flush()
+def _exit_code(rc: int) -> int:
+    return rc if rc >= 0 else 128 - rc
 
 
 def run(argv: list[str], stdin: BinaryIO, stdout: BinaryIO, containers: list[str], min_children: int,
@@ -240,20 +292,53 @@ def run(argv: list[str], stdin: BinaryIO, stdout: BinaryIO, containers: list[str
     child = subprocess.Popen([exe, *argv[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)  # noqa: S603 - argv list, no shell
     assert child.stdin is not None and child.stdout is not None
     guard = Guard(containers, min_children, heuristic)
-    t = threading.Thread(target=_pump_server_out, args=(child.stdout, stdout, guard), daemon=True)
+    shutting_down = threading.Event()
+
+    def kill_child(code: int) -> None:
+        shutting_down.set()
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        os._exit(code)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, lambda signum, _frame: kill_child(128 + signum))
+
+    def pump() -> None:
+        assert child.stdout is not None
+        while True:
+            got = read_message(child.stdout, guard.server_wants)
+            if got is None:
+                break
+            raw, msg = got
+            guard.from_server(msg)
+            stdout.write(raw)
+            stdout.flush()
+        if not shutting_down.is_set():  # the server ended first: report its status, do not wait for the client
+            try:
+                stdout.flush()
+            except OSError:
+                pass
+            os._exit(_exit_code(child.wait()))
+
+    t = threading.Thread(target=pump, daemon=True)
     t.start()
     try:
         while True:
-            got = read_message(stdin)
+            got = read_message(stdin, guard.client_wants)
             if got is None:
                 break
             data = guard.from_client(*got)
             if data is not None:
                 child.stdin.write(data)
                 child.stdin.flush()
-    except (BrokenPipeError, KeyboardInterrupt):
+    except (BrokenPipeError, KeyboardInterrupt, OSError):
         pass
     finally:
+        shutting_down.set()
         try:
             child.stdin.close()
         except OSError:
@@ -262,9 +347,13 @@ def run(argv: list[str], stdin: BinaryIO, stdout: BinaryIO, containers: list[str
         rc = child.wait(timeout=5)
     except subprocess.TimeoutExpired:
         child.terminate()
-        rc = child.wait()
+        try:
+            rc = child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            rc = child.wait()
     t.join(timeout=2)
-    return rc
+    return _exit_code(rc)
 
 
 def main(argv: list[str]) -> int:

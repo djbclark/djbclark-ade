@@ -77,10 +77,12 @@ def _session(tmp: Path, root: Path, extra: list[str] | None = None, env: dict[st
                 return
 
     proc.stdin.write(_frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}))
-    proc.stdin.write(_frame({"jsonrpc": "2.0", "method": "workspace/didChangeWorkspaceFolders", "params": {}}))
+    fl = [{"uri": f.as_uri(), "name": f.name} for f in (folders or [root])]
+    proc.stdin.write(_frame({"jsonrpc": "2.0", "method": "workspace/didChangeWorkspaceFolders",
+                             "params": {"event": {"added": fl, "removed": []}}}))
     proc.stdin.flush()
     read_until(lambda m: m.get("method") == "workspace/workspaceFolders")  # the client answers only after the request
-    proc.stdin.write(_frame({"jsonrpc": "2.0", "id": 900, "result": [{"uri": root.as_uri(), "name": "r"}]}))
+    proc.stdin.write(_frame({"jsonrpc": "2.0", "id": 900, "result": fl}))
     proc.stdin.write(_frame({"jsonrpc": "2.0", "method": "exit"}))
     proc.stdin.close()
     got.extend(_parse(proc.stdout.read()))
@@ -141,6 +143,9 @@ def test_env_container_and_multi_root_keeps_project(tmp_path: Path) -> None:
     echo = _echo(out)
     assert [f["uri"] for f in echo["workspaceFolders"]] == [proj.as_uri()]
     assert echo["rootUri"] == proj.as_uri()
+    resp = next(m for m in out if m.get("method") == "seen/response")
+    assert [f["uri"] for f in resp["params"]["result"]] == [proj.as_uri()]  # filtered, not nulled
+    assert any(m.get("method") == "seen/didChange" for m in out)  # the project folder change still reaches the server
 
 
 def test_check_and_errors(tmp_path: Path) -> None:
@@ -154,3 +159,47 @@ def test_check_and_errors(tmp_path: Path) -> None:
     r = subprocess.run([sys.executable, str(TOOL), "--", "no-such-lsp-binary-xyz"], capture_output=True, input=b"", env=env)
     assert r.returncode == 127
     assert subprocess.run([sys.executable, str(TOOL)], capture_output=True).returncode == 2
+
+
+def test_uri_forms(tmp_path: Path) -> None:
+    home = _mk(tmp_path)
+    env = dict(os.environ, HOME=str(home))
+    odd = home / "a#b"
+    (odd / ".git").mkdir(parents=True)
+    for arg, want in ((odd.as_uri().replace("%23", "#"), "project"), (f"file:{home}", "container"),
+                      (f"file://localhost{home}", "container"), (f"file://otherhost{home}", None)):
+        r = subprocess.run([sys.executable, str(TOOL), "--check", arg], capture_output=True, text=True, env=env)
+        assert (r.stdout.strip() or None) == want, (arg, r.stdout, r.stderr)
+
+
+def test_server_exit_ends_guard_and_sigterm_kills_child(tmp_path: Path) -> None:
+    import signal
+    import time
+    env = dict(os.environ, HOME=str(tmp_path))
+    quick = tmp_path / "quick.py"
+    _ = quick.write_text("import sys\nsys.stdin.buffer.readline()\nsys.exit(7)\n")
+    p = subprocess.Popen([sys.executable, str(TOOL), "--", sys.executable, str(quick)], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, env=env)
+    assert p.stdin is not None
+    _ = p.stdin.write(b"Content-Length: 2\r\n\r\n{}")
+    p.stdin.flush()
+    assert p.wait(timeout=15) == 7  # the client never closed stdin: the guard still follows the server out
+    pidfile = tmp_path / "pid"
+    sleeper = tmp_path / "sleeper.py"
+    _ = sleeper.write_text(f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(300)\n")
+    p = subprocess.Popen([sys.executable, str(TOOL), "--", sys.executable, str(sleeper)], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, env=env)
+    for _i in range(100):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        time.sleep(0.1)
+    child = int(pidfile.read_text())
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=15) == 128 + signal.SIGTERM
+    time.sleep(0.5)
+    try:
+        os.kill(child, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive

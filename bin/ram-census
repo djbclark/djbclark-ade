@@ -81,9 +81,11 @@ def census(rows: list[tuple[int, int, int, str]], want_fp: bool, want_roots: boo
         loader.exec_module(guard)
         containers, min_children = guard.load_policy()
     out: dict[str, dict[str, Any]] = {}
+    cmd_of = {pid: cmd for pid, _, _, cmd in rows}
     for pid, ppid, rss, cmd in rows:
         cls = classify(cmd)
-        if cls is None or " ram-census" in cmd:
+        # the proxy's own command line names the server it wraps: count the server, not the proxy
+        if cls is None or " ram-census" in cmd or "lsp-root-guard" in cmd:
             continue
         c = out.setdefault(cls, {"n": 0, "rss_mb": 0.0, "footprint_mb": 0.0, "roots": {}})
         c["n"] += 1
@@ -92,7 +94,10 @@ def census(rows: list[tuple[int, int, int, str]], want_fp: bool, want_roots: boo
             c["footprint_mb"] += footprint_mb(pid) or 0.0
         if want_roots and cls in LSP and guard is not None:
             root = cwd_of(ppid) or "?"
-            kind = "container" if root != "?" and guard.is_container(root, containers, min_children) else "project"
+            if "lsp-root-guard" in cmd_of.get(ppid, ""):  # behind the guard: the root it passed on is not visible here
+                kind = "guarded"
+            else:
+                kind = "container" if root != "?" and guard.is_container(root, containers, min_children) else "project"
             c["roots"][f"{kind}:{root}"] = c["roots"].get(f"{kind}:{root}", 0) + 1
     for c in out.values():
         c["rss_mb"] = round(c["rss_mb"], 1)

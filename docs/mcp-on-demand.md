@@ -707,6 +707,6 @@ the compressed tsserver and basedpyright pages; this item removes the avoidable 
    version in `plugin.json` and `marketplace.json`, merge, and `claude plugin update local-lsp@local`. New sessions use it;
    running ones keep their servers. Rollback: revert the commit and update again.
 3. Verify in a fresh session started in `~`: `bin/ram-census --roots` lists the basedpyright and marksman roots as
-   `container:` yet their RSS stays near 20-50 MB, and the Claude LSP log carries one `lsp-root-guard: workspace root ...` line.
+   `guarded:` and their RSS stays near the project-rooted level (about 220 MB for a basedpyright that has opened one file, section 12.3 item 5, against 1 GB or more unguarded), and the Claude LSP log carries one `lsp-root-guard: workspace root ...` line.
    If the LSP launcher cannot find `lsp-root-guard`, put the absolute path of the `~/.local/bin` link in the plugin entry.
 4. 2a and 2b are the commands in 11.1 and 11.2 under the section 9 approvals.
