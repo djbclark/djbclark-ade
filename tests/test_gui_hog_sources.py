@@ -208,28 +208,76 @@ def test_status_lines_name_the_load_sources(tmp_path):
     assert "load sources" in text and "bgrun (owner: claude), heaviest rustc" in text and "a build or test job" in text and "can freeze" in text   # Slack
 
 
-def test_no_argument_leaks_into_a_label_even_inside_an_app_bundle():   # adversary L1 of #872: the label is the executable name, never its arguments
-    import gui_hog_sources as gs
+MARK = "/Contents/MacOS/"
+REAL = "/Applications/Real.app" + MARK + "real-exe"   # what the kernel reports: differs from every word of the command lines below
+
+
+def test_a_label_is_never_text_from_an_argument_with_or_without_a_kernel_path():   # adversary L1, L1r, L1r' of #872
     for cmd, want in (("/Applications/Xcode.app/Contents/Developer/usr/bin/clang -c a.c -DPASS=hunter2", "clang"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo -apiToken s3cr3tvalue", "Foo"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo /Users/me/secret/file.txt", "Foo"),
-                      ("/Applications/Foo.app/Contents/MacOS/Foo secretword", "Foo"),
-                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --type=renderer --token=hunter2", "Google Chrome"),
-                      ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
-                      ("/Applications/Ghostty.app/Contents/MacOS/ghostty -e hunter2", "ghostty"),
-                      ("/Applications/Foo.app/Contents/MacOS/other-exe -x hunter2", "other-exe")):
-        label = gs._label(cmd)
-        assert label == want, (cmd, label)
-        assert "hunter2" not in label and "s3cr3t" not in label and "secret" not in label
+                      ("/Applications/Foo.app" + MARK + "Foo -apiToken s3cr3tvalue", "Foo"),
+                      ("/Applications/Foo.app" + MARK + "Foo /Users/me/secret/file.txt", "Foo"),
+                      ("/Applications/Foo.app" + MARK + "Foo secretword", "Foo"),
+                      ("/Applications/Google Chrome.app" + MARK + "Google Chrome --type=renderer --token=hunter2", "Google"),   # no kernel path: argv[0] only
+                      ("/usr/bin/tool --path=/x" + MARK + "hunter2 -k", "tool"),
+                      ("/usr/bin/tool SECRET" + MARK + "hunter2", "tool"),
+                      ("/usr/bin/tool a b c" + MARK + "hunter2", "tool"),
+                      ("/bin/cp Foo.app" + MARK + "hunter2 dest", "cp"),
+                      ("/usr/bin/codesign -v /Applications/Foo.app" + MARK + "Foo", "codesign"),
+                      ("/bin/sh -c cd /A.app" + MARK + " && ./Foo", "sh")):
+        for exe_of in (None, lambda pid: None, lambda pid: (_ for _ in ()).throw(OSError("gone"))):   # no lookup, a process that exited, a lookup that raises
+            label = gs._label(cmd, 7, exe_of)
+            assert label == want, (cmd, label)
+            assert not {"hunter2", "s3cr3tvalue", "secretword", "SECRET", "secret"} & set(label.replace("/", " ").split())
 
 
-def test_a_label_comes_from_the_kernel_executable_not_from_an_argument_that_holds_the_bundle_mark():   # adversary L1r of #872
-    mark = "tool --path=/x/Contents/MacOS/hunter2 -k"
-    assert gs._label("/usr/bin/" + mark, 7, lambda pid: "/usr/bin/tool") == "tool"   # the kernel path wins over argv
-    assert gs._label("/usr/bin/" + mark) == "tool"   # no kernel path: the fallback refuses a mark that sits inside an argument
-    assert gs._label("/usr/bin/codesign -v /Applications/Foo.app/Contents/MacOS/Foo") == "codesign"
-    assert gs._label("/bin/sh -c cd /A.app/Contents/MacOS/ && ./Foo") == "sh"
-    assert gs._label("/Applications/Foo.app/Contents/MacOS/Foo -x", 7, lambda pid: None) == "Foo"   # an unreadable kernel path falls back to the parse
-    table = {"10": (1, 501, 2.0, "/usr/bin/" + mark)}
-    out = gs.group_sources(table, {"10": 1024}, [], exe_of=lambda pid: "/usr/bin/tool")
-    assert [r["name"] for r in out] == ["tool"] and "hunter2" not in json.dumps(out)
+def test_the_kernel_executable_path_wins_over_argv_when_it_is_readable():   # kills `_label` ignoring exe_of (R1 of the #872 re-review)
+    cmd = "/usr/bin/tool SECRET" + MARK + "hunter2"
+    assert gs._label(cmd, 7, lambda pid: REAL) == "real-exe"
+    assert gs._label(cmd, "7", lambda pid: REAL + "/") == "real-exe"
+    assert gs._label(cmd, None, lambda pid: REAL) == "tool"   # no pid, no lookup
+    assert gs._label("/usr/bin/plain --x", 7, lambda pid: REAL) == "plain"   # a command without the mark never asks the kernel
+    asked = []
+    gs._label("/usr/bin/plain", 7, lambda pid: asked.append(pid))
+    assert asked == []
+
+
+def test_group_sources_labels_system_heaviest_and_build_names_from_the_kernel_path():   # kills R3: every `_label` call site passes exe_of
+    seen = []
+
+    def exe_of(pid):
+        seen.append(pid)
+        return REAL
+    rows = {"10": (1, ME, 2.0, "/usr/bin/tool SECRET" + MARK + "hunter2"),
+            "20": (1, ME, 1.0, "/usr/bin/other SECRET" + MARK + "hunter2"), "21": (20, ME, 3.0, "/usr/bin/third SECRET" + MARK + "hunter2")}
+    out = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], exe_of=exe_of)}
+    assert out["system:real-exe"]["name"] == "real-exe" and out["system:real-exe"]["heaviest"] == "real-exe"   # the system key, its name and its heaviest
+    assert "hunter2" not in json.dumps(list(out.values())) and seen
+    held = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], held_pids=("10",), exe_of=exe_of)}
+    assert held["build:10"]["name"] == "admit" and "hunter2" not in json.dumps(list(held.values()))
+    plain = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [])}
+    assert "hunter2" not in json.dumps(list(plain.values())) and "system:tool" in plain   # no lookup: argv[0], never an argument
+
+
+def test_a_terminal_subtree_inside_an_app_is_named_from_the_kernel_path_too():   # kills R3c: the third `_label` call site
+    t = table()
+    t["51"] = (50, ME, 0.01, "/usr/bin/login SECRET" + MARK + "hunter2")   # the top of the shell subtree inside Ghostty
+    seen = {s["key"]: s for s in gs.group_sources(t, {p: 1024 for p in t}, apps(), exe_of=lambda pid: REAL if str(pid) == "51" else None, agent_clis={"claude"})}
+    assert seen["build:51"]["name"] == "terminal session (real-exe)" and "hunter2" not in json.dumps(list(seen.values()))
+    plain = {s["key"]: s for s in gs.group_sources(t, {p: 1024 for p in t}, apps(), agent_clis={"claude"})}
+    assert plain["build:51"]["name"] == "terminal session (login)"
+
+
+def test_the_tick_gives_the_sampler_s_exe_of_to_the_labels(tmp_path):   # kills R4: tick stops passing exe_of to group_sources
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    gh.hold_write(state, os.getpid(), "S", "bg", T0 - 400, ["pageins"], T0)
+    t = table()
+    t["60"] = (1, ME, 1.4, "/usr/bin/tool SECRET" + MARK + "hunter2")
+    ls = [{"name": "Slack", "bundle_id": "com.example.slack", "bundle_path": "/Applications/Slack.app", "exe": SLACK, "pid": 10, "type": "Foreground"}]
+    gh.tick({}, T0, t, {p: 1024 for p in t}, set(), state_dir=state, my_uid=ME, agent_clis={"claude"}, cfg=cfg(), lsapps=ls, dry=False,
+            exe_of=lambda p: REAL if str(p) == "60" else (SLACK if str(p) in ("10", "11") else None), start_of=lambda p: "S", launch=False, gui_ok=False,
+            load_avg=(1.0, 2.0, 3.0), ncpu=10)
+    snap = json.loads((state / "gui-hog" / "snapshot.json").read_text())
+    names = [r["name"] for r in snap["sources"]]
+    assert "real-exe" in names and "tool" not in names and "hunter2" not in json.dumps(snap)
+

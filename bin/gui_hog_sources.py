@@ -34,32 +34,19 @@ MAX_SOURCES = 40   # per sample, after sorting by cores
 
 
 def _label(cmd, pid=None, exe_of=None):
-    """A cleaned program name for an unclaimed process, never any of its arguments. Only a command containing an app bundle's `/Contents/MacOS/` is hard
-    to cut (the executable may contain spaces, and an ARGUMENT may contain the mark too), so for it the name comes from the kernel's executable path
-    (`exe_of(pid)`, never argv), and only without one from the command line, accepted when the text before the mark looks like one path with no option
-    or `=` word in it (adversary L1r of #872: `tool --path=/x/Contents/MacOS/hunter2` must label `tool`)."""
+    """A cleaned program name for an unclaimed process, never a later argument of its command line. Only a command containing an app bundle's
+    `/Contents/MacOS/` is hard to cut (the executable may contain spaces, and an ARGUMENT may contain the mark too), so for it the name comes from the
+    kernel's executable path (`exe_of(pid)`) when that is readable. Otherwise (no lookup, or the process exited between the table read and the lookup)
+    it is the base name of argv[0], the first word: a bundle executable with a space in its path loses its tail ("Google"), which beats ever printing
+    text from an argument (adversary L1r and L1r' of #872: `tool SECRET/Contents/MacOS/hunter2` labels `tool` either way)."""
     cmd = str(cmd)
-    mark = "/Contents/MacOS/"
-    if mark in cmd:
-        exe = None
-        if exe_of is not None and pid is not None:
-            try:
-                exe = exe_of(int(pid))
-            except Exception:  # noqa: BLE001
-                exe = None
+    if "/Contents/MacOS/" in cmd and exe_of is not None and pid is not None:
+        try:
+            exe = exe_of(int(pid))
+        except Exception:  # noqa: BLE001
+            exe = None
         if exe:
             return gh.clean(os.path.basename(str(exe).rstrip("/")) or "?", 40)
-        head, rest = cmd.split(mark, 1)
-        if head.startswith("/") and not any(w[:1] in ("-", "/") or "=" in w for w in head.split()[1:]):
-            # a bundle's executable may contain spaces ("Google Chrome Helper (Renderer)") and the arguments follow it: the executable name is taken
-            # only when it matches the bundle's own name (its length bounds the cut, so no argument rides along), else the first word after the mark
-            bundle = os.path.basename(head.rstrip("/"))
-            bundle = bundle[:-4] if bundle.endswith(".app") else bundle
-            if bundle and rest[:len(bundle)].casefold() == bundle.casefold() and (len(rest) == len(bundle) or rest[len(bundle)] in " \t"):
-                name = rest[:len(bundle)]
-            else:
-                name = (rest.split() or [""])[0]
-            return gh.clean(name or "?", 40)
     first = (cmd.split() or [""])[0]
     return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
 
