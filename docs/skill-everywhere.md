@@ -81,11 +81,17 @@ daemon's updates. Nothing under a Paseo-managed dir is ever written, copied over
 section: `linked`, then `already linked` on a rerun; a dangling or chained link is relinked; a real dir or other link at
 the target is left alone and exits 1 (it is a collision with a link we are making); a missing source
 (`~/.agents/skills/paseo/SKILL.md`) makes no link, prints `error: paseo skill source ... is missing` and exits 1.
-`--check` (named or `--all`, so `bin/ade-update` sees it) exits 1 with `error: paseo skill is missing on <tui> (<path>)`
-on stderr when `paseo` is absent from any **live** target: claude `~/.claude/skills`, codex and pi `~/.agents/skills`,
-hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it). Because
-`bin/ade-update` treats an `error:` check as a stop, a machine where Hermes lacks the link is fixed by one
-`skill-everywhere --all` run.
+`--check` (named or `--all`, so `bin/ade-update` sees it) exits 1 with
+`error: paseo skill is <state> on <tui> (<path>): <hint>` on stderr (`<state>` is `missing`, `dangling -> ...`, `other
+link -> ...` or `real dir/file (not ours)`) when `paseo` is absent from any **live** target: claude `~/.claude/skills`, codex and pi `~/.agents/skills`,
+hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it). `skill-everywhere paseo` runs just this step (`paseo` is
+not a skill directory, so no `== paseo` header or per-skill rows come with it). **`bin/ade-update` reads those stderr lines as
+rows of the pseudo-skill `paseo` (2026-11-21, after #871), not as a helper failure (exit 4)**: a missing or dangling Hermes link is a
+link gap, fixable (exit 10 on `--check`, `would run: skill-everywhere paseo`; apply runs it, so apply self-heals the link); `paseo`
+missing from the claude, codex or pi dir is a stuck row (`not synced by Paseo`), exit 10, because Paseo's daemon writes
+that copy and no command of ours may. **A host where Paseo never syncs its skill** (no daemon, or `agents.skills.selection` without
+`paseo`, section 3a) with one of those clients installed therefore reads exit 10 from `ade-update` on every run, by design: enable
+Paseo's skill sync there; the row says so.
 
 If the skill has no directory yet, create it first: public skills in
 `~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)
@@ -177,6 +183,11 @@ bundled copy, and the daemon's startup sync and any skills install, update or sa
 harmless now that no entry of those names is a link into this repo (it was not before 2026-11-02: the unprefixed
 links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `ade-*` for that reason).
 
+0. **The Hermes link and the check depend on `paseo` staying selected (2026-11-21).** `bin/skill-everywhere` links
+   `~/.local/share/skill-everywhere/skills/paseo` to the daemon-synced `~/.agents/skills/paseo` (section 1), and its `--check` fails
+   when `paseo` is missing from a live target. A selection that drops `paseo` (`custom` with `[]`, or a list without it) makes the
+   daemon stop syncing it, so `skill-everywhere --check` and `bin/ade-update` fail (exit 10 on the claude/codex/pi rows) until the
+   selection includes `paseo` again. Narrowing to `paseo`, `paseo-help` and `paseo-plugin` (item 2) keeps it.
 1. **Operator step (final-merge batch)**: install Paseo's bundle with `npx skills add getpaseo/paseo`, or switch each
    Paseo home's `agents.skills.selection` in `~/.paseo/config.json` from `{"mode":"custom","skills":[]}` to the bundle
    (`{"mode":"all"}` is the default; the persisted path is `agents.skills.selection`, a top-level `"skills"` key is

@@ -271,6 +271,8 @@ for name in "$@"; do
   elif [[ -f $priv_root/$name/SKILL.md ]]; then src="$priv_root/$name"
   elif [[ -f $site_root/$name/SKILL.md ]]; then src="$site_root/$name"
   elif [[ -f $chrome_root/$name/SKILL.md ]]; then src="$chrome_root/$name"
+  elif [[ $name == paseo ]]; then
+    continue  # not a skill of ours: `skill-everywhere paseo` is only the paseo_step below (ade-update's fix command)
   else
     if [[ $mode != remove ]]; then
       echo "error: no SKILL.md under $ade_root/$name, $priv_root/$name, $site_root/$name or $chrome_root/$name" >&2; rc=1; continue

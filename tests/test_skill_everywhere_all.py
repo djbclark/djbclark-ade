@@ -483,3 +483,18 @@ def test_foreign_dir_at_the_name_of_our_own_skill_stays_an_error(catalog):
     result = run(catalog, "--all")
     assert result.returncode == 1  # steps collides; canvas alone would not
     assert (foreign / "SKILL.md").read_text() == "foreign"
+
+
+def test_paseo_as_a_name_runs_only_the_paseo_step(catalog, tmp_path):  # ade-update's fix command for a missing hermes link
+    home, public, _, _ = catalog
+    hermes = hermes_env(catalog, tmp_path)
+    skill(public, "steps")
+    failed = run(catalog, "--check", "paseo")
+    assert failed.returncode == 1 and "error: paseo skill is missing on hermes" in failed.stderr
+    assert failed.stdout.strip().splitlines() == ["== end"]
+    linked = run(catalog, "paseo")
+    assert linked.returncode == 0, linked.stdout + linked.stderr
+    assert "no SKILL.md" not in linked.stderr and "== steps" not in linked.stdout
+    assert (hermes / "paseo").readlink() == home / ".agents" / "skills" / "paseo"
+    assert not (hermes / "steps").exists()  # only the paseo step ran
+    assert run(catalog, "--check", "paseo").returncode == 0

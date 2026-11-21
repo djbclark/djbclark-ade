@@ -55,17 +55,29 @@ table = json.load(open(state))
 args = sys.argv[1:]
 check = bool(args) and args[0] == "--check"
 names = args[1:] if check else args
+# table["__paseo__"] = [[tui, state], ...]: skill-everywhere's paseo step (2026-11-21): --check prints one
+# `error: paseo skill is <state> on <tui> (<path>): <hint>` stderr line per gap and exits 1; any link call makes the
+# hermes link (the fixable gap states vanish). `paseo` as a name is the step alone: no `== paseo` header.
+gaps = table.get("__paseo__", [])
 if check:
     for n in names:
+        if n == "paseo":
+            continue  # like the real script: no header, no rows for the pseudo-name
         print("== " + n)
         for tui, st in table.get(n, [["claude", "linked"]]):
             print("  %-13s %s" % (tui, st))
     print("== end")
+    for tui, st in gaps:
+        sys.stderr.write("error: paseo skill is %s on %s (/h/%s/paseo): hint\\n" % (st, tui, tui))
+    sys.exit(1 if gaps else 0)
 else:
     for n in names:
+        if n == "paseo":
+            continue
         table[n] = [[t, "linked" if s in ("missing",) or s.startswith(("dangling", "chained")) else s]
                     for t, s in table.get(n, [])]
         print("== " + n)
+    table["__paseo__"] = [[t, s] for t, s in gaps if t != "hermes" or not (s == "missing" or s.startswith(("dangling", "chained")))]
     json.dump(table, open(state, "w"))
 sys.exit(0)
 """
@@ -286,6 +298,41 @@ def test_missing_skill_link_is_linked_on_apply_and_only_reported_on_check(env):
     assert env.calls()[2:] == [["alpha"], ["--check", "alpha"]]
     assert "linked now: alpha" in r.stdout
     assert env.state.read_text().split()[0] == env.first
+
+
+def test_a_missing_hermes_paseo_link_is_exit_10_on_check_and_linked_on_apply(env):  # PR 871 adversary L1
+    env.skills({"alpha": [["claude", "linked"]], "__paseo__": [["hermes", "missing"]]})
+    r = env.run("--check")
+    assert r.returncode == 10, r.stdout + r.stderr  # a link gap, not exit 4 "helper failed"
+    assert "paseo: hermes missing" in r.stdout and "would run:" in r.stdout and "skill-everywhere paseo" in r.stdout
+    assert env.calls() == [["--check", "alpha"]] and not env.state.exists()
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.calls()[2:] == [["paseo"], ["--check", "paseo"]]
+    assert "linked now: paseo" in r.stdout
+    assert env.state.read_text().split()[0] == env.first
+
+
+def test_paseo_missing_from_a_target_paseo_syncs_is_a_stuck_row_exit_10_never_a_helper_failure(env):
+    env.skills({"alpha": [["claude", "linked"]], "__paseo__": [["claude", "missing"], ["codex", "missing"]]})
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert "paseo/claude is not synced by Paseo: missing" in r.stdout
+    assert "paseo/codex is not synced by Paseo: missing" in r.stdout
+    assert "enable Paseo's skill sync" in r.stdout and "docs/skill-everywhere.md section 3a" in r.stdout
+    assert ["paseo"] not in env.calls()  # nothing of ours repairs it
+    assert "helper failed" not in r.stdout and "--check failed" not in r.stdout
+    assert not env.state.exists()
+
+
+def test_a_paseo_gap_line_does_not_hide_a_real_helper_failure(env):
+    plant_helper(env.trusted, FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "sys.exit(1 if gaps else 0)", """sys.stderr.write("bash: boom\\n")
+    sys.exit(1)"""))
+    env.skills({"alpha": [["claude", "linked"]], "__paseo__": [["hermes", "missing"]]})
+    r = env.run("--check")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "bash: boom" in r.stdout
 
 
 def test_unfixable_skill_link_is_reported_and_blocks_the_state_record(env):
@@ -944,6 +991,33 @@ def test_the_real_skill_everywhere_check_ends_with_the_sentinel(tmp_path):  # ad
                                 CODEX_HOME=str(home / ".codex")))
     assert r.returncode in (0, 1), r.stdout + r.stderr
     assert r.stdout.splitlines()[0] == "== alpha" and r.stdout.splitlines()[-1] == "== end"
+
+
+def test_the_real_paseo_gap_line_is_parsed_into_classified_rows(tmp_path):  # PR 871 adversary L1
+    """The real script's `error: paseo skill is <state> on <tui> (<path>): <hint>` line, with Hermes installed and no
+    Hermes link, must come back from check_skills as a fixable `paseo` row, not as a helper failure."""
+    mod = load_module()
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    home, fake = tmp_path / "home", tmp_path / "fakebin"
+    (home / ".agents" / "skills" / "paseo").mkdir(parents=True)
+    (home / ".agents" / "skills" / "paseo" / "SKILL.md").write_text("---\nname: paseo\n---\n")
+    fake.mkdir()
+    (fake / "hermes").write_text("#!/bin/sh\nexit 0\n")
+    (fake / "hermes").chmod(0o755)
+    env = dict(HOME=str(home), CODEX_HOME=str(home / ".codex"), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"),
+               SKILL_EVERYWHERE_ONLY="hermes", PATH=f"{fake}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert r.returncode == 1 and r.stderr.startswith("error: paseo skill is missing on hermes"), r.stdout + r.stderr
+    rows, rest = mod.paseo_gap_rows(r.stderr)
+    assert rows == [("paseo", "hermes", "missing")]
+    assert all(ln.startswith("warning:") for ln in rest)  # the script's own unrelated Hermes config warning stays a warning
+    assert mod.classify("missing") == "fixable"
+    assert mod.paseo_gap_rows("error: paseo skill is missing on claude (/h/c/paseo): x\n")[0] == [
+        ("paseo", "claude", "not synced by Paseo: missing")]
+    assert mod.classify("not synced by Paseo: missing") == "stuck"
+    assert mod.paseo_gap_rows("bash: boom\n") == ([], ["bash: boom"])
 
 
 def test_the_grokbot_copy_target_rows_are_classified_not_stuck(tmp_path):  # adversary R15-1
