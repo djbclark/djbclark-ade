@@ -351,18 +351,37 @@ def quiet_for(cfg, means, now, state_dir, gh_state, held=None):
 _libproc = None
 
 
+def _libproc_lib():
+    global _libproc
+    if _libproc is None:
+        _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    return _libproc
+
+
 def kernel_exe(pid):
     """The executable path the kernel reports for `pid` (never argv[0]): proc_pidpath on macOS, /proc/PID/exe on Linux. None
     when the process is gone or unreadable."""
     try:
         if sys.platform == "darwin":
-            global _libproc
-            if _libproc is None:
-                _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
             buf = ctypes.create_string_buffer(4096)
-            n = _libproc.proc_pidpath(int(pid), buf, 4096)
+            n = _libproc_lib().proc_pidpath(int(pid), buf, 4096)
             return os.fsdecode(buf.value) if n > 0 else None
         return os.readlink(f"/proc/{int(pid)}/exe")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def kernel_name(pid):
+    """The kernel's short process name for `pid` (libproc `proc_name`, the p_comm the kernel took from the exec'd file's name: not argv and not the
+    environment), or None. It answers for a process whose executable was replaced on disk by an upgrade (where `proc_pidpath` fails), and gives nothing
+    for a zombie or a process that is gone. macOS only: Linux has no such name that the process cannot set itself (/proc/PID/comm can be changed by
+    prctl), so there it is None."""
+    try:
+        if sys.platform != "darwin":
+            return None
+        buf = ctypes.create_string_buffer(256)
+        n = _libproc_lib().proc_name(int(pid), buf, 256)
+        return os.fsdecode(buf.value) if n > 0 and buf.value else None
     except (OSError, ValueError, AttributeError):
         return None
 
@@ -1354,6 +1373,12 @@ def collect_table(timeout=15):
     return table, rss, ttys
 
 
+def default_name_of(exe_of, name_of=None):
+    """The short-name lookup the sampler pairs with `exe_of`: an explicit `name_of` as given; else the kernel's `kernel_name` when `exe_of` is the real
+    `kernel_exe` (production), else None (a test's fake `exe_of` must never be paired with a lookup of REAL pids)."""
+    return name_of if name_of is not None else (kernel_name if exe_of is kernel_exe else None)
+
+
 def verify_identity(pid, expect_start, *, start_of=proc_start, exe_of=kernel_exe):
     """The pid-reuse check made right before an action (F3, carry-over e): the process exists, its executable path is readable and its start time
     equals `expect_start` (a non-empty string from the snapshot's `root_start`). Returns (ok, reason)."""
@@ -1467,7 +1492,7 @@ def auto_starts(roots, held, t, start_of=None):
 
 
 def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_cores=None, load1=None, dry=False,
-         cfg=None, lsapps=None, exe_of=kernel_exe, out=print, start_of=None, launch=False, popen=subprocess.Popen,
+         cfg=None, lsapps=None, exe_of=kernel_exe, name_of=None, out=print, start_of=None, launch=False, popen=subprocess.Popen,
          load_avg=None, ncpu=None, gui_ok=None, auto_freeze=False, sysread=None):
     """The sampler's whole GUI-hog step (K1): refresh the app window in `st`, read the holds, decide, keep the dialog's snapshot fresh while a hold
     is active or the dialog runs (D3), and on a `show` write the dry-run line (kept in 3b: it is the count of how often the dialog fired) and,
@@ -1499,7 +1524,8 @@ def tick(st, t, table, rss_kb, ttys, *, state_dir, my_uid, agent_clis=(), total_
         sr = sysread if isinstance(sysread, dict) else {}
         gui_hog_savings.hist_add(gh["hist"], t, sr.get("load1", load1), sr)
         gh["hist"] = gui_hog_savings.clean_hist(gh["hist"])
-        srcs = gui_hog_sources.group_sources(table, rss_kb, apps, held_pids=held_pids, agent_clis=agent_clis, exe_of=exe_of)
+        srcs = gui_hog_sources.group_sources(table, rss_kb, apps, held_pids=held_pids, agent_clis=agent_clis, exe_of=exe_of,
+                                              name_of=default_name_of(exe_of, name_of))
         gui_hog_sources.window_update(gh, t, srcs, total_cores, cfg)
         smeans = gui_hog_sources.window_means(gh, t, cfg)
         top = [m["id"] for m in smeans if m["kind"] in ("build", "agent") and m["present"]][:6]
