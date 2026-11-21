@@ -683,7 +683,7 @@ for building the aggregator.
    item in 12.1 and the place to try it. The official `pyright-lsp` plugin (`pyright-langserver`, installed at `/opt/homebrew/bin`, enabled) and
    `typescript-lsp` entries duplicate `local-lsp` and would root at the home directory unguarded if Claude Code ever preferred
    them (2026-11-21: `local-lsp` wins per extension, 0 `pyright-langserver` against 12 `basedpyright-langserver` processes; the
-   precedence is not documented). Disabling them is the operator's call (`enabledPlugins`). After #290 the guarded entries fall back to the plain server when `lsp-root-guard` is missing.
+   precedence is not documented). Disabling them is the operator's call (`enabledPlugins`). Since site-djbclark [#290](https://github.com/djbclark/site-djbclark/pull/290) the guarded entries fall back to the plain server when `lsp-root-guard` is missing (fail-open: no guard, the server roots at the session cwd), and [#292](https://github.com/djbclark/site-djbclark/pull/292) makes them say so on stderr and honour `ADE_LSP_ROOT_GUARD=off`.
 
 ### 12.4 Estimated saving
 
