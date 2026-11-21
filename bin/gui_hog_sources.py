@@ -33,13 +33,25 @@ GRADLE_MARKS = ("org.gradle", "GradleDaemon", "GradleWorkerMain", "gradle-launch
 MAX_SOURCES = 40   # per sample, after sorting by cores
 
 
-def _label(cmd, pid=None, exe_of=None):
-    """A cleaned program name for an unclaimed process, never any text of its command line. With a lookup (`exe_of`, the kernel's executable path: the
-    sampler always supplies one) the name is the base name of that path, asked for EVERY command: the first word `ps` prints cannot be proven to be
-    argv[0] (an empty or blank argv[0] makes it argv[1] or an environment string, and an argv[0] with a space is cut inside its path). When the lookup
-    returns nothing (the process exited between the table read and the lookup) the label is `?`, never a word of the command. Without a lookup
-    (fixtures and pure-data callers, which vouch for their own table) it is the base name of the command's first word. Adversary M1 and L1 of #875,
-    L1r and L1r' of #872."""
+def _memo(fn):
+    """`fn` with its results kept per pid (None too) for one sample: a raising lookup is not kept and is asked again."""
+    seen = {}
+
+    def f(pid):
+        if pid not in seen:
+            seen[pid] = fn(pid)
+        return seen[pid]
+    return f
+
+
+def _label(cmd, pid=None, exe_of=None, name_of=None):
+    """A cleaned program name for an unclaimed process, never any text of its command line or environment. With a lookup (`exe_of`, the kernel's
+    executable path: the sampler always supplies one) the name is the base name of that path, asked for EVERY command: the first word `ps` prints
+    cannot be proven to be argv[0] (an empty or blank argv[0] makes it argv[1] or an environment string, and an argv[0] with a space is cut inside
+    its path). When the path is unreadable (the process exited, its executable was replaced on disk by an upgrade, or it is not ours to read) the
+    kernel's short name from `name_of` (libproc `proc_name`: the exec'd file's name, not argv) is used, and `?` when that gives nothing either.
+    Without an `exe_of` (fixtures and pure-data callers, which vouch for their own table) it is the base name of the command's first word.
+    Adversary M1 and L1 of #875, L1r and L1r' of #872, the r2 Low of #875."""
     if exe_of is not None:
         exe = None
         if pid is not None:
@@ -48,6 +60,11 @@ def _label(cmd, pid=None, exe_of=None):
             except Exception:  # noqa: BLE001
                 exe = None
         name = os.path.basename(str(exe).rstrip("/")) if exe else ""
+        if not name and pid is not None and name_of is not None:   # no usable path (none, or the root): the kernel's short name, never argv
+            try:
+                name = str(name_of(int(pid)) or "")
+            except Exception:  # noqa: BLE001
+                name = ""
         return gh.clean(name or "?", 40)
     first = (str(cmd).split() or [""])[0]
     return gh.clean(os.path.basename(first.rstrip("/")) or "?", 40)
@@ -63,19 +80,16 @@ def _build_head(cmd):
     return None
 
 
-def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=None):
+def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=None, name_of=None):
     """[{key, kind, id, name, cores, rss_mb, procs, heaviest, heaviest_cores, owner, waiting, bundle_id, protected, excluded, hosts_build}] for every
     source with cores or memory worth keeping, busiest first (at most MAX_SOURCES). `table` is {pid str: (ppid, uid, cores, command)}, `rss_kb`
     {pid: KB}, `apps` the records of `gui_hog.group_apps` (their `member_pids`, `kept_pids` and `build_pids` say which process is whose),
-    `held_pids` the pids of waiting `admit` callers, `exe_of` the kernel executable lookup the labels use. Reads only: the result is data about processes, never a handle to signal one."""
+    `held_pids` the pids of waiting `admit` callers, `exe_of` the kernel executable lookup the labels use, `name_of` the kernel's short name tried when that path is unreadable. Reads only: the result is data about processes, never a handle to signal one."""
     held = {str(p) for p in held_pids}
     if exe_of is not None:   # one kernel lookup per process per sample, however many labels ask for it
-        _raw, _memo = exe_of, {}
-
-        def exe_of(pid):
-            if pid not in _memo:
-                _memo[pid] = _raw(pid)
-            return _memo[pid]
+        exe_of = _memo(exe_of)
+        if name_of is not None:
+            name_of = _memo(name_of)
     agents = set(agent_clis) - {"bg"}   # `bg` is a build here, an exclusion marker in group_apps
     app_of, inbuild, app_by_id = {}, set(), {}
     for a in apps:
@@ -119,7 +133,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=No
             elif r == "build":
                 key = base if base and base[0] == "build" else ("build", p)
             else:
-                key = base if base else ("system", _label(table[p][3], p, exe_of))
+                key = base if base else ("system", _label(table[p][3], p, exe_of, name_of))
             memo[p] = key
             base = key
         return memo[pid]
@@ -132,7 +146,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=No
         g["rss_kb"] += rss_kb.get(pid, 0)
         g["procs"] += 1
         if cores >= g["heavy"][1]:
-            g["heavy"] = (_label(cmd, pid, exe_of), cores)
+            g["heavy"] = (_label(cmd, pid, exe_of, name_of), cores)
 
     def owner_of(pid):
         cur, hops = str(table[pid][0]), 0
@@ -155,7 +169,7 @@ def group_sources(table, rss_kb, apps, *, held_pids=(), agent_clis=(), exe_of=No
                        hosts_build=bool(a["hosts_build"]), id=str(a["id"]))
         elif kind == "build":
             head = _build_head(table[ident][3]) or ("admit" if waiting else None)
-            rec["name"] = gh.clean(head or _label(table[ident][3], ident, exe_of), 40)
+            rec["name"] = gh.clean(head or _label(table[ident][3], ident, exe_of, name_of), 40)
             if ident in inbuild and not head:
                 rec["name"] = "terminal session (" + rec["name"] + ")"
             rec["owner"], rec["owner_pid"] = owner_of(ident)

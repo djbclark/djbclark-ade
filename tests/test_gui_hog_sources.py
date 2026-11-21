@@ -236,8 +236,6 @@ def test_the_kernel_is_asked_about_every_command_not_only_one_with_a_bundle_mark
 
 def test_without_a_lookup_only_a_fixture_label_is_the_first_word_and_the_sampler_always_supplies_one():
     assert gs._label("/usr/bin/plain --x") == "plain" and gs._label("") == "?"
-    import inspect
-    assert "exe_of=exe_of" in inspect.getsource(gh.tick)   # the sampler's call to group_sources passes its lookup
 
 
 def test_group_sources_labels_system_heaviest_and_build_names_from_the_kernel_path():   # kills R3: every `_label` call site passes exe_of
@@ -286,3 +284,94 @@ def test_the_tick_gives_the_sampler_s_exe_of_to_the_labels(tmp_path):   # kills 
     names = [r["name"] for r in snap["sources"]]
     assert "real-exe" in names and "tool" not in names and "hunter2" not in json.dumps(snap)
 
+
+def test_an_unreadable_path_falls_back_to_the_kernel_short_name_never_argv_or_env():   # r2 Low of #875
+    for cmd in LEAKY:
+        for gone in GONE:
+            assert gs._label(cmd, 7, gone, lambda pid: "Paseo Helper") == "Paseo Helper", (cmd, gone)   # replaced binary: no path, the kernel still has its name
+            for none in (lambda pid: None, lambda pid: "", lambda pid: (_ for _ in ()).throw(OSError("gone"))):
+                assert gs._label(cmd, 7, gone, none) == "?", cmd   # no name either: a question mark, still not a word of the command
+        assert gs._label(cmd, None, lambda pid: None, lambda pid: "Paseo Helper") == "?"   # no pid to ask about
+        assert gs._label(cmd, 7, lambda pid: REAL, lambda pid: "Paseo Helper") == "real-exe", cmd   # a readable path wins over the short name
+    asked = []
+    assert gs._label("x", 7, lambda pid: REAL, lambda pid: asked.append(pid)) == "real-exe" and asked == []   # the short name is not even asked for
+    assert gs._label("x", "7", lambda pid: None, lambda pid: "a\x1b[31mb\nc") == gh.clean("a\x1b[31mb\nc", 40) and "\x1b" not in gs._label("x", 7, lambda pid: None, lambda pid: "a\x1b[31mb")
+    assert gs._label("/usr/bin/plain --x", 7, None, lambda pid: "Paseo Helper") == "plain"   # without an exe lookup the short name is not used either
+
+
+def test_unreadable_processes_group_by_their_kernel_short_name_not_into_one_question_mark():   # kills R3/R3b/R3c-style drops of name_of at each call site
+    rows = {"10": (1, ME, 2.0, "API_TOKEN=hunter2"), "11": (1, ME, 1.0, "7 API_TOKEN=hunter2"), "20": (1, ME, 0.5, "/x/y z hunter2"), "21": (20, ME, 3.0, "tool hunter2")}
+    names = {"10": "chrome-use", "11": "uv", "20": "node", "21": "node"}
+    calls = []
+
+    def name_of(pid):
+        calls.append(pid)
+        return names.get(str(pid))
+    out = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], exe_of=lambda pid: None, name_of=name_of)}
+    assert set(out) == {"system:chrome-use", "system:uv", "system:node"} and out["system:node"]["procs"] == 2
+    assert out["system:node"]["heaviest"] == "node" and out["system:uv"]["heaviest"] == "uv" and "hunter2" not in json.dumps(list(out.values()))
+    assert sorted(calls) == sorted(set(calls))   # one lookup per process however many labels ask
+    held = {s["key"]: s for s in gs.group_sources(rows, {p: 1024 for p in rows}, [], held_pids=("10",), exe_of=lambda pid: None, name_of=name_of)}
+    assert held["build:10"]["name"] == "admit"
+    t = table()
+    t["51"] = (50, ME, 0.01, "API_TOKEN=hunter2")   # the third call site: the top of a shell subtree inside an app
+    seen = {s["key"]: s for s in gs.group_sources(t, {p: 1024 for p in t}, apps(), exe_of=lambda pid: None, name_of=lambda pid: "login" if str(pid) == "51" else None,
+                                                 agent_clis={"claude"})}
+    assert seen["build:51"]["name"] == "terminal session (login)" and "hunter2" not in json.dumps(list(seen.values()))
+
+
+def test_the_tick_hands_the_short_name_lookup_to_the_labels(tmp_path):   # kills tick dropping name_of; a fake exe_of is never paired with the real kernel
+    t = table()
+    t["60"] = (1, ME, 1.4, "API_TOKEN=hunter2")
+
+    def run(**kw):
+        state = tmp_path / f"state{len(list(tmp_path.iterdir()))}"
+        state.mkdir(mode=0o700)
+        gh.hold_write(state, os.getpid(), "S", "bg", T0 - 400, ["pageins"], T0)
+        gh.tick({}, T0, t, {p: 1024 for p in t}, set(), state_dir=state, my_uid=ME, agent_clis={"claude"}, cfg=cfg(), lsapps=[], dry=False,
+                exe_of=lambda p: None, start_of=lambda p: "S", launch=False, gui_ok=False, load_avg=(1.0, 2.0, 3.0), ncpu=10, **kw)
+        snap = json.loads((state / "gui-hog" / "snapshot.json").read_text())
+        assert "hunter2" not in json.dumps(snap)
+        return [r["name"] for r in snap["sources"]]
+    assert "replaced-bin" in run(name_of=lambda p: "replaced-bin" if str(p) == "60" else None)
+    assert "?" in run()   # a fake exe_of with no name_of: nothing is asked of the real kernel about fake pids
+
+
+def test_default_name_of_pairs_the_kernel_name_only_with_the_kernel_exe():
+    assert gh.default_name_of(gh.kernel_exe) is gh.kernel_name
+    assert gh.default_name_of(lambda p: None) is None
+    own = lambda p: "x"  # noqa: E731
+    assert gh.default_name_of(gh.kernel_exe, own) is own and gh.default_name_of(lambda p: None, own) is own
+
+
+class FakeLibproc:
+    def __init__(self, names):
+        self.names, self.calls = names, []
+
+    def proc_name(self, pid, buf, size):
+        self.calls.append((pid, size))
+        n = self.names.get(pid)
+        if n is None:
+            return 0
+        buf.value = n.encode()
+        return len(n)
+
+
+def test_kernel_name_reads_libproc_proc_name_on_macos_only(monkeypatch):
+    fake = FakeLibproc({7: "Paseo Helper"})
+    monkeypatch.setattr(gh, "_libproc", fake)
+    monkeypatch.setattr(gh.sys, "platform", "darwin")
+    assert gh.kernel_name(7) == "Paseo Helper" and gh.kernel_name("7") == "Paseo Helper" and fake.calls[0] == (7, 256)
+    assert gh.kernel_name(8) is None and gh.kernel_name("junk") is None   # gone, a zombie, or not a pid
+    monkeypatch.setattr(gh.sys, "platform", "linux")
+    fake.calls.clear()
+    assert gh.kernel_name(7) is None and fake.calls == []   # /proc/PID/comm can be set by the process itself: no Linux fallback
+
+
+def test_kernel_name_survives_a_missing_libproc(monkeypatch):
+    class Boom:
+        def proc_name(self, *a):
+            raise OSError("no libproc")
+    monkeypatch.setattr(gh, "_libproc", Boom())
+    monkeypatch.setattr(gh.sys, "platform", "darwin")
+    assert gh.kernel_name(7) is None
