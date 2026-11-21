@@ -135,8 +135,13 @@ def secret_paths(d, p="") -> list:
     return out
 
 
-def merge(live: dict, tmpl: dict, home: str, roots=None):
-    """Return (merged, added, not_applied): added/not_applied are lists of key-path strings."""
+def merge(live: dict, tmpl: dict, home: str, roots=None, allow_env_keys: set[str] | frozenset[str] = frozenset()):
+    """Return (merged, added, not_applied): added/not_applied are lists of key-path strings.
+
+    allow_env_keys names env keys that may be added (absent from live) or removed (absent from template). Empty by
+    default: auto-adding or dropping an env key is exactly the adversary A1 concern ADD_ABSENT avoids, so this is a
+    narrow, caller-named opt-in (mirrors codex-env-policy-apply --allow-set-keys).
+    """
     roots = default_roots(home) if roots is None else roots
     merged = copy.deepcopy(live)
     added, skipped = [], []
@@ -183,11 +188,14 @@ def merge(live: dict, tmpl: dict, home: str, roots=None):
                     walk(a[k], b[k], m[k], f"{p}/{k}")
                 elif k in b:
                     path = f"{p}/{k}"
-                    if any(path == r or path.startswith(r + "/") or p == r for r in ADD_ABSENT):
+                    if any(path == r or path.startswith(r + "/") or p == r for r in ADD_ABSENT) or (p == "/env" and k in allow_env_keys):
                         m[k] = copy.deepcopy(b[k])
                         added.append(f"{path} (key absent from live)")
                     else:
                         skipped.append(f"{path} (template only; not on the add list)")
+                elif k in a and p == "/env" and k in allow_env_keys:
+                    del m[k]
+                    added.append(f"{p}/{k} (key removed from live; --allow-env-key)")
         elif a != b:
             skipped.append(f"{p} (value differs)")
     walk(live, tmpl, merged, "")
@@ -274,6 +282,8 @@ def main(argv=None) -> int:
     ap.add_argument("--home", default=str(Path.home()))
     ap.add_argument("--live")
     ap.add_argument("--template")
+    ap.add_argument("--allow-env-key", action="append", default=[], metavar="NAME",
+                    help="env key the apply may add (absent from live) or remove (absent from template); repeatable; none by default")
     a = ap.parse_args(argv)
     home = a.home
     live_p = Path(a.live or Path(home) / ".claude" / "settings.json")
@@ -285,7 +295,7 @@ def main(argv=None) -> int:
     except (OSError, ValueError) as e:
         print(f"ade-settings-apply: cannot read inputs: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 2
-    merged, added, skipped = merge(live, tmpl, home)
+    merged, added, skipped = merge(live, tmpl, home, allow_env_keys=set(a.allow_env_key))
     if a.render_template:
         bad = secret_paths(merged)
         if bad:
