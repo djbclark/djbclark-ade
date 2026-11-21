@@ -209,7 +209,7 @@ claimed worktree; the merge is the atomic apply. The projection-drift test canon
 both sides and compares all other bytes exactly. After an intentional tier change, carry the new tier data into the
 frozen `tests/fixtures/config/legacy/config/model-tiers.toml` fixture as well; otherwise that test correctly reports
 the production/fixture drift.
-G4. Untiered models (e.g. `gemini-4-argon`) stay as literals in `[dispatch].frontier_models`; frontier matching is the
+G4. Untiered models are listed in `[dispatch].frontier_models` as families (e.g. `gemini-*-argon`, `gpt-*-astra`; a `*` stands for a version, A5); frontier matching is the
 union of that list and every spelling/alias of each tiered vendor's frontier role.
 
 ## H. Reasons kept from the earlier matrix

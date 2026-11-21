@@ -1654,3 +1654,13 @@ def test_r4_earliest_unbound_request_held(quota,monkeypatch,tmp_path,healthy,suc
     assert not any(r["action"] in ("transition-recovered","transition-observed-account-change","transition-observed-successor") for r in q["rows"]())
     assert sum(r["action"]=="transition-requested" and r["agent"]==CHILD for r in q["rows"]())==1
     assert not q["sent"].exists()
+
+
+def test_billing_identity_follows_the_gemini_version(fake):
+    """PR 881 r2 LOW-3: a resolved gemini-5-argon-high is still the Argon family, not the shared gemini one."""
+    _, _, _, state = fake
+    scanner = Scanner(LEAD, state)
+    for model, want in (("gemini-4-argon-high", "gemini_argon"), ("gemini-5-argon-high", "gemini_argon"),
+                        ("gemini-4.1-neon-high", "gemini"), ("gemini-5-neon-high", "gemini")):
+        got = scanner.billing_identity({"Provider": "antigravity", "Model": model})
+        assert got == ("antigravity", want, None), model

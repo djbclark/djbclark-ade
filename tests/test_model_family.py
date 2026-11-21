@@ -373,3 +373,38 @@ class TestStateLock:
         monkeypatch.setattr(mf.os, "replace", boom)
         assert mf.record("p", "f-*", "f-1", path=path) is False
         assert [p.name for p in tmp_path.iterdir() if p.name != "state.json.lock"] == []
+
+
+class TestUnresolvedFamilyStaysFrontier:
+    """PR 881 r2 LOW-1: with no catalog and no state the family string stays in the line; it keeps its frontier floor/refusal."""
+
+    def test_unresolved_family_string_is_still_frontier(self, catalog):
+        assert r.is_frontier_model("gpt-*-astra --effort high")
+        assert r.is_frontier_model("gemini-*-argon-high")
+        assert not r.is_frontier_model("gpt-*-sol --effort high")
+        assert not r.is_frontier_model("gemini-*-neon-high")
+
+    def test_unresolved_neon_and_astra_slices_are_not_refused_by_adjust(self, catalog):
+        import route_adjust as ra
+        catalog({})
+        for name, model in (("antigravity-neon", "gemini-*-neon-high"), ("codex", "gpt-*-astra --effort high")):
+            choice = r.Choice(svc(name), 50.0, 0.0, model=model, kind="frontier")
+            assert ra._refusal(r, "frontier", choice, {"never_target": ["omp"]}) is None, name
+
+    def test_frontier_floor_survives_an_unresolved_family(self, catalog):
+        frontier = r.is_frontier_model("gpt-*-astra")
+        assert r.floor_lookup({"codex": 10.0, "codex:frontier": 60.0}, "codex", "frontier", frontier) == 60.0
+
+
+class TestNoPiToAntigravityInstruction:
+    """PR 881 r2 MED-1: no instruction tells an agent to switch a Pi agent onto an antigravity/* model."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_model_routing_skill_names_no_antigravity_pi_switch_target(self):
+        text = (self.ROOT / "skills" / "model-routing" / "SKILL.md").read_text()
+        e1b = text[text.index("E1b."):text.index("E1c.")]
+        assert "never an `antigravity/*` model" in e1b
+        # every `antigravity/` left in E1b is the prohibition or the new-native-agent route, never a switch target
+        rest = e1b.replace("never an `antigravity/*` model", "").replace("--provider antigravity/<newest gemini family id>", "")
+        assert "antigravity/" not in rest, rest

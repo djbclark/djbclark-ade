@@ -11,3 +11,4 @@
 ### Fixed
 
 - Model-family repair after review (adversary 2026-11-21): a family `*` matches version text only, so `-mini`, `-lite`, `-flash`, `-preview` and dated ids never win as the newest of `gpt-*-sol` or `gemini-*-neon-high`; `route_agent.py adjust` no longer refuses a Neon frontier slice (new `[dispatch].frontier_slice_models = ["gemini-*-neon"]`); `map_agent_to_provider` follows the Gemini version; an unresolved family warns on a single-slice `route` too; the state file is written under a lock; routing text names families, not pinned ids. (#881)
+- Review round 2 (adversary 2026-11-21): `skills/model-routing` E1b no longer offers an `antigravity/*` Pi switch target (Antigravity is off Pi); an unresolved family string (`gpt-*-astra`) keeps its frontier floor and adjust rule; `ade-net-resume` billing identity follows the Gemini version; G4, the `frontier_slice_models` comment and the dialogue example name families or the newest id. (#881)

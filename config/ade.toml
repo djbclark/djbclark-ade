@@ -166,7 +166,8 @@ fable_gated_efforts = ["xhigh", "max"]
 frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
 # Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3).
 # `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
-# estimate floor and no frontier gate, so Neon judgment/code slices stay ordinary slices.
+# estimate floor, and a Neon judgment/code slice is not a frontier model; the per-wave frontier cap still counts a Neon
+# `frontier` slice, because it is keyed on the kind and the pool, not on the model.
 frontier_slice_models = ["gemini-*-neon"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing

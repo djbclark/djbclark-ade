@@ -185,9 +185,10 @@ and size the wave to it (2026-11-12: one 11:53 AM EST agy reading, served as `fr
 agy Claude/GPT and Argon pools both ran out mid-wave).
 E1b. A request-rate limit is not quota: `aiuse` cannot see it. Pi z.ai answers `429` code `1302` ("Rate limit
 reached for requests") once about 7 z.ai agents run at once, with 70% of its 5-hour window left (2026-11-12). Keep at
-most 5 z.ai agents running; on a 1302, switch that agent in place to another subscription pool Pi reaches
-(`update_agent settings.model`, e.g. `cursor/composer-2.5` or `antigravity/gemini-3.8-flash-high`) or send a
-"continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
+most 5 z.ai agents running; on a 1302, switch that agent in place to another subscription pool Pi still reaches
+(`update_agent settings.model`, e.g. `cursor/composer-2.5`; never an `antigravity/*` model: Antigravity is off Pi, operator
+2026-11-21, `docs/model-routing.md` A4a, and its work is a NEW `paseo run --provider antigravity/<newest gemini family id>` agent
+on Paseo's native provider, never an in-place Pi switch) or send a "continue" after the others finish, never mark the pool exhausted. **Pi's `openai/*` models are the metered OpenAI
 API, not the Codex subscription**: never a switch target (2026-11-12: one switch hit the org's enforced spend limit at
 once, while Codex showed 65% left). A Codex-pool agent is `paseo run --provider codex/...`, a new agent.
 E1c. Apply the canary-first wave rule in E1d, and match the route’s declared `pool_family` or explicit canonical vendor/pool identity. Schema 1.6 `vendor=openai` plus `pool_id=openai:codex` identifies the Codex subscription even when its residual family is null; it cannot fund `openai_api` models. Missing or unmatched identity remains unknown. Cursor `grok_bot` cannot fund Composer/Auto; Gemini, Argon and Claude/GPT stay separate; Fable only caps Claude’s shared default (2026-11-12).

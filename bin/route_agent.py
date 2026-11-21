@@ -2602,24 +2602,28 @@ def frontier_model_tokens() -> list[str]:
     return toks
 
 
+def _token_matches(tok: str, low: str) -> bool:
+    """Does the lower-cased model `low` carry the frontier token `tok`? A token with a wildcard names a family
+    (`gpt-*-astra`): it matches a model that contains an id of that family, so a newer release (gpt-6.2-astra) is frontier the
+    day it resolves, with no list edit. A model that is itself still an UNRESOLVED family string (`gpt-*-astra`, no catalog and
+    no state) carries the token's glob text, so it matches too and keeps its frontier floor and refusal rules."""
+    tok = tok.lower()
+    return tok in low or (_family.is_family(tok) and bool(_family.family_regex(tok).search(low)))
+
+
 def is_frontier_model(model: str | None) -> bool:
     """A frontier token (dispatch list ∪ model-tiers frontier spellings) is a substring of the model."""
     low = (model or "").lower()
-    # A token with a wildcard names a family (`gpt-*-astra`): it matches a model that contains an id of that family, so a
-    # newer release (gpt-6.2-astra) is frontier the day it resolves, with no list edit.
-    return bool(low) and any((_family.family_regex(str(tok).lower()).search(low) if _family.is_family(str(tok))
-                              else str(tok).lower() in low) for tok in frontier_model_tokens())
+    return bool(low) and any(_token_matches(str(tok), low) for tok in frontier_model_tokens())
 
 
 def is_frontier_slice_model(model: str | None) -> bool:
     """May `model` take a `frontier` slice? A frontier model (`is_frontier_model`) or a `[dispatch].frontier_slice_models` family.
-    Neon is frontier r3 (operator 2026-11-21) but stays out of `frontier_models`, which also floors and gates every slice of a
-    matching model, Neon judgment included; `adjust` asks this, so its never-downgrade rule does not refuse a Neon frontier route."""
+    Neon is frontier r3 (operator 2026-11-21) but stays out of `frontier_models`, which also floors every slice of a matching
+    model, Neon judgment included; `adjust` asks this, so its never-downgrade rule does not refuse a Neon frontier route."""
     low = (model or "").lower()
     toks = list((POLICY.get("dispatch") or {}).get("frontier_slice_models") or [])
-    return is_frontier_model(model) or (bool(low) and any(
-        (_family.family_regex(str(t).lower()).search(low) if _family.is_family(str(t)) else str(t).lower() in low)
-        for t in toks))
+    return is_frontier_model(model) or (bool(low) and any(_token_matches(str(t), low) for t in toks))
 
 
 def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:
