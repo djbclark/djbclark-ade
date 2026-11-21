@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""lsp-root-guard: stop a language server from indexing a container directory (queue item 89).
+
+A Claude Code (or Codex) session started in `~` or `~/src` tells every LSP server that its workspace root is that
+directory. basedpyright, marksman and tsserver then walk and index everything below it: one server held 2-3 GB
+compressed (2026-11-21 load-watcher evidence). The root is the session's cwd, so the plugin configs cannot fix it;
+this proxy sits between the client and the server on stdio and, only when the root is a container, rewrites the
+`initialize` request to carry no root (rootUri / rootPath / workspaceFolders = null). The server then runs in
+single-file mode: it serves the files the client opens and walks nothing. A project root passes through untouched,
+byte for byte.
+
+Usage in an LSP plugin entry:   "command": "lsp-root-guard", "args": ["--", "basedpyright-langserver", "--stdio"]
+
+  lsp-root-guard [--container PATH]... [--no-heuristic] [--check URI_OR_PATH] -- CMD [ARGS...]
+
+A root is a container when its realpath is in `config/lsp-roots.toml` [containers].paths (`~` expanded), in
+`--container`, or in `ADE_LSP_CONTAINER_ROOTS` (colon list); or, unless --no-heuristic, when it is not itself a project
+(no .git, pyproject.toml, package.json, Cargo.toml, go.mod, Package.swift, tsconfig.json) and at least `min_repo_children`
+(default 3) of its first 400 children hold a `.git`.
+
+  --check ROOT   print `container` or `project` for ROOT and exit 0 (no server is started)
+
+The child is run from an argv list (never a shell) with this process's cwd and environment. Client bytes the guard
+does not change are forwarded as received. Exit: the child's exit code; 127 command not found; 2 bad arguments.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from typing import Any, BinaryIO
+from urllib.parse import unquote, urlparse
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11: the built-in container list below still applies
+    tomllib = None  # type: ignore[assignment]
+
+PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Package.swift", "tsconfig.json")
+DEFAULT_CONTAINERS = ("~", "~/src", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
+                      "/opt", "/tmp", "/private/tmp", "/var", "/private/var")
+HEURISTIC_SCAN_LIMIT = 400
+
+
+def _repo_root() -> Path:
+    return Path(os.path.realpath(__file__)).parent.parent
+
+
+def load_policy() -> tuple[list[str], int]:
+    paths = list(DEFAULT_CONTAINERS)
+    min_children = 3
+    cfg = _repo_root() / "config" / "lsp-roots.toml"
+    if tomllib is not None and cfg.is_file():
+        try:
+            data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+            paths = [str(p) for p in data.get("containers", {}).get("paths", paths)]
+            min_children = int(data.get("containers", {}).get("min_repo_children", min_children))
+        except (OSError, ValueError):
+            pass  # a bad config falls back to the built-in list: the guard must never block a server
+    extra = os.environ.get("ADE_LSP_CONTAINER_ROOTS", "")
+    paths += [p for p in extra.split(":") if p]
+    return paths, min_children
+
+
+def _real(p: str) -> str:
+    return os.path.realpath(os.path.expanduser(p))
+
+
+def uri_to_path(uri_or_path: str) -> str | None:
+    if uri_or_path.startswith("file://"):
+        u = urlparse(uri_or_path)
+        if u.netloc not in ("", "localhost"):
+            return None
+        return unquote(u.path)
+    if "://" in uri_or_path:
+        return None
+    return uri_or_path
+
+
+def is_container(root: str, containers: list[str], min_repo_children: int, heuristic: bool = True) -> bool:
+    real = _real(root)
+    if real in {_real(c) for c in containers}:
+        return True
+    if not heuristic or not os.path.isdir(real):
+        return False
+    if any(os.path.exists(os.path.join(real, m)) for m in PROJECT_MARKERS):
+        return False
+    repos = 0
+    try:
+        with os.scandir(real) as it:
+            for n, entry in enumerate(it):
+                if n >= HEURISTIC_SCAN_LIMIT:
+                    break
+                try:
+                    if entry.is_dir(follow_symlinks=False) and os.path.exists(os.path.join(entry.path, ".git")):
+                        repos += 1
+                        if repos >= min_repo_children:
+                            return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _roots_in(params: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for key in ("rootUri", "rootPath"):
+        v = params.get(key)
+        if isinstance(v, str) and v:
+            p = uri_to_path(v)
+            if p:
+                out.append(p)
+    for f in params.get("workspaceFolders") or []:
+        if isinstance(f, dict) and isinstance(f.get("uri"), str):
+            p = uri_to_path(f["uri"])
+            if p:
+                out.append(p)
+    return out
+
+
+def guard_initialize(msg: dict[str, Any], containers: list[str], min_children: int, heuristic: bool) -> str | None:
+    """Rewrite an `initialize` request in place when every named root is a container. Returns the denied root or None.
+
+    A mix of a container and a project root keeps the project folders only (multi-root clients)."""
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return None
+    roots = _roots_in(params)
+    if not roots:
+        return None
+    bad = [r for r in roots if is_container(r, containers, min_children, heuristic)]
+    if not bad:
+        return None
+    good_folders = [f for f in params.get("workspaceFolders") or []
+                    if isinstance(f, dict) and isinstance(f.get("uri"), str)
+                    and (uri_to_path(f["uri"]) or "") not in bad
+                    and not is_container(uri_to_path(f["uri"]) or "/", containers, min_children, heuristic)]
+    if good_folders:
+        params["workspaceFolders"] = good_folders
+        params["rootUri"] = good_folders[0]["uri"]
+        params["rootPath"] = uri_to_path(good_folders[0]["uri"])
+    else:
+        params["rootUri"] = None
+        params["rootPath"] = None
+        params["workspaceFolders"] = None
+    return bad[0]
+
+
+def read_message(stream: BinaryIO) -> tuple[bytes, dict[str, Any] | None] | None:
+    """One LSP frame: (raw bytes incl. headers, parsed JSON object or None). None at EOF."""
+    headers = b""
+    length = -1
+    while True:
+        line = stream.readline()
+        if not line:
+            return None
+        headers += line
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            try:
+                length = int(value.strip())
+            except ValueError:
+                length = -1
+    if length < 0:
+        return headers, None
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return headers + body, None
+    return headers + body, obj if isinstance(obj, dict) else None
+
+
+def frame(obj: dict[str, Any]) -> bytes:
+    body = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+
+
+class Guard:
+    def __init__(self, containers: list[str], min_children: int, heuristic: bool) -> None:
+        self.containers, self.min_children, self.heuristic = containers, min_children, heuristic
+        self.denied: str | None = None
+        self.folder_request_ids: set[Any] = set()
+        self.lock = threading.Lock()
+
+    def from_client(self, raw: bytes, msg: dict[str, Any] | None) -> bytes | None:
+        """Bytes to forward to the server, or None to drop the message."""
+        if msg is None:
+            return raw
+        method = msg.get("method")
+        if method == "initialize" and "id" in msg:
+            denied = guard_initialize(msg, self.containers, self.min_children, self.heuristic)
+            if denied is not None:
+                self.denied = denied
+                sys.stderr.write(f"lsp-root-guard: workspace root {denied} is a container, started with no root\n")
+                return frame(msg)
+            return raw
+        if self.denied is not None:
+            if method == "workspace/didChangeWorkspaceFolders":
+                return None
+            if "method" not in msg and msg.get("id") in self.folder_request_ids:
+                with self.lock:
+                    self.folder_request_ids.discard(msg.get("id"))
+                msg["result"] = None
+                return frame(msg)
+        return raw
+
+    def from_server(self, msg: dict[str, Any] | None) -> None:
+        if self.denied is not None and msg is not None and msg.get("method") == "workspace/workspaceFolders" and "id" in msg:
+            with self.lock:
+                self.folder_request_ids.add(msg["id"])
+
+
+def _pump_server_out(child_out: BinaryIO, out: BinaryIO, guard: Guard) -> None:
+    while True:
+        got = read_message(child_out)
+        if got is None:
+            break
+        raw, msg = got
+        guard.from_server(msg)
+        out.write(raw)
+        out.flush()
+
+
+def run(argv: list[str], stdin: BinaryIO, stdout: BinaryIO, containers: list[str], min_children: int,
+        heuristic: bool) -> int:
+    exe = shutil.which(argv[0])
+    if exe is None:
+        sys.stderr.write(f"lsp-root-guard: command not found: {argv[0]}\n")
+        return 127
+    child = subprocess.Popen([exe, *argv[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)  # noqa: S603 - argv list, no shell
+    assert child.stdin is not None and child.stdout is not None
+    guard = Guard(containers, min_children, heuristic)
+    t = threading.Thread(target=_pump_server_out, args=(child.stdout, stdout, guard), daemon=True)
+    t.start()
+    try:
+        while True:
+            got = read_message(stdin)
+            if got is None:
+                break
+            data = guard.from_client(*got)
+            if data is not None:
+                child.stdin.write(data)
+                child.stdin.flush()
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
+    finally:
+        try:
+            child.stdin.close()
+        except OSError:
+            pass
+    try:
+        rc = child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.terminate()
+        rc = child.wait()
+    t.join(timeout=2)
+    return rc
+
+
+def main(argv: list[str]) -> int:
+    containers, min_children = load_policy()
+    heuristic = True
+    check: str | None = None
+    args = list(argv)
+    cmd: list[str] = []
+    while args:
+        a = args.pop(0)
+        if a == "--":
+            cmd = args
+            break
+        if a == "--container" and args:
+            containers.append(args.pop(0))
+        elif a == "--no-heuristic":
+            heuristic = False
+        elif a == "--check" and args:
+            check = args.pop(0)
+        else:
+            sys.stderr.write(__doc__ or "")
+            return 2
+    if check is not None:
+        p = uri_to_path(check)
+        if p is None:
+            sys.stderr.write("lsp-root-guard: not a file path or file:// URI\n")
+            return 2
+        print("container" if is_container(p, containers, min_children, heuristic) else "project")
+        return 0
+    if not cmd:
+        sys.stderr.write(__doc__ or "")
+        return 2
+    return run(cmd, sys.stdin.buffer, sys.stdout.buffer, containers, min_children, heuristic)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -67,7 +67,7 @@ Steps, in order:
    `macos/gui-hog` (`--check` only says it would). Fails open: no swiftc, a failed or slow build is a note, never a problem or an exit code (the sampler shows no dialog without
    a fresh bundle). `ADE_GUI_BUILD=0` skips it.
 3d. (canonical checkout) PATH links for repo tools: every name in `BIN_LINKS` (below the imports; git-commit-own, load-watch,
-   agent-id) is linked as `~/.local/bin/<name> -> <canonical checkout>/bin/<name>` (absolute, never a worktree: the
+   agent-id, lsp-root-guard) is linked as `~/.local/bin/<name> -> <canonical checkout>/bin/<name>` (absolute, never a worktree: the
    canonical checkout is the one ade-update treats as canonical, `canonical_repo()`). A missing link is created. A link
    that points elsewhere is repaired (temp symlink beside, `os.replace`) ONLY when it is a symlink to `<root>/bin/<name>`
    with a djbclark-ade checkout or worktree as `<root>` (a directory holding `bin/ade-update` and `skills/`, or, when it
@@ -128,7 +128,7 @@ OK_LINK_STATES = ("linked", "not installed")
 # Repo tools that must be on PATH as ~/.local/bin/<name> -> <canonical checkout>/bin/<name> (step 3d). Extend this tuple:
 # nothing else needs to change. It lives here, not in config/ade.toml, because ade-update is stdlib-only and must run
 # before (and without) any config parse, and a name here is a promise that bin/<name> exists (or is skipped with a note).
-BIN_LINKS = ("git-commit-own", "load-watch", "agent-id")
+BIN_LINKS = ("git-commit-own", "load-watch", "agent-id", "lsp-root-guard")
 BIN_LINK_DIR = "~/.local/bin"
 CHECK_SENTINEL = "== end"  # last line of `skill-everywhere --check`
 SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch: `$` would admit a trailing newline

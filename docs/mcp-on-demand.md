@@ -7,6 +7,9 @@ approval it needs and its tested rollback. The roster and per-server operations 
 [mcp-servers.md](mcp-servers.md). This page adds what that page lacks: every client, not just Claude Code; measured
 cost; usage; and a plan so that no client starts every server in every session.
 
+Section 12 (queue item 89, 2026-11-21) is the one live-capable part: `bin/lsp-root-guard`, `bin/ram-census` and the measured
+split; everything it would change outside this repo is a proposal.
+
 Proposed and unwired in this PR: [bin/mcp-usage](../bin/mcp-usage) (read-only transcript counter, section 2.3) and its
 fixture test `tests/test_mcp_usage.py`. `bin/mcp-find` and `config/mcp-registry.toml` exist here only as a spec
 (sections 3 and 4).
@@ -594,3 +597,116 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
 Suggested order: 2a; then 2b part 1, which also unblocks the Phase 1 doctor state; then 2c, one client at a time; then 2b
 part 2; the ADB helper at any point. Phase 1 (registry, `bin/mcp-find`, the doctor reading `expected`) can run in parallel
 with 2a.
+
+## 12. Queue item 89: which servers share, which go on demand, and the LSP root guard (2026-11-21)
+
+Slice `ram-relief-89`. Items 12.1-12.2 settle the split (the queue item asked for this first); 12.3-12.5 are what ships.
+Sections 1-11 stay as designed. Section 9 already approved 2a and 2b; this section adds the measured case for them, the
+LSP half of the item, and one finding that changes the queue's expectation: **no per-session server is a candidate for a
+shared HTTP daemon**.
+
+### 12.1 Sample (read-only, 2026-11-21 ~18:00Z, `bin/ram-census`, `footprint -p` on up to 8 processes per class)
+
+38 Claude sessions held a `chrome-devtools-mcp` pair and 42 a `graft mcp` (fewer than the 66-74 of section 1: the
+count follows the number of live sessions, and the cost per copy is what carries over).
+
+| Class | Processes | RSS sum | Footprint per copy (median of sample) | Footprint total (copies x median) |
+|---|---|---|---|---|
+| chrome-devtools (`npm exec` wrapper + node server) | 38 + 38 | 2.15 GB | 45 + 71.5 MB | **4.4 GB** |
+| graft mcp | 42 | 0.85 GB | 45 MB | **1.9 GB** |
+| extrabar | 3 | 0.02 GB | n/a | small |
+| basedpyright | 7 | 0.35 GB | 93-144 MB, one at 422 MB (`~/src/aiuse`) | 1.0 GB (6 sampled, sum) |
+| marksman | 8 | 0.13 GB | 103-157 MB | 0.6 GB (5 sampled, sum) |
+| tsserver, full + partial, and its language-server parent | 12 | 0.58 GB | **4,103 and 4,247 MB** for two full servers in `~/src/paseo`; 93-111 MB the other three | **8.8 GB** (8 sampled) |
+
+`ps rss` hides compressed and swapped pages (a full tsserver showed 38 and 305 MB RSS against 4.2 GB footprint), so the
+footprint column is the one that predicts memory pressure; both are given because the earlier sections quote RSS.
+
+### 12.2 The split
+
+| Server | Decision | Measured reason |
+|---|---|---|
+| chrome-devtools-mcp | **On demand** (2b: `--mcp` flag, then lazy wrapper) | chrome-devtools-mcp 1.13.0 `--help` has no HTTP or SSE transport; its flags (`--browserUrl`, `--wsEndpoint`, `--autoConnect`) only say which Chrome it drives. The selected page is process state (5.2). 4 calls in 30 days (2.3) against 4.4 GB footprint |
+| graft mcp | **On demand** (2a: remove from user scope; the CLI covers it) | `graft mcp --help`: "Serve the graph over MCP (stdio)", repository root `[dir]` defaults to the nearest ancestor of the cwd with a `graft/` index, so a shared copy answers for one repo. 3 calls in 30 days against 1.9 GB footprint |
+| extrabar | Unchanged | 3 copies, 6 MB each; the app is the server (5.2 item 4). Not worth a daemon |
+| ghost-os, cua-driver, cow, aws-mcp, node_repl (Codex, Cursor) | Unchanged (2d may disable the zero-call ones) | 2-6 MB each |
+| basic-memory, firecrawl, crawl4ai, arxiv, paper-search, hermes | Unchanged: already shared loopback daemons | One process each since 2026-09/10 (section 2.1) |
+| marksman, basedpyright, typescript-language-server + tsserver | **Not shared; guarded and capped** (12.3) | An LSP server holds one workspace's parsed files and open-buffer text per client. Two sessions in one repo (4 of the 8 marksman and 3 of the 7 basedpyright here are in `~/src/djbclark-ade`) would share files on disk but not unsaved buffers, and the protocol has no per-client isolation, so a shared server can show one session another's diagnostics |
+
+**No shared daemon is built.** Its precondition is a server that is both stateless per request and reachable over HTTP;
+every per-session server in the sample fails one or both (stdio-only, or per-repo or per-session state), and the ones
+that pass already are daemons. The launch path for a future one is the existing one: a plist under `config/launchd/`
+installed by `bin/ade-sched install` (docs/scheduling.md), bound to `127.0.0.1`, with the port claimed in
+site-public-djbclark `registry/ports.yml` first (a change in that repo: the operator's yes, standing order 11), a health
+check by `tools/list` over the loopback URL, and one client snippet per TUI from 5.5. Section 5.3 item 3 lists the triggers
+for building the aggregator.
+
+### 12.3 What ships: `bin/lsp-root-guard` and `bin/ram-census`
+
+1. **Where the roots come from.** Claude Code starts each LSP server from a plugin's `lspServers` entry
+   (`local-lsp@local`, source `site-public-djbclark/claude/local-marketplace/plugins/local-lsp/.lsp.json`; the official
+   `typescript-lsp` and `pyright-lsp` plugins add the same kind of entry) and passes the **session's working directory**
+   as `rootUri`, `rootPath` and `workspaceFolders` in the `initialize` request (inferred from the processes' parent
+   working directories, which equal the project each session sits in; the request itself was not captured). A session
+   started in `~` or `~/src` therefore roots the server there. The plugin config has no root option, and a server's own
+   exclude setting (basedpyright's `analysis.exclude`) is read from a config file in the root, not from a container. So the
+   fix sits between the client and the server.
+2. **`bin/lsp-root-guard [--container PATH] [--no-heuristic] -- CMD ARGS`** is a stdio proxy. On `initialize` it checks
+   each named root. A container (realpath in `config/lsp-roots.toml`, in `ADE_LSP_CONTAINER_ROOTS`, or a directory that
+   is not a project and has at least 3 child repositories) gets `rootUri`, `rootPath` and `workspaceFolders` set to null,
+   so the server serves only the files the client opens and walks nothing. It also answers a server's
+   `workspace/workspaceFolders` request with null and drops `didChangeWorkspaceFolders`, so the root cannot come back. A
+   project root, and every other message in both directions, passes through byte for byte. It never uses a shell and it
+   writes one line to stderr when it strips a root. `--check ROOT` prints `container` or `project`. Tests:
+   `tests/test_lsp_root_guard.py` (fixture server that echoes the `initialize` it received).
+3. **`bin/ram-census [--json] [--footprint] [--roots]`** prints the table in 12.1 from `ps`, and with `--roots` lists each LSP
+   server's workspace root and whether the guard would strip it. Read-only; it starts and kills nothing. Tests:
+   `tests/test_ram_census.py`.
+4. **`ade-update` step 3d** links `lsp-root-guard` into `~/.local/bin` (`BIN_LINKS`), so a plugin entry can say
+   `"command": "lsp-root-guard"` (`~/.local/bin` is on this session's PATH; whether Claude Code's LSP launcher uses the
+   same PATH is not verified: step 12.5.3 checks it).
+5. **Measured (live basedpyright 1.40.2, read-only, one file opened, 40 s):** rooted at `~/src` it reached **1,048 MB RSS**
+   and was still growing; behind the guard the same session stayed at **220 MB** and answered `documentSymbol` for the
+   open file (74 symbols). That is the saving per container-rooted instance: **about 0.83 GB RSS**, more as footprint. The
+   queue's 2-3 GB compressed per instance was seen by the load watcher; **this sample had no container-rooted
+   server** (0 of 7 basedpyright, 0 of 8 marksman, 3 typescript servers in project roots), so the guard saves nothing at
+   this moment and keeps the next `cd ~ && claude` from costing 1-3 GB. Rooted at a project the guard changes nothing
+   (209 MB plain against 224 MB guarded on `~/src/djbclark-ade`, the extra being the proxy's Python).
+6. **Proposal, other repo (not applied):** `ram-relief-89-local-lsp-guard.patch` in the lead's report directory wraps
+   `basedpyright`, `marksman` and `typescript` in `lsp-root-guard` in site-public-djbclark's `local-lsp` plugin and adds
+   `"maxTsServerMemory": 2048` to the typescript `initializationOptions`. `typescript-language-server` reads
+   `initializationOptions.maxTsServerMemory` and passes it to tsserver as `--max-old-space-size` (the same ask is open as
+   anthropics/claude-plugins-official#6800); a lower cap has caused tsserver restart loops for others (schwepps/claude-mods#1
+   kept 3072), so 2048 is a test value, not a verified one: the two 4.2 GB tsservers in `~/src/paseo` are the largest single
+   item in 12.1 and the place to try it. The official `pyright-lsp` plugin (`pyright-langserver`, not installed here) and
+   `typescript-lsp` entries duplicate `local-lsp`; disabling them is the operator's call (`enabledPlugins`).
+
+### 12.4 Estimated saving
+
+Method: counts and RSS are `bin/ram-census` over one `ps -axo pid,ppid,rss,command` sample; footprint is the median of up
+to 8 `footprint -p` readings per class times the process count (an estimate: copies differ with age, 4.5 to 119 MB).
+
+| Step | Needs | RSS | Footprint |
+|---|---|---|---|
+| 2a graft out of user scope | operator's yes (approved 2026-11-21, section 9) | 0.85 GB | ~1.9 GB |
+| 2b chrome-devtools on demand | operator's yes (approved) | 2.15 GB | ~4.4 GB |
+| LSP root guard | `ade-update`, then the proposal patch | 0 now; ~0.83 GB per container-rooted basedpyright | 1-3 GB per such instance |
+| tsserver memory cap (proposal) | patch, then a trial | not estimated | up to 4 GB per full tsserver |
+| **2a + 2b together at 38-42 sessions** | | **3.0 GB** | **~6.3 GB** |
+
+It scales with live sessions (section 1 counted 66-74 sessions and 12 GB), and the lazy wrapper leaves one small process
+per session. The load watcher's 55-65 GB working set is mostly the `claude` processes themselves (31 here, 5.6 GB RSS) and
+the compressed tsserver and basedpyright pages; this item removes the avoidable part, not that.
+
+### 12.5 Live apply (operator; nothing here touches the live config)
+
+1. After the PR merges: `~/src/djbclark-ade/bin/ade-update` links `~/.local/bin/lsp-root-guard`; check with
+   `lsp-root-guard --check ~` (prints `container`).
+2. Apply the proposal patch in a site-public-djbclark workspace (`git -C <worktree> apply
+   ~/.local/state/agent-reports/cad27907-8a41-4216-bd80-7851fb86aca6/ram-relief-89-local-lsp-guard.patch`), bump the plugin
+   version in `plugin.json` and `marketplace.json`, merge, and `claude plugin update local-lsp@local`. New sessions use it;
+   running ones keep their servers. Rollback: revert the commit and update again.
+3. Verify in a fresh session started in `~`: `bin/ram-census --roots` lists the basedpyright and marksman roots as
+   `container:` yet their RSS stays near 20-50 MB, and the Claude LSP log carries one `lsp-root-guard: workspace root ...` line.
+   If the LSP launcher cannot find `lsp-root-guard`, put the absolute path of the `~/.local/bin` link in the plugin entry.
+4. 2a and 2b are the commands in 11.1 and 11.2 under the section 9 approvals.

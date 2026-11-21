@@ -1,0 +1,9 @@
+# Read by bin/lsp-root-guard (queue item 89, docs/mcp-on-demand.md section 12).
+# A language server whose workspace root is one of these (realpath, `~` expanded) is started with no root, so it
+# serves the files the client opens and indexes nothing. ADE_LSP_CONTAINER_ROOTS (colon list) and --container add more.
+[containers]
+paths = ["~", "~/src", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users", "/opt",
+         "/tmp", "/private/tmp", "/var", "/private/var"]
+# A directory that is not itself a project (no .git, pyproject.toml, package.json, ...) and has at least this many
+# immediate children holding a .git is also a container (~/src-like folders nobody listed).
+min_repo_children = 3

@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""ram-census: per-class process count and memory of the per-session MCP and LSP servers (read-only; queue item 89).
+
+Reads `ps -axo pid,ppid,rss,command` (or --ps-file FILE with the same columns) and groups processes into the classes
+in docs/mcp-on-demand.md section 12: chrome-devtools, graft-mcp, extrabar, basedpyright, marksman, tsserver,
+ts-language-server, claude, codex. `--footprint` also runs `footprint -p PID` on each matched process (macOS; counts
+compressed and swapped pages that `ps rss` leaves out; slow for hundreds of processes). `--roots` adds the working
+directory of each LSP server's parent, which is the workspace root Claude Code passes to it, and flags container
+roots with the `lsp-root-guard --check` rule.
+
+Usage:  bin/ram-census [--json] [--footprint] [--roots] [--ps-file FILE]
+Exit:   0 ok, 2 bad arguments. It starts nothing, kills nothing, and prints no command line, only class names,
+        counts, megabytes and root directories.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, cast
+
+CLASSES: list[tuple[str, str]] = [
+    ("chrome-devtools", r"(^|/| )chrome-devtools-mcp"),
+    ("graft-mcp", r"graft(\.js)? mcp( |$)"),
+    ("extrabar", r"extrabar"),
+    ("basedpyright", r"basedpyright-langserver"),
+    ("marksman", r"marksman server"),
+    ("tsserver", r"tsserver\.js"),
+    ("ts-language-server", r"typescript-language-server"),
+    ("claude", r"(^|/)claude( |$)"),
+    ("codex", r"(^|/)codex( |$)"),
+]
+LSP = {"basedpyright", "marksman", "ts-language-server"}
+
+
+def parse_ps(text: str) -> list[tuple[int, int, int, str]]:
+    rows: list[tuple[int, int, int, str]] = []
+    for line in text.splitlines():
+        p = line.split(None, 3)
+        if len(p) == 4 and p[0].isdigit() and p[1].isdigit() and p[2].isdigit():
+            rows.append((int(p[0]), int(p[1]), int(p[2]), p[3]))
+    return rows
+
+
+def classify(cmd: str) -> str | None:
+    for name, pat in CLASSES:
+        if re.search(pat, cmd):
+            return name
+    return None
+
+
+def footprint_mb(pid: int) -> float | None:
+    r = subprocess.run(["footprint", "-p", str(pid)], capture_output=True, text=True)
+    m = re.search(r"Footprint:\s+([\d.]+)\s*(KB|MB|GB)", r.stdout)
+    if not m:
+        return None
+    return float(m.group(1)) * {"KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}[m.group(2)]
+
+
+def cwd_of(pid: int) -> str | None:
+    r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True)
+    for ln in r.stdout.splitlines():
+        if ln.startswith("n"):
+            return ln[1:]
+    return None
+
+
+def census(rows: list[tuple[int, int, int, str]], want_fp: bool, want_roots: bool) -> dict[str, Any]:
+    guard = None
+    if want_roots:
+        path = str(Path(__file__).resolve().parent / "lsp-root-guard")
+        loader = importlib.machinery.SourceFileLoader("lsp_root_guard", path)
+        spec = importlib.util.spec_from_loader("lsp_root_guard", loader)
+        assert spec is not None
+        guard = importlib.util.module_from_spec(spec)
+        loader.exec_module(guard)
+        containers, min_children = guard.load_policy()
+    out: dict[str, dict[str, Any]] = {}
+    for pid, ppid, rss, cmd in rows:
+        cls = classify(cmd)
+        if cls is None or " ram-census" in cmd:
+            continue
+        c = out.setdefault(cls, {"n": 0, "rss_mb": 0.0, "footprint_mb": 0.0, "roots": {}})
+        c["n"] += 1
+        c["rss_mb"] += rss / 1024
+        if want_fp:
+            c["footprint_mb"] += footprint_mb(pid) or 0.0
+        if want_roots and cls in LSP and guard is not None:
+            root = cwd_of(ppid) or "?"
+            kind = "container" if root != "?" and guard.is_container(root, containers, min_children) else "project"
+            c["roots"][f"{kind}:{root}"] = c["roots"].get(f"{kind}:{root}", 0) + 1
+    for c in out.values():
+        c["rss_mb"] = round(c["rss_mb"], 1)
+        c["footprint_mb"] = round(c["footprint_mb"], 1)
+        if not want_roots:
+            del c["roots"]
+        if not want_fp:
+            del c["footprint_mb"]
+    return out
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--footprint", action="store_true")
+    ap.add_argument("--roots", action="store_true")
+    ap.add_argument("--ps-file")
+    a = ap.parse_args(argv)
+    if a.ps_file:
+        try:
+            text = Path(a.ps_file).read_text()
+        except OSError as e:
+            sys.stderr.write(f"ram-census: {e}\n")
+            return 2
+    else:
+        text = subprocess.run(["ps", "-axo", "pid,ppid,rss,command"], capture_output=True, text=True, check=True).stdout
+    res = census(parse_ps(text), a.footprint, a.roots)
+    if a.json:
+        print(json.dumps(res, indent=1, sort_keys=True))
+        return 0
+    for name, c in sorted(res.items()):
+        extra = f"  footprint {c['footprint_mb']:>9.1f} MB" if "footprint_mb" in c else ""
+        print(f"{name:20s} n={c['n']:3d}  rss {c['rss_mb']:>9.1f} MB{extra}")
+        for root, n in sorted(cast(dict[str, int], c.get("roots", {})).items()):
+            print(f"    {n} x {root}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
