@@ -2,12 +2,44 @@
 name: herdr
 description: >-
   Control Herdr, a terminal multiplexer for coding agents. Use whenever a task
-  names or implies a terminal, tab, pane or workspace — "in tab xyz", "in the
-  N pane", "another agent's terminal", a session that is not this one — to
-  inspect, control, run a command in, or message another agent; check Herdr
-  tab/pane names AND Paseo workspace/tab names together when locating one.
-  Requires HERDR_ENV=1 to act; without it, use paseo send or the paseo skill.
+  names or implies a terminal, tab, pane or workspace ("in tab xyz", "in the N
+  pane", "another agent's terminal") to inspect or control panes, tabs and
+  workspaces, run a command in a shell pane, or locate another agent (then
+  message it with paseo send / SendMessage, see the ADE rules inside). Check
+  Herdr tab/pane names AND Paseo workspace/tab names together when locating
+  one. Do not use merely because a task could benefit from a background
+  terminal, delegation, or parallel work. Requires HERDR_ENV=1 and a pane that
+  is really this agent's own.
 ---
+## ADE rules (override the upstream text below)
+
+These rules come from this machine's operating orders (`~/CLAUDE.md`, the
+djbclark-ade `AGENTS.md`). Where the upstream text below disagrees, these win.
+
+1. **Am I really in Herdr?** `HERDR_ENV=1` can be inherited from a daemon started in a
+   pane, so it is not proof. Act only if `PASEO_AGENT_ID` is unset, or if
+   `herdr pane current --current` names a pane whose process tree holds this
+   agent. Otherwise treat yourself as outside Herdr: use `paseo send` or the
+   paseo skill, and never touch the launcher's pane.
+2. **Messaging an agent is not typing into its pane.** Never use `herdr agent prompt`,
+   `herdr agent send-keys` or `herdr pane run` to put text into another agent's
+   pane as a message: the receiver sees operator keystrokes, not a peer message,
+   and nothing proves delivery. Send with `paseo send --json --no-wait <id> --prompt '…'`
+   and ask for a named `ack <your id>` (order 10); a non-Paseo Claude session is
+   reached with `SendMessage` (name from `ListAgents`). Ask for the reply on **both** routes:
+   SendMessage and an atomic reply file at a path you name (temp file beside it,
+   then rename). Only the receiver writes an ack file, never the sender's own
+   status. See the agent-surfaces skill and `docs/cross-harness-messaging.md`.
+   Typing into a pane is only for a pane the operator names, and answering an
+   approval or question card stays the operator's call.
+3. **Launching agents is not `herdr agent start`.** Launch through
+   `bin/route_agent.py plan` then `ade-worker-run` (`skills/fan-out`), so quota,
+   labels and the delivery footer apply. Use `herdr agent start` only when the
+   operator asks for it by name, and never in a workspace another writer holds,
+   in a claimed worktree you do not own, or in a shared checkout (`~/src/<repo>`).
+4. **Builds and tests in a pane** still go through `~/ops/site-private-djbclark/bin/bgrun`
+   (after `load-watch ci decide`): `pane run` is not a way around it.
+
 # Herdr
 
 Herdr organizes terminals into workspaces, tabs, and panes, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
