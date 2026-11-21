@@ -1940,7 +1940,7 @@ def test_regular_file_and_foreign_symlink_are_untouched_and_reported(env):
 def test_absent_bin_tool_is_skipped_quietly_with_exit_0(env):
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "info: no executable bin/ file in this checkout for: git-commit-own, load-watch, agent-id; skipped" in r.stdout
+    assert "info: no executable bin/ file in this checkout for: git-commit-own, load-watch, agent-id, lsp-root-guard; skipped" in r.stdout
     assert not bin_dir(env).exists()
     (env.machine / "bin").mkdir()
     (env.machine / "bin" / "load-watch").write_text("not executable\n")  # a non-executable file is not a tool either
