@@ -103,7 +103,7 @@ Three more guards, all from 2026-11-07 (Argon review F-HIGH-2, and the Opus revi
   context to `$CLAUDE_CONFIG_DIR` (default `~/.claude`)`/projects/<encoded worktree>/<session id>/tool-results/toolu_*.txt`
   and tells the model to Read it; without an exception that read left the worktree and killed the review (exit 77) after
   the work was paid for. A Read is exempt only when the path is exactly a direct child of that run's own spool, the
-  file is a regular file (no symlink on the path, the spool root not redirected), the name matches `toolu_*.txt`, and
+  file is a regular file (no symlink below the configuration directory, which is itself resolved, and the spool root not redirected), the name matches `toolu_*.txt`, and
   the session id comes from the CLI's init event and agrees with its result event. Grep and Glob get no exception, an
   unknown session gets none, and `--json` reports the count as `spool_reads` next to `session_id`. The folder name is
   Claude Code's own encoding of the worktree path (non-alphanumerics to `-`, and for a path over 200 characters the first

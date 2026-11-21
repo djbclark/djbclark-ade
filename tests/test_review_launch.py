@@ -493,6 +493,17 @@ def test_a_read_of_a_symlink_that_stays_inside_the_worktree_is_allowed(world):
     assert json.loads(r.stdout)["spool_reads"] == 0
 
 
+def test_a_read_of_an_inside_symlink_through_another_spelling_of_the_worktree_path_is_allowed(world):
+    """/tmp vs /private/tmp: the worktree reached through a symlinked alias must not turn an inside link into a trip."""
+    world.passed_check()
+    commit_link(world, "CLAUDE.md", "a.txt")
+    alias = world.tmp / "alias-wt"
+    alias.symlink_to(world.wt, target_is_directory=True)
+    world.scenario(tool_uses=[{"name": "Read", "input": {"file_path": str(alias / "CLAUDE.md")}}])
+    r = world.launch("--json", "--head", world.head)
+    assert r.returncode == 0, r.stderr
+
+
 def test_a_read_of_a_symlink_that_escapes_the_worktree_still_trips(world):
     """A link the launch check never saw (created while the run was going) and that points out of the worktree is
     refused by the tripwire: realpath says where it leads, whatever the link's own name."""
@@ -521,6 +532,12 @@ def test_read_follows_symlink_only_judges_links_outside_the_worktree(tmp_path):
     assert rl.read_follows_symlink(str(wt / ".." / "outside-link"), wt_s) is True  # outside by name, a link: refused
     assert rl.read_follows_symlink(str(tmp_path / "outside-link"), wt_s) is True
     assert rl.read_follows_symlink(str(wt / "a.txt"), wt_s) is False
+    # Another spelling of the worktree path (a symlinked alias of it, like /tmp for /private/tmp): the inside link
+    # is still inside, a link outside is still refused.
+    (tmp_path / "alias-wt").symlink_to(wt, target_is_directory=True)
+    assert rl.read_follows_symlink(str(tmp_path / "alias-wt" / "inside"), wt_s) is False
+    assert rl.read_follows_symlink(str(tmp_path / "alias-wt" / "escapes"), wt_s) is False   # path_outside judges it
+    assert rl.path_outside(str(tmp_path / "alias-wt" / "escapes"), wt_s) is True
 
 
 def _node_project_name(cwd: str) -> str:

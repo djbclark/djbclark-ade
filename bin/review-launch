@@ -69,7 +69,8 @@ THE BOUNDARY IS PROVEN FROM THE RUN'S OWN STREAM, and the run is killed (exit 77
     pattern or glob whose fixed prefix (up to its first wildcard; a relative one joined to the tool's path or the
     worktree) resolves outside; the refusals Claude reports in `result.permission_denials` are logged to stderr.
   One exception, for Read only: a regular `toolu_*.txt` file in this run's own tool-results spool,
-  `$CLAUDE_CONFIG_DIR` (default ~/.claude)/projects/<encoded worktree>/<session id>/tool-results/. Claude spools a
+  `$CLAUDE_CONFIG_DIR` (default ~/.claude, itself resolved: a symlinked config dir is followed)/projects/<encoded
+  worktree>/<session id>/tool-results/. Claude spools a
   tool result too big for the context there and tells the model to Read it; killing that read lost the whole review.
   The session id comes only from the CLI's own init and result events (they must agree; `[A-Za-z0-9_-]+`), the
   folder name is Claude Code's own project encoding (claude_project_name; a change to it fails closed), the path
@@ -467,7 +468,9 @@ def read_follows_symlink(value: object, worktree: str) -> bool:
     p = os.path.expanduser(value)
     if not os.path.isabs(p):
         p = os.path.join(worktree, p)
-    if _inside(os.path.normpath(p), worktree):
+    # Judge where the link SITS, with its parent directory resolved, so another spelling of the worktree path
+    # (/tmp for /private/tmp, a symlinked parent, a different case) does not make an inside link look outside.
+    if _inside(os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p)), worktree):
         return False
     return os.path.islink(p)
 
@@ -675,11 +678,9 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                         # file. Only a genuine regular file in this run's own spool is exempt. A link inside the
                         # worktree is judged by where it resolves (an escaping one is bad above, and refused at launch).
                         if name == "Read" and isinstance(inp, dict) and read_follows_symlink(inp.get("file_path"), worktree):
-                            if own_spool_read(inp.get("file_path"), worktree, run.session_id):
-                                run.spool_reads += 1
-                                bad = None
-                            else:
-                                bad = f"Read file_path={inp.get('file_path')!r} follows a symlink"
+                            # own_spool_read never accepts a link (it lstat-checks for a regular file), so this
+                            # branch always trips.
+                            bad = f"Read file_path={inp.get('file_path')!r} follows a symlink"
                         elif bad and name == "Read" and isinstance(inp, dict):
                             if own_spool_read(inp.get("file_path"), worktree, run.session_id):
                                 run.spool_reads += 1
