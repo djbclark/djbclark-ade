@@ -254,7 +254,8 @@ once it is written.
 or the operator picks it, write down what the next turn needs and compact without asking, with
 `bin/ade-self-session compact --checkpoint FILE --request-id TOKEN` (docs/self-session.md section B; it preserves the
 checkpoint and intent, then sends itself `/compact`, and `requested` is never completed compaction), or leave it to
-Claude Code's auto-compaction; never because context merely looks large: each compaction costs ~150k+ token-equivalents
+Claude Code's auto-compaction (top-level session only, dispatch footer rule 15; a sub-agent leaves compaction to
+auto-compaction); never because context merely looks large: each compaction costs ~150k+ token-equivalents
 (`memory/feedback_self_compact.md` item 7). Grok Bot: skip (G6).
 
 ## Silent mode, before a handoff

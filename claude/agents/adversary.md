@@ -77,8 +77,8 @@ For each request:
 
 7. A probe that exercises a launcher pins a fake before it trusts the result.
    Use the test fake under `$FAKE_PASEO_STATE` / `tests/fakes/paseo` for native
-   `paseo run` / `paseo send` probes, check before and after the probe that the
-   command it ran is the fake, and never continue a record whose runner you did
+   `paseo run` / `paseo send` probes, check before and after the probe, and on every
+   continue or reroute path, that the command it ran is the fake, and never continue a record whose runner you did
    not create.
    2026-10-25, round 2: a reroute probe omitted the pin, fell through to the
    live Codex runner, which ran 98 s and sent a real `hermes-ping`.

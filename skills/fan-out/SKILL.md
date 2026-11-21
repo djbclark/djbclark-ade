@@ -174,7 +174,7 @@ only extra labels and the positional brief (`paseo run` has no `--prompt-file`).
 the brief yourself. For parallel same-pool waves, re-plan (or stagger) so combined floor estimates stay under remaining. Create a workspace only with native `paseo workspace create` or
 `paseo run --new-workspace …` when deliberate — ordinary dispatch never mints workspaces; the one routine mint is the
 lead's first launch of a run, which opens its WORKER box (above).
-For a by-hand launch only (`ade-worker-run` sets the workspace itself; pass it none of these flags): agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
+For a by-hand launch only (`ade-worker-run` sets the workspace itself; pass none of these flags after `--`; its own `--cwd` from the plan line stays): agent-origin runs, or runs with `PASEO_WORKSPACE_ID` set, must explicitly select a workspace:
 `--cwd` alone inherits the parent agent's workspace and directory. Pass `--workspace` (validated against
 `paseo workspace ls --json` and `-C` / `--cwd`) and never emit `--new-workspace` on an ordinary launch.
 With a caller, unreadable or missing workspace metadata refuses instead of using the ambient workspace.

@@ -230,7 +230,8 @@ The card has no header chip, no per-option description, no `helpText` and no
    it costs more than it saves, 2026-10-10): write the remaining queue into a
    checkpoint file, request the compaction yourself with
    `~/src/djbclark-ade/bin/ade-self-session compact --checkpoint ABSOLUTE_FILE --request-id TOKEN`
-   (docs/self-session.md section B), and end the turn; a `requested` result is not a
+   (docs/self-session.md section B; top-level session only, dispatch footer rule 15: a sub-agent leaves compaction to
+   auto-compaction), and end the turn; a `requested` result is not a
    completed compaction, so resume the walk from the checkpoint. Grok Bot: does not apply (2d.6).
 
 ## 4. Keep going until nothing is left

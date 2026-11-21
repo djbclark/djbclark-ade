@@ -220,10 +220,11 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    `paseo provider models claude --json` lists it, never guessed — on 2026-10-10
    a dispatch with an unlisted Fable id failed; or an Agent-tool sub-agent),
    and the Cursor grok model. Antigravity reaches research only
-   through its `antigravity-argon` and `antigravity-neon` rows, as the last-resort
-   research pool behind every other one and only while codex or claude cannot
-   take the kind (`fallback_kinds`, `fallback_after` in `config/ade.toml`); its
-   Flash and Claude/GPT pools are `never_route`. The lead merges
+   through two rows (`config/ade.toml`; current ranks: `route_agent.py policy --md`):
+   `antigravity-argon` is a last-resort research pool behind every other one and
+   only while codex or claude cannot take the kind (`fallback_kinds`,
+   `fallback_after`); `antigravity-neon` is a normal pool that competes on its
+   research rank (promoted 2026-11-21). Its Flash and Claude/GPT pools are `never_route`. The lead merges
    the three evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the lead picks among the three
    writer drafts or merges them into one `report.md`; the counter files
