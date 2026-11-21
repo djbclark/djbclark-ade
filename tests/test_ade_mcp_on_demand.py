@@ -64,14 +64,19 @@ def test_missing_profile_refuses_with_a_snippet_and_writes_the_config(tmp_path: 
     msg = str(e.value)
     assert "claude-mcp-chrome-devtools" in msg and "--mcp-config" in msg and "agents.providers" in msg
     assert (tmp_path / "chrome-devtools.json").is_file()
-    with pytest.raises(m.McpError):  # a profile that is listed but not ready is as good as missing
-        apply(["--provider", "claude", "b"], ["chrome-devtools"],
-              lambda: [{"provider": "claude-mcp-chrome-devtools", "enabled": True, "status": "error"}], tmp_path)
+    for row in ({"status": "error"}, {"status": "ready", "error": "x"}, {"status": "ready", "enabled": False}):  # listed but not usable
+        with pytest.raises(m.McpError):
+            apply(["--provider", "claude", "b"], ["chrome-devtools"],
+                  lambda row=row: [{"provider": "claude-mcp-chrome-devtools", "enabled": True, **row}], tmp_path)
 
 
-def test_codex_profile_enables_the_server_by_flag() -> None:
-    entry = m.profile_entry("codex", ["chrome-devtools"], Path("-"))
-    assert entry["command"] == ["codex", "-c", "mcp_servers.chrome-devtools.enabled=true"] and entry["extends"] == "codex"
+def test_codex_profile_carries_the_whole_server() -> None:
+    """898 LOW 3: with no [mcp_servers.NAME] table the profile still defines command and args, not just enabled."""
+    entry = m.profile_entry("codex", ["chrome-devtools"], Path("-"), REG)
+    cmd = entry["command"]
+    assert entry["extends"] == "codex" and cmd[0] == "codex"
+    assert 'mcp_servers.chrome-devtools.command="npx"' in cmd and "mcp_servers.chrome-devtools.enabled=true" in cmd
+    assert 'mcp_servers.chrome-devtools.args=["-y", "chrome-devtools-mcp@latest"]' in cmd
 
 
 def test_server_already_in_user_scope_adds_nothing(tmp_path: Path) -> None:
@@ -106,3 +111,27 @@ def test_worker_run_rejects_an_unknown_mcp_name_with_exit_2() -> None:
                         "--slice", "s", "--mcp", "no-such-server", "--", "--provider", "claude", "brief"],
                        capture_output=True, text=True, env=dict(os.environ))
     assert r.returncode == 2 and "unknown --mcp name" in r.stderr
+
+
+def test_registry_names_are_kebab_and_a_set_never_collides_with_one_name(tmp_path: Path) -> None:
+    """898 LOW 2: {"chrome", "devtools"} used to share the id and file of "chrome-devtools"; odd keys escaped the state dir."""
+    for key in ("../x", "a/b", "A", "a=b", "a_b", "a--b"):
+        bad = tmp_path / "r.toml"
+        _ = bad.write_text(f'[servers."{key}"]\ncommand = "c"\n')
+        with pytest.raises(m.McpError):
+            m.load_registry(bad)
+    assert m.profile_id("claude", ["chrome", "devtools"]) != m.profile_id("claude", ["chrome-devtools"])
+    assert m.config_path(["chrome", "devtools"], tmp_path) != m.config_path(["chrome-devtools"], tmp_path)
+
+
+def test_a_refused_launch_never_overwrites_the_live_config(tmp_path: Path) -> None:
+    """898 LOW 4: workers read the generated file; only `snippet --write` replaces it."""
+    live = tmp_path / "chrome-devtools.json"
+    _ = live.write_text('{"mcpServers": {"chrome-devtools": {"command": "other"}}}\n')
+    with pytest.raises(m.McpError) as e:
+        apply(["--provider", "claude", "b"], ["chrome-devtools"], ready(), tmp_path)
+    assert "other" in live.read_text() and "differs" in str(e.value)
+    ok = tmp_path / "ok"
+    with pytest.raises(m.McpError):
+        apply(["--provider", "claude", "b"], ["chrome-devtools"], ready(), ok)
+    assert (ok / "chrome-devtools.json").is_file()  # an absent file is created, so the printed profile points at something

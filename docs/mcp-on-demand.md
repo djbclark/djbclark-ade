@@ -489,8 +489,11 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
 no provider-argument passthrough (its options: title, provider, model, thinking, mode, workspace/worktree, env, label; the daemon's
 per-agent `mcpServers` is not reachable from the CLI), so step 1's fallback is the route: `ade-worker-run --mcp NAME` rewrites
 `--provider claude[/model]` to the Paseo provider profile `claude-mcp-NAME` (Codex: `codex-mcp-NAME`), after checking the catalog
-lists it ready; otherwise it refuses, writes the generated Claude config (mode 600, command and args only, under
-`~/.local/state/ade/mcp/`) and prints the profile entry for `~/.paseo/config.json`. If the server is already in the provider's user
+lists it ready; otherwise it refuses and prints the profile entry for `~/.paseo/config.json`. The generated Claude config (mode 600,
+command and args only, `~/.local/state/ade/mcp/NAME.json`; a set of servers joins the sorted names with `__`, and registry names are kebab-case,
+so two sets never share a file) is created by a refusal only when absent; an existing one is never overwritten from a launch, and
+`snippet NAME claude --write` replaces it. The Codex profile carries the registry command and args as `-c` values, so it works when
+`~/.codex/config.toml` lacks the server. If the server is already in the provider's user
 scope it adds nothing and says so. `bin/ade_mcp_on_demand.py snippet NAME PROVIDER` prints the entry on its own. **Not done:** the profile
 is not in the live Paseo config, and whether Paseo's `claude` profile `command` takes the extra `--mcp-config` argument is unverified,
 so step 4 (removing chrome-devtools from user scope) stays blocked until an attended check shows a `--mcp chrome-devtools` worker answering

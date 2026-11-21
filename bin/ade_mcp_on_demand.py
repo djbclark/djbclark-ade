@@ -12,14 +12,15 @@ launch route is one Paseo provider profile per provider and MCP set, which the o
 `--mcp NAME` rewrites `--provider claude[/model]` to the profile id, after checking the catalog lists it (otherwise it
 refuses and prints the snippet; nothing is launched). If the server is already present in the provider's user scope
 the flag adds nothing and says so (two entries under one name conflict). The generated Claude config holds the server's
-command and args only, never an `env` value, mode 600, written atomically; the registry is `config/mcp-on-demand.toml`.
+command and args only, never an `env` value, mode 600, written atomically, and a refused launch only creates it when absent (never overwrites); the registry is `config/mcp-on-demand.toml`.
 
-    bin/ade_mcp_on_demand.py snippet NAME PROVIDER   print the profile entry and write the generated config
+    bin/ade_mcp_on_demand.py snippet NAME PROVIDER [--write]   print the profile entry; --write also (re)writes the generated Claude config
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import tomllib
@@ -28,6 +29,8 @@ from typing import Any, Callable
 
 SUPPORTED = ("claude", "codex")
 REGISTRY = Path(__file__).resolve().parent.parent / "config" / "mcp-on-demand.toml"
+NAME_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")  # kebab names: no "_", "/", "." or "=", so SEP below cannot occur in one
+SEP = "__"  # joins the names of a set: {"chrome", "devtools"} is `chrome__devtools`, never `chrome-devtools`
 
 
 class McpError(Exception):
@@ -42,6 +45,8 @@ def load_registry(path: Path | None = None) -> dict[str, dict[str, Any]]:
         raise McpError(f"cannot read the on-demand MCP registry {path or REGISTRY}: {e}") from e
     out: dict[str, dict[str, Any]] = {}
     for name, ent in (data.get("servers") or {}).items():
+        if not NAME_RE.fullmatch(str(name)):
+            raise McpError(f"registry name {str(name)!r} must be kebab case ([a-z0-9] groups joined by '-'): it names a file, a profile and a -c key")
         if not isinstance(ent, dict) or not isinstance(ent.get("command"), str) or not ent["command"]:
             raise McpError(f"registry entry {name!r} needs a string `command`")
         args = ent.get("args", [])
@@ -56,17 +61,25 @@ def state_dir() -> Path:
 
 
 def profile_id(provider: str, names: list[str]) -> str:
-    return f"{provider}-mcp-{'-'.join(sorted(names))}"
+    return f"{provider}-mcp-{SEP.join(sorted(names))}"
 
 
 def claude_config(reg: dict[str, dict[str, Any]], names: list[str]) -> dict[str, Any]:
     return {"mcpServers": {n: {"type": "stdio", "command": reg[n]["command"], "args": reg[n]["args"]} for n in names}}
 
 
-def write_claude_config(reg: dict[str, dict[str, Any]], names: list[str], directory: Path | None = None) -> Path:
+def config_path(names: list[str], directory: Path | None = None) -> Path:
+    return (directory or state_dir()) / f"{SEP.join(sorted(names))}.json"
+
+
+def write_claude_config(reg: dict[str, dict[str, Any]], names: list[str], directory: Path | None = None,
+                        overwrite: bool = True) -> Path:
+    """Write the generated config atomically. `overwrite=False` leaves an existing file alone: live workers read it."""
     d = directory or state_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = d / f"{'-'.join(sorted(names))}.json"
+    path = config_path(names, d)
+    if path.exists() and not overwrite:
+        return path
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".mcp-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
@@ -80,14 +93,15 @@ def write_claude_config(reg: dict[str, dict[str, Any]], names: list[str], direct
     return path
 
 
-def profile_entry(provider: str, names: list[str], config_path: Path) -> dict[str, Any]:
+def profile_entry(provider: str, names: list[str], config_file: Path, reg: dict[str, dict[str, Any]]) -> dict[str, Any]:
     label = f"{provider.capitalize()} + {', '.join(sorted(names))}"
     if provider == "claude":
-        cmd = ["claude", "--mcp-config", str(config_path)]
-    else:
+        cmd = ["claude", "--mcp-config", str(config_file)]
+    else:  # the profile carries the whole server (a -c value is TOML; json.dumps quotes strings and arrays of strings)
         cmd = ["codex"]
         for n in sorted(names):
-            cmd += ["-c", f"mcp_servers.{n}.enabled=true"]
+            cmd += ["-c", f"mcp_servers.{n}.command={json.dumps(reg[n]['command'])}",
+                    "-c", f"mcp_servers.{n}.args={json.dumps(reg[n]['args'])}", "-c", f"mcp_servers.{n}.enabled=true"]
     return {"extends": provider, "label": label, "command": cmd}
 
 
@@ -145,11 +159,18 @@ def apply(rest: list[str], names: list[str], catalog: Callable[[], Any], reg: di
     rows = catalog()
     row = next((r for r in rows if isinstance(r, dict) and r.get("provider") == pid), None) if isinstance(rows, list) else None
     if row is None or row.get("enabled") not in (True, "Enabled") or row.get("status") not in ("ready", "available") or row.get("error"):
-        path = write_claude_config(reg, need, directory) if base == "claude" else Path("-")
-        snippet = json.dumps({pid: profile_entry(base, need, path)}, indent=2)
+        path = config_path(need, directory)
+        stale = ""
+        if base == "claude":
+            if path.exists():  # live workers read this file: a launch never rewrites it
+                if path.read_text() != json.dumps(claude_config(reg, need), indent=1, sort_keys=True) + "\n":
+                    stale = f" NOTE: {path} exists and differs from this registry; `snippet NAME claude --write` replaces it."
+            else:
+                _ = write_claude_config(reg, need, directory, overwrite=False)
+        snippet = json.dumps({pid: profile_entry(base, need, path, reg)}, indent=2)
         raise McpError(f"no ready, enabled Paseo provider profile {pid!r} (paseo run cannot pass provider arguments, so --mcp "
                        f"selects a profile). Add it under `agents.providers` in ~/.paseo/config.json, then relaunch (nothing "
-                       f"was launched):\n{snippet}")
+                       f"was launched):\n{snippet}{stale}")
     out = list(rest)
     new = pid + (sep + model if sep else "")
     if rest[pos - 1] == "--provider":
@@ -160,14 +181,15 @@ def apply(rest: list[str], names: list[str], catalog: Callable[[], Any], reg: di
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 3 and argv[0] == "snippet":
-        _, name, provider = argv
+    if len(argv) in (3, 4) and argv[0] == "snippet" and (len(argv) == 3 or argv[3] == "--write"):
+        _, name, provider = argv[:3]
         try:
             reg = load_registry()
             if name not in reg or provider not in SUPPORTED:
                 raise McpError(f"need a registry name and a provider in {SUPPORTED}")
-            path = write_claude_config(reg, [name]) if provider == "claude" else Path("-")
-            print(json.dumps({profile_id(provider, [name]): profile_entry(provider, [name], path)}, indent=2))
+            if len(argv) == 4 and provider == "claude":  # only an explicit --write replaces the file live workers read
+                _ = write_claude_config(reg, [name])
+            print(json.dumps({profile_id(provider, [name]): profile_entry(provider, [name], config_path([name]), reg)}, indent=2))
             return 0
         except McpError as e:
             sys.stderr.write(f"ade_mcp_on_demand: {e}\n")
