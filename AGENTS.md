@@ -201,6 +201,16 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
     (litellm, the oauth bridges, launchd services, anything another agent's turn calls while you work): experiment in a
     copy, swap the live one only with explicit approval and a tested rollback.
 
+13. **Questions for the operator go through `/steps`, unasked** (operator, 2026-11-21: "When an agent has questions for
+    me, automatically run /steps unless our upcoming alternative non-blocking universal questions system is being used").
+    Whenever you would end a turn or a post with questions or decisions for djbclark, load
+    [skills/steps/SKILL.md](skills/steps/SKILL.md) and walk them one at a time, recommendation first; never ask whether
+    to run it. A worker or sub-agent sends its question to its lead (order 10), and the lead runs `/steps`. The one
+    exception is the central, non-blocking questions system of queue 67
+    ([docs/central-questions-plan.md](docs/central-questions-plan.md)): not live as of 2026-11-21; once it is and the
+    agent is enrolled, the question goes there and independent work continues. Detail:
+    `site-private/memory/feedback_questions_run_steps.md`; home rules item 46.
+
 ## Machine context
 
 - **Paseo is the only harness (2026-10-31).** `paseo ls -a -g --json` / `paseo run` /

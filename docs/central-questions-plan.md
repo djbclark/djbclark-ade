@@ -12,6 +12,8 @@ A3. Keep ADE/Paseo and its existing plugin host; do not introduce a replacement 
 
 A4. Q1/Q2/Q3 are settled and must not be re-asked. Q3 separately authorizes audited declaration-metadata export work in sudo-secretspec, release/install if warranted, safe reconciliation and distinct actual-Jev storage. Blue/Green was a diagnostic canary, not operational consent. Preserve historical provenance without inventing missing old context/owner fields or widening those grants.
 
+A5. Until this system is live and an agent is enrolled in it, that agent runs `/steps` unasked for every question or decision it has for the operator (operator rule 2026-11-21; AGENTS.md standing order 13). When it goes live, it replaces that default only for enrolled agents.
+
 ## B. Evidence and limits
 
 B1. Progress saves questions but its option buttons copy reply text. Questions please navigates to worker tabs and filters by workspace. Neither meets the new UX. Preserve useful history rather than modifying those outside-ADE plugins for the first slice.

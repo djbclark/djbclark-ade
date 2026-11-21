@@ -7,6 +7,9 @@ description: >-
   each answer before the next. Use for /steps (optionally with item numbers or
   a topic), /steps plan (interview before writing a plan), "step me through it",
   "one at a time", "walk me through" a list of items or pending decisions.
+  Also run it unasked whenever you have questions or decisions for the
+  operator (operator rule 2026-11-21), unless the central questions system of
+  djbclark-ade queue 67 is live and carries them.
 ---
 
 # steps — one open item at a time, recommendation first
@@ -16,6 +19,13 @@ Hermes Telegram `/steps` is native skill slash. It injects this skill; call `cla
 Claude Code: `/steps` is the skill's own slash command (the `claude/commands/` wrapper was removed 2026-11-06).
 Grok Bot: a rendered copy `ade-steps` in `/home/box/agent-data/workflows/` (skill-everywhere `grokbot`
 target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 2026-10-23).
+
+**Run it unasked** (operator rule 2026-11-21, universal: "When an agent has questions for me, automatically run
+/steps unless our upcoming alternative non-blocking universal questions system is being used"). Any turn or post
+that would end with questions or decisions for djbclark runs this skill on them instead; never ask "shall I run
+/steps?". A worker sends its question to its lead, which runs `/steps`. Exception: once the central questions system
+(djbclark-ade queue 67, `docs/central-questions-plan.md`; not live as of 2026-11-21) is live and the agent is enrolled,
+the question goes there. Detail: `site-private/memory/feedback_questions_run_steps.md`.
 
 He is choosing, not reading. Give him one decision per prompt, pre-ranked, and
 do what he picked before asking the next one. Same motive as
