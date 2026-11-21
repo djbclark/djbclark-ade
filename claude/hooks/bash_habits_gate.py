@@ -1022,20 +1022,27 @@ ZSH_MODIFIER_REASON = (
 # and before one of them any prefixes f, g, w, `F` or `W` with a delimited argument and a bare `F` (`:F:2:r`, `:W:/:t`, `:gs/a/b/`, `:gr`,
 # `:fr`, `:Fr`). The delimiter is any character, read as the opener and closed by its next copy (`:F-2-r`, `:W.x.t`, `:Wrxrt`); `( [ { <`
 # close with `) ] } >` and no other copy of themselves. A bare `F` is only a prefix when no closing delimiter follows: `:Feature` and
-# `:Ftest` are plain text (`e`/`t` is the delimiter, no modifier follows its closer), while `:Fr` is `F` then `r`. Not followed: a delimiter
-# that is whitespace, `\ ' " $` or a backtick (zsh reads those as a math error or text), and whitespace inside the argument (a word ends
-# there outside double quotes). Not modifiers there, so left alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix
-# with no modifier after it (`:f`, `:F:r`). Between `$` and the name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name:
-# one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
+# `:Ftest` are plain text (`e`/`t` is the delimiter, no modifier follows its closer), while `:Fr` is `F` then `r`. Not modifiers there, so left
+# alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and the
+# name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
+# Known gaps, accepted because the forms are rare, NOT because they are harmless (zsh rewrites each one silently, the gate passes them):
+# a delimiter that is whitespace, `\`, `'`, a backtick or `$` (`"$C:F 2 r"`, `"$C:F'2'r"`, `$C:F$2$r`), and whitespace inside the argument
+# of a double-quoted `"$C:F.2 .r"`. A `"` delimiter cannot occur inside double quotes. Another accepted limit: an argument or subscript
+# longer than ZSH_ARG_MAX (256) characters is not followed. The patterns are bounded so the match cost per `$` is constant: an opener with
+# no closer made every `$` scan to the end of its word or line, and 200 KB of `$C:F<` or `$C[` took 60 to 80 s (PR 918 review M-B).
+ZSH_ARG_MAX = 256
+
+
 def _zsh_delimited(group: str) -> str:
-    return (r"(?:\([^)\s]*\)|\[[^\]\s]*\]|\{[^}\s]*\}|<[^>\s]*>"
-            rf"|(?P<{group}>[^\s\\'\"`$(\[{{<])(?:(?!(?P={group}))\S)*(?P={group}))")
+    n = f"{{0,{ZSH_ARG_MAX}}}"
+    return (rf"(?:\([^)\s]{n}\)|\[[^\]\s]{n}\]|\{{[^}}\s]{n}\}}|<[^>\s]{n}>"
+            rf"|(?P<{group}>[^\s\\'\"`$(\[{{<])(?:(?!(?P={group}))\S){n}(?P={group}))")
 
 
 _ZSH_MODIFIER_ARG = r"[FW]" + _zsh_delimited("d")
 _ZSH_BARE_F = r"F(?!" + _zsh_delimited("e") + r")"
 ZSH_MODIFIER = re.compile(
-    r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]*\])?|\d+|[#?$!-])"
+    r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]{0,%d}\])?|\d+|[#?$!-])" % ZSH_ARG_MAX +
     r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + "|" + _ZSH_BARE_F + r")*[aAcehlPqQrstu&]")
 ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
 

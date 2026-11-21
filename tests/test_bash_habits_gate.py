@@ -1381,3 +1381,29 @@ def test_zsh_modifier_scan_is_linear_on_unbalanced_substitutions_in_quotes():
     started = time.monotonic()
     run(command)
     assert time.monotonic() - started < 5, "the zsh modifier scan is no longer linear"
+
+
+@pytest.mark.parametrize("command", [
+    "echo " + "$C:F<" * 40000,                        # an opener with no closer: each `$` used to scan to the end of its word (PR 918 review M-B)
+    "echo \"" + "$C:F(" * 40000 + "\"",
+    "echo " + "$C:F[" * 40000,
+    "echo " + "$C:F{" * 40000,
+    "echo " + "$C:W<" * 40000,
+    "echo " + "$C[" * 70000,                          # a subscript with no `]` scanned to the end of the line
+    "echo " + "$C:W." * 40000,
+    "echo " + "$C:F." * 40000,
+], ids=["F<", "F(", "F[", "F{", "W<", "C[", "W.", "F."])
+def test_zsh_modifier_regex_is_linear_on_unclosed_delimiters_and_subscripts(command):
+    assert len(command) >= 195_000
+    started = time.monotonic()
+    run(command)
+    assert time.monotonic() - started < 5, "the zsh modifier regex is no longer linear"
+
+
+@pytest.mark.parametrize("command, denies", [          # an argument or subscript longer than 256 characters is not followed (accepted limit)
+    ("echo $C:F<" + "a" * 256 + ">r", True), ("echo $C:F<" + "a" * 257 + ">r", False),
+    ("echo $C:F-" + "a" * 256 + "-r", True), ("echo $C:F-" + "a" * 257 + "-r", False),
+    ("echo $C[" + "a" * 256 + "]:r", True), ("echo $C[" + "a" * 257 + "]:r", False),
+])
+def test_zsh_modifier_argument_and_subscript_cap_is_256_characters(command, denies):
+    assert denied(command) is denies
