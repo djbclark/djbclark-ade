@@ -50,7 +50,7 @@
       "label": "GPT-6 Astra",
       "pool_label": "Codex 5-hour",
       "routes": [
-        {"kind": "paseo", "agent": "codex", "model": "gpt-6-astra", "set": ["reasoning_effort=xhigh"]}
+        {"kind": "paseo", "agent": "codex", "model": "gpt-6.2-astra", "set": ["reasoning_effort=xhigh"]}
       ]
     }
   },

@@ -68,7 +68,7 @@ exact Pi/Paseo integration, and public token prices are not subscription costs.
 
 B3. Judgment and frontier keep the stronger, separately metered vendor routes
 and existing gates. No judgment qualification is inferred for the two Pi rows.
-Go awaits account scoping. Grok subscription and Antigravity OAuth paths passed
+Go awaits account scoping. Antigravity is off Pi (operator 2026-11-21): it routes only through Paseo's native `antigravity` provider, `accepted = false`, no `antigravity/*` model in any Pi pool ([pi-services.md](pi-services.md)). Grok subscription and Antigravity OAuth paths passed
 basic native tool checks on 2026-11-08; their continuation, quota and routing
 acceptance remain separate work ([service status](pi-services.md)). Neither is
 added to this automatic shortlist by those checks. OpenAI API and Anthropic API

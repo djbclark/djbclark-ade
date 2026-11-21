@@ -39,9 +39,8 @@ def write_acceptance(tmp_path, text: str) -> Path:
 def test_shipped_file_accepts_only_the_live_cursor_and_zai_shortlist():
     rows = pools.load_acceptance(REPO / "config" / "pi-pool-acceptance.toml")
     assert rows["cursor"]["accepted"] is True and rows["zai"]["accepted"] is True
-    # antigravity accepted 2026-11-19 (docs/pi-services.md records the evidence and the pending continuation)
-    assert rows["antigravity"]["accepted"] is True
-    for name in ("grok", "sipb", "go", "clinepass"):
+    # antigravity was accepted 2026-11-19 and switched off 2026-11-21 (operator: native Paseo antigravity provider only)
+    for name in ("antigravity", "grok", "sipb", "go", "clinepass"):
         assert rows[name]["accepted"] is False
     # clinepass dispatches through Pi for manual use (agent = "pi") but stays
     # unaccepted, so the fail-closed gate reports it and never auto-routes it.
@@ -63,9 +62,9 @@ accepted = true
     assert pools.unaccepted_auto_services() == {"clinepass", "cursor"}
     code, _, blocking = pools.check_auto()
     assert code == 2 and blocking == ["clinepass", "cursor"]
-    result = defaults.choose("code", MODELS, quota={"cursor": reading(90), "zai": reading(80)})
+    result = defaults.choose("research", MODELS, quota={"cursor": reading(90), "zai": reading(80)})   # zai has no code since 2026-11-21
     assert result["service"] == "zai"
-    result = defaults.choose("code", MODELS, quota={"cursor": reading(90), "zai": reading(90)},
+    result = defaults.choose("research", MODELS, quota={"cursor": reading(90), "zai": reading(90)},
                              excluded={"zai"})
     assert result["service"] is None
     assert "unaccepted pool(s): clinepass, cursor" in result["reason"]

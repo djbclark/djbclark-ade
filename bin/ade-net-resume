@@ -362,7 +362,7 @@ class Scanner:
         mapped = map_agent_to_provider(provider, model)
         if provider == "antigravity":
             lower = model.lower()
-            family = ("gemini_argon" if lower.startswith("gemini-4-argon") else
+            family = ("gemini_argon" if re.match(r"gemini-[0-9]+(?:\.[0-9]+)*-argon", lower) else
                       "gemini" if lower.startswith("gemini-") else
                       "claude_gpt" if lower.startswith(("claude-", "gpt-")) else None)
             mapped = (provider, family) if family else None

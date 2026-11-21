@@ -297,6 +297,10 @@ def sources(rows=()):
         yield
 
 
+# The suite's canned model catalog (tests/conftest.py ROUTE_AGENT_MODEL_CATALOG_JSON): what a model family resolves against.
+FAMILY_CATALOG: dict[str, list[str]] = json.loads((Path(__file__).parent / "fixtures" / "model_catalog.json").read_text())
+
+
 @contextlib.contextmanager
 def fake_paseo(**env: str):
     """route_agent's Paseo reads against tests/fakes/paseo, with its own state dir (no daemon, no network)."""
@@ -395,23 +399,34 @@ class TestDiscoverySources(unittest.TestCase):
 
     def test_pi_models_follow_pis_own_catalog_where_pi_keeps_one(self):
         # 2026-11-10: Paseo's Pi list kept a model Pi dropped (gemini-3.1-pro) and omitted one Pi runs (gemini-4-argon).
+        # The correction logic is `_pi_models`; `provider_models("pi")` then drops antigravity/* (2026-11-21, below).
         with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list(), FAKE_PI_LIST=self.PI_TABLE) as state:
             (state / "models-store.json").write_text(json.dumps({"antigravity": {"models": []}}))
             r._reset_paseo_cache()
-            self.assertEqual(r.provider_models("pi"), [
+            self.assertEqual(r._pi_models(json.loads(self.pi_paseo_list())["pi"]), [
                 "cursor/composer-2.5",                       # live extension namespace: Paseo's list stands
                 "antigravity/gemini-3.8-flash", "antigravity/gemini-4-argon"])
 
-    def test_pi_models_are_paseos_when_pi_cannot_list_or_has_no_store(self):
-        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list()):          # fake pi exits 1
-            self.assertEqual(r.provider_models("pi"), json.loads(self.pi_paseo_list())["pi"])
-        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list(), FAKE_PI_LIST=self.PI_TABLE):   # no models-store.json
-            self.assertEqual(r.provider_models("pi"), json.loads(self.pi_paseo_list())["pi"])
-
-    def test_pi_models_are_pis_when_paseo_cannot_say(self):
+    def test_pi_models_never_include_antigravity(self):
+        """Operator 2026-11-21: Pi reaches Antigravity only through pre-paid API money; antigravity work goes through
+        Paseo's native `antigravity` provider. The Pi catalog the router reads has no antigravity/* id, whoever lists it."""
+        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list(), FAKE_PI_LIST=self.PI_TABLE) as state:
+            (state / "models-store.json").write_text(json.dumps({"antigravity": {"models": []}}))
+            r._reset_paseo_cache()
+            self.assertEqual(r.provider_models("pi"), ["cursor/composer-2.5"])
+        with fake_paseo(FAKE_PASEO_MODELS=self.pi_paseo_list()):
+            r._reset_paseo_cache()
+            self.assertEqual(r.provider_models("pi"), ["cursor/composer-2.5"])
         with fake_paseo(FAKE_PI_LIST=self.PI_TABLE, ROUTE_AGENT_PASEO_BIN="/nonexistent/paseo"):
-            self.assertEqual(r.provider_models("pi"), ["antigravity/gemini-3.8-flash", "antigravity/gemini-4-argon",
-                                                       "cursor/composer-1"])
+            r._reset_paseo_cache()
+            self.assertEqual(r.provider_models("pi"), ["cursor/composer-1"])
+        # no Pi routing row names an antigravity model, and the native provider's own rows are the antigravity pools
+        for svc in r.SERVICES:
+            if svc.acp_agent == "pi":
+                for model in svc.models.values():
+                    self.assertNotEqual(model.split()[0].partition("/")[0], "antigravity", (svc.name, model))
+        self.assertEqual({s.name for s in r.SERVICES if s.acp_agent == "antigravity"},
+                         {"antigravity-argon", "antigravity-neon"})
 
     def test_pi_models_do_not_touch_other_providers(self):
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps({"codex": ["gpt-6-luna"]}), FAKE_PI_LIST=self.PI_TABLE):
@@ -420,7 +435,10 @@ class TestDiscoverySources(unittest.TestCase):
     def test_services_check_models_flags_a_suggestion_paseo_does_not_list(self):
         listed: dict[str, list[str]] = {}
         for s in r.SERVICES:                      # cursor-auto and cursor share the cursor provider
-            listed[s.acp_agent] = sorted(set(listed.get(s.acp_agent, [])) | {m.split()[0] for m in s.models.values()})
+            # a model family (`gpt-*-astra`) is listed as the id it resolves to (2026-11-21)
+            ids = {r._family.newest(m.split()[0], FAMILY_CATALOG.get(s.acp_agent, [])) or m.split()[0]
+                   if r._family.is_family(m.split()[0]) else m.split()[0] for m in s.models.values()}
+            listed[s.acp_agent] = sorted(set(listed.get(s.acp_agent, [])) | ids)
         out = io.StringIO()
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
             self.assertEqual(r.main(["services", "--check-models"]), 0, out.getvalue())
@@ -429,7 +447,8 @@ class TestDiscoverySources(unittest.TestCase):
         out = io.StringIO()
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
             self.assertEqual(r.main(["services", "--check-models"]), 1)
-        self.assertIn("MISSING codex frontier: gpt-6-astra", out.getvalue())
+        self.assertIn("MISSING codex frontier: no id in `paseo provider models codex` matches family gpt-*-astra",
+                      out.getvalue())
         out = io.StringIO()
         with mock.patch.dict(os.environ, {"ROUTE_AGENT_PASEO": "off"}), contextlib.redirect_stdout(out):
             r._reset_paseo_cache()
@@ -854,7 +873,7 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         q["codex"] = {"remaining": 100.0}
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical", "research"):
+            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical", "research", "ui-automation"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
@@ -1057,22 +1076,25 @@ class TestRoutingPolicyToml(unittest.TestCase):
         "claude": {
             "cli": "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)",
             "good_at": {"judgment": 1, "frontier": 2, "code": 12, "research": 10,
-                        "bulk": 32, "mechanical": 30},
+                        "bulk": 32, "mechanical": 30, "ui-automation": 1},
             "billing": "subscription",
             "judgment_tier": True,
             "models": {"judgment": "opus --effort high", "frontier": "fable --effort high",
                        "code": "sonnet --effort high", "research": "opus --effort high",
-                       "bulk": "haiku --effort low", "mechanical": "haiku --effort low"},
+                       "bulk": "haiku --effort low", "mechanical": "haiku --effort low",
+                       "ui-automation": "sonnet --effort high"},
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
-            "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol for judgment/code/research "
+            "cli": ("codex (newest gpt-*-astra for frontier; newest gpt-*-sol for judgment/code/research "
                     "on the OpenAI API prepaid credits)"),
-            "good_at": {"frontier": 1, "judgment": 3, "code": 15, "research": 13},
+            "good_at": {"frontier": 1, "judgment": 3, "code": 13, "research": 13, "ui-automation": 4},
             "billing": "prepaid",
             "judgment_tier": True,
-            "models": {"frontier": "gpt-6-astra --effort high", "judgment": "gpt-6.1-sol --effort high",
-                       "code": "gpt-6.1-sol --effort medium", "research": "gpt-6.1-sol --effort high"},
+            # model families (2026-11-21): the router resolves them to the newest id the provider lists
+            "models": {"frontier": "gpt-*-astra --effort high", "judgment": "gpt-*-sol --effort high",
+                       "code": "gpt-*-sol --effort medium", "research": "gpt-*-sol --effort high",
+                       "ui-automation": "gpt-*-sol --effort high"},
             "pool": ("codex", "openai_api"), "max_parallel": 1,
             "agent": "codex", "burn_first": False,
         },
@@ -1342,7 +1364,7 @@ class TestRoutingPolicyToml(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("codex", out)
         self.assertIn("frontier", out)
-        self.assertIn("gpt-6-astra", out)
+        self.assertIn("gpt-*-astra", out)
 
     def test_policy_md_and_json_carry_the_lead_session_model(self):
         """[lead] (2026-10-23): the session that dispatches runs on Opus 5.5 at high, Sonnet at
@@ -1719,7 +1741,8 @@ class TestCodexEverydayKinds(unittest.TestCase):
     def test_astra_is_frontier_only_in_the_profile(self):
         models = self.codex().models
         frontier = [str(m).lower() for m in r.POLICY["dispatch"]["frontier_models"]]
-        self.assertIn("gpt-6-astra", models["frontier"])
+        self.assertEqual(models["frontier"], "gpt-*-astra --effort high")          # a family, resolved at plan time
+        self.assertEqual(r.suggest_model(self.codex(), "frontier", {}), "gpt-6-astra --effort high")   # canned catalog
         for kind in self.EVERYDAY:
             self.assertFalse(any(tok in models[kind].lower() for tok in frontier), (kind, models[kind]))
         c = r.route("code", quota=self.drained(codex={"remaining": 100.0}))
@@ -1735,7 +1758,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         better = self.drained(codex={"remaining": 100.0}, **{"cursor-auto": {"remaining": 90.0}})
         self.assertEqual(r.route("code", quota=better).service.name, "cursor-auto")
         only = self.drained(codex={"remaining": 100.0}, cursor={"remaining": 90.0})
-        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats cursor r20
+        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r13 beats cursor r20
 
     def test_a_wave_puts_one_slice_on_codex(self):
         q = self.drained(codex={"remaining": 100.0})
@@ -1746,7 +1769,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         pub = r.policy_public()
         self.assertEqual(pub["routing"]["plenty_min"], 20.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
-        self.assertEqual(sorted(row["plenty_kinds"]), ["code", "judgment", "research"])
+        self.assertEqual(sorted(row["plenty_kinds"]), ["code", "judgment", "research", "ui-automation"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)
@@ -3161,7 +3184,7 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(r.map_agent_to_provider("antigravity", "gemini-4-argon"), ("antigravity", "gemini_argon"))
         self.assertEqual(r.dispatch_service_name("antigravity", "gemini-4-argon"), "antigravity-argon")
         self.assertIsNone(r.map_agent_to_provider("antigravity", "gemini-3.8-flash"))
-        self.assertIn("gemini-4-argon", r.POLICY["dispatch"]["frontier_models"])
+        self.assertIn("gemini-*-argon", r.POLICY["dispatch"]["frontier_models"])
         self.assertNotIn("antigravity", {s.name for s in r.discover(IDLE)})      # the provider's other pools stay unrouted
 
     def test_argon_takes_frontier_only_while_codex_or_claude_is_short(self):

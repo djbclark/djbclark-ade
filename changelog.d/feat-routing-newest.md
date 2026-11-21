@@ -1,0 +1,15 @@
+### Added
+
+- Model families in routing: a `[[service]].models` id with `*` (`gpt-*-astra`, `gpt-*-sol`, `gpt-*-luna`, `gemini-*-neon-high`, `gemini-*-argon-high`) resolves at plan/route time to the newest id `paseo provider models` lists, by version order (6.2 > 6.1 > 6, never lexical), with no eval gate; optional `[routing.model_holds]`, a last-resolved fallback in state, `route_agent.py models`, and a change line in `show` (`bin/model_family.py`). (#881)
+- New routing kind `ui-automation` (claude r1 Sonnet 5.5 high, antigravity-neon r2, codex r4) and `skills/model-routing` C8b: the split between `code`, `ui-automation` and the Coding bot. (#881)
+
+### Changed
+
+- `antigravity-neon` is a normal pool (operator 2026-11-21): frontier r3, judgment r2, code r13, research r11 at `neon-high`, no `fallback_after`, no last-resort research rule; `codex` code rank 13 (ahead of `cursor-auto`), `zai` loses `code`, code quality band 10 -> 8; Neon and Argon notes now say 512K context and Ultra 20x, and `docs/model-routing.md` B7/B7a/H3 follow. (#881)
+- `docs/queue.md` item 65: trial Gemini 4 Hydrogen and Orchestrator after the Google pool settles. (#881)
+
+### Fixed
+
+- Model-family repair after review (adversary 2026-11-21): a family `*` matches version text only, so `-mini`, `-lite`, `-flash`, `-preview` and dated ids never win as the newest of `gpt-*-sol` or `gemini-*-neon-high`; `route_agent.py adjust` no longer refuses a Neon frontier slice (new `[dispatch].frontier_slice_models = ["gemini-*-neon"]`); `map_agent_to_provider` follows the Gemini version; an unresolved family warns on a single-slice `route` too; the state file is written under a lock; routing text names families, not pinned ids. (#881)
+- Review round 2 (adversary 2026-11-21): `skills/model-routing` E1b no longer offers an `antigravity/*` Pi switch target (Antigravity is off Pi); an unresolved family string (`gpt-*-astra`) keeps its frontier floor and adjust rule; `ade-net-resume` billing identity follows the Gemini version; G4, the `frontier_slice_models` comment and the dialogue example name families or the newest id. (#881)
+- `route_agent.py plan`/`adjust` JSON slices carry an additive `model_note` key (how a model family resolved; empty for a literal id); the old keys are unchanged. (#881)
