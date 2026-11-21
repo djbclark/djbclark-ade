@@ -59,8 +59,9 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
 3a. **Antigravity under Paseo:** its `ask_question` has no working picker here.
    getpaseo/paseo#9355 asked for one and was closed by getpaseo/paseo#10193
    (0.17.0-beta.1, which moved Paseo to `agy acp`), but #10193 shipped without
-   native question forms (its non-goals defer them to follow-up work, and no open
-   follow-up issue was found 2026-11-21). The ACP client sends
+   native question forms (its non-goals defer them to follow-up work). The open
+   tracker is getpaseo/paseo#7470 (Discussion "Support ACP form elicitation"; the
+   server-side adapter is PR getpaseo/paseo#8236). The ACP client sends
    `clientCapabilities: {}` without `createElicitation`, so `ask_question` returns
    an empty `A1: ` in about 1 s. An Antigravity session hosted under Paseo skips
    `ask_question` and goes straight to rule 4's numbered text walk until ACP
