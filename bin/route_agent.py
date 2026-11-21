@@ -2630,6 +2630,17 @@ def is_frontier_slice_model(model: str | None) -> bool:
     return is_frontier_model(model) or any(_slice_token_matches(str(t), model) for t in toks)
 
 
+def _frontier_slice_only(svc: Service, kind: str) -> bool:
+    """Is `svc` a pool that takes a `frontier` slice only as a slice model (`frontier_slice_models`: Neon, cursor-grok), not as a
+    `frontier_models` model (Astra, Fable, Argon)? Only for kind `frontier`. `route` keeps such a pool behind every frontier_models
+    pool with room, whatever the pressure, burn bonus or pace penalty says (adversary PR 899 MED-1 rounds 1 and 2, 2026-11-21: the
+    3-point pace penalty on a hot Astra pool, or the 4-point burn bonus, otherwise carried the hardest slice to an r3/r4 pool)."""
+    if kind != "frontier":
+        return False
+    model = svc.models.get("frontier", "")
+    return bool(model) and not is_frontier_model(model)
+
+
 def _slice_token_matches(tok: str, model: str | None) -> bool:
     """Does the id in `model` (its first word; the effort flag is not part of the id) BE the whole slice-model `tok`, a literal
     or a family? Unlike `_token_matches` it is anchored: `grok-*` is `grok-4.7`, not `grok-4.7-fast`, `grok-3-mini` or `cursor/grok-4`
@@ -2890,8 +2901,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         tags: list[str] = []
         # A frontier slice is not spent to burn idle quota on a pool outside `frontier_models` (Neon r3, cursor-grok r4): the
         # bonus (4.0) would lift it above the Astra/Fable tier the policy calls frontier (adversary PR 899 MED-1, 2026-11-21)
-        fmodel = svc.models.get("frontier", "") if kind == "frontier" else ""
-        burn_bonus_ok = not (fmodel and not is_frontier_model(fmodel))
+        burn_bonus_ok = not _frontier_slice_only(svc, kind)
         waste = expected_waste(remaining, info.get("pace_ratio"),
                                info.get("resets_at"), info.get("window_minutes"))
         grant = False
@@ -2945,7 +2955,9 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     position = {n: i for i, n in enumerate(order)}
     scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after),
                                kind in t[1].fallback_kinds,   # last-resort kinds sort last, whatever the score
-                               position.get(t[1].name, len(position)), t[0], t[1].name))
+                               position.get(t[1].name, len(position)),
+                               _frontier_slice_only(t[1], kind) or (kind == "frontier" and bool(t[1].fallback_after)),   # frontier: a slice-only pool (Neon, cursor-grok) or the Argon fallback sorts behind every other frontier_models pool that has room, by rank among themselves
+                               t[0], t[1].name))
     best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]
     if remaining is not None:

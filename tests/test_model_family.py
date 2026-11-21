@@ -444,7 +444,7 @@ class TestCursorGrokRoute:
 
     def test_slice_tokens_match_the_whole_model_id(self, catalog):
         """Adversary PR 899 LOW-2: `grok-*` must not make a fast or mini Grok, or a namespaced one, a frontier-slice model."""
-        for model in ("grok-4.7", "grok-4.10", "grok-5 --effort high", "grok-*"):          # the id family, the unresolved glob
+        for model in ("grok-4.7", "grok-4.10", "grok-5 --effort high", "grok-*", "GROK-4.7", "Gemini-4-Neon-High"):    # the id family, the unresolved glob, any case
             assert r.is_frontier_slice_model(model), model
         for model in ("grok-4.7-fast", "grok-3-mini", "cursor/grok-4", "xgrok-4", "grok-4-mini --effort high", "grok-bot"):
             assert not r.is_frontier_slice_model(model), model
@@ -469,8 +469,41 @@ class TestCursorGrokRoute:
         # still reachable by rank when the better frontier pools have no room
         for name in ("codex", "claude"):
             q[name] = {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}}
-        names = {r.route("frontier", quota=q).service.name}
-        assert names <= {"antigravity-neon", "cursor-grok"}, names
+        assert r.route("frontier", quota=q).service.name == "antigravity-neon"       # r3 before r4 before the Argon fallback r5
+
+    def test_a_hot_astra_pool_still_beats_a_slice_only_frontier_pool(self, catalog):
+        """Adversary PR 899 r2 MED-1: the pace penalty (3.0 on frontier) must not carry a frontier slice across the tier line to
+        Neon (r3) or cursor-grok (r4) while a `frontier_models` pool has room."""
+        catalog({"cursor": self.CURSOR, "codex": CODEX, **AGY})
+
+        def reading(pct, pace=None):
+            d = {"remaining": pct, "age_s": 0, "windows": {"weekly": pct}}
+            if pace is not None:
+                d["pace_ratio"] = pace
+            return d
+        q = {s.name: reading(0.0) for s in r.SERVICES}
+        q.update({"codex": reading(70.0, 1.6), "cursor-grok": reading(95.0)})          # claude and Neon out
+        got = r.route("frontier", quota=q)
+        assert got is not None and got.service.name == "codex", got and got.service.name
+        assert r.plan(["frontier"], quota=q)[0][1].service.name == "codex"
+        q.update({"claude": reading(70.0, 1.6), "antigravity-neon": reading(95.0)})      # Neon has room too
+        assert r.route("frontier", quota=q).service.name in {"codex", "claude"}
+        # the other way round: the slice-only pools still take frontier when no frontier_models pool has room
+        q["codex"] = q["claude"] = reading(0.0)
+        assert r.route("frontier", quota=q).service.name in {"antigravity-neon", "cursor-grok"}
+        q["antigravity-neon"] = reading(0.0)
+        assert r.route("frontier", quota=q).service.name == "cursor-grok"
+        # and the order only binds kind frontier: research keeps its ranks
+        assert r._frontier_slice_only(svc("cursor-grok"), "frontier") and not r._frontier_slice_only(svc("cursor-grok"), "research")
+        assert not r._frontier_slice_only(svc("codex"), "frontier") and not r._frontier_slice_only(svc("claude"), "frontier")
+
+    def test_a_lapsed_login_falls_back_to_the_last_resolved_grok_from_state(self, catalog):
+        """A5: an unreadable catalog or one with no match keeps the last good id from state (docs B4a said `unresolved`)."""
+        catalog({"cursor": self.CURSOR})
+        assert r.suggest_model(svc("cursor-grok"), "research", {}) == "grok-4.7"           # records it in the state file
+        catalog({"cursor": ["default", "composer-2.5"]})
+        res = r.resolve_family("cursor", "grok-*")
+        assert res.model == "grok-4.7" and res.source != "unresolved", res
 
     def test_the_static_burn_first_flag_does_not_lift_a_non_frontier_model_either(self, catalog, monkeypatch):
         catalog({"cursor": self.CURSOR, "codex": CODEX})

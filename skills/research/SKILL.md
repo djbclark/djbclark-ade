@@ -204,7 +204,7 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
    only; the `model-routing` skill is unchanged until a run has exercised
    this): **lead and reviewer are the latest xAI model**, reached through `cursor-agent`
-   (the newest `grok-*` model in `paseo provider models cursor --json`, which the router's `cursor-grok` service resolves: `route_agent.py models` prints the newest id; `plan` names grok only when `cursor-grok` wins the pick, otherwise Astra or Composer, so a research lead or reviewer takes the id from `models` and dispatches it as a Cursor slice, `docs/model-routing.md` B4a) — not the never-routed `grok`/`grok-bot` providers: never guess the
+   (the newest `grok-*` model in `paseo provider models cursor --json`, which the router's `cursor-grok` service resolves and dispatches: ask `route_agent.py plan --kinds research` (with `--exclude` for the other research pools to force it) and use the `dispatch` line it prints as is; when `cursor-grok` is not eligible (its Cursor pool is empty, the login lapsed) plan names no grok slice and the lead waits or reports, never a hand-built `paseo run` that skips the pool and wave checks; `route_agent.py models` only shows the newest id, `docs/model-routing.md` B4a) — not the never-routed `grok`/`grok-bot` providers: never guess the
    id; the standalone xAI CLI retired 2026-11-07, so there is no other route). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
    go to a Cursor slice on that model and its verdict is applied as given. **Every worker
