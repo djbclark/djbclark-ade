@@ -132,45 +132,64 @@ def _clean(s: str) -> str:
     return "".join(ch for ch in s if ch.isprintable())
 
 
-def _read_bounded(path: str, tail: bool) -> bytes:
-    """At most TAIL_BYTES of a regular file, the last ones when `tail` (a cut that lands inside a line drops that partial
-    line), else the first ones; b"" for anything else or on any OS error. The file is opened without blocking and checked
-    with `fstat` on the descriptor, so a FIFO swapped in after a path check cannot hang the census, and the read is capped
-    even when the file grows meanwhile."""
+def _read_bounded(path: str, tail: bool) -> tuple[bytes, str]:
+    """(data, problem): at most TAIL_BYTES of a regular file, the last ones when `tail` (a cut that lands inside a line
+    drops that partial line), else the first ones. `problem` is "" when the whole file was read (or, in tail mode, when only
+    the old part was cut), "missing", "not a regular file", "over 1 MiB" (head mode: data is the first MiB) or "unreadable".
+    The file is opened without blocking and without becoming a controlling terminal, and checked with `fstat` on the
+    descriptor, so a FIFO swapped in after a path check cannot hang the census; the read is capped even when the file
+    grows meanwhile."""
     try:
-        fd = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
+        fd = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except FileNotFoundError:
+        return b"", "missing"
     except OSError:
-        return b""
+        return b"", "unreadable"
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return b""
+            return b"", "not a regular file"
         with os.fdopen(fd, "rb", closefd=False) as f:
-            start = max(0, f.seek(0, os.SEEK_END) - TAIL_BYTES) if tail else 0
+            size = f.seek(0, os.SEEK_END)
+            start = max(0, size - TAIL_BYTES) if tail else 0
             _ = f.seek(max(0, start - 1))  # one byte before the cut tells whether it landed on a line start
             raw = f.read(TAIL_BYTES + (1 if start else 0))
     except OSError:
-        return b""
+        return b"", "unreadable"
     finally:
         os.close(fd)
     if not start:
-        return raw
-    if raw[:1] == b"\n":
-        return raw[1:]
+        return raw, ("over 1 MiB" if not tail and size > TAIL_BYTES else "")
+    # a cut on a line start leaves a newline first, which `find` below drops with nothing else
     cut = raw.find(b"\n")
-    return raw[cut + 1:] if cut >= 0 else b""
+    return (raw[cut + 1:] if cut >= 0 else b""), ""
 
 
 def guard_switch(settings_path: str) -> dict[str, Any]:
     """Where `ADE_LSP_ROOT_GUARD` is set: the `env` of Claude's settings.json and this process's environment (key and value of
-    this one variable only; None when unset or unreadable; read like the log, regular file only and capped)."""
+    this one variable only; None when unset or unreadable). The settings file is read like the log (regular file only,
+    capped) and `settings_status` says what happened: "read", "missing" (no file, so nothing set there) or "unreadable: WHY"
+    (present but not checked: a reader that could not look must never report "not off")."""
     value: Any = None
-    try:
-        data = json.loads(_read_bounded(settings_path, tail=False).decode("utf-8", errors="replace"))
-        env = data.get("env") if isinstance(data, dict) else None
-        value = env.get(SWITCH) if isinstance(env, dict) else None
-    except (ValueError, RecursionError):  # also an empty or truncated read
-        pass
-    return {"settings": value if isinstance(value, str) else None, "env": os.environ.get(SWITCH)}
+    status = "read"
+    raw, problem = _read_bounded(settings_path, tail=False)
+    if problem == "missing":
+        status = "missing"
+    elif problem:
+        status = f"unreadable: {problem}"
+    else:
+        try:
+            data = json.loads(raw.decode("utf-8", errors="replace"))
+        except RecursionError:
+            status = "unreadable: nested too deeply"
+        except ValueError:  # also a number of thousands of digits and an empty file
+            status = "unreadable: not valid JSON or too large to parse"
+        else:
+            if isinstance(data, dict):
+                env = data.get("env")
+                value = env.get(SWITCH) if isinstance(env, dict) else None
+            else:
+                status = "unreadable: not a JSON object"
+    return {"settings": value if isinstance(value, str) else None, "settings_status": status, "env": os.environ.get(SWITCH)}
 
 
 def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str, Any]:
@@ -183,7 +202,7 @@ def unguarded_log(path: str, days: int, now: datetime | None = None) -> dict[str
         cutoff = datetime.min.replace(tzinfo=timezone.utc)
     by_server: dict[str, int] = {}
     newest = ""
-    for line in _read_bounded(path, tail=True).decode("utf-8", errors="replace").splitlines():
+    for line in _read_bounded(path, tail=True)[0].decode("utf-8", errors="replace").splitlines():
         m = UNGUARDED_LINE.match(line)
         if m is None:
             continue
@@ -243,6 +262,11 @@ def main(argv: list[str]) -> int:
         if where:
             print(f"{SWITCH}=off is set in {' and '.join(where)}: the guard is skipped at every LSP start and nothing is logged "
                   f"(deliberate; unset it and restart sessions to restore the RAM relief)")
+            if sw["settings_status"].startswith("unreadable"):
+                print(f"    settings.json {sw['settings_status']}, so it was not checked")
+        elif sw["settings_status"].startswith("unreadable"):
+            print(f"{SWITCH}: settings.json {sw['settings_status']}, so it was NOT checked; this process's environment: not off "
+                  f"(other settings layers and running sessions are not checked either)")
         else:
             print(f"{SWITCH}: not off in settings.json env or this process's environment "
                   f"(other settings layers and running sessions are not checked)")
