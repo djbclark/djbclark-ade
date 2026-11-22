@@ -1,0 +1,17 @@
+#!/usr/bin/env -S python3 -I
+"""ade-approval-window: answer agent tool-permission prompts while the sudo-ask approval window is open.
+
+  ade-approval-window status [--json]
+  ade-approval-window respond --once [--daemon-url URL] [--log FILE]
+  ade-approval-window watch [--interval S] [--duration S] [--daemon-url URL] [--log FILE]
+
+Design, the policy and the threat notes: docs/approval-window.md. The logic is bin/ade_approval_window.py.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import ade_approval_window  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(ade_approval_window.main(sys.argv[1:]))
