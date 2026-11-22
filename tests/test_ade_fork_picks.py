@@ -120,7 +120,6 @@ def test_shipped_registry_is_valid():
     elic = by_id["plugin-acp-elicitation-forms"]
     assert elic["hold"] and elic["trial_required"] and elic["local_path"].startswith("/") and "repo" not in elic
     assert by_id["paseo-bump-wrangler-sharp-0-35"]["status"] == "dropped"
-    # r3 LOW-1: the Pi 6643 entry is its single commit, not the 14-commit stack branch
     # 2026-11-22: every Pi entry is the whole stack branch at one pinned head
     for pid in ("paseo-pi-permission-selected-action", "paseo-pi-ask-user-question-scope"):
         assert by_id[pid]["branch"] == "trial/pi-8326-6643-on-fork2"
@@ -568,18 +567,58 @@ def test_apply_reports_already_present_for_patch_equivalent_commit(world, tmp_pa
 def test_exclude_names_skipped_commits_and_unused_ids(world, tmp_path, capsys):
     """A branch entry's `exclude` drops named commits, names them in both outputs, reports unmatched ids."""
     wt = world["wt"]
+    base = sh(wt, "rev-parse", "HEAD")                # in the source's history, not a candidate: known but not needed
     path = registry(tmp_path, pick("ex", branch="feat",
-                                   extra=f'exclude = ["{world["f1"]}", "{world["conf"]}"]'))
+                                   extra=f'exclude = ["{world["f1"]}", "{base}"]'))
     code, report = apply_json(path, wt, capsys)
     row = report["applied"][0]
     assert code == 0 and row["commits"] == [world["f2"]]
     assert row["excluded_by_entry"] == [{"commit": world["f1"], "subject": "feat one"}]
-    assert row["exclude_unused"] == [world["conf"]]
+    assert row["exclude_unused"] == [base]
     assert (wt / "f2.txt").exists() and not (wt / "f1.txt").exists()
     assert run_main(path, "apply", "--dry-run", "--target", "desktop-build-2", "--workspace", str(wt)) == 0
     out = capsys.readouterr().out
     assert f"EXCLUDED by entry {world['f1'][:9]} (feat one)" in out
-    assert f"exclude matched nothing: {world['conf'][:9]}" in out
+    assert f"exclude not needed (already present or excluded upstream): {base[:9]}" in out
+
+
+def test_both_exclude_ids_are_honoured(world, tmp_path, capsys):
+    """PR 946 review LOW-3: the second id of a list is dropped too (a mutant honouring only the first survived)."""
+    path = registry(tmp_path, pick("ex", branch="feat", extra=f'exclude = ["{world["f1"]}", "{world["f2"]}"]'))
+    code, report = apply_json(path, world["wt"], capsys)
+    row = report["applied"][0]
+    assert code == 0 and row["commits"] == [] and {x["commit"] for x in row["excluded_by_entry"]} == {world["f1"], world["f2"]}
+    assert row["exclude_unused"] == []
+
+
+@pytest.mark.parametrize("bad", ["f1-typo", "other-branch"])
+def test_unknown_exclude_stops_before_any_pick_even_on_dry_run(world, tmp_path, capsys, bad):
+    """PR 946 review LOW-2: an exclude id outside the source's history (a typo, or another branch's commit) would
+    otherwise apply the commit it was meant to drop; the run stops before the first pick."""
+    wt = world["wt"]
+    unknown = world["f1"][:-1] + ("0" if world["f1"][-1] != "0" else "1") if bad == "f1-typo" else world["conf"]
+    path = registry(tmp_path, pick("one", commit=world["single"], order=1),
+                    pick("ex", branch="feat", order=2, extra=f'exclude = ["{unknown}"]'))
+    start = sh(wt, "rev-parse", "HEAD")
+    for extra in ((), ("--dry-run",)):
+        code, report = apply_json(path, wt, capsys, *extra)
+        assert code == 3 and report["conflict"]["reason"] == "exclude-unknown"
+        assert report["conflict"]["unknown_excludes"] == [unknown] and report["applied"] == []
+        assert sh(wt, "rev-parse", "HEAD") == start and not (wt / "s.txt").exists()
+    assert run_main(path, "apply", "--target", "desktop-build-2", "--workspace", str(wt)) == 3
+    assert f"not in the source's history: {unknown}" in capsys.readouterr().out
+
+
+def test_exclude_with_trailing_newline_is_refused(tmp_path):
+    """PR 946 review LOW-4: `$` accepted '<sha>\\n', which can never match a commit."""
+    for text in (GOOD_SHA + "\\n", GOOD_SHA):
+        entry = pick("e", branch="feat", extra=f'exclude = ["{text}"]')
+        if text.endswith("\\n"):
+            with pytest.raises(fp.RegistryError, match="40-hex"):
+                fp.load_registry(registry(tmp_path, entry), FORKS)
+        else:
+            fp.load_registry(registry(tmp_path, entry), FORKS)
+    assert not fp.COMMIT_RE.match(GOOD_SHA + "\n")
 
 
 @pytest.mark.parametrize("extra, kwargs, needle", [
@@ -621,6 +660,38 @@ def test_trailer_must_name_the_exact_sha(world, tmp_path, capsys):
     path = registry(tmp_path, pick("br", branch="feat"))
     code, report = apply_json(path, wt, capsys)
     assert code == 3 and report["conflict"]["commit"] == world["f1"]
+
+
+@pytest.mark.parametrize("message", [
+    "feat one\n\n(cherry picked from commit {f1}) trailing words",          # not the whole line
+    "feat one\n\n  (cherry picked from commit {f1}x)",                       # not anchored
+    "feat one\n\n(cherry picked from commit {short})",                       # a prefix names nothing
+    "feat one\n\n(cherry picked from commit {upper})",                       # uppercase hex
+    "feat one\n\n(cherry picked from commit {f1})\n\nmore prose after it",   # mid-message, not the final paragraph
+])
+def test_only_a_whole_exact_trailer_line_in_the_final_paragraph_counts(world, tmp_path, capsys, message):
+    """PR 946 review LOW-1 and LOW-3: a copied or mid-message line, a prefix, upper case or an unanchored line is no trailer."""
+    wt = world["wt"]
+    sh(wt, "fetch", "-q", str(world["fork"]), "feat")
+    f1 = world["f1"]
+    commit_file(wt, "f1.txt", "different\n", message.format(f1=f1, short=f1[:12], upper=f1.upper()))
+    code, report = apply_json(registry(tmp_path, pick("br", branch="feat")), wt, capsys)
+    assert code == 3 and report["conflict"]["commit"] == f1
+
+
+def test_a_trailer_line_copied_from_a_picked_body_does_not_suppress_another_entry(world, tmp_path, capsys):
+    """PR 946 review LOW-1 (P6): the line sits mid-message in a pick's body; `-x` appends the real trailer last."""
+    wt = world["wt"]
+    sh(wt, "fetch", "-q", str(world["fork"]), "feat")
+    f1 = world["f1"]
+    sh(world["fork"], "checkout", "-q", "-b", "evil", "main")
+    evil = commit_file(world["fork"], "evil.txt", "e\n", f"evil\n\n(cherry picked from commit {f1})\n\nbody after the copied line")
+    path = registry(tmp_path, pick("evil", commit=evil, order=1), pick("br", branch="feat", order=2))
+    code, report = apply_json(path, wt, capsys)
+    assert code == 0 and report["applied"][1]["commits"] == [f1, world["f2"]]
+    assert report["applied"][1]["already_present_by_trailer"] == []
+    assert (wt / "f1.txt").exists()
+
 
 
 def test_apply_already_present_when_commit_is_ancestor(world, tmp_path, capsys):

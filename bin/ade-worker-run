@@ -747,7 +747,7 @@ _DELIVERABLE = r"(?:full\s+)?(?:report(?:\s+file)?|deliverable)"
 BRIEF_REPORT_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
     _LIST + r"report\b(?:[ \t]+(?:path|file)\b)?[*_`]*[ \t]*(?:is\b[ \t]*|[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*)[`'\"]?" + _PATH,
     r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n(?:[ \t]*\n)?" + _P,
-    r"\b(?:write|save)\s+(?:your|the|a|its)\s+" + _DELIVERABLE + r"\s+(?:to|at|as)[ \t]*:?[ \t]*(?:\n[ \t]*){0,2}[`'\"]?" + _PATH,
+    r"\b(?:write|save)\s+(?:your|the|a|its)\s+" + _DELIVERABLE + r"\s+(?:to|at|as)[ \t]*:?[ \t]*(?:\r?\n[ \t]*){0,2}[`'\"]?" + _PATH,
     r"\{report\}\s*[=:]" + _P)]
 BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (  # no bare `Done:`: it is a status-line word
     _LIST + r"done[ \t]+(?:marker|file|path)\b[*_`]*[ \t]*[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*[`'\"]?" + _PATH,

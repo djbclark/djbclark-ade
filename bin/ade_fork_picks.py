@@ -34,7 +34,7 @@ NETWORK_TIMEOUT = 600
 LOCAL_TIMEOUT = 120
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}\Z")  # \Z: `$` also accepts a trailing newline, which never matches a commit
 OWNER_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9._-]+)$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 TARGET_RE = re.compile(r"^[a-z][a-z0-9]*-build-[1-9][0-9]*$")
@@ -348,7 +348,15 @@ def trailer_sources(wt: Path, tip: str) -> set[str]:
     stay recognisable after a rebase changed their context and so their patch-id."""
     log = git_ok(wt, "log", "--format=%B%x00", "--fixed-strings", "--grep=(cherry picked from commit ",
                  "HEAD", "--not", tip)
-    return set(TRAILER_RE.findall(log))
+    found: set[str] = set()
+    for message in log.split("\x00"):
+        # only the LAST such line of the message's final paragraph counts: `cherry-pick -x` always appends its own
+        # line there, so a line copied from a picked commit's body (mid-message) names nothing
+        paragraphs = re.split(r"\n[ \t]*\n", message.strip())
+        names = TRAILER_RE.findall(paragraphs[-1]) if paragraphs and paragraphs[-1] else []
+        if names:
+            found.add(names[-1])
+    return found
 
 
 def plan_commits(wt: Path, entry: dict[str, Any], tip: str, upstream_tip: str | None = None) -> dict[str, Any]:
@@ -454,6 +462,12 @@ def do_apply(registry: Path, forks: Path, target: str, wt: Path, dry_run: bool,
         if "commit" not in entry and entry["component"] not in upstream_tips:
             upstream_tips[entry["component"]] = fetch_upstream_tip(wt, upstream_urls[entry["component"]])
         tips.append((entry, tip))
+    for entry, tip in tips:  # an exclude id outside its source's history is a typo: refuse before any pick (dry run too)
+        unknown = [x for x in entry.get("exclude", [])
+                   if git(wt, "merge-base", "--is-ancestor", x, tip).returncode != 0]
+        if unknown:
+            report["conflict"] = {"id": entry["id"], "reason": "exclude-unknown", "files": [], "unknown_excludes": unknown}
+            return EXIT_STOPPED, report
     for entry, tip in tips:
         upstream_tip = None if "commit" in entry else upstream_tips[entry["component"]]
         plan = plan_commits(wt, entry, tip, upstream_tip)
@@ -752,15 +766,18 @@ def main(argv: list[str] | None = None) -> int:
                         " newer upstream)" if r["excluded_upstream_commits"] else "")
                      + (" (LARGE plan: check this source's base)" if len(r["commits"]) > LARGE_PLAN else "")
                      + "".join(f"; EXCLUDED by entry {x['commit'][:9]} ({x['subject']})" for x in r["excluded_by_entry"])
-                     + (f"; exclude matched nothing: {', '.join(c[:9] for c in r['exclude_unused'])}"
-                        if r["exclude_unused"] else "")
+                     + (f"; exclude not needed (already present or excluded upstream): "
+                        f"{', '.join(c[:9] for c in r['exclude_unused'])}" if r["exclude_unused"] else "")
                      for r in report["applied"]]
             lines += [f"skipped {s['id']} ({s['why']}{': ' + s['hold'] if s.get('hold') else ''})"
                       for s in report["skipped"]]
             if report["conflict"]:
                 c = report["conflict"]
                 lines.append(f"STOPPED {c['reason']} in {c['id']}: "
-                             + (", ".join(c["files"]) or (f"git said (untrusted): {c['git_message_untrusted']}" if c.get("git_message_untrusted") else "") or f"head is {c.get('actual_head')}"))
+                             + (("not in the source's history: " + ", ".join(c["unknown_excludes"])
+                                 + " (fix the entry's exclude list; nothing was applied)") if c.get("unknown_excludes") else "")
+                             + ("" if c.get("unknown_excludes") else
+                                ", ".join(c["files"]) or (f"git said (untrusted): {c['git_message_untrusted']}" if c.get("git_message_untrusted") else "") or f"head is {c.get('actual_head')}"))
             lines.append(f"HEAD {report['head']}")
             emit(report, args.json, "\n".join(lines))
             return code

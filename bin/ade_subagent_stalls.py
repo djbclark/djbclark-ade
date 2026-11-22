@@ -93,6 +93,8 @@ class Config:
     baseline: bool = False
     max_pings: int = 5
     max_notices: int = 2                     # per stall and per action: the first announcement and one repeat, then silence
+    redirect_probe: Any = None               # (cfg, parent, warnings) -> redirect target | None; default `handed_off_to` (tests inject)
+    max_inspects: int = 40                 # `paseo agent inspect` / guard probes per run; none after the first timeout
 
 
 def make_config(home: Path, **over: Any) -> Config:
@@ -201,36 +203,74 @@ def description_of(t: Transcript) -> str | None:
     return desc if isinstance(desc, str) else None
 
 
-def own_reports(text: str) -> tuple[set[str], set[str]]:
-    """(the report paths the prompt labels as its own, every `*-report.md` path it names). Labelled: the footer's delivery line and
-    `Report path:` / `Report:` labels."""
-    return set(FOOTER_DELIVERY.findall(text)) | set(REPORT_LABEL.findall(text)), set(ANY_REPORT_PATH.findall(text))
+BRIEF_PATH = re.compile(_LEFT + r"(/[\w.@~+/-]+-brief\.md)" + _END)
+MAX_BRIEF_BYTES = 64 * 1024
+MAX_BRIEFS = 3
 
 
-def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str | None]) -> list[tuple[Transcript, str]]:
-    """Every transcript the stub links to, as (transcript, how). Empty = unlinked."""
+def with_brief_text(text: str, reports_dir: Path | None) -> str:
+    """The prompt plus the text of the `*-brief.md` files it names under `reports_dir` (PR 938 round 2, LOW-3): a prompt "Your brief
+    is the file X-brief.md" carries the real `Report path:` label in that file, while its own footer names another path, so without
+    the brief the stub the worker writes is `unlinked` and its death is never announced. Bounded, regular files only."""
+    if reports_dir is None:
+        return text
+    try:
+        root = reports_dir.resolve()
+    except OSError:
+        return text
+    extra = []
+    for name in list(dict.fromkeys(BRIEF_PATH.findall(text)))[:MAX_BRIEFS]:
+        try:
+            p = Path(name).resolve()
+            if root not in p.parents or not p.is_file():
+                continue
+            with open(p, "rb") as f:
+                extra.append(f.read(MAX_BRIEF_BYTES).decode("utf-8", "replace"))
+        except OSError:
+            continue
+    return text + "\n" + "\n".join(extra) if extra else text
+
+
+def own_reports(text: str) -> tuple[set[str], set[str], set[str]]:
+    """(the footer's delivery-line paths, the `Report path:` / `Report:` label paths, every `*-report.md` path the prompt names)."""
+    return set(FOOTER_DELIVERY.findall(text)), set(REPORT_LABEL.findall(text)), set(ANY_REPORT_PATH.findall(text))
+
+
+# link strength, highest first: the footer's delivery line (always the launch's own), a label, a bare mention, the description slug
+_LINK_RANK = {"footer": 3, "label": 2, "path-mention": 1, "session+description": 0}
+
+
+def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str | None],
+              reports_dir: Path | None = None) -> list[tuple[Transcript, str]]:
+    """Every transcript the stub links to, as (transcript, how). Empty = unlinked. Only the strongest kind of link present is
+    kept (PR 938 LOW-2, round 2): a reviewer whose list line `Report: <the writer's report>` is context must not hide the dead
+    writer when it finishes. A relaunch gets the same footer path, so every footer-linked transcript still counts."""
     found = []
     for t in transcripts:
         if t.mtime < stub.mtime - LINK_MTIME_SLACK_S:
             continue
         if t.path not in prompts:
-            prompts[t.path] = prompt_text(t)
+            raw = prompt_text(t)
+            prompts[t.path] = None if raw is None else with_brief_text(raw, reports_dir)
         text = prompts[t.path]
         if text is None:
             continue
-        labelled, named = own_reports(text)
-        if stub.path in labelled:
-            found.append((t, "path"))
-        elif not labelled and named == {stub.path}:
+        footer, labels, named = own_reports(text)
+        if stub.path in footer:
+            found.append((t, "footer"))
+        elif stub.path in labels:
+            found.append((t, "label"))
+        elif not (footer | labels) and named == {stub.path}:
             found.append((t, "path-mention"))          # a prompt whose only report path is this one, with no label
         elif not named and t.session == stub.session:
             desc = description_of(t)
             if desc is not None and slug(desc) + "-report.md" == stub.name:
                 found.append((t, "session+description"))
-    if any(how == "path" for _, how in found):
+    if found:
         # An agent that merely read the stub's path (a footerless prompt "read X-report.md") must not mask the writer's death
-        # when it finishes: once a transcript names the stub as its own, links made by the bare mention are dropped (PR 938 LOW-2).
-        found = [(t, how) for t, how in found if how != "path-mention"]
+        # when it finishes: weaker links are dropped once a stronger one exists (PR 938 LOW-2, both rounds).
+        best = max(_LINK_RANK[how] for _, how in found)
+        found = [(t, "path" if how in ("footer", "label") else how) for t, how in found if _LINK_RANK[how] == best]
     return found
 
 
@@ -420,7 +460,7 @@ def scan(cfg: Config) -> ScanResult:
     transcripts = index_transcripts(cfg, min(s.mtime for s in stubs) - LINK_MTIME_SLACK_S)
     prompts: dict[Path, str | None] = {}
     for stub in stubs:
-        links = link_stub(stub, transcripts, prompts)
+        links = link_stub(stub, transcripts, prompts, cfg.reports_dir)
         if not links:
             res.unlinked.append(stub.path)
             continue
@@ -488,19 +528,54 @@ def _run_env(argv: list[str], env: dict[str, str] | None, warnings: list[str]) -
         return None
 
 
-def ping_text(cfg: Config, s: Stall) -> str:
+def ping_text(cfg: Config, s: Stall, handed_off_to: str | None = None) -> str:
     parent = s.parent_paseo_agent_id or s.parent_session
-    return (f"{cfg.repo}: stalled sub-agent {s.agent_id} (report {s.report}), idle {s.idle_min:.0f} min; parent {parent}")
+    note = (f"; parent was handed off to {handed_off_to} (resuming needs the predecessor's session, so no message was sent)"
+            if handed_off_to else "")
+    return f"{cfg.repo}: stalled sub-agent {s.agent_id} (report {s.report}), idle {s.idle_min:.0f} min; parent {parent}{note}"
 
 
-def parent_idle(cfg: Config, paseo_id: str, warnings: list[str]) -> bool:
+SENDER_OVERRIDE_ENV = ("PASEO_AGENT_ID", "ADE_ALLOW_ARCHIVED_SEND", "ADE_ALLOW_REPLACED_SEND")
+
+
+def _scrubbed_env() -> dict[str, str]:
+    """The environment without the sender identity and the operator's send overrides: neither the launcher exemption nor an
+    exported override may apply to this automated send."""
+    return {k: v for k, v in os.environ.items() if k not in SENDER_OVERRIDE_ENV}
+
+
+def handed_off_to(cfg: Config, parent: str, warnings: list[str]) -> str | None:
+    """The agent the send guard would redirect a send to `parent` to (a completed or acknowledged self-handoff), decided here before
+    anything is sent: the shim redirects without checking the successor is idle, which would interrupt the new lead's turn and name
+    the wrong recipient in the log (PR 938 round 2, LOW-1). A refusal also returns the parent itself: nothing is sent."""
+    if cfg.paseo is None:
+        return None
+    try:
+        import ade_send_guard as guard_mod
+        d = guard_mod.guard(parent, paseo=str(cfg.paseo), env=_scrubbed_env())
+    except Exception as exc:  # noqa: BLE001 - the shim stays as the backstop
+        warnings.append(f"send guard precheck failed for {parent}: {exc}")
+        return None
+    if d.action == guard_mod.REDIRECT:
+        return d.target
+    if d.action == guard_mod.REFUSE:
+        return parent
+    return None
+
+
+def parent_idle(cfg: Config, paseo_id: str, warnings: list[str], run_state: dict | None = None) -> bool:
     """True only when `paseo agent inspect` says the parent exists, is not archived and is idle: a send to a busy agent would interrupt
-    its turn, and one to an archived agent would un-archive it."""
+    its turn, and one to an archived agent would un-archive it. A timeout or a failure to run sets `run_state["down"]` so the rest of
+    the run stops inspecting (PR 938 round 2, LOW-5)."""
     if cfg.paseo is None:
         warnings.append("no paseo path configured: parent not messaged")
         return False
     proc = _run([str(cfg.paseo), "agent", "inspect", "--json", "--", paseo_id], warnings)
-    if proc is None or proc.returncode != 0:
+    if proc is None:
+        if run_state is not None:
+            run_state["down"] = True
+        return False
+    if proc.returncode != 0:
         return False
     try:
         info = json.loads(proc.stdout)
@@ -526,7 +601,8 @@ def _send_argv_env(cfg: Config, parent: str, text: str) -> tuple[list[str], dict
     """The send goes through the ADE guard shim when one is configured (it redirects a handed-off parent to its successor and refuses
     an archived one, docs/archived-send-guard.md); the shim finds the real paseo through ADE_REAL_PASEO, never through PATH."""
     if cfg.paseo_guard is not None:
-        env = {**os.environ, "PATH": SHIM_PATH}
+        # an automated send never carries the caller's operator overrides or launcher identity (PR 938 round 2, LOW-1)
+        env = {**_scrubbed_env(), "PATH": SHIM_PATH}
         if cfg.paseo is not None:
             env["ADE_REAL_PASEO"] = str(cfg.paseo)
         return [str(cfg.paseo_guard), "send", "--json", "--no-wait", "--", parent, text], env
@@ -552,6 +628,25 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
         before = json.dumps(data, sort_keys=True)
         live_keys = {stall_key(s) for s in stalls}
         pings = 0
+        run_state: dict = {"down": False, "inspects": 0}
+        decisions: dict[str, str | None] = {}
+
+        def may_inspect() -> bool:
+            return not run_state["down"] and run_state["inspects"] < cfg.max_inspects
+
+        def decision(parent: str) -> str | None:
+            """Where the guard would redirect a send to `parent` (the parent itself: refused), or None; once per run and parent."""
+            if parent not in decisions:
+                if cfg.paseo_guard is None or cfg.dry_run or not may_inspect():
+                    return None
+                run_state["inspects"] += 1
+                decisions[parent] = (cfg.redirect_probe or handed_off_to)(cfg, parent, events)
+            return decisions[parent]
+
+        def check_idle(parent: str) -> bool:
+            run_state["inspects"] += 1
+            return parent_idle(cfg, parent, events, run_state)
+
         by_parent: dict[str, list[tuple[Stall, dict]]] = {}
         for s in stalls:
             entry = seen.setdefault(stall_key(s), {"first_seen": cfg.now, "report": s.report, "agent_id": s.agent_id})
@@ -568,7 +663,10 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                 elif cfg.hermes_ping is None:
                     events.append("no hermes-ping path configured: not pinged")
                 else:
-                    proc = _run([str(cfg.hermes_ping), ping_text(cfg, s)], events)
+                    redirected = decision(s.parent_paseo_agent_id) if s.parent_paseo_agent_id and s.parent_live else None
+                    if redirected == s.parent_paseo_agent_id:
+                        redirected = None                   # a refusal is no handoff: the send stage reports it
+                    proc = _run([str(cfg.hermes_ping), ping_text(cfg, s, redirected)], events)
                     pings += 1
                     if proc is not None and proc.returncode == 0:
                         _record(entry, "hermes_ping", cfg.now)
@@ -584,7 +682,17 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                 events.append(f"dry-run: would paseo send {parent} if idle ({len(items)} sub-agent(s))")
             elif sends >= cfg.max_pings:
                 events.append(f"send cap ({cfg.max_pings} per run): parent {parent} waits for the next run")
-            elif parent_idle(cfg, parent, events):
+            elif not may_inspect():
+                events.append(f"inspect cap or paseo unreachable ({run_state['inspects']} of {cfg.max_inspects} used): "
+                              f"parent {parent} waits for the next run")
+            elif check_idle(parent):
+                moved = decision(parent)
+                if moved:
+                    verdict = "refused by the send guard" if moved == parent else f"handed off to {moved}"
+                    events.append(f"parent {parent} {verdict}: no message sent (a resume needs the predecessor's own session)")
+                    for _, entry in group:
+                        _record(entry, "paseo_send", cfg.now)       # decided, not retried every run
+                    continue
                 argv, env = _send_argv_env(cfg, parent, resume_text_many(items))
                 sends += 1
                 proc = _run_env(argv, env, events)
@@ -652,6 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--baseline", action="store_true",
                     help="with --notify: record every stall found now as known, announce nothing (switching the watcher on; they are never pinged)")
     ap.add_argument("--max-pings", type=int, default=5, help="at most this many hermes pings, and this many parent sends, per run (default 5), repeats included; the rest wait for the next run")
+    ap.add_argument("--max-inspects", type=int, default=40,
+                    help="at most this many `paseo agent inspect` and send-guard probes per run (default 40); none after the first timeout")
     ap.add_argument("--now", type=float, help=argparse.SUPPRESS)
     return ap
 
@@ -660,7 +770,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
     home = args.home if args.home is not None else Path.home()
     over: dict[str, Any] = {"stale_min": args.stale_min, "max_age_h": args.max_age_h, "tool_grace_min": args.tool_grace_min,
                             "repeat_h": args.repeat_h, "dry_run": args.dry_run, "baseline": args.baseline,
-                            "max_pings": args.max_pings, "max_notices": args.max_notices}
+                            "max_pings": args.max_pings, "max_notices": args.max_notices,
+                            "max_inspects": args.max_inspects}
     for opt, key in (("reports_dir", "reports_dir"), ("projects_dir", "projects_dir"), ("paseo_agents_dir", "paseo_agents_dir"),
                      ("state_dir", "state_dir")):
         if getattr(args, opt) is not None:
@@ -682,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = config_from_args(args)
         if cfg.max_notices < 1:
             raise StallError("--max-notices must be at least 1")
-        for opt in ("stale_min", "max_age_h", "tool_grace_min", "repeat_h", "max_pings"):
+        for opt in ("stale_min", "max_age_h", "tool_grace_min", "repeat_h", "max_pings", "max_inspects"):
             if getattr(cfg, opt) < 0:
                 raise StallError(f"--{opt.replace('_', '-')} must not be negative")
         for tool in (cfg.hermes_ping, cfg.paseo, cfg.paseo_guard):

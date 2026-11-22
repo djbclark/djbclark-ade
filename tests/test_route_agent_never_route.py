@@ -8,6 +8,7 @@ did not reach `route`/`plan` either (only `bin/pi-default`).
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import dataclasses
 import io
@@ -403,3 +404,33 @@ def test_estimate_floors_read_the_override_repo(accept, tmp_path, monkeypatch):
     with mock.patch.object(r, "repo_floors", wraps=r.repo_floors) as floors:
         plan_cli("plan", "--kinds", "frontier", "--json", "--cwd", str(tendcf), "--repo", "nix2cf", quota=OPEN)
     assert {c.args[0] for c in floors.call_args_list} == {"nix2cf"}
+
+
+# -- PR 947 review LOWs (2026-11-22) ---------------------------------------------------------------------------------------
+
+def test_empty_cwd_is_not_the_planner_cwd_and_a_bad_cwd_is_named(accept, tmp_path, monkeypatch, capsys):
+    te = make_repo(tmp_path, "te", "https://example.test/frdminc/techno-euphora.git")
+    monkeypatch.chdir(te)                                  # the planner runs inside the scoped repo
+    monkeypatch.setattr(r, "_WARNED_CWDS", set())
+    assert r.repo_of("") is None and r.repo_of("  ") is None
+    assert r.scope_repo_of(argparse.Namespace(cwd=None)) == "techno-euphora"
+    assert capsys.readouterr().err == ""
+    missing = str(tmp_path / "missing")
+    for bad in ("", missing):
+        ns = argparse.Namespace(cwd=bad, repo=None)
+        assert r.scope_repo_of(ns) is None                 # fail closed, not "the planner's repo"
+        assert r.override_repo_of(ns) is None
+    err = capsys.readouterr().err
+    assert "--cwd '' is empty" in err and missing in err
+    assert err.count("repo scope fails closed") == 2
+    r.scope_repo_of(argparse.Namespace(cwd="", repo=None))
+    assert capsys.readouterr().err == ""                   # warned once per value
+    assert plan_cli("plan", "--kinds", "bulk", "--json", "--cwd", "", quota=drained(clinepass=100.0))[0]["service"] is None
+
+
+def test_route_keeps_no_local_named_like_the_module_function():
+    import ast
+    tree = ast.parse(Path(r.__file__).read_text())
+    route = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "route")
+    assigned = {n.id for n in ast.walk(route) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    assert "barred_notes" not in assigned and "barred_list" in assigned

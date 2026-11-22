@@ -2844,13 +2844,14 @@ def kind_rows(svc: Service, kind: str, info: dict[str, Any] | None = None) -> li
 
 
 _REPO_MEMO: dict[str, str | None] = {}
+_WARNED_CWDS: set[str] = set()
 
 
 def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
     """Repository name of a working directory, lower case: the `origin` remote's last path part (a worktree such as
     ~/src/tendcf-foo-wt has the remote of its repository), else the basename of the git common dir's parent, else None."""
-    if directory is None:
-        return None
+    if directory is None or not str(directory).strip():
+        return None          # an empty string is not "here": Path('') resolves to the planner's cwd
     key = str(Path(directory).expanduser().resolve())
     if key in _REPO_MEMO:
         return _REPO_MEMO[key]
@@ -2880,7 +2881,15 @@ def scope_repo_of(args: argparse.Namespace) -> str | None:
     """The repository the slice works in for `candidate_block` (never_route, repo scope): the repo of --cwd when given, else of
     the planner's own cwd. `--repo` and slice names are not read: a pool restricted to a repository is judged by where
     the worker runs. None (fail closed) when that directory is no git repository or is gone."""
-    return repo_of(getattr(args, "cwd", None) or os.getcwd())
+    cwd = getattr(args, "cwd", None)
+    if cwd is None:
+        return repo_of(os.getcwd())
+    name = repo_of(cwd)          # an explicit but empty --cwd is None (fail closed), never the planner's cwd
+    if name is None and str(cwd) not in _WARNED_CWDS:
+        _WARNED_CWDS.add(str(cwd))
+        print(f"route_agent: --cwd {str(cwd)!r} is empty, gone or no git repository: repo scope fails closed and "
+              f"[dispatch.repo_overrides] do not apply", file=sys.stderr)
+    return name
 
 
 def override_repo_of(args: argparse.Namespace) -> str | None:
@@ -3018,13 +3027,13 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     skipped: list[str] = []
-    barred_notes: list[str] = []           # barred pools are named in Choice.barred and never re-open the unprofiled retry below
+    barred_list: list[str] = []            # barred pools are named in Choice.barred and never re-open the unprofiled retry below
     profiled = False                       # some pool that can take `kind` has a model profile (headroom aside)
     for svc in services:
         if not svc.eligible(kind, quota):
             continue
         if svc.name in barred:
-            barred_notes.append(barred[svc.name])   # never_route, repo scope or Pi acceptance: no candidate, does not make the kind "profiled"
+            barred_list.append(barred[svc.name])   # never_route, repo scope or Pi acceptance: no candidate, does not make the kind "profiled"
             continue
         has_profile = bool(svc.models.get(kind))
         profiled = profiled or has_profile     # counted before exclude/avoid: a full, held or disabled profiled pool still queues
@@ -3139,7 +3148,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind, skipped=skipped, barred=barred_notes, model_note=model_note(best, kind))
+                  kind=kind, skipped=skipped, barred=barred_list, model_note=model_note(best, kind))
 
 
 def _barred(services: list[Service], quota: dict[str, Any], scope_repo: str | None) -> dict[str, str]:
