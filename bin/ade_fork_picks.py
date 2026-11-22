@@ -40,6 +40,8 @@ TARGET_RE = re.compile(r"^[a-z][a-z0-9]*-build-[1-9][0-9]*$")
 STATUS_RE = re.compile(r"^(queued|carried|landed:([1-9][0-9]*|main)|upstreamed|dropped)$")
 MARK_RE = re.compile(r"^(carried|landed:([1-9][0-9]*|main)|upstreamed|dropped)$")
 ACTIVE = ("queued", "carried")
+OWN_ORGS = {"frdminc", "djbclark"}  # branches of these owners may be unpinned; every other source must pin
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 PR_RE = re.compile(r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+/pull/[0-9]+/?$")
 FIELDS = {"id", "component", "repo", "commit", "branch", "pr", "local_path", "expected_head", "intent",
           "target", "targets", "status", "upstream", "order", "notes", "trial_required", "hold"}
@@ -125,6 +127,10 @@ def _validate_one(raw: dict[str, Any]) -> list[str]:
             raise RegistryError("expected_head applies to branch or pr sources only")
         if not COMMIT_RE.match(raw["expected_head"]):
             raise RegistryError("expected_head must be a full 40-hex id (lowercase)")
+    if raw["status"] in ACTIVE and "expected_head" not in raw and (
+            "pr" in raw or ("branch" in raw and normalize_repo(raw["repo"]).split("/")[3].lower() not in OWN_ORGS)):
+        raise RegistryError("an active pr entry, or a branch of a repo outside our orgs, requires expected_head "
+                            "(pin the head you reviewed; `apply --dry-run` prints the current tip)")
     if not raw["intent"].strip() or "\n" in raw["intent"]:
         raise RegistryError("intent must be one non-empty line")
     if ("target" in raw) == ("targets" in raw):
@@ -318,13 +324,23 @@ def fetch_entry(wt: Path, entry: dict[str, Any]) -> str:
     return resolved
 
 
-def plan_commits(wt: Path, entry: dict[str, Any], tip: str) -> tuple[list[str], list[str]]:
-    """(to_pick, already_present) for an entry whose tip is fetched.
+def fetch_upstream_tip(wt: Path, url: str) -> str:
+    """The component's upstream default-branch tip, fetched into wt's object store (fetch only)."""
+    git_ok(wt, "fetch", "--no-tags", "--quiet", url, "HEAD", timeout=NETWORK_TIMEOUT)
+    return git_ok(wt, "rev-parse", "--verify", "FETCH_HEAD^{commit}").strip()
+
+
+def plan_commits(wt: Path, entry: dict[str, Any], tip: str,
+                 upstream_tip: str | None = None) -> tuple[list[str], list[str], list[str]]:
+    """(to_pick, already_present, excluded_upstream) for an entry whose tip is fetched.
 
     Candidates are the non-merge commits on the tip that are not on HEAD (HEAD..tip), oldest
     first. Of those, a commit with a patch-equivalent on HEAD's side since the merge-base
     (`git rev-list --cherry-pick --right-only`, which compares patch-ids) is already present
-    and is not picked again. A commit entry is just its one commit."""
+    and is not picked again. A branch or PR entry's own commits are those not reachable from
+    the component's upstream default branch (`upstream_tip`): when the source sits on a newer
+    upstream than the workspace, the upstream commits in between are excluded and reported,
+    never picked under the entry's name. A commit entry is just its one commit."""
     candidates = git_ok(wt, "rev-list", "--reverse", "--topo-order", "--no-merges",
                         f"HEAD..{tip}").split()
     fresh = git_ok(wt, "rev-list", "--reverse", "--topo-order", "--no-merges", "--cherry-pick",
@@ -333,9 +349,24 @@ def plan_commits(wt: Path, entry: dict[str, Any], tip: str) -> tuple[list[str], 
         if len(git_ok(wt, "rev-list", "--parents", "-n", "1", tip).split()) > 2:
             raise ToolError(f"{entry['id']}: {tip} is a merge commit; register its commits instead")
         if tip in fresh:
-            return [tip], []
-        return [], [tip]
-    return fresh, [c for c in candidates if c not in set(fresh)]
+            return [tip], [], []
+        return [], [tip], []
+    own = set(git_ok(wt, "rev-list", "--no-merges", tip, "--not", upstream_tip).split())
+    present = [c for c in candidates if c not in set(fresh)]
+    return [c for c in fresh if c in own], present, [c for c in fresh if c not in own]
+
+
+def scrub(text: str, limit: int = 300) -> str:
+    """Third-party text (git output, file names) as inert data: control characters become '?'."""
+    return CONTROL_RE.sub("?", text.strip())[:limit]
+
+
+def abort_pick(wt: Path) -> dict[str, Any]:
+    """Abort an interrupted cherry-pick and report, without assuming, whether the tree is clean."""
+    result = git(wt, "cherry-pick", "--abort")
+    pending = Path(git_ok(wt, "rev-parse", "--path-format=absolute", "--git-path", "CHERRY_PICK_HEAD").strip())
+    clean = not git_ok(wt, "status", "--porcelain", "--untracked-files=normal").strip() and not pending.exists()
+    return {"abort_rc": result.returncode, "tree_clean": clean}
 
 
 def do_apply(registry: Path, forks: Path, target: str, wt: Path, dry_run: bool,
@@ -367,21 +398,35 @@ def do_apply(registry: Path, forks: Path, target: str, wt: Path, dry_run: bool,
                                   "expected_head": entry["expected_head"], "actual_head": tip}
             return EXIT_STOPPED, report
         tips.append((entry, tip))
+    upstream_urls = {row["id"]: row["upstream"] for row in _forks_rows(forks)}
+    upstream_tips: dict[str, str] = {}
     for entry, tip in tips:
-        picks, present = plan_commits(wt, entry, tip)
-        row: dict[str, Any] = {"id": entry["id"], "commits": picks, "already_present": not picks,
-                               "already_present_commits": present}
+        upstream_tip = None
+        if "commit" not in entry:
+            component = entry["component"]
+            if component not in upstream_tips:
+                upstream_tips[component] = fetch_upstream_tip(wt, upstream_urls[component])
+            upstream_tip = upstream_tips[component]
+        picks, present, excluded = plan_commits(wt, entry, tip, upstream_tip)
+        row: dict[str, Any] = {"id": entry["id"], "tip": tip, "commits": picks, "already_present": not picks,
+                               "already_present_commits": present, "excluded_upstream_commits": excluded}
         report["applied"].append(row)
         if dry_run:
             continue
         for sha in picks:
-            result = git(wt, "cherry-pick", "-x", sha, timeout=NETWORK_TIMEOUT)
-            if result.returncode != 0:
+            try:
+                result = git(wt, "cherry-pick", "-x", sha, timeout=NETWORK_TIMEOUT)
+                reason, message = "conflict", result.stderr
+                failed = result.returncode != 0
+            except ToolError as error:
+                failed, reason, message = True, "cherry-pick-timeout", str(error)
+            if failed:
                 files = git(wt, "diff", "--name-only", "--diff-filter=U").stdout.split()
-                git(wt, "cherry-pick", "--abort")
+                state = abort_pick(wt)
                 row["commits"] = picks[:picks.index(sha)]
-                report["conflict"] = {"id": entry["id"], "reason": "conflict", "commit": sha,
-                                      "files": sorted(files), "message": result.stderr.strip()[:300]}
+                report["conflict"] = {"id": entry["id"], "reason": reason, "commit": sha,
+                                      "files": sorted(scrub(f, 200) for f in files),
+                                      "git_message_untrusted": scrub(message), **state}
                 report["head"] = git_ok(wt, "rev-parse", "HEAD").strip()
                 return EXIT_STOPPED, report
     report["head"] = git_ok(wt, "rev-parse", "HEAD").strip()
@@ -417,7 +462,7 @@ def edit_status(text: str, pick_id: str, status: str, note: str | None, old_note
     lines[status_at] = status_re.sub(lambda m: f'{m.group(1)}"{status}"{m.group(2)}', lines[status_at], count=1)
     if note:
         combined = f"{old_notes} | {note}" if old_notes else note
-        value = json.dumps(combined)
+        value = json.dumps(combined, ensure_ascii=False)
         notes_at = next((i for i in range(start, end) if notes_re.match(lines[i])), None)
         if notes_at is not None:
             lines[notes_at] = notes_re.sub(lambda m: f"{m.group(1)}{value}{m.group(2)}", lines[notes_at], count=1)
@@ -450,8 +495,8 @@ def atomic_write(path: Path, text: str) -> None:
 def do_mark(registry: Path, forks: Path, pick_id: str, status: str, note: str | None) -> dict[str, Any]:
     if not MARK_RE.match(status):
         raise RegistryError("status must be carried, landed:N, landed:main, upstreamed or dropped")
-    if note is not None and (not note.strip() or "\n" in note or "\r" in note):
-        raise RegistryError("note must be one non-empty line")
+    if note is not None and (not note.strip() or CONTROL_RE.search(note)):
+        raise RegistryError("note must be one non-empty line without control characters")
     registry = registry.resolve()
     primary = is_primary_checkout(registry.parent)
     if primary is None:
@@ -464,7 +509,11 @@ def do_mark(registry: Path, forks: Path, pick_id: str, status: str, note: str | 
         raise RegistryError(f"no pick with id {pick_id!r}")
     text = registry.read_text(encoding="utf-8")
     new_text = edit_status(text, pick_id, status, note, current.get("notes"))
-    updated = validate_entries(tomllib.loads(new_text), component_ids(forks))
+    try:
+        updated = validate_entries(tomllib.loads(new_text), component_ids(forks))
+    except ValueError as error:  # RegistryError is a ValueError: let it through as is
+        raise error if isinstance(error, RegistryError) else RegistryError(
+            f"edited registry does not parse ({type(error).__name__}: {error}); nothing written") from error
     expected = [dict(e) for e in original]
     for entry in expected:
         if entry["id"] == pick_id:
@@ -648,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
             if report["conflict"]:
                 c = report["conflict"]
                 lines.append(f"STOPPED {c['reason']} in {c['id']}: "
-                             + (", ".join(c["files"]) or c.get("message") or f"head is {c.get('actual_head')}"))
+                             + (", ".join(c["files"]) or (f"git said (untrusted): {c['git_message_untrusted']}" if c.get("git_message_untrusted") else "") or f"head is {c.get('actual_head')}"))
             lines.append(f"HEAD {report['head']}")
             emit(report, args.json, "\n".join(lines))
             return code

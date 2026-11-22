@@ -63,13 +63,14 @@ id = "paseo-sync-sidebar-order"
 component = "paseo"
 repo = "getpaseo/paseo"
 pr = 9830
+expected_head = "bc6e7f3b587723dee1d7f40a632b7e043bd2477d"
 intent = "same sidebar order on macOS and Android (sync workspace, pinned and tab order across clients; open upstream, by luoph)"
 targets = ["desktop-build-2", "android-build-2"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/9830"
 trial_required = true
 order = 30
-notes = "68 files, daemon + app; trial cherry-pick before promising"
+notes = "68 files, daemon + app; trial cherry-pick before promising; pinned to the head seen on 2026-11-22 16:12Z (pinned, NOT reviewed: review the diff before trusting it, then re-pin on any move)"
 
 [[pick]]
 id = "paseo-android-fork-release"
