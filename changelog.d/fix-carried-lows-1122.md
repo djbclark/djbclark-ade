@@ -4,4 +4,4 @@
 
 ### Changed
 
-- Docs and tests: resume-first wording in `docs/paseo-only-rearchitecture.md`, a stronger relaunch-reason assertion in `tests/test_agent_footer_gate.py` (lows of #929), how to count open ledger PRs in `docs/macroscope-spend.md` (low of #930), queue Carried 118 (a failing coord-adapter test on master) and 119 (chrome-devtools EPERM under macOS 27 App Data protection, also in `docs/mcp-servers.md`) (#934)
+- Docs and tests: resume-first wording in `docs/paseo-only-rearchitecture.md`, a stronger relaunch-reason assertion in `tests/test_agent_footer_gate.py` (lows of #929), how to count open ledger PRs in `docs/macroscope-spend.md` (low of #930), queue Carried 118 (a failing coord-adapter test on master), the chrome-devtools EPERM failure mode under macOS 27 App Data protection in `docs/mcp-servers.md` (resolved 2026-11-22) (#934)
