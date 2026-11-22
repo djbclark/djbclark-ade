@@ -589,9 +589,10 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
 
 
 @lru_cache(maxsize=1024)
-def _closing_paren(text: str, i: int, arithmetic: bool = False) -> int:
-    """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed."""
-    n = len(text)
+def _closing_paren(text: str, i: int, arithmetic: bool = False, limit: int | None = None) -> int:
+    """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed. With `limit`, the text
+    is read only up to there (a caller that scans a region of its own) and `limit` stands for an unclosed one."""
+    n = len(text) if limit is None else min(limit, len(text))
     # Explicit call frames keep deeply nested substitutions off Python's call
     # stack. Results are pure offsets, including the arithmetic trial parse.
     results = {}
@@ -746,21 +747,30 @@ def _join_continuations(c: str) -> str:
     return "\n".join(out)
 
 
-def _drop_heredocs(c: str) -> str:
-    """The command without heredoc bodies (their text is data, not commands)."""
-    out, lines, i, state = [], c.split("\n"), 0, None
+def _split_heredocs(c: str) -> tuple[str, list[str]]:
+    """(the command without heredoc bodies, the bodies whose delimiter is unquoted). A body is data, not commands, but the
+    shell expands `$...` in an unquoted-delimiter body before whatever reads it runs; `<<'EOF'` and `<<"EOF"` keep it literal."""
+    out, bodies, lines, i, state = [], [], c.split("\n"), 0, None
     offsets = _line_offsets(lines)
     while i < len(lines):
         out.append(lines[i])
         matches, state = _heredoc_introducers(lines[i], state, c, offsets[i])
         for m in matches:
             i += 1
+            first = i
             while i < len(lines) and not _heredoc_terminates(lines[i], m.group(3), m.group(1) == "-"):
                 i += 1
+            if not m.group(2):
+                bodies.append("\n".join(lines[first:i]))
             if i < len(lines):
                 out.append(lines[i])  # recursive substitutions still need their verified delimiter
         i += 1
-    return "\n".join(out)
+    return "\n".join(out), bodies
+
+
+def _drop_heredocs(c: str) -> str:
+    """The command without heredoc bodies (their text is data, not commands)."""
+    return _split_heredocs(c)[0]
 
 
 def _drop_redirections(stage: str) -> list[str]:
@@ -1007,41 +1017,98 @@ ZSH_MODIFIER_REASON = (
     "zsh (this Mac's Bash-tool shell) applies history modifiers to a bare `{word}`: `$C:r` strips an extension, so "
     "`git push origin $C:refs/heads/x` pushed `<sha>efs/heads/x` (2026-11-21), and `\"$h:c...\"` ate the `:c`; refspecs, "
     "`scp host:path` and rsync targets are hit the same way. Write `${{NAME}}:...` instead (braced forms, single quotes and "
-    "`\\$` are safe).")
-# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21): a A c e h l P q Q r s t u &, and g or w
-# before one of them (`:gs/a/b/`, `:gr`). Not modifiers there, so left alone: p S x f F 0-9, `::`, `:-`, `:/`.
-ZSH_MODIFIER = re.compile(r"\$(?:[A-Za-z_]\w*|\d+|[@*#?$!-]):[gw]?[aAcehlPqQrstu&]")
+    "`\\$` are safe). An unquoted heredoc body (`<<EOF`) is expanded too: quote its delimiter (`<<'EOF'`) or use `${{NAME}}`.")
+# Modifiers zsh applies to $NAME:x (probed with /bin/zsh -f, 2026-11-21; zsh manual, Expansion: Modifiers): a A c e h l P q Q r s t u &,
+# and before one of them any prefixes f, g, w, `F` or `W` with a delimited argument and a bare `F` (`:F:2:r`, `:W:/:t`, `:gs/a/b/`, `:gr`,
+# `:fr`, `:Fr`). The delimiter is any character, read as the opener and closed by its next copy (`:F-2-r`, `:W.x.t`, `:Wrxrt`); `( [ { <`
+# close with `) ] } >` and no other copy of themselves. A bare `F` is only a prefix when no closing delimiter follows: `:Feature` and
+# `:Ftest` are plain text (`e`/`t` is the delimiter, no modifier follows its closer), while `:Fr` is `F` then `r`. Not modifiers there, so left
+# alone: p S x, 0-9, `::`, `:-`, `:/`, `:g:opts:`, a lone `W`, and a prefix with no modifier after it (`:f`, `:F:r`). Between `$` and the
+# name: parameter flags `= ~ ^ + #` (`$=C:t`, `$#C:t`); after the name: one subscript (`$C[1]:r`, `$@[1]:t`; `$1[1]` is a glob).
+# Known gaps, accepted because the forms are rare, NOT because they are harmless (zsh rewrites each one silently, the gate passes them):
+# a delimiter that is whitespace, `\`, `'`, a backtick or `$` (`"$C:F 2 r"`, `"$C:F'2'r"`, `$C:F$2$r`), and whitespace inside the argument
+# of a double-quoted `"$C:F.2 .r"`. A `"` delimiter cannot occur inside double quotes. Another accepted limit: an argument or subscript
+# longer than ZSH_ARG_MAX (256) characters is not followed. The patterns are bounded so the match cost per `$` is constant: an opener with
+# no closer made every `$` scan to the end of its word or line, and 200 KB of `$C:F<` or `$C[` took 60 to 80 s (PR 918 review M-B).
+ZSH_ARG_MAX = 256
+# The same cost bound for the chain of prefix items before the modifier letter: an item's argument may hold `$C:` and its closing
+# delimiter may be `f`/`g`/`w` (itself an item), so `Ff$C:f` repeated made every `$` chain to the end of the word (102 KB: 68 s, PR 918
+# review r3 M-1). Real chains are 1 to 3 items; more than ZSH_PREFIX_MAX (8) items before the modifier letter are not followed (accepted limit).
+ZSH_PREFIX_MAX = 8
 
 
-def zsh_modifier_word(text: str) -> str | None:
+def _zsh_delimited(group: str) -> str:
+    n = f"{{0,{ZSH_ARG_MAX}}}"
+    return (rf"(?:\([^)\s]{n}\)|\[[^\]\s]{n}\]|\{{[^}}\s]{n}\}}|<[^>\s]{n}>"
+            rf"|(?P<{group}>[^\s\\'\"`$(\[{{<])(?:(?!(?P={group}))\S){n}(?P={group}))")
+
+
+_ZSH_MODIFIER_ARG = r"[FW]" + _zsh_delimited("d")
+_ZSH_BARE_F = r"F(?!" + _zsh_delimited("e") + r")"
+ZSH_MODIFIER = re.compile(
+    r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]{0,%d}\])?|\d+|[#?$!-])" % ZSH_ARG_MAX +
+    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + "|" + _ZSH_BARE_F + r"){0,%d}[aAcehlPqQrstu&]" % ZSH_PREFIX_MAX)
+ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
+
+
+def zsh_modifier_word(text: str, bodies: list[str] | tuple[str, ...] = ()) -> str | None:
     """The first `$NAME:x` in `text` (heredoc bodies already dropped) that zsh reads as a history modifier, found outside
     single quotes, comments and backslash escapes; a double-quoted `$NAME:x` counts (zsh expands it too). `${NAME}:x` never
-    matches because the pattern needs the name to follow `$` directly."""
-    i, n, dq = 0, len(text), False
-    while i < n:
+    matches because the pattern needs the name to follow `$` directly. `$(...)` and backtick bodies are scanned as fresh
+    command text, also inside double quotes (a quote in there is a real quote). `bodies` are the unquoted-delimiter heredoc
+    bodies (`_split_heredocs`): there only a backslash and `$` are special, quotes and `#` are literal."""
+    hit = _zsh_modifier_scan(text, 0, len(text), "cmd", 0)
+    for body in bodies:
+        hit = hit or _zsh_modifier_scan(body, 0, len(body), "body", 0)
+    return hit
+
+
+def _zsh_modifier_scan(text: str, i: int, end: int, mode: str, depth: int) -> str | None:
+    """Scan text[i:end]; mode is "cmd" (unquoted), "dq" (inside double quotes) or "body" (unquoted heredoc body)."""
+    start, dq, body = i, mode == "dq", mode == "body"
+    while i < end:
         ch = text[i]
         if ch == "\\":
             i += 2
-        elif ch == "#" and not dq and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif ch == "'" and not dq:
+        elif ch == "#" and not body and not dq and (i == start or text[i - 1].isspace() or text[i - 1] in ";&|("):
+            j = text.find("\n", i, end)
+            i = end if j < 0 else j
+        elif ch == "'" and not body and not dq:
             j = i + 1
             if i and text[i - 1] == "$":                 # $'...': a backslash escapes the next character
-                while j < n and text[j] != "'":
+                while j < end and text[j] != "'":
                     j += 2 if text[j] == "\\" else 1
             else:
-                k = text.find("'", j)
-                j = n if k < 0 else k
+                k = text.find("'", j, end)
+                j = end if k < 0 else k
             i = j + 1
-        elif ch == '"':
+        elif ch == '"' and not body:
             dq = not dq
             i += 1
+        elif ch == "`" and depth < ZSH_SCAN_DEPTH:
+            j, inner = i + 1, []
+            while j < end and text[j] != "`":
+                if text[j] == "\\" and j + 1 < end and text[j + 1] in ("\\$`\"" if dq else "\\$`"):
+                    j += 1
+                inner.append(text[j])
+                j += 1
+            code = "".join(inner)
+            hit = _zsh_modifier_scan(code, 0, len(code), "cmd", depth + 1)
+            if hit:
+                return hit
+            i = j + 1
         elif ch == "$":
-            m = ZSH_MODIFIER.match(text, i)
+            if text.startswith("$(", i) and depth < ZSH_SCAN_DEPTH:      # `$((` too: its body is read as plain text anyway
+                close = _closing_paren(text, i + 2, limit=end)    # reads to `end` only: a read to len(text) per `$(` is quadratic
+                hit = _zsh_modifier_scan(text, i + 2, close, "cmd", depth + 1)
+                if hit:
+                    return hit
+                i = close + 1
+                continue
+            m = ZSH_MODIFIER.match(text, i, end)
             if m:
                 return m.group(0)
-            i += 1
+            i += 2 if text[i + 1:i + 2] == "$" else 1    # `$$` is the pid: the name after it is plain text
         else:
             i += 1
     return None
@@ -1348,7 +1415,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     send = risky_send_reason(cmd)
     if send:
         return send, None
-    zmod = zsh_modifier_word(_drop_heredocs(cmd))
+    stripped, heredoc_bodies = _split_heredocs(cmd)
+    zmod = zsh_modifier_word(stripped, heredoc_bodies)
     if zmod:
         return ZSH_MODIFIER_REASON.format(word=zmod), None
     plain = strip_literals(cmd)
@@ -1419,6 +1487,85 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     return None, warn
 
 
+BUDGET_ENV = "BASH_HABITS_GATE_BUDGET"
+BUDGET_SECONDS = 20.0        # whole-gate time budget; the hook timeout is 60 s, so a stuck scan is cut off well before it
+BUDGET_REASON = ("the habits gate exceeded its time budget ({budget:g} s) on this command, so it is denied rather than "
+                 "left unchecked; split or simplify the command (very long runs of `$(`, `$((`, quotes or `$NAME:` text "
+                 "are the usual cause) and re-run it.")
+
+
+def _budget() -> float:
+    try:
+        value = float(os.environ.get(BUDGET_ENV, ""))
+    except ValueError:
+        return BUDGET_SECONDS
+    return value if value > 0 else BUDGET_SECONDS
+
+
+def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
+    """`check(cmd)`, failing CLOSED when it runs past the budget: a gate killed by the hook timeout lets the command run
+    unchecked (rounds 1 to 3 of PR 918 each found a quadratic scan, and `$((` x 2000 is slow on master too). `check` runs in
+    a forked child that reports through a pipe; the parent waits with a timeout and kills the child. A signal timer is not
+    enough: it works on this Python's `re`, but only because the regex engine polls for signals, which not every version does,
+    and a thread cannot run while one C call holds the GIL. Without `os.fork`, or when forking fails, `check` runs in-process."""
+    budget = _budget()
+    if not hasattr(os, "fork"):
+        return check(cmd)
+    try:
+        rfd, wfd = os.pipe()
+        pid = os.fork()
+    except OSError:
+        return check(cmd)
+    if pid == 0:
+        status = 1
+        try:
+            os.close(rfd)
+            try:
+                payload = json.dumps(["ok", *check(cmd)])
+            except (re.error, TypeError, AttributeError, IndexError):
+                payload = json.dumps(["skip", None, None])      # main() passes the command on these, as before
+            data = payload.encode()
+            while data:
+                data = data[os.write(wfd, data):]
+            status = 0
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+        finally:
+            os._exit(status)
+    os.close(wfd)
+    import select
+    import time
+    deadline = time.monotonic() + budget
+    chunks: list[bytes] = []
+    timed_out = False
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([rfd], [], [], left)[0]:
+                timed_out = True
+                break
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(rfd)
+        if timed_out:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        _, wait_status = os.waitpid(pid, 0)
+    if timed_out:
+        return BUDGET_REASON.format(budget=budget), None
+    try:
+        kind, reason, warn = json.loads(b"".join(chunks))
+    except ValueError:
+        raise RuntimeError(f"the habits gate child exited with status {wait_status} and no result")
+    return (None, None) if kind == "skip" else (reason, warn)
+
+
 def main() -> None:
     """Claude Code PreToolUse by default; `--codex` (Codex PreToolUse: deny = exit 2, reason on
     stderr, its documented form) and `--cursor` (Cursor beforeShellExecution: stdin `command`,
@@ -1438,10 +1585,7 @@ def main() -> None:
         sys.exit(0)
     if isinstance(cmd, list):                    # an argv such as ["bash", "-lc", "<script>"]
         cmd = cmd[-1] if cmd else ""
-    try:
-        reason, warn = check(str(cmd or ""))
-    except (re.error, TypeError, AttributeError, IndexError):
-        sys.exit(0)
+    reason, warn = check_within_budget(str(cmd or ""))
     if reason:
         reason = ("NOTHING in this command ran; no earlier part executed. "
                   "Fix the command and re-run the whole command. " + reason)

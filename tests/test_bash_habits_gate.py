@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1192,22 +1193,126 @@ def test_background_reason_names_timeout_and_long_job_routes():
     assert "7200000" in reason and "bin/ade-sched" in reason
 
 
-# zsh reads `$NAME:x` as a history modifier (2026-11-21: `$C:refs/heads/x` pushed `<sha>efs/heads/x`)
+# zsh reads `$NAME:x` as a history modifier (2026-11-21: `$C:refs/heads/x` pushed `<sha>efs/heads/x`). Every case below is one
+# rule branch of `zsh_modifier_word`, probed against /bin/zsh -f; each is its own command, so a mutant that drops one branch
+# fails exactly the cases that need it (PR 909 review L4: packed commands let one surviving match satisfy a whole case).
+def _assert_zsh_modifier_denied(command):
+    out = run(command)
+    assert out and out["permissionDecision"] == "deny", command
+    assert "${NAME}:" in out["permissionDecisionReason"]
+
+
 @pytest.mark.parametrize("command", [
     "C=abc1234; git push origin $C:refs/heads/ci/x",
     'git show "$h:c..."',
     "scp $HOST:tmp/x .",                    # `$HOST:t` strips to the tail; `:path` is NOT a modifier (p is not applied)
-    "echo $x:t",
-    'echo "$C:r"',
-    "echo $1:h $@:t",
-    "echo $C:gs/a/b/ $C:s/a/b/ $C:& $C:u $C:e",
+    "docker pull $IMG:latest",              # `:l`
+    "docker tag x $IMG:frontend",           # `:fr` (f is a repeat prefix, then r)
     "echo ok; echo \"a $x:t\" 'b'",
     "cat <<EOF >/dev/null\nplain\nEOF\necho $C:r",
 ])
 def test_zsh_history_modifier_on_bare_variable_is_denied(command):
-    out = run(command)
-    assert out and out["permissionDecision"] == "deny", command
-    assert "${NAME}:" in out["permissionDecisionReason"]
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("letter", list("aAcehlPqQrstu"))
+def test_zsh_modifier_each_letter_is_denied(letter):
+    _assert_zsh_modifier_denied(f"echo $C:{letter}" + ("/a/b/" if letter == "s" else ""))
+
+
+def test_zsh_modifier_ampersand_is_denied_in_double_quotes():
+    _assert_zsh_modifier_denied('echo "$C:&"')            # unquoted `&` is the background operator (denied anyway)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $@:t", "echo $*:t", "echo $#:t", "echo $?:t", "echo $$:t", "echo $!:t", "echo $-:t",   # special parameters
+    "echo $1:h", "echo $0:t", "echo $10:h",                                                       # positionals
+])
+def test_zsh_modifier_special_parameters_and_positionals_are_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $C:gr", "echo $C:wr", "echo $C:fr", "echo $C:Fr", "echo $C:gwr", "echo $C:fgr", "echo $C:F:2:r", "echo $C:F::r",
+    "echo $C:F:2:fr", "echo $C:gs/a/b/", "echo $C:s/a/b/ $C:s:x:y:",
+    "echo $C:W:x:r", "echo $C:W:/:t", "echo $C:F:1:W:x:t",                    # W:sep: and F:expr: take an argument
+    "echo $C:F/2/r", "echo $C:F,2,r", "echo $C:F{2}r", "echo $C:F[2]r", "echo $C:W/x/r", "echo $C:W,x,t", "echo $C:W[x]t",
+    "echo $C:W(x)t",
+])
+def test_zsh_modifier_prefixes_f_g_w_and_F_are_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [                 # zsh reads the character after F or W as the delimiter (PR 918 review L-A)
+    "echo $C:F-2-r", "echo $C:F.2.r", "echo $C:F_2_r", "echo $C:F@2@r", "echo $C:F%2%r", "echo $C:F=2=r", "echo $C:F+2+r",
+    "echo $C:Fx2xr", "echo $C:W.x.t", "echo $C:Wrxrt", "echo $C:Wxxt", "echo $C:F323r", "echo $C:F<2>r", "echo $C:W<x>t",
+    "echo $C:F)2)r", "echo $C:F]2]r", "echo $C:F}2}r", "echo $C:F>2>r",         # a closing bracket is an ordinary delimiter
+    "echo \"$C:F|2|r\"", "echo \"$C:F;2;r\"", "echo \"$C:F#2#r\"", "echo \"$C:F!2!r\"", "echo \"$C:F*2*r\"",
+    "echo $C:F-1-W.x.t", "echo $C:FW.x.t", "echo $C:Fre",                       # prefixes chain; `F` with no closer is bare
+])
+def test_zsh_modifier_any_delimiter_after_f_and_w_is_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "echo $C[1]:r", "echo $C[1,3]:u", "echo $C[-1]:l", "echo $C[(r)B]:r", "echo $@[1]:t", 'echo "$C[1]:r"',
+    "echo $=C:t", "echo $~C:t", "echo $^C:t", "echo $^^C:t", "echo $+C:t", "echo $#C:t",
+])
+def test_zsh_modifier_subscripts_and_parameter_flags_are_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    'echo "$C:r"',                                   # double quotes expand it too
+    'echo "it\'s" $C:r',                             # an apostrophe inside double quotes is not a quote
+    'echo "a # $C:r"',                               # `#` inside double quotes is not a comment
+    "echo $'it\\'s' $C:r",                           # ANSI-C string: `\'` does not end it, the next `$C:r` is live
+    "echo \\' $C:r",                                 # an escaped apostrophe opens no quote
+    "echo a#b $C:r",                                 # `#` inside a word is not a comment
+    "echo a # c\necho $C:r",                         # a comment ends at the newline
+    "echo \\\\$C:r",                                 # `\\` is an escaped backslash, the `$C:r` is live
+    "echo $$$C:r",                                   # `$$` (pid) then a live `$C:r`
+    "echo 'a' $C:r 'b'",
+    "echo \\\"$C:r\\\" | cat",                   # `\"` is an escaped quote: the `$C:r` is outside any quote
+    "echo \"`echo \\\"it's\\\" $C:r`\"",               # backtick body in double quotes: `\"` unescapes to a real double quote
+    "echo $C:r # not this one",
+])
+def test_zsh_modifier_quote_and_comment_tracking_denies_live_text(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "cat <<EOF\n$C:r\nEOF",                          # an unquoted heredoc body is expanded by the shell (PR 909 review L1)
+    "cat <<-EOF\n\t$C:r\n\tEOF",
+    "bash <<EOF\ngit push origin $C:refs/heads/x\nEOF",
+    "ssh host <<EOF\ngit push origin $C:refs/heads/x\nEOF",
+    "cat <<EOF\n'$C:r' \"$C:r\"\nEOF",               # quotes are literal in a body
+    "cat <<EOF\n# $C:r\nEOF",                        # and so is `#`
+    "cat <<EOF\n'$C:r'\nEOF",                        # a single-quoted `$C:r` in a body is still expanded
+    "cat <<EOF\na \"b $C:t\nEOF",
+    "cat <<EOF\n\\\\$C:r\nEOF",                      # `\\` then a live `$C:r`
+    "cat <<A <<B\n$C:r\nA\n$C:t\nB",
+    "cat <<A <<'B'\n$C:r\nA\nplain\nB",
+    "cat <<'A' <<B\nplain\nA\n$C:t\nB",
+    "cat <<EOF\n$(echo $C:r)\nEOF",                  # `$(...)` in a body runs
+    "cat <<EOF\nplain\nEOF\necho $C:r",
+])
+def test_zsh_modifier_in_unquoted_heredoc_body_is_denied(command):
+    _assert_zsh_modifier_denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    'echo "$(echo "it\'s")" $C:r',                   # nested quotes: the inner apostrophe is inside a real double quote (L3)
+    'echo "$(echo "x $C:r")"',
+    "echo \"a `echo \"it's\"` $C:r\"",
+    "echo \"a `echo \\$C:r` b\"",                    # backtick body: `\$` is a live `$`
+    "echo $(echo $C:r)",
+    'echo "$(echo "$(echo $C:r)")"',
+    "echo \"$((1+2)) $C:r\"",
+    "echo $(( ${#C} + 1 )) $C:r",
+])
+def test_zsh_modifier_follows_command_substitution_inside_double_quotes(command):
+    _assert_zsh_modifier_denied(command)
 
 
 @pytest.mark.parametrize("command", [
@@ -1217,13 +1322,131 @@ def test_zsh_history_modifier_on_bare_variable_is_denied(command):
     "echo $C/:r",
     'echo "$C" :r',
     "echo $C:",
-    "echo $C::x $C:/y $C:-x $C:x $C:p $C:f $C:1 $a:b:c",
+    "echo $C::x $C:/y $C:-x $C:x $C:p $C:S $C:1 $a:b:c",
+    "echo $C:f $C:F $C:ff $C:g $C:gp $C:Fx $C:FZ $C:F:r $C:F:2 $C:fx",    # a prefix with no modifier after it is plain
+    "echo $C:Fxt $C:F2t $C:Wr $C:W:x $C:W:x: $C:g:o:r $C:g:e:r",
+    "echo $C:Feature $C:Ftest $C:F-2- $C:Wxx $C:F(2(r $C:W(x]t $C:F[2}r",       # `e`/`t` is a delimiter whose closer is followed by no modifier
     "echo \\$C:r",
     "echo \"${C}:r\" \"x:$C\"",
     "echo $PATH:/usr/bin $HOST:8080 scp $HOST:path .",
     "echo ok # $C:r",
+    "echo x;# $C:r",                                 # `#` starts a comment at the start, after whitespace and after `; & | (`
+    "# $C:r\necho a",
+    "echo a\n# $C:r\necho b",
+    "echo a &&# $C:r\necho b",
+    "echo a |# $C:r\ncat",
+    "(# $C:r\necho a)",
+    "echo $$C:r",                                    # `$$` is the pid; `C:r` after it is plain text
+    "echo ${C}[1]:r $1[1]:r $C[1]x:r",               # `${C}` braces end the name; `$1[1]` is a glob; text sits before `:r`
+    "echo $C[1]",
     "cat <<'EOF'\n$C:r\nEOF",
+    'cat <<"EOF"\n$C:r\nEOF',
     "cat <<'EOF' > f\ngit push origin $C:refs/heads/x\nEOF",
+    "cat <<EOF\n\\$C:r\nEOF",                        # an escaped `$` in an unquoted body is literal
+    "cat <<EOF\n${C}:r $C: $C/:r\nEOF",
+    "cat <<EOF\n$(echo '$C:r')\nEOF",                # a single quote inside `$(...)` in a body is a real quote
+    "cat <<EOF\n`echo '$C:r'`\nEOF",
+    "cat <<'A' <<'B'\n$C:r\nA\n$C:t\nB",
+    "echo $'\\' $C:r'",                              # ANSI-C string holds `\'` and the `$C:r`
+    "echo $'$C:r'",
+    'echo "$(echo \'$C:r\')"',                       # single quotes inside `$(...)` inside double quotes are real (L3)
+    'echo "`echo \'$C:r\'`"',
+    'echo "$(echo "$(echo \'$C:r\')")"',
+    "echo \"a `echo '$C:r'` b\"",
+    'cat <<EOF\n"`echo \\"\'$C:r\'\\"`"\nEOF',                    # in a heredoc body `"` is literal: this `$C:r` stays inside single quotes (L-B)
 ])
 def test_zsh_modifier_lookalikes_and_safe_forms_pass(command):
     assert not denied(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "echo " + "$(" * 5000,
+    "echo " + "$(echo " * 200 + "$C:r",
+    "echo \"" + "`" * 5001,
+    "echo " + "$" * 20000 + ":r",
+    "echo '" + "\\" * 10001,
+    "cat <<EOF\n" + "$(" * 3000 + "\nEOF",
+    "echo " + "$(echo $C) " * 3000,
+    "echo " + '$(echo "$(" ) ' * 500,
+])
+def test_zsh_modifier_scan_survives_pathological_input(command):
+    run(command)                                      # `run` asserts exit 0 and a 30 s ceiling; the verdict may be either
+
+
+def test_zsh_modifier_scan_is_linear_on_unbalanced_substitutions_in_quotes():
+    """PR 918 review M-A: an unbalanced `$(` inside double quotes, repeated in sibling `$(...)`, made `_closing_paren` read to
+    the end of the command each time (quadratic: 68 s at 140 KB, past the 60 s hook timeout, so the gate failed open)."""
+    command = "echo " + '$(echo "$(" ) ' * 10000      # about 140 KB
+    assert len(command) > 130_000
+    started = time.monotonic()
+    run(command)
+    assert time.monotonic() - started < 5, "the zsh modifier scan is no longer linear"
+
+
+@pytest.mark.parametrize("command", [
+    "echo " + "$C:F<" * 40000,                        # an opener with no closer: each `$` used to scan to the end of its word (PR 918 review M-B)
+    "echo \"" + "$C:F(" * 40000 + "\"",
+    "echo " + "$C:F[" * 40000,
+    "echo " + "$C:F{" * 40000,
+    "echo " + "$C:W<" * 40000,
+    "echo " + "$C[" * 70000,                          # a subscript with no `]` scanned to the end of the line
+    "echo " + "$C:W." * 40000,
+    "echo " + "$C:F." * 40000,
+    "echo $C:" + "Ff$C:f" * 34000 + "; git push origin $C:refs/heads/x",   # the prefix chain: each `$` chained to the end of the word (r3 M-1)
+    "echo $C:" + "Wf$C:f" * 34000,
+], ids=["F<", "F(", "F[", "F{", "W<", "C[", "W.", "F.", "Ff-chain", "Wf-chain"])
+def test_zsh_modifier_regex_is_linear_on_unclosed_delimiters_and_subscripts(command):
+    assert len(command) >= 195_000
+    started = time.monotonic()
+    run(command)
+    assert time.monotonic() - started < 5, "the zsh modifier regex is no longer linear"
+
+
+@pytest.mark.parametrize("command, denies", [          # an argument or subscript longer than 256 characters is not followed (accepted limit)
+    ("echo $C:F<" + "a" * 256 + ">r", True), ("echo $C:F<" + "a" * 257 + ">r", False),
+    ("echo $C:F-" + "a" * 256 + "-r", True), ("echo $C:F-" + "a" * 257 + "-r", False),
+    ("echo $C[" + "a" * 256 + "]:r", True), ("echo $C[" + "a" * 257 + "]:r", False),
+])
+def test_zsh_modifier_argument_and_subscript_cap_is_256_characters(command, denies):
+    assert denied(command) is denies
+
+
+@pytest.mark.parametrize("command, denies", [          # more than 8 prefix items before the modifier letter are not followed (accepted limit)
+    ("echo $C:" + "f" * 8 + "r", True), ("echo $C:" + "f" * 9 + "r", False),
+    ("echo $C:" + "g" * 7 + "F:2:r", True), ("echo $C:" + "fg" * 4 + "r", True),
+])
+def test_zsh_modifier_prefix_chain_cap_is_8_items(command, denies):
+    assert denied(command) is denies
+
+
+def _budget_env(seconds):
+    return dict(os.environ, BASH_HABITS_GATE_BUDGET=str(seconds))
+
+
+def test_gate_fails_closed_when_it_exceeds_its_time_budget():
+    """`$((` x 2000 takes the unbudgeted gate past 60 s (also on master): with the budget lowered it must end in a deny, fast."""
+    command = "echo " + "$((" * 2000
+    started = time.monotonic()
+    out = run(command, env=_budget_env(2))
+    elapsed = time.monotonic() - started
+    assert out and out["permissionDecision"] == "deny", out
+    assert "time budget" in out["permissionDecisionReason"] and "split or simplify" in out["permissionDecisionReason"]
+    assert 1.5 < elapsed < 15, elapsed
+
+
+def test_time_budget_deny_works_for_the_cursor_and_codex_forms_too():
+    command = "echo " + "$((" * 2000
+    cursor = subprocess.run([sys.executable, str(HOOK), "--cursor"], input=json.dumps({"command": command}),
+                            capture_output=True, text=True, timeout=30, env=_budget_env(2))
+    assert cursor.returncode == 0 and json.loads(cursor.stdout)["permission"] == "deny"
+    codex = subprocess.run([sys.executable, str(HOOK), "--codex"],
+                           input=json.dumps({"tool_name": "shell", "tool_input": {"command": command}}),
+                           capture_output=True, text=True, timeout=30, env=_budget_env(2))
+    assert codex.returncode == 2 and "time budget" in codex.stderr
+
+
+@pytest.mark.parametrize("value", ["", "0", "-3", "abc"])
+def test_an_unusable_budget_value_falls_back_to_the_default(value):
+    assert run("git status", env=_budget_env(value)) is None
+    out = run("git push origin $C:refs/heads/x", env=_budget_env(value))
+    assert out and out["permissionDecision"] == "deny" and "time budget" not in out["permissionDecisionReason"]
