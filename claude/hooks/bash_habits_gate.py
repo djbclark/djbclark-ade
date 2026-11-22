@@ -1031,6 +1031,10 @@ ZSH_MODIFIER_REASON = (
 # longer than ZSH_ARG_MAX (256) characters is not followed. The patterns are bounded so the match cost per `$` is constant: an opener with
 # no closer made every `$` scan to the end of its word or line, and 200 KB of `$C:F<` or `$C[` took 60 to 80 s (PR 918 review M-B).
 ZSH_ARG_MAX = 256
+# The same cost bound for the chain of prefix items before the modifier letter: an item's argument may hold `$C:` and its closing
+# delimiter may be `f`/`g`/`w` (itself an item), so `Ff$C:f` repeated made every `$` chain to the end of the word (102 KB: 68 s, PR 918
+# review r3 M-1). Real chains are 1 to 3 items; more than ZSH_PREFIX_MAX (8) items before the modifier letter are not followed (accepted limit).
+ZSH_PREFIX_MAX = 8
 
 
 def _zsh_delimited(group: str) -> str:
@@ -1043,7 +1047,7 @@ _ZSH_MODIFIER_ARG = r"[FW]" + _zsh_delimited("d")
 _ZSH_BARE_F = r"F(?!" + _zsh_delimited("e") + r")"
 ZSH_MODIFIER = re.compile(
     r"\$[=~^+#]*(?:(?:[A-Za-z_]\w*|[@*])(?:\[[^\]\n]{0,%d}\])?|\d+|[#?$!-])" % ZSH_ARG_MAX +
-    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + "|" + _ZSH_BARE_F + r")*[aAcehlPqQrstu&]")
+    r":(?:[fgw]|" + _ZSH_MODIFIER_ARG + "|" + _ZSH_BARE_F + r"){0,%d}[aAcehlPqQrstu&]" % ZSH_PREFIX_MAX)
 ZSH_SCAN_DEPTH = 16          # nested `$(` / backtick levels followed before the rest is scanned flat (bounds the cost)
 
 
@@ -1483,6 +1487,85 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     return None, warn
 
 
+BUDGET_ENV = "BASH_HABITS_GATE_BUDGET"
+BUDGET_SECONDS = 20.0        # whole-gate time budget; the hook timeout is 60 s, so a stuck scan is cut off well before it
+BUDGET_REASON = ("the habits gate exceeded its time budget ({budget:g} s) on this command, so it is denied rather than "
+                 "left unchecked; split or simplify the command (very long runs of `$(`, `$((`, quotes or `$NAME:` text "
+                 "are the usual cause) and re-run it.")
+
+
+def _budget() -> float:
+    try:
+        value = float(os.environ.get(BUDGET_ENV, ""))
+    except ValueError:
+        return BUDGET_SECONDS
+    return value if value > 0 else BUDGET_SECONDS
+
+
+def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
+    """`check(cmd)`, failing CLOSED when it runs past the budget: a gate killed by the hook timeout lets the command run
+    unchecked (rounds 1 to 3 of PR 918 each found a quadratic scan, and `$((` x 2000 is slow on master too). `check` runs in
+    a forked child that reports through a pipe; the parent waits with a timeout and kills the child. A signal timer is not
+    enough: it works on this Python's `re`, but only because the regex engine polls for signals, which not every version does,
+    and a thread cannot run while one C call holds the GIL. Without `os.fork`, or when forking fails, `check` runs in-process."""
+    budget = _budget()
+    if not hasattr(os, "fork"):
+        return check(cmd)
+    try:
+        rfd, wfd = os.pipe()
+        pid = os.fork()
+    except OSError:
+        return check(cmd)
+    if pid == 0:
+        status = 1
+        try:
+            os.close(rfd)
+            try:
+                payload = json.dumps(["ok", *check(cmd)])
+            except (re.error, TypeError, AttributeError, IndexError):
+                payload = json.dumps(["skip", None, None])      # main() passes the command on these, as before
+            data = payload.encode()
+            while data:
+                data = data[os.write(wfd, data):]
+            status = 0
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+        finally:
+            os._exit(status)
+    os.close(wfd)
+    import select
+    import time
+    deadline = time.monotonic() + budget
+    chunks: list[bytes] = []
+    timed_out = False
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([rfd], [], [], left)[0]:
+                timed_out = True
+                break
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(rfd)
+        if timed_out:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        _, wait_status = os.waitpid(pid, 0)
+    if timed_out:
+        return BUDGET_REASON.format(budget=budget), None
+    try:
+        kind, reason, warn = json.loads(b"".join(chunks))
+    except ValueError:
+        raise RuntimeError(f"the habits gate child exited with status {wait_status} and no result")
+    return (None, None) if kind == "skip" else (reason, warn)
+
+
 def main() -> None:
     """Claude Code PreToolUse by default; `--codex` (Codex PreToolUse: deny = exit 2, reason on
     stderr, its documented form) and `--cursor` (Cursor beforeShellExecution: stdin `command`,
@@ -1502,10 +1585,7 @@ def main() -> None:
         sys.exit(0)
     if isinstance(cmd, list):                    # an argv such as ["bash", "-lc", "<script>"]
         cmd = cmd[-1] if cmd else ""
-    try:
-        reason, warn = check(str(cmd or ""))
-    except (re.error, TypeError, AttributeError, IndexError):
-        sys.exit(0)
+    reason, warn = check_within_budget(str(cmd or ""))
     if reason:
         reason = ("NOTHING in this command ran; no earlier part executed. "
                   "Fix the command and re-run the whole command. " + reason)

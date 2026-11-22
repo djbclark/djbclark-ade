@@ -1392,7 +1392,9 @@ def test_zsh_modifier_scan_is_linear_on_unbalanced_substitutions_in_quotes():
     "echo " + "$C[" * 70000,                          # a subscript with no `]` scanned to the end of the line
     "echo " + "$C:W." * 40000,
     "echo " + "$C:F." * 40000,
-], ids=["F<", "F(", "F[", "F{", "W<", "C[", "W.", "F."])
+    "echo $C:" + "Ff$C:f" * 34000 + "; git push origin $C:refs/heads/x",   # the prefix chain: each `$` chained to the end of the word (r3 M-1)
+    "echo $C:" + "Wf$C:f" * 34000,
+], ids=["F<", "F(", "F[", "F{", "W<", "C[", "W.", "F.", "Ff-chain", "Wf-chain"])
 def test_zsh_modifier_regex_is_linear_on_unclosed_delimiters_and_subscripts(command):
     assert len(command) >= 195_000
     started = time.monotonic()
@@ -1407,3 +1409,44 @@ def test_zsh_modifier_regex_is_linear_on_unclosed_delimiters_and_subscripts(comm
 ])
 def test_zsh_modifier_argument_and_subscript_cap_is_256_characters(command, denies):
     assert denied(command) is denies
+
+
+@pytest.mark.parametrize("command, denies", [          # more than 8 prefix items before the modifier letter are not followed (accepted limit)
+    ("echo $C:" + "f" * 8 + "r", True), ("echo $C:" + "f" * 9 + "r", False),
+    ("echo $C:" + "g" * 7 + "F:2:r", True), ("echo $C:" + "fg" * 4 + "r", True),
+])
+def test_zsh_modifier_prefix_chain_cap_is_8_items(command, denies):
+    assert denied(command) is denies
+
+
+def _budget_env(seconds):
+    return dict(os.environ, BASH_HABITS_GATE_BUDGET=str(seconds))
+
+
+def test_gate_fails_closed_when_it_exceeds_its_time_budget():
+    """`$((` x 2000 takes the unbudgeted gate past 60 s (also on master): with the budget lowered it must end in a deny, fast."""
+    command = "echo " + "$((" * 2000
+    started = time.monotonic()
+    out = run(command, env=_budget_env(2))
+    elapsed = time.monotonic() - started
+    assert out and out["permissionDecision"] == "deny", out
+    assert "time budget" in out["permissionDecisionReason"] and "split or simplify" in out["permissionDecisionReason"]
+    assert 1.5 < elapsed < 15, elapsed
+
+
+def test_time_budget_deny_works_for_the_cursor_and_codex_forms_too():
+    command = "echo " + "$((" * 2000
+    cursor = subprocess.run([sys.executable, str(HOOK), "--cursor"], input=json.dumps({"command": command}),
+                            capture_output=True, text=True, timeout=30, env=_budget_env(2))
+    assert cursor.returncode == 0 and json.loads(cursor.stdout)["permission"] == "deny"
+    codex = subprocess.run([sys.executable, str(HOOK), "--codex"],
+                           input=json.dumps({"tool_name": "shell", "tool_input": {"command": command}}),
+                           capture_output=True, text=True, timeout=30, env=_budget_env(2))
+    assert codex.returncode == 2 and "time budget" in codex.stderr
+
+
+@pytest.mark.parametrize("value", ["", "0", "-3", "abc"])
+def test_an_unusable_budget_value_falls_back_to_the_default(value):
+    assert run("git status", env=_budget_env(value)) is None
+    out = run("git push origin $C:refs/heads/x", env=_budget_env(value))
+    assert out and out["permissionDecision"] == "deny" and "time budget" not in out["permissionDecisionReason"]
