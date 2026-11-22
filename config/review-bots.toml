@@ -90,11 +90,11 @@ check_apps = []
 source = "brandondees/code-quality-atlas PR 640 and auerbachb/claude-code-config PR 2317 (reviewer_bots list); fstack review-bots.md (copilot-pull-request-reviewer), 2026-11-14"
 
 # Macroscope (operator ruling 2026-11-22: trusted like CodeRabbit, must-triage). SCARCE: the workspace holds a US$100
-# non-renewable balance billed per KB of reviewed diff, so NOTHING in this repo requests a review (`@macroscope-app
-# review` is the operator's or a lead's deliberate act, skills/macroscope-review). A PR with no Macroscope check run
+# non-renewable balance billed per KB of reviewed diff, so NOTHING in this repo requests a review (a macroscope-app
+# mention comment is the operator's or a lead's deliberate act, skills/macroscope-review; so is a mode label). A PR with no Macroscope check run
 # is `not_started`, never pending. Only the Correctness check is listed in check_names: Approvability (a verdict
 # review/comment, no inline threads) and Check Run Agents are not findings and must not hold a merge.
-# NOTE the mention handle `@macroscope-app` is NOT the login: the login is `macroscopeapp[bot]` (the `-nonprod` app,
+# NOTE the mention handle `macroscope-app` (written with a leading at-sign only in the skill) is NOT the login: the login is `macroscopeapp[bot]` (the `-nonprod` app,
 # `macroscopeapp-nonprod[bot]`, is Macroscope's own test app and is not listed).
 [[bot]]
 id = "macroscope"

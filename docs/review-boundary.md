@@ -470,8 +470,9 @@ older than that is a `stalled` note, and a bot with no check run or status on th
 reviews without a check) never blocks.
 
 **Macroscope (operator, 2026-11-22: "New github username we trust in the same manner as coderabbit and a new thing we
-can post to get a review done @macroscope-app review").** Trusted like CodeRabbit: `macroscopeapp[bot]`, GraphQL
-`macroscopeapp`, actor type `Bot` (verified on public PRs, `source` in the config); the mention handle `@macroscope-app`
+can post to get a review done" followed by the mention handle `macroscope-app` and the word review; the leading at-sign
+is left out here on purpose, see the budget paragraph).** Trusted like CodeRabbit: `macroscopeapp[bot]`, GraphQL
+`macroscopeapp`, actor type `Bot` (verified on public PRs, `source` in the config); the mention handle `macroscope-app`
 is not the login, and the app's test twin `macroscopeapp-nonprod[bot]` is not listed. Its findings are inline review
 threads, so every unresolved thread is a finding (no marker is needed); its Approvability verdict comment and APPROVED
 review are not findings. Only the `Macroscope - Correctness Check` run is a pending signal: Approvability and custom Check
@@ -481,14 +482,29 @@ Run Agents never hold a merge.
 kilobyte. Use it wisely." then "No 100 dollars"): US$100 in total, non-renewable, billed per KB of reviewed diff (Balanced
 $0.05/KB with a 10 KB, $0.50 minimum per review: about 2,000 KB, or 200 minimum-size reviews; Budget $0.025/KB, about
 4,000 KB; Precise $0.06/KB; Ultra $0.20/KB, about 500 KB; docs.macroscope.com/pricing, 2026-11-22). Therefore: nothing in
-this repo (pr-wait, review-launch, ade-merge-ready, a hook or a script) requests a review (a test scans `bin/`,
-`libexec/`, `claude/`, `plugins/` and `.github/` for the trigger); an agent posts `@macroscope-app review` only when the
-operator asks or a lead judges one small, high-risk diff worth it, and the requester records the spend (PR, head, KB,
-mode, running total); a head with no Macroscope check run is `not_started`, which neither waits nor blocks, so a PR the
-operator never sent to Macroscope is never held. How to ask and triage: [skills/macroscope-review](../skills/macroscope-review/SKILL.md).
-If the app is installed on a repo, the operator turns off reviews on every PR in app.macroscope.com: Settings, Repos,
-Correctness to **Manual invocation only**, no Always Review PR labels, Approvability and Status off, Billing Auto Refill
-off (it defaults on) and a monthly spend limit.
+this repo (pr-wait, review-launch, ade-merge-ready, a hook or a script) requests a review (a test scans every tracked file
+outside a small allowlist for the mention handle with its leading at-sign and for the mode labels; it cannot see a string
+built at runtime); **no agent writes the handle with a leading at-sign anywhere on GitHub** (PR body, comment, review,
+commit message), with or without the word review, except the one deliberate, operator-approved request of
+[skills/macroscope-review](../skills/macroscope-review/SKILL.md): any mention of the handle can start a paid review,
+and the quoted operator sentence, a changelog bullet or a pasted doc line is enough. Prose writes `macroscope-app`
+without the at-sign. **Never add a `macroscope-budget`, `macroscope-balanced`, `macroscope-precise` or
+`macroscope-ultra` label, or any "Always Review PR" label**: each label is a trigger that also starts Approvability and
+Check Run Agents and overrides the skip-label and target-branch rules. The requester appends the spend to the
+append-only ledger [docs/macroscope-spend.md](macroscope-spend.md) (PR, head, KB, mode, estimated cost, running total)
+and reads its running total before asking; a head with no Macroscope check run is `not_started`, which neither waits nor
+blocks, so a PR the operator never sent to Macroscope is never held. How to ask and triage:
+[skills/macroscope-review](../skills/macroscope-review/SKILL.md).
+
+**Operator checklist if the app is installed on a repo** (app.macroscope.com; agents have no access): Settings, Repos,
+Correctness to **Manual invocation only**; no Always Review PR labels; Approvability and Status off; **Review Cross-Repo
+PRs OFF** (fork and external PRs); **Max Reviewable File Size** set (50-100 KB; off by default, which reviews files of
+any size); Billing **Auto Refill off** (it defaults on); a **monthly spend limit well below the balance** (US$10-20 a
+month, not left blank). A mention bypasses the per-review ($10) and per-PR ($50) correctness caps: only the balance and
+the monthly limit hold. **Open operator item:** confirm with Macroscope whether a mention by a non-member (an outsider on
+a public repo) starts a review. Until confirmed, install the app only on private repos, or not at all: on a public repo
+one outsider comment on a large fork diff could spend the balance. An unexpected Macroscope check run or comment on any
+PR is a possible spend incident: report it to the lead and the operator, do not triage it as an ordinary finding first.
 
 ```sh
 review-bot-findings --repo OWNER/NAME --pr N [--pr M] [--json] [--check]   # --check: exit 3 untriaged, 4 pending

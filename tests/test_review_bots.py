@@ -10,6 +10,8 @@ import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
+import re
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -574,21 +576,65 @@ def test_macroscope_approvability_verdicts_are_not_findings() -> None:
     assert v["findings"] == [] and v["state"] == "clear"
 
 
-def test_no_tool_in_this_repo_requests_a_macroscope_review() -> None:
-    # Operator 2026-11-22: US$100, non-renewable, per KB. The trigger comment is a person's deliberate act: no script,
-    # hook, shim or agent definition may contain it (docs and skills may describe it; the config only comments on it).
-    needle = "macroscope-app review"
-    offenders = []
-    for sub in ("bin", "libexec", "claude", "plugins", ".github"):
-        for path in (ROOT / sub).rglob("*"):
-            if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
-                try:
-                    text = path.read_text()
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if needle in text:
-                    offenders.append(str(path.relative_to(ROOT)))
+# Macroscope is billed per KB from a non-renewable US$100 balance (operator 2026-11-22), and any mention of its handle,
+# or a mode label, starts a paid review. A files-only scan: it reads the TEXT of tracked files, so a string built at
+# runtime (a split literal, an f-string, a computed label name) is out of its scope; it guards against careless text
+# that an agent might copy into a PR, not against a determined one.
+MACROSCOPE_TRIGGER = re.compile(r"(?i)@\s*macroscope-app\b|macroscope-(budget|balanced|precise|ultra)\b")
+MACROSCOPE_AT_HANDLE = re.compile(r"(?i)@\s*macroscope-app\b")
+# Files that legitimately NAME the trigger, each justified: docs/ (the rules and the budget), the skill (the rules and
+# the one request block), the bot list (a comment on the handle), this test (the pattern), changelog.d/ (a bullet about
+# the bot) and AGENTS.md (the reader list). Keep it minimal: anything else, code, hooks, scripts, agent definitions,
+# prompts, workflows, must not contain a trigger.
+MACROSCOPE_ALLOWED = ("docs/", "skills/macroscope-review/", "config/review-bots.toml",
+                      "tests/test_review_bots.py", "changelog.d/", "AGENTS.md")
+# The skill's one deliberate request block: a fenced block whose only content is the handle and the word review
+# (built from parts so that this file itself holds no at-sign handle).
+MACROSCOPE_REQUEST_BLOCK = re.compile(r"```\n[ \t]*" + "@" + r"macroscope-app review\n[ \t]*```")
+
+
+def _tracked_text_files() -> dict[str, str]:
+    r = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True, check=True)
+    out: dict[str, str] = {}
+    for rel in (x for x in r.stdout.split("\0") if x):
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        try:
+            out[rel] = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+    return out
+
+
+def test_macroscope_trigger_pattern_matches_the_variants_a_careless_agent_writes() -> None:
+    at = "@"
+    for text in (at + "macroscope-app review", at + "Macroscope-App please look", at + " macroscope-app", "x " + at + "MACROSCOPE-APP, see above",
+                 "gh pr edit --add-label macroscope-budget", "label: Macroscope-Ultra", "macroscope-precise"):
+        assert MACROSCOPE_TRIGGER.search(text), text
+    for text in ("macroscope-app review", "macroscopeapp[bot]", "the Macroscope reviewer", "macroscope-nonprod"):
+        assert not MACROSCOPE_TRIGGER.search(text), text
+
+
+def test_no_tracked_file_outside_the_allowlist_can_request_a_macroscope_review() -> None:
+    offenders = [rel for rel, text in _tracked_text_files().items()
+                 if not rel.startswith(MACROSCOPE_ALLOWED) and MACROSCOPE_TRIGGER.search(text)]
     assert offenders == []
+
+
+def test_allowlisted_files_never_write_the_macroscope_handle_with_an_at_sign_but_the_skills_request_block() -> None:
+    offenders = []
+    request_blocks = 0
+    for rel, text in _tracked_text_files().items():
+        if not rel.startswith(MACROSCOPE_ALLOWED):
+            continue
+        if rel == "skills/macroscope-review/SKILL.md":
+            request_blocks += len(MACROSCOPE_REQUEST_BLOCK.findall(text))
+            text = MACROSCOPE_REQUEST_BLOCK.sub("", text)
+        if MACROSCOPE_AT_HANDLE.search(text):
+            offenders.append(rel)
+    assert offenders == []
+    assert request_blocks == 1
 
 
 # ------------------------------------------------------------------ read-only guarantee
