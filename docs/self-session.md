@@ -349,7 +349,7 @@ The successor inherits the predecessor's name (C-id), so a chain's agents all re
    state file `<home>/agents/*/<id>.json`, and when that cannot be read the advice is given anyway (`rename-advised`, `reason`
    `successor-window-unresolved`, no `name`). The result is `lead_window` in the record and in `finish`'s JSON: `state` `ok`;
    `rename-advised` with the exact `command` (`ade-worker-run rename-lead --lead <successor id>`, also printed on stderr; add
-   `--window-middle "WORK"` to choose the work part); or `unknown` (with `reason`: window not listed, listing failed). It only
+   `--window-middle "WORK"` to choose the work part, `--repo REPO` to correct the repo); or `unknown` (with `reason`: window not listed, listing failed). It only
    observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs
    it itself (SKILL `handoff`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
 

@@ -12,7 +12,9 @@ window (the tab row that includes the lead), `WORKER <repo> (<work>)` holds ever
 `OTHER <repo> (<work>)` holds probes and side tasks. A name is `<KIND> <repo> (<work>)` (bin/ade_ws_names.py); the lead id is
 NOT in it (it stays in the tab name and the ade.lead label). The 2026-11-13 kinds MAIN, WORKERS and USER are still found
 (as LEAD, WORKER, OTHER) and renamed to the current kind when a launch reuses the window. <repo> is --repo, else the repo of
---cwd (the main checkout's name, also from a linked worktree).
+--cwd (the main checkout's name, also from a linked worktree). rename-lead never takes the home directory's name as a repo (a window
+whose cwd is $HOME needs --repo, or a bare `LEAD <repo>` name that already says it), and with --repo or --window-middle it corrects a
+window already named in the current form (a launch never does).
 
 Launch (default --placement worker): ONE box per lead and repo, whatever the slice and whatever --window-middle says: the lead's
 box is found by ownership (never by its name) and reused. A successor lead of a completed self-handoff (bin/ade_lead_succession.py)
@@ -36,9 +38,13 @@ Tab names: `worker <slice> <lead id>` plus ` [wt: <worktree dir>]` when --worktr
 Pass --no-wait to paseo. The last `--` argument (the brief) gets one line appended: `Also follow every item of <repo root>/docs/
 dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). A `Footer values:` line
 always follows it and fills {lead}, {report}, {done}, {inbox} and {replies}. A report path the brief LABELS (a line-start `Report:`/
-`Report path:`/`Report file:`, a `## Report path` heading with the path below, "write your report to <path>", `{report} = <path>`)
-is used as {report} and nothing is generated or created; {done} is the brief's labelled `Done:`/`{done} =` path, else `<report>.done`.
-A path merely mentioned (an input report of another agent) is not a label. Otherwise report = ~/.local/state/agent-reports/<lead id>/
+`Report path:`/`Report file:` with the path on that line or the next (one blank line allowed), a `## Report path` heading with the
+path below, "write|save your report [file] to|at|in|as <path>", `{report} = <path>`) is used as {report} and nothing is generated or
+created; {done} is the brief's labelled `Done marker:`/`Done file:`/`Done path:`/`{done} =` path (ignored when that file exists; a bare
+`Done:` is no label), else `<report>.done`. A `>` quoted line labels nothing, and two different labelled report paths (or done markers)
+are refused rather than picked by position. A path merely mentioned (an input report of another agent) is not a label; when no label
+matches and the brief names a `-report.md` or `agent-reports/` path, a stderr warning names it and the generated one. A generated stub
+is removed again only when `paseo run` exits nonzero (no agent exists) and the file is still the exact stub this launch created. Otherwise report = ~/.local/state/agent-reports/<lead id>/
 <slice>-report.md (or $AGENT_FOOTER_REPORT_DIR/<lead id>/..., the agent_footer_gate layout; `worker-` is prefixed to a slice starting with
 report/summary/findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done, and a report or .done that exists is
 never reused: the next free `<slice>-N-report.md` is taken. A generated report is created exclusively (`STATUS: working`) in a 700
@@ -634,31 +640,53 @@ def own_window(lead: str, why: str) -> dict:
     return row
 
 
-def main_target(row: dict, repo: str | None, explicit: bool, work: str | None) -> str | None:
+_BARE_LEAD = re.compile(r"LEAD (\S(?:.*\S)?)")  # `LEAD tendcf`: the kind and a middle, no `<repo> (<work>)` shape (never a parsed name)
+
+
+def main_target(row: dict, repo: str | None, explicit: bool, work: str | None, correct: bool = False) -> str | None:
     """The `LEAD <repo> (<work>)` name the lead's own window should have, or None when it already has it. A 2026-11-13
-    `MAIN <repo> (<work>)` or `MAIN <middle>` name comes back as its LEAD name. Refuses a WORKER or OTHER window (the lead's own
-    tab row is never one of those)."""
+    `MAIN <repo> (<work>)` or `MAIN <middle>` name comes back as its LEAD name; so does a bare `LEAD <middle>`. The repo is
+    --repo (`explicit`), else the window cwd's repo: never the home directory's name, and for a bare `LEAD <repo>` name over a cwd that
+    is not a git repo, the name's own middle (`LEAD tendcf` in $HOME is repo `tendcf`). `correct` (rename-lead): an explicit --repo or
+    `work` (--window-middle) that differs from a name already in the current form builds the corrected name instead of None.
+    Refuses a WORKER or OTHER window (the lead's own tab row is never one of those)."""
     name = row["name"]
     cur = wsn.parse(name)
     if cur:
         if cur.box != "LEAD":
             raise Refused(f"the lead's own window {row['workspaceId']} is named {name!r} ({cur.kind}); a lead lives in a LEAD "
                           "window: rename it by hand if that is really the lead's window")
-        if cur.current:
+        new_repo, new_work = (repo if explicit and repo else cur.repo), (work if work is not None else cur.work)
+        if cur.current and not (correct and (new_repo, new_work) != (cur.repo, cur.work)):
             return None
         try:
-            return wsn.current_name(cur)
-        except ValueError as e:
+            return build_name("LEAD", new_repo, new_work) if correct else wsn.current_name(cur)
+        except (ValueError, Refused) as e:
             raise Refused(f"the lead's own window {row['workspaceId']} ({name!r}) cannot be renamed to its current kind: {e}; rename it by hand")
     legacy = wsn.parse_legacy(name)
     if legacy and legacy.kind == "WORKERS":
         raise Refused(f"the lead's own window {row['workspaceId']} is named {name!r}, a workers window; rename it by hand")
-    r = repo if explicit or not row.get("cwd") else wsn.repo_of(row["cwd"])
+    bare = _BARE_LEAD.fullmatch(name)
+    middle = legacy.middle if legacy else (bare.group(1) if bare else None)
+    cwd = row.get("cwd")
+    if explicit or not cwd:
+        r = repo
+    else:
+        home = same_dir(cwd, str(Path.home()))
+        in_repo = not home and bool(wsn._git(cwd, "rev-parse", "--git-common-dir"))
+        name_repo = bare.group(1) if bare and wsn.REPO_RE.fullmatch(bare.group(1)) else None
+        if in_repo or (not home and not name_repo):
+            r = wsn.repo_of(cwd)
+        elif name_repo:
+            r = name_repo  # not in a git repo: the name already says which repo this is
+        else:
+            raise Refused(f"pass --repo: the window's cwd {cwd} is the home directory, whose name is not a repo")
     if not r:
         raise Refused("pass --repo: the window has no cwd to take the repo name from")
     if work is None:
-        work = legacy.middle if legacy else name
-        work = wsn.normalize_work(work, r)
+        work = wsn.normalize_work(middle if middle is not None else name, r)
+        if bare and work == r:
+            work = "lead"  # `LEAD tendcf` held no work text: the middle was the repo
     return build_name("LEAD", r, work)
 
 
@@ -668,7 +696,7 @@ def rename_main(opts) -> int:
     lock = lock_for(opts.lead)
     try:
         row = own_window(opts.lead, "rename-main")
-        new = main_target(row, opts.repo, bool(opts.repo), opts.window_middle)
+        new = main_target(row, opts.repo, bool(opts.repo), opts.window_middle, correct=True)
         if new is None:
             print(json.dumps({"renamed": False, "workspaceId": row["workspaceId"], "windowName": row["name"]}))
             return 0
@@ -706,43 +734,83 @@ def add_footer(rest: list[str]) -> list[str]:
 REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.IGNORECASE)  # Claude Code refuses a Write of these .md names
 # The brief's OWN report path is read from labelled lines only (operator ruling 2026-11-22, PR 935 LOW-4): a path merely mentioned as an
 # input (another agent's `~/.local/state/agent-reports/x/old-report.md`) is not the report. Labels: a line-start `Report:` / `Report path:`
-# / `Report file:` (list marker, quote or markdown around it allowed), a `## Report path` heading with the path on the next line,
-# "write your report to <path>", and `{report} = <path>`. The path is absolute, `~/` or `$HOME/`; the first labelled one in the brief wins.
+# / `Report file:` (list marker or markdown around it allowed; the path may sit on the next line, after at most one blank line), a
+# `## Report path` heading with the path on the next line (one blank line allowed), "write|save your report [file] to|at|in|as[:] <path>",
+# and `{report} = <path>`. The path is absolute, `~/` or `$HOME/`. A line quoted with `>` is untrusted pasted content and labels nothing.
+# Every labelled path is collected: two different ones are refused (PR 935 r3 LOW-2), never resolved by position.
 _PATH = r"(?P<p>(?:/|~/|\$HOME/)[\w.@+~/-]+)"  # a label counts only when a PATH follows it: absolute, ~/ or $HOME/
 _P = r"[ \t]*[`'\"]?" + _PATH
-_LIST = r"^[ \t>*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?"
+_LIST = r"^[ \t*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?"
+_DELIVERABLE = r"(?:full\s+)?(?:report(?:\s+file)?|deliverable)"
 BRIEF_REPORT_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
-    _LIST + r"report\b(?:[ \t]+(?:path|file)\b)?[*_`]*[ \t]*(?:is\b|:|=)[*_`]*" + _P,
-    r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n" + _P,
-    r"\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\s+[`'\"]?" + _PATH,
+    _LIST + r"report\b(?:[ \t]+(?:path|file)\b)?[*_`]*[ \t]*(?:is\b[ \t]*|[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*)[`'\"]?" + _PATH,
+    r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n(?:[ \t]*\n)?" + _P,
+    r"\b(?:write|save)\s+(?:your|the|a|its)\s+" + _DELIVERABLE + r"\s+(?:to|at|in|as)\s*:?\s*[`'\"]?" + _PATH,
     r"\{report\}\s*[=:]" + _P)]
-BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
-    _LIST + r"done\b(?:[ \t]+(?:marker|file|path)\b)?[*_`]*[ \t]*[:=][*_`]*" + _P,
+BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (  # no bare `Done:`: it is a status-line word
+    _LIST + r"done[ \t]+(?:marker|file|path)\b[*_`]*[ \t]*[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*[`'\"]?" + _PATH,
     r"\{done\}\s*[=:]" + _P)]
 SAFE_PATH = re.compile(r"[\w./@+~-]+")  # no space or quote: the worker copies the path into a Write call as given
 VALUES_MARK = "Footer values:"
 
 
-def _first_label(brief: str, labels: list) -> str | None:
-    """The path of the earliest labelled match (any of `labels`), `~/` expanded, or None. Refused when it is not a plain absolute path."""
-    hits = [m for m in (rx.search(brief) for rx in labels) if m]
-    if not hits:
-        return None
-    raw = min(hits, key=lambda m: m.start()).group("p").rstrip(".,")
-    path = os.path.expanduser("~/" + raw[len("$HOME/"):] if raw.startswith("$HOME/") else raw)
-    if not os.path.isabs(path) or ".." in path.split("/") or has_control_char(path) or not SAFE_PATH.fullmatch(path):
-        raise Refused(f"the brief's labelled report path {raw!r} is not a plain absolute path (no `..`, spaces or quotes)")
-    return path
+def _quoted(brief: str, pos: int) -> bool:
+    """True when the line holding `pos` is a `>` blockquote line."""
+    return brief[brief.rfind("\n", 0, pos) + 1:].lstrip(" \t").startswith(">")
+
+
+def _labelled_paths(brief: str, labels: list, what: str) -> list[str]:
+    """Every distinct path the brief labels (any of `labels`, outside `>` quotes), `~/` expanded, in order of first appearance.
+    A path that is not a plain absolute one is refused, naming the label it came from."""
+    found: list[tuple[int, str, str]] = []
+    for rx in labels:
+        for m in rx.finditer(brief):
+            if not _quoted(brief, m.start()):
+                found.append((m.start(), m.group("p").rstrip(".,"), " ".join(brief[m.start():m.start("p")].split())))
+    paths: list[str] = []
+    for _, raw, label in sorted(found):
+        path = os.path.expanduser("~/" + raw[len("$HOME/"):] if raw.startswith("$HOME/") else raw)
+        if not os.path.isabs(path) or ".." in path.split("/") or has_control_char(path) or not SAFE_PATH.fullmatch(path):
+            raise Refused(f"the brief's labelled {what} path {raw!r} (label {label!r}) is not a plain absolute path (no `..`, spaces or quotes)")
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _one_label(brief: str, labels: list, what: str) -> str | None:
+    paths = _labelled_paths(brief, labels, what)
+    if len(paths) > 1:
+        raise Refused(f"the brief labels {len(paths)} {what} paths: {', '.join(paths)}; keep one (a quoted or pasted label can "
+                      "override the real one, so the tool never picks by position)")
+    return paths[0] if paths else None
 
 
 def brief_footer_values(lead: str, brief: str) -> dict[str, str] | None:
     """The footer values for a brief that labels its own report path (see BRIEF_REPORT_LABELS), else None. {done} is the brief's
-    labelled done marker, else `<report>.done`; {inbox} and {replies} sit beside the report. Nothing is generated or created."""
-    report = _first_label(brief, BRIEF_REPORT_LABELS)
+    labelled done marker (one that already exists is somebody's old file and is ignored), else `<report>.done`; {inbox} and {replies} sit
+    beside the report. Nothing is generated or created."""
+    report = _one_label(brief, BRIEF_REPORT_LABELS, "report")
     if report is None:
         return None
-    done = _first_label(brief, BRIEF_DONE_LABELS) or report + ".done"
+    dones = [d for d in _labelled_paths(brief, BRIEF_DONE_LABELS, "done marker") if not os.path.lexists(d)]
+    if len(dones) > 1:
+        raise Refused(f"the brief labels {len(dones)} done marker paths: {', '.join(dones)}; keep one")
+    done = dones[0] if dones else report + ".done"
     return {"lead": lead, "report": report, "done": done, "inbox": report + ".inbox.md", "replies": report + ".replies.md"}
+
+
+_MENTIONED_REPORT = re.compile(_PATH)
+
+
+def mentioned_report_paths(brief: str) -> list[str]:
+    """Absolute, `~/` or `$HOME/` paths in the brief that look like a report (`...-report.md` or under `agent-reports/`), for the
+    warning printed when no label matched and a generated path is used instead."""
+    out: list[str] = []
+    for m in _MENTIONED_REPORT.finditer(brief):
+        p = m.group("p").rstrip(".,")
+        if (p.endswith("-report.md") or "/agent-reports/" in p) and p not in out:
+            out.append(p)
+    return out
 
 
 def footer_report_paths(lead: str, slice_name: str) -> dict[str, str]:
@@ -769,10 +837,13 @@ def footer_report_paths(lead: str, slice_name: str) -> dict[str, str]:
     return {"lead": lead, "report": r, "done": r + ".done", "inbox": r + ".inbox.md", "replies": r + ".replies.md"}
 
 
-def reserve_report(values: dict[str, str]) -> None:
+STUB_TEXT = "STATUS: working\n"
+
+
+def reserve_report(values: dict[str, str]) -> tuple[int, int]:
     """Just before `paseo run`: make the report directory (a symlink, a non-directory or another user's directory is refused; a looser
     mode is tightened to 700) and create the report itself exclusively with `STATUS: working`, so two launches can never share a path and
-    an existing report is never overwritten. An OS error is a refusal, not a traceback."""
+    an existing report is never overwritten. An OS error is a refusal, not a traceback. Returns the stub's (device, inode)."""
     report = Path(values["report"])
     d = report.parent
     try:
@@ -788,7 +859,9 @@ def reserve_report(values: dict[str, str]) -> None:
     except OSError as e:
         raise Refused(f"cannot prepare the report {report}: {e}")
     with os.fdopen(fd, "w") as f:
-        f.write("STATUS: working\n")
+        f.write(STUB_TEXT)
+        st = os.fstat(f.fileno())
+    return st.st_dev, st.st_ino
 
 
 def add_footer_values(rest: list[str], values: dict[str, str], created: bool = False) -> list[str]:
@@ -944,16 +1017,30 @@ def launch(opts, rest: list[str]) -> int:
     brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
     report_info: dict[str, str] | None = None
     report_generated = False
-    reserved = False  # the stub reserve_report created: removed again when the launch fails before an agent exists
+    reserved: tuple[int, int] | None = None  # (device, inode) of the stub reserve_report created, else None
 
     def drop_stub() -> None:
-        if reserved and report_info:
-            Path(report_info["report"]).unlink(missing_ok=True)
+        """Remove the stub this launch created, only when it is still that file and still exactly `STATUS: working`: a brief's own
+        labelled report (never created here) and a stub the worker already wrote to are left alone."""
+        if reserved is None or not report_info:
+            return
+        stub = Path(report_info["report"])
+        try:
+            st = stub.lstat()
+            if (st.st_dev, st.st_ino) == reserved and stub.read_text() == STUB_TEXT:
+                stub.unlink()
+        except OSError:
+            pass
     if not opts.no_footer:
         rest = add_footer(rest)
         report_info = brief_footer_values(lead, brief)  # a labelled report path in the brief is the report: nothing is generated
         if report_info is None:
             report_info, report_generated = footer_report_paths(lead, name), True
+            mentioned = mentioned_report_paths(brief)
+            if mentioned:  # a label form this tool does not know would leave the worker two conflicting report paths
+                sys.stderr.write(f"ade-worker-run: warning: no labelled report path in the brief, so {{report}} is the generated "
+                                 f"{report_info['report']}, but the brief names {', '.join(mentioned[:3])}; if that is the report, "
+                                 "label it (`Report: <path>`) and launch again\n")
         rest = add_footer_values(rest, report_info, created=report_generated)
     rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
@@ -1061,8 +1148,7 @@ def launch(opts, rest: list[str]) -> int:
         before = {row_wks(r) for r in list_windows()} if win is None else set()
         if report_info:  # as late as possible: a launch refused above leaves nothing behind
             if report_generated:
-                reserve_report(report_info)
-                reserved = True
+                reserved = reserve_report(report_info)
             sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
         rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
@@ -1070,16 +1156,14 @@ def launch(opts, rest: list[str]) -> int:
         if rc != 0:
             if win is None and "AGENT_CREATE_FAILED" in out + err:
                 cleanup_failed_workspace(err, before)
-            drop_stub()
+            drop_stub()  # rc != 0: no agent was created, so no worker holds this path
             raise Refused(f"paseo run failed (rc {rc}): {out.strip()[:300]}")
         try:
             result = json.loads(out)
             agent_id = result["agentId"]
-        except (ValueError, KeyError, TypeError):
-            drop_stub()
+        except (ValueError, KeyError, TypeError):  # rc 0: an agent may exist and hold the stub's path, so the stub stays
             raise Refused("paseo run printed no agentId; check `paseo ls -g --json` for the new agent")
         if not isinstance(agent_id, str) or not LEAD_RE.fullmatch(agent_id):
-            drop_stub()
             raise Refused("paseo run printed an unusable agentId (expected a UUID)")
         try:
             wks = resolve_window_id(win, result, err, agent_id)

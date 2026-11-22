@@ -948,6 +948,81 @@ def test_rename_main_converts_the_name(main_env, old, new, verb):
     assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, new]] and json.loads(r.stdout)["renamed"] is True
 
 
+HOME_DIR = os.path.expanduser("~")
+
+
+def rename_lead(env, *extra):
+    return env.run("rename-lead", "--lead", LEAD, *extra)
+
+
+@pytest.mark.parametrize("cwd", [HOME_DIR, "/repo/lead", None])
+def test_a_bare_lead_name_keeps_its_own_repo_when_the_cwd_is_not_a_repo(main_env, cwd, tmp_path):
+    """Part B (a): `LEAD tendcf` over the home directory (or any non-git cwd) is repo `tendcf`, never the directory's name."""
+    main_env.data["workspaces"][0].update(name="LEAD tendcf", cwd=cwd or str(tmp_path))
+    r = rename_lead(main_env)
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD tendcf (lead)"]]
+
+
+def test_a_bare_lead_name_over_a_git_repo_takes_the_cwds_repo(main_env, tmp_path):
+    repo = tmp_path / "realrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    main_env.data["workspaces"][0].update(name="LEAD tendcf", cwd=str(repo))
+    r = rename_lead(main_env)
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD realrepo (tendcf)"]]
+
+
+@pytest.mark.parametrize("name", ["master", "LEAD two words", "Wave 7"])
+def test_the_home_directorys_name_is_never_a_repo(main_env, name):
+    main_env.data["workspaces"][0].update(name=name, cwd=HOME_DIR)
+    r = rename_lead(main_env)
+    assert r.returncode == 1 and "pass --repo" in r.stderr and rename_calls(main_env) == []
+    r = rename_lead(main_env, "--repo", "tendcf")
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env)[-1][-1].startswith("LEAD tendcf (")
+
+
+def test_an_explicit_repo_beats_a_bare_names_middle(main_env):
+    main_env.data["workspaces"][0].update(name="LEAD tendcf", cwd=HOME_DIR)
+    r = rename_lead(main_env, "--repo", "other", "--window-middle", "Wave 9")
+    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD other (Wave 9)"]]
+
+
+@pytest.mark.parametrize("args, new", [
+    (["--repo", "right"], "LEAD right (Wave 7)"),
+    (["--window-middle", "Wave 8"], "LEAD repo (Wave 8)"),
+    (["--repo", "right", "--window-middle", "Wave 8"], "LEAD right (Wave 8)"),
+])
+def test_an_explicit_repo_or_work_corrects_a_name_already_in_the_current_form(main_env, args, new):
+    """Part B (b): `rename-lead` on `LEAD repo (Wave 7)` with a differing --repo / --window-middle builds the corrected name."""
+    main_env.data["workspaces"][0]["name"] = "LEAD repo (Wave 7)"
+    r = rename_lead(main_env, *args)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["renamed"] is True and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, new]]
+
+
+@pytest.mark.parametrize("args", [[], ["--repo", "repo"], ["--window-middle", "Wave 7"], ["--repo", "repo", "--window-middle", "Wave 7"]])
+def test_the_same_repo_and_work_leave_a_current_name_alone(main_env, args):
+    main_env.data["workspaces"][0]["name"] = "LEAD repo (Wave 7)"
+    r = rename_lead(main_env, *args)
+    assert r.returncode == 0 and json.loads(r.stdout)["renamed"] is False and rename_calls(main_env) == []
+
+
+def test_a_main_name_with_an_explicit_repo_is_renamed_to_that_repo(main_env):
+    main_env.data["workspaces"][0]["name"] = "MAIN old (Wave 7)"
+    r = rename_lead(main_env, "--repo", "new")
+    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD new (Wave 7)"]]
+
+
+def test_a_launch_with_repo_never_renames_a_current_lead_window(main_env):
+    """The correction is rename-lead's: a `--placement lead` launch still takes a current name as it is."""
+    r = interactive(main_env, "--placement", "lead", "--repo", "other")
+    assert r.returncode == 0, r.stderr
+    assert rename_calls(main_env) == []
+
+
 def test_rename_main_is_a_noop_on_a_lead_name_and_takes_an_explicit_work(main_env):
     r = main_env.run("rename-main", "--lead", LEAD)
     assert r.returncode == 0 and json.loads(r.stdout)["renamed"] is False and rename_calls(main_env) == []
@@ -2845,9 +2920,15 @@ HOME_OUT = os.path.expanduser("~/out/a.md")
     ("BRIEF\nReport file: /tmp/x/a-report.md", "/tmp/x/a-report.md"),
     ("BRIEF\nReport: /tmp/x/a-report.md", "/tmp/x/a-report.md"),
     ("BRIEF\n- **Report path:** /tmp/x/a-report.md", "/tmp/x/a-report.md"),
-    ("BRIEF\n> Report file = /tmp/x/a-report.md", "/tmp/x/a-report.md"),
     ("BRIEF\nWrite your report to /tmp/x/a-report.md, then touch the .done", "/tmp/x/a-report.md"),
     ("BRIEF\n## Report path\n/tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\n## Report path\n\n/tmp/x/a-report.md", "/tmp/x/a-report.md"),  # LOW-3: a blank line between heading and path
+    ("BRIEF\nReport path:\n/tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nReport path:\n\n`/tmp/x/a-report.md`", "/tmp/x/a-report.md"),
+    ("BRIEF\nWrite the report file to /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nWrite your report to: /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nSave your report as /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nReport: /tmp/x/a-report.md\n{report} = /tmp/x/a-report.md", "/tmp/x/a-report.md"),  # the same path twice is one path
     ("BRIEF\nReport file: ~/out/a.md", HOME_OUT), ("BRIEF\nReport: ~/out/a.md", HOME_OUT),
     ("BRIEF\nWrite your report to ~/out/a.md", HOME_OUT), ("BRIEF\n## Report path\n~/out/a.md", HOME_OUT),
     ("BRIEF\nReport: ~/out/a-report.md", os.path.expanduser("~/out/a-report.md")),
@@ -2880,6 +2961,9 @@ def test_a_labelled_done_marker_is_used(env):
     "BRIEF\nReport: one paragraph per finding",
     "BRIEF\nReport issues you find to the lead",
     "BRIEF\nReport is due soon; see /tmp/x/a-report.md",
+    "BRIEF\n> Report: /Users/djbclark/.zshrc",  # LOW-2: a quoted line (pasted untrusted content) labels nothing
+    "BRIEF\n> Report file = /tmp/x/a-report.md",
+    "BRIEF\n> write your report to /tmp/x/a-report.md",
 ])
 def test_a_path_only_mentioned_in_the_brief_is_not_the_report(env, brief):
     """(a): an input report path (or a label with no path) still gets the generated values."""
@@ -3015,9 +3099,87 @@ def test_the_values_line_tells_the_worker_to_read_the_reserved_report_first(env)
     assert "/tmp/x/b-report.md" in last and "Read it, then overwrite" not in last  # a labelled path is the brief's own: nothing was created
 
 
-@pytest.mark.parametrize("failure", [{"run_rc": 1}, {"run_out": {"status": "running"}}, {"run_out": {"agentId": "not-a-uuid"}}])
-def test_a_launch_that_fails_before_an_agent_exists_removes_its_reserved_stub(env, failure):
-    env.data.update(failure)
+def test_a_launch_that_fails_with_a_nonzero_exit_removes_its_reserved_stub(env):
+    env.data.update({"run_rc": 1})
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r.returncode == 1, r.stderr
     assert not (env.tmp / "reports" / LEAD / "a-report.md").exists()
+
+
+@pytest.mark.parametrize("failure", [{"run_out": {"status": "running"}}, {"run_out": {"agentId": "not-a-uuid"}}])
+def test_a_launch_that_exits_zero_without_a_usable_agent_id_keeps_its_stub(env, failure):
+    """LOW-1: rc 0 means paseo may have created an agent holding {report}: a relaunch must not be handed the same path."""
+    env.data.update(failure)
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1, r.stderr
+    d = env.tmp / "reports" / LEAD
+    assert (d / "a-report.md").read_text() == "STATUS: working\n"
+    again = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert again.returncode == 1 and (d / "a-2-report.md").read_text() == "STATUS: working\n"  # the next free name, not a shared path
+
+
+def test_reserve_report_returns_the_stubs_identity(env, monkeypatch):
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_ident_t", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ade_worker_run_ident_t", loader))
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    vals = mod.footer_report_paths(LEAD, "ident")
+    ident = mod.reserve_report(vals)
+    st = os.stat(vals["report"])
+    assert ident == (st.st_dev, st.st_ino)
+
+
+@pytest.mark.parametrize("failure", [{"run_rc": 1}, {"run_out": {"status": "running"}}, {"run_out": {"agentId": "not-a-uuid"}}])
+def test_a_failed_launch_never_removes_the_briefs_own_labelled_report(env, failure):
+    """LOW-4 / mutant M7: the brief's labelled report was not created by the tool and may be a real earlier report."""
+    own = env.tmp / "own-report.md"
+    own.write_text("REAL EARLIER REPORT\n")
+    env.data.update(failure)
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                f"BRIEF\nReport: {own}")
+    assert r.returncode == 1, r.stderr
+    assert own.read_text() == "REAL EARLIER REPORT\n"
+
+
+@pytest.mark.parametrize("brief, what", [
+    ("BRIEF\nWrite your report to /tmp/x/a-report.md\nReport: /tmp/x/b-report.md", "2 report paths"),  # M6: neither wins by position
+    ("BRIEF\nReport: /tmp/x/b-report.md\nWrite your report to /tmp/x/a-report.md", "2 report paths"),
+    ("BRIEF\nReport: /tmp/x/a.md\n\nWrite the full deliverable to `/tmp/other/b-report.md`", "2 report paths"),  # a pasted, filled footer
+    ("BRIEF\nReport: /tmp/x/a-report.md\nDone marker: /tmp/x/one\n{done} = /tmp/x/two", "2 done marker paths"),
+])
+def test_two_different_labelled_paths_are_refused_not_picked(env, brief, what):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 1 and f"the brief labels {what}" in r.stderr
+    assert not [c for c in env.calls() if c["argv"][0] == "run"] and not (env.tmp / "reports").exists()
+
+
+def test_a_bare_done_line_is_not_a_done_marker(env):
+    brief = "BRIEF\nReport: /tmp/x/p-report.md\n- Done: /tmp/x/refactor-notes.txt refactor merged"
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["donePath"] == "/tmp/x/p-report.md.done"
+
+
+def test_a_labelled_done_marker_that_already_exists_is_ignored(env):
+    old = env.tmp / "old.done"
+    old.write_text("")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                f"BRIEF\nReport: /tmp/x/p-report.md\nDone marker: {old}")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["donePath"] == "/tmp/x/p-report.md.done"
+
+
+def test_a_bad_done_path_is_refused_naming_the_done_label(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                "BRIEF\nReport: /tmp/x/p-report.md\nDone marker: /x/../y")
+    assert r.returncode == 1 and "labelled done marker path" in r.stderr and "Done marker:" in r.stderr and "report path" not in r.stderr
+
+
+def test_an_unlabelled_report_path_in_the_brief_warns_naming_both_paths(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                "BRIEF the deliverable goes in /tmp/x/mine-report.md")
+    assert r.returncode == 0, r.stderr
+    assert "warning: no labelled report path" in r.stderr and "/tmp/x/mine-report.md" in r.stderr and f"{LEAD}/a-report.md" in r.stderr
+    r = env.run("--lead", LEAD, "--slice", "b", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF plain")
+    assert "warning: no labelled report path" not in r.stderr
