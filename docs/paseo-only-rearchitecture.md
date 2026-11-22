@@ -199,8 +199,8 @@ no longer describes today's tree. Where a phase below says what will be built, d
    6. **Recovery runs exactly once, durably and bounded.** An atomic "recovery started" mark is written before
       it runs (review rule 6), so a watchdog restart mid-recovery does not run it again. A reroute counts per
       task lineage, at most one, and goes through the admission gate (`acp-dispatch`'s gates until D2, then
-      G2). An expiry caused by a quota stop is resumed after the reset, never rerouted fresh (`~/AGENTS.md`
-      item 25). A recovery into the same workspace waits until the killed group is confirmed gone and the
+      G2). An expiry caused by a quota stop is resumed after the reset (resume first; reroute only after a reasonable effort to resume has failed, operator
+      2026-11-22; `~/AGENTS.md` item 25). A recovery into the same workspace waits until the killed group is confirmed gone and the
       writer claim is released or transferred (order 9).
    7. **Only declared budgets kill** (Trinity 869). A pid whose start time differs from the registration is
       never signalled. An optional heartbeat, which may carry a checkpoint path, catches a stall sooner, but

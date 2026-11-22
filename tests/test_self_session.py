@@ -3020,7 +3020,7 @@ def test_the_window_advice_follows_a_new_local_successor_to_its_own_workspace(se
         assert info['command'] == f'ade-worker-run rename-lead --lead {SUCC}' and 'reason' not in info
 
 
-@pytest.mark.parametrize('content', [None, 'not json', '[]', '{"workspaceId": "nope"}'])
+@pytest.mark.parametrize('content', [None, 'not json', '[]', '{"workspaceId": "nope"}', '[' * 200000])
 def test_an_unreadable_new_local_window_still_gets_the_rename_advice(setup, content):
     service, native, record, path = new_local_chain(setup)
     if content is not None:
@@ -3030,3 +3030,21 @@ def test_an_unreadable_new_local_window_still_gets_the_rename_advice(setup, cont
     info = settle(service, native, record, path)['lead_window']
     assert info == {'state': 'rename-advised', 'reason': 'successor-window-unresolved',
                     'command': f'ade-worker-run rename-lead --lead {SUCC}'}
+
+
+DECOY = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+
+
+@pytest.mark.parametrize('with_own', [False, True])
+def test_the_successor_window_is_read_from_its_own_state_file_only(setup, with_own):
+    """A decoy agent's state file (another agent's workspace) is never read for the successor."""
+    service, native, record, path = new_local_chain(setup, state_name='proj' if with_own else None, window='MAIN q (z)')
+    agents = service.home / 'agents' / 'proj'
+    agents.mkdir(parents=True, exist_ok=True)
+    native.workspaces.append({'workspaceId': 'wks_fedcba9876543210', 'project': 'p', 'name': 'LEAD decoy (d)', 'cwd': '/x'})
+    (agents / (DECOY + '.json')).write_text(json.dumps({'workspaceId': 'wks_fedcba9876543210'}))
+    info = settle(service, native, record, path)['lead_window']
+    if with_own:
+        assert info['state'] == 'rename-advised' and info['name'] == 'MAIN q (z)'
+    else:
+        assert info['state'] == 'rename-advised' and info['reason'] == 'successor-window-unresolved'

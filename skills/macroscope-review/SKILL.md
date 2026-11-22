@@ -59,7 +59,7 @@ first look; name the mode in the comment only if the operator asks for one.
 
 ## How to request one
 
-1. Check the budget first: read the running total in `docs/macroscope-spend.md` (the true balance is in the
+1. Check the budget first: read the running total in `docs/macroscope-spend.md` plus any entry in an open ledger PR (the ledger on master can lag; how to list them is in that file) (the true balance is in the
    Macroscope app, Settings, Billing, which only the operator can read). A stalled or missing check with the note "Insufficient
    credits" means the balance is gone: stop and tell the operator.
 2. Post the comment on the PR (as `djbclark`'s account or an agent under it), only on a repo where the operator has

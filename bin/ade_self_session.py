@@ -1336,7 +1336,8 @@ class Service:
             for path in sorted((self.home / 'agents').glob(f'*/{ident(record.get("successor"))}.json')):
                 data = json.loads(read_regular(path, 262144))
                 return workspace_ident(data.get('workspaceId'))
-        except (OSError, ValueError, SessionError, AttributeError):
+        except (OSError, ValueError, SessionError, AttributeError, RecursionError):
+            # RecursionError: json.loads of a deeply nested file under the size cap; unreadable, never fails finish
             pass
         return None
 

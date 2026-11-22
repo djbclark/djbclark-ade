@@ -14,6 +14,14 @@ Format, one line per request, newest last:
 
 Example shape (not an entry): `2026-11-23T14:05Z | https://github.com/OWNER/REPO/pull/1 | <40 hex> | 30 | balanced | US$1.50 | US$1.50 of US$100`
 
+Master is PR-only, so each ledger append is its own docs PR and the ledger on master can lag. Before a request, the
+requester counts the running total as master's last line plus every entry in an open ledger PR. A ledger PR's branch is
+named `macroscope-ledger-<date>` (mandatory). List the open PRs that change this file, then read each one's added line:
+`gh pr list --state open --limit 100 --json number,headRefName,files --jq '[.[] | select(any(.files[]?; .path == "docs/macroscope-spend.md")) | {number, headRefName}]'`
+(`in:path` is not a PR-search qualifier, so filter on the changed files). Merge the ledger PR promptly, before the next request. The first entry replaces the
+"No entries yet" line below; later ones append after the last entry, so two in-flight appends conflict on the tail line
+and the later one is rebased (a conflict is a signal that someone else already spent: re-add their entry to your total).
+
 ## Entries
 
 No entries yet. Running total: US$0.00 of US$100.
