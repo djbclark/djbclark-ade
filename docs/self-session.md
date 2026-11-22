@@ -103,7 +103,7 @@ Title: `--title TEXT`; else the predecessor's live name (`agent inspect` `Name`)
 `Self-handoff ...` title; else the title its own handoff record carried; else `Lead ROLE` (or `Lead (self-handoff
 successor)` with no role). A generated title never holds an agent id: `agent archive SHORTID` falls back to a partial
 title match when the id is missing from the listing (paseo#9668), and an id prefix in a lead's title would let it pick
-the live lead.
+the live lead (the one id-bearing title is the archived predecessor's `RETIRED ...` name, C0b).
 **Paseo's CLI cannot read one agent's labels back** (`agent inspect` shows the name and parent only, `agent ls` rows
 carry no labels; `agent ls --label K=V` only filters), so labels travel in our records (reading the daemon's agent
 files, as `peer_trust_gate` does, is a possible later route): a chain's first handoff after this change names its role with `--role`, and
@@ -318,6 +318,35 @@ retries). Nothing is written unless the archive is confirmed. The state dir hono
 
 The launchd `ade-net-resume` job needs no such repoint: its pinned `--lead <id>` already follows the ledger (C0a item 2), so a stale
 pin is harmless (it only shows an old id in `launchctl print`). `ade-supervisor-scan` also follows a replaced lead through the send guard.
+
+### C0b. The retired predecessor is renamed; the lead window is advised (2026-11-22)
+The successor inherits the predecessor's name (C-id), so a chain's agents all read the same in the sidebar: on 2026-11-22
+`fork-release-alerts` named three Paseo agents (`4c3521b9...` -> `4fd28378...` -> `96711956...`; handoff records
+`identity.title_source = predecessor-name`), the operator could not find the live lead, and a retired one that he typed into
+(Paseo un-archives on a message) looked exactly like it. Two steps of `finish` now fix that. Both run after the archive is confirmed
+(and again on a re-run of an archived record), and neither ever fails `finish`.
+
+1. **Rename the predecessor.** When the archived predecessor's name is the successor's own title, `finish` runs
+   `paseo agent update PRED --name=...` with `RETIRED <old name> (-> <successor full id>)` (the old name is cut, never the suffix, to
+   Paseo's 200 UTF-16 units), then reads `agent inspect` back. The successor keeps the plain name (no generation counter in the
+   lead's own title). Why after the archive: Paseo's `agent update` on an archived agent rewrites only the stored title
+   (`writeStoredMetadata` spreads the stored record and keeps `archivedAt`; read at getpaseo/paseo a3aa8afaa, 2026-11-22), so it
+   does not un-archive, whereas a rename before the archive would call a still-live agent `RETIRED` through the archive retries.
+   The readback proves `Archived` still holds; if a Paseo version ever un-archived on rename, that is recorded, never "fixed" with a
+   second archive. The id sits in the title of an archived agent only: a title match (paseo#9668) can meet it as
+   `AGENT_ALREADY_ARCHIVED` and never archive a live lead. Outcome in `identity.checks.retire_rename` (`ok`, `skipped`, `failed`) and
+   `identity.retire_rename` (`reason`, `name`, `native_error`): `renamed`; `already-retired` (ok; a name that already starts
+   `RETIRED `, so nothing is renamed twice); `names-differ` (skipped, final: a `--title` or another name already tells them apart);
+   `malformed-identity` (skipped, final); `predecessor-not-archived` (skipped, retried by a re-run); `native-error`,
+   `rename-unarchived-predecessor`, `name-readback-mismatch` (failed, retried by a re-run of `finish`). A record from before st-01
+   has no `identity` and is left alone. A later handoff never inherits a `RETIRED ...` name as a title (a revived retired agent
+   handing off falls through to the chain record).
+2. **Advise the lead window.** `finish` reads `paseo workspace ls` and checks the successor's own window name (the record's
+   `workspace`) against `LEAD <repo> (<work>)`. The result is `lead_window` in the record and in `finish`'s JSON: `state` `ok`;
+   `rename-advised` with the exact `command` (`ade-worker-run rename-lead --lead <successor id>`, also printed on stderr; add
+   `--window-middle "WORK"` to choose the work part); or `unknown` (with `reason`: window not listed, listing failed). It only
+   observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs
+   it itself (SKILL `handoff`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
 
 ### C0a. Lead ids pinned elsewhere follow the successor (2026-11-14)
 A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own

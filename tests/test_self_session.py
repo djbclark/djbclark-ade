@@ -69,6 +69,8 @@ class Native:
         self.labels = {}            # 'key=value' -> ids carrying it (every label but ade.handoff, which `labelled` serves)
         self.updates = []           # argv tails of `agent update`
         self.update_result = None   # (returncode, stdout, stderr) replacing the `agent update` answer
+        self.rename_unarchives = False  # an `agent update` of the predecessor flips it back to unarchived
+        self.rename_ignored = False     # an `agent update` of the predecessor answers ok but changes nothing
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
@@ -138,8 +140,10 @@ class Native:
             self.updates.append(args[2:])
             if self.update_result is not None:
                 return subprocess.CompletedProcess(argv, *self.update_result)
+            if args[2] == PRED and self.rename_unarchives:
+                self.rows[PRED]['Archived'] = False
             for i, a in enumerate(args):
-                if a.startswith('--name='):
+                if a.startswith('--name=') and not (args[2] == PRED and self.rename_ignored):
                     self.rows[args[2]]['Name'] = a.split('=', 1)[1]
                 elif a == '--label':
                     self.labels.setdefault(args[i + 1], set()).add(args[2])
@@ -1674,7 +1678,11 @@ def test_successor_keeps_predecessor_title_and_chain_labels_through_accept_and_f
     native.rows[PRED]['Status'] = 'idle'
     finished = service.finish(path)
     assert finished['status'] == 'archived' and finished['identity']['checks']['finish'] == 'ok'
-    assert native.updates == [] and native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
+    retired = f'RETIRED Lead tendcf (cfengine) (-> {SUCC})'
+    assert native.updates == [[PRED, '--name=' + retired]] and native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
+    assert native.rows[PRED]['Name'] == retired and native.rows[PRED]['Archived'] is True
+    assert finished['identity']['checks']['retire_rename'] == 'ok'
+    assert finished['identity']['retire_rename'] == {'reason': 'renamed', 'name': retired}
     assert json.loads(path.read_text()) == finished
 
 
@@ -1686,7 +1694,7 @@ def test_predecessor_without_a_role_label_still_gets_predecessor_and_chain_label
     assert record['identity']['labels'] == {'ade.chain': PRED, 'ade.predecessor': PRED}
     assert record['identity']['role_source'] is None
     assert settle(service, native, record, Path(record['record']))['identity']['checks'] == {
-        'create': 'requested', 'accept': 'ok', 'finish': 'ok'}
+        'create': 'requested', 'accept': 'ok', 'finish': 'ok', 'retire_rename': 'ok'}
 
 
 def test_chain_record_supplies_title_chain_and_role_when_the_name_is_a_bootstrap_title(setup):
@@ -1767,7 +1775,8 @@ def test_finish_repairs_a_successor_paseo_retitled_after_accept(setup):
     native.rows[SUCC]['Name'] = 'retitled by something'
     native.rows[PRED]['Status'] = 'idle'
     finished = service.finish(path)
-    assert finished['identity']['checks'] == {'create': 'requested', 'accept': 'ok', 'finish': 'repaired'}
+    assert finished['identity']['checks'] == {'create': 'requested', 'accept': 'ok', 'finish': 'repaired',
+                                              'retire_rename': 'skipped'}  # the predecessor had no name to clash with
     assert native.rows[SUCC]['Name'] == record['identity']['title']
     assert [u[1] for u in native.updates] == ['--name=' + record['identity']['title']]  # labels were intact
 
@@ -1837,6 +1846,9 @@ def test_a_malformed_or_forged_identity_is_recorded_and_never_fatal_or_sent(setu
         assert done['status'] == 'acknowledged'
     assert done['identity']['checks'][stage] == 'failed'
     assert done['identity']['error']['stage'] == stage
+    if stage == 'finish':
+        assert done['identity']['checks']['retire_rename'] == 'skipped'
+        assert done['identity']['retire_rename'] == {'reason': 'malformed-identity'}
     assert native.updates == []  # nothing from the record reached `agent update`
 
 
@@ -2826,3 +2838,155 @@ def test_a_write_failure_is_recorded_and_a_rerun_retries_it(setup, tmp_path, mon
     monkeypatch.setattr(ss, 'write_atomic', real)
     out = service.finish(path)
     assert out['supervisor_lead'] == 'repointed' and 'supervisor_lead_error' not in out and lead.read_text() == SUCC + '\n'
+
+
+# --- 2026-11-22: the retired predecessor is told apart from the live lead --------------------------------------------
+
+def named_chain(setup, name='fork-release-alerts'):
+    """handoff from a predecessor called `name`: the successor inherits it (title_source predecessor-name)."""
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = name
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['identity']['title'] == name and record['identity']['title_source'] == 'predecessor-name'
+    return service, native, record, Path(record['record'])
+
+
+def test_finish_renames_the_archived_predecessor_so_the_live_lead_is_the_only_one_with_the_name(setup):
+    service, native, record, path = named_chain(setup)
+    finished = settle(service, native, record, path)
+    retired = f'RETIRED fork-release-alerts (-> {SUCC})'
+    assert native.rows[PRED]['Name'] == retired and native.rows[SUCC]['Name'] == 'fork-release-alerts'
+    assert native.rows[PRED]['Archived'] is True  # the rename must never revive it
+    verbs = [tuple(a[4:6]) + ((a[6],) if len(a) > 6 else ()) for a, _ in native.calls if a[:1] == ['paseo']]
+    assert verbs.index(('agent', 'archive', PRED)) < verbs.index(('agent', 'update', PRED))  # after the archive, never before
+    assert finished['identity']['checks']['retire_rename'] == 'ok'
+    assert finished['identity']['retire_rename'] == {'reason': 'renamed', 'name': retired}
+    assert json.loads(path.read_text()) == finished
+    again = service.finish(path)  # a re-run does not rename twice
+    assert again['identity']['checks']['retire_rename'] == 'ok' and len(native.updates) == 1
+
+
+def test_a_long_name_is_cut_never_the_successor_suffix(setup):
+    service, native, record, path = named_chain(setup, name='\U0001F600' * 97 + ' tail')
+    settle(service, native, record, path)
+    new = native.rows[PRED]['Name']
+    assert new.endswith(f' (-> {SUCC})') and new.startswith('RETIRED ')
+    assert ss.utf16_len(new) <= 200
+    assert new == ss.retired_title(record['identity']['title'], SUCC)
+    assert ss.retired_title('a' * 300, SUCC) == 'RETIRED ' + 'a' * (200 - 8 - len(f' (-> {SUCC})')) + f' (-> {SUCC})'
+
+
+def test_a_predecessor_already_told_apart_is_not_renamed(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'Lead other'
+    record = service.handoff(checkpoint, quiesced=True, requested_title='Lead tendcf')
+    finished = settle(service, native, record, Path(record['record']))
+    assert finished['identity']['checks']['retire_rename'] == 'skipped'
+    assert finished['identity']['retire_rename'] == {'reason': 'names-differ'}
+    assert native.updates == [] and native.rows[PRED]['Name'] == 'Lead other'
+
+
+def test_an_already_retired_predecessor_name_is_kept(setup):
+    service, native, record, path = named_chain(setup)
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.rows[PRED]['Name'] = 'RETIRED by hand'  # an earlier run, or the operator, already marked it
+    finished = service.finish(path)
+    assert finished['identity']['checks']['retire_rename'] == 'ok'
+    assert finished['identity']['retire_rename']['reason'] == 'already-retired'
+    assert native.updates == [] and native.rows[PRED]['Name'] == 'RETIRED by hand'
+
+
+def test_a_refused_rename_is_recorded_not_fatal_and_a_rerun_retries_it(setup):
+    service, native, record, path = named_chain(setup)
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.update_result = (1, '', envelope('AGENT_NOT_FOUND', 'Agent not found'))
+    finished = service.finish(path)
+    assert finished['status'] == 'archived' and native.archived == 1
+    assert finished['identity']['checks']['retire_rename'] == 'failed'
+    detail = finished['identity']['retire_rename']
+    assert detail['reason'] == 'native-error' and detail['native_error']['code'] == 'AGENT_NOT_FOUND'
+    assert detail['native_error']['op'] == 'agent update'
+    assert native.rows[PRED]['Name'] == 'fork-release-alerts'
+    native.update_result = None
+    again = service.finish(path)  # the archived record: only the retryable steps run
+    assert native.archived == 1
+    assert again['identity']['checks']['retire_rename'] == 'ok'
+    assert native.rows[PRED]['Name'] == f'RETIRED fork-release-alerts (-> {SUCC})'
+
+
+def test_a_rename_that_would_unarchive_the_predecessor_is_reported_as_failed(setup):
+    service, native, record, path = named_chain(setup)
+    native.rename_unarchives = True
+    finished = settle(service, native, record, path)
+    assert finished['status'] == 'archived'
+    assert finished['identity']['checks']['retire_rename'] == 'failed'
+    assert finished['identity']['retire_rename']['reason'] == 'rename-unarchived-predecessor'
+    assert native.rows[PRED]['Archived'] is False  # observed and recorded; finish never forces a second archive
+    assert native.archived == 1
+
+
+def test_a_rename_that_does_not_take_effect_is_reported_as_failed(setup):
+    service, native, record, path = named_chain(setup)
+    native.rename_ignored = True
+    finished = settle(service, native, record, path)
+    assert finished['identity']['checks']['retire_rename'] == 'failed'
+    assert finished['identity']['retire_rename']['reason'] == 'name-readback-mismatch'
+
+
+def test_a_predecessor_that_is_not_archived_is_skipped_and_stays_retryable(setup):
+    service, native, record, path = named_chain(setup)
+    done = settle(service, native, record, path)
+    done['identity']['checks'].pop('retire_rename')
+    native.rows[PRED]['Archived'] = False
+    service.retire_predecessor_name(done, path)
+    assert done['identity']['checks']['retire_rename'] == 'skipped'
+    assert done['identity']['retire_rename'] == {'reason': 'predecessor-not-archived'}
+    native.rows[PRED]['Archived'] = True
+    service.retire_predecessor_name(done, path)  # the skip was not final
+    assert done['identity']['checks']['retire_rename'] == 'ok'
+
+
+def test_a_revived_retired_name_is_never_inherited_as_the_next_title(setup):
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = f'RETIRED fork-release-alerts (-> {SUCC})'
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['identity']['title'] == 'Lead (self-handoff successor)' and record['identity']['title_source'] == 'derived'
+
+
+@pytest.mark.parametrize('window, state', [('MAIN p (w)', 'rename-advised'), ('p chat', 'rename-advised'),
+                                           ('LEAD p (w)', 'ok'), ('LEAD fork-release-alerts (CVE watch)', 'ok')])
+def test_finish_advises_the_exact_rename_lead_command_when_the_window_is_not_a_lead_window(setup, window, state):
+    service, native, record, path = named_chain(setup)
+    native.workspaces[0]['name'] = window
+    finished = settle(service, native, record, path)
+    info = finished['lead_window']
+    assert info['state'] == state and info['name'] == window
+    if state == 'ok':
+        assert 'command' not in info
+    else:
+        assert info['command'] == f'ade-worker-run rename-lead --lead {SUCC}'
+    assert json.loads(path.read_text())['lead_window'] == info
+    assert not [a for a, _ in native.calls if a[4:6] == ['workspace', 'rename']]  # observe and advise only
+
+
+def test_the_window_advice_is_unknown_when_the_window_is_not_listed(setup):
+    service, native, record, path = named_chain(setup)
+    native.workspaces[:] = []
+    assert settle(service, native, record, path)['lead_window'] == {'state': 'unknown', 'reason': 'window-not-listed'}
+
+
+def test_a_failing_workspace_listing_never_fails_finish(setup):
+    service, native, record, path = named_chain(setup)
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+
+    def runner(argv, **kwargs):
+        if argv[4:6] == ['workspace', 'ls']:
+            raise subprocess.TimeoutExpired(argv, 30)
+        return native(argv, **kwargs)
+    service.runner = runner
+    finished = service.finish(path)
+    assert finished['status'] == 'archived' and finished['lead_window']['state'] == 'unknown'
+    assert 'timed out' in finished['lead_window']['reason']
