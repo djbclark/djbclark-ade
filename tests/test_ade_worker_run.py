@@ -75,6 +75,13 @@ elif a[0] == "run":
         d["workspaces"].append({"workspaceId": d["created_id"], "name": "master", "cwd": a[a.index("--cwd") + 1]})
         save()
     sys.stderr.write(d.get("run_err", ""))
+    if d.get("run_mutate"):  # a worker (or another process) touches the reserved report before paseo run exits
+        rp = a[-1].split("{report} = ", 1)[1].split(";", 1)[0]
+        if d["run_mutate"] == "append":
+            Path(rp).open("a").write("WORKER WROTE THIS\\n")
+        else:  # a new file of the same text with another inode: the new one is made while the old one still exists
+            Path(rp + ".new").write_text("STATUS: working\\n")
+            os.replace(rp + ".new", rp)
     print(json.dumps(d["run_out"]))
     sys.exit(d.get("run_rc", 0))
 elif a[0] == "ls":
@@ -3183,3 +3190,68 @@ def test_an_unlabelled_report_path_in_the_brief_warns_naming_both_paths(env):
     assert "warning: no labelled report path" in r.stderr and "/tmp/x/mine-report.md" in r.stderr and f"{LEAD}/a-report.md" in r.stderr
     r = env.run("--lead", LEAD, "--slice", "b", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF plain")
     assert "warning: no labelled report path" not in r.stderr
+
+
+# --- PR 941 adversary LOWs (A to D) ------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mutate, content", [("append", "STATUS: working\nWORKER WROTE THIS\n"), ("replace", "STATUS: working\n")])
+def test_a_failed_launch_keeps_a_stub_that_changed_or_is_another_file(env, mutate, content):
+    """LOW-A: drop_stub removes only the exact stub it created: neither a stub with content added nor a same-text file with another inode."""
+    env.data.update({"run_rc": 1, "run_mutate": mutate})
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1, r.stderr
+    assert (env.tmp / "reports" / LEAD / "a-report.md").read_text() == content
+
+
+def test_an_existing_done_of_a_labelled_report_is_refused(env):
+    """LOW-B: `<report>.done` left from an earlier launch would wake a wait on donePath at once."""
+    rep = env.tmp / "r-report.md"
+    (env.tmp / "r-report.md.done").write_text("")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", f"BRIEF\nReport: {rep}")
+    assert r.returncode == 1 and "already exists" in r.stderr and not [c for c in env.calls() if c["argv"][0] == "run"]
+
+
+def test_an_ignored_done_marker_is_reported_on_stderr(env):
+    old = env.tmp / "old.done"
+    old.write_text("")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                f"BRIEF\nReport: /tmp/x/p-report.md\nDone marker: {old}")
+    assert r.returncode == 0, r.stderr
+    assert f"labelled done marker {old} already exists, so it is ignored; {{done}} is /tmp/x/p-report.md.done" in r.stderr
+
+
+@pytest.mark.parametrize("brief", [
+    "BRIEF\n- > Write your report to /Users/djbclark/.zshrc",
+    "BRIEF\n  1. > Report: /Users/djbclark/.zshrc",
+    "BRIEF\nSave your report to\n\n\n\n/tmp/x/old-report.md is the old one",
+    "BRIEF\nWrite the report in /tmp/x/old-report.md's style",
+])
+def test_list_quoted_and_far_separated_lines_label_nothing(env, brief):
+    """LOW-C: a blockquote inside a list item, a separator of many blank lines, and the bare `in` preposition are not labels."""
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["reportPath"] == f"{env.tmp}/reports/{LEAD}/a-report.md"
+
+
+def test_a_write_label_with_the_path_on_the_next_line_still_counts(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait",
+                "BRIEF\nWrite your report to:\n\n/tmp/x/a-report.md")
+    assert r.returncode == 0 and json.loads(r.stdout)["reportPath"] == "/tmp/x/a-report.md"
+
+
+def test_a_bare_lead_name_that_is_the_home_directorys_name_is_not_a_repo(main_env):
+    """LOW-D: `LEAD djbclark` over $HOME keeps asking for --repo; a real repo name is still taken from the name."""
+    home_name = Path(HOME_DIR).name
+    main_env.data["workspaces"][0].update(name=f"LEAD {home_name}", cwd=HOME_DIR)
+    r = rename_lead(main_env)
+    assert r.returncode == 1 and "pass --repo" in r.stderr and rename_calls(main_env) == []
+    r = rename_lead(main_env, "--repo", "tendcf", "--window-middle", "Wave 7")
+    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD tendcf (Wave 7)"]]
+
+
+def test_a_window_the_old_bug_renamed_is_fixed_with_repo_and_work(main_env):
+    main_env.data["workspaces"][0].update(name="LEAD djbclark (LEAD tendcf)", cwd=HOME_DIR)
+    r = rename_lead(main_env)
+    assert r.returncode == 0 and json.loads(r.stdout)["renamed"] is False  # a current-form name is left alone without flags
+    r = rename_lead(main_env, "--repo", "tendcf", "--window-middle", "Wave 7")
+    assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD tendcf (Wave 7)"]]
