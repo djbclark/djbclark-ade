@@ -1,16 +1,16 @@
 # CI runners: WarpBuild is opt-in only
 
-**Update 2026-11-22 (operator yes, "Yes, all four repos"; spend cap "$10/month"):** WarpBuild is **opt-in only**. Default is GitHub-hosted:
+**Update 2026-11-22 (operator ruling via the lead's /steps walk, 2026-11-22, lead 41840155-eb9e-4a7d-b449-a3b439d0daee: "all four repos" move to free runners; spend cap target US$10/month):** WarpBuild is **opt-in only**. Default is GitHub-hosted:
 `macos-26` for macOS and `ubuntu-latest` for Linux, both free on public repos. **GitHub `macos-26` first; WarpBuild only if measured >= 1.5x and
 > 10 min** (the gate below). A survey of the four `frdminc` repos with any WarpBuild job (`warpbuild-pilot`, `tendcf`, `paseo`,
 `sudo-secretspec`; all public) measured **US$4.83 in 30 days** (11 jobs, 71 billed minutes, 91% macOS 6x/12x, all from branch-only or one-off
 pilot workflows, none from default-branch CI). Moved to free runners that day: `sudo-secretspec` branch `ci/base` `linux-ci.yml` macOS job and
 `paseo` branch `local/main-desktop-v0171-20261122` `fork-desktop-build.yml` (both to `macos-26`; fall back to `warp-macos-26-arm64-6x` only if
 the Electron build OOMs or times out on the 3 vCPU/7 GB runner); `warpbuild-pilot` `test.yml` is `workflow_dispatch` only (no push or PR
-trigger); the `tendcf` branch `spike/macos-check8-warp` is deleted. The WarpBuild **spend cap is US$10/month** for the `frdminc` org, set in
-the console at <https://app.warpbuild.com> (the MCP sign-in was refused on 2026-11-22, so an agent could not set it: the operator does; per-job
-cost is on Insights > Spend, CI tab; whether the app has a hard cap or only budget alerts was not verified, so confirm the setting exists
-before relying on it). Billing rounds each job up to whole minutes with a 1-minute floor.
+trigger); the `tendcf` branch `spike/macos-check8-warp` is deleted. The WarpBuild **spend cap is an operator-chosen target of US$10/month** for the
+`frdminc` org (2026-11-22), **not yet set**: the WarpBuild sign-in was refused, so an agent could not set it, and a hard-cap setting is
+unconfirmed (the operator sets it in the console at <https://app.warpbuild.com>; per-job cost is on Insights > Spend, CI tab; the app may
+offer only budget alerts, so confirm the setting exists before relying on it). Billing rounds each job up to whole minutes with a 1-minute floor.
 
 Snapshot **2026-11-13** (operator rulings, card answers; superseded as the default by the update above, still the gate for any opt-in). A GitHub Actions job moves to
 [WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) runners only when **both** hold:
