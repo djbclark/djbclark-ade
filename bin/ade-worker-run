@@ -39,9 +39,9 @@ Pass --no-wait to paseo. The last `--` argument (the brief) gets one line append
 dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). A `Footer values:` line
 always follows it and fills {lead}, {report}, {done}, {inbox} and {replies}. A report path the brief LABELS (a line-start `Report:`/
 `Report path:`/`Report file:` with the path on that line or the next (one blank line allowed), a `## Report path` heading with the
-path below, "write|save your report [file] to|at|in|as <path>", `{report} = <path>`) is used as {report} and nothing is generated or
+path below, "write|save your report [file] to|at|as <path>", `{report} = <path>`) is used as {report} and nothing is generated or
 created; {done} is the brief's labelled `Done marker:`/`Done file:`/`Done path:`/`{done} =` path (ignored when that file exists; a bare
-`Done:` is no label), else `<report>.done`. A `>` quoted line labels nothing, and two different labelled report paths (or done markers)
+`Done:` is no label; a stderr note names it), else `<report>.done`, which must not exist (refused). A `>` quoted line (also `- > ...`) labels nothing, and two different labelled report paths (or done markers)
 are refused rather than picked by position. A path merely mentioned (an input report of another agent) is not a label; when no label
 matches and the brief names a `-report.md` or `agent-reports/` path, a stderr warning names it and the generated one. A generated stub
 is removed again only when `paseo run` exits nonzero (no agent exists) and the file is still the exact stub this launch created. Otherwise report = ~/.local/state/agent-reports/<lead id>/
@@ -675,6 +675,8 @@ def main_target(row: dict, repo: str | None, explicit: bool, work: str | None, c
         home = same_dir(cwd, str(Path.home()))
         in_repo = not home and bool(wsn._git(cwd, "rev-parse", "--git-common-dir"))
         name_repo = bare.group(1) if bare and wsn.REPO_RE.fullmatch(bare.group(1)) else None
+        if home and name_repo == Path.home().name:
+            name_repo = None  # a name that already carries the home directory's name (the old bug's) is not a repo
         if in_repo or (not home and not name_repo):
             r = wsn.repo_of(cwd)
         elif name_repo:
@@ -735,7 +737,7 @@ REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.
 # The brief's OWN report path is read from labelled lines only (operator ruling 2026-11-22, PR 935 LOW-4): a path merely mentioned as an
 # input (another agent's `~/.local/state/agent-reports/x/old-report.md`) is not the report. Labels: a line-start `Report:` / `Report path:`
 # / `Report file:` (list marker or markdown around it allowed; the path may sit on the next line, after at most one blank line), a
-# `## Report path` heading with the path on the next line (one blank line allowed), "write|save your report [file] to|at|in|as[:] <path>",
+# `## Report path` heading with the path on the next line (one blank line allowed), "write|save your report [file] to|at|as[:] <path>",
 # and `{report} = <path>`. The path is absolute, `~/` or `$HOME/`. A line quoted with `>` is untrusted pasted content and labels nothing.
 # Every labelled path is collected: two different ones are refused (PR 935 r3 LOW-2), never resolved by position.
 _PATH = r"(?P<p>(?:/|~/|\$HOME/)[\w.@+~/-]+)"  # a label counts only when a PATH follows it: absolute, ~/ or $HOME/
@@ -745,7 +747,7 @@ _DELIVERABLE = r"(?:full\s+)?(?:report(?:\s+file)?|deliverable)"
 BRIEF_REPORT_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
     _LIST + r"report\b(?:[ \t]+(?:path|file)\b)?[*_`]*[ \t]*(?:is\b[ \t]*|[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*)[`'\"]?" + _PATH,
     r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n(?:[ \t]*\n)?" + _P,
-    r"\b(?:write|save)\s+(?:your|the|a|its)\s+" + _DELIVERABLE + r"\s+(?:to|at|in|as)\s*:?\s*[`'\"]?" + _PATH,
+    r"\b(?:write|save)\s+(?:your|the|a|its)\s+" + _DELIVERABLE + r"\s+(?:to|at|as)[ \t]*:?[ \t]*(?:\n[ \t]*){0,2}[`'\"]?" + _PATH,
     r"\{report\}\s*[=:]" + _P)]
 BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (  # no bare `Done:`: it is a status-line word
     _LIST + r"done[ \t]+(?:marker|file|path)\b[*_`]*[ \t]*[:=][*_`]*(?:[ \t]*\n(?:[ \t]*\n)?)?[ \t]*[`'\"]?" + _PATH,
@@ -754,9 +756,13 @@ SAFE_PATH = re.compile(r"[\w./@+~-]+")  # no space or quote: the worker copies t
 VALUES_MARK = "Footer values:"
 
 
+_LIST_MARKERS = re.compile(r"^(?:[ \t]*(?:[-*+]|\d+[.)])[ \t]+)+")
+
+
 def _quoted(brief: str, pos: int) -> bool:
     """True when the line holding `pos` is a `>` blockquote line."""
-    return brief[brief.rfind("\n", 0, pos) + 1:].lstrip(" \t").startswith(">")
+    line = brief[brief.rfind("\n", 0, pos) + 1:].split("\n", 1)[0]
+    return _LIST_MARKERS.sub("", line).lstrip(" \t").startswith(">")  # `- > quoted` and `1. > quoted` are quotes too
 
 
 def _labelled_paths(brief: str, labels: list, what: str) -> list[str]:
@@ -795,7 +801,13 @@ def brief_footer_values(lead: str, brief: str) -> dict[str, str] | None:
     dones = [d for d in _labelled_paths(brief, BRIEF_DONE_LABELS, "done marker") if not os.path.lexists(d)]
     if len(dones) > 1:
         raise Refused(f"the brief labels {len(dones)} done marker paths: {', '.join(dones)}; keep one")
+    ignored = [d for d in _labelled_paths(brief, BRIEF_DONE_LABELS, "done marker") if os.path.lexists(d)]
     done = dones[0] if dones else report + ".done"
+    if done == report + ".done" and os.path.lexists(done):  # a stale marker wakes a lead's wait on donePath at once
+        raise Refused(f"{done} already exists, so a wait on it would end at once and read an old report: remove it, or label a "
+                      "new report path (or a done marker that does not exist yet)")
+    for d in ignored:
+        sys.stderr.write(f"ade-worker-run: warning: the brief's labelled done marker {d} already exists, so it is ignored; {{done}} is {done}\n")
     return {"lead": lead, "report": report, "done": done, "inbox": report + ".inbox.md", "replies": report + ".replies.md"}
 
 
