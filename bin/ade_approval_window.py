@@ -741,6 +741,7 @@ FIND_PRINTS = frozenset({"-print", "-print0", "-printf", "-fprint", "-fprint0", 
 RUNNERS = frozenset({"uv", "uvx", "pipx", "poetry", "npx", "bunx", "pnpm", "npm", "pdm", "rye", "hatch"})
 G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"mv", "find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
 COMPOUND_OPENERS = frozenset({"if", "while", "until", "for", "select", "case"})
+FEED_WORD = "ade-xargs-feed-input"          # stands for what xargs appends to a shell body's positional parameters
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash"})
 KEYWORDS = frozenset({"{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "fi", "done", "esac", "case",
                       "select", "function"})
@@ -1030,6 +1031,7 @@ class _Scan:
         self.chain: Optional[Tuple[Optional[str], Tuple[str, ...]]] = None   # directory (and alternatives) before a `cd X && ...` chain
         self.loops = 0                           # `for`/`while`/`until`/`select` bodies open around the statement
         self.loop_leave = False                  # a `cd X || break` (or `continue`) made a directory certain inside a loop
+        self.ghost: List[str] = []               # the directory a broken cd chain would have reached when the old one is unknown
         self.has_function = False                # the request defines a function or alias (`return` can leave, tracking is off)
 
     def note(self, kind: str, what: str) -> None:
@@ -1049,7 +1051,9 @@ class _Scan:
         self.chain = None if depth else self.chain                # a body is a subshell: nothing it sets leaks out
         body_cwd = None if any(self.is_cd(st) for st in stmts) else cwd      # a body runs after the line's cd, in a directory not known here
         for body in nested:
-            self.text(body, body_cwd, depth + 1)
+            self.text(body, cwd, depth + 1)
+            if body_cwd != cwd:
+                self.text(body, body_cwd, depth + 1)
         stack: List[Tuple[Optional[str], bool, Dict[str, List[str]], List[str], Any]] = []
         pending: Optional[Tuple[Optional[str], bool, List[str], Optional[str], bool]] = None
         prev: Optional[Stmt] = None
@@ -1141,6 +1145,7 @@ class _Scan:
         old, old_alts = chain
         if old is None or cwd is None:
             self.alts = []
+            self.ghost = [cwd] if cwd is not None else []
             return None
         alts = [d for d in dict.fromkeys(list(old_alts) + [old]) if d != cwd]
         if len(alts) > 8:
@@ -1458,7 +1463,7 @@ class _Scan:
         elif prog == "git":
             self.git(args, idx0, st, cwd)
         elif prog in SHELLS:
-            body_at = self.shell(st, args, cwd, depth)
+            body_at = self.shell(st, args, cwd, depth, chain, prev)
             if body_at is not None:
                 exempt.add(idx0 + body_at)           # recursed into: the words of the body are judged as commands
         elif prog == "eval":
@@ -1549,7 +1554,7 @@ class _Scan:
             self.note("unp", "git clean in a directory that cannot be read")
         elif bad == "relative":
             self.note("unp", "git clean relative to an unknown directory")
-        for where in [gcwd] + (self.alts if gcwd is not None and gcwd == cwd else []):
+        for where in [gcwd] + (self.alts if gcwd is not None and gcwd == cwd else []) + (self.ghost if gcwd is None else []):
             hit = _critical_abs(where, self.home) if where is not None else None
             if hit:
                 self.note("crit", "git clean %s" % hit)
@@ -1559,7 +1564,8 @@ class _Scan:
                 if hit:
                     self.note("crit", "git clean %s" % hit)
 
-    def shell(self, st: Stmt, args: List[str], cwd: Optional[str], depth: int) -> Optional[int]:
+    def shell(self, st: Stmt, args: List[str], cwd: Optional[str], depth: int, chain: Optional[List[int]] = None,
+              prev: Optional[Stmt] = None) -> Optional[int]:
         """Judge a shell's command line. Returns the index (in args) of a `-c` body that was recursed into."""
         if st.heredocs or st.herestring:
             self.note("unp", "here-document fed to a shell")
@@ -1591,14 +1597,25 @@ class _Scan:
                 return None
             body = args[body_at]
             params = args[body_at + 1:]
-            if params:                         # `sh -c 'rm -rf "$1"' _ /`: positional parameters name the operands
+            fed = any(_name(st.words[c]) == "xargs" for c in (chain or [])[:-1])      # xargs appends its input to the parameters
+            used_feed = [False]
+            if params or fed:                  # `sh -c 'rm -rf "$1"' _ /`: positional parameters name the operands
                 def fill(m: "re.Match[str]") -> str:
                     key = m.group(1) or m.group(2)
                     if key in ("@", "*"):
-                        return " ".join(params[1:])
+                        if fed:
+                            used_feed[0] = True
+                        return " ".join(params[1:] + ([FEED_WORD] if fed else []))
                     pos = int(key)
-                    return params[pos] if pos < len(params) else ""
+                    if pos < len(params):
+                        return params[pos]
+                    if fed:
+                        used_feed[0] = True
+                        return FEED_WORD
+                    return ""
                 body = re.sub(r"\$(?:\{([0-9]+|@|\*)\}|([0-9@*]))", fill, body)
+            if used_feed[0] and (REMOVER_TEXT.search(body) or re.search(r"(?<![\w-])(?:chmod|chown|chgrp|chflags)(?![\w-])", body)):
+                self.xargs_input(chain or [], st.words, st, prev, cwd)    # the feed is judged as it is for a bare `xargs rm`
             self.child_text(body, cwd, depth + 1)
             return body_at
         if not script:

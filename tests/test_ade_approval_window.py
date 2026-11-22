@@ -1170,7 +1170,7 @@ def test_a_known_request_directory_still_judges_relative_removals():
 
 @pytest.mark.parametrize("command", [
     "parallel rm ::: x", "ssh host rm -rf x", "ssh host 'rm -rf /'", "fd -X rm", "fd . -x rm {}", "flock /tmp/l rm -rf x", "script -q /dev/null rm -rf x",
-    "echo a | xargs -d '\\n' -n1 sh -c 'rm -rf $0'", "xargs -J % rm %", "echo a | xargs -I{} sh -c 'rm {}'", "find /tmp/x -exec sh -c 'rm -rf /' _ {} \\;",
+    "echo ~ | xargs -d '\\n' -n1 sh -c 'rm -rf $0'", "xargs -J % rm %", "echo a | xargs -I{} sh -c 'rm {}'", "find /tmp/x -exec sh -c 'rm -rf /' _ {} \\;",
     "find /tmp/x -name a -exec env rm {} \\;", "alias ls='rm -rf'", "alias x=rm", "f() { :; }; rm x", "function g { :; }; rm x", "x=1; y() { :; }\nrm -f z",
     "docker rm x", "aws s3 sync . s3://b --delete", "trash x", "tmux send-keys 'rm -rf /' Enter",
     "xargs -P4 -n1 -- rm", "time -p parallel rm", "nohup parallel rm", "echo x | parallel rm", "sudo --preserve-env parallel rm x",
@@ -1849,3 +1849,58 @@ def test_a_print_before_the_name_test_without_xargs_still_narrows_the_delete():
 def test_git_clean_with_its_own_directory_ignores_the_alternatives():
     assert allowed_in("cd /tmp/x && ls; git -C /tmp/y clean -fdx", HOME)
     assert not allowed_in("cd /tmp/x && ls; git clean -fdx", HOME)
+
+
+# ---------------------------------------------------------------- adversary round 6 (PR 939), fixed in round 7
+
+# MED: the positional parameters of a shell body fed by xargs are unknown, not empty
+
+@pytest.mark.parametrize("command", [
+    "find \"$OUT\"/ -mindepth 1 -print0 | xargs -0 sh -c 'rm -rf \"$@\"' _", "find ~ -print0 | xargs -0 sh -c 'rm -rf \"$@\"' _",
+    "find ~ -print0 | xargs -0 bash -c 'rm -rf \"$@\"' _", "find ~ -print0 | xargs -0 sh -c 'rm -rf $*' _",
+    "find ~ -print0 | xargs -0 sh -c 'for f in \"$@\"; do rm -rf \"$f\"; done' _", "ls -A | xargs sh -c 'rm -rf \"$@\"' _",
+    "find . -mindepth 1 -maxdepth 1 -print0 | xargs -0 sh -c 'rm -rf \"$@\"' _", "echo ~ | xargs sh -c 'rm -rf \"$@\"' _",
+    "cat list | xargs sh -c 'rm -rf \"$@\"' _", "find / -maxdepth 1 -print0 | xargs -0 sh -c 'chmod -R 777 \"$@\"' _",
+    "find ~ -print0 | xargs -0 -n1 sh -c 'rm -rf \"$1\"' _", "find ~ -print0 | xargs -0 sudo sh -c 'rm -rf \"$@\"' _",
+    "find ~ -print0 | xargs -0 nohup sh -c 'rm -rf \"$@\"' _", "find ~ -print0 | xargs -0 sh -c 'rm -rf \"${@}\"' _",
+    "find ~ -print0 | xargs -0 sh -c 'rm -rf \"$@\"'",
+])
+def test_an_xargs_fed_shell_body_judges_the_feed(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find build -name '*.o' -print0 | xargs -0 sh -c 'rm -f \"$@\"' _",
+    "find . -name '*.pyc' -print0 | xargs -0 sh -c 'rm -f \"$@\"' _",
+    "find . -print0 | xargs -0 sh -c 'echo \"$@\"' _",
+])
+def test_an_xargs_fed_shell_body_with_a_narrowed_feed_or_no_removal_stays_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+def test_a_shell_body_with_given_parameters_is_unchanged():
+    assert is_held("sh -c 'rm -rf \"$@\"' _ ~")
+    assert held("sh -c 'rm -rf \"$1\"' _ /tmp/x/a").allow
+    assert held("sh -c 'rm -rf \"$2\"' _ /tmp/x/a").allow             # no xargs: a missing positional is empty and harmless
+
+
+# LOW-1: a body is scanned with the line's directory and again with none
+
+def test_a_body_before_a_later_cd_is_still_judged_in_the_request_directory():
+    assert not allowed_in('n=$(find . -name "*.log" -delete -print | wc -l); cd ~/src/x && make', HOME)
+    assert not allowed_in("x=$(rm -rf Library); cd /tmp", HOME)
+    assert not allowed_in("x=$(rm -rf *); cd /tmp", SRC_X)
+
+
+# LOW-2: git clean after a chain that began in an unknown directory
+
+@pytest.mark.parametrize("command", [
+    "cd ~ && ls; git clean -fdx", "cd ~; git clean -fdx", "cd ~ && make; git clean -fdx", "cd ~/Library && ls; git clean -fdx",
+    "cd / && ls\ngit clean -fdx",
+])
+def test_git_clean_after_a_broken_chain_from_an_unknown_directory_is_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_git_clean_after_a_safe_broken_chain_from_an_unknown_directory_is_allowed():
+    assert held("cd /tmp/x && ls; git clean -fdx").allow

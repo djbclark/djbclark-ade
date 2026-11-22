@@ -168,7 +168,8 @@ directory is known, the removal is judged against **every** directory the line m
 one a later `cd` in the chain left (`cd ~ && cd build; rm -rf *` is held in `~/src/x` because the second cd may fail; `cd /tmp/x && ls;
 rm -rf *` is allowed in `~/src/x` and held in `~`). `git clean` uses the same list. A `cd X || break` or `|| continue` makes `X`
 certain only inside its loop: at the `done` the directory is unknown. A `$( )` or backtick body is scanned before the statements
-run, so once the line holds any `cd`, `pushd` or `popd` its bodies are judged in an unknown directory. After `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
+run, so once the line holds any `cd`, `pushd` or `popd` it is judged twice, in the request's directory and in an unknown one. A
+`git clean` after a broken chain that began in an unknown directory is also judged in the directory the cd would have reached. After `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
 group (and a `sh -c` or `$(...)` body) gives the outer directory and the outer variables back when it ends. So `cd ~ && rm -rf *` and
 `cd / && rm -rf ./*` are judged against `~` and `/`, `cd build && rm -rf *` against `build`, and `cd build; rm -rf *`,
 `cd build || true; rm -rf *`, `cd /tmp/x; rm -rf *` and `(cd /tmp/x); rm -rf *` (with no outer directory) are held. A Paseo Claude
@@ -195,7 +196,10 @@ removal the parser did judge (the program word, the `-exec` word of a `find` it 
 arguments of programs that only carry text (`echo`, `printf`, `grep`, `rg`, `cat`, `git`, `gh`, `man`, `paseo`, ...), are not counted.
 A command word that is not a plain word (written with quotes or a backslash, or holding `$`, `{`, `?`, `*`, `[`, or starting with `=`;
 `[` and `[[` excepted) is held. `noglob`, `nocorrect`, `builtin`, `coproc`, `command` and `exec -a NAME` are followed like `sudo` and `env`
-(whose long `--user`, `--group`, `--unset` options take a value, as do `xargs -d -J -R -S -a`). A python, perl, ruby, node, php or osascript
+(whose long `--user`, `--group`, `--unset` options take a value, as do `xargs -d -J -R -S -a`). The positional parameters of a `sh|bash|zsh -c` body named on the line (`sh -c 'rm -rf "$1"' _ /`) are filled in; when `xargs`
+feeds the shell (`... | xargs -0 sh -c 'rm -rf "$@"' _`) the parameters beyond those given are the feed, which is judged like the input of
+a bare `xargs rm` (a narrowed `find`, an `echo` of safe paths; anything else is unknown and held; round 7).
+A python, perl, ruby, node, php or osascript
 one-liner (`-c`, `-e`, `--eval`, a here-document or here-string) whose text names `rmtree`, `unlink`, `remove`, `rmdir`, `rm -`, `rmSync`,
 `do shell script`, `delete` or `trash` is held; a script file is not read. Round 4 extends the one-liner check to the runners that
 start an interpreter (`uv run python -c`, `uvx`, `pipx run`, `poetry run`, `npx node -e`, `bunx`, `pnpm`, `npm`, `pdm`, `rye`,
