@@ -308,6 +308,19 @@ def test_the_unprofiled_retry_in_route_keeps_the_cwd_scope(accept):
         assert r.route("bulk", quota=quota, repo="techno-euphora") is None
 
 
+def test_adjust_defaults_to_no_scope_not_to_the_repo_name(accept):
+    """Mutant M-J: `adjust(scope_repo=None)` falling back to `repo`. Programmatic callers pass the cwd's repo or get no scoped pool."""
+    import route_adjust
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    def served(**kw):
+        out = route_adjust.adjust(r, ["bulk"], quota=drained(clinepass=100.0), age=60.0, state=route_adjust.empty_state(),
+                                  now=now, repo="techno-euphora", **kw)
+        return out["rows"][0][1]
+    assert served() is None and served(scope_repo="tendcf") is None
+    assert served(scope_repo="techno-euphora").service.name == "clinepass"          # the control: the scope is what admits it
+
+
 def test_cli_route_and_adjust_ignore_a_repo_name_for_the_scope(accept, tmp_path):
     """`--repo techno-euphora --cwd <other repo>`: the name feeds [dispatch.repo_overrides] only, on every command."""
     other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
