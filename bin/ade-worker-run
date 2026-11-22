@@ -31,9 +31,15 @@ window, resolved from the lead's agent record ($PASEO_AGENT_ID must be --lead); 
 is renamed to that) or the launch is refused (`rename-main` fixes that); never archived by this tool. Label ade.placement=main.
 Tab names: `worker <slice> <lead id>` plus ` [wt: <worktree dir>]` when --worktree DIR names the worktree the worker writes in or
 --cwd is a linked worktree (a hint, shortened to fit 100 characters; the brief still carries the path). Every launch carries
-`--label ade.lead=<lead>` and `--label slice=<NAME>`. One JSON line goes to stdout: {agentId, workspaceId, windowName, tabName}.
+`--label ade.lead=<lead>` and `--label slice=<NAME>`. One JSON line goes to stdout: {agentId, workspaceId, windowName, tabName}
+(plus reportPath and donePath when the footer values below were added).
 Pass --no-wait to paseo. The last `--` argument (the brief) gets one line appended: `Also follow every item of <repo root>/docs/
-dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief).
+dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). Unless the brief already
+defines its report (it names an `agent-reports/` path, `{report} =`/`{report}:` or a `Report path:` line), a `Footer values:` line follows
+it that fills {lead}, {report}, {done}, {inbox} and {replies}: report = ~/.local/state/agent-reports/<lead id>/<slice>-report.md
+(or $AGENT_FOOTER_REPORT_DIR/<lead id>/..., the agent_footer_gate layout; `worker-` is prefixed to a slice starting with report/summary/
+findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done. The directory is created (mode 700) and the paths go to
+stderr and the JSON, so the lead can wait on the .done.
 A box a launch opens is created in --cwd's primary checkout: the launch is refused unless the brief names --cwd by absolute path, and
 the JSON line then carries cwd and requestedCwd. --cwd must be the directory of the box the worker is placed in (`paseo run
 --workspace` ignores it, getpaseo/paseo#9699): a different --cwd is refused before anything is renamed or launched, and after every
@@ -693,6 +699,40 @@ def add_footer(rest: list[str]) -> list[str]:
     return [*rest[:-1], f"{last}\n\nAlso follow every item of {FOOTER}."]
 
 
+REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.IGNORECASE)  # Claude Code refuses a Write of these .md names
+BRIEF_DEFINES_VALUES = re.compile(r"agent-reports/|\{report\}\s*[=:]|\breport path\s*:", re.IGNORECASE)
+VALUES_MARK = "Footer values:"
+
+
+def brief_defines_footer_values(brief: str) -> bool:
+    """True when the brief already says where the report goes: it names an `agent-reports/` path, defines `{report} =` / `{report}:`,
+    or has a `Report path:` line (the label agent_footer_gate reads). Deliberately broad: a brief that sets its own report path must
+    never be given a second, conflicting one (a stray mention of the directory only skips the values, as before this feature)."""
+    return BRIEF_DEFINES_VALUES.search(brief) is not None
+
+
+def footer_report_paths(lead: str, slice_name: str) -> dict[str, str]:
+    """The values the footer's placeholders take for this launch, by the layout agent_footer_gate uses:
+    <report dir>/<lead id>/<slice>-report.md, .done / .inbox.md / .replies.md beside it. The report dir is
+    $AGENT_FOOTER_REPORT_DIR (the gate's own override) else ~/.local/state/agent-reports. A slice whose report name Claude Code would
+    refuse to Write (starts with report/summary/findings/analysis) gets a `worker-` prefix. Refused on a path with a control character."""
+    base = Path(os.environ.get("AGENT_FOOTER_REPORT_DIR") or Path.home() / ".local/state/agent-reports")
+    stem = f"worker-{slice_name}" if REFUSED_REPORT_BASENAME.match(slice_name) else slice_name
+    report = base / lead / f"{stem}-report.md"
+    if has_control_char(str(report)) or not SLICE_RE.fullmatch(slice_name):
+        raise Refused(f"the report path {str(report)!r} holds a control character or an unusable slice name; "
+                      "set AGENT_FOOTER_REPORT_DIR to a plain directory or pass --no-footer")
+    r = str(report)
+    return {"lead": lead, "report": r, "done": r + ".done", "inbox": r + ".inbox.md", "replies": r + ".replies.md"}
+
+
+def add_footer_values(rest: list[str], values: dict[str, str]) -> list[str]:
+    """Append the `Footer values:` line after the footer pointer, so the worker never meets an unfilled {report} / {done} / {lead}."""
+    line = (f"{VALUES_MARK} " + "; ".join(f"{{{k}}} = {shlex.quote(v)}" for k, v in values.items())
+            + ". Use these wherever the footer says {report}, {done}, {lead}, {inbox} or {replies}.")
+    return [*rest[:-1], f"{rest[-1]}\n\n{line}"]
+
+
 def has_control_char(p: str) -> bool:
     """True when the path holds a control, format or line/paragraph-separator character (a newline, U+2028 or U+2029 would split the
     brief line that names it; U+202E reverses how the rest of the path reads)."""
@@ -716,8 +756,9 @@ def add_cwd_line(rest: list[str], eff_cwd: str, cwd: str, explicit: bool) -> lis
         line = (f"Your session starts in {shlex.quote(eff_cwd)}, the shared primary checkout: never edit or commit there; "
                 "work only in the worktree your brief names.")
     last, tail = rest[-1], f"\n\nAlso follow every item of {FOOTER}."
-    if last.endswith(tail):
-        return [*rest[:-1], f"{last[:-len(tail)]}\n\n{line}{tail}"]
+    at = last.rfind(tail)
+    if at >= 0 and (last[at + len(tail):] == "" or last[at + len(tail):].startswith(f"\n\n{VALUES_MARK} ")):
+        return [*rest[:-1], f"{last[:at]}\n\n{line}{last[at:]}"]  # before the pointer and the values block ade-worker-run added
     return [*rest[:-1], f"{last}\n\n{line}"]
 
 
@@ -833,8 +874,14 @@ def launch(opts, rest: list[str]) -> int:
         raise Refused(str(e))
     bi = brief_index(rest)  # before the footer line: the footer names paths of its own
     brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
+    report_info: dict[str, str] | None = None
     if not opts.no_footer:
         rest = add_footer(rest)
+        if not brief_defines_footer_values(brief):  # a brief that sets its own report path keeps it
+            report_info = footer_report_paths(lead, name)
+            rest = add_footer_values(rest, report_info)
+            Path(report_info["report"]).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
     rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
     box = "OTHER" if opts.placement == "other" else "WORKER"  # the box the window is looked up or opened in (not the lead's own)
@@ -976,6 +1023,8 @@ def launch(opts, rest: list[str]) -> int:
         if lock is not None:
             lock.close()
     out = {"agentId": agent_id, "workspaceId": wks, "windowName": wname, "tabName": tab}
+    if report_info:
+        out.update({"reportPath": report_info["report"], "donePath": report_info["done"]})
     if moved and requested:  # the caller asked for another directory (or stood in one): say where the worker started
         out.update({"cwd": eff_cwd, "requestedCwd": cwd})
     print(json.dumps(out))

@@ -21,6 +21,19 @@ LEAD_NAME = "LEAD repo (Wave 7)"  # the lead's own window in `main_env`
 # repo's window instead of opening its own, as the 2026-11-14 ruling says. These tests assert the ruling; remove the marker with the fix.
 LEAD_WKS = "wks_lead01"
 FOOTER_LINE = f"Also follow every item of {ROOT}/docs/dispatch-footer.md."
+
+
+def values_line(env, slice_name, lead=LEAD):
+    """The `Footer values:` line ade-worker-run adds, built by hand (not by the code under test)."""
+    r = f"{env.tmp}/reports/{lead}/{slice_name}-report.md"
+    return (f"Footer values: {{lead}} = {lead}; {{report}} = {r}; {{done}} = {r}.done; {{inbox}} = {r}.inbox.md; "
+            f"{{replies}} = {r}.replies.md. Use these wherever the footer says {{report}}, {{done}}, {{lead}}, {{inbox}} or {{replies}}.")
+
+
+def ftail(env, slice_name):
+    return f"{FOOTER_LINE}\n\n{values_line(env, slice_name)}"
+
+
 STUB = '''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -94,6 +107,7 @@ class Env:
         monkeypatch.setenv("FAKE_CALLS", str(self.calls_path))
         monkeypatch.setenv("PASEO_HOME", str(self.home))
         monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(tmp_path / "state"))
+        monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", str(tmp_path / "reports"))
         monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(tmp_path / "self-session"))
         monkeypatch.setenv("PASEO_AGENT_ID", LEAD)
         monkeypatch.setenv("PASEO_AGENT_CWD", "/ambient/cwd")
@@ -135,12 +149,13 @@ def launch(env, slice_name="alpha", *extra):
 def test_first_launch_creates_and_renames(env):
     r = launch(env)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"agentId": AGENT, "workspaceId": "wks_abc123", "windowName": WIN,
-                                    "tabName": f"worker alpha {LEAD}"}
+    out = json.loads(r.stdout)
+    assert out.pop("reportPath").endswith("/alpha-report.md") and out.pop("donePath").endswith("/alpha-report.md.done")
+    assert out == {"agentId": AGENT, "workspaceId": "wks_abc123", "windowName": WIN, "tabName": f"worker alpha {LEAD}"}
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert run[run.index("--cwd") + 1] == os.path.realpath("/repo")
-    assert run[-1] == f"BRIEF TEXT\n\n{FOOTER_LINE}" and "--provider" in run
+    assert run[-1] == f"BRIEF TEXT\n\n{ftail(env, 'alpha')}" and "--provider" in run
     assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["run"], ["workspace", "rename"], ["agent", "update"], ["agent", "inspect"]]
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
@@ -844,8 +859,9 @@ def interactive(env, *extra, slice_name="op1", cwd=None):
 def test_main_placement_launches_into_the_leads_window(main_env, flag):
     r = interactive(main_env, *flag)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": LEAD_NAME,
-                                    "tabName": f"worker op1 {LEAD}"}
+    out = json.loads(r.stdout)
+    assert out.pop("reportPath").endswith("/op1-report.md") and out.pop("donePath").endswith("/op1-report.md.done")
+    assert out == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": LEAD_NAME, "tabName": f"worker op1 {LEAD}"}
     run = run_argv(main_env)
     assert run[run.index("--workspace") + 1] == LEAD_WKS and "--new-workspace" not in run
     assert run[run.index("--cwd") + 1] == "/repo/lead"
@@ -961,14 +977,14 @@ def test_rename_main_needs_the_lead_to_be_the_caller_and_a_short_name(main_env, 
 def test_footer_line_is_appended_to_the_brief_once(env):
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r.returncode == 0, r.stderr
-    assert run_argv(env)[-1] == f"BRIEF\n\n{FOOTER_LINE}"
+    assert run_argv(env)[-1] == f"BRIEF\n\n{ftail(env, 'a')}"
     assert (ROOT / "docs/dispatch-footer.md").is_file() and str(ROOT) in FOOTER_LINE  # an absolute path from the repo root
 
 
 def test_footer_not_doubled_when_the_brief_already_names_it(env):
     brief = f"BRIEF {ROOT}/docs/dispatch-footer.md"
     env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
-    assert run_argv(env)[-1] == brief
+    assert run_argv(env)[-1] == f"{brief}\n\n{values_line(env, 'a')}"  # no second pointer; the values still follow
 
 
 def test_no_footer_leaves_the_brief_alone(env):
@@ -1029,7 +1045,7 @@ def test_footer_accepts_the_brief_after_flags_and_their_values(env, rest):
     env.data["providers"] = [{"provider": "x", "enabled": "Enabled", "status": "available", "modes": [{"id": "full-access"}]}]
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", *rest)
     assert r.returncode == 0, r.stderr
-    assert run_argv(env)[-1] == f"BRIEF\n\n{FOOTER_LINE}"
+    assert run_argv(env)[-1] == f"BRIEF\n\n{ftail(env, 'a')}"
 
 
 # --- round 2 adversary findings (B1-B6) ---------------------------------------------------------------------------------
@@ -2621,7 +2637,7 @@ def test_a_moved_worker_brief_carries_the_cwd_line_before_the_footer(env, tmp_pa
     r = mint(env, wt)
     assert r.returncode == 0, r.stderr
     eff, want = os.path.realpath(main), os.path.realpath(wt)
-    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(eff, want)}\n\n{FOOTER_LINE}"  # exact paths, footer still last
+    assert placed(env)[0][-1] == f"work in {wt}\n\n{cwd_line(eff, want)}\n\n{ftail(env, 's')}"  # exact paths, footer still last
     assert json.loads(r.stdout)["requestedCwd"] == want  # the same condition as the JSON fields and the stderr note
 
 
@@ -2646,7 +2662,7 @@ def test_an_unmoved_worker_brief_has_no_cwd_line(env, tmp_path):
     r = env.run("--lead", LEAD, "--slice", "s", "--window-middle", "strictjson", "--cwd", str(main), "--", "--no-wait", "just do the work")
     assert r.returncode == 0, r.stderr
     assert "requestedCwd" not in json.loads(r.stdout)
-    assert placed(env)[0][-1] == f"just do the work\n\n{FOOTER_LINE}"
+    assert placed(env)[0][-1] == f"just do the work\n\n{ftail(env, 's')}"
 
 
 def test_a_case_variant_of_the_primary_checkout_is_not_a_move_so_no_cwd_line(env, tmp_path):
@@ -2683,7 +2699,7 @@ def test_the_implicit_case_brief_never_sends_the_worker_to_the_leads_worktree(en
     assert "run every command from" not in got and "cd there" not in got
     tail = got[len(brief):]  # what the tool added: it names no directory but the primary checkout
     assert os.path.realpath(wt) not in tail and str(wt) not in tail
-    assert got.endswith(FOOTER_LINE)  # the footer stays last
+    assert got.endswith(ftail(env, "s"))  # the footer and its values stay last
 
 
 def test_with_no_footer_a_trailing_flag_value_never_gets_the_line_and_the_launch_is_refused(env, tmp_path):
@@ -2779,7 +2795,7 @@ def test_a_brief_that_already_names_the_footer_gets_the_line_after_its_own_foote
     r = mint(env, wt, brief=brief)
     assert r.returncode == 0, r.stderr
     got = placed(env)[0][-1]
-    assert got == f"{brief}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
+    assert got == f"{brief}\n\n{values_line(env, 's')}\n\n{cwd_line(os.path.realpath(main), os.path.realpath(wt))}"
     assert got.count("dispatch-footer.md") == 1
 
 
@@ -2802,3 +2818,51 @@ def test_mcp_flag_launches_under_the_profile_and_refuses_without_one(env, monkey
     assert r.returncode == 0, r.stderr
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     assert run[run.index("--provider") + 1] == "claude/sonnet"
+
+
+# --- footer values (2026-11-22): the worker never meets an unfilled {report} / {done} / {lead} ---------------------------------------
+
+def test_footer_values_are_appended_and_reported(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    rep = f"{env.tmp}/reports/{LEAD}/a-report.md"
+    got = run_argv(env)[-1]
+    assert got.endswith(values_line(env, "a")) and got.index("dispatch-footer.md") < got.index("Footer values:")
+    out = json.loads(r.stdout)
+    assert out["reportPath"] == rep and out["donePath"] == rep + ".done"
+    assert rep in r.stderr
+    assert (env.tmp / "reports" / LEAD).is_dir() and (env.tmp / "reports" / LEAD).stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("brief", ["BRIEF\nReport path: /x/a-report.md", "BRIEF {report} = /x/a-report.md", "BRIEF {report}: /x/a-report.md",
+                                   "BRIEF write to /home/u/.local/state/agent-reports/zz/a-report.md"])
+def test_footer_values_not_added_when_the_brief_defines_them(env, brief):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    got = run_argv(env)[-1]
+    assert got == f"{brief}\n\n{FOOTER_LINE}" and "Footer values:" not in got
+    assert "reportPath" not in json.loads(r.stdout) and not (env.tmp / "reports").exists()
+
+
+def test_footer_values_untouched_by_no_footer(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--no-footer", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0 and run_argv(env)[-1] == "BRIEF"
+    assert "reportPath" not in json.loads(r.stdout) and not (env.tmp / "reports").exists()
+
+
+@pytest.mark.parametrize("slice_name", ["a\nb", "a b", "../x", "a/b"])
+def test_footer_values_unsafe_slice_refused(env, slice_name):
+    r = env.run("--lead", LEAD, "--slice", slice_name, "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and not env.calls() and not (env.tmp / "reports").exists()
+
+
+def test_footer_values_unsafe_report_dir_refused(env, monkeypatch):
+    monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", f"{env.tmp}/bad\ndir")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "control character" in r.stderr and not [c for c in env.calls() if c["argv"][0] == "run"]
+
+
+def test_footer_values_rename_a_slice_claude_would_refuse_to_write(env):
+    r = env.run("--lead", LEAD, "--slice", "report-probe", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["reportPath"] == f"{env.tmp}/reports/{LEAD}/worker-report-probe-report.md"
