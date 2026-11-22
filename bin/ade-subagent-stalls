@@ -1,0 +1,16 @@
+#!/usr/bin/env -S python3 -I
+"""ade-subagent-stalls: report (and with --notify, announce) Agent-tool sub-agents that died mid-run. See docs/subagent-stalls.md.
+
+  ade-subagent-stalls [--json] [--notify [--dry-run]] [--stale-min 10] [--max-age-h 48] [--home DIR] ...
+
+Exit 0 nothing stalled, 1 something is, 2 error. It only reports and notifies: it never resumes, restarts, archives or kills anything.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from ade_subagent_stalls import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
