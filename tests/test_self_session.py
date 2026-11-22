@@ -2956,7 +2956,8 @@ def test_a_revived_retired_name_is_never_inherited_as_the_next_title(setup):
 
 
 @pytest.mark.parametrize('window, state', [('MAIN p (w)', 'rename-advised'), ('p chat', 'rename-advised'),
-                                           ('LEAD p (w)', 'ok'), ('LEAD fork-release-alerts (CVE watch)', 'ok')])
+                                           ('LEAD p (w)', 'ok'), ('LEAD fork-release-alerts (CVE watch)', 'ok'),
+                                           ('LEAD p (w) stray', 'rename-advised'), ('xLEAD p (w)', 'rename-advised')])
 def test_finish_advises_the_exact_rename_lead_command_when_the_window_is_not_a_lead_window(setup, window, state):
     service, native, record, path = named_chain(setup)
     native.workspaces[0]['name'] = window
@@ -2990,3 +2991,42 @@ def test_a_failing_workspace_listing_never_fails_finish(setup):
     finished = service.finish(path)
     assert finished['status'] == 'archived' and finished['lead_window']['state'] == 'unknown'
     assert 'timed out' in finished['lead_window']['reason']
+
+
+WS2 = 'wks_0123456789abcdef'
+
+
+def new_local_chain(setup, state_name=None, window='MAIN q (z)'):
+    """A handoff whose predecessor workspace had vanished: the successor sits in WS2, named only in its daemon state file."""
+    service, native, checkpoint = setup
+    native.rows[PRED]['Name'] = 'fork-release-alerts'
+    native.workspaces[:] = []  # WS (the predecessor's) is gone: placement new-local
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['workspace_placement'] == 'new-local' and record['workspace'] == WS
+    native.workspaces.append({'workspaceId': WS2, 'project': 'p', 'name': window, 'cwd': '/x'})
+    if state_name is not None:
+        agents = service.home / 'agents' / 'proj'
+        agents.mkdir(parents=True)
+        (agents / (SUCC + '.json')).write_text(json.dumps({'workspaceId': WS2}))
+    return service, native, record, Path(record['record'])
+
+
+@pytest.mark.parametrize('window, state', [('MAIN q (z)', 'rename-advised'), ('LEAD q (z)', 'ok')])
+def test_the_window_advice_follows_a_new_local_successor_to_its_own_workspace(setup, window, state):
+    service, native, record, path = new_local_chain(setup, state_name='proj', window=window)
+    info = settle(service, native, record, path)['lead_window']
+    assert info['state'] == state and info['name'] == window  # WS2 (the successor's), not WS (the predecessor's, gone)
+    if state == 'rename-advised':
+        assert info['command'] == f'ade-worker-run rename-lead --lead {SUCC}' and 'reason' not in info
+
+
+@pytest.mark.parametrize('content', [None, 'not json', '[]', '{"workspaceId": "nope"}'])
+def test_an_unreadable_new_local_window_still_gets_the_rename_advice(setup, content):
+    service, native, record, path = new_local_chain(setup)
+    if content is not None:
+        agents = service.home / 'agents' / 'proj'
+        agents.mkdir(parents=True)
+        (agents / (SUCC + '.json')).write_text(content)
+    info = settle(service, native, record, path)['lead_window']
+    assert info == {'state': 'rename-advised', 'reason': 'successor-window-unresolved',
+                    'command': f'ade-worker-run rename-lead --lead {SUCC}'}

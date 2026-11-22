@@ -699,7 +699,9 @@ class Service:
         successor)`. A generated title never holds an agent id: paseo#9668 resolves `agent archive SHORTID`
         by partial title match when the id is missing from the listing, so an id prefix in a lead's title
         would let that fallback pick the live lead. (The one id-bearing title is the RETIRED predecessor's, set after its
-        archive: an archived agent a title match can only meet as AGENT_ALREADY_ARCHIVED, never archive a live lead.)
+        archive. While it stays archived a title match meets it as AGENT_ALREADY_ARCHIVED; once an operator message revives it,
+        a manual `agent archive|reload|detach SUCCESSOR_ID` acts on it, as an ordinary agent, when the successor is missing from
+        the listing: the same class as a `worker <slice> <lead id>` tab, and never the live lead.)
         Labels: `ade.predecessor`; `ade.chain` (the first lead's id, carried from the predecessor's record,
         else the predecessor itself); `ade.role` from --role or the predecessor's record.
         """
@@ -1322,6 +1324,22 @@ class Service:
         identity['retire_rename'] = detail
         self.save(target, record)
 
+    def successor_workspace(self, record):
+        """The workspace id of the successor's own window, or None when it cannot be told.
+
+        `record['workspace']` is the PREDECESSOR's workspace. An `existing` placement put the successor there, so it is the
+        answer. A `new-local` one (the predecessor's workspace had vanished) gave the successor a fresh workspace: read it from
+        the successor's daemon state file `<home>/agents/*/<id>.json` (`workspaceId`, as `ade-worker-run` does), else None."""
+        if record.get('workspace_placement') != 'new-local':
+            return record.get('workspace')
+        try:
+            for path in sorted((self.home / 'agents').glob(f'*/{ident(record.get("successor"))}.json')):
+                data = json.loads(read_regular(path, 262144))
+                return workspace_ident(data.get('workspaceId'))
+        except (OSError, ValueError, SessionError, AttributeError):
+            pass
+        return None
+
     def advise_lead_window(self, record, target):
         """Observe the successor's own window name and print the exact `rename-lead` command when it is not `LEAD <repo> (<work>)`.
 
@@ -1330,19 +1348,27 @@ class Service:
         `command`, `reason`); read-only, never fails finish, recomputed on every run."""
         successor = record.get('successor')
         info = {'state': 'unknown'}
+        command = f'ade-worker-run rename-lead --lead {successor}'
         try:
-            rows = self.native('workspace', 'ls')
-            row = next((r for r in rows if isinstance(r, dict) and r.get('workspaceId') == record.get('workspace')), None) \
+            workspace = self.successor_workspace(record)
+            rows = self.native('workspace', 'ls') if workspace else None
+            row = next((r for r in rows if isinstance(r, dict) and r.get('workspaceId') == workspace), None) \
                 if isinstance(rows, list) else None
             name = row.get('name') if isinstance(row, dict) else None
-            if not isinstance(name, str):
+            if workspace is None:
+                # a new-local successor sits in a window of its own that the record does not name: it certainly has no
+                # LEAD name yet, so the advice is given without a name to show
+                info.update(state='rename-advised', reason='successor-window-unresolved', command=command)
+                self.progress(f'the successor\'s window is new (not the predecessor\'s); run as the successor: {command}'
+                              ' [--window-middle "WORK"]')
+            elif not isinstance(name, str):
                 info['reason'] = 'window-not-listed'
             else:
                 info['name'] = bounded(name, TITLE_LIMIT)
                 if LEAD_WINDOW.fullmatch(name):
                     info['state'] = 'ok'
                 else:
-                    info.update(state='rename-advised', command=f'ade-worker-run rename-lead --lead {successor}')
+                    info.update(state='rename-advised', command=command)
                     self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}'
                                   ' [--window-middle "WORK"]')
         except SessionError as error:
