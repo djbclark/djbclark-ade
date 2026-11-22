@@ -12,6 +12,13 @@ That is Claude Code's built-in `rm` safety check. No allow rule and no PreToolUs
 through to the host's `canUseTool` callback, which for Paseo is the card (docs: permission-modes.md, agent-sdk/permissions.md,
 hooks.md on code.claude.com).
 
+**What this is, plainly (lead and operator, 2026-11-22: "denylist plus hardening; say plainly it is not a boundary").** Our agents
+are trusted. The critical-path removal rule and the denylist below guard against **careless commands from a trusted agent** (an
+empty variable, a stray glob, a runaway `rm`), not against a hostile one, and they are **not a security boundary**. A determined
+agent can write a command this parser misreads; the shell is too large to out-parse. So the policy does two things: it fails closed
+wherever it cannot be sure (it holds, the operator is asked as before), and it adds a textual tripwire for a remover word it did
+not itself judge (III 1d4). Section III 2a lists what passes on purpose.
+
 ## I. What the window covers
 
 ***1.*** **`sudo-ask` commands** (the site repo's `roles/sudo_ask_grant`): unchanged by this change; the root helper judges them.
@@ -72,7 +79,9 @@ newlines and parentheses, so `zsh -lc 'cd /tmp && rm -rf ~/'` is one `zsh` comma
 or parenthesis, nesting deeper than 4, `eval`, `source` or `.` of stdin or a substitution, a shell with no `-c` and no script (it reads
 stdin: `curl ... | sh`), a here-document or here-string fed to a shell, a command substitution or backtick **in the command word or in
 the arguments of a removal** (`rm`, `find -delete`, `chmod -R`, `rsync --delete`, ...), and a removal through `xargs` whose input
-is not an `echo`, `printf` or `find` it can read. **Decision (the lead may overrule):** a substitution elsewhere
+is not an `echo`, `printf` or `find` it can read (a substitution inside that input counts as unreadable too). Also held (round 3):
+a shell script named `-`, `/dev/stdin`, `/dev/fd/N` or by a substitution (`bash <(curl ...)`), and `alias` or a function
+definition in a command line that also holds a remover word anywhere. **Decision (the lead may overrule):** a substitution elsewhere
 (`git commit -m "$(cat <<'EOF' ... EOF)"`, `echo $(date)`, `x=$(git rev-parse HEAD)`) is not held, because it is
 everyday agent text and holding it would defeat the window: its body is parsed and judged like any command line (so
 `echo $(rm -rf /)` is held), and an unquoted here-document body is scanned for substitutions too.
@@ -99,17 +108,53 @@ programs under writable directories) and the hard-link check. `tests/test_ade_ap
 `passwd` or `security` counts only where a command stands (first word, after `sudo`/`env`/`time`/...), so `echo passwd` and
 `cat /etc/passwd` do not trip it.
 
-***d.*** *A critical-path removal* (rule `critical-rm:*`, or `critical-reason` when the card's own title or description says "critical
-path"): the removal family `rm`, `rmdir`, `unlink`, `srm`, `shred` (also GNU `grm`, `gfind` and the like, and any directory or `..`
-form of the program path), `find` with `-delete` or `-exec`, `-execdir`, `-ok`, `-okdir` running `rm` or a shell (roots, `-f ROOT` and the
-default `.` judged), `xargs rm` (the piped `echo`, `printf` or `find` input judged), `chmod|chown|chgrp|chflags -R`, `rsync --delete*`
-(the destination) and `git clean -f` (the directory, or `-C DIR`), aimed at `/`, `~`, `$HOME`,
-`/Users`, a home directory (`/Users/<name>`), `/System` (and its tree), `/usr`, `/etc`, `/var`, `/private`, `/Volumes/<volume>`,
-`/bin`, `/sbin`, `/opt`, `/opt/homebrew`, `/usr/local`, `/Library`, `/Applications`, `/tmp`, the system `bin`/`lib` trees,
-or `D/*` for any of them. Symlinks are resolved (`/etc` is `/private/etc`). Variables are modelled as **empty**, the failure Claude
-Code's own check warns about: `rm -rf $S/` is `rm -rf /` and stays pending, `rm -rf $S/*` is `rm -rf /*` and stays pending.
-`cd` is followed within one command line (and the request's own `cwd` is the start), so `cd ~ && rm -rf *` and `cd / && rm -rf ./*`
-are judged against `~` and `/`, and a glob or `.` at the top of a critical directory is held.
+***d.*** *A critical-path removal* (rule `critical-rm:*`, `critical-reason` when the card's own title or description says "critical
+path", or `unreadable:unparsable:*` where the parser cannot be sure): the removal family `rm`, `rmdir`, `unlink`, `srm`, `shred` (also
+GNU `grm`, `gfind` and the like, and any directory or `..` form of the program path), `find` with `-delete` or `-exec`, `-execdir`,
+`-ok`, `-okdir` running `rm` or a shell (roots, `-f ROOT` and the default `.` judged), `xargs rm` (the piped `echo`, `printf` or `find`
+input judged), `chmod|chown|chgrp|chflags -R`, `rsync --delete*` (the destination) and `git clean -f` (the directory, or `-C DIR`
+or `--work-tree DIR`), aimed at `/`, `~`, `$HOME`, `/Users`, a home directory (`/Users/<name>`), `~/Library` and
+`~/Library/Application Support` themselves (ancestors of the protected TCC and Keychains paths), `/System` (and its tree), `/usr`, `/etc`,
+`/var`, `/private`, `/Volumes/<volume>`, `/bin`, `/sbin`, `/opt`, `/opt/homebrew`, `/usr/local`, `/Library`, `/Applications`, `/tmp`, the
+system `bin`/`lib` trees, or `D/<glob>` for any of them (d2). Symlinks are resolved (`/etc` is `/private/etc`). The details, each a rule
+with a test:
+
+***d1.*** *Variables* (round 3). A variable the command line **never sets** is modelled as **empty**, the failure Claude Code's own
+check warns about: `rm -rf $S/` is `rm -rf /` and stays pending, `rm -rf $S/<glob>` is `rm -rf /<glob>`, while the screenshot's
+`rm -f $S/all.done $S/*.log` models as `/all.done` and `/*.log` and is allowed. A variable the line **sets anywhere** (`NAME=`,
+`export/declare/local/readonly NAME=`, `for NAME in`, `select`, `read NAME`, `mapfile`, `printf -v`, in any nested `-c` body, before or
+after the use), a positional (`$1`, `$@`, `$*`, `$0`, also inside a function body), `$PWD`/`$OLDPWD` and any `${NAME<operator>...}`
+form (`${S:-/}`, `${S:=/}`, `${S/x/y}`, `${!S}`, `${#S}`) is **unknown**, not empty: a removal operand that uses one is held
+(`unreadable:unparsable:variable $S in a removal`). `${S:?}` is read as a plain name. So `D=/tmp/x; rm -rf $D` is held on purpose.
+
+***d2.*** *Globs and braces* (round 3). A glob or brace character (`*`, `?`, `[`, `]`, `{`, `}`) in the first path component under a
+critical directory is held: `~/*`, `~/.*`, `~/{*,.*}`, `~/?*`, `~/[a-z]*`, `~/*.*`, `/Users/*`,
+`/Users/tester/{.,}*`, `/usr/lo*`, `/Us*rs`. The one exception is a name pattern that ends in an extension
+(`*.log`, `?*-old.txt`: stars or `?`, optional name characters, a dot and 2 or more letters or digits), which does not reach
+everything: `/*.log` (what `$S/*.log` becomes with S empty) and `~/*.log` stay allowed. Below a critical `tree` (`/etc`,
+`/usr/bin`, `/System`...) every path is already critical, glob or not. A glob deeper than the first component under a non-critical
+directory (`~/src/*`, `/var/folders/*/x`) is not held.
+
+***d3.*** *The working directory* (round 3). `cd` is followed within one command line, and the request's own `cwd` is the start, so
+`cd ~ && rm -rf *` and `cd / && rm -rf ./*` are judged against `~` and `/`. A Paseo Claude request carries **no** `cwd`, so
+the start is unknown: a relative removal that reaches all of its directory (`.`, `..`, `../x`, a bare glob such as `*`, `.*`,
+`./*`, `*.*`, `?*`, `[a-z]*`, `{a,b}*`) is held, `find . -name x -delete` (a name or type test) is not, and
+`rm -rf ./build`, `rm -f *.log`, `rm -rf build/*` are not. A `cd` to a substitution or a variable (`cd "$(echo ~)"`, `cd $X`,
+`cd -`, `popd`) followed by a removal with a relative operand, or by `git clean -f`, is held. `git -C DIR` and `git --work-tree DIR`
+follow the same rule; a `git -C "$(...)"` or `-C $VAR` is unreadable (held), and an `xargs` fed by a substitution counts as unknown
+input.
+
+***d4.*** *The textual tripwire and command words* (round 3). Anywhere in a command line, after quotes, backslashes and `$'...'`
+(decoded) are removed, a **remover word** (`rm`, `rmdir`, `unlink`, `srm`, `shred`, `trash`, `rip`, the GNU `g` forms, `-delete`,
+`--delete*`, `git clean`) that the parser did **not** itself judge as a removal holds the request. That covers `parallel`, `ssh`,
+`fd -X`, `flock`, `script`, `tmux send-keys`, `xargs -J`, `alias`, `docker rm` and the like without parsing each. The words of a
+removal the parser did judge (the program word, the `-exec` word of a `find` it judged, a `-c` body it recursed into), and the
+arguments of programs that only carry text (`echo`, `printf`, `grep`, `rg`, `cat`, `git`, `gh`, `man`, `paseo`, ...), are not counted.
+A command word that is not a plain word (written with quotes or a backslash, or holding `$`, `{`, `?`, `*`, `[`, or starting with `=`;
+`[` and `[[` excepted) is held. `noglob`, `nocorrect`, `builtin`, `coproc`, `command` and `exec -a NAME` are followed like `sudo` and `env`
+(whose long `--user`, `--group`, `--unset` options take a value, as do `xargs -d -J -R -S -a`). A python, perl, ruby, node, php or osascript
+one-liner (`-c`, `-e`, `--eval`, a here-document or here-string) whose text names `rmtree`, `unlink`, `remove`, `rmdir`, `rm -`, `rmSync`,
+`do shell script`, `delete` or `trash` is held; a script file is not read.
 
 ***2.*** **Allowed** (rule `allow:window`): everything else, any agent, any provider. In particular **the "possibly-empty variable"
 class from the screenshot is allowed**: `rm -f $S/all.done $S/*.log` models as `/all.done` and `/*.log`, which name no critical
@@ -119,6 +164,15 @@ Also allowed by that ruling, and worth knowing: a Bash call with `dangerouslyDis
 URL, `mcp__paseo__create_agent` with `mode: bypassPermissions`, tools whose only argument sits under a content key
 (`{"text": "rm -rf /"}` on an unknown tool; content keys are not scanned), and, in non-interactive sessions, a call that would have been
 auto-denied for want of a hook decision.
+
+***2a.*** **What passes on purpose** (the guard is for careless commands, so these are known and accepted): a script file the agent
+wrote and runs later (`bash script.sh`, `python3 script.py`: its text is not read) and `source FILE`; a substitution anywhere except in
+a removal's operands or the command word (its body is parsed and judged); a removal with a literal operand below a critical directory
+(`rm -rf /Users/tester/src/old`); `rm` of a narrow glob (`~/*.log`); a `find . -name x -delete` (a name or type test) from an
+unknown directory; `git clean -f` with no path in the unknown directory; a link made after the check; a program that deletes through
+its own code (`make clean`, `git filter-branch`, `docker`/`aws`/`gh` actions on remote things; their arguments are not read for
+remover words when the program only carries text); and anything the shell assembles from a variable the line never sets. Hostile
+commands can reach the shell in ways this parser misreads; see V 4.
 
 ***3.*** **Window closed** (missing, expired, revoked, or any check above fails): nothing at all. The responder does not contact
 the daemon, writes no log line, and the hook prints nothing.
@@ -166,8 +220,12 @@ inside a window the operator opened.
 injected into one agent can have its next Bash card answered. The window is the bound: pick the shortest duration that covers the
 work, and `sudo-ask --revoke` ends it.
 
-***4.*** **The denylist is a guard rail, not a sandbox.** It reads the text of the request, with shell quoting and `//`, `.` and `..` in paths removed. A variable, a glob (`v?sudo`), a link to a denied program, a script
-the agent wrote first and ran later, or `python3 -c` that opens `/etc/sudoers` are not seen. The same limits the site helper
+***4.*** **The denylist and the critical-path rule are guard rails against careless commands, not a sandbox and not a security
+boundary** (adversary rounds 1 and 2 broke the earlier, tighter claims with forms such as `$'\x72m'`, `xargs -d`, `exec -a`, `sudo --user`,
+`fd -X`, a loop variable and `~/{*,.*}`; the answer was to fail closed and add the textual tripwire, not to out-parse the shell).
+It reads the text of the request, with shell quoting and `//`, `.` and `..` in paths removed. **A variable, a glob (`v?sudo`,
+`/etc/sudo*`), a link to a denied program, a script the agent wrote first and ran later, or `python3 -c` that opens `/etc/sudoers`
+are not seen** (the denylist half; round 2 LOW 4, kept as documented). The same limits the site helper
 documents for root commands apply. (The prompts replaced here belong to agents that run as the operator, not as root, so the
 worst case is the operator's own files, which a bypass-mode agent could already change.)
 

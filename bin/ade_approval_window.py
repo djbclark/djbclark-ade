@@ -330,9 +330,11 @@ class Stmt:
     """One simple command of a command line: its words with shell quoting removed."""
     words: List[str] = field(default_factory=list)
     subst: set = field(default_factory=set)            # indexes of words holding a command/process substitution
+    quoted: set = field(default_factory=set)           # indexes of words that were written with quotes or backslashes
     redirs: List[str] = field(default_factory=list)    # redirection targets (writes, as far as this module cares)
     heredocs: List[list] = field(default_factory=list)  # [delimiter, quoted, body]
     herestring: bool = False
+    herewords: List[str] = field(default_factory=list)  # the words of `<<< WORD`
     sep: str = ""                                      # what ended the statement before this one: ; && || | & newline ( )
 
 
@@ -463,6 +465,17 @@ def _read_word(text: str, i: int, nested: List[str]) -> Tuple[str, int, bool, bo
                 else:
                     out.append(d)
                     i += 1
+        elif c == "$" and text[i + 1:i + 2] == "'":                  # $'...': ANSI-C quoting, read as the shell reads it
+            j = i + 2
+            while j < n and text[j] != "'":
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                raise Unparsable("unbalanced quote")
+            out.append(_ansi_c(text[i + 2:j]))
+            quoted = True
+            i = j + 1
+        elif c == "$" and text[i + 1:i + 2] == '"':                  # $"...": locale quoting, a plain double quote here
+            i += 1
         elif c == "$" and text[i + 1:i + 2] == "(":
             j = _match_paren(text, i + 2)
             nested.append(text[i + 2:j])
@@ -477,6 +490,46 @@ def _read_word(text: str, i: int, nested: List[str]) -> Tuple[str, int, bool, bo
             out.append(c)
             i += 1
     return "".join(out), i, sub, quoted
+
+
+_ANSI_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b", "E": "\x1b",
+                "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    """The text of a `$'...'` word: backslash escapes decoded (`$'\\x72m'` is `rm`)."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        e = body[i + 1]
+        if e in _ANSI_SIMPLE:
+            out.append(_ANSI_SIMPLE[e])
+            i += 2
+            continue
+        m = None
+        if e == "x":
+            m = re.match(r"[0-9A-Fa-f]{1,2}", body[i + 2:])
+            value, width = (int(m.group(), 16), 2 + len(m.group())) if m else (0, 0)
+        elif e in "01234567":
+            m = re.match(r"[0-7]{1,3}", body[i + 1:])
+            value, width = (int(m.group(), 8) & 0xFF, 1 + len(m.group())) if m else (0, 0)
+        elif e in "uU":
+            m = re.match(r"[0-9A-Fa-f]{1,8}", body[i + 2:])
+            value, width = (int(m.group(), 16), 2 + len(m.group())) if m else (0, 0)
+        if m:
+            try:
+                out.append(chr(value))
+            except (ValueError, OverflowError):
+                out.append("�")
+            i += width
+        else:
+            out.append("\\" + e)
+            i += 2
+    return "".join(out)
 
 
 def _substitutions_in(text: str) -> List[str]:
@@ -581,7 +634,8 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
                 while i < n and text[i] in _BLANK:
                     i += 1
                 if i < n and text[i] not in _OPCHARS:
-                    _, i, _, _ = _read_word(text, i, nested)
+                    hw, i, _, _ = _read_word(text, i, nested)
+                    cur.herewords.append(hw)
                 cur.herestring = True
             elif text.startswith("<<", i):
                 i += 2
@@ -615,6 +669,8 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
             if word.isdigit() and not quoted and i < n and text[i] in "<>":
                 continue                      # a file descriptor prefix: 2>file
             cur.words.append(word)
+            if quoted:
+                cur.quoted.add(len(cur.words) - 1)
             if sub:
                 cur.subst.add(len(cur.words) - 1)
     end("")
@@ -640,10 +696,28 @@ def _is_program(token: str, names: Iterable[str]) -> Optional[str]:
 
 
 # Wrappers a command can hide behind, and the flags of theirs that take a value (so `sudo -u root visudo` finds visudo).
-WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D", "-R"}, "env": {"-u", "-C"},
-            "nohup": set(), "time": set(), "nice": {"-n"}, "command": set(), "exec": set(), "caffeinate": {"-t", "-w"},
-            "arch": {"-arch"}, "stdbuf": {"-i", "-o", "-e"}, "timeout": {"-s", "-k"}, "xargs": {"-n", "-I", "-L", "-P", "-s", "-E"},
-            "sudo-ask": set(), "rtk": set(), "bgrun": set(), "bg": set()}
+WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D", "-R", "--user", "--group", "--host", "--prompt",
+                     "--chdir", "--role", "--type", "--other-user", "--close-from", "--command-timeout"},
+            "env": {"-u", "-C", "--unset", "--chdir"},
+            "nohup": set(), "time": set(), "nice": {"-n"}, "command": set(), "exec": {"-a"}, "caffeinate": {"-t", "-w"},
+            "arch": {"-arch"}, "stdbuf": {"-i", "-o", "-e"}, "timeout": {"-s", "-k"},
+            "xargs": {"-n", "-I", "-L", "-P", "-s", "-E", "-d", "-J", "-R", "-S", "-a"},
+            "sudo-ask": set(), "rtk": set(), "bgrun": set(), "bg": set(), "noglob": set(), "nocorrect": set(), "builtin": set(),
+            "coproc": set(), "-": set()}
+# Programs whose arguments are text or data, never a command line they run: a remover word there is prose, not a removal.
+NON_EXEC = frozenset("ls stat file cat head tail wc grep egrep fgrep rg readlink realpath du df basename dirname id whoami "
+                     "test [ [[ echo printf true false : pwd ps lsof shasum md5 cmp diff strings hexdump uname sw_vers which "
+                     "mdfind sleep git gh jq man type whereis help tldr paseo hermes-ping clip ref ref-append graft".split())
+REMOVER_NAMES = frozenset({"rm", "rmdir", "unlink", "srm", "shred", "trash", "trash-put", "rip"})
+# A remover word anywhere in a multi-word string (a shell body, a quoted command line): `rm`, `grm -rf`, `-delete`, `git clean`.
+REMOVER_TEXT = re.compile(r"(?<![\w.$~-])(?:g?rm|g?rmdir|g?unlink|g?srm|g?shred|trash(?:-put)?|rip)(?![\w./-])"
+                          r"|(?<![\w-])--?(?:delete|del)(?:-[a-z-]+)?(?![\w])|(?<![\w-])git\s+(?:-\S+\s+)*clean\b")
+DEFINITION = re.compile(r"(?:^|[\s;&|(){}])(?:alias\s|function\s+\S|[A-Za-z_][\w.:-]*\s*\(\s*\))")
+INTERPRETERS = re.compile(r"(?:python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node(?:js)?|osascript|php[0-9.]*|lua[0-9.]*|deno|bun)")
+INTERPRETER_BAD = re.compile(r"rmtree|unlink|remove|rmdir|rm_rf?|rm_f|rmSync|\brm\s*[-(]|do\s+shell\s+script|delete|trash", re.I)
+FIND_FILTERS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-type", "-newer",
+                          "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-user", "-group", "-perm", "-size", "-links",
+                          "-empty", "-lname", "-ilname", "-samefile", "-inum", "-newermt"})
 G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash"})
 KEYWORDS = frozenset({"{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "fi", "done", "esac", "case",
@@ -757,49 +831,90 @@ def _expand(arg: str, home: str) -> Optional[str]:
     return arg
 
 
+_GLOB = re.compile(r"[*?\[\]{}]")
+# A glob that is a name pattern with an extension (`*.log`, `?*-old.txt`): it does not reach "everything" in its directory.
+_NARROW_GLOB = re.compile(r"[*?]+[A-Za-z0-9_-]*\.[A-Za-z0-9]{2,}")
+_VAR = re.compile(r"\$(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*|[0-9@*]))")
+UNKNOWN_NAMES = frozenset({"PWD", "OLDPWD", "DIRSTACK"})      # set by the shell itself: never "empty"
+
+
+def _unknown_variable(arg: str, assigned: "set[str]") -> Optional[str]:
+    """The variable of `arg` whose value this module cannot know: a name the command line sets anywhere (assignment, `for`,
+    `read`, `export`...), a positional (`$1`, `$@`, `$*`), `$PWD`, or a `${NAME<operator>...}` expansion. A name the line never
+    sets stays EMPTY (Claude Code's own rm warning is about exactly that, and the screenshot class is that), so this is None."""
+    for m in _VAR.finditer(arg):
+        if m.group(2) is not None:
+            name, rest = m.group(2), ""
+        else:
+            mm = re.match(r"([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])(.*)", m.group(1), re.S)
+            if not mm:
+                return "${%s}" % m.group(1)
+            name, rest = mm.groups()
+            if rest and not rest.startswith((":?", "?")):
+                return "${%s}" % m.group(1)
+        if name in assigned or name in UNKNOWN_NAMES or name.isdigit() or name in ("@", "*"):
+            return "$" + name
+    return None
+
+
+def _assigned_names(text: str) -> "set[str]":
+    """Every variable name the text sets anywhere: NAME=, NAME+=, NAME[i]=, `for NAME`, `select NAME`, `read NAME`, `mapfile`,
+    `getopts`, `printf -v NAME`, `declare/local/export NAME=`. Over-approximate on purpose (a `--opt=x` word counts)."""
+    names = set(re.findall(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=", text))
+    names.update(re.findall(r"\b(?:for|select)\s+\(?\(?\s*([A-Za-z_][A-Za-z0-9_]*)", text))
+    names.update(re.findall(r"\bprintf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*)", text))
+    for m in re.finditer(r"\b(?:read|mapfile|readarray|getopts)\b([^;&|\n)]*)", text):
+        names.update(w for w in re.findall(r"(?<![\w-])([A-Za-z_][A-Za-z0-9_]*)", m.group(1)))
+    return names
+
+
+def _crit_kind(cand: str, home_cf: str) -> Optional[str]:
+    """"tree" (everything below it is critical), "dir" (it, but not a file inside a narrow glob), or None."""
+    low = cand.casefold()
+    parts = [p for p in low.split("/") if p]
+    if any(low == t or low.startswith(t + "/") for t in CRITICAL_TREES):
+        return "tree"
+    if low in CRITICAL_EXACT or low == home_cf or low == home_cf + "/library" or low == home_cf + "/library/application support":
+        return "dir"
+    if len(parts) == 2 and parts[0] in ("users", "volumes"):          # a home directory or a volume root
+        return "dir"
+    if len(parts) in (3, 4) and parts[0] == "users" and parts[2] == "library" and (len(parts) == 3 or parts[3] == "application support"):
+        return "dir"                                                    # ~/Library and ~/Library/Application Support: ancestors of the protected paths
+    return None
+
+
 def _critical_abs(path: str, home: str) -> Optional[str]:
-    core = re.sub(r"(?:/(?:\*\*|\.\*|\*))+/*$", "", path)   # `D/*`, `D/.*` and `D/**` reach everything in D
-    core = core or "/"
-    cands = {posixpath.normpath(core)}
-    cands.add(os.path.realpath(core))        # /etc is /private/etc; a symlink cannot hide a target
+    """The critical path an absolute path names. A glob or brace in the first component under a critical directory (`~/*`,
+    `~/.*`, `~/{*,.*}`, `~/?*`, `~/[a-z]*`, `/Users/*`) reaches everything in it, so it is critical too; a glob that names an
+    extension (`/*.log`, `~/*.log`) does not (it is what the screenshot's `$S/*.log` becomes with S empty)."""
     home_cf = posixpath.normpath(home).casefold()
-    for cand in cands:
-        low = cand.casefold()
-        if low in CRITICAL_EXACT or low == home_cf:
-            return cand
-        if any(low == t or low.startswith(t + "/") for t in CRITICAL_TREES):
-            return cand
-        parts = [p for p in low.split("/") if p]
-        if len(parts) == 2 and parts[0] in ("users", "volumes"):      # a home directory or a volume root
+    parts = path.split("/")
+    gi = next((i for i, p in enumerate(parts) if i > 0 and _GLOB.search(p)), None)
+    if gi is not None:
+        narrow = _NARROW_GLOB.fullmatch(parts[gi]) is not None
+        prefix = "/".join(parts[:gi]) or "/"
+        for cand in (posixpath.normpath(prefix), os.path.realpath(prefix)):
+            kind = _crit_kind(cand, home_cf)
+            if kind == "tree" or (kind == "dir" and not narrow):
+                return cand
+        return None
+    core = path or "/"
+    for cand in (posixpath.normpath(core), os.path.realpath(core)):     # /etc is /private/etc; a symlink cannot hide a target
+        if _crit_kind(cand, home_cf):
             return cand
     return None
 
 
-def _judge_path(operand: str, cwd: Optional[str], home: str) -> Optional[str]:
-    """The critical path an operand names, with a relative operand judged against the directory a `cd` left us in."""
-    exp = _expand(operand, home)
-    if not exp:
-        return None
-    if not exp.startswith("/"):
-        if cwd is None:
-            return None
-        exp = posixpath.join(cwd, exp)
-    return _critical_abs(exp, home)
-
-
-def _cd_target(args: List[str], cwd: Optional[str], home: str) -> Optional[str]:
-    ops = [a for a in args if a == "-" or not a.startswith("-")]
-    if not ops:
-        return home
-    target = ops[0]
-    if target == "-" or (target.startswith("$") and not re.match(r"\$(?:\{HOME\}|HOME\b)", target)):
-        return None                          # `cd -` and `cd $UNKNOWN`: the directory is not known
-    exp = _expand(target, home)
-    if not exp:
-        return None
-    if exp.startswith("/"):
-        return posixpath.normpath(exp)
-    return posixpath.normpath(posixpath.join(cwd, exp)) if cwd else None
+def _broad_relative(exp: str, filtered: bool = False) -> bool:
+    """A relative removal target that reaches the whole of the (unknown) current directory or its parent: `.`, `..`, `../x`, a
+    glob or brace in the first component (`*`, `.*`, `*.*`, `?*`, `[a-z]*`, `{a,b}`), but not `*.log`."""
+    norm = posixpath.normpath(exp)
+    first = norm.split("/")[0]
+    if norm == ".":
+        return not filtered                  # `find . -name x -delete` has a test; a bare `rm -rf .` does not
+    if first == "..":
+        return True
+    return bool(_GLOB.search(first)) and _NARROW_GLOB.fullmatch(first) is None
 
 
 def _find_parts(args: List[str]) -> Tuple[List[str], bool, List[str]]:
@@ -823,9 +938,11 @@ def _find_parts(args: List[str]) -> Tuple[List[str], bool, List[str]]:
 
 
 class _Scan:
-    def __init__(self, home: str) -> None:
+    def __init__(self, home: str, assigned: Optional["set[str]"] = None) -> None:
         self.home = home
+        self.assigned = assigned or set()        # every name the whole request sets anywhere (`_assigned_names`)
         self.found = _Found()
+        self.cd_unknown = False                  # a `cd` to a variable or substitution came before: relative operands are unknown
 
     def note(self, kind: str, what: str) -> None:
         if getattr(self.found, kind) is None:
@@ -847,13 +964,65 @@ class _Scan:
             cwd = self.stmt(st, prev, cwd, depth)
             prev = st
 
-    def remove_operand(self, name: str, operand: str, idx: int, st: Stmt, cwd: Optional[str]) -> None:
+    # ---- paths
+
+    def judge(self, operand: str, cwd: Optional[str], filtered: bool = False) -> Optional[str]:
+        """The critical path a removal operand names. Held (a note, no path) when a variable the line sets, a positional or a
+        `${NAME:-x}` form is in it, or when the operand is relative and the directory it is relative to is unknown and the operand
+        reaches all of it (`.`, `..`, `../x`, `*`, `.*`, `?*`). `filtered`: a find with a name/type test (`find . -name x -delete`)."""
+        var = _unknown_variable(operand, self.assigned)
+        if var:
+            self.note("unp", "variable %s in a removal" % var)
+            return None
+        exp = _expand(operand, self.home)
+        if not exp:
+            return None
+        if not exp.startswith("/"):
+            if cwd is None:
+                if self.cd_unknown:
+                    self.note("unp", "removal after a cd to an unknown directory")
+                elif _broad_relative(exp, filtered):
+                    self.note("unp", "removal of %s relative to an unknown directory" % operand)
+                return None
+            exp = posixpath.join(cwd, exp)
+        return _critical_abs(exp, self.home)
+
+    def directory(self, target: str, cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """(directory, why not known). `cd -`, a variable, a substitution: not known (`variable`); a relative target while the
+        current directory is unknown: no directory, but nothing wrong either."""
+        stripped = re.sub(r"\$\{HOME\}|\$HOME\b", "", target)
+        if target == "-" or "$" in stripped or "`" in target or _unknown_variable(target, self.assigned):
+            return None, "variable"
+        exp = _expand(target, self.home)
+        if not exp:
+            return None, "variable"
+        if exp.startswith("/"):
+            return posixpath.normpath(exp), None
+        if cwd:
+            return posixpath.normpath(posixpath.join(cwd, exp)), None
+        return None, ("relative" if _broad_relative(exp) else None)
+
+    def cd(self, args: List[str], cwd: Optional[str]) -> Optional[str]:
+        ops = [a for a in args if a == "-" or not a.startswith("-")]
+        if not ops:
+            self.cd_unknown = False
+            return self.home
+        directory, why = self.directory(ops[0], cwd)
+        if why == "variable":
+            self.cd_unknown = True
+        elif directory is not None:
+            self.cd_unknown = False
+        return directory
+
+    def remove_operand(self, name: str, operand: str, idx: int, st: Stmt, cwd: Optional[str], filtered: bool = False) -> None:
         if idx in st.subst:
             self.note("unp", "substitution in a removal")
             return
-        hit = _judge_path(operand, cwd, self.home)
+        hit = self.judge(operand, cwd, filtered)
         if hit:
             self.note("crit", "%s %s" % (name, hit))
+
+    # ---- one simple command
 
     def stmt(self, st: Stmt, prev: Optional[Stmt], cwd: Optional[str], depth: int) -> Optional[str]:
         words, home = st.words, self.home
@@ -864,7 +1033,35 @@ class _Scan:
             self.text(env_split, cwd, depth + 1)
             return cwd
         if not chain:
+            self.remover_words(st, set())
             return cwd
+        for c in chain:                              # the command word must be a plain word the shell will not rewrite
+            w = words[c]
+            if c not in st.subst and w not in ("[", "[[") and (c in st.quoted or w.startswith("=") or re.search(r"[$?*\[{]", w)):
+                self.note("unp", "command word %r is not a plain word" % w[:40])
+        exempt: set = set()
+        new_cwd = self.dispatch(st, prev, cwd, depth, chain, exempt)
+        self.remover_words(st, exempt)
+        return new_cwd
+
+    def remover_words(self, st: Stmt, exempt: set) -> None:
+        """The textual tripwire (round 3): a remover word anywhere in a command that the parser did not itself judge as a removal
+        (`parallel rm`, `ssh h rm -rf x`, `xargs -d '\\n' rm`, `fd -X rm`, `flock f rm`, `script rm`, `alias ls='rm -rf'`) holds the request."""
+        for k, w in enumerate(st.words):
+            if k in exempt or not w:
+                continue
+            if re.search(r"\s", w):
+                hit = REMOVER_TEXT.search(w) is not None
+            else:
+                hit = (_name(w) in REMOVER_NAMES or re.fullmatch(r"--?(?:delete|del)(?:-[a-z-]+)?(?:=.*)?", w) is not None
+                       or ("=" in w and _name(w.split("=", 1)[1]) in REMOVER_NAMES))
+            if hit:
+                self.note("unp", "remover word %r outside a command the parser judged" % w[:40])
+                return
+
+    def dispatch(self, st: Stmt, prev: Optional[Stmt], cwd: Optional[str], depth: int, chain: List[int],
+                 exempt: set) -> Optional[str]:
+        words, home = st.words, self.home
         pi = chain[-1]
         prog, args = _name(words[pi]), words[pi + 1:]
         at = set(chain)
@@ -886,6 +1083,8 @@ class _Scan:
         if pi in st.subst:
             self.note("unp", "substitution as the command")
         idx0 = pi + 1                              # index in `words` of args[0]
+        if prog in NON_EXEC:
+            exempt.update(range(idx0, len(words)))
 
         def operands_of(arglist: List[str], first: int) -> List[Tuple[int, str]]:
             out, end_of_opts = [], False
@@ -897,6 +1096,7 @@ class _Scan:
             return out
 
         if prog in REMOVERS:
+            exempt.add(pi)
             if "--no-preserve-root" in args:
                 self.note("crit", "%s --no-preserve-root" % prog)
             for k, operand in operands_of(args, idx0):
@@ -904,11 +1104,17 @@ class _Scan:
             self.xargs_input(chain, words, st, prev, cwd)
         elif prog == "find":
             roots, delete, execs = _find_parts(args)
+            for j, w in enumerate(words):
+                if w == "-delete":
+                    exempt.add(j)
+                elif w in EXEC_FLAGS and j + 1 < len(words):
+                    exempt.add(j + 1)
             if delete or any(e in REMOVERS or e in SHELLS for e in execs):
                 if sub_in_args:
                     self.note("unp", "substitution in a find that removes")
+                filtered = any(a in FIND_FILTERS for a in args)
                 for root in roots:
-                    hit = _judge_path(root, cwd, home)
+                    hit = self.judge(root, cwd, filtered)
                     if hit:
                         self.note("crit", "find %s" % hit)
         elif prog in RECURSIVE_CHANGERS:
@@ -921,24 +1127,42 @@ class _Scan:
                     self.remove_operand(prog, operand, k, st, cwd)
         elif prog == "rsync":
             if any(a.startswith("--del") for a in args):
+                exempt.update(j for j, w in enumerate(words) if w.startswith("--del"))
                 ops = [(k, a) for k, a in operands_of(args, idx0)]
                 if ops:
                     self.remove_operand("rsync", ops[-1][1], ops[-1][0], st, cwd)
         elif prog == "git":
             self.git(args, idx0, st, cwd)
         elif prog in SHELLS:
-            self.shell(st, args, cwd, depth)
+            body_at = self.shell(st, args, cwd, depth)
+            if body_at is not None:
+                exempt.add(idx0 + body_at)           # recursed into: the words of the body are judged as commands
         elif prog == "eval":
             self.note("unp", "eval")
         elif prog in ("source", "."):
             target = args[0] if args else ""
-            if not target or target == "-" or target.startswith(("/dev/stdin", "/dev/fd")) or idx0 in st.subst:
+            if not target or target == "-" or target.startswith(("/dev/stdin", "/dev/fd", "/proc/self/fd")) or idx0 in st.subst:
                 self.note("unp", "source of stdin or a substitution")
         elif prog in ("cd", "pushd"):
-            return _cd_target(args, cwd, home)
+            return self.cd(args, cwd)
+        elif prog == "popd":
+            self.cd_unknown = True
+            return None
+        elif INTERPRETERS.fullmatch(prog):
+            self.interpreter(st, args)
         elif prog in ("crontab", "launchctl", "date"):
             pass
         return cwd
+
+    def interpreter(self, st: Stmt, args: List[str]) -> None:
+        """A python/perl/ruby/node/osascript one-liner (-c, -e, a here-document) that names a deletion."""
+        one_liner = bool(st.heredocs) or st.herestring or any(
+            a in ("-", "--eval", "--print") or re.fullmatch(r"-[A-Za-z]*[cerp][A-Za-z]*", a) for a in args)
+        if not one_liner:
+            return
+        text = " ".join(args) + " " + " ".join(h[2] for h in st.heredocs) + " " + " ".join(st.herewords)
+        if INTERPRETER_BAD.search(text):
+            self.note("unp", "interpreter one-liner that deletes")
 
     def xargs_input(self, chain: List[int], words: List[str], st: Stmt, prev: Optional[Stmt], cwd: Optional[str]) -> None:
         if not any(_name(words[c]) == "xargs" for c in chain[:-1]):
@@ -947,28 +1171,37 @@ class _Scan:
             pchain, _ = _chain(prev.words)
             if pchain:
                 pprog, pargs = _name(prev.words[pchain[-1]]), prev.words[pchain[-1] + 1:]
+                if pprog in ("echo", "printf", "find") and (prev.subst or any("$(" in a or "`" in a for a in pargs)):
+                    self.note("unp", "xargs removal of substitution input")
+                    return
                 if pprog in ("echo", "printf"):
                     for a in pargs:
-                        hit = _judge_path(a, cwd, self.home) if not a.startswith("-") else None
+                        hit = self.judge(a, cwd) if not a.startswith("-") else None
                         if hit:
                             self.note("crit", "xargs rm %s" % hit)
                     return
                 if pprog == "find":
+                    filtered = any(a in FIND_FILTERS for a in pargs)
                     for root in _find_parts(pargs)[0]:
-                        hit = _judge_path(root, cwd, self.home)
+                        hit = self.judge(root, cwd, filtered)
                         if hit:
                             self.note("crit", "xargs rm %s" % hit)
                     return
         self.note("unp", "xargs removal of unknown input")
 
     def git(self, args: List[str], first: int, st: Stmt, cwd: Optional[str]) -> None:
-        gcwd, k, sub = cwd, 0, None
+        gcwd, k, sub, bad = cwd, 0, None, None
         while k < len(args):
             a = args[k]
-            if a == "-C" and k + 1 < len(args):
-                nxt = _cd_target([args[k + 1]], gcwd, self.home)
-                gcwd, k = nxt, k + 2
-            elif a in ("-c", "--git-dir", "--work-tree", "--namespace") and k + 1 < len(args):
+            if a in ("-C", "--work-tree") and k + 1 < len(args):
+                gcwd, why = self.directory(args[k + 1], gcwd)
+                bad = bad or why
+                k += 2
+            elif a.startswith("--work-tree="):
+                gcwd, why = self.directory(a.split("=", 1)[1], gcwd)
+                bad = bad or why
+                k += 1
+            elif a in ("-c", "--git-dir", "--namespace") and k + 1 < len(args):
                 k += 2
             elif a.startswith("-"):
                 k += 1
@@ -980,24 +1213,29 @@ class _Scan:
         rest = args[k:]
         if not any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", x) or x == "--force" for x in rest):
             return
+        if bad == "variable" or self.cd_unknown:
+            self.note("unp", "git clean in a directory that cannot be read")
+        elif bad == "relative":
+            self.note("unp", "git clean relative to an unknown directory")
         if gcwd is not None:
             hit = _critical_abs(gcwd, self.home)
             if hit:
                 self.note("crit", "git clean %s" % hit)
         for x in rest:
             if not x.startswith("-"):
-                hit = _judge_path(x, gcwd, self.home)
+                hit = self.judge(x, gcwd)
                 if hit:
                     self.note("crit", "git clean %s" % hit)
 
-    def shell(self, st: Stmt, args: List[str], cwd: Optional[str], depth: int) -> None:
+    def shell(self, st: Stmt, args: List[str], cwd: Optional[str], depth: int) -> Optional[int]:
+        """Judge a shell's command line. Returns the index (in args) of a `-c` body that was recursed into."""
         if st.heredocs or st.herestring:
             self.note("unp", "here-document fed to a shell")
-        k, body_at, script = 0, None, False
+        k, body_at, script, script_at = 0, None, False, 0
         while k < len(args):
             a = args[k]
             if a == "--":
-                script = k + 1 < len(args)
+                script, script_at = k + 1 < len(args), k + 1
                 break
             if a in SHELL_VALUE_FLAGS:
                 k += 2
@@ -1006,13 +1244,19 @@ class _Scan:
                 body_at = k + 1
                 break
             if not a.startswith("-") and not a.startswith("+"):
-                script = True
+                script, script_at = True, k
                 break
             k += 1
+        if script and script_at < len(args):
+            target = args[script_at]
+            if target == "-" or target.startswith(("/dev/stdin", "/dev/fd", "/proc/self/fd")):
+                self.note("unp", "shell script read from stdin")
+            elif any(j >= 0 and j - (len(st.words) - len(args)) == script_at for j in st.subst):
+                self.note("unp", "shell script named by a substitution")
         if body_at is not None:
             if body_at >= len(args):
                 self.note("unp", "shell -c without a command")
-                return
+                return None
             body = args[body_at]
             params = args[body_at + 1:]
             if params:                         # `sh -c 'rm -rf "$1"' _ /`: positional parameters name the operands
@@ -1024,8 +1268,10 @@ class _Scan:
                     return params[pos] if pos < len(params) else ""
                 body = re.sub(r"\$(?:\{([0-9]+|@|\*)\}|([0-9@*]))", fill, body)
             self.text(body, cwd, depth + 1)
-        elif not script:
+            return body_at
+        if not script:
             self.note("unp", "shell reads its commands from stdin")
+        return None
 
     def denylist(self, words: List[str], at: set) -> None:
         for i, tok in enumerate(words):
@@ -1073,9 +1319,15 @@ class _Scan:
 
 
 def _analyze(commands: List[str], paths: List[str], file_tool: bool, home: str, cwd: Optional[str]) -> _Found:
-    scan = _Scan(home)
+    assigned: set = set()
+    for text in commands:
+        assigned |= _assigned_names(text)
+    scan = _Scan(home, assigned)
     for text in commands:
         _tripwire(text, scan.found)
+        flat = re.sub(r"[\\'\"]", "", text)
+        if DEFINITION.search(flat) and REMOVER_TEXT.search(flat):
+            scan.note("unp", "alias or function definition with a removal")
         scan.text(text, cwd, 0)
     for path in paths:
         _tripwire(path, scan.found)
