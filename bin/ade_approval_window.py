@@ -736,6 +736,7 @@ FIND_NAME_TESTS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename",
 FIND_ALWAYS_NARROW = frozenset({"-empty", "-samefile", "-inum"})
 FIND_OPERATORS = frozenset({"-o", "-or", "!", "-not", ","})
 FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+FIND_PRINTS = frozenset({"-print", "-print0", "-printf", "-fprint", "-fprint0", "-fprintf", "-ls", "-fls"})
 # Runners that start an interpreter named later on their command line (`uv run python -c ...`, `npx node -e ...`).
 RUNNERS = frozenset({"uv", "uvx", "pipx", "poetry", "npx", "bunx", "pnpm", "npm", "pdm", "rye", "hatch"})
 G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"mv", "find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
@@ -973,14 +974,15 @@ def _broad_relative(exp: str, filtered: bool = False) -> bool:
     return bool(_GLOB.search(first)) and _NARROW_GLOB.fullmatch(first) is None
 
 
-def _find_narrow(args: List[str]) -> bool:
+def _find_narrow(args: List[str], feeds_xargs: bool = False) -> bool:
     """A find that cannot reach everything below its start path: a `-name`/`-iname`/`-path` test whose pattern keeps at least two
     literal characters (one of them a letter or digit): `-name node_modules`, `-name '*.pyc'`, `-name 'core.*'`; or `-empty`,
     `-samefile`, `-inum`. `-type`, `-mtime`, `-size`, `-user`, `-newer`, `-perm` and `-name '*'` do not narrow it, and nothing does
     when the expression is negated or has an `-o`."""
     if any(a in FIND_OPERATORS for a in args):
         return False
-    args = args[:next((k for k, a in enumerate(args) if a in FIND_ACTIONS), len(args))]     # a test after the action filters nothing
+    actions = FIND_ACTIONS | FIND_PRINTS if feeds_xargs else FIND_ACTIONS      # a printed path is an xargs argument
+    args = args[:next((k for k, a in enumerate(args) if a in actions), len(args))]     # a test after the action filters nothing
     for k, a in enumerate(args):
         if a in FIND_ALWAYS_NARROW:
             return True
@@ -1027,6 +1029,7 @@ class _Scan:
         self.alts: List[str] = []                # other directories the line may be in (a cd chain that was cut short)
         self.chain: Optional[Tuple[Optional[str], Tuple[str, ...]]] = None   # directory (and alternatives) before a `cd X && ...` chain
         self.loops = 0                           # `for`/`while`/`until`/`select` bodies open around the statement
+        self.loop_leave = False                  # a `cd X || break` (or `continue`) made a directory certain inside a loop
         self.has_function = False                # the request defines a function or alias (`return` can leave, tracking is off)
 
     def note(self, kind: str, what: str) -> None:
@@ -1044,8 +1047,9 @@ class _Scan:
             return
         saved = (dict(self.values), self.cd_unknown, list(self.alts), self.chain, self.loops) if depth else None
         self.chain = None if depth else self.chain                # a body is a subshell: nothing it sets leaks out
+        body_cwd = None if any(self.is_cd(st) for st in stmts) else cwd      # a body runs after the line's cd, in a directory not known here
         for body in nested:
-            self.text(body, cwd, depth + 1)
+            self.text(body, body_cwd, depth + 1)
         stack: List[Tuple[Optional[str], bool, Dict[str, List[str]], List[str], Any]] = []
         pending: Optional[Tuple[Optional[str], bool, List[str], Optional[str], bool]] = None
         prev: Optional[Stmt] = None
@@ -1075,9 +1079,17 @@ class _Scan:
                 cwd = new_cwd
                 self.track(st, nxt, compound)
             compound, loops = self.compound_after(st, compound, loops)
+            if self.loop_leave and st.words and st.words[0] == "done":
+                cwd, self.cd_unknown, self.loop_leave = None, True, False       # the loop ended when the cd failed: the directory is unknown
+                self.alts, self.chain = [], None
             prev = st
         if saved:
             self.values, self.cd_unknown, self.alts, self.chain, self.loops = saved
+
+    @staticmethod
+    def is_cd(st: Stmt) -> bool:
+        chain, _ = _chain(st.words)
+        return bool(chain) and _name(st.words[chain[-1]]) in ("cd", "pushd", "popd")
 
     @staticmethod
     def compound_after(st: Stmt, compound: int, loops: int) -> Tuple[int, int]:
@@ -1085,10 +1097,16 @@ class _Scan:
         w = st.words
         if not w:
             return compound, loops
-        head = w[1] if w[0] in ("then", "do", "else", "elif") and len(w) > 1 else w[0]
-        if head in COMPOUND_OPENERS:
-            return compound + 1, loops + (1 if head in ("for", "while", "until", "select") else 0)
-        if w[0] in ("fi", "done", "esac"):
+        k, braces = 0, 0
+        while k < len(w) and w[k] in ("{", "!", "time", "then", "do", "else", "elif"):
+            braces += w[k] == "{"                         # `cond && {` newline `D=...` newline `}`: the group is conditional too
+            k += 1
+        head = w[k] if k < len(w) else ""
+        extra = 1 if head in COMPOUND_OPENERS else 0
+        loop_extra = 1 if head in ("for", "while", "until", "select") else 0
+        if braces or extra:
+            return compound + braces + extra, loops + loop_extra
+        if w[0] in ("fi", "done", "esac", "}"):
             return max(0, compound - 1), max(0, loops - (1 if w[0] == "done" else 0))
         return compound, loops
 
@@ -1104,6 +1122,15 @@ class _Scan:
         if name == "return":
             return self.has_function
         return name in ("break", "continue") and self.loops > 0
+
+    def join_chain(self, old: Optional[str], old_alts: List[str]) -> None:
+        """A cd runs: start a chain at the directory it leaves, or (inside a live chain) add that directory to the chain's alternatives."""
+        if self.chain is None:
+            self.chain = (old, tuple(old_alts))
+        elif old is None or self.chain[0] is None:
+            self.chain = (None, ())
+        else:
+            self.chain = (self.chain[0], tuple(dict.fromkeys(self.chain[1] + (old,))))
 
     def break_chain(self, cwd: Optional[str]) -> Optional[str]:
         """A `cd X && A` chain ended at `;`, a newline, `||` or `&`: if the cd failed the rest runs where it was before, so the
@@ -1138,8 +1165,7 @@ class _Scan:
         are known) and relative removals that reach everything are held."""
         old, old_unknown, old_alts, new, new_unknown = pending
         if st.sep == "&&":
-            if self.chain is None:
-                self.chain = (old, tuple(old_alts))
+            self.join_chain(old, old_alts)
             self.alts = []
             self.cd_unknown = new_unknown
             return new
@@ -1149,10 +1175,10 @@ class _Scan:
             return old
         self.cd_unknown = new_unknown
         if st.sep == "||" and self.leaves(st):
+            self.loop_leave = self.loop_leave or (self.loops > 0 and _name(st.words[_chain(st.words)[0][-1]]) in ("break", "continue"))
             self.chain, self.alts = None, []
             return new
-        if self.chain is None:
-            self.chain = (old, tuple(old_alts))
+        self.join_chain(old, old_alts)
         return self.break_chain(new)
 
     # ---- variables with a known value
@@ -1487,7 +1513,7 @@ class _Scan:
                             self.note("crit", "xargs rm %s" % hit)
                     return
                 if pprog == "find":
-                    filtered = _find_narrow(pargs)
+                    filtered = _find_narrow(pargs, True)
                     for root in _find_parts(pargs)[0]:
                         hit = self.judge(root, cwd, filtered)
                         if hit:
@@ -1523,8 +1549,8 @@ class _Scan:
             self.note("unp", "git clean in a directory that cannot be read")
         elif bad == "relative":
             self.note("unp", "git clean relative to an unknown directory")
-        if gcwd is not None:
-            hit = _critical_abs(gcwd, self.home)
+        for where in [gcwd] + (self.alts if gcwd is not None and gcwd == cwd else []):
+            hit = _critical_abs(where, self.home) if where is not None else None
             if hit:
                 self.note("crit", "git clean %s" % hit)
         for x in rest:

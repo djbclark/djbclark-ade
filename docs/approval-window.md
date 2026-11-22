@@ -125,7 +125,8 @@ while the screenshot's `rm -f $S/all.done $S/*.log` models as `/all.done` and `/
 (`NAME=`, `export/declare/local/readonly NAME=`, `for NAME in`, `select`, `read NAME`, `mapfile`, `printf -v`, `${NAME:=x}`, in any
 nested `-c` body, before or after the use) is **tracked** when it is set exactly once, by a plain assignment at the top of a command
 list (not after `&&`, `||` or `then`, also when a line break only continues the `&&`, `||` or `|`; not inside an `if`, `while`, `until`,
-`for`, `select` or `case` body, also when `then` and `do` stand on lines of their own; not in a pipeline or before `&`; not when
+`for`, `select` or `case` body or in a `{ ... }` group (`[ -n "$CI" ] && {` newline `D=...` newline `}`), also when `then`, `do`
+and `{` stand on lines of their own; not in a pipeline or before `&`; not when
 the request defines a function or alias; and not used after the `( ... )` group it was set in), to one of
 three things: a **literal** (no whitespace, no `$(`, not starting with `-`; `~`, `$HOME` and other tracked variables allowed), a
 **`$(mktemp ...)`** (alone in the substitution: a fresh temp path, safe to remove, modelled as `/private/tmp/ade-fresh-mktemp`), or the
@@ -163,8 +164,11 @@ statements after it, or when `||` is followed by `exit` (round 5: `return` leave
 anyway, and `break` and `continue` only inside a loop; at the top level bash prints an error and goes on). A line break after `&&`,
 `||` or `|` does not end the join (`cd /tmp/x &&` newline `rm -rf *` is judged in `/tmp/x`). At the first `;`, newline, `||` or `&`
 after the chain (`cd /tmp/x && ls; rm -rf *`) the cd may have failed, so the directory is **unknown**; when the request's own
-directory is known, the removal is judged against **both** directories (`cd /tmp/x && ls; rm -rf *` is allowed in `~/src/x` and
-held in `~`). After `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
+directory is known, the removal is judged against **every** directory the line may be in: the one the chain started from and each
+one a later `cd` in the chain left (`cd ~ && cd build; rm -rf *` is held in `~/src/x` because the second cd may fail; `cd /tmp/x && ls;
+rm -rf *` is allowed in `~/src/x` and held in `~`). `git clean` uses the same list. A `cd X || break` or `|| continue` makes `X`
+certain only inside its loop: at the `done` the directory is unknown. A `$( )` or backtick body is scanned before the statements
+run, so once the line holds any `cd`, `pushd` or `popd` its bodies are judged in an unknown directory. After `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
 group (and a `sh -c` or `$(...)` body) gives the outer directory and the outer variables back when it ends. So `cd ~ && rm -rf *` and
 `cd / && rm -rf ./*` are judged against `~` and `/`, `cd build && rm -rf *` against `build`, and `cd build; rm -rf *`,
 `cd build || true; rm -rf *`, `cd /tmp/x; rm -rf *` and `(cd /tmp/x); rm -rf *` (with no outer directory) are held. A Paseo Claude
@@ -176,7 +180,8 @@ has no glob character at all (`-name node_modules`) or at least two literal char
 `-name 'core.*'`), or `-empty`. Round 5: only the tests **before the first action** (`-delete`, `-exec`, `-execdir`, `-ok`,
 `-okdir`) count, because find evaluates left to right and a test after the action filters nothing (`find . -delete -name '*.pyc'` is
 held). `-type`, `-mtime`, `-size`, `-user`, `-newer`, `-perm`, `-name '*'` and `-name '*.*'` do not narrow it, and neither does an
-expression with `!`, `-not`, `-o` or `,`. A `cd` to a substitution or a variable (`cd "$(echo ~)"`, `cd $X`, `cd -`,
+expression with `!`, `-not`, `-o` or `,`. When the find feeds `xargs rm`, a `-print`, `-print0`, `-printf`, `-ls` or the like counts as an
+action too, since it hands every path found so far to xargs (`find . -print0 -name x | xargs -0 rm` is held). A `cd` to a substitution or a variable (`cd "$(echo ~)"`, `cd $X`, `cd -`,
 `popd`) followed by a removal with a relative operand, or by `git clean -f`, is held; a `cd` to a tracked variable (d1) is followed.
 `git -C DIR` and `git --work-tree DIR` follow the same rule; a `git -C "$(...)"` or `-C $VAR` is unreadable (held), and an `xargs` fed
 by a substitution counts as unknown input.

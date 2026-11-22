@@ -1723,3 +1723,129 @@ def test_values_come_back_after_a_child_shell_body():
 ])
 def test_a_request_that_defines_a_function_or_alias_tracks_no_values(command):
     assert is_held(command), (command, held(command).rule)
+
+
+# ---------------------------------------------------------------- adversary round 5 (PR 939), fixed in round 6
+
+SRC_X = HOME + "/src/x"
+
+
+def held_in_all_three(command):
+    return is_held(command) and not allowed_in(command, HOME) and not allowed_in(command, SRC_X)
+
+
+# MED-1: a brace group joined by `&&` or `||` and written over several lines is conditional
+
+@pytest.mark.parametrize("command", [
+    '[ -d /tmp/x ] && {\nD=/tmp/x\n}\nrm -rf "$D"/*',
+    '[ -n "$CI" ] && {\n  OUT=/tmp/ci-out\n  mkdir -p "$OUT"\n}\nrm -rf "$OUT"/*',
+    '[ -n "$CI" ] || {\nD=/tmp/x\n}\nrm -rf $D/*',
+    'command -v foo >/dev/null || {\n  D=/tmp/x\n}\nrm -rf "$D"/',
+    '{ if [ -n "$CI" ]; then\nD=/tmp/x\nfi\n}\nrm -rf "$D"/*',
+    '[ -n "$CI" ] && { D=/tmp/x; }; rm -rf "$D"/*',
+    '{ { [ -n "$CI" ] && {\nD=/tmp/x\n}\n}\n}\nrm -rf "$D"/*',
+])
+def test_an_assignment_in_a_brace_group_is_unknown(command):
+    assert held_in_all_three(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    '[ -n "$CI" ] && {\n  echo hi\n}\nD=/tmp/x\nrm -rf "$D"/*', '{\n  echo hi\n}\nS=$(mktemp -d)\nrm -rf "$S"',
+    '{ if true; then\n  echo\nfi\n}\nD=/tmp/x\nrm -rf "$D"',
+])
+def test_an_assignment_after_the_brace_group_ended_is_tracked_again(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+# LOW-1: every directory a live cd chain leaves is an alternative
+
+@pytest.mark.parametrize("command", [
+    "cd ~ && cd build; rm -rf *", "cd ~ && ls && cd build; rm -rf *", "cd ~ && cd build && make; rm -rf *", "cd ~ && cd build\nrm -rf *",
+    "cd ~ && cd build || true; rm -rf *", "cd / && cd tmp/x; rm -rf *", "cd ~/Library && cd Caches/foo; rm -rf *",
+])
+def test_the_directory_a_second_cd_leaves_is_an_alternative(command):
+    assert not allowed_in(command, SRC_X), command
+    assert is_held(command), command
+
+
+def test_a_two_step_cd_chain_that_stays_joined_is_judged_in_the_last_directory():
+    assert allowed_in("cd /tmp/a && cd b && rm -rf *", SRC_X)
+    assert allowed_in("cd /tmp/a && cd /tmp/b && ls && rm -rf *", HOME)
+
+
+# LOW-2: the certainty of `cd X || break` ends with the loop
+
+@pytest.mark.parametrize("command", [
+    'for d in /tmp/a; do cd "$d" || break; done; rm -rf *', 'for d in /tmp/a; do cd /tmp/a || continue; done; rm -rf *',
+    "while true; do cd /tmp/a || break; done\nrm -rf *",
+])
+def test_a_break_certainty_does_not_outlive_the_loop(command):
+    assert is_held(command) and not allowed_in(command, HOME), command
+
+
+# LOW-3: print before the name test feeds every path to xargs
+
+@pytest.mark.parametrize("command", [
+    "find . -print0 -name x | xargs -0 rm", "find . -print -name '*.pyc' | xargs rm", "find . -ls -name x | xargs rm",
+    "find . -printf '%p\\n' -name x | xargs rm",
+])
+def test_a_print_before_the_name_test_gives_xargs_every_path(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_a_print_after_the_name_test_still_narrows():
+    assert held("find . -name '*.pyc' -print0 | xargs -0 rm").allow
+
+
+# LOW-4: git clean through the alternatives
+
+def test_git_clean_is_judged_against_every_possible_directory():
+    assert not allowed_in("cd /tmp/x && ls; git clean -fdx", HOME)
+    assert allowed_in("cd /tmp/x && ls; git clean -fdx", SRC_X)
+    assert not allowed_in("git clean -fdx", HOME)
+
+
+# LOW-5: a body is not judged in the directory the line starts in once a cd is on the line
+
+@pytest.mark.parametrize("command", [
+    "cd ~ && x=$(find . -delete)", 'cd ~ && echo "$(rm -rf *)"', "cd ~; echo `rm -rf *`",
+])
+def test_a_substitution_body_after_a_cd_has_an_unknown_directory(command):
+    assert not allowed_in(command, SRC_X), command
+
+
+def test_a_substitution_body_without_a_cd_keeps_the_request_directory():
+    assert allowed_in('echo "$(rm -rf *)"', SRC_X)
+    assert allowed_in('cd /tmp/x && git commit -m "$(cat <<EOF\nmsg\nEOF\n)"', SRC_X)
+
+
+# LOW-6: a `)` gives the alternatives back
+
+def test_a_group_end_restores_the_alternatives():
+    assert not allowed_in("cd /tmp/x && ls; (cd /tmp/y && ls); rm -rf *", HOME)
+    assert not allowed_in("cd /tmp/x && ls\n(cd /tmp/y && ls)\nrm -rf *", HOME)
+    assert allowed_in("cd /tmp/x && ls; (cd /tmp/y && ls); rm -rf *", SRC_X)
+
+
+# round 6: survivors of the first mutation pass, killed
+
+def test_a_group_around_an_if_stays_conditional_after_the_inner_fi():
+    assert held_in_all_three('{ if [ -n "$CI" ]; then\n  echo\nfi\nD=/tmp/x\n}\nrm -rf "$D"/*')
+
+
+def test_exit_in_a_loop_keeps_the_certain_directory_after_the_loop():
+    assert allowed_in("for d in a; do cd /tmp/x || exit; done; rm -rf *", HOME)
+
+
+@pytest.mark.parametrize("command", ['pushd ~ && echo "$(rm -rf *)"', 'popd; echo "$(rm -rf *)"'])
+def test_a_body_after_pushd_or_popd_has_an_unknown_directory(command):
+    assert not allowed_in(command, SRC_X), command
+
+
+def test_a_print_before_the_name_test_without_xargs_still_narrows_the_delete():
+    assert held("find . -print -name x -delete").allow
+
+
+def test_git_clean_with_its_own_directory_ignores_the_alternatives():
+    assert allowed_in("cd /tmp/x && ls; git -C /tmp/y clean -fdx", HOME)
+    assert not allowed_in("cd /tmp/x && ls; git clean -fdx", HOME)
