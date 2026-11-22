@@ -797,14 +797,24 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         fd = os.open(evidence_dir / "stream.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         evidence = os.fdopen(fd, "wb")
     err = tempfile.TemporaryFile()
-    # From before the Popen until the main loop owns the run, a signal is only RECORDED (a handler that raised could leave
-    # claude, which runs in a session of its own, with nobody to stop it); the main loop turns it into Interrupted.
+    # For the whole run (from before the Popen to after the last kill) a signal is only RECORDED: a handler that raised
+    # could leave claude, which runs in a session of its own, with nobody to stop it, skip the final kill, or break
+    # Condition internals (two quick signals: "release unlocked lock"). Ordinary code turns a recorded signal into
+    # Interrupted (check_signal, at the top of every loop turn), and one that arrives after that is re-delivered once the
+    # caller's own handler is back and claude is dead.
     pending: list[int] = []
     old = {s: signal.signal(s, lambda signum, _frame: pending.append(signum)) for s in SIGNALS}
+    seen = 0           # recorded signals already turned into Interrupted
 
     def restore_signals() -> None:
         for s, h in old.items():
             signal.signal(s, h)
+
+    def check_signal() -> None:
+        nonlocal seen
+        if len(pending) > seen:
+            first, seen = pending[seen], len(pending)
+            raise Interrupted(f"signal {first}")
 
     try:
         proc = subprocess.Popen(argv, cwd=worktree, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -827,7 +837,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             lines.put(raw)
         lines.put(None)
 
-    try:    # a signal in here (main()'s handler raises Interrupted) must not leave claude running with nobody watching
+    try:    # a failure in here (the pgid record, the reader thread) must not leave claude running with nobody watching
         if evidence_dir is not None:
             try:
                 update_launch(evidence_dir, child_pgid=proc.pid, child_started=proc_start(proc.pid))
@@ -983,6 +993,7 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             dec = read_json(ctl.dir / "decision.json")
             if dec and dec.get("decision") in ("resume", "abort"):
                 break
+            check_signal()
             if proc.poll() is not None:
                 return None
             if time.monotonic() - since >= ctl.pause_max:
@@ -1004,11 +1015,8 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
         return extend if math.isfinite(extend) and extend > 0 else 0.0
 
     try:
-        for s in SIGNALS:
-            signal.signal(s, _on_signal)
-        if pending:
-            raise Interrupted(f"signal {pending[0]}")      # one came while claude was starting: the finally stops claude
         while True:
+            check_signal()                  # one that came while claude was starting is caught here: the finally stops claude
             now = time.monotonic()
             overdue = now >= deadline
             if overdue and ctl is not None and ctl.on_timeout:
@@ -1077,16 +1085,17 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
                 break
             if raw is None or handle(raw):
                 break
+        check_signal()
     except Interrupted as e:
         # A signal (SIGTERM/SIGHUP/SIGINT to the launcher) ends the run without output: exit 3, never the signal's
         # 128+N, so a caller's exit-code contract stays the documented one (E8 review, 2026-11-07). A tripwire
         # that fired first keeps its 77.
         run.exit, run.reason = (EXIT_TRIP if run.exit == EXIT_TRIP else EXIT_NO_OUTPUT), f"interrupted ({e})"
     finally:
-        for s in SIGNALS:                      # a second signal must not cut the kill short
-            signal.signal(s, signal.SIG_IGN)
-        kill_all(proc, tracked)
-        restore_signals()
+        try:
+            kill_all(proc, tracked)
+        finally:
+            restore_signals()
         run.returncode = proc.returncode
         try:
             err.seek(0)
@@ -1099,6 +1108,8 @@ def run_claude(argv: list[str], worktree: str, mode: str, timeout: float, path_t
             write_private(evidence_dir / "stderr.txt", err.read().decode("utf-8", "replace"))
         err.close()
         run.raw = "".join(raw_parts)
+    for late in pending[seen:]:         # a signal during the final kill: now that claude is dead, hand it to the caller
+        signal.raise_signal(late)
     if run.reason:
         return run
     if run.init is None:

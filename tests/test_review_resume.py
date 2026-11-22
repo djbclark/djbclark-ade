@@ -601,6 +601,32 @@ def test_a_pause_found_with_an_event_queued_is_undone_and_retried(world, tmp_pat
     assert sent[:3] == [int(signal.SIGSTOP), int(signal.SIGCONT), int(signal.SIGSTOP)], sent   # stop, undo, stop again for real
 
 
+def test_a_signal_during_a_pause_ends_the_run_with_exit_3_and_kills_claude(world, tmp_path, monkeypatch, outer_signals):
+    import threading
+    mod = load_launcher()
+    d = tmp_path / "ev"
+    d.mkdir()
+    monkeypatch.setattr(mod, "notify_operator", lambda msg: None)
+    mod.update_launch(d, schema=1, state="running", pid=os.getpid(), pid_started=mod.proc_start(os.getpid()))
+    (d / "pause-request.json").write_text(json.dumps({"reason": "test"}))
+    argv = stub_claude(tmp_path, world.wt, [], tail=60)
+
+    def stop_it():
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not (d / "pause.json").exists():
+            time.sleep(0.05)
+        os.kill(os.getpid(), signal.SIGTERM)             # nobody answers the pause: the operator stops the launcher
+
+    t = threading.Thread(target=stop_it)
+    t0 = time.monotonic()
+    t.start()
+    run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 60.0, evidence_dir=d / "evid", ctl=mod.PauseCtl(d, False, 60))
+    t.join()
+    mod.update_launch(d, state="finished")               # lets the pause watchdog it started exit
+    assert run.exit == 3 and "interrupted (signal 15)" in run.reason, (run.exit, run.reason)
+    assert time.monotonic() - t0 < 20, "the pause wait did not notice the signal"
+
+
 def stopped_run(tmp_path: Path, state: str, mod, alive: bool) -> Path:
     d = Path(tempfile.mkdtemp(prefix=f"run-{state}-{alive}-", dir=tmp_path))
     if alive:
@@ -849,20 +875,81 @@ def test_a_signal_during_the_popen_stops_claude_in_a_plain_run_too(world, tmp_pa
                 os.killpg(p_.pid, signal.SIGKILL)
 
 
-def test_a_second_signal_during_the_final_kill_does_not_cut_it_short(world, tmp_path, monkeypatch, kept_signals):
+@pytest.fixture
+def outer_signals(kept_signals):
+    """The caller's own handlers (main()'s in a detached child): they only record, so a test can see what reaches them."""
+    got = []
+    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(s, lambda signum, _f: got.append(signum))
+    return got
+
+
+def test_signals_during_the_final_kill_neither_cut_it_short_nor_get_lost(world, tmp_path, monkeypatch, outer_signals):
     mod = load_launcher()
     real_kill_all = mod.kill_all
     done = []
 
-    def kill_all_after_a_signal(proc, tracked):
-        os.kill(os.getpid(), signal.SIGTERM)               # a second abort, in the finally
+    def kill_all_after_signals(proc, tracked):
+        os.kill(os.getpid(), signal.SIGHUP)                # the very start of the cleanup: nothing may skip the kill
+        os.kill(os.getpid(), signal.SIGTERM)
         real_kill_all(proc, tracked)
         done.append(proc)
 
-    monkeypatch.setattr(mod, "kill_all", kill_all_after_a_signal)
+    monkeypatch.setattr(mod, "kill_all", kill_all_after_signals)
     argv = stub_claude(tmp_path, world.wt, [], tail=60)
     run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 1.0, evidence_dir=tmp_path / "ev")     # ends by timeout
-    assert run.exit == 124 and len(done) == 1 and done[0].poll() is not None
+    assert run.exit == 124 and len(done) == 1 and done[0].poll() is not None          # claude is dead
+    assert outer_signals == [int(signal.SIGHUP), int(signal.SIGTERM)]          # not dropped: handed to the caller afterwards
+    assert signal.getsignal(signal.SIGTERM) is not signal.SIG_IGN
+
+
+def test_a_failing_final_kill_still_restores_the_callers_handlers(world, tmp_path, monkeypatch, outer_signals):
+    mod = load_launcher()
+    seen = []
+    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    started = []
+    real_popen = subprocess.Popen
+
+    class Recording(real_popen):
+        def __init__(self, argv, *a, **k):
+            super().__init__(argv, *a, **k)
+            if "stub-claude.py" in " ".join(map(str, argv)):
+                started.append(self)
+
+    def boom(proc, tracked):
+        seen.append(proc)
+        raise RuntimeError("kill failed")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", Recording)
+    monkeypatch.setattr(mod, "kill_all", boom)
+    argv = stub_claude(tmp_path, world.wt, [], tail=60)
+    try:
+        with pytest.raises(RuntimeError):
+            mod.run_claude(argv, os.path.realpath(world.wt), "review", 1.0, evidence_dir=tmp_path / "ev")
+        assert {s: signal.getsignal(s) for s in before} == before
+    finally:
+        for p_ in started:
+            if p_.poll() is None:
+                os.killpg(p_.pid, signal.SIGKILL)
+
+
+def test_two_quick_signals_end_the_run_with_exit_3_not_a_lock_error(world, tmp_path, outer_signals):
+    import threading
+    mod = load_launcher()
+    for n in range(4):
+        def burst():
+            time.sleep(0.4)
+            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGHUP)
+
+        t = threading.Thread(target=burst)
+        t0 = time.monotonic()
+        t.start()
+        argv = stub_claude(tmp_path, world.wt, [], tail=60)
+        run = mod.run_claude(argv, os.path.realpath(world.wt), "review", 30.0, evidence_dir=tmp_path / f"ev{n}")
+        t.join()
+        assert run.exit == 3 and "interrupted (signal" in run.reason, (n, run.exit, run.reason)
+        assert time.monotonic() - t0 < 10, "the signal was only noticed at the time limit"
 
 
 def test_a_no_init_tripwire_followed_by_a_full_disk_at_the_record_is_still_a_77(world, tmp_path, monkeypatch, kept_signals):
@@ -887,4 +974,4 @@ def test_a_no_init_tripwire_followed_by_a_full_disk_at_the_record_is_still_a_77(
     code = mod.main(["--mode", "review", "-C", str(world.wt), "--schema", str(world.schema), "-p", "x", "--json",
                      "--evidence-dir", str(d), "--detached-child"])
     assert failed and code == 77 and (d / "done").read_text() == "exit=77\n"
-    assert "no init event" in json.loads((d / "result.json").read_text())["reason"] or "tripwire" in (d / "result.json").read_text()
+    assert json.loads((d / "result.json").read_text())["reason"].startswith("tripwire (exit 77), then OSError")
