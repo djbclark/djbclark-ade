@@ -68,9 +68,10 @@ expected_head = "e2cd572a679c4efe18f44a18577f689aa43a5b06"
 intent = "Shift-drag copy"
 target = "desktop-build-2"
 status = "queued"
-hold = "operator hands-on test pending; shift-drag lead 5d854159-afab-4231-983c-09e7e0851997 reports result and any new head"
+trial_required = false
+upstream = "https://github.com/getpaseo/paseo/discussions/10542"
 order = 25
-notes = "on upstream/main 2445adecd; security review APPROVE at e2cd572a, CI green https://github.com/frdminc/paseo/actions/runs/45040296766"
+notes = "on upstream/main 2445adecd; security review APPROVE at e2cd572a, CI green https://github.com/frdminc/paseo/actions/runs/45040296766; operator hand-tested 2026-11-22: shift-drag is working, so the hold is released and the trial is satisfied; shift-drag lead 5d854159-afab-4231-983c-09e7e0851997"
 
 [[pick]]
 id = "paseo-sync-sidebar-order"
@@ -102,27 +103,28 @@ notes = "merged to fork main as 52e55ac8a (branch feat/android-fork-release)"
 id = "paseo-pi-permission-selected-action"
 component = "paseo"
 repo = "frdminc/paseo"
-branch = "fix/pi-permission-selected-action"
-expected_head = "4a58d3e529c94aeec3c495dab08874da3027a1f5"
+branch = "trial/pi-8326-6643-on-fork2"
+expected_head = "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
 intent = "Pi keeps an approved permission instead of turning it into a cancellation"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/issues/8326"
 order = 35
-notes = "two commits on upstream/main ec22b8265, two files under packages/server/src/server/agent/providers/pi/; two reviews APPROVE; CI green https://github.com/frdminc/paseo/actions/runs/45044468003; known limits: pi-ask-user and rpiv-ask-user-question adapters still cancel an allow (rpiv overlaps getpaseo#6643); not upstreamed yet; SAFE FALLBACK (the stack carrying this fix, also used by paseo-pi-ask-user-question-scope): trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (re-pin expected_head then)"
+notes = "STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; this entry applies the whole stack, so paseo-pi-ask-user-question-scope then reports already-present; earlier form: branch fix/pi-permission-selected-action @ 4a58d3e529c94aeec3c495dab08874da3027a1f5 (two commits on upstream/main ec22b8265, CI green https://github.com/frdminc/paseo/actions/runs/45044468003)"
 
 [[pick]]
 id = "paseo-pi-ask-user-question-scope"
 component = "paseo"
 repo = "frdminc/paseo"
-commit = "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
+branch = "trial/pi-8326-6643-on-fork2"
+expected_head = "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
 intent = "DeepSeek via Pi gets the same question/permission behavior as Claude and Codex"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/6643"
 trial_required = false
 order = 40
-notes = "registered as the single commit ca6826bfc, not the stack branch (r3 LOW-1: that branch carries 14 commits not on upstream main, so on a base without the fork2 line it would pick fork-base commits; a commit source picks only this one); a security reviewer read the ca6826bf diff in r3 (rpiv-ask-user-question/index.ts identical to upstream PR head c445b9b7ce0a1b141441a9d773c6dcbd265e026f); fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); trial DONE: stack branch trial/pi-8326-6643-on-fork2 on frdminc/paseo, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb: our 8326 fix (906cbef77, 27701d707) then upstream #6643 c445b9b7c cherry-picked as ca6826bfc (one trivial test-file conflict in rpiv-ask-user-question/index.test.ts); local tests 173/173; SAFE FALLBACK: trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (switch this entry to a pinned branch with expected_head then); applies after paseo-pi-permission-selected-action (its commits already present are skipped)"
+notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640): upstream #6643 c445b9b7c cherry-picked as ca6826bfc (a security reviewer read that diff in r3: identical to the upstream PR head); STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; registered as the same pinned branch as paseo-pi-permission-selected-action (order 35 applies first, this entry then has nothing left); the 940 single-commit form ca6826bfc98033bcc0a08362be264d9d2ca73cff is superseded because the lead wants the whole stack"
 
 [[pick]]
 id = "worktree-setup-sharp-global-libvips"

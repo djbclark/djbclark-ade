@@ -121,9 +121,12 @@ def test_shipped_registry_is_valid():
     assert elic["hold"] and elic["trial_required"] and elic["local_path"].startswith("/") and "repo" not in elic
     assert by_id["paseo-bump-wrangler-sharp-0-35"]["status"] == "dropped"
     # r3 LOW-1: the Pi 6643 entry is its single commit, not the 14-commit stack branch
-    assert by_id["paseo-pi-ask-user-question-scope"]["commit"] == "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
-    assert "branch" not in by_id["paseo-pi-ask-user-question-scope"]
-    assert by_id["paseo-shift-drag-copy"]["hold"] and by_id["paseo-sidebar-nav-divider"]["status"] == "carried"
+    # 2026-11-22: every Pi entry is the whole stack branch at one pinned head
+    for pid in ("paseo-pi-permission-selected-action", "paseo-pi-ask-user-question-scope"):
+        assert by_id[pid]["branch"] == "trial/pi-8326-6643-on-fork2"
+        assert by_id[pid]["expected_head"] == "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
+        assert "b720fd6b6773b3036c59dd54a2efa89436a24f76" in by_id[pid]["notes"]
+    assert "hold" not in by_id["paseo-shift-drag-copy"] and by_id["paseo-shift-drag-copy"]["trial_required"] is False and by_id["paseo-sidebar-nav-divider"]["status"] == "carried"
     assert by_id["paseo-android-fork-release"]["status"] == "landed:main"
 
 
