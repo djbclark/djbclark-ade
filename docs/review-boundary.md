@@ -428,7 +428,8 @@ inside them). Scope: every repo our agents open or merge PRs in (`djbclark/*`, `
 
 **The list.** `config/review-bots.toml` (schema 1): CodeRabbit (`coderabbitai[bot]`), Codex (`chatgpt-codex-connector[bot]`,
 inline findings carry `codex-code-review-finding:v1` / `codex-security-review-finding:v1`), Greptile (`greptile-apps[bot]`),
-Cursor Bugbot (`cursor[bot]`), Copilot code review (`copilot-pull-request-reviewer[bot]`). Each entry names the REST login
+Cursor Bugbot (`cursor[bot]`), Copilot code review (`copilot-pull-request-reviewer[bot]`), Macroscope
+(`macroscopeapp[bot]`; see "Macroscope" below: a scarce, manually requested reviewer). Each entry names the REST login
 (with `[bot]`) and the GraphQL login (without) and where they were verified (`source`), how its findings are recognised
 (`thread_markers`, `review_body_patterns`, `issue_comment_patterns`) and which check runs show it is working
 (`check_names`, `check_apps`, `status_contexts`). Identity is the exact login AND actor type `Bot`: a human account `coderabbitai`, `CodeRabbitAI`,
@@ -467,6 +468,27 @@ reason of at least three characters; a top-level finding needs a later issue com
 than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the next `classify` sees the result. A running check
 older than that is a `stalled` note, and a bot with no check run or status on the head (never installed, never started, or one that
 reviews without a check) never blocks.
+
+**Macroscope (operator, 2026-11-22: "New github username we trust in the same manner as coderabbit and a new thing we
+can post to get a review done @macroscope-app review").** Trusted like CodeRabbit: `macroscopeapp[bot]`, GraphQL
+`macroscopeapp`, actor type `Bot` (verified on public PRs, `source` in the config); the mention handle `@macroscope-app`
+is not the login, and the app's test twin `macroscopeapp-nonprod[bot]` is not listed. Its findings are inline review
+threads, so every unresolved thread is a finding (no marker is needed); its Approvability verdict comment and APPROVED
+review are not findings. Only the `Macroscope - Correctness Check` run is a pending signal: Approvability and custom Check
+Run Agents never hold a merge.
+
+**Macroscope is a scarce budget** (operator: "We have 100 credits and will not be getting more. It is charged per
+kilobyte. Use it wisely." then "No 100 dollars"): US$100 in total, non-renewable, billed per KB of reviewed diff (Balanced
+$0.05/KB with a 10 KB, $0.50 minimum per review: about 2,000 KB, or 200 minimum-size reviews; Budget $0.025/KB, about
+4,000 KB; Precise $0.06/KB; Ultra $0.20/KB, about 500 KB; docs.macroscope.com/pricing, 2026-11-22). Therefore: nothing in
+this repo (pr-wait, review-launch, ade-merge-ready, a hook or a script) requests a review (a test scans `bin/`,
+`libexec/`, `claude/`, `plugins/` and `.github/` for the trigger); an agent posts `@macroscope-app review` only when the
+operator asks or a lead judges one small, high-risk diff worth it, and the requester records the spend (PR, head, KB,
+mode, running total); a head with no Macroscope check run is `not_started`, which neither waits nor blocks, so a PR the
+operator never sent to Macroscope is never held. How to ask and triage: [skills/macroscope-review](../skills/macroscope-review/SKILL.md).
+If the app is installed on a repo, the operator turns off reviews on every PR in app.macroscope.com: Settings, Repos,
+Correctness to **Manual invocation only**, no Always Review PR labels, Approvability and Status off, Billing Auto Refill
+off (it defaults on) and a monthly spend limit.
 
 ```sh
 review-bot-findings --repo OWNER/NAME --pr N [--pr M] [--json] [--check]   # --check: exit 3 untriaged, 4 pending

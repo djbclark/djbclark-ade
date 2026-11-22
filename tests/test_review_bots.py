@@ -139,9 +139,9 @@ def statuses(v: dict) -> list[str]:
 
 # ------------------------------------------------------------------ config
 
-def test_default_config_lists_the_five_bots_with_consistent_logins() -> None:
+def test_default_config_lists_the_six_bots_with_consistent_logins() -> None:
     cfg = rb.load_default_config()
-    assert [b.id for b in cfg.bots] == ["coderabbit", "codex", "greptile", "cursor-bugbot", "copilot"]
+    assert [b.id for b in cfg.bots] == ["coderabbit", "codex", "greptile", "cursor-bugbot", "copilot", "macroscope"]
     for b in cfg.bots:
         assert b.rest_login == b.graphql_login + "[bot]"
         assert b.source
@@ -149,6 +149,7 @@ def test_default_config_lists_the_five_bots_with_consistent_logins() -> None:
     assert by["codex"].rest_login == "chatgpt-codex-connector[bot]"
     assert by["cursor-bugbot"].graphql_login == "cursor"
     assert by["copilot"].graphql_login == "copilot-pull-request-reviewer"
+    assert by["macroscope"].rest_login == "macroscopeapp[bot]" and by["macroscope"].graphql_login == "macroscopeapp"
 
 
 GOOD_BOT = (
@@ -499,6 +500,95 @@ def test_check_apps_match_by_slug() -> None:
           'check_apps = ["app-slug"]\n')
     v = evaluate(FakeGh(checks=[run_of("Anything", "in_progress", "2026-11-14T21:59:00Z", app="app-slug")], override=ov))
     assert v["pending"] == ["app"]
+
+
+# ------------------------------------------------------------------ Macroscope (2026-11-22): trusted, but a scarce paid reviewer
+
+MACROSCOPE = bot("macroscopeapp")
+MACROSCOPE_CHECK = "Macroscope - Correctness Check"
+
+
+def test_macroscope_bot_thread_is_a_must_triage_finding() -> None:
+    v = evaluate(FakeGh(threads=[thread([comment(MACROSCOPE, "Medium `bin/x.py:7` a bug")])]))
+    assert statuses(v) == ["untriaged"] and v["state"] == "untriaged"
+    assert v["findings"][0]["bot"] == "macroscope" and v["findings"][0]["kind"] == "thread"
+    done = thread([comment(MACROSCOPE, "bug")], resolved=True)
+    assert evaluate(FakeGh(threads=[done]))["state"] == "clear"
+    reply = thread([comment(MACROSCOPE, "bug"), comment(OWNER, "not a bug: the lock is held by the caller")])
+    assert statuses(evaluate(FakeGh(threads=[reply]))) == ["triaged"]
+
+
+@pytest.mark.parametrize("actor", [
+    {"__typename": "User", "login": "macroscopeapp"},              # a human account with the bot's GraphQL login
+    {"__typename": "Bot", "login": "macroscope-app"},              # the mention handle is not the login
+    {"__typename": "Bot", "login": "macroscopeapp-nonprod"},       # Macroscope's own test app is not listed
+    {"__typename": "Bot", "login": "macroscopeapp[bot]"},          # REST spelling in a GraphQL position
+    {"__typename": "Bot", "login": "MacroscopeApp"},
+    {"__typename": "Mannequin", "login": "macroscopeapp"},
+])
+def test_spoofed_macroscope_actor_is_not_the_bot_and_never_blocks(actor) -> None:
+    assert rb.actor_bot(actor, rb.load_default_config().bots) is None
+    v = evaluate(FakeGh(threads=[thread([comment(actor, "looks like a finding")])]))
+    assert v["findings"] == [] and v["state"] == "clear"
+
+
+def test_macroscope_rest_user_needs_the_exact_login_and_type_bot() -> None:
+    bots = rb.load_default_config().bots
+    assert rb.rest_user_bot({"type": "Bot", "login": "macroscopeapp[bot]"}, bots).id == "macroscope"
+    for user in ({"type": "User", "login": "macroscopeapp[bot]"}, {"type": "Bot", "login": "macroscopeapp-nonprod[bot]"},
+                 {"type": "Bot", "login": "macroscope-app[bot]"}, {"type": "Bot", "login": "macroscopeapp"}):
+        assert rb.rest_user_bot(user, bots) is None
+
+
+def test_macroscope_never_requested_review_is_not_pending_and_never_blocks() -> None:
+    # The budget is US$100 and nothing here may request a review: a head with no Macroscope check run at all (the
+    # normal case) or with only other bots' / CI checks is `not_started`, which is neither untriaged nor pending.
+    v = evaluate(FakeGh())
+    assert v["checks"]["macroscope"] == "not_started" and v["pending"] == [] and v["state"] == "clear"
+    other = run_of("pytest-linux", "in_progress", "2026-11-14T21:59:00Z", app="github-actions")
+    v = evaluate(FakeGh(checks=[other]))
+    assert v["checks"]["macroscope"] == "not_started" and v["state"] == "clear"
+
+
+def test_macroscope_check_states_follow_the_correctness_check_only() -> None:
+    def mk(name: str, status: str, started: str) -> dict:
+        return run_of(name, status, started, app="macroscopeapp")
+
+    running = evaluate(FakeGh(checks=[mk(MACROSCOPE_CHECK, "in_progress", "2026-11-14T21:55:00Z")]))
+    assert running["state"] == "pending" and running["pending"] == ["macroscope"]
+    stale = evaluate(FakeGh(checks=[mk(MACROSCOPE_CHECK, "in_progress", "2026-11-14T21:00:00Z")]))
+    assert stale["state"] == "clear" and any("stalled" in n for n in stale["notes"])
+    done = evaluate(FakeGh(checks=[mk(MACROSCOPE_CHECK, "completed", "2026-11-14T21:59:00Z")]))
+    assert done["state"] == "clear" and done["checks"]["macroscope"] == "completed"
+    # Approvability and a custom Check Run Agent are not the correctness review: a running one never holds a merge.
+    for name in ("Macroscope - Approvability Check", "Macroscope - UI Consistency"):
+        v = evaluate(FakeGh(checks=[mk(name, "in_progress", "2026-11-14T21:59:00Z")]))
+        assert v["state"] == "clear" and v["checks"]["macroscope"] == "not_started"
+
+
+def test_macroscope_approvability_verdicts_are_not_findings() -> None:
+    approved = review(MACROSCOPE, "<!-- Macroscope (Approvability) review body marker -->", state="APPROVED")
+    summary = issue_comment(MACROSCOPE, "<!-- MURMUR_IGNORE -->\n#### Approvability\n\n**Verdict:** Approved f6a4dea")
+    clean = issue_comment(MACROSCOPE, "Review complete! No issues found.")
+    v = evaluate(FakeGh(reviews=[approved], comments=[summary, clean]))
+    assert v["findings"] == [] and v["state"] == "clear"
+
+
+def test_no_tool_in_this_repo_requests_a_macroscope_review() -> None:
+    # Operator 2026-11-22: US$100, non-renewable, per KB. The trigger comment is a person's deliberate act: no script,
+    # hook, shim or agent definition may contain it (docs and skills may describe it; the config only comments on it).
+    needle = "macroscope-app review"
+    offenders = []
+    for sub in ("bin", "libexec", "claude", "plugins", ".github"):
+        for path in (ROOT / sub).rglob("*"):
+            if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
+                try:
+                    text = path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if needle in text:
+                    offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []
 
 
 # ------------------------------------------------------------------ read-only guarantee
