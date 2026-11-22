@@ -565,6 +565,64 @@ def test_apply_reports_already_present_for_patch_equivalent_commit(world, tmp_pa
     assert sh(wt, "log", "--format=%s").splitlines().count("single pick") == 1
 
 
+def test_exclude_names_skipped_commits_and_unused_ids(world, tmp_path, capsys):
+    """A branch entry's `exclude` drops named commits, names them in both outputs, reports unmatched ids."""
+    wt = world["wt"]
+    path = registry(tmp_path, pick("ex", branch="feat",
+                                   extra=f'exclude = ["{world["f1"]}", "{world["conf"]}"]'))
+    code, report = apply_json(path, wt, capsys)
+    row = report["applied"][0]
+    assert code == 0 and row["commits"] == [world["f2"]]
+    assert row["excluded_by_entry"] == [{"commit": world["f1"], "subject": "feat one"}]
+    assert row["exclude_unused"] == [world["conf"]]
+    assert (wt / "f2.txt").exists() and not (wt / "f1.txt").exists()
+    assert run_main(path, "apply", "--dry-run", "--target", "desktop-build-2", "--workspace", str(wt)) == 0
+    out = capsys.readouterr().out
+    assert f"EXCLUDED by entry {world['f1'][:9]} (feat one)" in out
+    assert f"exclude matched nothing: {world['conf'][:9]}" in out
+
+
+@pytest.mark.parametrize("extra, kwargs, needle", [
+    ('exclude = ["' + GOOD_SHA + '"]', {"commit": GOOD_SHA}, "branch or pr"),
+    ('exclude = "x"', {"branch": "feat"}, "non-empty list"),
+    ("exclude = []", {"branch": "feat"}, "non-empty list"),
+    ('exclude = ["' + GOOD_SHA[:39] + '"]', {"branch": "feat"}, "40-hex"),
+    ('exclude = ["' + GOOD_SHA + '", "' + GOOD_SHA + '"]', {"branch": "feat"}, "unique"),
+])
+def test_exclude_validation(tmp_path, extra, kwargs, needle):
+    with pytest.raises(fp.RegistryError, match=needle):
+        fp.load_registry(registry(tmp_path, pick("e", extra=extra, **kwargs)), FORKS)
+
+
+def test_cherry_pick_trailer_counts_as_present_when_patch_id_changed(world, tmp_path, capsys):
+    """A pick whose context changed has another patch-id; its -x trailer still marks it present."""
+    wt = world["wt"]
+    sh(wt, "fetch", "-q", str(world["fork"]), "feat")
+    commit_file(wt, "f1.txt", "f1 with other context\n", f"feat one\n\n(cherry picked from commit {world['f1']})")
+    head = sh(wt, "rev-parse", "HEAD")
+    path = registry(tmp_path, pick("br", branch="feat", order=1), pick("one", commit=world["f1"], order=2))
+    code, report = apply_json(path, wt, capsys)
+    br, one = report["applied"]
+    assert code == 0
+    assert br["commits"] == [world["f2"]] and br["already_present_commits"] == [world["f1"]]
+    assert br["already_present_by_trailer"] == [world["f1"]]
+    assert one["commits"] == [] and one["already_present"] and one["already_present_by_trailer"] == [world["f1"]]
+    assert sh(wt, "log", "--format=%s", f"{head}..HEAD") == "feat two"
+    # re-running is idempotent
+    code, again = apply_json(path, wt, capsys)
+    assert code == 0 and all(r["already_present"] for r in again["applied"])
+
+
+def test_trailer_must_name_the_exact_sha(world, tmp_path, capsys):
+    """A trailer naming another commit does not make f1 present (it would stop on the conflict instead)."""
+    wt = world["wt"]
+    sh(wt, "fetch", "-q", str(world["fork"]), "feat")
+    commit_file(wt, "f1.txt", "different\n", f"feat one\n\n(cherry picked from commit {world['f2']})")
+    path = registry(tmp_path, pick("br", branch="feat"))
+    code, report = apply_json(path, wt, capsys)
+    assert code == 3 and report["conflict"]["commit"] == world["f1"]
+
+
 def test_apply_already_present_when_commit_is_ancestor(world, tmp_path, capsys):
     sh(world["wt"], "fetch", "-q", str(world["fork"]), "single")
     sh(world["wt"], "merge", "-q", "--ff-only", "FETCH_HEAD")
