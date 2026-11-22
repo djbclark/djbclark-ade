@@ -220,6 +220,10 @@ NO_INHERITED_THINKING = ('', '-', 'auto', 'default')
 BOOTSTRAP_TITLE = re.compile(r'Self-handoff\b')  # the prompt-derived title of a successor created before st-01
 ROLE_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 TITLE_LIMIT = 200  # Paseo's MAX_EXPLICIT_AGENT_TITLE_CHARS
+# A retired predecessor is renamed `RETIRED <its old name> (-> <successor id>)` (2026-11-22): the successor keeps the inherited
+# name (st-01), so without it the sidebar shows the live lead and every retired one under one name.
+RETIRED_PREFIX = 'RETIRED '
+LEAD_WINDOW = re.compile(r'LEAD \S+ \(.+\)')  # the current window name `ade-worker-run rename-lead` gives a lead
 
 
 def role_ident(value):
@@ -245,6 +249,19 @@ def usable_title(value):
         return title_ident(value) if isinstance(value, str) else None
     except SessionError:
         return None
+
+
+def utf16_len(text):
+    return len(text.encode('utf-16-le')) // 2
+
+
+def retired_title(old, successor):
+    """`RETIRED <old> (-> <successor>)`, the old name cut (never the suffix) to Paseo's 200 UTF-16 units."""
+    suffix = f' (-> {successor})'
+    head = title_ident(old)
+    while head and utf16_len(RETIRED_PREFIX + head + suffix) > TITLE_LIMIT:
+        head = head[:-1].rstrip()
+    return RETIRED_PREFIX + (head or 'agent') + suffix
 
 
 # The only labels the successor identity may carry, each with its validator (a record file is not trusted:
@@ -681,7 +698,8 @@ class Service:
         name is still the prompt-derived bootstrap one), else a derived `Lead <role>` / `Lead (self-handoff
         successor)`. A generated title never holds an agent id: paseo#9668 resolves `agent archive SHORTID`
         by partial title match when the id is missing from the listing, so an id prefix in a lead's title
-        would let that fallback pick the live lead.
+        would let that fallback pick the live lead. (The one id-bearing title is the RETIRED predecessor's, set after its
+        archive: an archived agent a title match can only meet as AGENT_ALREADY_ARCHIVED, never archive a live lead.)
         Labels: `ade.predecessor`; `ade.chain` (the first lead's id, carried from the predecessor's record,
         else the predecessor itself); `ade.role` from --role or the predecessor's record.
         """
@@ -699,7 +717,7 @@ class Service:
             role_source = None
         name = source.get('Name')
         live = None if not isinstance(name, str) or name.strip() in ('', '-') or BOOTSTRAP_TITLE.match(name.strip()) \
-            else usable_title(name)
+            or name.startswith(RETIRED_PREFIX) else usable_title(name)  # a revived RETIRED name is not the lead's title
         derived = f'Lead {labels["ade.role"]}' if 'ade.role' in labels else 'Lead (self-handoff successor)'
         title, title_source = next((t, s) for t, s in (
             (requested_title, 'requested'), (live, 'predecessor-name'), (usable_title(prior.get('title')),
@@ -1127,6 +1145,8 @@ class Service:
             if record['status'] == 'archived':
                 self.rebind_claims(record, target)  # idempotent: a re-run after a failed rebind retries it
                 self.repoint_supervisor_lead(record, target)  # idempotent: a re-run after a failed write retries it
+                self.retire_predecessor_name(record, target)  # a re-run after a failed or skipped-too-early rename retries it
+                self.advise_lead_window(record, target)
                 return record
             deadline = self.clock() + timeout
             refused_running = 0
@@ -1240,7 +1260,95 @@ class Service:
             self.save(target, record)
             self.rebind_claims(record, target)
             self.repoint_supervisor_lead(record, target)
+            self.retire_predecessor_name(record, target)
+            self.advise_lead_window(record, target)
             return record
+
+    def retire_predecessor_name(self, record, target):
+        """Rename the archived predecessor `RETIRED <old name> (-> <successor id>)` when it carries the successor's own title.
+
+        The successor inherits the predecessor's name (st-01), so the sidebar showed the live lead and every retired one under one
+        name (2026-11-22: three agents named `fork-release-alerts`), and an operator who typed into a retired one (Paseo un-archives
+        on a message) could not tell. The rename comes AFTER the archive is confirmed: Paseo's `agent update` on an archived agent
+        rewrites only the stored title (`writeStoredMetadata` keeps `archivedAt`), and a readback proves `Archived` still holds; a
+        rename of a still-live predecessor would also lie while the archive is retried. Outcome in `identity.checks.retire_rename`:
+        `ok` (renamed, or already `RETIRED ...`), `skipped` or `failed`, the reason in `identity.retire_rename` (`reason`, `name`,
+        `native_error`). Never fails finish, and a re-run retries anything but `ok` and a final skip. A record without an `identity`
+        block (before st-01) is left alone."""
+        identity = record.get('identity')
+        if not isinstance(identity, dict) or not isinstance(record.get('successor'), str):
+            return
+        if not isinstance(identity.get('checks'), dict):
+            identity['checks'] = {}
+        checks = identity['checks']
+        earlier = identity.get('retire_rename') if isinstance(identity.get('retire_rename'), dict) else {}
+        if checks.get('retire_rename') == 'ok' or (checks.get('retire_rename') == 'skipped'
+                                                   and earlier.get('reason') != 'predecessor-not-archived'):
+            return
+        op, state, detail = 'agent inspect', 'failed', {}
+        try:
+            try:
+                title, _ = checked_identity(identity)
+            except SessionError:
+                state, detail = 'skipped', {'reason': 'malformed-identity'}
+            else:
+                predecessor, successor = record['predecessor'], record['successor']
+                row = self.inspect(predecessor)
+                name = usable_title(row.get('Name'))
+                if row.get('Archived') is not True:
+                    state, detail = 'skipped', {'reason': 'predecessor-not-archived'}
+                elif name is not None and name.startswith(RETIRED_PREFIX):
+                    state, detail = 'ok', {'reason': 'already-retired', 'name': name}
+                elif name != title:
+                    state, detail = 'skipped', {'reason': 'names-differ'}  # already told apart: nothing to mark
+                else:
+                    new = retired_title(name, successor)
+                    op = 'agent update'
+                    self.native('agent', 'update', predecessor, '--name=' + new)
+                    op = 'agent inspect'
+                    after = self.inspect(predecessor)
+                    if after.get('Archived') is not True:
+                        detail = {'reason': 'rename-unarchived-predecessor', 'name': new}
+                    elif after.get('Name') != new:
+                        detail = {'reason': 'name-readback-mismatch', 'name': new}
+                    else:
+                        state, detail = 'ok', {'reason': 'renamed', 'name': new}
+                        self.progress(f'predecessor {predecessor} renamed {new!r}: the sidebar tells it from the live lead')
+        except SessionError as error:
+            state, detail = 'failed', {'reason': 'native-error', 'native_error': native_error_record(op, error)}
+        if state == 'failed':
+            self.progress(f'predecessor rename failed ({detail["reason"]}); finish continues, see identity.retire_rename')
+        checks['retire_rename'] = state
+        identity['retire_rename'] = detail
+        self.save(target, record)
+
+    def advise_lead_window(self, record, target):
+        """Observe the successor's own window name and print the exact `rename-lead` command when it is not `LEAD <repo> (<work>)`.
+
+        Observe and advise only: `ade-worker-run rename-lead` resolves the window from the calling lead's agent record and holds its own
+        lock, and the name is the operator's sidebar. Recorded as `lead_window` (`state` `ok`, `rename-advised` or `unknown`, `name`,
+        `command`, `reason`); read-only, never fails finish, recomputed on every run."""
+        successor = record.get('successor')
+        info = {'state': 'unknown'}
+        try:
+            rows = self.native('workspace', 'ls')
+            row = next((r for r in rows if isinstance(r, dict) and r.get('workspaceId') == record.get('workspace')), None) \
+                if isinstance(rows, list) else None
+            name = row.get('name') if isinstance(row, dict) else None
+            if not isinstance(name, str):
+                info['reason'] = 'window-not-listed'
+            else:
+                info['name'] = bounded(name, TITLE_LIMIT)
+                if LEAD_WINDOW.fullmatch(name):
+                    info['state'] = 'ok'
+                else:
+                    info.update(state='rename-advised', command=f'ade-worker-run rename-lead --lead {successor}')
+                    self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}'
+                                  ' [--window-middle "WORK"]')
+        except SessionError as error:
+            info['reason'] = bounded(str(error), MESSAGE_LIMIT)
+        record['lead_window'] = info
+        self.save(target, record)
 
     def supervisor_lead_file(self):
         """The file `bin/ade-supervisor-scan` reads its lead from: `$ADE_SUPERVISOR_STATE_DIR/lead`, default

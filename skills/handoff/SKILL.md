@@ -35,7 +35,7 @@ handoff that never runs `finish` records no chain: re-point those jobs by hand.
 Placement differs: workers go in the lead's one `WORKER <repo> (<work>)` box, and workers the operator asks for
 interactively in the lead's own `LEAD <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a
 **successor is a new lead, not a worker**: it starts top-level in its own placement (not in the predecessor's WORKER box;
-it names its own window `LEAD …` with `ade-worker-run rename-lead`), then **reuses the predecessor chain's WORKER and OTHER boxes**
+it names its own window `LEAD …` with `ade-worker-run rename-lead`; `ade-self-session finish` prints the exact command as `lead_window.command` when the window is not already named so), then **reuses the predecessor chain's WORKER and OTHER boxes**
 when it dispatches (operator ruling 2026-11-14: at most three windows per lead and repo; window names carry no lead id).
 
 ## Opt-in NATS coordination
