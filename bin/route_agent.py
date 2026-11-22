@@ -2883,6 +2883,13 @@ def scope_repo_of(args: argparse.Namespace) -> str | None:
     return repo_of(getattr(args, "cwd", None) or os.getcwd())
 
 
+def override_repo_of(args: argparse.Namespace) -> str | None:
+    """The repository whose `[dispatch.repo_overrides]` apply (tendcf's frontier order and estimate floors): an explicit `--repo`,
+    else the repo of --cwd (`scope_repo_of`), as the scope reads it. Before 2026-11-22 the default was the planner's own cwd, so a
+    lead planning tendcf slices from another repository got none of tendcf's overrides."""
+    return args.repo or scope_repo_of(args)
+
+
 def repo_floors(repo: str | None) -> dict[str, float]:
     """The `[dispatch.repo_overrides.REPO.estimate_floor]` table of `repo` (operator 2026-11-01), {} for any other repo."""
     if not repo:
@@ -2976,14 +2983,11 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
             f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota")
 
 
-_SCOPE_FROM_REPO: Any = object()     # route(scope_repo=...) default: the repo scope reads `repo`
-
-
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
           exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
           avoid: frozenset[str] | set[str] = frozenset(), need_profile: bool = True,
-          scope_repo: str | None = _SCOPE_FROM_REPO) -> Choice | None:
+          scope_repo: str | None = None) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     A pool with no model profile for `kind` (`models[kind]`) is passed over (rt-bulk: its dispatch line would carry a
@@ -2998,19 +3002,16 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     `exclude` names services to skip (full for this wave, or just failed). `avoid` (route_adjust holds) skips
     candidates the same way but, unlike `exclude`, does not move the quality band's anchor.
 
-    `scope_repo` is the repository of the slice's --cwd (`repo_of`; default: `repo`), which `candidate_block` reads for
+    `scope_repo` is the repository of the slice's --cwd (`repo_of`; never the `repo` name, which only selects
+    `[dispatch.repo_overrides]`), which `candidate_block` reads for
     `[routing].never_route`, `[routing.repo_scoped]` and the Pi pool acceptance (2026-11-22). A barred pool is no
     candidate and no anchor of the quality band, and is named in `Choice.barred` (and the JSON output's `barred`). Fail closed: no `scope_repo`
     means no repo-scoped pool."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
-    if scope_repo is _SCOPE_FROM_REPO:
-        scope_repo = repo
     services = list(discover(quota))
-    pi_off = pi_unaccepted_services() if any(s.acp_agent == "pi" for s in services) else set()
-    barred = {s.name: why for s in services
-              if (why := candidate_block(s, quota, scope_repo, pi_unaccepted=pi_off)) is not None}
+    barred = _barred(services, quota, scope_repo)
     best = quality_best(kind, services, frozenset(exclude) | barred.keys(), quota, need_profile=need_profile)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     by_name = {s.name: s for s in services}
@@ -3141,6 +3142,21 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                   kind=kind, skipped=skipped, barred=barred_notes, model_note=model_note(best, kind))
 
 
+def _barred(services: list[Service], quota: dict[str, Any], scope_repo: str | None) -> dict[str, str]:
+    """`{service name: why}` for every service `candidate_block` refuses a slice working in `scope_repo`."""
+    pi_off = pi_unaccepted_services() if any(s.acp_agent == "pi" for s in services) else set()
+    return {s.name: why for s in services
+            if (why := candidate_block(s, quota, scope_repo, pi_unaccepted=pi_off)) is not None}
+
+
+def barred_notes(kind: str, quota: dict[str, Any] | None, scope_repo: str | None) -> list[str]:
+    """The refusals `route` would name in `Choice.barred` for `kind`: pools that can take it but are barred. For a slice that
+    found no pool at all, where there is no Choice to carry them."""
+    quota = quota or {}
+    barred = _barred(list(discover(quota)), quota, scope_repo)
+    return [barred[s.name] for s in discover(quota) if s.name in barred and s.eligible(kind, quota)]
+
+
 def canary_pool(svc: Service) -> str | None:
     """Quota identity for pools whose meter cannot warn before a first refusal.
 
@@ -3167,7 +3183,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          kind_exclude: dict[str, set[str]] | None = None,
          reject: Callable[[str, Choice], str | None] | None = None,
          refusals: list[str | None] | None = None,
-         scope_repo: str | None = _SCOPE_FROM_REPO
+         scope_repo: str | None = None
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
 
@@ -3913,7 +3929,7 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
     if args.slices and len(args.slices) != len(kinds):
         parser.error("--slice must be given once per kind, in --kinds order")   # before the locked write below
     skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
-    repo = args.repo or repo_of(os.getcwd())
+    repo = override_repo_of(args)
     scope_repo = scope_repo_of(args)
     write = cfg["enabled"] and not args.dry_run
     try:
@@ -4030,7 +4046,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=KINDS)
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
-    r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
+    r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the repo of --cwd, else of the caller's cwd); "
+                   "never read for the never_route / repo scope, which follows --cwd")
+    r.add_argument("--cwd", help="the directory the slice works in (a repo checkout or worktree): its repository decides [routing.repo_scoped] "
+                   "and, without --repo, [dispatch.repo_overrides] (default: the caller's cwd)")
     r.add_argument("--brief", help="the slice's brief file (accepted and ignored since 2026-11-06, when the "
                    "Jev shadow ask was removed)")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
@@ -4040,7 +4059,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma list of services to skip (just failed or spent); repeatable. "
                     "aiuse [disabled_services] are always skipped")
     pl.add_argument("--min-headroom", type=float, default=15.0)
-    pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
+    pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the repo of --cwd, else of the caller's cwd)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; accepted and ignored since 2026-11-06)")
@@ -4050,7 +4069,7 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--kinds", help="comma list, hardest first, e.g. code,code,research,bulk")
     ad.add_argument("--exclude", action="append", default=[], help="comma list of services to skip; repeatable")
     ad.add_argument("--min-headroom", type=float, default=15.0)
-    ad.add_argument("--repo", help="repository the slices work in (default: the cwd's origin remote)")
+    ad.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the repo of --cwd, else of the caller's cwd)")
     ad.add_argument("--json", action="store_true")
     ad.add_argument("--dry-run", action="store_true", help="compute and print, but write no state and no log")
     ad.add_argument("--status", action="store_true", help="print the saved holds and exit")
@@ -4112,7 +4131,7 @@ def main(argv: list[str] | None = None) -> int:
         skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
         skip |= operator_disabled()
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
-                    repo=(args.repo or repo_of(os.getcwd())), scope_repo=scope_repo_of(args))
+                    repo=override_repo_of(args), scope_repo=scope_repo_of(args))
         if args.brief and len(args.brief) != len(kinds):
             parser.error("--brief must be given once per kind, in --kinds order")
         apply_placement(rows, args, parser, kinds)
@@ -4131,7 +4150,7 @@ def main(argv: list[str] | None = None) -> int:
                             "dispatch": c.dispatch if c else None,
                             "dispatch_warnings": c.dispatch_warnings if c else [],
                             "skipped": c.skipped if c else [],
-                            "barred": c.barred if c else [],
+                            "barred": c.barred if c else barred_notes(k, quota, scope_repo_of(args)),
                             "model_note": c.model_note if c else "",
                             "remaining": c.remaining if c else None,
                             "why": c.why if c else unrouted_why(k, quota, skip)}
@@ -4313,11 +4332,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if missing else 2 if unreadable else 0
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
-                   repo=(args.repo or repo_of(os.getcwd())), scope_repo=scope_repo_of(args))
+                   repo=override_repo_of(args), scope_repo=scope_repo_of(args))
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": unrouted_why(args.kind, quota, operator_disabled()),
-                          "skipped": profile_skips(args.kind, quota, operator_disabled())}))
+                          "skipped": profile_skips(args.kind, quota, operator_disabled()),
+                          "barred": barred_notes(args.kind, quota, scope_repo_of(args))}))
         return 1
     if args.json:
         print(json.dumps({

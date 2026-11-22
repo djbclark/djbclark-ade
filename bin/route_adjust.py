@@ -311,7 +311,7 @@ def _refusal(router: Any, kind: str, choice: Any, cfg: dict[str, Any]) -> str | 
 def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float | None,
            state: dict[str, Any], now: datetime | None = None, exclude: set[str] | frozenset[str] = frozenset(),
            min_headroom: float = 15.0, repo: str | None = None, cfg: dict[str, Any] | None = None,
-           scope_repo: Any = ...) -> dict[str, Any]:
+           scope_repo: str | None = None) -> dict[str, Any]:
     """Plan one wave with hysteresis. Pure: returns the new state and events, writes nothing.
 
     The tracked pool of a kind is the one its FIRST slice in the wave gets; a kind's later slices (spread
@@ -320,7 +320,7 @@ def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float |
     `plan` anchors it, and a held pool still takes the kind when nothing acceptable remains.
 
     `scope_repo` is the repository of the slices' --cwd for never_route, repo scope and Pi acceptance (`route_agent.route`);
-    left out, it follows `repo`.
+    left out, it is None and the scoped pools are refused (never `repo`, a name).
 
     Result: {"rows": [(kind, Choice|None, refusal|None)], "state": ..., "events": [...],
              "held": {kind: [pool...]}, "fresh": bool}."""
@@ -345,7 +345,7 @@ def adjust(router: Any, kinds: list[str], *, quota: dict[str, Any], age: float |
     refusals: list[str | None] = []
     planned = router.plan(kinds, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo,
                           kind_exclude=kind_exclude, reject=lambda k, c: _refusal(router, k, c, cfg),
-                          refusals=refusals, **({} if scope_repo is ... else {"scope_repo": scope_repo}))
+                          refusals=refusals, scope_repo=scope_repo)
     rows: list[tuple[str, Any, str | None]] = []
     seen: set[str] = set()
     changed: set[str] = set()                                   # state keys with a change line this call
