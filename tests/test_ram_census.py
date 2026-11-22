@@ -1,6 +1,8 @@
 """bin/ram-census (queue item 89): classification and totals from a fixture `ps` listing."""
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -152,13 +154,13 @@ def test_roots_reports_the_off_switch_from_settings_and_from_the_environment(tmp
     _ = settings.write_text(json.dumps({"env": {"ADE_LSP_ROOT_GUARD": "off"}}))
     r = _text(tmp_path, *base)
     assert "ADE_LSP_ROOT_GUARD=off is set in settings.json env" in r.stdout and "not off" not in r.stdout
-    assert json.loads(_text(tmp_path, "--json", *base).stdout)["_unguarded_log"]["switch"] == {"settings": "off", "env": None}
+    assert json.loads(_text(tmp_path, "--json", *base).stdout)["_unguarded_log"]["switch"] == {"settings": "off", "settings_status": "read", "env": None}
     _ = settings.write_text(json.dumps({"env": {"ADE_LSP_ROOT_GUARD": "on"}}))
     r = _text(tmp_path, *base, env={"ADE_LSP_ROOT_GUARD": "off"})
     assert "set in this process's environment" in r.stdout and "settings.json env" not in r.stdout
-    _ = settings.write_text("{not json")  # unreadable settings never break the census
+    _ = settings.write_text("{not json")  # unreadable settings never break the census, and are not "checked"
     r = _text(tmp_path, *base)
-    assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout
+    assert r.returncode == 0 and "NOT checked" in r.stdout and "not off in settings.json" not in r.stdout
     r = _text(tmp_path, *base[:-1], str(tmp_path / "missing.json"))
     assert r.returncode == 0 and "ADE_LSP_ROOT_GUARD: not off" in r.stdout
 
@@ -174,20 +176,79 @@ def test_escapes_in_a_server_name_or_a_root_never_reach_the_terminal(tmp_path: P
     assert list(got["by_server"]) == ["mark]0;PWNEDman"]
 
 
-def test_a_hostile_settings_file_never_breaks_or_hangs_the_census(tmp_path: Path) -> None:
-    base = ["--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings"]
+def _switch(tmp: Path, settings: Path) -> tuple[str, dict[str, Any]]:
+    args = ["--roots", "--unguarded-log", str(tmp / "absent.log"), "--claude-settings", str(settings)]
+    r = _text(tmp, *args)
+    assert r.returncode == 0 and "Traceback" not in r.stderr, r.stderr
+    return r.stdout, json.loads(_text(tmp, "--json", *args).stdout)["_unguarded_log"]["switch"]
+
+
+def test_a_settings_file_that_could_not_be_read_is_never_reported_as_not_off(tmp_path: Path) -> None:
+    """Each valid-JSON-or-not file below holds `ADE_LSP_ROOT_GUARD=off` where a parser that can read it would find it
+    (node's JSON.parse reads the deep one): the census must say it did not check, never "not off in settings.json"."""
+    key = '"env":{"ADE_LSP_ROOT_GUARD":"off"}'
+    files = {
+        "deep.json": ("{" + key + ',"x":' + "[" * 200000 + "]" * 200000 + "}", "nested too deeply"),
+        "big.json": ("{" + key + ',"pad":"' + "x" * (1 << 20) + '"}', "over 1 MiB"),
+        "digits.json": ("{" + key + ',"n":' + "9" * 5000 + "}", "not valid JSON or too large to parse"),
+        "list.json": ("[{" + key + "}]", "not a JSON object"),
+        "empty.json": ("", "not valid JSON or too large to parse"),
+    }
+    for name, (text, why) in files.items():
+        f = tmp_path / name
+        _ = f.write_text(text)
+        out, sw = _switch(tmp_path, f)
+        assert sw["settings_status"] == f"unreadable: {why}", (name, sw)
+        assert "NOT checked" in out and why in out and "not off in settings.json" not in out, (name, out)
     fifo = tmp_path / "settings.fifo"
     os.mkfifo(fifo)  # a blocking read would hang
-    r = _text(tmp_path, *base, str(fifo))
-    assert r.returncode == 0 and "not off" in r.stdout
-    deep = tmp_path / "deep.json"
-    _ = deep.write_text("[" * 200000)  # RecursionError in the JSON parser
-    r = _text(tmp_path, *base, str(deep))
-    assert r.returncode == 0 and "not off" in r.stdout and "Traceback" not in r.stderr
     d = tmp_path / "adir"
     d.mkdir()
-    r = _text(tmp_path, *base, str(d))
-    assert r.returncode == 0 and "not off" in r.stdout
+    for special in (fifo, d, Path("/dev/zero")):
+        out, sw = _switch(tmp_path, special)
+        assert sw["settings_status"] == "unreadable: not a regular file", (special, sw)
+        assert "NOT checked" in out and "not off in settings.json" not in out
+    out, sw = _switch(tmp_path, tmp_path / "missing.json")  # no file: nothing set there, so "not off" is true
+    assert sw["settings_status"] == "missing" and "not off in settings.json env" in out
+    ok = tmp_path / "ok.json"
+    _ = ok.write_text("{" + key + "}")
+    out, sw = _switch(tmp_path, ok)
+    assert sw["settings_status"] == "read" and sw["settings"] == "off" and "off is set in settings.json env" in out
+
+
+def _module() -> Any:
+    loader = importlib.machinery.SourceFileLoader("ram_census_under_test", str(TOOL))
+    spec = importlib.util.spec_from_loader("ram_census_under_test", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_the_reader_caps_what_it_reads_and_refuses_devices(tmp_path: Path) -> None:
+    m = _module()
+    big = tmp_path / "big.txt"
+    _ = big.write_bytes(b"a\n" * (1 << 20))  # 2 MiB
+    data, problem = m._read_bounded(str(big), tail=False)
+    assert len(data) == 1 << 20 and problem == "over 1 MiB"  # an uncapped read() returns all 2 MiB
+    data, problem = m._read_bounded(str(big), tail=True)
+    assert 0 < len(data) <= 1 << 20 and problem == ""
+    for tail in (False, True):  # /dev/zero is seekable with size 0: only the type check refuses it
+        assert m._read_bounded("/dev/zero", tail=tail) == (b"", "not a regular file")
+    assert m._read_bounded(str(tmp_path / "none"), tail=False) == (b"", "missing")
+
+
+def test_a_root_with_an_escape_in_it_is_printed_clean(tmp_path: Path, capsys: Any, monkeypatch: Any) -> None:
+    m = _module()
+    root = "project:/x\x1b]0;PWN\x07\u009by"
+    monkeypatch.setattr(m, "census", lambda *a, **k: {"basedpyright": {"n": 1, "rss_mb": 1.0, "roots": {root: 1}}})
+    f = tmp_path / "ps.txt"
+    _ = f.write_text(PS)
+    rc = m.main(["--ps-file", str(f), "--roots", "--unguarded-log", str(tmp_path / "absent.log"),
+                 "--claude-settings", str(tmp_path / NONE)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "1 x project:/x]0;PWNy" in out
+    assert "\x1b" not in out and "\x07" not in out and "\u009b" not in out
 
 
 def test_a_cut_that_lands_on_a_line_start_keeps_that_line(tmp_path: Path) -> None:
