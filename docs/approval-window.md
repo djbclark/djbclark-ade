@@ -198,7 +198,9 @@ A command word that is not a plain word (written with quotes or a backslash, or 
 `[` and `[[` excepted) is held. `noglob`, `nocorrect`, `builtin`, `coproc`, `command` and `exec -a NAME` are followed like `sudo` and `env`
 (whose long `--user`, `--group`, `--unset` options take a value, as do `xargs -d -J -R -S -a`). The positional parameters of a `sh|bash|zsh -c` body named on the line (`sh -c 'rm -rf "$1"' _ /`) are filled in; when `xargs`
 feeds the shell (`... | xargs -0 sh -c 'rm -rf "$@"' _`) the parameters beyond those given are the feed, which is judged like the input of
-a bare `xargs rm` (a narrowed `find`, an `echo` of safe paths; anything else is unknown and held; round 7).
+a bare `xargs rm` (a narrowed `find`, an `echo` of safe paths; anything else is unknown and held; round 7). Round 8: the feed is judged whenever xargs
+feeds a shell body that removes, moves (`mv`), changes recursively or runs `git ... clean`, whatever the way the feed arrives (`$@`, `$N`,
+the `-I{}` or `-I %` replacement string); a bare xargs-fed `mv` judges its feed the same way.
 A python, perl, ruby, node, php or osascript
 one-liner (`-c`, `-e`, `--eval`, a here-document or here-string) whose text names `rmtree`, `unlink`, `remove`, `rmdir`, `rm -`, `rmSync`,
 `do shell script`, `delete` or `trash` is held; a script file is not read. Round 4 extends the one-liner check to the runners that

@@ -1441,6 +1441,7 @@ class _Scan:
             sources = ops if has_target else ops[:-1]
             for k, operand in sources:
                 self.remove_operand("mv", operand, k, st, cwd)
+            self.xargs_input(chain, words, st, prev, cwd)           # an xargs-fed mv moves what the feed names
         elif prog in RUNNERS:
             for k, a in enumerate(args):
                 if INTERPRETERS.fullmatch(_name(a)):
@@ -1598,23 +1599,20 @@ class _Scan:
             body = args[body_at]
             params = args[body_at + 1:]
             fed = any(_name(st.words[c]) == "xargs" for c in (chain or [])[:-1])      # xargs appends its input to the parameters
-            used_feed = [False]
             if params or fed:                  # `sh -c 'rm -rf "$1"' _ /`: positional parameters name the operands
                 def fill(m: "re.Match[str]") -> str:
                     key = m.group(1) or m.group(2)
                     if key in ("@", "*"):
-                        if fed:
-                            used_feed[0] = True
                         return " ".join(params[1:] + ([FEED_WORD] if fed else []))
                     pos = int(key)
                     if pos < len(params):
                         return params[pos]
                     if fed:
-                        used_feed[0] = True
                         return FEED_WORD
                     return ""
                 body = re.sub(r"\$(?:\{([0-9]+|@|\*)\}|([0-9@*]))", fill, body)
-            if used_feed[0] and (REMOVER_TEXT.search(body) or re.search(r"(?<![\w-])(?:chmod|chown|chgrp|chflags)(?![\w-])", body)):
+            if fed and (REMOVER_TEXT.search(body) or re.search(r"(?<![\w-])(?:chmod|chown|chgrp|chflags|mv)(?![\w-])", body)
+                        or re.search(r"(?<![\w-])git\b[^;&|]*\bclean\b", body)):
                 self.xargs_input(chain or [], st.words, st, prev, cwd)    # the feed is judged as it is for a bare `xargs rm`
             self.child_text(body, cwd, depth + 1)
             return body_at

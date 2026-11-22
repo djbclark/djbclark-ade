@@ -1904,3 +1904,56 @@ def test_git_clean_after_a_broken_chain_from_an_unknown_directory_is_held(comman
 
 def test_git_clean_after_a_safe_broken_chain_from_an_unknown_directory_is_allowed():
     assert held("cd /tmp/x && ls; git clean -fdx").allow
+
+
+# ---------------------------------------------------------------- adversary round 7 (PR 939), fixed in round 8
+
+def held_in_three_modes(command):
+    return is_held(command) and not allowed_in(command, HOME) and not allowed_in(command, SRC_X)
+
+
+@pytest.mark.parametrize("command", [
+    "find \"$OUT\"/ -mindepth 1 -maxdepth 1 | xargs -I{} sh -c 'rm -rf \"{}\"'",
+    "find \"$OUT\"/ -mindepth 1 -maxdepth 1 -print0 | xargs -0 -I{} sh -c 'rm -rf \"{}\"'",
+    "find ~ | xargs -I{} sh -c 'rm -rf \"$1\"' _ {}", "find ~ | xargs -I{} bash -c 'echo removing {}; rm -rf \"{}\"'",
+    "find / -maxdepth 1 | xargs -I{} sh -c 'chmod -R 777 {}'", "ls -d */ | xargs -I{} sh -c 'rm -rf {}'", "cat list | xargs -I{} sh -c 'rm -rf {}'",
+    "find ~ | xargs -i sh -c 'rm -rf {}'", "find ~ | xargs --replace sh -c 'rm -rf {}'", "find ~ | xargs -I{} sh -c 'rm -rf {}/build'",
+    "find ~ | xargs -I % sh -c 'rm -rf \"%\"'", "find ~ | xargs -I% sh -c 'rm -rf %'", "find ~ | xargs -I FILE sh -c 'rm -rf FILE'",
+    "echo ~ | xargs -I % sh -c 'rm -rf \"%\"'", "find ~ -print0 | xargs -I % sh -c 'rm -rf \"$1\"' _ %",
+    "find ~ | xargs -I{} sh -c 'unlink {}'", "find ~ | xargs -I{} sh -c 'find \"$1\" -delete' _ {}", "find ~ | xargs -I{} sh -c 'cd \"$1\" && rm -rf *' _ {}",
+])
+def test_an_xargs_replace_string_in_a_shell_body_judges_the_feed(command):
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+def test_a_narrowed_feed_with_a_replace_string_or_a_zero_positional_stays_allowed():
+    assert held("find build -name '*.o' -print0 | xargs -0 -n1 sh -c 'rm -f \"$0\"'").allow
+    assert allowed_in("find build -name '*.o' -print0 | xargs -0 -I{} sh -c 'rm -f \"{}\"'", SRC_X)     # `{}` is a broad glob when the directory is unknown
+    assert held("printf '%s\\n' build dist | xargs -n1 sh -c 'rm -rf \"$0\"'").allow
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -print0 | xargs -0 -n1 sh -c 'git -C \"$1\" clean -fdx' _", "find ~ -print0 | xargs -0 -n1 sh -c 'git -C \"$0\" clean -fdx'",
+    "find ~ | xargs -I{} sh -c 'git -C {} clean -fdx'", "find ~ | xargs -I{} git -C {} clean -fdx",
+])
+def test_an_xargs_fed_git_clean_is_held(command):
+    assert held_in_three_modes(command) or is_held(command), (command, held(command).rule)
+    assert not allowed_in(command, HOME), command
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -print0 | xargs -0 sh -c 'mv \"$@\" /tmp/old/' _", "find ~ -print0 | xargs -0 -I{} mv {} /tmp/old/",
+    "find ~ | xargs -I{} sh -c 'mv {} /tmp/old/'", "ls -A | xargs mv -t /tmp/old", "echo ~ | xargs -I{} mv {} /tmp/old/",
+])
+def test_an_xargs_fed_mv_judges_the_feed(command):
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+def test_an_xargs_fed_mv_of_a_narrowed_feed_stays_allowed():
+    assert allowed_in("find build -name '*.o' -print0 | xargs -0 -I{} mv {} dist/", SRC_X)
+    assert held("find build -name '*.o' -print0 | xargs -0 mv -t dist").allow
+
+
+def test_a_feed_positional_is_a_name_not_an_empty_string():
+    assert held("find build -name '*.d' -print0 | xargs -0 -n1 sh -c 'rm -rf \"$0\"/*'").allow     # not `rm -rf /*`
+    assert is_held("find ~ -print0 | xargs -0 -n1 sh -c 'rm -rf \"$0\"/*'")
