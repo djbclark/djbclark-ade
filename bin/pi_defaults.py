@@ -18,7 +18,7 @@ import route_agent as router
 
 def choose(kind: str, models: list[str], *, native_tools: bool = False,
            excluded: set[str] | None = None, quota: dict | None = None,
-           age: float | None = None, repo: str | None = None) -> dict:
+           age: float | None = None, repo: str | None = None, scope_repo: str | None = None) -> dict:
     """Return a qualified physical Pi route, or a visible no-route result."""
     if kind not in router.KINDS:
         raise ValueError("unknown task kind")
@@ -33,7 +33,7 @@ def choose(kind: str, models: list[str], *, native_tools: bool = False,
                 or router.pi_excluded(spec[0])      # antigravity: native provider only
                 or (native_tools and spec[0].startswith("cursor/"))):
             skip.add(svc.name)
-    picked = router.route(kind, quota=quota, exclude=skip, repo=repo)
+    picked = router.route(kind, quota=quota, exclude=skip, repo=repo, scope_repo=scope_repo)
     if picked is None:
         reason = "No qualified Pi route with fresh quota and the required tools/model"
         if unaccepted:
@@ -109,7 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-service", action="append", default=[])
     p.add_argument("--models-json", metavar="FILE",
                    help="available physical model IDs as a JSON array; - reads stdin")
-    p.add_argument("--repo", help="repository name for the existing router's quota floors")
+    p.add_argument("--repo", help="repository name for the existing router's quota floors (default: the repo of --cwd)")
+    p.add_argument("--cwd", help="directory the slice works in: its repository scopes never_route / [routing.repo_scoped] pools "
+                   "(default: the caller's cwd; a name is never read)")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--block-service", metavar="SERVICE")
     mode.add_argument("--clear-block", metavar="SERVICE")
@@ -146,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 if models is None:
                     raise ValueError("Pi model catalog unavailable")
             result = choose(a.kind, models, native_tools=a.native_tools,
-                            excluded=set(a.exclude_service), repo=a.repo or router.repo_of(os.getcwd()))
+                            excluded=set(a.exclude_service), repo=router.override_repo_of(a), scope_repo=router.scope_repo_of(a))
         print(json.dumps(result, allow_nan=False))
         return 0 if result.get("service") is not None else 1
     except (OSError, ValueError, TypeError):

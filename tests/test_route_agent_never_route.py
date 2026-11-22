@@ -9,6 +9,7 @@ did not reach `route`/`plan` either (only `bin/pi-default`).
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import subprocess
@@ -144,9 +145,11 @@ def test_an_unmeasured_scoped_pool_is_refused(accept):
 def test_an_unknown_repository_is_refused(accept):
     assert chosen("bulk", drained(clinepass=100.0), None) is None
     assert chosen("bulk", drained(clinepass=100.0), "") is None
-    # route() without scope_repo reads `repo`, which defaults to None
+    # route() without scope_repo is fail closed; `repo` is a name that only selects [dispatch.repo_overrides] and never unlocks
+    # a scoped pool (LOW-1 of the PR 945 review, 2026-11-22: it used to be the default scope)
     assert r.route("bulk", quota=drained(clinepass=100.0)) is None
-    assert r.route("bulk", quota=drained(clinepass=100.0), repo="techno-euphora").service.name == "clinepass"
+    assert r.route("bulk", quota=drained(clinepass=100.0), repo="techno-euphora") is None
+    assert r.plan(["bulk"], quota=drained(clinepass=100.0), repo="techno-euphora") == [("bulk", None)]
 
 
 def test_the_floor_refusal_says_why(accept):
@@ -278,3 +281,112 @@ def test_a_malformed_repo_scope_fails_the_load(table, message):
 def test_policy_output_states_the_scope():
     assert r.policy_public()["routing"]["repo_scoped"] == {"clinepass": {"repos": ["techno-euphora"], "min_headroom": 40.0}}
     assert "| routing.repo_scoped" in r.policy_markdown() and "clinepass: techno-euphora only, >= 40% left" in r.policy_markdown()
+
+
+# -- LOW-1 (PR 945 review, 2026-11-22): the retry paths keep the --cwd scope, never fall back to a name --------------------------
+
+def test_the_held_pool_retry_in_plan_keeps_the_cwd_scope(accept):
+    """Mutant M-C: `plan` drops `scope_repo` in the retry that takes a held pool when nothing else is left. The only pool with room
+    is clinepass, held for the kind: the first pass finds nothing, the retry takes it, and only with the scope still passed."""
+    quota = drained(clinepass=100.0)
+    held = {"bulk": {"clinepass"}}
+    kept = r.plan(["bulk"], quota=quota, kind_exclude=held, repo="tendcf", scope_repo="techno-euphora")
+    assert kept[0][1] is not None and kept[0][1].service.name == "clinepass"
+    for scope in ("tendcf", None):                       # a --repo name of techno-euphora does not stand in for the cwd
+        assert r.plan(["bulk"], quota=quota, kind_exclude=held, repo="techno-euphora", scope_repo=scope) == [("bulk", None)]
+
+
+def test_the_unprofiled_retry_in_route_keeps_the_cwd_scope(accept):
+    """Mutant M-B: `route` drops `scope_repo` in the need_profile=False retry. clinepass, the only pool, has no profile for
+    bulk, so the first pass skips it and the retry is what routes it: it must still be scoped."""
+    bare = [dataclasses.replace(r.BY_NAME["clinepass"], models={})]       # the only pool: no other pool is profiled for bulk
+    with mock.patch.object(r, "discover", return_value=bare):
+        quota = drained(clinepass=100.0)
+        c = r.route("bulk", quota=quota, scope_repo="techno-euphora")
+        assert c is not None and c.service.name == "clinepass" and c.model == ""      # the retry ran (the control: a profile-less pool)
+        assert r.route("bulk", quota=quota, scope_repo="tendcf", repo="techno-euphora") is None
+        assert r.route("bulk", quota=quota, repo="techno-euphora") is None
+
+
+def test_cli_route_and_adjust_ignore_a_repo_name_for_the_scope(accept, tmp_path):
+    """`--repo techno-euphora --cwd <other repo>`: the name feeds [dispatch.repo_overrides] only, on every command."""
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    for argv in (("plan", "--kinds", "bulk"), ("adjust", "--kinds", "bulk", "--dry-run")):
+        row = plan_cli(*argv, "--json", "--repo", "techno-euphora", "--cwd", str(other), quota=drained(clinepass=100.0))[0]
+        assert row["service"] is None, argv
+    code, answer = route_cli("--kind", "bulk", "--repo", "techno-euphora", "--cwd", str(other), quota=drained(clinepass=100.0))
+    assert code == 1 and answer["service"] is None
+
+
+def test_cli_route_scope_follows_cwd(accept, tmp_path):
+    te = make_repo(tmp_path, "te", "https://example.test/frdminc/techno-euphora.git")
+    code, answer = route_cli("--kind", "bulk", "--cwd", str(te), quota=drained(clinepass=100.0))
+    assert code == 0 and answer["service"] == "clinepass"
+
+
+def test_pi_default_scopes_by_cwd_never_by_the_repo_name(accept, tmp_path):
+    import pi_defaults
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    models = tmp_path / "models.json"
+    models.write_text(json.dumps(["clinepass/cline-pass/deepseek-v4.1-flash"]))
+    with mock.patch.object(r, "route", return_value=None) as route, \
+            mock.patch.object(r, "load_snapshot", return_value=(drained(clinepass=100.0), 60.0)), \
+            contextlib.redirect_stdout(io.StringIO()):
+        pi_defaults.main(["--models-json", str(models), "--kind", "bulk", "--repo", "techno-euphora", "--cwd", str(other)])
+    assert route.call_args.kwargs["scope_repo"] == "tendcf" and route.call_args.kwargs["repo"] == "techno-euphora"
+
+
+# -- LOW-2: a refusal carries the pools barred for the slice ----------------------------------------------------------------
+
+def route_cli(*argv, quota):
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(r, "load_snapshot", return_value=(quota, 60.0)), \
+            mock.patch.object(r, "operator_disabled", return_value=set()), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = r.main(["route", "--json", *argv])
+    return code, json.loads(out.getvalue())
+
+
+def test_a_route_refusal_names_the_barred_pools(accept, tmp_path):
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    code, answer = route_cli("--kind", "bulk", "--cwd", str(other), quota=drained(clinepass=100.0))
+    assert code == 1 and answer["service"] is None
+    assert any(n.startswith("clinepass: only for techno-euphora") and "tendcf" in n for n in answer["barred"])
+    code, answer = route_cli("--kind", "bulk", "--cwd", str(other), quota=drained())      # no room anywhere: the key is still there
+    assert code == 1 and isinstance(answer["barred"], list)
+
+
+def test_a_plan_row_with_no_pool_names_the_barred_pools(accept, tmp_path):
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    row = plan_cli("plan", "--kinds", "bulk", "--json", "--cwd", str(other), quota=drained(clinepass=100.0))[0]
+    assert row["service"] is None
+    assert any(n.startswith("clinepass: only for techno-euphora") for n in row["barred"])
+
+
+# -- [dispatch.repo_overrides] keys on the --cwd repo too, an explicit --repo overriding it -----------------------------------
+
+OPEN = {"codex": {"remaining": 90.0, "pace_ratio": 2.0}, "claude": {"remaining": 90.0}, "antigravity-argon": {"remaining": 90.0}}
+
+
+def test_repo_overrides_follow_cwd_and_an_explicit_repo_wins(accept, tmp_path, monkeypatch):
+    tendcf = make_repo(tmp_path, "wt-1", "https://example.test/djbclark/tendcf.git")
+    other = make_repo(tmp_path, "wt-2", "https://example.test/djbclark/nix2cf.git")
+    monkeypatch.chdir(other)                                  # the lead plans from another repository
+    first = lambda *extra: plan_cli("plan", "--kinds", "frontier", "--json", *extra, quota=OPEN)[0]["service"]
+    assert first() == "claude"                                # no tendcf override: the score decides
+    assert first("--cwd", str(tendcf)) == "codex"             # tendcf's frontier_order (astra, fable, argon)
+    assert first("--cwd", str(other), "--repo", "tendcf") == "codex"      # an explicit --repo selects the overrides
+    assert first("--cwd", str(tendcf), "--repo", "nix2cf") == "claude"    # and replaces the cwd's
+    code, answer = route_cli("--kind", "frontier", "--cwd", str(tendcf), quota=OPEN)
+    assert code == 0 and answer["service"] == "codex"
+
+
+def test_estimate_floors_read_the_override_repo(accept, tmp_path, monkeypatch):
+    tendcf = make_repo(tmp_path, "wt-1", "https://example.test/djbclark/tendcf.git")
+    monkeypatch.chdir(tmp_path)
+    with mock.patch.object(r, "repo_floors", wraps=r.repo_floors) as floors:
+        plan_cli("plan", "--kinds", "frontier", "--json", "--cwd", str(tendcf), quota=OPEN)
+    assert floors.call_args_list and {c.args[0] for c in floors.call_args_list} == {"tendcf"}
+    with mock.patch.object(r, "repo_floors", wraps=r.repo_floors) as floors:
+        plan_cli("plan", "--kinds", "frontier", "--json", "--cwd", str(tendcf), "--repo", "nix2cf", quota=OPEN)
+    assert {c.args[0] for c in floors.call_args_list} == {"nix2cf"}
