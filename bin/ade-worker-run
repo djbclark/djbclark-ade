@@ -452,14 +452,19 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
 
 
 def state_file(agent_id: str) -> dict | None:
+    """The agent's Paseo state record, or None when there is none, it cannot be read, or the id has MORE THAN ONE file: Paseo
+    writes a moved record's new file before it unlinks the old one and ignores an unlink error, so a stale copy can name another
+    window, and picking one of the two would let `archive-window` skip a running worker (adversary PR 910 LOW-2). None is an
+    unknown window, which the archive check treats as a blocker."""
     home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
-    for p in sorted((home / "agents").glob(f"*/{agent_id}.json")):
-        try:
-            data = json.loads(p.read_text())
-        except (OSError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
-    return None
+    files = sorted((home / "agents").glob(f"*/{agent_id}.json"))
+    if len(files) != 1:
+        return None
+    try:
+        data = json.loads(files[0].read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def state_dir() -> Path:

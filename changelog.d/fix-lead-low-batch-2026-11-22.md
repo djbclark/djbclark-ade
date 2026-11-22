@@ -1,0 +1,7 @@
+### Fixed
+
+- A batch of review LOWs from merged PRs 899, 900, 905, 907, 910, 913, 915, 916, 918, 921 and 925: `claude/hooks/bash_habits_gate.py` clamps `BASH_HABITS_GATE_BUDGET` to 45 s (`inf`, `1e400` or `1e12` no longer crash the hook parent on every call or bring back the 60 s fail-open), the forked scan child ends itself with SIGALRM (budget + 2 s) when the hook parent is killed, and the no-fork fallback keeps `main()`'s old guard and closes its pipe; `bin/ade-worker-run` treats an agent with two Paseo state files as an unknown window, so `archive-window` blocks instead of trusting a stale copy; `bin/ram-census` says `unreadable: cannot be opened or read` instead of `unreadable: unreadable`; new tests pin the exactly-1-MiB settings file, off-in-the-environment with unreadable settings, the load-watch pasture-source race guard and each `tools:` YAML guard of the footer gate alone; wording fixes in `skills/steps/SKILL.md` (a standing permission is one the operator granted), `docs/archived-send-guard.md`, `docs/model-routing.md`, `docs/dispatch-footer.md` (rule 16 names `pending`) and two comments. (#PR)
+
+### Added
+
+- `docs/review-boundary.md` rule: never wait on a running third-party AI reviewer check that hangs because its quota is out (a finished failing check or an untriaged finding still blocks; `bin/ade-merge-ready` stalls a listed bot's check after 15 minutes), pointed to from `docs/code-review.md` rule 9; queue items 112 (PR 924 lows), 113 (the `$((` slow path root cause) and 114 (skills review of the 2026-11-21/22 lead sessions). (#PR)

@@ -468,6 +468,19 @@ than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the nex
 older than that is a `stalled` note, and a bot with no check run or status on the head (never installed, never started, or one that
 reviews without a check) never blocks.
 
+**Never wait on a stuck third-party reviewer check (operator ruling 2026-11-22: "We're out of cursor quota. You need to just
+route out those and you should have a plan that you should always route out things like that").** A vendor AI reviewer whose
+quota is out never finishes (the Cursor Approval Agent and Security Agent checks sat in progress for over 2 h on a site PR while
+a merge job waited on them). A merge wait therefore never blocks on a third-party AI reviewer check (Cursor's agents,
+CodeRabbit, Greptile, Copilot, Codex) that is still running: it is routed out of the wait, not waited out. `bin/ade-merge-ready`
+already does this for a listed bot: a running check younger than `pending_max_minutes` (15) blocks as `review_bot_pending`, one
+older is a `stalled` note and never blocks, and `merge_now` itself reads only `pytest-linux` and the `adversary-marker`, so an unlisted vendor check never gates it. A hand-rolled
+merge script or wait (site PRs, a lead's loop) applies the same cap and never polls such a check past it; when a vendor is known
+to be out of quota, the status post says so and the wait is skipped from the start. What is NOT routed out: a **finished** check with
+a failing conclusion, and an unresolved or untriaged finding (above), still block; so do the required gates (the tests and the
+`adversary-marker`). The adversary review, the tests and the listed-bot triage are the real gates, not a vendor check that cannot
+run.
+
 ```sh
 review-bot-findings --repo OWNER/NAME --pr N [--pr M] [--json] [--check]   # --check: exit 3 untriaged, 4 pending
 review-bot-findings --repo OWNER/NAME --merged-limit 20 --check          # hygiene over the newest merged PRs

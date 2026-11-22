@@ -412,6 +412,22 @@ def test_archive_state_file_without_workspace_id_blocks(window):
     assert r.returncode == 1 and "n1" in r.stderr
 
 
+def test_archive_blocks_an_agent_with_two_state_files(window):
+    """Paseo writes a moved record's new file before it unlinks the old one; a stale copy (sorting first) naming another
+    window must not let archive-window skip a running worker (adversary PR 910 LOW-2): two files = an unknown window."""
+    window.data["agents"] = [{"id": "w1", "status": "running", "labels": {"ade.lead": LEAD}}]
+    window.state("w1", "wks_win1", {"ade.lead": LEAD})                         # agents/proj/w1.json: the live record
+    stale = window.home / "agents/aaa-old/w1.json"                              # sorts first
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"id": "w1", "workspaceId": "wks_elsewhere", "labels": {"ade.lead": LEAD}}))
+    r = archive(window, "--idle-handled")
+    assert r.returncode == 1 and "w1" in r.stderr and "no usable workspaceId" in r.stderr
+    assert ["workspace", "archive"] not in window.verbs()
+    stale.unlink()                                                              # one file again: the running worker blocks as usual
+    r = archive(window, "--idle-handled")
+    assert r.returncode == 1 and "w1" in r.stderr and "no usable workspaceId" not in r.stderr
+
+
 def test_archive_waits_for_the_lead_lock(window):
     import fcntl
     import threading

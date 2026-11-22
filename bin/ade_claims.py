@@ -2715,8 +2715,9 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
                "which is not one of its owner keys.\n")
         agent = d.detail.get("owner_agent") or ""
         session = bool(d.detail.get("owner_session"))
-        # bind-owner refuses to replace a different owner.agent and leaves owner.session alone unless an --owner-session value is passed (never advised: any value replaces or clears it), which keeps both the
-        # M1 shape and the owner.agent rule of is_mine from accepting the caller: offer it only when it ends the refusal
+        # bind-owner refuses to replace a different owner.agent and leaves owner.session alone unless an --owner-session value is
+        # passed (any value replaces or clears it, so the refusal never advises one). A session-bound claim keeps both the M1 shape
+        # and the owner.agent rule of is_mine from accepting the caller: offer the bind only when it ends the refusal
         if is_paseo_agent_id(paseo) and agent in ("", paseo) and not session:
             fix = f"re-bind it with `ade_claims.py bind-owner --id {_esc(d.claim_id)} --owner-agent {_esc(paseo)}`"
         elif session:
