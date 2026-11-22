@@ -32,32 +32,9 @@ def acceptance_path() -> Path:
 
 
 def load_acceptance(path: Path | None = None) -> dict[str, dict[str, Any]]:
-    """Return `{pool: {accepted: bool, note: str, ...}}`. Missing file → {}. Unreadable → raise."""
-    target = path or acceptance_path()
-    try:
-        raw = target.read_bytes()
-    except FileNotFoundError:
-        return {}
-    data = tomllib.loads(raw.decode("utf-8"))
-    pools = data.get("pools")
-    if pools is None:
-        return {}
-    if not isinstance(pools, dict):
-        raise ValueError("pi-pool-acceptance.toml: [pools] must be a table of pool tables")
-    out: dict[str, dict[str, Any]] = {}
-    for name, row in pools.items():
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("pi-pool-acceptance.toml: pool names must be non-empty strings")
-        if not isinstance(row, dict):
-            raise ValueError(f"pi-pool-acceptance.toml: pools.{name} must be a table")
-        accepted = row.get("accepted", False)
-        if not isinstance(accepted, bool):
-            raise ValueError(f"pi-pool-acceptance.toml: pools.{name}.accepted must be a bool")
-        note = row.get("note", "")
-        if note is not None and not isinstance(note, str):
-            raise ValueError(f"pi-pool-acceptance.toml: pools.{name}.note must be a string")
-        out[name] = {"accepted": accepted, "note": note or ""}
-    return out
+    """Return `{pool: {accepted: bool, note: str, ...}}`. Missing file → {}. Unreadable → raise.
+    The reader is `route_agent.load_pi_acceptance`, the one `route`/`plan` apply too."""
+    return router.load_pi_acceptance(path or acceptance_path())
 
 
 def routing_pi_services() -> list[str]:

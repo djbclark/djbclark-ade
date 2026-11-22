@@ -151,7 +151,7 @@ Paseo's provider/model identifier is `pi/clinepass/cline-pass/deepseek-v4.1-flas
 Existing interactive Pi sessions need `/reload` to discover the new extension.
 No running agents are restarted. This does not change the new-session default.
 
-ClinePass stays in `never_route` and out of ADE Auto. The previous reservation
+ClinePass stays in `never_route` and out of ADE Auto (`route`/`plan` enforce both: `never_route` for the curated row since 2026-11-22, with the techno-euphora repo scope of [model-routing.md](model-routing.md) B8a as the one exception, and the `accepted = false` row of the Pi pool acceptance). The previous reservation
 for Hermes/Hindsight continues to apply to automatic spending; this manual
 exception spends the same subscription allowance. Rollback removes only this
 extension path from the current extension list, retaining all later settings,

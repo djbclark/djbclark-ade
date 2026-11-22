@@ -131,7 +131,7 @@ def test_old_json_keys_are_unchanged_and_the_new_key_is_additive():
     slices, _ = _slices("plan", "--kinds", "code,research", "--slice", "a", "--slice", "b", "--lead", LEAD, "--cwd", "/w")
     for s in slices:
         assert OLD_KEYS <= set(s)
-        assert set(s) - OLD_KEYS == {"dispatch_warnings", "skipped", "model_note"}
+        assert set(s) - OLD_KEYS == {"dispatch_warnings", "skipped", "barred", "model_note"}
         assert s["service"] and s["agent"] and s["model"] is not None and isinstance(s["why"], str)
 
 

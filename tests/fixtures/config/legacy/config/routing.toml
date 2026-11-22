@@ -97,7 +97,10 @@ plenty_min = 20.0
 default_profile = { bulk = 60, mechanical = 60 }
 # Never a routable service, whatever aiuse or Paseo lists (the [discovery] table until 2026-11-07, slim-down E7):
 # hermes is the operator's own assistant (operator 2026-10-15). clinepass: reserved as the lifeline/substrate of BOTH
-# Hermes and Dann (operator 2026-10-23), never a slice target. Retired TUIs whose accounts aiuse still reports or
+# Hermes and Dann (operator 2026-10-23), never a slice target, except for the repo scope of
+# [routing.repo_scoped] below (operator 2026-11-02). A name here is never a candidate of `route`/`plan`, curated
+# `[[service]]` row or discovered (until 2026-11-22 only discovery applied it, so the curated clinepass row still
+# routed: tendcf's wearos-watch-research slice went to clinepass). Retired TUIs whose accounts aiuse still reports or
 # whose providers Paseo still lists (slim-down E9, 2026-11-06; grok 2026-11-07): no curated row drives them, so
 # discovery must not surface them as unprofiled, dispatchable services (`antigravity` here is the provider's other
 # pools, Flash and Claude/GPT; its Argon window is the curated `antigravity-argon` row). grok-bot is the Cursor-billed Chief of
@@ -109,6 +112,20 @@ never_route = ["hermes", "clinepass", "antigravity", "alibaba", "devin", "copilo
 # the curated service that already covers it, so it never becomes a second entry (Paseo's `opencode` provider is the
 # Go pool). The retired TUIs have no alias: they are `never_route` above.
 aliases = { claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go" }
+
+# Repo scope: a pool named here is a candidate ONLY for a slice whose --cwd resolves (git origin remote name, else the
+# git common dir's parent; `repo_of`) to one of its `repos`, lower case. It overrides `never_route` for that pool and nothing
+# else: the Pi pool acceptance (config/pi-pool-acceptance.toml) and the quota gates still apply. Fail closed: a cwd whose
+# repo cannot be determined, a repo not listed, an unmeasured pool or one under `min_headroom` percent (the tightest
+# window) is refused, and the refusal is named in the plan's `barred` list. The slice name is never read.
+# clinepass (operator 2026-11-02, site-private memory feedback_go_cline_pools_scoped_to_techno_euphora_hermes): only the
+# techno-euphora project and Hermes may route to the cline pool, so the 2026-10-23 lifeline protection of Hermes and Dann
+# stays: refused under 40% headroom (tunable here). Hermes is not a slice target (`never_route`), so it needs no entry.
+# opencode-go carries the same ruling (techno-euphora and Hermes only; bulk/mechanical, never code) but is `retired`
+# (2026-11-08), so it is not routed at all and has no entry here; add `[routing.repo_scoped.opencode-go]` the day it returns.
+[routing.repo_scoped.clinepass]
+repos = ["techno-euphora"]
+min_headroom = 40.0
 
 # Launch-time pool adjustment with restoration (W8, 2026-11-12; `route_agent.py adjust`, bin/route_adjust.py).
 # A kind's last routed pool that falls below its floor is held off and NEW launches of that kind go to the next
@@ -527,9 +544,12 @@ good_at = { bulk = 40, code = 40, mechanical = 40, research = 38 }
 billing = "subscription"
 # An API-key bundle we hold, so Hermes may call it directly. The
 # old blanket never_bulk rule was retired 2026-08-24 in favour of
-# the measured burn-rate alert (agent_stats.py burn). aiuse's
-# [disabled_services] keeps it out of `plan` since 2026-10-08.
-note = "Hermes-usable API pool; watch the burn alert"
+# the measured burn-rate alert (agent_stats.py burn). It is in [routing].never_route (lifeline of Hermes and Dann,
+# operator 2026-10-23) and `route`/`plan` apply that to this curated row too (2026-11-22; the stale claim that aiuse's
+# [disabled_services] kept it out of `plan` since 2026-10-08 stopped being true). The one way in is the repo scope
+# [routing.repo_scoped.clinepass] (techno-euphora, 40% floor, operator 2026-11-02), and even there the Pi pool acceptance
+# (config/pi-pool-acceptance.toml, `[pools.clinepass] accepted = false`) keeps it out until the operator flips it.
+note = "Hermes-usable API pool; watch the burn alert; never a slice target outside its repo scope"
 access = "api"
 agent = "pi"
 models = { bulk = "clinepass/cline-pass/deepseek-v4.1-flash", mechanical = "clinepass/cline-pass/deepseek-v4.1-flash", code = "clinepass/cline-pass/glm-5.3", research = "clinepass/cline-pass/glm-5.3" }

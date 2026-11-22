@@ -85,7 +85,7 @@ for that pool. `bin/ade-pi-pools check` exits 0 when every routing Pi service is
 accepted, and exits 2 with the blocking names otherwise; `ls` lists checklist
 rows (Grok, Antigravity, SIPB, Go, …) that stay out of auto until both accepted
 here and added to the routing shortlist. Cursor and Z.ai are accepted as of the
-2026-11-08 live path (D3–D5); other pools remain false by default.
+2026-11-08 live path (D3–D5); other pools remain false by default. **`bin/route_agent.py route`, `plan` and `adjust` apply the same gate since 2026-11-22**: an unaccepted Pi service is no candidate there either, and an unreadable acceptance file leaves every Pi service unaccepted (before, only `pi-default` read the file, so `plan` could name `clinepass`; [model-routing.md](model-routing.md) B8b).
 
 B4a. **Doctor advisory (2026-11-10).** `ade-install doctor` / `just install-doctor`
 observes the same acceptance file: it `warn`s naming every still-UNACCEPTED

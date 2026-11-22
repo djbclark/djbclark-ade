@@ -57,18 +57,17 @@ class TestStandingRules(unittest.TestCase):
         for kind in ("bulk", "mechanical"):
             self.assertNotEqual(r.route(kind, quota=IDLE).service.name, "clinepass")
 
-    def test_clinepass_is_usable_when_it_is_the_pool_with_room(self):
-        """Retired rule, deliberately inverted.
+    def test_clinepass_is_not_usable_even_when_it_is_the_pool_with_room(self):
+        """Re-inverted 2026-11-22 (operator 2026-10-23, 2026-11-02).
 
-        Until 2026-08-24 a standing order forbade bulk on clinepass outright.
-        That was a guess standing in for a measurement; it is now replaced by
-        `agent_stats.py burn`, which projects hours-to-empty. So when clinepass
-        is the pool with headroom, using it is correct."""
+        The 2026-08-24 burn-alert test said that a clinepass with headroom is correct to use. clinepass is the lifeline of
+        Hermes and Dann (`[routing].never_route`) and only the techno-euphora repo may route to it
+        (`[routing.repo_scoped.clinepass]`, tests/test_route_agent_never_route.py), however much room it reads: a slice
+        with no known repository, or in another one, finds nothing."""
         tight = {name: {"remaining": 0.0} for name in IDLE}
         tight["clinepass"] = {"remaining": 100.0}
-        choice = r.route("bulk", quota=tight)
-        self.assertIsNotNone(choice)
-        self.assertEqual(choice.service.name, "clinepass")
+        self.assertIsNone(r.route("bulk", quota=tight))
+        self.assertIsNone(r.route("bulk", quota=tight, repo="tendcf"))
 
     def test_prepaid_tier_is_retired(self):
         for name in ("opencode-zen",):
@@ -516,19 +515,20 @@ class TestQuotaFamilyIsolation(unittest.TestCase):
 
     def test_canary_first_caps_each_blind_pool_at_one_and_prints_max(self):
         services = [r.Service(name, name, {"research": 1}, "subscription", max_parallel=4,
-                              agent="antigravity" if name == "antigravity" else "pi",
+                              agent="antigravity" if name == "antigravity-neon" else "pi",     # not the never_route name `antigravity`
                               models={"research": "zai/glm-5.3-flash"})
-                    for name in ("antigravity", "openai_api", "zai")]
+                    for name in ("antigravity-neon", "openai_api", "zai")]
         services.append(r.Service("zai-alias", "alias", {"research": 1}, "subscription",
                                   shares_pool="zai", agent="pi", max_parallel=4,
                                   models={"research": "zai/glm-5.3-flash"}))
         quota = {s.name: {"remaining": 80} for s in services}
         with mock.patch.object(r, "discover", return_value=services), \
                 mock.patch.object(r, "operator_disabled", return_value=set()), \
+                mock.patch.object(r, "pi_unaccepted_services", return_value=set()), \
                 mock.patch.object(r, "load_snapshot", return_value=(quota, 60)):
             rows = r.plan(["research"] * 6, quota=quota)
             names = [c.service.name for _, c in rows if c]
-            self.assertEqual(sorted(names), ["antigravity", "openai_api", "zai"])
+            self.assertEqual(sorted(names), ["antigravity-neon", "openai_api", "zai"])
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 self.assertEqual(r.main(["plan", "--kinds", "research,research", "--json"]), 0)
