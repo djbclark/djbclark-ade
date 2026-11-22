@@ -7,7 +7,8 @@ detector the evidence file proposed ("fix 1"): a zero-token scan the machine's w
 A STUB is an agent-report file `<reports>/<session>/<name>-report.md` whose first line is `STATUS: working` and that has no
 `<report>.done` (the delivery footer, docs/dispatch-footer.md, makes every sub-agent write one first). A stub is STALLED when the
 transcript that writes it (`<projects>/<proj>/<session>/subagents/agent-<id>.jsonl`) has not been written for more than `stale_min`
-minutes AND its last message record is not a final assistant message. Stubs older than `max_age_h` are skipped.
+minutes AND its last message record is not a final assistant message (a real model's `end_turn`/`stop_sequence`; Claude Code's synthetic
+API-error and REPL inner-tool records are not finishes). Stubs older than `max_age_h`, and stubs with a `<report>.stall-ack` file, are skipped.
 
 Linking a stub to its transcript, never guessing (agent_footer_gate.py derives the report path from the launch):
   1. the transcript's FIRST record (the sub-agent's prompt, which carries the filled footer) names the stub's absolute path as ITS OWN
@@ -21,9 +22,10 @@ A pending tool call is not a stall: when the last message is an assistant `tool_
 `bgrun` test run, a `wait-file --timeout 1500`), so that case waits `tool_grace_min` (default 35: just over the 30-minute foreground
 cap) or the call's own `timeout` plus 5 minutes, whichever is longer.
 
-Notify mode only pings (`hermes-ping`) and, for a parent that is a live IDLE Paseo agent, `paseo send --json --no-wait` it the resume
-instruction. It never resumes, restarts, archives or kills anything. Per stall, each action repeats at most once per `repeat_h` (6 h);
-the state is `<state>/seen.json`, written atomically under a lock. Both tools are called by the absolute paths in `Config`: nothing
+Notify mode only pings (`hermes-ping`) and, for a parent that is a live IDLE Paseo agent, sends it one resume instruction through the ADE
+send guard shim (`paseo send --json --no-wait -- <id>`; the shim redirects a handed-off parent, docs/archived-send-guard.md). It never resumes,
+restarts, archives or kills anything. Per stall, each action repeats at most once per `repeat_h` (6 h) and at most `max_notices` (2) times in
+all; `max_pings` caps pings and sends per run, repeats included. The state is `<state>/seen.json`, written atomically under a lock. Both tools are called by the absolute paths in `Config`: nothing
 here looks at PATH, and no function reads the real home unless `Config.home` is it.
 """
 from __future__ import annotations
@@ -35,7 +37,9 @@ import os
 import re
 import subprocess
 import sys
+import shlex
 import tempfile
+from collections import deque
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +54,10 @@ MAX_FIRST_RECORD_BYTES = 4 * 1024 * 1024
 MAX_TAIL_BYTES = 64 * 1024 * 1024
 CHUNK = 256 * 1024
 NOTIFY_TIMEOUT_S = 60
+AGENT_ID_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]*")         # a Paseo agent id never starts with `-` (it is passed to `paseo` as an argument)
+SHIM_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"     # the send guard shim needs python3; the caller's PATH may be a launchd one
+MAX_LISTED = 10
+GUARD_SHIM = Path(__file__).resolve().parent.parent / "libexec/agent-bin/paseo"   # the checkout's `paseo` send guard (docs/archived-send-guard.md)
 
 # The own-report patterns of claude/hooks/agent_footer_gate.py, simplified (that file runs at import and cannot be imported).
 _LEFT = r"(?<![\w.~$@+/-])"
@@ -78,11 +86,13 @@ class Config:
     repeat_h: float = 6.0
     now: float = field(default_factory=time.time)
     hermes_ping: Path | None = None
-    paseo: Path | None = None
+    paseo: Path | None = None                # the real paseo: `agent inspect` goes straight to it
+    paseo_guard: Path | None = None          # the ADE send guard shim (libexec/agent-bin/paseo): every `send` goes through it; None: via `paseo`
     repo: str = "djbclark-ade"
     dry_run: bool = False
     baseline: bool = False
     max_pings: int = 5
+    max_notices: int = 2                     # per stall and per action: the first announcement and one repeat, then silence
 
 
 def make_config(home: Path, **over: Any) -> Config:
@@ -125,8 +135,8 @@ def find_stubs(cfg: Config) -> tuple[list[Stub], int]:
                 continue
             with open(p, "rb") as f:
                 first = f.readline(256).decode("utf-8", "replace").strip()
-            if first != STUB_FIRST_LINE or Path(str(p) + ".done").exists():
-                continue
+            if first != STUB_FIRST_LINE or Path(str(p) + ".done").exists() or Path(str(p) + ".stall-ack").exists():
+                continue                        # `.stall-ack`: the operator's or lead's "known, stop reporting this one" (PR 938 LOW-1)
             mtime = p.stat().st_mtime
         except OSError:
             continue
@@ -191,14 +201,10 @@ def description_of(t: Transcript) -> str | None:
     return desc if isinstance(desc, str) else None
 
 
-def own_reports(text: str) -> tuple[set[str], bool]:
-    """(the report paths the prompt gives as its own, whether it names any `*-report.md` path at all). Own: the footer's delivery
-    line and `Report path:` / `Report:` labels; with neither, the one `*-report.md` path of the prompt when it has just one."""
-    own = set(FOOTER_DELIVERY.findall(text)) | set(REPORT_LABEL.findall(text))
-    anyp = set(ANY_REPORT_PATH.findall(text))
-    if not own and len(anyp) == 1:
-        own = anyp
-    return own, bool(anyp)
+def own_reports(text: str) -> tuple[set[str], set[str]]:
+    """(the report paths the prompt labels as its own, every `*-report.md` path it names). Labelled: the footer's delivery line and
+    `Report path:` / `Report:` labels."""
+    return set(FOOTER_DELIVERY.findall(text)) | set(REPORT_LABEL.findall(text)), set(ANY_REPORT_PATH.findall(text))
 
 
 def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str | None]) -> list[tuple[Transcript, str]]:
@@ -212,13 +218,19 @@ def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str
         text = prompts[t.path]
         if text is None:
             continue
-        own, named_any = own_reports(text)
-        if stub.path in own:
+        labelled, named = own_reports(text)
+        if stub.path in labelled:
             found.append((t, "path"))
-        elif not named_any and t.session == stub.session:
+        elif not labelled and named == {stub.path}:
+            found.append((t, "path-mention"))          # a prompt whose only report path is this one, with no label
+        elif not named and t.session == stub.session:
             desc = description_of(t)
             if desc is not None and slug(desc) + "-report.md" == stub.name:
                 found.append((t, "session+description"))
+    if any(how == "path" for _, how in found):
+        # An agent that merely read the stub's path (a footerless prompt "read X-report.md") must not mask the writer's death
+        # when it finishes: once a transcript names the stub as its own, links made by the bare mention are dropped (PR 938 LOW-2).
+        found = [(t, how) for t, how in found if how != "path-mention"]
     return found
 
 
@@ -226,7 +238,7 @@ def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str
 
 @dataclass
 class LastMessage:
-    kind: str                 # final | tool_pending | assistant | user | none
+    kind: str                 # final | tool_pending | api_error | assistant | user
     tool_timeout_min: float | None = None
 
 
@@ -235,19 +247,27 @@ def _reverse_lines(path: Path):
     with open(path, "rb") as f:
         pos = f.seek(0, os.SEEK_END)
         floor = max(0, pos - MAX_TAIL_BYTES)
-        carry = b""
+        tail: deque[bytes] = deque()        # the pieces of the line cut by the previous chunk's start, joined once per line (linear)
         while pos > floor:
             step = min(CHUNK, pos - floor)
             pos -= step
             f.seek(pos)
-            buf = f.read(step) + carry
-            parts = buf.split(b"\n")
-            carry = parts[0]
-            for line in reversed(parts[1:]):
+            parts = f.read(step).split(b"\n")
+            if len(parts) == 1:
+                tail.appendleft(parts[0])
+                continue
+            tail.appendleft(parts[-1])
+            line = b"".join(tail)
+            if line.strip():
+                yield line
+            for line in reversed(parts[1:-1]):
                 if line.strip():
                     yield line
-        if pos == 0 and carry.strip():
-            yield carry
+            tail = deque([parts[0]])
+        if pos == 0:
+            line = b"".join(tail)
+            if line.strip():
+                yield line
 
 
 def last_message(path: Path) -> LastMessage | None:
@@ -265,15 +285,21 @@ def last_message(path: Path) -> LastMessage | None:
                 return LastMessage("user")
             msg = rec.get("message") or {}
             stop = msg.get("stop_reason")
-            if stop in FINAL_STOP_REASONS:
-                return LastMessage("final")
             blocks = msg.get("content") if isinstance(msg.get("content"), list) else []
             calls = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+            # Claude Code writes synthetic assistant records (`model: "<synthetic>"`) with stop_reason `stop_sequence`: an API-error
+            # ending ("out of usage credits", "Failed to authenticate", `isApiErrorMessage`) and the inner tool calls of the REPL and
+            # Poll tools. Neither is a finished agent (PR 938 MED-1), so a pending tool call is looked for BEFORE the stop reason and a
+            # synthetic text record is its own kind.
             if stop == "tool_use" or calls:
                 timeouts = [b["input"]["timeout"] for b in calls
                             if isinstance(b.get("input"), dict) and isinstance(b["input"].get("timeout"), (int, float))
                             and not isinstance(b["input"].get("timeout"), bool) and not b["input"].get("run_in_background")]
                 return LastMessage("tool_pending", max(timeouts) / 60000.0 if timeouts else None)
+            if rec.get("isApiErrorMessage") or msg.get("model") == "<synthetic>":
+                return LastMessage("api_error")
+            if stop in FINAL_STOP_REASONS:
+                return LastMessage("final")
             return LastMessage("assistant")
     except OSError:
         return None
@@ -322,7 +348,7 @@ def paseo_parent(cfg: Config, session: str) -> tuple[str | None, bool]:
             continue
         sessions = {(rec.get("persistence") or {}).get("sessionId"), (rec.get("persistence") or {}).get("nativeHandle"),
                     (rec.get("runtimeInfo") or {}).get("sessionId")}
-        if session not in sessions or not isinstance(rec.get("id"), str):
+        if session not in sessions or not isinstance(rec.get("id"), str) or not AGENT_ID_RE.fullmatch(rec["id"]):
             continue
         live = not rec.get("archivedAt")
         if best is None or (live and not best[1]):
@@ -367,9 +393,21 @@ def resume_text(agent_id: str, report: str) -> str:
             f"Resume it with SendMessage to {agent_id}: \"resume from where you stopped\" (it continues from its transcript).")
 
 
+def resume_text_many(items: list[tuple[str, str]]) -> str:
+    """One message for a parent with several stalled sub-agents: (agent id, report) per line, at most MAX_LISTED."""
+    if len(items) == 1:
+        return resume_text(*items[0])
+    lines = [f"{len(items)} of your sub-agents stopped mid-run (transcript silent, report has no .done). Resume each with SendMessage "
+             "to its id, text \"resume from where you stopped\" (it continues from its transcript):"]
+    lines += [f"- {a} (report {r})" for a, r in items[:MAX_LISTED]]
+    if len(items) > MAX_LISTED:
+        lines.append(f"- and {len(items) - MAX_LISTED} more: run ade-subagent-stalls")
+    return "\n".join(lines)
+
+
 def suggested_action(agent_id: str, report: str, session: str, paseo_id: str | None, live: bool) -> str:
     if paseo_id and live:
-        return f"paseo send --json --no-wait {paseo_id} \"{resume_text(agent_id, report)}\""
+        return shlex.join(["paseo", "send", "--json", "--no-wait", "--", paseo_id, resume_text(agent_id, report)])
     return f"SendMessage to {agent_id} from session {session} to resume"
 
 
@@ -439,8 +477,12 @@ def _write_atomic(path: Path, data: dict) -> None:
 
 
 def _run(argv: list[str], warnings: list[str]) -> subprocess.CompletedProcess | None:
+    return _run_env(argv, None, warnings)
+
+
+def _run_env(argv: list[str], env: dict[str, str] | None, warnings: list[str]) -> subprocess.CompletedProcess | None:
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=NOTIFY_TIMEOUT_S, stdin=subprocess.DEVNULL)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=NOTIFY_TIMEOUT_S, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         warnings.append(f"{argv[0]} failed: {exc}")
         return None
@@ -457,7 +499,7 @@ def parent_idle(cfg: Config, paseo_id: str, warnings: list[str]) -> bool:
     if cfg.paseo is None:
         warnings.append("no paseo path configured: parent not messaged")
         return False
-    proc = _run([str(cfg.paseo), "agent", "inspect", paseo_id, "--json"], warnings)
+    proc = _run([str(cfg.paseo), "agent", "inspect", "--json", "--", paseo_id], warnings)
     if proc is None or proc.returncode != 0:
         return False
     try:
@@ -467,10 +509,36 @@ def parent_idle(cfg: Config, paseo_id: str, warnings: list[str]) -> bool:
     return isinstance(info, dict) and info.get("Archived") is False and str(info.get("Status", "")).lower() == "idle"
 
 
+def _due(entry: dict, action: str, cfg: Config) -> bool:
+    """Is `action` (hermes | paseo) owed for this stall: never done, or done fewer than max_notices times and repeat_h ago."""
+    last = entry.get(action)
+    if not last:
+        return True
+    return entry.get(action + "_count", 1) < cfg.max_notices and cfg.now - last >= cfg.repeat_h * 3600.0
+
+
+def _record(entry: dict, action: str, now: float) -> None:
+    entry[action] = now
+    entry[action + "_count"] = entry.get(action + "_count", 0) + 1
+
+
+def _send_argv_env(cfg: Config, parent: str, text: str) -> tuple[list[str], dict[str, str] | None]:
+    """The send goes through the ADE guard shim when one is configured (it redirects a handed-off parent to its successor and refuses
+    an archived one, docs/archived-send-guard.md); the shim finds the real paseo through ADE_REAL_PASEO, never through PATH."""
+    if cfg.paseo_guard is not None:
+        env = {**os.environ, "PATH": SHIM_PATH}
+        if cfg.paseo is not None:
+            env["ADE_REAL_PASEO"] = str(cfg.paseo)
+        return [str(cfg.paseo_guard), "send", "--json", "--no-wait", "--", parent, text], env
+    return [str(cfg.paseo), "send", "--json", "--no-wait", "--", parent, text], None
+
+
 def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
-    """Ping each NEW stall, and each one again at most once per repeat_h. Returns warnings and event lines (printed to stderr)."""
+    """Announce each stall: a hermes-ping, and one `paseo send` per live idle Paseo parent listing its stalled sub-agents. Each action
+    repeats for a stall at most once per repeat_h and at most max_notices times; every ping counts against max_pings per run (a repeat
+    too, so an event that orphaned many sub-agents drains over several runs instead of all at once), and so does every send. A stall
+    not announced for lack of a slot keeps waiting. Returns warnings and event lines (printed to stderr)."""
     events: list[str] = []
-    repeat_s = cfg.repeat_h * 3600.0
     if not cfg.dry_run:
         cfg.state_dir.mkdir(parents=True, exist_ok=True)
     state_file = cfg.state_dir / "seen.json"
@@ -484,6 +552,7 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
         before = json.dumps(data, sort_keys=True)
         live_keys = {stall_key(s) for s in stalls}
         pings = 0
+        by_parent: dict[str, list[tuple[Stall, dict]]] = {}
         for s in stalls:
             entry = seen.setdefault(stall_key(s), {"first_seen": cfg.now, "report": s.report, "agent_id": s.agent_id})
             if cfg.baseline:
@@ -491,38 +560,47 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                 continue
             if entry.get("baseline"):
                 continue
-            if pings >= cfg.max_pings and not entry.get("hermes_ping"):
-                events.append(f"ping cap ({cfg.max_pings} per run): {s.agent_id} waits for the next run")
-                seen.pop(stall_key(s), None)
-                continue
-            if not entry.get("hermes_ping") or cfg.now - entry["hermes_ping"] >= repeat_s:
+            if _due(entry, "hermes_ping", cfg):
                 if cfg.dry_run:
                     events.append(f"dry-run: would hermes-ping: {ping_text(cfg, s)}")
+                elif pings >= cfg.max_pings:
+                    events.append(f"ping cap ({cfg.max_pings} per run): {s.agent_id} waits for the next run")
                 elif cfg.hermes_ping is None:
                     events.append("no hermes-ping path configured: not pinged")
                 else:
                     proc = _run([str(cfg.hermes_ping), ping_text(cfg, s)], events)
                     pings += 1
                     if proc is not None and proc.returncode == 0:
-                        entry["hermes_ping"] = cfg.now
+                        _record(entry, "hermes_ping", cfg.now)
                         events.append(f"pinged: {s.agent_id}")
                     elif proc is not None:
                         events.append(f"hermes-ping rc={proc.returncode} for {s.agent_id}: {(proc.stderr or '').strip()[:200]}")
-            if s.parent_paseo_agent_id and s.parent_live and (not entry.get("paseo_send") or cfg.now - entry["paseo_send"] >= repeat_s):
-                if cfg.dry_run:
-                    events.append(f"dry-run: would paseo send {s.parent_paseo_agent_id} if idle")
-                elif parent_idle(cfg, s.parent_paseo_agent_id, events):
-                    proc = _run([str(cfg.paseo), "send", "--json", "--no-wait", s.parent_paseo_agent_id,
-                                 resume_text(s.agent_id, s.report)], events)
-                    if proc is not None and proc.returncode == 0:
-                        entry["paseo_send"] = cfg.now
-                        events.append(f"sent resume instruction to {s.parent_paseo_agent_id}")
-                    elif proc is not None:
-                        events.append(f"paseo send rc={proc.returncode} to {s.parent_paseo_agent_id}: {(proc.stderr or '').strip()[:200]}")
-                else:
-                    events.append(f"parent {s.parent_paseo_agent_id} is not an idle live agent: not messaged (retried next run)")
-            if not entry.get("hermes_ping") and not entry.get("paseo_send") and not cfg.dry_run:
-                seen.pop(stall_key(s), None)        # nothing delivered: not "seen", so the next run tries again
+            if s.parent_paseo_agent_id and s.parent_live and _due(entry, "paseo_send", cfg):
+                by_parent.setdefault(s.parent_paseo_agent_id, []).append((s, entry))
+        sends = 0
+        for parent, group in by_parent.items():
+            items = [(s.agent_id, s.report) for s, _ in group]
+            if cfg.dry_run:
+                events.append(f"dry-run: would paseo send {parent} if idle ({len(items)} sub-agent(s))")
+            elif sends >= cfg.max_pings:
+                events.append(f"send cap ({cfg.max_pings} per run): parent {parent} waits for the next run")
+            elif parent_idle(cfg, parent, events):
+                argv, env = _send_argv_env(cfg, parent, resume_text_many(items))
+                sends += 1
+                proc = _run_env(argv, env, events)
+                if proc is not None and proc.returncode == 0:
+                    for _, entry in group:
+                        _record(entry, "paseo_send", cfg.now)
+                    events.append(f"sent resume instruction to {parent} ({len(items)} sub-agent(s))")
+                elif proc is not None:
+                    events.append(f"paseo send rc={proc.returncode} to {parent}: {(proc.stderr or '').strip()[:200]}")
+            else:
+                events.append(f"parent {parent} is not an idle live agent: not messaged (retried next run)")
+        if not cfg.dry_run:
+            for s in stalls:
+                entry = seen.get(stall_key(s))
+                if entry and not entry.get("baseline") and not entry.get("hermes_ping") and not entry.get("paseo_send"):
+                    del seen[stall_key(s)]          # nothing delivered: not "seen", so the next run tries again
         for key in [k for k in seen if k not in live_keys]:
             del seen[key]                            # no longer stalled: a later stall of it is new
         if not cfg.dry_run and json.dumps(data, sort_keys=True) != before:
@@ -567,9 +645,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--state-dir", type=Path)
     ap.add_argument("--hermes-ping", type=Path, help="absolute path of hermes-ping (default: <home>/.local/bin/hermes-ping)")
     ap.add_argument("--paseo", type=Path, help="absolute path of paseo (default: <home>/.local/bin/paseo)")
+    ap.add_argument("--paseo-guard", type=Path,
+                    help="absolute path of the ADE send guard shim every send goes through (default: libexec/agent-bin/paseo of this checkout)")
+    ap.add_argument("--max-notices", type=int, default=2,
+                    help="announce a stall at most this many times per action (default 2: the first and one repeat); then it is quiet")
     ap.add_argument("--baseline", action="store_true",
                     help="with --notify: record every stall found now as known, announce nothing (switching the watcher on; they are never pinged)")
-    ap.add_argument("--max-pings", type=int, default=5, help="at most this many hermes pings per run (default 5); the rest wait for the next run")
+    ap.add_argument("--max-pings", type=int, default=5, help="at most this many hermes pings, and this many parent sends, per run (default 5), repeats included; the rest wait for the next run")
     ap.add_argument("--now", type=float, help=argparse.SUPPRESS)
     return ap
 
@@ -578,7 +660,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
     home = args.home if args.home is not None else Path.home()
     over: dict[str, Any] = {"stale_min": args.stale_min, "max_age_h": args.max_age_h, "tool_grace_min": args.tool_grace_min,
                             "repeat_h": args.repeat_h, "dry_run": args.dry_run, "baseline": args.baseline,
-                            "max_pings": args.max_pings}
+                            "max_pings": args.max_pings, "max_notices": args.max_notices}
     for opt, key in (("reports_dir", "reports_dir"), ("projects_dir", "projects_dir"), ("paseo_agents_dir", "paseo_agents_dir"),
                      ("state_dir", "state_dir")):
         if getattr(args, opt) is not None:
@@ -587,6 +669,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         over["now"] = args.now
     over["hermes_ping"] = args.hermes_ping if args.hermes_ping is not None else Path(home) / ".local/bin/hermes-ping"
     over["paseo"] = args.paseo if args.paseo is not None else Path(home) / ".local/bin/paseo"
+    over["paseo_guard"] = args.paseo_guard if args.paseo_guard is not None else GUARD_SHIM
     return make_config(home, **over)
 
 
@@ -597,10 +680,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         cfg = config_from_args(args)
+        if cfg.max_notices < 1:
+            raise StallError("--max-notices must be at least 1")
         for opt in ("stale_min", "max_age_h", "tool_grace_min", "repeat_h", "max_pings"):
             if getattr(cfg, opt) < 0:
                 raise StallError(f"--{opt.replace('_', '-')} must not be negative")
-        for tool in (cfg.hermes_ping, cfg.paseo):
+        for tool in (cfg.hermes_ping, cfg.paseo, cfg.paseo_guard):
             if tool is not None and not tool.is_absolute():
                 raise StallError(f"{tool}: tool paths must be absolute")
         if args.notify and not cfg.dry_run and not (cfg.hermes_ping and os.access(cfg.hermes_ping, os.X_OK)):

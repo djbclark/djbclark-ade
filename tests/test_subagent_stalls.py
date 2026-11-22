@@ -42,7 +42,11 @@ class World:
             "if argv[:2] == ['agent', 'inspect']:\n"
             "    sys.stdout.write(open(os.path.join(here, 'inspect.json')).read())\n"
             "sys.exit(0)")
+        self.guard = self._tool("paseo-guard", "sys.exit(0)")        # stands in for libexec/agent-bin/paseo: every `send` goes here
         self.set_parent_state(archived=False, status="idle")
+
+    def sends(self) -> list[list[str]]:
+        return self.calls(self.guard)
 
     def _tool(self, name: str, body: str) -> Path:
         d = self.tools / name
@@ -62,7 +66,7 @@ class World:
         (self.paseo.parent / "inspect.json").write_text(json.dumps({"Archived": archived, "Status": status}))
 
     def cfg(self, **over) -> ss.Config:
-        base = {"now": NOW, "hermes_ping": self.hermes, "paseo": self.paseo}
+        base = {"now": NOW, "hermes_ping": self.hermes, "paseo": self.paseo, "paseo_guard": self.guard}
         base.update(over)
         return ss.make_config(self.home, **base)
 
@@ -96,6 +100,15 @@ class World:
                 inp["timeout"] = tool_timeout_ms
             recs.append({"type": "assistant", "message": {"stop_reason": "tool_use", "content": [{"type": "tool_use", "name": "Bash", "input": inp}]}})
             recs.append({"type": "attachment", "attachment": {"type": "hook_success"}})
+        elif tail == "api_error":              # Claude Code's synthetic API-error ending: stop_reason stop_sequence, model <synthetic>
+            recs.append({"type": "assistant", "isApiErrorMessage": True, "message": {
+                "model": "<synthetic>", "stop_reason": "stop_sequence", "content": [{"type": "text", "text": "You're out of usage credits."}]}})
+        elif tail == "synthetic_tool_use":     # an inner tool call of the REPL tool
+            recs.append({"type": "assistant", "message": {"model": "<synthetic>", "stop_reason": "stop_sequence",
+                                                           "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "bgrun x"}}]}})
+        elif tail == "real_stop_sequence":
+            recs.append({"type": "assistant", "message": {"model": "claude-sonnet-5-5", "stop_reason": "stop_sequence",
+                                                           "content": [{"type": "text", "text": "written: x"}]}})
         elif tail != "tool_result":
             raise ValueError(tail)
         p = d / f"agent-{agent}.jsonl"
@@ -287,7 +300,7 @@ def test_live_paseo_parent_changes_the_suggested_action(w):
     w.paseo_agent()
     s = ss.scan(w.cfg()).stalled[0]
     assert (s.parent_paseo_agent_id, s.parent_live) == (PARENT_PASEO, True)
-    assert s.suggested_action.startswith(f"paseo send --json --no-wait {PARENT_PASEO} ")
+    assert s.suggested_action.startswith(f"paseo send --json --no-wait -- {PARENT_PASEO} ")
     assert AGENT in s.suggested_action and "SendMessage" in s.suggested_action
 
 
@@ -328,11 +341,12 @@ def test_notify_pings_and_messages_the_idle_live_parent_once(w):
     pings = w.calls(w.hermes)
     assert len(pings) == 1 and len(pings[0]) == 1
     assert pings[0][0] == (f"djbclark-ade: stalled sub-agent {AGENT} (report {report}), idle 30 min; parent {PARENT_PASEO}")
-    sends = [c for c in w.calls(w.paseo) if c[0] == "send"]
+    sends = w.sends()
     assert len(sends) == 1
-    assert sends[0][:4] == ["send", "--json", "--no-wait", PARENT_PASEO]
-    assert AGENT in sends[0][4] and report in sends[0][4] and "resume from where you stopped" in sends[0][4]
-    assert ["agent", "inspect", PARENT_PASEO, "--json"] in w.calls(w.paseo)
+    assert sends[0][:5] == ["send", "--json", "--no-wait", "--", PARENT_PASEO]
+    assert AGENT in sends[0][5] and report in sends[0][5] and "resume from where you stopped" in sends[0][5]
+    assert ["agent", "inspect", "--json", "--", PARENT_PASEO] in w.calls(w.paseo)
+    assert [c for c in w.calls(w.paseo) if c[0] == "send"] == []          # the raw paseo never sees a send: it goes through the guard
     seen = json.loads((w.home / ".local/state/djbclark-ade/subagent-stalls/seen.json").read_text())
     assert list(seen["stalls"]) == [f"{AGENT}|{report}"]
 
@@ -342,16 +356,16 @@ def test_notify_dedupes_then_pings_again_after_six_hours(w):
     run_notify(w)
     run_notify(w, now=NOW + 5.9 * 3600)
     assert len(w.calls(w.hermes)) == 1
-    assert len([c for c in w.calls(w.paseo) if c[0] == "send"]) == 1
+    assert len(w.sends()) == 1
     run_notify(w, now=NOW + 6.01 * 3600)
     assert len(w.calls(w.hermes)) == 2
-    assert len([c for c in w.calls(w.paseo) if c[0] == "send"]) == 2
+    assert len(w.sends()) == 2
 
 
 def test_notify_without_a_paseo_parent_only_pings(w):
     stalled_world(w, with_paseo=False)
     run_notify(w)
-    assert len(w.calls(w.hermes)) == 1 and w.calls(w.paseo) == []
+    assert len(w.calls(w.hermes)) == 1 and w.calls(w.paseo) == [] and w.sends() == []
     assert "parent " + SESSION in w.calls(w.hermes)[0][0]
 
 
@@ -360,18 +374,18 @@ def test_notify_never_interrupts_a_busy_parent_and_retries_when_idle(w):
     w.set_parent_state(archived=False, status="running")
     run_notify(w)
     assert len(w.calls(w.hermes)) == 1
-    assert [c for c in w.calls(w.paseo) if c[0] == "send"] == []
+    assert w.sends() == []
     w.set_parent_state(archived=False, status="idle")
     run_notify(w, now=NOW + 120)
     assert len(w.calls(w.hermes)) == 1                                       # the ping is not repeated
-    assert len([c for c in w.calls(w.paseo) if c[0] == "send"]) == 1       # the parent is told as soon as it is idle
+    assert len(w.sends()) == 1       # the parent is told as soon as it is idle
 
 
 def test_notify_never_wakes_an_archived_parent(w):
     stalled_world(w)
     w.set_parent_state(archived=True, status="idle")
     run_notify(w)
-    assert [c for c in w.calls(w.paseo) if c[0] == "send"] == []
+    assert w.sends() == []
 
 
 def test_failed_ping_is_not_recorded_and_is_retried(w):
@@ -402,7 +416,7 @@ def test_baseline_records_current_stalls_and_announces_nothing(w):
     stalled_world(w)
     run_notify(w, baseline=True)
     run_notify(w, now=NOW + 7 * 3600)
-    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == []
+    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == [] and w.sends() == []
 
 
 def test_ping_cap_per_run(w):
@@ -418,7 +432,7 @@ def test_ping_cap_per_run(w):
 def test_dry_run_sends_nothing_and_writes_no_state(w):
     stalled_world(w)
     _, events = run_notify(w, dry_run=True)
-    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == []
+    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == [] and w.sends() == []
     assert any("would hermes-ping" in e for e in events)
     assert not (w.home / ".local/state/djbclark-ade/subagent-stalls").exists()
 
@@ -462,7 +476,7 @@ def test_corrupt_state_starts_empty_with_a_warning(w):
 
 def cli(w, *args, **kw):
     cmd = [sys.executable, "-I", str(ROOT / "bin/ade-subagent-stalls"), "--home", str(w.home), "--hermes-ping", str(w.hermes),
-           "--paseo", str(w.paseo), "--now", str(NOW), *args]
+           "--paseo", str(w.paseo), "--paseo-guard", str(w.guard), "--now", str(NOW), *args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120, env={"PATH": "", "HOME": str(w.home / "unused")})
 
 
@@ -508,4 +522,136 @@ def test_cli_notify_dry_run_leaves_the_tools_alone(w):
     stalled_world(w)
     r = cli(w, "--notify", "--dry-run")
     assert r.returncode == 1 and "would hermes-ping" in r.stderr
-    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == []
+    assert w.calls(w.hermes) == [] and w.calls(w.paseo) == [] and w.sends() == []
+
+
+# ------------------------------------------------------------------ PR 938 review (adversary r1): findings MED-1, MED-2, LOW-1..6
+
+def test_out_of_credits_ending_is_a_death_not_a_finish(w):
+    """MED-1: Claude Code's synthetic API-error record carries stop_reason stop_sequence; it is how a quota-tight agent dies."""
+    report = w.stub()
+    w.transcript(report, idle_min=30, tail="api_error")
+    s = ss.scan(w.cfg()).stalled
+    assert len(s) == 1 and s[0].last_record == "api_error"
+
+
+def test_a_pending_synthetic_repl_tool_call_gets_the_tool_grace(w):
+    """MED-1: the REPL tool's inner tool calls are synthetic tool_use records with stop_reason stop_sequence."""
+    report = w.stub()
+    w.transcript(report, idle_min=20, tail="synthetic_tool_use")
+    assert ss.scan(w.cfg()).stalled == []
+    w.transcript(report, idle_min=40, tail="synthetic_tool_use")
+    s = ss.scan(w.cfg()).stalled
+    assert len(s) == 1 and s[0].last_record == "tool_pending"
+
+
+def test_a_real_stop_sequence_message_is_still_a_finish(w):
+    report = w.stub()
+    w.transcript(report, idle_min=500, tail="real_stop_sequence")
+    assert ss.scan(w.cfg()).stalled == []
+
+
+def many_stalls(w, n, parents=False):
+    for i in range(n):
+        session = f"{i:08d}-aaaa-4bbb-8ccc-222222222222" if parents else SESSION
+        r = w.stub(f"job{i}-report.md", session=session)
+        w.transcript(r, idle_min=30, agent=f"a{i}", session=session)
+        if parents:
+            w.paseo_agent(session=session, agent_id=f"{i:08d}-9999-4bbb-8ccc-333333333333")
+
+
+def test_max_pings_caps_the_repeat_pings_too(w):
+    """MED-2: six stalls, cap 2: no run, the 6-hour repeat run included, sends more than two pings."""
+    many_stalls(w, 6)
+    per_run = []
+    for when in (0, 60, 120, 7 * 3600, 7 * 3600 + 60, 7 * 3600 + 120):
+        before = len(w.calls(w.hermes))
+        run_notify(w, now=NOW + when, max_pings=2)
+        per_run.append(len(w.calls(w.hermes)) - before)
+    assert per_run == [2, 2, 2, 2, 2, 2]          # six first pings, then six repeats, two per run
+
+
+def test_max_pings_caps_the_parent_sends(w):
+    many_stalls(w, 4, parents=True)
+    run_notify(w, max_pings=1)
+    assert len(w.sends()) == 1
+    run_notify(w, now=NOW + 60, max_pings=1)
+    assert len(w.sends()) == 2
+
+
+def test_one_send_per_parent_lists_all_its_stalled_sub_agents(w):
+    many_stalls(w, 3)
+    w.paseo_agent()
+    run_notify(w)
+    sends = w.sends()
+    assert len(sends) == 1 and all(f"a{i}" in sends[0][5] for i in range(3)) and "3 of your sub-agents" in sends[0][5]
+
+
+def test_a_stall_is_announced_at_most_max_notices_times(w):
+    """LOW-1: the first announcement and one repeat, then silence."""
+    stalled_world(w)
+    for when in (0, 7 * 3600, 14 * 3600, 21 * 3600):
+        run_notify(w, now=NOW + when)
+    assert len(w.calls(w.hermes)) == 2 and len(w.sends()) == 2
+    run_notify(w, now=NOW + 28 * 3600, max_notices=3)
+    assert len(w.calls(w.hermes)) == 3
+
+
+def test_stall_ack_file_mutes_a_stub(w):
+    report = stalled_world(w)
+    Path(report + ".stall-ack").write_text("known")
+    res = ss.scan(w.cfg())
+    assert res.stalled == [] and res.checked == 0
+
+
+def test_a_finished_reader_of_a_stub_path_does_not_mask_the_dead_writer(w):
+    """LOW-2: a footerless agent told to "read X-report.md" links by bare mention; finishing must not hide the writer's death."""
+    report = w.stub()
+    w.transcript(report, idle_min=60, agent="awriter")
+    w.transcript(None, idle_min=1, tail="final", agent="areader", prompt=f"Read {report} and summarise it.")
+    s = ss.scan(w.cfg()).stalled
+    assert [x.agent_id for x in s] == ["awriter"] and s[0].link == "path"
+
+
+def test_a_lone_bare_mention_still_links_when_no_transcript_labels_the_path(w):
+    report = w.stub()
+    w.transcript(None, idle_min=60, prompt=f"Work on the task and keep notes in {report}.")
+    s = ss.scan(w.cfg()).stalled
+    assert len(s) == 1 and s[0].link == "path-mention"
+
+
+def test_suggested_action_survives_shell_quoting():
+    """LOW-4: pasting the printed action runs exactly the argv, whatever the report path holds."""
+    import shlex
+    evil = '/x/a"; touch /tmp/pwned; echo `id` $(id)-report.md'
+    action = ss.suggested_action(AGENT, evil, SESSION, PARENT_PASEO, True)
+    argv = shlex.split(action)
+    assert argv[:6] == ["paseo", "send", "--json", "--no-wait", "--", PARENT_PASEO]
+    assert argv[6] == ss.resume_text(AGENT, evil) and len(argv) == 7
+
+
+def test_a_paseo_id_that_looks_like_an_option_is_not_a_parent(w):
+    """LOW-5: ids go to `paseo` as arguments, after `--`; one starting with `-` is never taken."""
+    w.paseo_agent(agent_id="--json")
+    assert ss.paseo_parent(w.cfg(), SESSION) == (None, False)
+
+
+def test_reverse_lines_matches_a_plain_reverse_read_at_every_chunk_size(tmp_path, monkeypatch):
+    """LOW-6: the linear rewrite of the tail reader returns the same lines as reading the whole file."""
+    p = tmp_path / "f.jsonl"
+    body = b"\n".join([b"short", b"", b"x" * 100, b"   ", b"y" * 1000, b"z"]) + b"\n" + b"w" * 50
+    for chunk in (1, 2, 7, 64, 4096):
+        monkeypatch.setattr(ss, "CHUNK", chunk)
+        for text in (body, body + b"\n", b"one", b"\n\n", b"a\nb"):
+            p.write_bytes(text)
+            assert list(ss._reverse_lines(p)) == [ln for ln in reversed(text.split(b"\n")) if ln.strip()]
+
+
+def test_the_send_goes_through_the_real_guard_shim_by_absolute_path(w, monkeypatch):
+    """LOW-3: with the checkout's libexec/agent-bin/paseo as the guard, the shim runs, probes the parent and execs the real paseo."""
+    stalled_world(w)
+    monkeypatch.setenv("HOME", str(w.home))
+    monkeypatch.setenv("ADE_SEND_GUARD_LOG", str(w.home / "send-guard.log"))
+    run_notify(w, paseo_guard=ROOT / "libexec/agent-bin/paseo")
+    sends = [c for c in w.calls(w.paseo) if c[0] == "send"]
+    assert len(sends) == 1 and sends[0][:5] == ["send", "--json", "--no-wait", "--", PARENT_PASEO]
