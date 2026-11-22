@@ -574,7 +574,8 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
             stmts.append(cur)
         state["cur"] = Stmt()
         if not paren:
-            state["sep"] = new_sep
+            if not (not appended and new_sep == "\n" and state["sep"] in ("&&", "||", "|")):
+                state["sep"] = new_sep                 # `a &&` + newline + `b`: the line break does not end the `&&`
         elif appended:
             state["sep"] = ";"                 # `(a) b`: sequential; `a && (b)` keeps the `&&` that joined it
 
@@ -637,6 +638,8 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
                 end("|")
                 i += 2 if text[i + 1:i + 2] == "&" else 1
         elif c in "()":
+            if c == "(" and i > 0 and text[i - 1] == "=" and cur.words and cur.words[-1].endswith("="):
+                cur.words[-1] += "("                   # `arr=(a b)`: an array, never an empty literal
             end(c, True)
             state["opens" if c == "(" else "closes"] += 1
             i += 1
@@ -722,19 +725,21 @@ WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D",
 NON_EXEC = frozenset("ls stat file cat head tail wc grep egrep fgrep rg readlink realpath du df basename dirname id whoami "
                      "test [ [[ echo printf true false : pwd ps lsof shasum md5 cmp diff strings hexdump uname sw_vers which "
                      "mdfind sleep git gh jq man type whereis help tldr paseo hermes-ping clip ref ref-append graft".split())
-REMOVER_NAMES = frozenset({"rm", "rmdir", "unlink", "srm", "shred", "trash", "trash-put", "rip"})
+REMOVER_NAMES = frozenset({"rm", "rmdir", "unlink", "srm", "shred", "trash", "trash-put", "rip", "rimraf", "del-cli"})
 # A remover word anywhere in a multi-word string (a shell body, a quoted command line): `rm`, `grm -rf`, `-delete`, `git clean`.
-REMOVER_TEXT = re.compile(r"(?<![\w.$~-])(?:g?rm|g?rmdir|g?unlink|g?srm|g?shred|trash(?:-put)?|rip)(?![\w./-])"
+REMOVER_TEXT = re.compile(r"(?<![\w.$~-])(?:g?rm|g?rmdir|g?unlink|g?srm|g?shred|trash(?:-put)?|rip|rimraf|del-cli)(?![\w./-])"
                           r"|(?<![\w-])--?(?:delete|del)(?:-[a-z-]+)?(?![\w])|(?<![\w-])git\s+(?:-\S+\s+)*clean\b")
 DEFINITION = re.compile(r"(?:^|[\s;&|(){}])(?:alias\s|function\s+\S|[A-Za-z_][\w.:-]*\s*\(\s*\))")
 INTERPRETERS = re.compile(r"(?:python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node(?:js)?|osascript|php[0-9.]*|lua[0-9.]*|deno|bun)")
 INTERPRETER_BAD = re.compile(r"rmtree|unlink|remove|rmdir|rm_rf?|rm_f|rmSync|\brm\s*[-(]|do\s+shell\s+script|delete|trash", re.I)
 FIND_NAME_TESTS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname"})
 FIND_ALWAYS_NARROW = frozenset({"-empty", "-samefile", "-inum"})
-FIND_OPERATORS = frozenset({"-o", "-or", "!", "-not"})
+FIND_OPERATORS = frozenset({"-o", "-or", "!", "-not", ","})
+FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
 # Runners that start an interpreter named later on their command line (`uv run python -c ...`, `npx node -e ...`).
 RUNNERS = frozenset({"uv", "uvx", "pipx", "poetry", "npx", "bunx", "pnpm", "npm", "pdm", "rye", "hatch"})
 G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"mv", "find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
+COMPOUND_OPENERS = frozenset({"if", "while", "until", "for", "select", "case"})
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash"})
 KEYWORDS = frozenset({"{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "fi", "done", "esac", "case",
                       "select", "function"})
@@ -882,7 +887,7 @@ class _AllNames:
         return True
 
 
-SOURCING = re.compile(r"(?:^|[;&|(){}\n'\"])\s*(?:source|\.)\s+\S|\bset\s+-[a-z]*a|\bexport\s+\$\(|\beval\b")
+SOURCING = re.compile(r"(?:^|[;&|(){}!\n'\"]|\b(?:then|do|else|elif|if|while|until|time)\b)\s*(?:source|\.)\s+\S|\bset\s+-[a-z]*a|\bexport\s+\$\(|\beval\b")
 FRESH_TEMP = "/private/tmp/ade-fresh-mktemp"          # what `$(mktemp ...)` is modelled as: a new, unique, removable path
 DECLARERS = frozenset({"export", "local", "declare", "typeset", "readonly"})
 
@@ -938,6 +943,10 @@ def _critical_abs(path: str, home: str) -> Optional[str]:
     home_cf = posixpath.normpath(home).casefold()
     parts = path.split("/")
     gi = next((i for i, p in enumerate(parts) if i > 0 and _GLOB.search(p)), None)
+    if gi is not None and ".." in parts[gi + 1:]:                 # `/tmp/cl*/../../Users`: it climbs out, judge the whole path
+        path = posixpath.normpath(path)
+        parts = path.split("/")
+        gi = next((i for i, p in enumerate(parts) if i > 0 and _GLOB.search(p)), None)
     if gi is not None:
         prefix = "/".join(parts[:gi]) or "/"
         for cand in (posixpath.normpath(prefix), os.path.realpath(prefix)):
@@ -971,6 +980,7 @@ def _find_narrow(args: List[str]) -> bool:
     when the expression is negated or has an `-o`."""
     if any(a in FIND_OPERATORS for a in args):
         return False
+    args = args[:next((k for k, a in enumerate(args) if a in FIND_ACTIONS), len(args))]     # a test after the action filters nothing
     for k, a in enumerate(args):
         if a in FIND_ALWAYS_NARROW:
             return True
@@ -1014,6 +1024,10 @@ class _Scan:
         self.found = _Found()
         self.cd_unknown = False                  # a `cd` to a variable or substitution came before: relative operands are unknown
         self.was_cd = False                      # the statement that just ran was a cd, pushd or popd
+        self.alts: List[str] = []                # other directories the line may be in (a cd chain that was cut short)
+        self.chain: Optional[Tuple[Optional[str], Tuple[str, ...]]] = None   # directory (and alternatives) before a `cd X && ...` chain
+        self.loops = 0                           # `for`/`while`/`until`/`select` bodies open around the statement
+        self.has_function = False                # the request defines a function or alias (`return` can leave, tracking is off)
 
     def note(self, kind: str, what: str) -> None:
         if getattr(self.found, kind) is None:
@@ -1028,54 +1042,118 @@ class _Scan:
         except Unparsable as exc:
             self.note("unp", str(exc))
             return
-        saved = (dict(self.values), self.cd_unknown) if depth else None     # a body is a subshell: nothing it sets leaks out
+        saved = (dict(self.values), self.cd_unknown, list(self.alts), self.chain, self.loops) if depth else None
+        self.chain = None if depth else self.chain                # a body is a subshell: nothing it sets leaks out
         for body in nested:
             self.text(body, cwd, depth + 1)
-        stack: List[Tuple[Optional[str], bool, Dict[str, List[str]]]] = []
-        pending: Optional[Tuple[Optional[str], bool, Optional[str], bool]] = None
+        stack: List[Tuple[Optional[str], bool, Dict[str, List[str]], List[str], Any]] = []
+        pending: Optional[Tuple[Optional[str], bool, List[str], Optional[str], bool]] = None
         prev: Optional[Stmt] = None
+        compound, loops = 0, 0
         for idx, st in enumerate(stmts):
             for _ in range(st.closes):                    # `( ... )` ended: its cd and its assignments are gone
                 if stack:
-                    cwd, self.cd_unknown, self.values = stack.pop()
+                    cwd, self.cd_unknown, self.values, self.alts, self.chain = stack.pop()
                 pending = None
             if pending is not None:
                 cwd = self.after_cd(pending, st)
                 pending = None
+            elif self.chain is not None and st.sep not in ("&&", "|"):
+                cwd = self.break_chain(cwd)               # the `&&` chain after a cd ended: the cd may have failed
             for _ in range(st.opens):
-                stack.append((cwd, self.cd_unknown, dict(self.values)))
-            old_unknown = self.cd_unknown
+                stack.append((cwd, self.cd_unknown, dict(self.values), list(self.alts), self.chain))
+            self.loops = loops
+            old_unknown, old_alts = self.cd_unknown, list(self.alts)
             self.was_cd = False
             new_cwd = self.stmt(st, prev, cwd, depth)
             nxt = stmts[idx + 1].sep if idx + 1 < len(stmts) else ""
             if self.was_cd and st.sep == "|":
                 self.cd_unknown = old_unknown             # a cd in a pipeline stage is lost with its subshell
             elif self.was_cd:
-                pending = (cwd, old_unknown, new_cwd, self.cd_unknown)
+                pending = (cwd, old_unknown, old_alts, new_cwd, self.cd_unknown)
             else:
                 cwd = new_cwd
-                self.track(st, nxt)
+                self.track(st, nxt, compound)
+            compound, loops = self.compound_after(st, compound, loops)
             prev = st
         if saved:
-            self.values, self.cd_unknown = saved
+            self.values, self.cd_unknown, self.alts, self.chain, self.loops = saved
 
-    def after_cd(self, pending: Tuple[Optional[str], bool, Optional[str], bool], st: Stmt) -> Optional[str]:
-        """The directory after a `cd`, known only from what joins the next statement: `&&` (and `|| exit`/`|| return`) mean the cd
-        worked; a pipe means it ran in a subshell and changed nothing; `;`, a newline, `||`, `&` mean it may have failed, so the
-        directory is unknown (relative removals that reach everything are then held)."""
-        old, old_unknown, new, new_unknown = pending
+    @staticmethod
+    def compound_after(st: Stmt, compound: int, loops: int) -> Tuple[int, int]:
+        """Depth of `if`/`while`/`until`/`for`/`select`/`case` bodies after this statement (`then`, `do`, `else` do not close one)."""
+        w = st.words
+        if not w:
+            return compound, loops
+        head = w[1] if w[0] in ("then", "do", "else", "elif") and len(w) > 1 else w[0]
+        if head in COMPOUND_OPENERS:
+            return compound + 1, loops + (1 if head in ("for", "while", "until", "select") else 0)
+        if w[0] in ("fi", "done", "esac"):
+            return max(0, compound - 1), max(0, loops - (1 if w[0] == "done" else 0))
+        return compound, loops
+
+    def leaves(self, st: Stmt) -> bool:
+        """The statement ends the shell (or the loop or function) when it runs: `exit` always, `return` only where a function is
+        defined, `break` and `continue` only inside a loop (bash at the top level just prints an error and goes on)."""
+        chain, _ = _chain(st.words)
+        if not chain:
+            return False
+        name = _name(st.words[chain[-1]])
+        if name == "exit":
+            return True
+        if name == "return":
+            return self.has_function
+        return name in ("break", "continue") and self.loops > 0
+
+    def break_chain(self, cwd: Optional[str]) -> Optional[str]:
+        """A `cd X && A` chain ended at `;`, a newline, `||` or `&`: if the cd failed the rest runs where it was before, so the
+        directory is unknown, or both directories when both are known."""
+        chain, self.chain = self.chain, None
+        if chain is None:
+            return cwd
+        old, old_alts = chain
+        if old is None or cwd is None:
+            self.alts = []
+            return None
+        alts = [d for d in dict.fromkeys(list(old_alts) + [old]) if d != cwd]
+        if len(alts) > 8:
+            self.alts = []
+            return None
+        self.alts = alts
+        return cwd
+
+    def child_text(self, text: str, cwd: Optional[str], depth: int) -> None:
+        """A `-c` body or an `env -S` line runs in a new process: it sees only exported names, and `sudo` and `env -i` drop even
+        those, so no value tracked in the outer line applies (a name it sets itself is tracked inside)."""
+        outer, self.values = self.values, {}
+        try:
+            self.text(text, cwd, depth)
+        finally:
+            self.values = outer
+
+    def after_cd(self, pending: Tuple[Optional[str], bool, List[str], Optional[str], bool], st: Stmt) -> Optional[str]:
+        """The directory after a `cd`, known only from what joins the next statement: `&&` keeps it for as long as `&&` (or a
+        pipe) keeps joining the statements, `|| exit` keeps it for good; a pipe means the cd ran in a subshell and changed
+        nothing; `;`, a newline, `||`, `&` mean it may have failed, so the directory is unknown (both directories when both
+        are known) and relative removals that reach everything are held."""
+        old, old_unknown, old_alts, new, new_unknown = pending
         if st.sep == "&&":
+            if self.chain is None:
+                self.chain = (old, tuple(old_alts))
+            self.alts = []
             self.cd_unknown = new_unknown
             return new
         if st.sep == "|":
             self.cd_unknown = old_unknown
+            self.alts = list(old_alts)
             return old
         self.cd_unknown = new_unknown
-        if st.sep == "||":
-            chain, _ = _chain(st.words)
-            if chain and _name(st.words[chain[-1]]) in ("exit", "return", "continue", "break"):
-                return new
-        return None
+        if st.sep == "||" and self.leaves(st):
+            self.chain, self.alts = None, []
+            return new
+        if self.chain is None:
+            self.chain = (old, tuple(old_alts))
+        return self.break_chain(new)
 
     # ---- variables with a known value
 
@@ -1092,12 +1170,12 @@ class _Scan:
                     return None
         return out
 
-    def track(self, st: Stmt, nxt: str) -> None:
+    def track(self, st: Stmt, nxt: str, compound: int = 0) -> None:
         """Remember the value of a plain assignment (`S=/private/tmp/x`, `S=$(mktemp -d)`, `export S=...`) or of a `for NAME in
         WORDS` list, when the name is set exactly once on the whole line, at the top of a command list (not after `&&`/`||`, not
         in a pipeline, not in `(...)`, not after `then`). Anything else stays an unknown variable."""
         words = st.words
-        if self.all_unknown or not words or st.sep not in ("", ";", "\n") or nxt in ("|", "&"):
+        if self.all_unknown or self.has_function or compound or not words or st.sep not in ("", ";", "\n") or nxt in ("|", "&"):
             return
         if words[0] == "for":
             if len(words) >= 4 and words[2] == "in" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", words[1]) \
@@ -1130,7 +1208,7 @@ class _Scan:
             if m and subs and len(subs) == 1 and self.is_mktemp(subs[0]):
                 self.values[name] = [FRESH_TEMP + (m.group(1) or "")]
             return
-        if re.search(r"[\s`]", value) or value.startswith("-"):
+        if re.search(r"[\s`]", value) or value.startswith(("-", "(")):
             return
         cands = self.candidates(value)
         if cands is None:
@@ -1164,7 +1242,8 @@ class _Scan:
             return None
         hit = None
         for cand in cands:
-            hit = hit or self.judge_one(cand, cwd, filtered)
+            for where in [cwd] + (self.alts if cwd is not None else []):
+                hit = hit or self.judge_one(cand, where, filtered)
         return hit
 
     def judge_one(self, operand: str, cwd: Optional[str], filtered: bool = False) -> Optional[str]:
@@ -1195,6 +1274,8 @@ class _Scan:
         if cands is None or len(cands) != 1:
             return None, "variable"
         target = cands[0]
+        if FRESH_TEMP in target:
+            return None, "variable"                   # mktemp may have failed: `cd ""` stays where it is
         stripped = re.sub(r"\$\{HOME\}|\$HOME\b", "", target)
         if target == "-" or "$" in stripped or "`" in target or _unknown_variable(target, self.assigned):
             return None, "variable"
@@ -1235,7 +1316,7 @@ class _Scan:
             _tripwire(w, self.found)
         chain, env_split = _chain(words)
         if env_split is not None:
-            self.text(env_split, cwd, depth + 1)
+            self.child_text(env_split, cwd, depth + 1)
             return cwd
         if not chain:
             self.remover_words(st, set())
@@ -1492,7 +1573,7 @@ class _Scan:
                     pos = int(key)
                     return params[pos] if pos < len(params) else ""
                 body = re.sub(r"\$(?:\{([0-9]+|@|\*)\}|([0-9@*]))", fill, body)
-            self.text(body, cwd, depth + 1)
+            self.child_text(body, cwd, depth + 1)
             return body_at
         if not script:
             self.note("unp", "shell reads its commands from stdin")
@@ -1549,6 +1630,7 @@ def _analyze(commands: List[str], paths: List[str], file_tool: bool, home: str, 
     for text in commands:
         counts.update(_assigned_counts(text))
     scan = _Scan(home, counts, any(SOURCING.search(text) for text in commands))
+    scan.has_function = any(DEFINITION.search(re.sub(r"[\\'\"]", "", text)) for text in commands)
     for text in commands:
         _tripwire(text, scan.found)
         flat = re.sub(r"[\\'\"]", "", text)

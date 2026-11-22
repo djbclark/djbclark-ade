@@ -1310,13 +1310,13 @@ def test_a_cd_not_joined_by_and_leaves_the_directory_unknown(command):
 @pytest.mark.parametrize("command", [
     "cd /tmp/x; rm -rf *", "cd /tmp/x\nrm -rf *", "cd /tmp/x || true; rm -rf *", "cd /tmp/x & rm -rf *",
 ])
-def test_a_cd_not_joined_by_and_beats_the_known_request_directory(command):
-    assert not allowed_in(command)
-    assert not allowed_in(command, HOME)
+def test_a_cd_not_joined_by_and_is_judged_against_both_directories(command):
+    assert allowed_in(command)                      # round 5: both /tmp/x and the request directory src/x are safe
+    assert not allowed_in(command, HOME)            # the request directory is home: the failed-cd case reaches it
 
 
 @pytest.mark.parametrize("command", [
-    "cd build && rm -rf *", "cd build || exit 1; rm -rf *", "cd /tmp/x && rm -rf *", "cd /tmp/x || return; rm -rf *",
+    "cd build && rm -rf *", "cd build || exit 1; rm -rf *", "cd /tmp/x && rm -rf *", "cd /tmp/x || exit; rm -rf *",
     "(cd /tmp/x && rm -rf *)", "cd /tmp/x && cd y && rm -rf *", "cd /tmp/x && (rm -rf *)", "cd /tmp/x && { rm -rf *; }",
 ])
 def test_a_cd_joined_by_and_or_followed_by_exit_is_judged_against_its_directory(command):
@@ -1365,7 +1365,7 @@ def test_find_from_a_known_directory_is_judged_against_it():
     assert allowed_in("find . -type f -delete")
     assert not allowed_in("find . -type f -delete", HOME)
     assert allowed_in("cd /tmp/x && find . -type f -delete", HOME)
-    assert not allowed_in("cd /tmp/x; find . -type f -delete")
+    assert not allowed_in("cd /tmp/x; find . -type f -delete", HOME)
 
 
 # item 3 (LOW): `${X:?}`, `${X:=...}`, sourced files, runners, mv, git commands
@@ -1468,7 +1468,7 @@ def test_stem_globs_below_the_temp_directories_and_extensions_below_slash_are_al
     "S=\"$(mktemp -d)\"; rm -rf \"$S\"", "S=`mktemp -d`; rm -rf $S", "S=$(mktemp -d)/sub; rm -rf $S", "export S=$(mktemp -d); rm -rf $S/*",
     "S=/private/tmp/claude-502/x; rm -f $S/*.log", "S=/tmp/x; rm -f $S/a $S/*.log", "for f in a.log b.log; do rm -f \"$f\"; done",
     "export S=/tmp/x; rm -rf $S", "S=/tmp/a; T=$S/b; rm -rf $T", "declare -x S=/tmp/x; rm -rf $S/*", "S=/tmp/x\nrm -rf $S", "S=/tmp/x && rm -rf $S",
-    "S=$(mktemp -d); cd \"$S\" && rm -rf *", "(S=/tmp/x; rm -rf $S)", "S=/tmp/x; rm -rf ${S}/a", "D=build; rm -rf $D/out",
+    "(S=/tmp/x; rm -rf $S)", "S=/tmp/x; rm -rf ${S}/a", "D=build; rm -rf $D/out",
     "for d in /tmp/a /tmp/b; do rm -rf $d; done", "for f in a b c; do rm -f $f.log; done", "S=~/src/x-wt; rm -rf $S/*", "S=$HOME/src/x; rm -rf $S",
     "bash -c 'S=$(mktemp -d); rm -rf $S'", "S=/tmp/x; cd $S && rm -rf *",
 ])
@@ -1499,3 +1499,227 @@ def test_critical_values_are_reported_as_critical_removals():
     assert held("for d in /tmp/a /; do rm -rf $d; done").rule.startswith("critical-rm:")
     assert held("HOME=/ ; rm -rf $HOME").rule.startswith("critical-rm:")
     assert held("rm -rf $S/; S=/tmp/x").rule.startswith("unreadable:unparsable:variable $S")
+
+
+# ---------------------------------------------------------------- adversary round 4 (PR 939), fixed in round 5
+
+
+def held_everywhere(command):
+    """Held with no request directory and with the request directory at home."""
+    return is_held(command) and not allowed_in(command, HOME)
+
+
+# MED-1: a cd's directory holds only while `&&` (or a pipe) keeps joining the statements
+
+@pytest.mark.parametrize("command", [
+    "cd /tmp/x && ls; rm -rf *", "cd /tmp/x && make\nrm -rf *", "cd /tmp/x && make || true; rm -rf *", "cd /tmp/x && (make); rm -rf *",
+    "cd /tmp/x && { make; }; rm -rf *", "cd /tmp/x && true\nrm -rf .", "cd /tmp/x && rm -rf * ; rm -rf ./*",
+    "cd /tmp/x && find . -type f -delete; find . -type f -delete", "pushd /tmp/x && ls; rm -rf *",
+    "cd /tmp/x && ls & rm -rf *", "cd /tmp/x && ls && make; rm -rf *",
+])
+def test_statements_after_a_cd_chain_that_ended_are_in_an_unknown_directory(command):
+    assert held_everywhere(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "cd /tmp/x && ls && rm -rf *", "cd /tmp/x && ls | cat && rm -rf *", "cd /tmp/x && (ls) && rm -rf *", "cd /tmp/x &&\nrm -rf *",
+    "cd /tmp/x && ls &&\nrm -rf *", "cd /tmp/x || exit\nrm -rf *", "cd /tmp/x && ls && make && rm -rf *",
+])
+def test_a_cd_chain_joined_all_the_way_is_judged_in_its_directory(command):
+    assert allowed_in(command, HOME), (command, held(command).rule)
+
+
+def test_a_cut_chain_is_judged_against_both_known_directories():
+    assert allowed_in("cd /tmp/x && ls; rm -rf *")                    # request directory src/x and /tmp/x: both safe
+    assert not allowed_in("cd /tmp/x && ls; rm -rf *", HOME)          # the failed cd leaves it in home
+    assert allowed_in("cd build && ls; rm -rf *")
+    assert not allowed_in("cd ~ && ls; rm -rf *")                     # the new directory itself is critical
+
+
+# MED-2: find narrows only through tests that come before the first action
+
+@pytest.mark.parametrize("command", [
+    "find . -delete -name '*.pyc'", "find . -exec rm -rf {} + -name '*.pyc'", "find . -delete -empty", "find . -true -delete -name x",
+    "find . -name '*.pyc' , -delete", "find . -name x -print , -delete", "find . -execdir rm {} + -name x", "find . -ok rm {} \\; -name x",
+])
+def test_find_tests_after_the_action_or_a_comma_do_not_narrow(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find . -name '*.pyc' -delete", "find . -name x -print -delete", "find . -type f -name '*.pyc' -exec rm {} +", "find . -empty -delete",
+])
+def test_find_tests_before_the_action_still_narrow(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+# MED-3 (a): an assignment inside a compound command or after a joining line break is not unconditional
+
+@pytest.mark.parametrize("command", [
+    'if [ -n "$CI" ]; then\nD=/tmp/ci-cache\nfi\nrm -rf "$D"/*', 'if [ -n "$CI" ]; then\nD=/tmp/ci-cache\nfi\nrm -rf "$D"/',
+    'while false; do\nD=/tmp/x\ndone\nrm -rf "$D"/*', '[ -d /tmp/x ] &&\nD=/tmp/x\nrm -rf "$D"/*', 'false ||\nD=/tmp/x\nrm -rf "$D"/*',
+    'until true; do\nD=/tmp/x\ndone\nrm -rf "$D"/*', 'for i in 1 2; do\nD=/tmp/x\ndone\nrm -rf "$D"/*',
+    'case $X in\na) D=/tmp/x;;\nesac\nrm -rf "$D"/*', 'if true; then\nD=/tmp/x\nelse\nD=/tmp/y\nfi\nrm -rf "$D"/*',
+    'true |\nD=/tmp/x\nrm -rf "$D"/*',
+])
+def test_an_assignment_in_a_compound_body_or_after_a_joining_newline_is_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    'if true; then echo hi; fi\nD=/tmp/x\nrm -rf "$D"/*', 'for i in 1; do echo $i; done\nS=$(mktemp -d)\nrm -rf "$S"',
+    'case a in a) echo;; esac\nD=/tmp/x\nrm -rf $D',
+])
+def test_an_assignment_after_the_compound_command_ended_is_tracked_again(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+def test_a_line_break_after_and_joins_the_next_statement_to_the_chain():
+    assert allowed_in("cd /tmp/x &&\nrm -rf *", HOME)               # was a false hold before round 5
+    assert allowed_in("cd /tmp/x && ls &&\nrm -rf *", HOME)
+    assert not allowed_in("cd /tmp/x &&\nls\nrm -rf *", HOME)       # the second line break does end the chain
+
+
+# MED-3 (b): a child shell sees no value tracked in the outer line
+
+@pytest.mark.parametrize("command", [
+    "S=/tmp/x; bash -c 'rm -rf \"$S\"/*'", "S=/tmp/x; sh -c 'rm -rf $S/'", "S=/tmp/x; nohup bash -c 'rm -rf \"$S\"/*'",
+    "S=/tmp/x; sudo bash -c 'rm -rf \"$S\"/*'", "export S=/tmp/x; sudo bash -c 'rm -rf \"$S\"/*'",
+    "S=/tmp/x; timeout 60 bash -c 'rm -rf \"$S\"/*'", "S=/tmp/x; env bash -c 'rm -rf \"$S\"/*'", "S=/tmp/x; zsh -c 'rm -rf \"$S\"/*'",
+    "S=/tmp/x; env -S 'rm -rf $S/'",
+])
+def test_a_child_shell_body_does_not_see_the_outer_tracked_values(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_a_child_shell_tracks_the_names_it_sets_itself():
+    assert held("bash -c 'S=$(mktemp -d); rm -rf $S'").allow
+    assert held("bash -c 'S=/tmp/x; rm -rf \"$S\"/*'").allow
+    assert held("S=/tmp/x; rm -rf \"$S\"/*").allow                  # the outer line is unchanged
+
+
+# LOW-1: only exit leaves at the top level; return needs a function, break and continue need a loop
+
+@pytest.mark.parametrize("command", [
+    "cd /tmp/x || return; rm -rf *", "cd /tmp/x || break; rm -rf *", "cd /tmp/x || continue; rm -rf *", "cd /tmp/x || return 1; rm -rf *",
+])
+def test_return_break_and_continue_outside_a_function_or_loop_do_not_leave(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "cd /tmp/x || exit; rm -rf *", "cd /tmp/x || exit 1; rm -rf *", "for d in a b; do cd /tmp/x || continue; rm -rf *; done",
+    "while true; do cd /tmp/x || break; rm -rf *; done",
+])
+def test_exit_always_and_break_or_continue_inside_a_loop_leave(command):
+    assert allowed_in(command, HOME), (command, held(command).rule)
+
+
+# LOW-2: an array assignment is not an empty literal
+
+@pytest.mark.parametrize("command", [
+    "arr=(~ /tmp/x); rm -rf $arr", "arr=(/ /tmp/x); rm -rf $arr", "declare -a arr=(~); rm -rf $arr", "arr=(); rm -rf $arr/",
+    "local -a arr=(/); rm -rf ${arr[0]}",
+])
+def test_an_array_assignment_is_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+# LOW-3: a glob followed by `..`, sourcing after a keyword, more remover words
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /tmp/cl*/../../../Users/tester", "rm -rf /tmp/*.log/../..", "rm -rf /tmp/a*/../../..", "rm -rf ~/src/*/../..",
+])
+def test_a_glob_followed_by_dotdot_is_judged_by_its_whole_path(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_a_glob_that_stays_narrow_after_dotdot_is_still_allowed():
+    assert held("rm -rf /tmp/claude-*.log").allow
+
+
+@pytest.mark.parametrize("command", [
+    'if source ./env.sh; then rm -rf "$OUT"; fi', 'true && ! source ./env.sh; rm -rf "$OUT"', 'time source ./env.sh; rm -rf "$OUT"',
+    'while source ./env.sh; do rm -rf "$OUT"; done', 'if true; then source ./env.sh; rm -rf "$OUT"; fi',
+    'for i in 1; do . ./env.sh; rm -rf "$OUT"; done', 'until source ./env.sh; do rm -rf "$OUT"/*; done',
+    'if true; then\nsource ./env.sh\nfi\nrm -rf "$OUT"',
+])
+def test_sourcing_after_a_shell_keyword_makes_every_name_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "npx rimraf ~", "npx del-cli ~", "rimraf /", "npx rimraf '/Users/*'", "pnpm dlx del-cli /", "bunx rimraf ~/Library",
+])
+def test_rimraf_and_del_cli_are_removers(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_rimraf_and_del_cli_are_never_judged_so_every_form_keeps_the_card():
+    assert is_held("rimraf node_modules")                 # remover words the parser does not judge: held whatever the operand (fails safe)
+    assert is_held("npx rimraf dist")
+    assert is_held("del-cli build")
+
+
+# LOW-4: a fresh mktemp path is a removal operand only, never a cd target
+
+@pytest.mark.parametrize("command", [
+    'S=$(mktemp -d); cd "$S" && rm -rf *', "S=$(mktemp -d); cd $S && rm -rf .", "S=`mktemp -d`; cd \"$S\" && rm -rf *",
+    'S=$(mktemp -d); pushd "$S" && rm -rf *',
+])
+def test_a_mktemp_path_is_not_a_cd_target(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_a_mktemp_path_is_still_a_removal_operand():
+    assert held('S=$(mktemp -d); rm -rf "$S"').allow
+    assert held('S=$(mktemp -d); touch "$S/a"; rm -rf "$S"/*').allow
+
+
+# round 5: survivors of the first mutation pass, killed
+
+@pytest.mark.parametrize("command", [
+    "ssh host rimraf dist", "parallel del-cli ::: build", "xargs -J {} rimraf {}", "ssh host 'rimraf dist'", "ssh host 'cd x && del-cli build'",
+])
+def test_rimraf_and_del_cli_are_remover_words_for_the_tripwire(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_a_chain_cut_many_times_gives_up_on_the_alternatives():
+    many = "".join("cd /tmp/d%d && ls; " % i for i in range(10))
+    assert allowed_in("cd /tmp/d0 && ls; rm -rf *")
+    assert not allowed_in(many + "rm -rf *")                          # more than 8 alternative directories: unknown
+
+
+def test_a_later_cd_chain_forgets_the_alternatives_of_the_earlier_one():
+    assert allowed_in("cd /tmp/a && ls; cd /tmp/b && rm -rf *", HOME)  # a failed second cd skips the rm
+
+
+def test_a_cd_cut_by_a_semicolon_is_not_a_certain_directory_even_before_a_break():
+    assert not allowed_in("for i in 1; do cd /tmp/x; break; done; rm -rf *", HOME)
+
+
+def test_break_after_a_finished_loop_does_not_leave():
+    assert is_held("for i in 1; do :; done; cd /tmp/x || break; rm -rf *")
+    assert is_held("while false; do :; done\ncd /tmp/x || continue; rm -rf *")
+
+
+def test_a_substitution_body_does_not_leak_its_cut_chain_alternatives():
+    assert allowed_in("echo $(cd /tmp/a && ls; true); rm -rf *")
+
+
+def test_an_if_inside_an_if_keeps_the_assignment_after_the_inner_fi_conditional():
+    assert is_held('if true; then if true; then echo; fi\nD=/tmp/x\nfi\nrm -rf "$D"/*')
+    assert is_held('if true; then\nwhile false; do :; done\nD=/tmp/x\nfi\nrm -rf "$D"/*')
+    assert is_held('while true; do for i in 1; do :; done\nD=/tmp/x\ndone\nrm -rf "$D"/*')
+
+
+def test_values_come_back_after_a_child_shell_body():
+    assert held("S=/tmp/x; bash -c 'echo hi'; rm -rf \"$S\"/*").allow
+
+
+@pytest.mark.parametrize("command", [
+    'f() { :; }; S=/tmp/x; rm -rf "$S"/*', 'alias ll=ls; S=/tmp/x; rm -rf "$S"/*', 'function g { :; }; S=/tmp/x; rm -rf $S',
+])
+def test_a_request_that_defines_a_function_or_alias_tracks_no_values(command):
+    assert is_held(command), (command, held(command).rule)

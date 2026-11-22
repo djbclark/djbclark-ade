@@ -119,12 +119,14 @@ or `--work-tree DIR`), aimed at `/`, `~`, `$HOME`, `/Users`, a home directory (`
 system `bin`/`lib` trees, or `D/<glob>` for any of them (d2). Symlinks are resolved (`/etc` is `/private/etc`). The details, each a rule
 with a test:
 
-***d1.*** *Variables* (round 3, revised in round 4). A variable the command line **never sets** is modelled as **empty**, the
+***d1.*** *Variables* (round 3, revised in rounds 4 and 5). A variable the command line **never sets** is modelled as **empty**, the
 failure Claude Code's own check warns about: `rm -rf $S/` is `rm -rf /` and stays pending, `rm -rf $S/<glob>` is `rm -rf /<glob>`,
 while the screenshot's `rm -f $S/all.done $S/*.log` models as `/all.done` and `/*.log` and is allowed. A variable the line **sets**
 (`NAME=`, `export/declare/local/readonly NAME=`, `for NAME in`, `select`, `read NAME`, `mapfile`, `printf -v`, `${NAME:=x}`, in any
 nested `-c` body, before or after the use) is **tracked** when it is set exactly once, by a plain assignment at the top of a command
-list (not after `&&`, `||` or `then`, not in a pipeline or before `&`, and not used after the `( ... )` group it was set in), to one of
+list (not after `&&`, `||` or `then`, also when a line break only continues the `&&`, `||` or `|`; not inside an `if`, `while`, `until`,
+`for`, `select` or `case` body, also when `then` and `do` stand on lines of their own; not in a pipeline or before `&`; not when
+the request defines a function or alias; and not used after the `( ... )` group it was set in), to one of
 three things: a **literal** (no whitespace, no `$(`, not starting with `-`; `~`, `$HOME` and other tracked variables allowed), a
 **`$(mktemp ...)`** (alone in the substitution: a fresh temp path, safe to remove, modelled as `/private/tmp/ade-fresh-mktemp`), or the
 loop variable of `for NAME in WORDS` with a literal word list (no glob, brace or `$`; at most 32 values, each one judged). A removal
@@ -132,11 +134,17 @@ is judged on the real value(s): `S=$(mktemp -d); ...; rm -rf "$S"`, `S=/private/
 `for f in a.log b.log; do rm -f "$f"; done` pass, while `S=/; rm -rf $S`, `S=~; rm -rf $S` and `for d in /tmp/a /; ...` are
 `critical-rm`. Every other set variable is **unknown** and a removal that uses it is held (`unreadable:unparsable:variable $S in a
 removal`): a use before the assignment, a name set twice (also `+=`, `unset`, `read`), a value from any other substitution, a prefix
-assignment (`S=/ rm -rf $S`), an assignment after `&&` or inside `if`. So are positionals (`$1`, `$@`, `$*`, `$0`, also inside a
+assignment (`S=/ rm -rf $S`), an assignment after `&&` or inside `if` (one line or many), an array (`arr=(~ /tmp/x)`, `declare -a
+arr=(~)`: `$arr` is its first element in bash, every element in zsh). So are positionals (`$1`, `$@`, `$*`, `$0`, also inside a
 function body), `$PWD`/`$OLDPWD`, and every `${NAME<operator>...}` form, `${S:?}` and `${S?}` included (the check Claude Code suggests
 makes the variable error out, but this module cannot tell that it did). When the line **sources** anything (`source F`, `. F`,
-`set -a`, `export $(...)`, `eval`), every variable except `$HOME` is unknown and nothing is tracked, because the file may set any
-name.
+`set -a`, `export $(...)`, `eval`; also after `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `time` or `!`), every variable
+except `$HOME` is unknown and nothing is tracked, because the file may set any name. The body of a `bash -c` or `sh -c` (also through
+`nohup`, `timeout`, `env`, `sudo`) and the line of an `env -S` run in a **new process**: they see none of the values tracked in the
+outer line (a child shell gets only exported names, and `sudo` drops those), so an outer name that is set is unknown there, while a
+name the body sets itself is tracked inside the body. `$(mktemp ...)` is modelled as a fresh path **only as a removal operand**: it
+is never a `cd` target (`S=$(mktemp -d); cd "$S" && rm -rf *` is held, because a failed mktemp makes `cd ""`, a no-op that leaves the
+old directory).
 
 ***d2.*** *Globs and braces* (round 3, revised in round 4). A glob or brace character (`*`, `?`, `[`, `]`, `{`, `}`) in the first
 path component under a critical directory is held: `~/*`, `~/.*`, `~/{*,.*}`, `~/?*`, `~/[a-z]*`, `~/*.*`, `/Users/*`,
@@ -149,10 +157,14 @@ does not reach everything: `/*.log` (what `$S/*.log` becomes with S empty) and `
 `/System`...) every path is already critical, glob or not. A glob deeper than the first component under a non-critical directory
 (`~/src/*`, `/var/folders/*/x`) is not held.
 
-***d3.*** *The working directory* (round 3, revised in round 4). The request's own `cwd` is the start, and `cd` (also `pushd`,
-`popd`) is followed within one command line, but a `cd` changes the judged directory only when the next command is joined to it by `&&`
-(or by `||` and a command that leaves: `exit`, `return`, `continue`, `break`). After `;`, a newline, `||` or `&` the cd may have
-failed, so the directory is **unknown**; after `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
+***d3.*** *The working directory* (round 3, revised in rounds 4 and 5). The request's own `cwd` is the start, and `cd` (also `pushd`,
+`popd`) is followed within one command line, but a `cd` changes the judged directory only while `&&` (or `|`) keeps joining the
+statements after it, or when `||` is followed by `exit` (round 5: `return` leaves only inside a function, which the module holds
+anyway, and `break` and `continue` only inside a loop; at the top level bash prints an error and goes on). A line break after `&&`,
+`||` or `|` does not end the join (`cd /tmp/x &&` newline `rm -rf *` is judged in `/tmp/x`). At the first `;`, newline, `||` or `&`
+after the chain (`cd /tmp/x && ls; rm -rf *`) the cd may have failed, so the directory is **unknown**; when the request's own
+directory is known, the removal is judged against **both** directories (`cd /tmp/x && ls; rm -rf *` is allowed in `~/src/x` and
+held in `~`). After `|` the cd ran in a pipeline stage and the outer directory is unchanged. A `( ... )`
 group (and a `sh -c` or `$(...)` body) gives the outer directory and the outer variables back when it ends. So `cd ~ && rm -rf *` and
 `cd / && rm -rf ./*` are judged against `~` and `/`, `cd build && rm -rf *` against `build`, and `cd build; rm -rf *`,
 `cd build || true; rm -rf *`, `cd /tmp/x; rm -rf *` and `(cd /tmp/x); rm -rf *` (with no outer directory) are held. A Paseo Claude
@@ -161,14 +173,17 @@ bare glob such as `*`, `.*`, `./*`, `*.*`, `?*`, `[a-z]*`, `{a,b}*`) is held, an
 not. From an unknown directory a `find` that starts at `.`, `..` or a glob and deletes (`-delete`, `-exec rm`, `-execdir rm`, also
 `find ... | xargs rm`) is held **unless a narrowing name test is present**: `-name`, `-iname`, `-path` or the like with a pattern that
 has no glob character at all (`-name node_modules`) or at least two literal characters, one a letter or digit (`-name '*.pyc'`,
-`-name 'core.*'`), or `-empty`. `-type`, `-mtime`, `-size`, `-user`, `-newer`, `-perm`, `-name '*'` and `-name '*.*'` do not narrow it,
-and neither does an expression with `!`, `-not` or `-o`. A `cd` to a substitution or a variable (`cd "$(echo ~)"`, `cd $X`, `cd -`,
+`-name 'core.*'`), or `-empty`. Round 5: only the tests **before the first action** (`-delete`, `-exec`, `-execdir`, `-ok`,
+`-okdir`) count, because find evaluates left to right and a test after the action filters nothing (`find . -delete -name '*.pyc'` is
+held). `-type`, `-mtime`, `-size`, `-user`, `-newer`, `-perm`, `-name '*'` and `-name '*.*'` do not narrow it, and neither does an
+expression with `!`, `-not`, `-o` or `,`. A `cd` to a substitution or a variable (`cd "$(echo ~)"`, `cd $X`, `cd -`,
 `popd`) followed by a removal with a relative operand, or by `git clean -f`, is held; a `cd` to a tracked variable (d1) is followed.
 `git -C DIR` and `git --work-tree DIR` follow the same rule; a `git -C "$(...)"` or `-C $VAR` is unreadable (held), and an `xargs` fed
 by a substitution counts as unknown input.
 
-***d4.*** *The textual tripwire and command words* (round 3). Anywhere in a command line, after quotes, backslashes and `$'...'`
-(decoded) are removed, a **remover word** (`rm`, `rmdir`, `unlink`, `srm`, `shred`, `trash`, `rip`, the GNU `g` forms, `-delete`,
+***d4.*** *The textual tripwire and command words* (round 3, revised in round 5). Anywhere in a command line, after quotes, backslashes
+and `$'...'` (decoded) are removed, a **remover word** (`rm`, `rmdir`, `unlink`, `srm`, `shred`, `trash`, `rip`, `rimraf`, `del-cli`
+(the two JavaScript tools are never judged, so every form of them, `npx rimraf dist` included, keeps the card), the GNU `g` forms, `-delete`,
 `--delete*`, `git clean`) that the parser did **not** itself judge as a removal holds the request. That covers `parallel`, `ssh`,
 `fd -X`, `flock`, `script`, `tmux send-keys`, `xargs -J`, `alias`, `docker rm` and the like without parsing each. The words of a
 removal the parser did judge (the program word, the `-exec` word of a `find` it judged, a `-c` body it recursed into), and the
@@ -181,7 +196,9 @@ one-liner (`-c`, `-e`, `--eval`, a here-document or here-string) whose text name
 start an interpreter (`uv run python -c`, `uvx`, `pipx run`, `poetry run`, `npx node -e`, `bunx`, `pnpm`, `npm`, `pdm`, `rye`,
 `hatch`), judges `mv` like a removal of its sources (`mv ~ /tmp/gone`, `mv ~/Library ~/L.old`, `mv -t DIR ~` are held), and reads the
 command lines that `git` runs (`git submodule foreach CMD`, `rebase --exec CMD`, `-x`, `bisect run CMD`, `-c alias.x='!CMD'`) for
-remover words, though `git` otherwise stays a program whose arguments are only text.
+remover words, though `git` otherwise stays a program whose arguments are only text. A path that has a glob component and then a `..`
+(`/tmp/cl*/../../../Users/tester`) is judged by its whole normalised path (round 5). Not judged, noted only: the zsh `$~S` and `$=S`
+expansion forms (`S=/; rm -rf $=S`), which are written only to evade.
 
 ***2.*** **Allowed** (rule `allow:window`): everything else, any agent, any provider. In particular **the "possibly-empty variable"
 class from the screenshot is allowed**: `rm -f $S/all.done $S/*.log` models as `/all.done` and `/*.log`, which name no critical
@@ -196,7 +213,7 @@ auto-denied for want of a hook decision.
 wrote and runs later (`bash script.sh`, `python3 script.py`: its text is not read) and `source FILE`; a substitution anywhere except in
 a removal's operands or the command word (its body is parsed and judged); a removal with a literal operand below a critical directory
 (`rm -rf /Users/tester/src/old`); `rm` of a narrow glob (`/tmp/*.log`, `/tmp/claude-*`); a `find . -name '*.pyc' -delete` (a narrowing
-name test, d3) from an unknown directory; a removal of a variable set once to a literal or `$(mktemp ...)` (d1); `git clean -f` with no path in the unknown directory; a link made after the check; a program that deletes through
+name test, d3) from an unknown directory; a removal of a variable set once to a literal or `$(mktemp ...)` (d1; a failed `mktemp` makes `rm -rf "$S"` an `rm -rf ""`, accepted); `git clean -f` with no path in the unknown directory; a link made after the check; a program that deletes through
 its own code (`make clean`, `git filter-branch`, `docker`/`aws`/`gh` actions on remote things; their arguments are not read for
 remover words when the program only carries text); and anything the shell assembles from a variable the line never sets. Hostile
 commands can reach the shell in ways this parser misreads; see V 4.
