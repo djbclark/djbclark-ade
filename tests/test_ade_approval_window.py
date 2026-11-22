@@ -1077,14 +1077,14 @@ def cwd_req(command, cwd):
 # item 1 (HIGH): a variable the command line sets is UNKNOWN, not empty
 
 VARIABLE_HOLDS = [
-    "S=/tmp/x; rm -f $S/a $S/*.log", "S=; rm -rf $S/", "S=/ ; rm -rf ${S}", "rm -rf $S/; S=/tmp", "S=/ rm -rf $S",
+    "rm -f $S/a $S/*.log; S=/tmp/x", "S=; rm -rf $S/", "S=/ ; rm -rf ${S}", "rm -rf $S/; S=/tmp", "S=/ rm -rf $S",
     "export S=/; rm -rf $S", "declare S=/; rm -rf $S", "local S=/; rm -rf $S", "readonly S=/; rm -rf $S", "S+=/; rm -rf $S",
     "for d in /tmp/a /; do rm -rf $d; done", "for d in *; do rm -rf \"$d\"; done", "while read f; do rm -rf \"$f\"; done",
     "read X; rm -rf \"$X\"", "printf -v D /; rm -rf $D", "mapfile -t L; rm -rf ${L[0]}", "select d in /x /; do rm -rf $d; done",
     "f() { rm -rf \"$1\"; }; f /", "f() { rm -rf $@; }; f /Users", "function f { rm -rf \"$*\"; }; f ~", "rm -rf $1", "rm -rf ${1}", "rm -rf $0",
     "rm -rf ${S:-/}", "rm -rf ${S:=/}", "rm -rf ${S-/}", "rm -rf ${S/x/y}", "rm -rf ${!S}", "rm -rf ${#S}", "rm -rf $PWD/*", "rm -rf $OLDPWD",
     "HOME=/ ; rm -rf $HOME", "bash -c 'D=/; rm -rf $D'", "sh -c 'for d in /; do rm -rf $d; done'",
-    "D=/; find $D -delete", "D=/; echo $D | xargs rm -rf", "D=/; git -C $D clean -fdx", "D=/x; rsync -a --delete /tmp/e/ $D",
+    "D=/; find $D -delete", "D=/; echo $D | xargs rm -rf", "D=/; git -C $D clean -fdx", "D=/; rsync -a --delete /tmp/e/ $D",
     "D=/; chmod -R 000 $D", "A=/; cd /tmp && rm -rf $A", "env S=/ sh -c 'rm -rf $S'", "F=-rf; rm $F /tmp/x",
 ]
 
@@ -1096,13 +1096,13 @@ def test_a_variable_the_line_sets_is_unknown_not_empty(command):
 
 
 def test_variable_holds_say_why():
-    assert held("S=/tmp/x; rm -f $S/a").rule == "unreadable:unparsable:variable $S in a removal"
+    assert held("rm -f $S/a; S=/tmp/x").rule == "unreadable:unparsable:variable $S in a removal"
     assert "positional" not in held("rm -rf $1").rule and "$1" in held("rm -rf $1").rule
     assert "${S:-/}" in held("rm -rf ${S:-/}").rule
 
 
 @pytest.mark.parametrize("command", [
-    SCREENSHOT, "rm -rf $UNSET/x", "rm -f $S/all.done $S/*.log", 'rm -rf "${S:?}"/x', "rm -f /tmp/foo.$$", "rm -rf $HOME/src/x-wt",
+    SCREENSHOT, "rm -rf $UNSET/x", "rm -f $S/all.done $S/*.log", "rm -f /tmp/foo.$$", "rm -rf $HOME/src/x-wt",
     "rm -rf ${HOME}/src/x", "S=/tmp/x; ls $S", "S=/tmp/x; echo $S; rm -rf ./build", "for f in a b; do echo $f; done",
     "rm -rf ./a$UNSET", "X=1 make test", "x=$(git rev-parse HEAD); echo $x",
 ])
@@ -1124,8 +1124,8 @@ def test_a_glob_or_brace_at_the_top_of_a_critical_directory_is_held(command):
 
 
 @pytest.mark.parametrize("command", [
-    "rm -f /*.log", "rm -f ~/*.log", "rm -f /tmp/*.log", "rm -rf ~/src/*", "rm -rf /tmp/x/{a,b}", "rm -f $S/*.log", "rm -rf ~/src/x-wt/*",
-    "rm -f /Users/tester/*-old.txt", "rm -rf /var/folders/*/x", "rm -rf /Volumes/Backup/old/*",
+    "rm -f /*.log", "rm -f /tmp/*.log", "rm -rf ~/src/*", "rm -rf /tmp/x/{a,b}", "rm -f $S/*.log", "rm -rf ~/src/x-wt/*",
+    "rm -rf /var/folders/*/x", "rm -rf /Volumes/Backup/old/*",
 ])
 def test_narrow_globs_and_globs_below_the_top_stay_allowed(command):
     assert held(command).allow, (command, held(command).rule)
@@ -1288,3 +1288,214 @@ def test_the_library_folder_is_judged_for_any_home():
     d = W.decide(rq(command="rm -rf ~/Library"), "/srv/tester")
     assert not d.allow and d.rule.startswith("critical-rm:")
     assert W.decide(rq(command="rm -rf ~/Library/Caches/x"), "/srv/tester").allow
+
+
+# ---------------------------------------------------------------- adversary round 3 (PR 939), fixed in round 4
+
+
+def allowed_in(command, cwd=HOME + "/src/x"):
+    return verdict(cwd_req(command, cwd)).allow
+
+
+# item 1 (MED-1): a cd changes the judged directory only when `&&` (or `|| exit`) follows it
+
+@pytest.mark.parametrize("command", [
+    "cd build; rm -rf *", "cd build\nrm -rf *", "cd build || true; rm -rf *", "cd /tmp/nonexistent-build; rm -rf *", "(cd /tmp/x); rm -rf *",
+    "cd build & rm -rf *", "cd build || rm -rf *", "pushd build; rm -rf .", "cd /tmp/x ; rm -rf ./..",
+])
+def test_a_cd_not_joined_by_and_leaves_the_directory_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "cd /tmp/x; rm -rf *", "cd /tmp/x\nrm -rf *", "cd /tmp/x || true; rm -rf *", "cd /tmp/x & rm -rf *",
+])
+def test_a_cd_not_joined_by_and_beats_the_known_request_directory(command):
+    assert not allowed_in(command)
+    assert not allowed_in(command, HOME)
+
+
+@pytest.mark.parametrize("command", [
+    "cd build && rm -rf *", "cd build || exit 1; rm -rf *", "cd /tmp/x && rm -rf *", "cd /tmp/x || return; rm -rf *",
+    "(cd /tmp/x && rm -rf *)", "cd /tmp/x && cd y && rm -rf *", "cd /tmp/x && (rm -rf *)", "cd /tmp/x && { rm -rf *; }",
+])
+def test_a_cd_joined_by_and_or_followed_by_exit_is_judged_against_its_directory(command):
+    assert allowed_in(command, HOME)               # judged against its own directory, not the request directory
+
+
+def test_cd_to_the_home_directory_is_still_critical_when_joined_by_and():
+    assert not allowed_in("cd ~ && rm -rf *", HOME + "/src/x")
+    assert not allowed_in("cd ~ || exit; rm -rf *", HOME + "/src/x")
+    assert not allowed_in("cd / && rm -rf ?*", HOME + "/src/x")
+
+
+def test_a_subshell_or_a_pipeline_stage_gives_the_outer_directory_back():
+    assert allowed_in("(cd ~ && ls); rm -rf *")                      # the outer directory is src/x again
+    assert not allowed_in("(cd /tmp/x && ls); rm -rf *", HOME)       # and it is home here
+    assert allowed_in("cd ~ | cat; rm -rf *")
+    assert not allowed_in("cd ~ | cat; rm -rf *", HOME)
+    assert allowed_in("echo | cd ~; rm -rf *")
+    assert allowed_in("(cd /tmp/x; ls) && rm -rf *")
+    assert not allowed_in("(cd /tmp/x && ls) && rm -rf *", HOME)
+
+
+# item 2 (MED-2): find from an unknown directory needs a narrowing name test
+
+@pytest.mark.parametrize("command", [
+    "find . -type f -delete", "find . -mtime +7 -delete", "find . -size +0 -delete", "find . -newer x -delete", "find . -name '*' -delete",
+    "find . -user tester -exec rm -rf {} +", "find . -type f -exec rm {} \\;", "find . -type f -execdir rm {} \\;", "find . -perm 600 -delete",
+    "find . ! -name keep -delete", "find . -name a -o -type f -delete", "find . -name '*.*' -delete", "find . -name '?' -delete", "find . -name '*..' -delete", "find . -name '*x' -delete", "find . -name 'a*' -exec rm {} +",
+    "find . -type f | xargs rm", "find . -type f -print0 | xargs -0 rm", "find . -type f -name '*' -exec rm {} +",
+])
+def test_find_from_an_unknown_directory_without_a_narrowing_name_is_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find . -name '*.pyc' -delete", "find . -name __pycache__ -type d -exec rm -rf {} +", "find . -type d -empty -delete",
+    "find . -name node_modules -exec rm -rf {} +", "find . -iname '*.log' -delete",
+    "find . -name 'core.*' -delete", "find build -type f -delete", "find ./build -mtime +7 -delete", "find . -name x -delete",
+    "find . -name '*.pyc' -print0 | xargs -0 rm",
+])
+def test_find_from_an_unknown_directory_with_a_narrowing_name_is_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+def test_find_from_a_known_directory_is_judged_against_it():
+    assert allowed_in("find . -type f -delete")
+    assert not allowed_in("find . -type f -delete", HOME)
+    assert allowed_in("cd /tmp/x && find . -type f -delete", HOME)
+    assert not allowed_in("cd /tmp/x; find . -type f -delete")
+
+
+# item 3 (LOW): `${X:?}`, `${X:=...}`, sourced files, runners, mv, git commands
+
+@pytest.mark.parametrize("command", [
+    'rm -rf "${HOME:?}"', 'rm -rf "${HOME?}"', 'rm -rf "${S:?}"/x', "rm -rf ${S:?}", ": ${D:=~}; rm -rf $D", ": ${D=~}; rm -rf $D",
+    ": ${D:=/}; rm -rf $D/", "rm -rf ${D:=~}",
+])
+def test_the_error_and_assign_forms_of_a_variable_are_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "source env.sh; rm -rf $S/", ". ./env.sh; rm -rf $BUILD", "set -a; rm -rf $S/x", "export $(cat env); rm -rf $S", "x=1; . ./e; rm -rf $S/*.log",
+    "cd /tmp && source e && rm -rf $S/*.log", "(. e; rm -rf $S/)", "source e\nrm -f $S/all.done $S/*.log",
+])
+def test_a_line_that_sources_a_file_makes_every_variable_unknown(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", ["source e; rm -rf $HOME/src/x", "source e; rm -rf ./build", "source e; rm -rf /tmp/x", "echo source e"])
+def test_sourcing_leaves_home_and_variable_free_removals_alone(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "uv run python -c 'import shutil; shutil.rmtree(\"x\")'", "uvx python -c 'import os; os.remove(1)'", "pipx run python3 -c 'p.unlink()'",
+    "poetry run python -c 'import shutil; shutil.rmtree(1)'", "npx node -e \"require('fs').rmSync('x')\"", "bunx bun -e 'fs.unlinkSync(1)'",
+    "pnpm exec node -e 'fs.rmSync(1)'", "uv run python - <<'PY'\nimport shutil; shutil.rmtree('x')\nPY", "uv run --with x python -c 'os.unlink(1)'",
+])
+def test_runners_of_interpreters_get_the_one_liner_check(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "uv run python -c 'print(1)'", "uv run pytest tests", "uvx ruff check .", "npx prettier --write .", "poetry run python script.py", "pipx run black x",
+    "uv run python -m pytest -k remove",
+])
+def test_ordinary_runner_calls_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "mv ~ /tmp/gone", "mv ~/Library ~/L.old", "mv /Users/tester /tmp/x", "mv -t /tmp/x ~", "mv /Applications /tmp/a", "mv /etc /tmp/e", "mv ~/* /tmp/old",
+    "mv -f ~ /tmp/gone", "mv -- ~ /tmp/gone", "mv $HOME /tmp/x", "mv /Users/tester/Library/Application\\ Support /tmp/a", "gmv ~ /tmp/x",
+    "mv --target-directory=/tmp/x ~", "mv *.log ~/ ; mv * /tmp/x",
+])
+def test_moving_a_critical_directory_is_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "mv a b", "mv ~/x.log /tmp/y", "mv -t /tmp/dst a b", "mv ~/old /tmp", "mv /tmp/a /tmp/b", "mv -f build/out dist", "mv ~/src/x ~/src/y",
+    "mv /tmp/x ~", "mv a.log ~/logs/", "mv -n a /Applications", "mv -t /tmp a b", "mv -t ~ x", "mv --target-directory ~/ x", "mv --target-directory=/tmp a",
+])
+def test_ordinary_moves_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "git submodule foreach 'rm -rf ~'", "git -c alias.x='!rm -rf ~' x", "git rebase --exec 'rm -rf x' main", "git rebase -x 'rm x' main", "git rebase --exec='rm x' main",
+    "git bisect run rm x", "git submodule foreach --recursive 'rm -rf x'", "git -C ~/src/x submodule foreach 'trash x'", "git -c alias.go='!trash x' go",
+])
+def test_git_commands_that_run_a_command_line_are_read_for_removers(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "git submodule foreach 'git pull'", "git rebase --exec 'make test' main", "git -c alias.x='!echo hi' x", "git commit -m 'rm -rf handling'",
+    "git rm -rf --cached x", "git log --grep=rm", "git bisect run make test",
+])
+def test_git_commands_without_a_remover_stay_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+# item 3 (LOW-4): the extension glob exception only below `/` and the temp directories
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /Applications/*.app", "rm -rf ~/*.app", "rm -rf /System/Library/*.plist", "rm -rf /Library/*.plist", "rm -rf /Users/*.app",
+    "rm -f ~/*.log", "rm -f /Users/tester/*-old.txt", "rm -rf /Users/tester/{a,b}.log", "rm -rf /usr/local/*.txt", "rm -rf /opt/*.app",
+    "rm -rf /tmp/*", "rm -rf /tmp/c*", "rm -rf /tmp/.*", "rm -rf /private/tmp/*", "rm -rf /tmp/?", "rm -rf /tmp/.hidden*", "rm -rf /tmp/{a,b}*",
+    "rm -rf /tmp/[a-z]*", "rm -rf /private/tmp/*-*",
+])
+def test_extension_and_stem_globs_do_not_narrow_critical_top_directories(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /tmp/claude-*", "rm -rf /private/tmp/claude-*", "rm -f /tmp/pytest-*.log", "rm -rf /tmp/prefix-*", "rm -f /*.log", "rm -f /tmp/*.log",
+    "rm -rf /private/tmp/build-*/x", "rm -rf /tmp/ade-?", "rm -f /private/tmp/a.b*",
+])
+def test_stem_globs_below_the_temp_directories_and_extensions_below_slash_are_allowed(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+# item 4: values of variables set once on the line
+
+@pytest.mark.parametrize("command", [
+    "S=$(mktemp -d); rm -rf \"$S\"", "S=$(mktemp -d); touch $S/a; rm -rf \"$S\"/*", "S=$(mktemp -d /tmp/x.XXXX); rm -rf $S", "S=$(mktemp); rm -f $S",
+    "S=\"$(mktemp -d)\"; rm -rf \"$S\"", "S=`mktemp -d`; rm -rf $S", "S=$(mktemp -d)/sub; rm -rf $S", "export S=$(mktemp -d); rm -rf $S/*",
+    "S=/private/tmp/claude-502/x; rm -f $S/*.log", "S=/tmp/x; rm -f $S/a $S/*.log", "for f in a.log b.log; do rm -f \"$f\"; done",
+    "export S=/tmp/x; rm -rf $S", "S=/tmp/a; T=$S/b; rm -rf $T", "declare -x S=/tmp/x; rm -rf $S/*", "S=/tmp/x\nrm -rf $S", "S=/tmp/x && rm -rf $S",
+    "S=$(mktemp -d); cd \"$S\" && rm -rf *", "(S=/tmp/x; rm -rf $S)", "S=/tmp/x; rm -rf ${S}/a", "D=build; rm -rf $D/out",
+    "for d in /tmp/a /tmp/b; do rm -rf $d; done", "for f in a b c; do rm -f $f.log; done", "S=~/src/x-wt; rm -rf $S/*", "S=$HOME/src/x; rm -rf $S",
+    "bash -c 'S=$(mktemp -d); rm -rf $S'", "S=/tmp/x; cd $S && rm -rf *",
+])
+def test_variables_set_once_to_a_literal_or_a_fresh_temp_path_are_judged_on_their_value(command):
+    assert held(command).allow, (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "S=/; rm -rf $S", "S=/tmp; rm -rf $S/", "S=/tmp; rm -rf $S/*", "S=~; rm -rf $S", "D=$HOME; rm -rf $D", "S=$HOME/Library; rm -rf $S",
+    "for d in /tmp/a /; do rm -rf $d; done", "for d in ~ /tmp/a; do rm -rf \"$d\"; done", "for d in /Users /tmp/a; do rm -rf $d/*; done",
+    "S=/tmp/x; S=/; rm -rf $S", "true && S=/tmp/x; rm -rf $S/", "if true; then S=/tmp/x; fi; rm -rf $S/", "(S=/tmp/x); rm -rf $S/",
+    "S=/tmp/x | cat; rm -rf $S", "S=/tmp/x & rm -rf $S/", "S=$(echo /); rm -rf $S", "S=$(mktemp -d) rm -rf $S/", "rm -rf $S/; S=/tmp/x",
+    "S=/tmp/x; unset S; rm -rf $S/", "source e; S=/tmp/x; rm -rf $S", "S=/tmp/x; S+=/y; rm -rf $S", "S=/tmp/x; read S; rm -rf $S",
+    "for f in *; do rm -rf $f; done", "for f in $(ls); do rm -rf $f; done", "for f in a $X; do rm -rf $f; done", "for f in a; do rm -rf $f; done; f=/; rm -rf $f",
+    "S=/tmp/x; rm -rf ${S:-/}", "S=/tmp/$X; rm -rf $S", "S=\"/tmp/a b\"; rm -rf $S", "S=-rf; rm $S x", "A=/; B=$A; rm -rf $B",
+    "S=$(mktemp -d)$X; rm -rf $S", "S=$(mktemp -d); T=$(echo /); rm -rf $T", "S=$(mktemp -d \"$(echo ~)\"); rm -rf $S", "S=/tmp/x; rm -rf $SS/", "S=$X/y; X=/; rm -rf $S",
+    "echo $(S=/tmp/x; true); rm -rf $S/", "for d in /tmp/a /; do cd $d && rm -rf *; done", "for d in " + " ".join("a%d" % i for i in range(40)) + "; do rm -rf $d; done", "S=$(mktemp -d && echo /); rm -rf $S",
+    "S=$(mktemp -d; rm -rf ~); echo $S", "S=/; cd $S && rm -rf *",
+])
+def test_other_assignments_and_critical_values_stay_held(command):
+    assert is_held(command), (command, held(command).rule)
+
+
+def test_critical_values_are_reported_as_critical_removals():
+    assert held("S=/; rm -rf $S").rule.startswith("critical-rm:")
+    assert held("S=/; rm -rf ${S}").rule.startswith("critical-rm:")
+    assert "too many values" in held("for d in " + " ".join("a%d" % i for i in range(40)) + "; do rm -rf $d; done").rule
+    assert held("for d in /tmp/a /; do rm -rf $d; done").rule.startswith("critical-rm:")
+    assert held("HOME=/ ; rm -rf $HOME").rule.startswith("critical-rm:")
+    assert held("rm -rf $S/; S=/tmp/x").rule.startswith("unreadable:unparsable:variable $S")

@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -331,6 +332,9 @@ class Stmt:
     words: List[str] = field(default_factory=list)
     subst: set = field(default_factory=set)            # indexes of words holding a command/process substitution
     quoted: set = field(default_factory=set)           # indexes of words that were written with quotes or backslashes
+    opens: int = 0                                     # `(` seen since the previous statement (a subshell starts here)
+    closes: int = 0                                    # `)` seen since the previous statement (a subshell ended before this one)
+    wordsubs: Dict[int, List[str]] = field(default_factory=dict)   # word index -> bodies of the substitutions in it
     redirs: List[str] = field(default_factory=list)    # redirection targets (writes, as far as this module cares)
     heredocs: List[list] = field(default_factory=list)  # [delimiter, quoted, body]
     herestring: bool = False
@@ -557,15 +561,22 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
     stmts: List[Stmt] = []
     nested: List[str] = []
     pending: List[Tuple[list, bool]] = []
-    state = {"cur": Stmt(), "sep": ""}
+    state: Dict[str, Any] = {"cur": Stmt(), "sep": "", "opens": 0, "closes": 0}
     n, i = len(text), 0
 
-    def end(new_sep: str) -> None:
+    def end(new_sep: str, paren: bool = False) -> None:
         cur = state["cur"]
-        if cur.words or cur.redirs or cur.heredocs or cur.herestring:
+        appended = bool(cur.words or cur.redirs or cur.heredocs or cur.herestring)
+        if appended:
             cur.sep = state["sep"]
+            cur.opens, cur.closes = state["opens"], state["closes"]
+            state["opens"] = state["closes"] = 0
             stmts.append(cur)
-        state["cur"], state["sep"] = Stmt(), new_sep
+        state["cur"] = Stmt()
+        if not paren:
+            state["sep"] = new_sep
+        elif appended:
+            state["sep"] = ";"                 # `(a) b`: sequential; `a && (b)` keeps the `&&` that joined it
 
     def redirect_target(at: int) -> int:
         while at < n and text[at] in _BLANK:
@@ -626,7 +637,8 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
                 end("|")
                 i += 2 if text[i + 1:i + 2] == "&" else 1
         elif c in "()":
-            end(c)
+            end(c, True)
+            state["opens" if c == "(" else "closes"] += 1
             i += 1
         elif c in "<>":
             if text.startswith("<<<", i):
@@ -661,6 +673,7 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
                     i += 1
                 i = redirect_target(i)
         else:
+            before = len(nested)
             word, j, sub, quoted = _read_word(text, i, nested)
             if j == i:
                 i += 1
@@ -673,6 +686,7 @@ def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
                 cur.quoted.add(len(cur.words) - 1)
             if sub:
                 cur.subst.add(len(cur.words) - 1)
+                cur.wordsubs[len(cur.words) - 1] = nested[before:]
     end("")
     return stmts, nested
 
@@ -715,10 +729,12 @@ REMOVER_TEXT = re.compile(r"(?<![\w.$~-])(?:g?rm|g?rmdir|g?unlink|g?srm|g?shred|
 DEFINITION = re.compile(r"(?:^|[\s;&|(){}])(?:alias\s|function\s+\S|[A-Za-z_][\w.:-]*\s*\(\s*\))")
 INTERPRETERS = re.compile(r"(?:python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node(?:js)?|osascript|php[0-9.]*|lua[0-9.]*|deno|bun)")
 INTERPRETER_BAD = re.compile(r"rmtree|unlink|remove|rmdir|rm_rf?|rm_f|rmSync|\brm\s*[-(]|do\s+shell\s+script|delete|trash", re.I)
-FIND_FILTERS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-type", "-newer",
-                          "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-user", "-group", "-perm", "-size", "-links",
-                          "-empty", "-lname", "-ilname", "-samefile", "-inum", "-newermt"})
-G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
+FIND_NAME_TESTS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname"})
+FIND_ALWAYS_NARROW = frozenset({"-empty", "-samefile", "-inum"})
+FIND_OPERATORS = frozenset({"-o", "-or", "!", "-not"})
+# Runners that start an interpreter named later on their command line (`uv run python -c ...`, `npx node -e ...`).
+RUNNERS = frozenset({"uv", "uvx", "pipx", "poetry", "npx", "bunx", "pnpm", "npm", "pdm", "rye", "hatch"})
+G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"mv", "find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash"})
 KEYWORDS = frozenset({"{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "fi", "done", "esac", "case",
                       "select", "function"})
@@ -850,22 +866,38 @@ def _unknown_variable(arg: str, assigned: "set[str]") -> Optional[str]:
             if not mm:
                 return "${%s}" % m.group(1)
             name, rest = mm.groups()
-            if rest and not rest.startswith((":?", "?")):
-                return "${%s}" % m.group(1)
+            if rest:
+                return "${%s}" % m.group(1)               # `${X:-y}`, `${X:?}`, `${X?}`, `${X/a/b}`: not a plain name
+        if name == "HOME" and isinstance(assigned, _AllNames):
+            continue
         if name in assigned or name in UNKNOWN_NAMES or name.isdigit() or name in ("@", "*"):
             return "$" + name
     return None
 
 
-def _assigned_names(text: str) -> "set[str]":
-    """Every variable name the text sets anywhere: NAME=, NAME+=, NAME[i]=, `for NAME`, `select NAME`, `read NAME`, `mapfile`,
-    `getopts`, `printf -v NAME`, `declare/local/export NAME=`. Over-approximate on purpose (a `--opt=x` word counts)."""
-    names = set(re.findall(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=", text))
-    names.update(re.findall(r"\b(?:for|select)\s+\(?\(?\s*([A-Za-z_][A-Za-z0-9_]*)", text))
-    names.update(re.findall(r"\bprintf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*)", text))
-    for m in re.finditer(r"\b(?:read|mapfile|readarray|getopts)\b([^;&|\n)]*)", text):
-        names.update(w for w in re.findall(r"(?<![\w-])([A-Za-z_][A-Za-z0-9_]*)", m.group(1)))
-    return names
+class _AllNames:
+    """`name in _AllNames()` is always true: the command line sources a file (or `set -a`, `eval`), which may set anything."""
+
+    def __contains__(self, name: object) -> bool:
+        return True
+
+
+SOURCING = re.compile(r"(?:^|[;&|(){}\n'\"])\s*(?:source|\.)\s+\S|\bset\s+-[a-z]*a|\bexport\s+\$\(|\beval\b")
+FRESH_TEMP = "/private/tmp/ade-fresh-mktemp"          # what `$(mktemp ...)` is modelled as: a new, unique, removable path
+DECLARERS = frozenset({"export", "local", "declare", "typeset", "readonly"})
+
+
+def _assigned_counts(text: str) -> "Counter[str]":
+    """How many times the text sets each variable name: NAME=, NAME+=, NAME[i]=, `${NAME:=x}`, `for NAME`, `select NAME`, `read NAME`,
+    `mapfile`, `getopts`, `printf -v NAME`, `declare/local/export NAME=`. Over-approximate on purpose (a `--opt=x` word counts)."""
+    counts: "Counter[str]" = Counter()
+    counts.update(re.findall(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=", text))
+    counts.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?=", text))
+    counts.update(re.findall(r"\b(?:for|select)\s+\(?\(?\s*([A-Za-z_][A-Za-z0-9_]*)", text))
+    counts.update(re.findall(r"\bprintf\s+-v\s+([A-Za-z_][A-Za-z0-9_]*)", text))
+    for m in re.finditer(r"\b(?:read|mapfile|readarray|getopts|unset)\b([^;&|\n)]*)", text):
+        counts.update(re.findall(r"(?<![\w-])([A-Za-z_][A-Za-z0-9_]*)", m.group(1)))
+    return counts
 
 
 def _crit_kind(cand: str, home_cf: str) -> Optional[str]:
@@ -883,6 +915,22 @@ def _crit_kind(cand: str, home_cf: str) -> Optional[str]:
     return None
 
 
+# `claude-*`, `pytest-of-*.log` below /tmp: a literal stem of 2 or more characters, no leading dot.
+_STEM_GLOB = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]+[*?][A-Za-z0-9_.*?-]*")
+TMP_DIRS = ("/tmp", "/private/tmp")
+
+
+def _glob_is_narrow(directory: str, comp: str) -> bool:
+    """A glob in the first component under a critical `directory` that does not reach everything in it. Only `/` (the screenshot's
+    `$S/*.log` with S empty) and the temp directories get that: an extension pattern; the temp directories also a stem pattern.
+    Home, /Applications, /Library, /Users and the rest never do (`~/*.app`, `/Applications/*.app`)."""
+    low = directory.casefold()
+    if low == "/" or low in TMP_DIRS:
+        if _NARROW_GLOB.fullmatch(comp):
+            return True
+    return low in TMP_DIRS and _STEM_GLOB.fullmatch(comp) is not None
+
+
 def _critical_abs(path: str, home: str) -> Optional[str]:
     """The critical path an absolute path names. A glob or brace in the first component under a critical directory (`~/*`,
     `~/.*`, `~/{*,.*}`, `~/?*`, `~/[a-z]*`, `/Users/*`) reaches everything in it, so it is critical too; a glob that names an
@@ -891,11 +939,10 @@ def _critical_abs(path: str, home: str) -> Optional[str]:
     parts = path.split("/")
     gi = next((i for i, p in enumerate(parts) if i > 0 and _GLOB.search(p)), None)
     if gi is not None:
-        narrow = _NARROW_GLOB.fullmatch(parts[gi]) is not None
         prefix = "/".join(parts[:gi]) or "/"
         for cand in (posixpath.normpath(prefix), os.path.realpath(prefix)):
             kind = _crit_kind(cand, home_cf)
-            if kind == "tree" or (kind == "dir" and not narrow):
+            if kind == "tree" or (kind == "dir" and not _glob_is_narrow(cand, parts[gi])):
                 return cand
         return None
     core = path or "/"
@@ -915,6 +962,26 @@ def _broad_relative(exp: str, filtered: bool = False) -> bool:
     if first == "..":
         return True
     return bool(_GLOB.search(first)) and _NARROW_GLOB.fullmatch(first) is None
+
+
+def _find_narrow(args: List[str]) -> bool:
+    """A find that cannot reach everything below its start path: a `-name`/`-iname`/`-path` test whose pattern keeps at least two
+    literal characters (one of them a letter or digit): `-name node_modules`, `-name '*.pyc'`, `-name 'core.*'`; or `-empty`,
+    `-samefile`, `-inum`. `-type`, `-mtime`, `-size`, `-user`, `-newer`, `-perm` and `-name '*'` do not narrow it, and nothing does
+    when the expression is negated or has an `-o`."""
+    if any(a in FIND_OPERATORS for a in args):
+        return False
+    for k, a in enumerate(args):
+        if a in FIND_ALWAYS_NARROW:
+            return True
+        if a in FIND_NAME_TESTS and k + 1 < len(args):
+            pat = args[k + 1]
+            if pat and not re.search(r"[*?\[\\]", pat):
+                return True                               # an exact name
+            lit = [c for c in re.sub(r"\[[^\]]*\]", "", pat) if c not in "*?\\"]
+            if len(lit) >= 2 and any(c.isalnum() for c in lit):
+                return True
+    return False
 
 
 def _find_parts(args: List[str]) -> Tuple[List[str], bool, List[str]]:
@@ -938,11 +1005,15 @@ def _find_parts(args: List[str]) -> Tuple[List[str], bool, List[str]]:
 
 
 class _Scan:
-    def __init__(self, home: str, assigned: Optional["set[str]"] = None) -> None:
+    def __init__(self, home: str, counts: Optional["Counter[str]"] = None, all_unknown: bool = False) -> None:
         self.home = home
-        self.assigned = assigned or set()        # every name the whole request sets anywhere (`_assigned_names`)
+        self.counts: "Counter[str]" = counts if counts is not None else Counter()    # `_assigned_counts` of the whole request
+        self.all_unknown = all_unknown           # the line sources a file: any variable may have been set by it
+        self.assigned: Any = _AllNames() if all_unknown else {n for n, c in self.counts.items() if c}
+        self.values: Dict[str, List[str]] = {}   # names set once, by a plain assignment, to a literal or a fresh temp path
         self.found = _Found()
         self.cd_unknown = False                  # a `cd` to a variable or substitution came before: relative operands are unknown
+        self.was_cd = False                      # the statement that just ran was a cd, pushd or popd
 
     def note(self, kind: str, what: str) -> None:
         if getattr(self.found, kind) is None:
@@ -957,19 +1028,149 @@ class _Scan:
         except Unparsable as exc:
             self.note("unp", str(exc))
             return
+        saved = (dict(self.values), self.cd_unknown) if depth else None     # a body is a subshell: nothing it sets leaks out
         for body in nested:
             self.text(body, cwd, depth + 1)
+        stack: List[Tuple[Optional[str], bool, Dict[str, List[str]]]] = []
+        pending: Optional[Tuple[Optional[str], bool, Optional[str], bool]] = None
         prev: Optional[Stmt] = None
-        for st in stmts:
-            cwd = self.stmt(st, prev, cwd, depth)
+        for idx, st in enumerate(stmts):
+            for _ in range(st.closes):                    # `( ... )` ended: its cd and its assignments are gone
+                if stack:
+                    cwd, self.cd_unknown, self.values = stack.pop()
+                pending = None
+            if pending is not None:
+                cwd = self.after_cd(pending, st)
+                pending = None
+            for _ in range(st.opens):
+                stack.append((cwd, self.cd_unknown, dict(self.values)))
+            old_unknown = self.cd_unknown
+            self.was_cd = False
+            new_cwd = self.stmt(st, prev, cwd, depth)
+            nxt = stmts[idx + 1].sep if idx + 1 < len(stmts) else ""
+            if self.was_cd and st.sep == "|":
+                self.cd_unknown = old_unknown             # a cd in a pipeline stage is lost with its subshell
+            elif self.was_cd:
+                pending = (cwd, old_unknown, new_cwd, self.cd_unknown)
+            else:
+                cwd = new_cwd
+                self.track(st, nxt)
             prev = st
+        if saved:
+            self.values, self.cd_unknown = saved
+
+    def after_cd(self, pending: Tuple[Optional[str], bool, Optional[str], bool], st: Stmt) -> Optional[str]:
+        """The directory after a `cd`, known only from what joins the next statement: `&&` (and `|| exit`/`|| return`) mean the cd
+        worked; a pipe means it ran in a subshell and changed nothing; `;`, a newline, `||`, `&` mean it may have failed, so the
+        directory is unknown (relative removals that reach everything are then held)."""
+        old, old_unknown, new, new_unknown = pending
+        if st.sep == "&&":
+            self.cd_unknown = new_unknown
+            return new
+        if st.sep == "|":
+            self.cd_unknown = old_unknown
+            return old
+        self.cd_unknown = new_unknown
+        if st.sep == "||":
+            chain, _ = _chain(st.words)
+            if chain and _name(st.words[chain[-1]]) in ("exit", "return", "continue", "break"):
+                return new
+        return None
+
+    # ---- variables with a known value
+
+    def candidates(self, arg: str) -> Optional[List[str]]:
+        """`arg` with every tracked variable replaced by each of its values (all of a `for` list). None when there are too many."""
+        out = [arg]
+        if "$" not in arg or not self.values:
+            return out
+        for name, vals in self.values.items():
+            pat = re.compile(r"\$\{%s\}|\$%s(?![A-Za-z0-9_])" % (re.escape(name), re.escape(name)))
+            if any(pat.search(a) for a in out):
+                out = [pat.sub(lambda m, v=v: v, a) for a in out for v in vals]
+                if len(out) > 32:
+                    return None
+        return out
+
+    def track(self, st: Stmt, nxt: str) -> None:
+        """Remember the value of a plain assignment (`S=/private/tmp/x`, `S=$(mktemp -d)`, `export S=...`) or of a `for NAME in
+        WORDS` list, when the name is set exactly once on the whole line, at the top of a command list (not after `&&`/`||`, not
+        in a pipeline, not in `(...)`, not after `then`). Anything else stays an unknown variable."""
+        words = st.words
+        if self.all_unknown or not words or st.sep not in ("", ";", "\n") or nxt in ("|", "&"):
+            return
+        if words[0] == "for":
+            if len(words) >= 4 and words[2] == "in" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", words[1]) \
+                    and self.counts.get(words[1], 0) == 1:
+                items = words[3:]
+                if not any(k in st.subst or re.search(r"[$`*?\[\]{}\s]", it) or it.startswith("-")
+                           for k, it in enumerate(items, 3)):
+                    exp = [_expand(it, self.home) for it in items]
+                    if all(e is not None for e in exp):
+                        self.values[words[1]] = [e for e in exp if e is not None]
+            return
+        k = 0
+        if words[0] in DECLARERS:
+            k = 1
+            while k < len(words) and words[k].startswith("-"):
+                k += 1
+        rest = words[k:]
+        if not rest or not all(ASSIGNMENT.fullmatch(w) or (k and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", w)) for w in rest):
+            return
+        for j, w in enumerate(rest):
+            m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", w, re.S)
+            if m:
+                self.set_value(m.group(1), m.group(2), st.wordsubs.get(k + j), (k + j) in st.subst)
+
+    def set_value(self, name: str, value: str, subs: Optional[List[str]], has_sub: bool) -> None:
+        if self.counts.get(name, 0) != 1:
+            return
+        if has_sub:
+            m = re.fullmatch(r"\$\(SUB\)(/[^$`\s]*)?", value)
+            if m and subs and len(subs) == 1 and self.is_mktemp(subs[0]):
+                self.values[name] = [FRESH_TEMP + (m.group(1) or "")]
+            return
+        if re.search(r"[\s`]", value) or value.startswith("-"):
+            return
+        cands = self.candidates(value)
+        if cands is None:
+            return
+        vals: List[str] = []
+        for c in cands:
+            exp = None if _unknown_variable(c, self.assigned) else _expand(c, self.home)
+            if exp is None:
+                return
+            vals.append(exp)
+        self.values[name] = vals
+
+    def is_mktemp(self, body: str) -> bool:
+        """`mktemp ...` alone: a fresh path that nothing else uses, safe to remove."""
+        try:
+            stmts, nested = _tokenize(body.strip())
+        except Unparsable:
+            return False
+        if len(stmts) != 1 or nested or stmts[0].subst or stmts[0].redirs or stmts[0].heredocs or stmts[0].herestring:
+            return False
+        w = stmts[0].words
+        return bool(w) and _is_program(w[0], ["mktemp", "gmktemp"]) is not None
 
     # ---- paths
 
     def judge(self, operand: str, cwd: Optional[str], filtered: bool = False) -> Optional[str]:
-        """The critical path a removal operand names. Held (a note, no path) when a variable the line sets, a positional or a
-        `${NAME:-x}` form is in it, or when the operand is relative and the directory it is relative to is unknown and the operand
-        reaches all of it (`.`, `..`, `../x`, `*`, `.*`, `?*`). `filtered`: a find with a name/type test (`find . -name x -delete`)."""
+        """The critical path a removal operand names, for each value of the tracked variables in it."""
+        cands = self.candidates(operand)
+        if cands is None:
+            self.note("unp", "too many values for a variable in a removal")
+            return None
+        hit = None
+        for cand in cands:
+            hit = hit or self.judge_one(cand, cwd, filtered)
+        return hit
+
+    def judge_one(self, operand: str, cwd: Optional[str], filtered: bool = False) -> Optional[str]:
+        """Held (a note, no path) when a variable the line sets (and this module cannot value), a positional or a `${NAME:-x}`
+        form is in the operand, or when it is relative and the directory it is relative to is unknown and it reaches all of it
+        (`.`, `..`, `../x`, `*`, `.*`, `?*`). `filtered`: a find with a narrowing test (`find . -name x -delete`)."""
         var = _unknown_variable(operand, self.assigned)
         if var:
             self.note("unp", "variable %s in a removal" % var)
@@ -990,6 +1191,10 @@ class _Scan:
     def directory(self, target: str, cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """(directory, why not known). `cd -`, a variable, a substitution: not known (`variable`); a relative target while the
         current directory is unknown: no directory, but nothing wrong either."""
+        cands = self.candidates(target)
+        if cands is None or len(cands) != 1:
+            return None, "variable"
+        target = cands[0]
         stripped = re.sub(r"\$\{HOME\}|\$HOME\b", "", target)
         if target == "-" or "$" in stripped or "`" in target or _unknown_variable(target, self.assigned):
             return None, "variable"
@@ -1083,7 +1288,7 @@ class _Scan:
         if pi in st.subst:
             self.note("unp", "substitution as the command")
         idx0 = pi + 1                              # index in `words` of args[0]
-        if prog in NON_EXEC:
+        if prog in NON_EXEC and not (prog == "git" and self.git_runs_commands(args)):
             exempt.update(range(idx0, len(words)))
 
         def operands_of(arglist: List[str], first: int) -> List[Tuple[int, str]]:
@@ -1112,11 +1317,23 @@ class _Scan:
             if delete or any(e in REMOVERS or e in SHELLS for e in execs):
                 if sub_in_args:
                     self.note("unp", "substitution in a find that removes")
-                filtered = any(a in FIND_FILTERS for a in args)
+                filtered = _find_narrow(args)
                 for root in roots:
                     hit = self.judge(root, cwd, filtered)
                     if hit:
                         self.note("crit", "find %s" % hit)
+        elif prog == "mv":
+            skip = {k + 1 for k, a in enumerate(args) if a in ("-t", "--target-directory")}
+            has_target = bool(skip) or any(a.startswith("--target-directory=") for a in args)
+            ops = [(k, a) for k, a in operands_of(args, idx0) if (k - idx0) not in skip]
+            sources = ops if has_target else ops[:-1]
+            for k, operand in sources:
+                self.remove_operand("mv", operand, k, st, cwd)
+        elif prog in RUNNERS:
+            for k, a in enumerate(args):
+                if INTERPRETERS.fullmatch(_name(a)):
+                    self.interpreter(st, args[k + 1:])
+                    break
         elif prog in RECURSIVE_CHANGERS:
             flags = [a for a in args if a.startswith("-") and a != "--"]
             if any(re.fullmatch(r"-[A-Za-z]*R[A-Za-z]*", f) or f == "--recursive" for f in flags):
@@ -1144,8 +1361,10 @@ class _Scan:
             if not target or target == "-" or target.startswith(("/dev/stdin", "/dev/fd", "/proc/self/fd")) or idx0 in st.subst:
                 self.note("unp", "source of stdin or a substitution")
         elif prog in ("cd", "pushd"):
+            self.was_cd = True
             return self.cd(args, cwd)
         elif prog == "popd":
+            self.was_cd = True
             self.cd_unknown = True
             return None
         elif INTERPRETERS.fullmatch(prog):
@@ -1153,6 +1372,12 @@ class _Scan:
         elif prog in ("crontab", "launchctl", "date"):
             pass
         return cwd
+
+    @staticmethod
+    def git_runs_commands(args: List[str]) -> bool:
+        """`git submodule foreach CMD`, `rebase --exec CMD`, `bisect run CMD`, `-c alias.x=!CMD`: arguments that are command lines."""
+        return any(a in ("foreach", "--exec", "-x", "run") or a.startswith("--exec=") or re.match(r"alias\.[^=]*=!", a) is not None
+                   for a in args)
 
     def interpreter(self, st: Stmt, args: List[str]) -> None:
         """A python/perl/ruby/node/osascript one-liner (-c, -e, a here-document) that names a deletion."""
@@ -1181,7 +1406,7 @@ class _Scan:
                             self.note("crit", "xargs rm %s" % hit)
                     return
                 if pprog == "find":
-                    filtered = any(a in FIND_FILTERS for a in pargs)
+                    filtered = _find_narrow(pargs)
                     for root in _find_parts(pargs)[0]:
                         hit = self.judge(root, cwd, filtered)
                         if hit:
@@ -1319,10 +1544,11 @@ class _Scan:
 
 
 def _analyze(commands: List[str], paths: List[str], file_tool: bool, home: str, cwd: Optional[str]) -> _Found:
-    assigned: set = set()
+    commands = list(dict.fromkeys(commands))              # the same text in two fields must not count as two assignments
+    counts: "Counter[str]" = Counter()
     for text in commands:
-        assigned |= _assigned_names(text)
-    scan = _Scan(home, assigned)
+        counts.update(_assigned_counts(text))
+    scan = _Scan(home, counts, any(SOURCING.search(text) for text in commands))
     for text in commands:
         _tripwire(text, scan.found)
         flat = re.sub(r"[\\'\"]", "", text)
