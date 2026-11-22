@@ -137,7 +137,7 @@ ade-worker-run rename-lead --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    `--new-workspace`, `--cwd`, `--dir`, `-C`, `--host`, `--home`, `-o`/`--format`, `-q`/`--quiet`), renames the tab
    `worker <NAME> <LEAD>` with `paseo agent update` (**the tab may mention its worktree**: `--worktree <dir>`, or a `--cwd` that is itself a
    linked worktree, appends ` [wt: <worktree dir basename>]`, shortened to fit 100 characters; a hint, the brief still names the absolute path;
-   the OTHER box's tabs start `other `), and prints one JSON line `{agentId, workspaceId, windowName, tabName}`.
+   the OTHER box's tabs start `other `), and prints one JSON line `{agentId, workspaceId, windowName, tabName}` (plus `reportPath` and `donePath`, the report the footer values name, unless the brief defines its own: wait on `donePath`).
    The arguments after `--` are `paseo run`'s own: flags first, then the brief; no leading `paseo run` (the bare
    `paseo run` template that `route --kind K` prints starts with it; `plan`'s `dispatch` is already the whole `ade-worker-run` line
    (rd-01, 2026-11-14), so run it as it stands and append only the brief); no bundled short options

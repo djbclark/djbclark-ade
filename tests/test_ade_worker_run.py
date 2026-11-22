@@ -2835,7 +2835,14 @@ def test_footer_values_are_appended_and_reported(env):
 
 
 @pytest.mark.parametrize("brief", ["BRIEF\nReport path: /x/a-report.md", "BRIEF {report} = /x/a-report.md", "BRIEF {report}: /x/a-report.md",
-                                   "BRIEF write to /home/u/.local/state/agent-reports/zz/a-report.md"])
+                                   "BRIEF write to /home/u/.local/state/agent-reports/zz/a-report.md",
+                                   "BRIEF\nReport file: /tmp/x/a-report.md", "BRIEF\nReport: /tmp/x/a-report.md",
+                                   "BRIEF\n- **Report path:** /tmp/x/a-report.md", "BRIEF\n> Report file = /tmp/x/a-report.md",
+                                   "BRIEF\nWrite your report to /tmp/x/a-report.md, then touch the .done",
+                                   # no absolute path: only the label / phrase / heading rule can see these
+                                   "BRIEF\nReport file: ~/out/a.md", "BRIEF\nReport: ~/out/a.md", "BRIEF\nWrite your report to ~/out/a.md",
+                                   "BRIEF\n## Report path\n~/out/a.md",
+                                   "BRIEF\n## Report path\n/tmp/x/a-report.md", "BRIEF\nthe deliverable is /tmp/x/a-report.md"])
 def test_footer_values_not_added_when_the_brief_defines_them(env, brief):
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
     assert r.returncode == 0, r.stderr
@@ -2866,3 +2873,89 @@ def test_footer_values_rename_a_slice_claude_would_refuse_to_write(env):
     r = env.run("--lead", LEAD, "--slice", "report-probe", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["reportPath"] == f"{env.tmp}/reports/{LEAD}/worker-report-probe-report.md"
+
+
+# --- r1 adversary repair (PR 935): unique per launch, wider detection, late and safe directory creation ----------------------------
+
+def test_a_reused_slice_name_never_gets_a_finished_reports_path(env):
+    d = env.tmp / "reports" / LEAD
+    d.mkdir(parents=True)
+    (d / "a-report.md").write_text("OLD REPORT\n")
+    (d / "a-report.md.done").write_text("")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["reportPath"] == f"{d}/a-2-report.md" and out["donePath"] == f"{d}/a-2-report.md.done"
+    assert (d / "a-report.md").read_text() == "OLD REPORT\n"  # never overwritten
+    assert (d / "a-2-report.md").read_text() == "STATUS: working\n" and not (d / "a-2-report.md.done").exists()
+    assert f"{{report}} = {d}/a-2-report.md;" in run_argv(env)[-1]
+
+
+def test_an_existing_report_without_done_is_skipped_too_and_names_count_up(env):
+    d = env.tmp / "reports" / LEAD
+    d.mkdir(parents=True)
+    (d / "a-report.md").write_text("OLD\n")
+    (d / "a-2-report.md.done").write_text("")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["reportPath"] == f"{d}/a-3-report.md" and (d / "a-report.md").read_text() == "OLD\n"
+
+
+def test_a_refused_launch_leaves_no_report_directory(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "x", "--cwd", "/repo", "--placement", "lead", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and not (env.tmp / "reports").exists()
+
+
+def test_a_symlinked_or_loose_report_directory(env):
+    (env.tmp / "reports").mkdir()
+    (env.tmp / "elsewhere").mkdir()
+    (env.tmp / "reports" / LEAD).symlink_to(env.tmp / "elsewhere")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "not a directory of yours" in r.stderr and not [c for c in env.calls() if c["argv"][0] == "run"]
+    (env.tmp / "reports" / LEAD).unlink()
+    (env.tmp / "reports" / LEAD).mkdir(mode=0o755)
+    (env.tmp / "reports" / LEAD).chmod(0o755)
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    assert (env.tmp / "reports" / LEAD).stat().st_mode & 0o777 == 0o700  # tightened
+
+
+def test_an_unusable_report_base_is_a_refusal_not_a_traceback(env, monkeypatch):
+    (env.tmp / "afile").write_text("x")
+    monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", str(env.tmp / "afile"))
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "cannot prepare the report" in r.stderr
+
+
+def test_a_report_dir_with_a_space_is_refused(env, monkeypatch):
+    monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", f"{env.tmp}/my reports")
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1 and "space, quote or control" in r.stderr and not [c for c in env.calls() if c["argv"][0] == "run"]
+
+
+def test_footer_report_paths_rechecks_the_slice_itself(env, monkeypatch):
+    """The backup check no CLI path reaches (check_names refuses first): call the function directly."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_frp_t", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ade_worker_run_frp_t", loader))
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    for bad in ("../x", "a/b", "a b", "a\nb", ""):
+        with pytest.raises(mod.Refused, match="cannot name a report file"):
+            mod.footer_report_paths(LEAD, bad)
+    assert mod.footer_report_paths(LEAD, "ok")["report"].endswith(f"/{LEAD}/ok-report.md")
+
+
+def test_reserve_report_never_overwrites_an_existing_report(env, monkeypatch):
+    """The race the path search cannot see: the report appears between choosing the path and reserving it."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ade_worker_run_rsv_t", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ade_worker_run_rsv_t", loader))
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    loader.exec_module(mod)
+    vals = mod.footer_report_paths(LEAD, "race")
+    mod.reserve_report(vals)
+    Path(vals["report"]).write_text("WORK\n")
+    with pytest.raises(mod.Refused, match="appeared while"):
+        mod.reserve_report(vals)
+    assert Path(vals["report"]).read_text() == "WORK\n"

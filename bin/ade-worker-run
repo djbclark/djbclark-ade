@@ -35,11 +35,13 @@ Tab names: `worker <slice> <lead id>` plus ` [wt: <worktree dir>]` when --worktr
 (plus reportPath and donePath when the footer values below were added).
 Pass --no-wait to paseo. The last `--` argument (the brief) gets one line appended: `Also follow every item of <repo root>/docs/
 dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). Unless the brief already
-defines its report (it names an `agent-reports/` path, `{report} =`/`{report}:` or a `Report path:` line), a `Footer values:` line follows
+defines its report (an `agent-reports/` path, `{report} =`, any absolute `...-report.md` path, a line-start `Report:`/`Report path:`/
+`Report file:` label, or "write your report to"), a `Footer values:` line follows
 it that fills {lead}, {report}, {done}, {inbox} and {replies}: report = ~/.local/state/agent-reports/<lead id>/<slice>-report.md
 (or $AGENT_FOOTER_REPORT_DIR/<lead id>/..., the agent_footer_gate layout; `worker-` is prefixed to a slice starting with report/summary/
-findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done. The directory is created (mode 700) and the paths go to
-stderr and the JSON, so the lead can wait on the .done.
+findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done. A report or .done that exists is never reused: the
+next free `<slice>-N-report.md` is taken. The report is created exclusively (`STATUS: working`) in a 700 directory just before the
+launch, and the paths go to stderr and the JSON, so the lead can wait on the .done.
 A box a launch opens is created in --cwd's primary checkout: the launch is refused unless the brief names --cwd by absolute path, and
 the JSON line then carries cwd and requestedCwd. --cwd must be the directory of the box the worker is placed in (`paseo run
 --workspace` ignores it, getpaseo/paseo#9699): a different --cwd is refused before anything is renamed or launched, and after every
@@ -64,6 +66,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -700,7 +703,17 @@ def add_footer(rest: list[str]) -> list[str]:
 
 
 REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.IGNORECASE)  # Claude Code refuses a Write of these .md names
-BRIEF_DEFINES_VALUES = re.compile(r"agent-reports/|\{report\}\s*[=:]|\breport path\s*:", re.IGNORECASE)
+# What counts as "the brief already says where its report goes", mirroring agent_footer_gate (REPORT_IN_PROMPT, REPORT_OWN,
+# REPORT_OWN_STRICT): an agent-reports/ path, `{report} =`, ANY absolute `...-report.md` path, a line-start `Report:` / `Report path:` /
+# `Report file:` label (list marker, quote or markdown around it allowed), a `## Report path` heading, or "write your report to".
+BRIEF_DEFINES_VALUES = re.compile(
+    r"agent-reports/|\{report\}\s*[=:]"
+    r"|(?<![\w.~$@+/-])/[\w.@~+/-]+-report\.md"
+    r"|^[ \t>*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?report(?:[ \t]+(?:path|file))?[*_`]*[ \t]*(?:is|:|=)"
+    r"|^#+[ \t]*report[ \t]+(?:path|file)\b"
+    r"|\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\b",
+    re.IGNORECASE | re.MULTILINE)
+SAFE_PATH = re.compile(r"[\w./@+~-]+")  # no space or quote: the worker copies the path into a Write call as given
 VALUES_MARK = "Footer values:"
 
 
@@ -718,17 +731,48 @@ def footer_report_paths(lead: str, slice_name: str) -> dict[str, str]:
     refuse to Write (starts with report/summary/findings/analysis) gets a `worker-` prefix. Refused on a path with a control character."""
     base = Path(os.environ.get("AGENT_FOOTER_REPORT_DIR") or Path.home() / ".local/state/agent-reports")
     stem = f"worker-{slice_name}" if REFUSED_REPORT_BASENAME.match(slice_name) else slice_name
-    report = base / lead / f"{stem}-report.md"
-    if has_control_char(str(report)) or not SLICE_RE.fullmatch(slice_name):
-        raise Refused(f"the report path {str(report)!r} holds a control character or an unusable slice name; "
-                      "set AGENT_FOOTER_REPORT_DIR to a plain directory or pass --no-footer")
+    if not SLICE_RE.fullmatch(slice_name):
+        raise Refused(f"the slice name {slice_name!r} cannot name a report file")
+    # A report or .done that already exists is someone's earlier (maybe finished) report (agent_footer_gate, 2026-10-18): never reused,
+    # so a lead waiting on this launch's .done cannot be woken by a stale one. The next free `<stem>-N-report.md` is taken instead.
+    for n in range(1, 1000):
+        report = base / lead / (f"{stem}-report.md" if n == 1 else f"{stem}-{n}-report.md")
+        if not report.exists() and not Path(str(report) + ".done").exists():
+            break
+    else:
+        raise Refused(f"no free report name for slice {slice_name!r} under {base / lead}; clear the old reports")
     r = str(report)
+    if has_control_char(r) or not SAFE_PATH.fullmatch(r):
+        raise Refused(f"the report path {r!r} holds a space, quote or control character; "
+                      "set AGENT_FOOTER_REPORT_DIR to a plain directory or pass --no-footer")
     return {"lead": lead, "report": r, "done": r + ".done", "inbox": r + ".inbox.md", "replies": r + ".replies.md"}
+
+
+def reserve_report(values: dict[str, str]) -> None:
+    """Just before `paseo run`: make the report directory (a symlink, a non-directory or another user's directory is refused; a looser
+    mode is tightened to 700) and create the report itself exclusively with `STATUS: working`, so two launches can never share a path and
+    an existing report is never overwritten. An OS error is a refusal, not a traceback."""
+    report = Path(values["report"])
+    d = report.parent
+    try:
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = d.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise Refused(f"{d} is not a directory of yours (a symlink or another user's); pass --no-footer or fix it")
+        if st.st_mode & 0o077:
+            d.chmod(0o700)
+        fd = os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise Refused(f"{report} appeared while the launch was prepared; launch again")
+    except OSError as e:
+        raise Refused(f"cannot prepare the report {report}: {e}")
+    with os.fdopen(fd, "w") as f:
+        f.write("STATUS: working\n")
 
 
 def add_footer_values(rest: list[str], values: dict[str, str]) -> list[str]:
     """Append the `Footer values:` line after the footer pointer, so the worker never meets an unfilled {report} / {done} / {lead}."""
-    line = (f"{VALUES_MARK} " + "; ".join(f"{{{k}}} = {shlex.quote(v)}" for k, v in values.items())
+    line = (f"{VALUES_MARK} " + "; ".join(f"{{{k}}} = {v}" for k, v in values.items())
             + ". Use these wherever the footer says {report}, {done}, {lead}, {inbox} or {replies}.")
     return [*rest[:-1], f"{rest[-1]}\n\n{line}"]
 
@@ -880,8 +924,6 @@ def launch(opts, rest: list[str]) -> int:
         if not brief_defines_footer_values(brief):  # a brief that sets its own report path keeps it
             report_info = footer_report_paths(lead, name)
             rest = add_footer_values(rest, report_info)
-            Path(report_info["report"]).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
     rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
     box = "OTHER" if opts.placement == "other" else "WORKER"  # the box the window is looked up or opened in (not the lead's own)
@@ -986,6 +1028,9 @@ def launch(opts, rest: list[str]) -> int:
         if "--json" not in rest:
             args.append("--json")
         before = {row_wks(r) for r in list_windows()} if win is None else set()
+        if report_info:  # as late as possible: a launch refused above leaves nothing behind
+            reserve_report(report_info)
+            sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
         rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
             sys.stderr.write(err)
