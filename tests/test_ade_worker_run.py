@@ -599,6 +599,21 @@ def test_window_holding_another_leads_labelled_agent_is_refused(window):
     assert ["run"] not in window.verbs()
 
 
+def test_another_leads_live_agent_with_two_state_files_makes_the_window_unplaceable_for_a_launch(window):
+    """Two state files = an unknown window (adversary PR 926 LOW-2): the agent may be another lead's worker in this window, so a
+    launch is refused instead of silently skipping it as `not in this window`."""
+    member(window, "o9", "wks_win1", lead=OTHER_LEAD)
+    stale = window.home / "agents/aaa-old/o9.json"                               # sorts before agents/proj/o9.json
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"id": "o9", "workspaceId": "wks_elsewhere", "labels": {"ade.lead": OTHER_LEAD}}))
+    r = launch(window)
+    assert r.returncode == 1 and "another lead's agents" in r.stderr and "o9" in r.stderr and "two Paseo state files" in r.stderr
+    assert ["run"] not in window.verbs()
+    stale.unlink()                                                               # one file: it names this window, still foreign
+    r = launch(window)
+    assert r.returncode == 1 and "two Paseo state files" not in r.stderr
+
+
 def test_window_holding_only_another_leads_closed_agent_is_refused(env):
     env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]
     own(LEAD, "wks_b1")  # the lead's box (by its record) that once held another lead's worker

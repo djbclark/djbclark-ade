@@ -1488,12 +1488,15 @@ def check(cmd: str) -> tuple[str | None, str | None]:
 
 
 BUDGET_ENV = "BASH_HABITS_GATE_BUDGET"
-BUDGET_SECONDS = 20.0        # whole-gate time budget; the hook timeout is 60 s, so a stuck scan is cut off well before it
-BUDGET_MAX = 45.0            # the largest budget honoured: Python start and the stdin read need margin below the 60 s hook timeout
+BUDGET_SECONDS = 20.0        # whole-gate time budget: a stuck scan is cut off well before any hook timeout (60 s in older Claude Code docs, 600 s in the current ones)
+BUDGET_MAX = 45.0            # the largest budget honoured: below the 60 s hook timeout of older Claude Code, with margin for Python start and the stdin read
 CHILD_GRACE = 2              # seconds past the budget after which the forked child ends itself (SIGALRM, default action)
 BUDGET_REASON = ("the habits gate exceeded its time budget ({budget:g} s) on this command, so it is denied rather than "
                  "left unchecked; split or simplify the command (very long runs of `$(`, `$((`, quotes or `$NAME:` text "
                  "are the usual cause) and re-run it.")
+CHILD_FAILED_REASON = ("the habits gate could not finish checking this command (its scan process ended without a result, wait "
+                       "status {status}), so it is denied rather than left unchecked; re-run it, and if it repeats, split or "
+                       "simplify the command.")
 
 
 def _budget() -> float:
@@ -1523,6 +1526,10 @@ def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
     version does, and a thread cannot run while one C call holds the GIL. The child, though, arms SIGALRM at its default
     action (the kernel ends it, no Python handler runs) as a backstop, so a hook parent killed from outside never leaves it
     burning a core (adversary PR 918 r4 L-2). Without `os.fork`, or when forking fails, `check` runs in-process (no budget)."""
+    import math
+    import select
+    import signal
+    import time
     budget = _budget()
     if not hasattr(os, "fork"):
         return _check_guarded(cmd)
@@ -1542,8 +1549,6 @@ def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
         status = 1
         try:
             os.close(rfd)
-            import math
-            import signal
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             signal.alarm(int(math.ceil(budget)) + CHILD_GRACE)
             try:
@@ -1560,8 +1565,6 @@ def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
         finally:
             os._exit(status)
     os.close(wfd)
-    import select
-    import time
     deadline = time.monotonic() + budget
     chunks: list[bytes] = []
     timed_out = False
@@ -1588,7 +1591,12 @@ def check_within_budget(cmd: str) -> tuple[str | None, str | None]:
     try:
         kind, reason, warn = json.loads(b"".join(chunks))
     except ValueError:
-        raise RuntimeError(f"the habits gate child exited with status {wait_status} and no result")
+        # No usable result and not our own timeout: the child's own SIGALRM fired first (the parent was delayed past the grace:
+        # heavy load, a stopped hook process, a clock jump), or it crashed or was killed. A raise here exits the hook 1, which
+        # Claude Code reads as a non-blocking error, so the command would run unchecked: deny instead (adversary PR 926 LOW-1).
+        if os.WIFSIGNALED(wait_status) and os.WTERMSIG(wait_status) == signal.SIGALRM:
+            return BUDGET_REASON.format(budget=budget), None
+        return CHILD_FAILED_REASON.format(status=wait_status), None
     return (None, None) if kind == "skip" else (reason, warn)
 
 

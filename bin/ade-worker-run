@@ -236,6 +236,17 @@ def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
     return out
 
 
+def _state_owner(path: Path) -> str | None:
+    """The ade.lead label in one Paseo state file, None when it cannot be read or carries none."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    labels = data.get("labels") if isinstance(data, dict) else None
+    owner = labels.get("ade.lead") if isinstance(labels, dict) else None
+    return owner if isinstance(owner, str) else None
+
+
 def foreign_agents(wks: str, lead: str) -> list[str]:
     """Agents in window `wks` (closed ones too: a closed worker still says whose window it was) labelled
     ade.lead=<another lead> (not this lead or one it replaced)."""
@@ -243,6 +254,11 @@ def foreign_agents(wks: str, lead: str) -> list[str]:
     out = []
     for a in live_agents():
         st = state_file(a["id"])
+        if len(state_paths(a["id"])) > 1 and a.get("status") != "closed":
+            if all(_state_owner(p) in mine for p in state_paths(a["id"])):
+                continue  # every copy says it is this lead's (or a replaced lead's): never foreign, wherever its window is
+            out.append(f"{a['id']} ({a.get('status')}, two Paseo state files: its window is unknown, it may be in this one)")
+            continue
         if not st or st.get("workspaceId") != wks:
             continue
         labels = st.get("labels")
@@ -451,13 +467,18 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     return Found(row, new, owned_here)
 
 
+def state_paths(agent_id: str) -> list[Path]:
+    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+    return sorted((home / "agents").glob(f"*/{agent_id}.json"))
+
+
 def state_file(agent_id: str) -> dict | None:
     """The agent's Paseo state record, or None when there is none, it cannot be read, or the id has MORE THAN ONE file: Paseo
     writes a moved record's new file before it unlinks the old one and ignores an unlink error, so a stale copy can name another
     window, and picking one of the two would let `archive-window` skip a running worker (adversary PR 910 LOW-2). None is an
-    unknown window, which the archive check treats as a blocker."""
-    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
-    files = sorted((home / "agents").glob(f"*/{agent_id}.json"))
+    unknown window: the archive check blocks on it, and so do `unclaimed_agents` and `foreign_agents` for a live agent (a window
+    holding one is not handed to a new launch; adversary PR 926 LOW-2)."""
+    files = state_paths(agent_id)
     if len(files) != 1:
         return None
     try:

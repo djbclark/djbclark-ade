@@ -1466,7 +1466,7 @@ def _load_hook():
     ("0.5", 0.5), ("30", 30.0), ("45", 45.0), ("46", 45.0), ("100", 45.0), ("1e12", 45.0), ("inf", 45.0), ("1e400", 45.0),
 ])
 def test_the_budget_is_clamped_below_the_hook_timeout(monkeypatch, value, expected):
-    """A large value must not move the deadline past the hook's 60 s timeout (that would bring back the old fail-open)."""
+    """A large value must not move the deadline past the old 60 s hook timeout (that would bring back the old fail-open)."""
     monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", value)
     mod = _load_hook()
     assert mod._budget() == expected
@@ -1527,6 +1527,27 @@ def test_the_forked_child_ends_itself_when_the_hook_parent_is_killed(tmp_path):
                 os.kill(child, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_a_child_killed_by_its_own_alarm_before_the_parents_deadline_is_denied_not_raised(monkeypatch):
+    """A delayed parent (load, a stopped hook, a clock jump) can see the child's SIGALRM fire before its own deadline: the
+    parent used to raise RuntimeError (hook exit 1, the command runs unchecked); it must deny (adversary PR 926 LOW-1)."""
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", "3")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "CHILD_GRACE", -2)            # the alarm (ceil(3) - 2 = 1 s) fires well before the parent's 3 s deadline
+    monkeypatch.setattr(mod, "check", lambda cmd: time.sleep(60))
+    started = time.monotonic()
+    reason, warn = mod.check_within_budget("echo x")
+    assert reason and "time budget" in reason and warn is None
+    assert time.monotonic() - started < 2.9                 # the child's alarm ended it, not the parent's deadline
+
+
+def test_a_child_that_dies_without_a_result_is_denied_not_raised(monkeypatch):
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", "5")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "check", lambda cmd: os._exit(3))
+    reason, warn = mod.check_within_budget("echo x")
+    assert reason and "could not finish checking" in reason and warn is None
 
 
 @pytest.mark.parametrize("fork_is", ["missing", "failing"])
