@@ -1,0 +1,111 @@
+# Desired future cherry-picks into our patched fork builds (docs/fork-picks.md).
+# One pick table per entry; `bin/ade-fork-picks apply --target T --workspace WT`
+# cherry-picks the active (queued or carried) entries for T. Edit status with
+# `ade-fork-picks mark` in a worktree. Fields: id (kebab, unique), component (an
+# id in config/forks.toml), repo (OWNER/NAME or https GitHub URL; optional with
+# local_path), exactly one source of commit (40-hex) / branch / pr (number),
+# intent (one line), target or targets (PLATFORM-build-N; build 1 = the installed
+# 0.17.1 cutover), status (queued | carried | landed:N | landed:main | upstreamed
+# | dropped), optional: upstream URL, order, notes, local_path, expected_head,
+# trial_required, hold.
+schema_version = 1
+
+[[pick]]
+id = "paseo-workspace-id-search"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "feat/command-center-agent-id-search"
+intent = "find a workspace by the start of (or a substring of) an agent ID in the command center"
+target = "desktop-build-2"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/discussions/10120"
+order = 10
+notes = "redo in progress; fork PR frdminc/paseo#3; superseded commit ffa8a54ac16437a7dba21f792ad4983ceea70e97"
+
+[[pick]]
+id = "paseo-sidebar-nav-divider"
+component = "paseo"
+repo = "frdminc/paseo"
+commit = "d92ff0929d281a69e9f2575f22a3f303205c9bf3"
+intent = "draggable sidebar top-nav divider"
+target = "desktop-build-2"
+status = "carried"
+upstream = "https://github.com/getpaseo/paseo/discussions/10429"
+order = 15
+notes = "branch feat/sidebar-nav-divider; cherry-picked from 248cd11091076c758cf1d8c4b37b462e1bb97784 onto upstream/main ec22b8265, 10 files +395/-43; issue getpaseo/paseo#9872; upstream PR pending from lead b89b4844-9707-43b0-99c6-18795f4c7c29; already in build 2 base via 248cd110, so apply reports already-present"
+
+[[pick]]
+id = "paseo-about-fork-marker"
+component = "paseo"
+commit = "1c03220bb03e683ea2658908d075860d9fbeca04"
+local_path = "/Users/djbclark/src/paseo-desktop-v0171-fork2-wt"
+intent = "About screen shows 'djbclark fork N'"
+target = "desktop-build-2"
+status = "queued"
+order = 20
+notes = "local only, not pushed; local branch local/main-desktop-v0171-fork2-20261122"
+
+[[pick]]
+id = "paseo-shift-drag-copy"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "feat/shift-drag-copy"
+expected_head = "e2cd572a679c4efe18f44a18577f689aa43a5b06"
+intent = "Shift-drag copy"
+target = "desktop-build-2"
+status = "queued"
+hold = "operator hands-on test pending; shift-drag lead 5d854159-afab-4231-983c-09e7e0851997 reports result and any new head"
+order = 25
+notes = "on upstream/main 2445adecd; security review APPROVE at e2cd572a, CI green https://github.com/frdminc/paseo/actions/runs/45040296766"
+
+[[pick]]
+id = "paseo-sync-sidebar-order"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 9830
+intent = "same sidebar order on macOS and Android (sync workspace, pinned and tab order across clients; open upstream, by luoph)"
+targets = ["desktop-build-2", "android-build-2"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/9830"
+trial_required = true
+order = 30
+notes = "68 files, daemon + app; trial cherry-pick before promising"
+
+[[pick]]
+id = "paseo-android-fork-release"
+component = "paseo"
+repo = "frdminc/paseo"
+pr = 4
+intent = "Android fork release"
+target = "android-build-2"
+status = "landed:main"
+upstream = "https://github.com/frdminc/paseo/pull/4"
+order = 5
+notes = "merged to fork main as 52e55ac8a (branch feat/android-fork-release)"
+
+[[pick]]
+id = "paseo-pi-permission-selected-action"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "fix/pi-permission-selected-action"
+expected_head = "4a58d3e529c94aeec3c495dab08874da3027a1f5"
+intent = "Pi keeps an approved permission instead of turning it into a cancellation"
+target = "desktop-build-2"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/issues/8326"
+order = 35
+notes = "two commits on upstream/main ec22b8265, two files under packages/server/src/server/agent/providers/pi/; two reviews APPROVE; CI green https://github.com/frdminc/paseo/actions/runs/45044468003; known limits: pi-ask-user and rpiv-ask-user-question adapters still cancel an allow (rpiv overlaps getpaseo#6643); not upstreamed yet"
+
+[[pick]]
+id = "paseo-pi-ask-user-question-scope"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 6643
+expected_head = "c445b9b7ce0a1b141441a9d773c6dcbd265e026f"
+intent = "DeepSeek via Pi gets the same question/permission behavior as Claude and Codex"
+target = "desktop-build-2"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/6643"
+trial_required = true
+order = 40
+notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); 2 files, open, last updated 2026-10-16, may need a rebase; trial until a clean apply is shown; applies after paseo-pi-permission-selected-action and the two may conflict in neighbouring Pi code"
