@@ -362,6 +362,7 @@ PLENTY_MIN: float
 QUALITY_MAX_RANK_GAP: dict[str, int]
 DEFAULT_PROFILE: dict[str, int]
 NEVER_ROUTE: frozenset[str]
+REPO_SCOPED: dict[str, RepoScope]
 OPERATOR_GATED: frozenset[str]
 ALIASES: dict[str, str]
 DISPATCH_EXTRA: dict[str, str]
@@ -374,6 +375,39 @@ CALIBRATE_SUGGEST_WORSE_BELOW: float
 CALIBRATE_SUGGEST_WORSE_DELTA: int
 CALIBRATE_SUGGEST_BETTER_ABOVE: float
 CALIBRATE_SUGGEST_BETTER_DELTA: int
+
+
+@dataclass(frozen=True)
+class RepoScope:
+    """`[routing.repo_scoped.NAME]`: pool NAME is a candidate only for a slice whose --cwd resolves to one of `repos`
+    (lower case repository names, `repo_of`) and while its tightest window reads at least `min_headroom` percent
+    (operator 2026-11-02; operator 2026-10-23 keeps the rest of the world out through `never_route`)."""
+    repos: frozenset[str]
+    min_headroom: float = 0.0
+
+
+def _parse_repo_scoped(routing: dict[str, Any]) -> dict[str, RepoScope]:
+    """Validate `[routing.repo_scoped]` and return it. A malformed table fails the load: a typo must not widen a scope. A scope
+    that names no `[[service]]` is inert (a local override may replace the service array), and a `never_route` name with no
+    scope row stays out everywhere."""
+    raw = routing.get("repo_scoped") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("routing.repo_scoped must be a table of [routing.repo_scoped.SERVICE] tables")  # noqa: TRY004  (ValueError is the loader's documented error)
+    out: dict[str, RepoScope] = {}
+    for name, row in raw.items():
+        where = f"routing.repo_scoped.{name}"
+        if not isinstance(row, dict) or set(row) - {"repos", "min_headroom"}:
+            raise ValueError(f"{where} must be a table with only the keys repos and min_headroom")
+        repos = row.get("repos")
+        if not (isinstance(repos, list) and repos and all(isinstance(x, str) and x for x in repos)):
+            raise ValueError(f"{where}.repos must be a non-empty array of repository names")
+        if any(x != x.lower() for x in repos):
+            raise ValueError(f"{where}.repos: repository names are lower case (the lookup lower-cases the cwd's repository)")
+        floor = row.get("min_headroom", 0.0)
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) or not 0.0 <= float(floor) <= 100.0:
+            raise ValueError(f"{where}.min_headroom must be a number from 0 to 100, got {floor!r}")
+        out[str(name)] = RepoScope(frozenset(repos), float(floor))
+    return out
 
 
 def load_policy(path: Path | str) -> dict[str, Any]:
@@ -497,7 +531,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
     global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
-    global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
+    global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED, REPO_SCOPED
     global ALIASES, DISPATCH_EXTRA, DISPATCH_MODES, HERMES_MODELS
     global HERMES_PROVIDER_NAME
     global SUBSTRATE_LIFELINE
@@ -534,6 +568,7 @@ def apply_policy(data: dict[str, Any]) -> None:
         # holds for operator approval is never discovered either.
         NEVER_ROUTE = frozenset(str(x) for x in routing.get("never_route") or [])
         OPERATOR_GATED = frozenset(str(x) for x in dispatch["operator_gated"])
+        REPO_SCOPED = _parse_repo_scoped(routing)
         ALIASES = {str(k): str(v) for k, v in (routing.get("aliases") or {}).items()}
 
         DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
@@ -660,6 +695,8 @@ def policy_public() -> dict[str, Any]:
             "plenty_min": PLENTY_MIN,
             "default_profile": dict(DEFAULT_PROFILE),
             "never_route": sorted(NEVER_ROUTE),
+            "repo_scoped": {n: {"repos": sorted(v.repos), "min_headroom": v.min_headroom}
+                            for n, v in sorted(REPO_SCOPED.items())},
             "aliases": dict(ALIASES),
         },
         "calibrate": {
@@ -725,6 +762,9 @@ def policy_markdown() -> str:
     lines.append("|---|---|")
     d = POLICY["dispatch"]
     lines.append(f"| routing.never_route | {', '.join(sorted(NEVER_ROUTE))} |")
+    scoped = "; ".join(f"{n}: {', '.join(sorted(v.repos))} only" + (f", >= {v.min_headroom:g}% left" if v.min_headroom else "")
+                       for n, v in sorted(REPO_SCOPED.items())) or "(none)"
+    lines.append(f"| routing.repo_scoped (overrides never_route for that repo) | {scoped} |")
     lines.append(f"| dispatch.operator_gated | {', '.join(d['operator_gated'])} |")
     lines.append(f"| dispatch.fable_gated_efforts | {', '.join(d['fable_gated_efforts'])} |")
     caps = ", ".join(f"{k}={v}" for k, v in (d.get("inflight_cap") or {}).items()) or "(none)"
@@ -840,6 +880,92 @@ def pi_blocked_services() -> set[str]:
                    for k, v in data["blocked"].items())):
         return pi_services
     return set(data["blocked"])
+
+
+def pi_acceptance_path() -> Path:
+    """`config/pi-pool-acceptance.toml`, or `$PI_POOL_ACCEPTANCE` (tests, a trial copy)."""
+    return Path(os.environ.get("PI_POOL_ACCEPTANCE")
+                or Path(__file__).resolve().parent.parent / "config" / "pi-pool-acceptance.toml")
+
+
+def load_pi_acceptance(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Return `{pool: {accepted: bool, note: str}}` from the Pi pool acceptance file. Missing file: {}. Unreadable or
+    malformed: raises (`ValueError`, `tomllib.TOMLDecodeError`, `OSError`). `bin/ade_pi_pools.py` reads it through here."""
+    target = path or pi_acceptance_path()
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        return {}
+    data = tomllib.loads(raw.decode("utf-8"))
+    pools = data.get("pools")
+    if pools is None:
+        return {}
+    if not isinstance(pools, dict):
+        raise ValueError("pi-pool-acceptance.toml: [pools] must be a table of pool tables")  # noqa: TRY004  (ValueError is the loader's documented error)
+    out: dict[str, dict[str, Any]] = {}
+    for name, row in pools.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("pi-pool-acceptance.toml: pool names must be non-empty strings")
+        if not isinstance(row, dict):
+            raise ValueError(f"pi-pool-acceptance.toml: pools.{name} must be a table")  # noqa: TRY004  (ValueError is the loader's documented error)
+        accepted = row.get("accepted", False)
+        if not isinstance(accepted, bool):
+            raise ValueError(f"pi-pool-acceptance.toml: pools.{name}.accepted must be a bool")  # noqa: TRY004  (ValueError is the loader's documented error)
+        note = row.get("note", "")
+        if note is not None and not isinstance(note, str):
+            raise ValueError(f"pi-pool-acceptance.toml: pools.{name}.note must be a string")
+        out[name] = {"accepted": accepted, "note": note or ""}
+    return out
+
+
+def pi_unaccepted_services(path: Path | None = None) -> set[str]:
+    """Routing Pi services (`agent = "pi"`) the operator has not accepted for automatic routing: no row or `accepted = false`
+    (docs/pi-defaults.md B4). Fail closed: an unreadable or malformed acceptance file leaves every Pi service unaccepted."""
+    pi = {s.name for s in SERVICES if s.acp_agent == "pi" and not s.retired}
+    try:
+        rows = load_pi_acceptance(path)
+    except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return pi
+    return {n for n in pi if (rows.get(n) or {}).get("accepted") is not True}
+
+
+def is_never_routed(name: str) -> bool:
+    """Is service `name` out of every `route`/`plan` candidate list whatever the repo? True for a `[routing].never_route` name
+    that no `[routing.repo_scoped]` row can let back in."""
+    return name in NEVER_ROUTE and name not in REPO_SCOPED
+
+
+def candidate_block(svc: Service, quota: dict[str, Any] | None, scope_repo: str | None, *,
+                    pi_unaccepted: set[str] | frozenset[str] | None = None) -> str | None:
+    """Why `svc` may not be handed a slice working in repo `scope_repo` whatever its quota (None when it may), the one predicate
+    `route` applies to every candidate, curated or discovered:
+
+    - `[routing].never_route` (a name the repo scope does not list: never);
+    - `[routing.repo_scoped.NAME]` (operator 2026-11-02): only the listed repos, and only while the pool's tightest window
+      reads at least `min_headroom`; an unknown repo (`scope_repo` None) or an unmeasured pool is refused (fail closed);
+    - a Pi service the operator has not accepted in `config/pi-pool-acceptance.toml` (docs/pi-defaults.md B4).
+
+    `scope_repo` is the repository of the slice's --cwd (`repo_of`), never read from a slice name."""
+    scope = REPO_SCOPED.get(svc.name)
+    if scope is not None:
+        names = ", ".join(sorted(scope.repos))
+        if not scope_repo:
+            return f"{svc.name}: only for {names} (repo scope, operator 2026-11-02) and the cwd's repository is unknown: refused"
+        if scope_repo.lower() not in scope.repos:
+            return f"{svc.name}: only for {names} (repo scope, operator 2026-11-02), not {scope_repo}"
+        if scope.min_headroom > 0:
+            left = (quota or {}).get(svc.name, {}).get("remaining")
+            if isinstance(left, bool) or not isinstance(left, (int, float)):
+                return f"{svc.name}: repo-scope floor {scope.min_headroom:g}% with no reading: refused"
+            if left < scope.min_headroom:
+                return f"{svc.name}: {left:.0f}% left, under its {scope.min_headroom:g}% repo-scope floor"
+    elif svc.name in NEVER_ROUTE:
+        return f"{svc.name}: never_route"
+    if svc.acp_agent == "pi":
+        off = pi_unaccepted_services() if pi_unaccepted is None else pi_unaccepted
+        if svc.name in off:
+            return f"{svc.name}: Pi pool not accepted for automatic routing (config/pi-pool-acceptance.toml)"
+    return None
 
 
 def operator_disabled(path: Path | None = None) -> set[str]:
@@ -2199,7 +2325,8 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
             billing=(quota.get(name, {}).get("billing_kind") or "unknown"),
             note="discovered; no curated profile — bulk/mechanical only",
         )
-    return list(services.values())
+    # a curated row obeys never_route too (2026-11-22: only discovered services did, so the curated clinepass row was routed)
+    return [s for s in services.values() if not is_never_routed(s.name)]
 
 
 # -- routing --------------------------------------------------------------
@@ -2266,6 +2393,7 @@ class Choice:
     kind: str = ""                  # recorded as --label ade.kind=… on paseo run
     placement: Placement | None = None   # set by `plan` / `adjust`; None (the single-slice `route`) = a bare launch template
     skipped: list[str] = field(default_factory=list)   # pools passed over for lacking a model profile for `kind` (rt-bulk)
+    barred: list[str] = field(default_factory=list)    # pools `candidate_block` refused (never_route, repo scope, Pi acceptance), with why
     model_note: str = ""            # how a model family resolved (hold, state fallback, unresolved); empty for a literal id
 
     @property
@@ -2748,6 +2876,13 @@ def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
     return name
 
 
+def scope_repo_of(args: argparse.Namespace) -> str | None:
+    """The repository the slice works in for `candidate_block` (never_route, repo scope): the repo of --cwd when given, else of
+    the planner's own cwd. `--repo` and slice names are not read: a pool restricted to a repository is judged by where
+    the worker runs. None (fail closed) when that directory is no git repository or is gone."""
+    return repo_of(getattr(args, "cwd", None) or os.getcwd())
+
+
 def repo_floors(repo: str | None) -> dict[str, float]:
     """The `[dispatch.repo_overrides.REPO.estimate_floor]` table of `repo` (operator 2026-11-01), {} for any other repo."""
     if not repo:
@@ -2841,10 +2976,14 @@ def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: 
             f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota")
 
 
+_SCOPE_FROM_REPO: Any = object()     # route(scope_repo=...) default: the repo scope reads `repo`
+
+
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
           exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
-          avoid: frozenset[str] | set[str] = frozenset(), need_profile: bool = True) -> Choice | None:
+          avoid: frozenset[str] | set[str] = frozenset(), need_profile: bool = True,
+          scope_repo: str | None = _SCOPE_FROM_REPO) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     A pool with no model profile for `kind` (`models[kind]`) is passed over (rt-bulk: its dispatch line would carry a
@@ -2857,20 +2996,34 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     binding window is burning ahead of schedule.
 
     `exclude` names services to skip (full for this wave, or just failed). `avoid` (route_adjust holds) skips
-    candidates the same way but, unlike `exclude`, does not move the quality band's anchor."""
+    candidates the same way but, unlike `exclude`, does not move the quality band's anchor.
+
+    `scope_repo` is the repository of the slice's --cwd (`repo_of`; default: `repo`), which `candidate_block` reads for
+    `[routing].never_route`, `[routing.repo_scoped]` and the Pi pool acceptance (2026-11-22). A barred pool is no
+    candidate and no anchor of the quality band, and is named in `Choice.barred` (and the JSON output's `barred`). Fail closed: no `scope_repo`
+    means no repo-scoped pool."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
+    if scope_repo is _SCOPE_FROM_REPO:
+        scope_repo = repo
     services = list(discover(quota))
-    best = quality_best(kind, services, exclude, quota, need_profile=need_profile)
+    pi_off = pi_unaccepted_services() if any(s.acp_agent == "pi" for s in services) else set()
+    barred = {s.name: why for s in services
+              if (why := candidate_block(s, quota, scope_repo, pi_unaccepted=pi_off)) is not None}
+    best = quality_best(kind, services, frozenset(exclude) | barred.keys(), quota, need_profile=need_profile)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
     by_name = {s.name: s for s in services}
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     skipped: list[str] = []
+    barred_notes: list[str] = []           # barred pools are named in Choice.barred and never re-open the unprofiled retry below
     profiled = False                       # some pool that can take `kind` has a model profile (headroom aside)
     for svc in services:
         if not svc.eligible(kind, quota):
+            continue
+        if svc.name in barred:
+            barred_notes.append(barred[svc.name])   # never_route, repo scope or Pi acceptance: no candidate, does not make the kind "profiled"
             continue
         has_profile = bool(svc.models.get(kind))
         profiled = profiled or has_profile     # counted before exclude/avoid: a full, held or disabled profiled pool still queues
@@ -2949,7 +3102,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             # NO pool that can take the kind has a profile: an unprofiled one stays reachable, placeholder and warning intact.
             # A profiled pool that is merely full queues the slice instead (a placeholder line would only be blocked)
             return route(kind, quota=quota, min_headroom=min_headroom, exclude=exclude, repo=repo, avoid=avoid,
-                         need_profile=False)
+                         need_profile=False, scope_repo=scope_repo)
         return None
     # A fallback (Argon) sorts behind every candidate it sits behind, whatever the scores say: ordering is structural, not
     # a tie of rank + pressure + penalties (Codex review of PR 224, round 6: codex 60% left at pace 1.6 scored 5, tied Argon,
@@ -2985,7 +3138,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind, skipped=skipped, model_note=model_note(best, kind))
+                  kind=kind, skipped=skipped, barred=barred_notes, model_note=model_note(best, kind))
 
 
 def canary_pool(svc: Service) -> str | None:
@@ -3013,7 +3166,8 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None,
          kind_exclude: dict[str, set[str]] | None = None,
          reject: Callable[[str, Choice], str | None] | None = None,
-         refusals: list[str | None] | None = None
+         refusals: list[str | None] | None = None,
+         scope_repo: str | None = _SCOPE_FROM_REPO
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
 
@@ -3021,7 +3175,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     keeps its anchor); it is soft: a kind that finds no room, or only a choice `reject` refuses, is routed
     again with them allowed, so a hold never strands a kind. `reject(kind, choice)` returns a refusal
     reason or None; a refused slice comes back None, takes no wave slot, and its reason is appended to
-    `refusals` (one entry per slice, None when not refused).
+    `refusals` (one entry per slice, None when not refused). `scope_repo`: see `route` (the repo of the slices' --cwd).
 
     Greedy in the given order (put the hardest first), honouring each
     service's `max_parallel` so a wave spreads over pools. Slices that
@@ -3040,10 +3194,11 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
             gate = frontier_gate()
             skip = skip | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
         held = (kind_exclude or {}).get(kind) or set()
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, avoid=held)
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, avoid=held,
+                       scope_repo=scope_repo)
         reason = reject(kind, choice) if reject and choice is not None else None
         if held and (choice is None or reason):
-            retry = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
+            retry = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo, scope_repo=scope_repo)
             retry_reason = reject(kind, retry) if reject and retry is not None else None
             if retry is not None and (choice is None or not retry_reason):
                 choice, reason = retry, retry_reason
@@ -3759,12 +3914,14 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("--slice must be given once per kind, in --kinds order")   # before the locked write below
     skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()} | operator_disabled()
     repo = args.repo or repo_of(os.getcwd())
+    scope_repo = scope_repo_of(args)
     write = cfg["enabled"] and not args.dry_run
     try:
         with (ra.locked(directory) if write else contextlib.nullcontext()):
             state = ra.load_state(directory / "state.json") if cfg["enabled"] else ra.empty_state()
             result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age, state=state,
-                               exclude=skip, min_headroom=args.min_headroom, repo=repo, cfg=cfg)
+                               exclude=skip, min_headroom=args.min_headroom, repo=repo, cfg=cfg,
+                               scope_repo=scope_repo)
             if write:
                 ra.log_events(directory, result["events"])
                 ra.save_state(directory / "state.json", result["state"])
@@ -3773,7 +3930,7 @@ def _adjust_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
         print(f"WARNING: {e}; planning read-only (no hold or restore recorded)", file=sys.stderr)
         result = ra.adjust(sys.modules[__name__], kinds, quota=quota, age=age,
                            state=ra.load_state(directory / "state.json"), exclude=skip,
-                           min_headroom=args.min_headroom, repo=repo, cfg=cfg)
+                           min_headroom=args.min_headroom, repo=repo, cfg=cfg, scope_repo=scope_repo)
     for event in result["events"]:
         print("adjust: " + json.dumps(event, sort_keys=True), file=sys.stderr)
     refused = any(r is not None for _, _, r in result["rows"])
@@ -3955,7 +4112,7 @@ def main(argv: list[str] | None = None) -> int:
         skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
         skip |= operator_disabled()
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
-                    repo=(args.repo or repo_of(os.getcwd())))
+                    repo=(args.repo or repo_of(os.getcwd())), scope_repo=scope_repo_of(args))
         if args.brief and len(args.brief) != len(kinds):
             parser.error("--brief must be given once per kind, in --kinds order")
         apply_placement(rows, args, parser, kinds)
@@ -3974,6 +4131,7 @@ def main(argv: list[str] | None = None) -> int:
                             "dispatch": c.dispatch if c else None,
                             "dispatch_warnings": c.dispatch_warnings if c else [],
                             "skipped": c.skipped if c else [],
+                            "barred": c.barred if c else [],
                             "model_note": c.model_note if c else "",
                             "remaining": c.remaining if c else None,
                             "why": c.why if c else unrouted_why(k, quota, skip)}
@@ -4025,6 +4183,12 @@ def main(argv: list[str] | None = None) -> int:
             svc = BY_NAME.get(name)
             flag = "" if not svc else ("  [retired]" if svc.retired else
                                        "  [never-bulk]" if svc.never_bulk else "")
+            if name in REPO_SCOPED:
+                scope = REPO_SCOPED[name]
+                flag += (f"  [repo-scoped: {', '.join(sorted(scope.repos))} only"
+                         + (f", >= {scope.min_headroom:g}% left" if scope.min_headroom else "") + "]")
+            elif name in NEVER_ROUTE:
+                flag += "  [never_route]"
             rem = info.get("remaining")
             pace = info.get("pace_ratio")
             hrs = hours_to_reset(info.get("resets_at"))
@@ -4149,7 +4313,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if missing else 2 if unreadable else 0
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
-                   repo=(args.repo or repo_of(os.getcwd())))
+                   repo=(args.repo or repo_of(os.getcwd())), scope_repo=scope_repo_of(args))
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": unrouted_why(args.kind, quota, operator_disabled()),
@@ -4164,6 +4328,7 @@ def main(argv: list[str] | None = None) -> int:
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "skipped": choice.skipped,
+            "barred": choice.barred,
             "model_note": choice.model_note,
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),

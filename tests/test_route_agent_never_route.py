@@ -1,0 +1,280 @@
+"""route_agent.py never_route, repo scope and Pi acceptance (2026-11-22).
+
+Bug (tendcf lead 7833318b, 2026-11-22): `plan --kinds research --cwd ~/src/tendcf` picked the curated clinepass row although
+`[routing].never_route` names it (operator 2026-10-23: lifeline of Hermes and Dann, never a slice target), because only
+`discover()` applied never_route and only to discovered services. Operator 2026-11-02: only techno-euphora (and Hermes)
+may route to the cline pool, refused under 40% headroom. `config/pi-pool-acceptance.toml` `[pools.clinepass] accepted = false`
+did not reach `route`/`plan` either (only `bin/pi-default`).
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bin"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import route_agent as r  # noqa: E402
+from test_route_agent import IDLE  # noqa: E402
+
+ACCEPT_ALL = """
+[pools.cursor]
+accepted = true
+[pools.zai]
+accepted = true
+[pools.clinepass]
+accepted = true
+"""
+ACCEPT_NO_CLINEPASS = ACCEPT_ALL.replace("[pools.clinepass]\naccepted = true", "[pools.clinepass]\naccepted = false")
+ACCEPT_NO_CURSOR = ACCEPT_ALL.replace("[pools.cursor]\naccepted = true", "[pools.cursor]\naccepted = false")
+
+
+def drained(**open_pools: float) -> dict[str, dict[str, float]]:
+    """Every pool of the idle fixture at 0% except the named ones (`open_pools`: remaining percent)."""
+    quota = {name: {"remaining": 0.0} for name in IDLE}
+    for name, left in open_pools.items():
+        quota[name] = {"remaining": left}
+    return quota
+
+
+@pytest.fixture
+def accept(monkeypatch, tmp_path):
+    """Point the Pi pool acceptance at a temp file with the given text (the live file is never read)."""
+    def write(text: str | None) -> Path:
+        path = tmp_path / "pi-pool-acceptance.toml"
+        path.unlink(missing_ok=True)
+        if text is not None:
+            path.write_text(text)
+        monkeypatch.setenv("PI_POOL_ACCEPTANCE", str(path))
+        return path
+    write(ACCEPT_ALL)
+    return write
+
+
+def chosen(kind, quota, scope_repo):
+    c = r.route(kind, quota=quota, scope_repo=scope_repo)
+    return c.service.name if c else None
+
+
+# -- (a) a curated never_route row is never a candidate -----------------------------------------------------------------
+
+def test_the_curated_clinepass_row_is_in_never_route():
+    # the premise of the bug: the curated service and the never_route name are the same string
+    assert "clinepass" in r.BY_NAME and "clinepass" in r.NEVER_ROUTE
+
+
+@pytest.mark.parametrize("kind", ["bulk", "mechanical", "research"])     # `code` is outside the quality band for clinepass anyway
+def test_clinepass_is_never_chosen_outside_its_repo_scope(accept, kind):
+    quota = drained(clinepass=100.0)                     # the only pool with room: the repro's 100% headroom
+    for repo in ("tendcf", "djbclark-ade", "techno-euphora-research", None):
+        assert chosen(kind, quota, repo) is None, repo
+
+
+def test_never_route_reaches_a_curated_row_with_no_repo_scope(accept):
+    """The generic rule, not clinepass by name: with the scope removed a never_route curated row is out for every repo."""
+    with mock.patch.object(r, "REPO_SCOPED", {}):
+        assert chosen("bulk", drained(clinepass=100.0), "techno-euphora") is None
+        assert "clinepass" not in {s.name for s in r.discover(drained(clinepass=100.0))}
+    assert "clinepass" in {s.name for s in r.discover(drained(clinepass=100.0))}     # scoped: still listed (show, policy)
+
+
+def test_route_itself_refuses_a_never_route_row_whatever_discover_returns(accept):
+    """Defense in depth: `discover` drops the row, and `route` alone (discover patched to hand the curated list back) refuses it too."""
+    with mock.patch.object(r, "REPO_SCOPED", {}), mock.patch.object(r, "discover", return_value=list(r.SERVICES)):
+        assert chosen("bulk", drained(clinepass=100.0), "techno-euphora") is None
+        assert chosen("bulk", drained(clinepass=100.0), "tendcf") is None
+        c = r.route("bulk", quota=dict(IDLE, clinepass={"remaining": 100.0}), scope_repo="tendcf")
+        assert "clinepass: never_route" in c.barred
+
+
+def test_the_repro_plan_cwd_tendcf_never_names_clinepass(accept):
+    rows = r.plan(["research", "bulk"], quota=drained(clinepass=100.0), repo="tendcf", scope_repo="tendcf")
+    assert [(k, c) for k, c in rows] == [("research", None), ("bulk", None)]
+
+
+def test_a_refused_pool_is_named_in_barred_not_silently_dropped(accept):
+    quota = dict(IDLE, clinepass={"remaining": 100.0})
+    c = r.route("bulk", quota=quota, scope_repo="tendcf")
+    assert c is not None and c.service.name != "clinepass"
+    assert any(n.startswith("clinepass: only for techno-euphora") and "tendcf" in n for n in c.barred)
+
+
+def test_a_barred_pool_does_not_anchor_the_quality_band(accept):
+    """A refused pool is not the band's best pool: it cannot pull a worse pool out of (or into) the band by rank."""
+    with mock.patch.object(r, "quality_best", wraps=r.quality_best) as qb:
+        r.route("code", quota=drained(clinepass=100.0), scope_repo="tendcf")
+    assert "clinepass" in qb.call_args.args[2]       # the `exclude` argument of the anchor lookup
+
+
+# -- (b) the repo scope of the operator's 2026-11-02 ruling ---------------------------------------------------------------
+
+def test_techno_euphora_may_take_clinepass(accept):
+    assert chosen("bulk", drained(clinepass=100.0), "techno-euphora") == "clinepass"
+    for kind in ("mechanical", "research"):
+        assert chosen(kind, drained(clinepass=100.0), "techno-euphora") == "clinepass", kind
+
+
+def test_the_repo_name_compares_case_insensitively(accept):
+    assert chosen("bulk", drained(clinepass=100.0), "Techno-Euphora") == "clinepass"
+
+
+def test_the_floor_is_40_percent_of_the_tightest_window(accept):
+    assert r.REPO_SCOPED["clinepass"].min_headroom == 40.0
+    assert chosen("bulk", drained(clinepass=40.0), "techno-euphora") == "clinepass"
+    assert chosen("bulk", drained(clinepass=39.9), "techno-euphora") is None
+    assert chosen("bulk", drained(clinepass=0.0), "techno-euphora") is None
+
+
+def test_an_unmeasured_scoped_pool_is_refused(accept):
+    quota = drained()
+    quota["clinepass"] = {}                               # no `remaining`: the floor cannot be checked
+    assert chosen("bulk", quota, "techno-euphora") is None
+    del quota["clinepass"]
+    assert chosen("bulk", quota, "techno-euphora") is None
+
+
+def test_an_unknown_repository_is_refused(accept):
+    assert chosen("bulk", drained(clinepass=100.0), None) is None
+    assert chosen("bulk", drained(clinepass=100.0), "") is None
+    # route() without scope_repo reads `repo`, which defaults to None
+    assert r.route("bulk", quota=drained(clinepass=100.0)) is None
+    assert r.route("bulk", quota=drained(clinepass=100.0), repo="techno-euphora").service.name == "clinepass"
+
+
+def test_the_floor_refusal_says_why(accept):
+    c = r.route("bulk", quota=dict(IDLE, clinepass={"remaining": 30.0}), scope_repo="techno-euphora")
+    assert any("30% left, under its 40% repo-scope floor" in n for n in c.barred)
+
+
+# -- the cwd is what scopes: git repo of --cwd, never a directory name or a slice name -------------------------------------
+
+def make_repo(parent: Path, directory: str, origin: str | None) -> Path:
+    path = parent / directory
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    if origin:
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    return path
+
+
+def plan_cli(*argv, quota):
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(r, "load_snapshot", return_value=(quota, 60.0)), \
+            mock.patch.object(r, "operator_disabled", return_value=set()), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = r.main(list(argv))
+    assert code == 0, err.getvalue()
+    return json.loads(out.getvalue())["slices"]
+
+
+def test_cli_scope_follows_the_repo_of_cwd_not_a_name(accept, tmp_path):
+    drained_q = drained(clinepass=100.0)
+    te = make_repo(tmp_path, "feature-wt", "https://example.test/frdminc/techno-euphora.git")
+    other = make_repo(tmp_path, "techno-euphora", "https://example.test/djbclark/tendcf.git")       # right name, other repo
+    bare = make_repo(tmp_path, "plain", None)                                                        # no remote
+    gone = tmp_path / "missing"
+    base = ["plan", "--kinds", "bulk", "--json"]
+    assert plan_cli(*base, "--cwd", str(te), quota=drained_q)[0]["service"] == "clinepass"
+    for cwd in (other, bare, gone):
+        assert plan_cli(*base, "--cwd", str(cwd), quota=drained_q)[0]["service"] is None, cwd
+    # the slice name is never read, and --repo only feeds the repo overrides, not the scope
+    row = plan_cli(*base, "--cwd", str(other), "--slice", "techno-euphora", "--repo", "techno-euphora", quota=drained_q)[0]
+    assert row["service"] is None
+
+
+def test_cli_route_and_adjust_apply_the_same_scope(accept, tmp_path):
+    te = make_repo(tmp_path, "te", "https://example.test/frdminc/techno-euphora.git")
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    quota = drained(clinepass=100.0)
+    for cwd, expect in ((te, "clinepass"), (other, None)):
+        rows = plan_cli("adjust", "--kinds", "bulk", "--dry-run", "--json", "--cwd", str(cwd), quota=quota)
+        assert rows[0]["service"] == expect, cwd
+
+
+def test_scope_refusal_is_in_plan_json_barred(accept, tmp_path):
+    other = make_repo(tmp_path, "tc", "https://example.test/djbclark/tendcf.git")
+    row = plan_cli("plan", "--kinds", "bulk", "--json", "--cwd", str(other), quota=dict(IDLE, clinepass={"remaining": 100.0}))[0]
+    assert any(n.startswith("clinepass: only for techno-euphora") for n in row["barred"])
+
+
+# -- (c) an unaccepted Pi pool is never chosen ------------------------------------------------------------------------------
+
+@pytest.fixture
+def pi_ready():
+    """The suite's fake Paseo lists no `pi`/`cursor` provider, so `service_ready` is False for the Pi pools; the acceptance is
+    what these tests isolate."""
+    with mock.patch.object(r, "service_ready", return_value=True):
+        yield
+
+
+def test_an_unaccepted_pi_pool_is_not_chosen(accept, pi_ready):
+    quota = drained(cursor=100.0)
+    quota["cursor"].update(windows={}, age_s=10.0)         # cursor is measured_only: needs a fresh reading to be eligible
+    assert r.BY_NAME["cursor"].acp_agent == "pi"
+    with_row = chosen("mechanical", quota, "any")
+    assert with_row == "cursor"
+    accept(ACCEPT_NO_CURSOR)
+    assert chosen("mechanical", quota, "any") is None
+
+
+def test_a_missing_or_unreadable_acceptance_file_fails_closed(accept, pi_ready):
+    quota = drained(cursor=100.0)
+    quota["cursor"].update(windows={}, age_s=10.0)
+    assert chosen("mechanical", quota, "any") == "cursor"      # the control: the same quota routes with a good file
+    for text in (None, "[pools\nbroken", '[pools.cursor]\naccepted = "yes"\n', "pools = 3\n"):
+        accept(text)                                      # None: no file at all
+        assert chosen("mechanical", quota, "any") is None, text
+    accept('[pools.zai]\naccepted = true\n')              # a file with no cursor row: missing row is unaccepted
+    assert chosen("mechanical", quota, "any") is None
+
+
+def test_clinepass_in_scope_still_needs_the_pi_acceptance(accept):
+    """techno-euphora lifts never_route for the pool and nothing else: `accepted = false` keeps it out until the operator flips it."""
+    quota = drained(clinepass=100.0)
+    assert chosen("bulk", quota, "techno-euphora") == "clinepass"
+    accept(ACCEPT_NO_CLINEPASS)
+    assert chosen("bulk", quota, "techno-euphora") is None
+    c = r.route("bulk", quota=dict(IDLE, clinepass={"remaining": 100.0}), scope_repo="techno-euphora")
+    assert any("clinepass: Pi pool not accepted" in n for n in c.barred)
+
+
+def test_the_live_acceptance_file_keeps_clinepass_off_automatic_routing(monkeypatch):
+    monkeypatch.delenv("PI_POOL_ACCEPTANCE", raising=False)
+    assert "clinepass" in r.pi_unaccepted_services()
+    assert "cursor" not in r.pi_unaccepted_services() and "zai" not in r.pi_unaccepted_services()
+    assert chosen("bulk", drained(clinepass=100.0), "techno-euphora") is None
+
+
+def test_ade_pi_pools_reads_the_acceptance_through_the_routers_loader(accept):
+    import ade_pi_pools
+    assert ade_pi_pools.load_acceptance() == r.load_pi_acceptance()
+    assert ade_pi_pools.unaccepted_auto_services() == r.pi_unaccepted_services()
+
+
+# -- policy loading ---------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("table, message", [
+    ({"clinepass": {"repos": []}}, "non-empty array"),
+    ({"clinepass": {"repos": ["Techno-Euphora"]}}, "lower case"),
+    ({"clinepass": {"repos": ["x"], "min_headroom": 140}}, "0 to 100"),
+    ({"clinepass": {"repos": ["x"], "min_headroom": True}}, "0 to 100"),
+    ({"clinepass": {"repos": ["x"], "floor": 1}}, "only the keys"),
+    ({"clinepass": ["x"]}, "only the keys"),
+])
+def test_a_malformed_repo_scope_fails_the_load(table, message):
+    with pytest.raises(ValueError, match="routing.repo_scoped") as err:
+        r._parse_repo_scoped({"repo_scoped": table})
+    assert message in str(err.value)
+
+
+def test_policy_output_states_the_scope():
+    assert r.policy_public()["routing"]["repo_scoped"] == {"clinepass": {"repos": ["techno-euphora"], "min_headroom": 40.0}}
+    assert "| routing.repo_scoped" in r.policy_markdown() and "clinepass: techno-euphora only, >= 40% left" in r.policy_markdown()
