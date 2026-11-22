@@ -51,13 +51,13 @@ notes = "branch feat/sidebar-nav-divider; cherry-picked from 248cd11091076c758cf
 [[pick]]
 id = "paseo-about-fork-marker"
 component = "paseo"
+repo = "frdminc/paseo"
 commit = "1c03220bb03e683ea2658908d075860d9fbeca04"
-local_path = "/Users/djbclark/src/paseo-desktop-v0171-fork2-wt"
 intent = "About screen shows 'djbclark fork N'"
 target = "desktop-build-2"
 status = "queued"
 order = 20
-notes = "local only, not pushed; local branch local/main-desktop-v0171-fork2-20261122"
+notes = "public on frdminc/paseo (an ancestor of trial/pi-8326-6643-on-fork2); local branch local/main-desktop-v0171-fork2-20261122"
 
 [[pick]]
 id = "paseo-shift-drag-copy"
@@ -115,12 +115,50 @@ notes = "two commits on upstream/main ec22b8265, two files under packages/server
 id = "paseo-pi-ask-user-question-scope"
 component = "paseo"
 repo = "frdminc/paseo"
-branch = "trial/pi-8326-6643-on-fork2"
-expected_head = "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
+commit = "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
 intent = "DeepSeek via Pi gets the same question/permission behavior as Claude and Codex"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/6643"
 trial_required = false
 order = 40
-notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); trial DONE: stack branch trial/pi-8326-6643-on-fork2 on frdminc/paseo, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb: our 8326 fix (906cbef77, 27701d707) then upstream #6643 c445b9b7c cherry-picked as ca6826bfc (one trivial test-file conflict in rpiv-ask-user-question/index.test.ts); local tests 173/173; SAFE FALLBACK: trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (re-pin expected_head then); applies after paseo-pi-permission-selected-action (its commits already present are skipped)"
+notes = "registered as the single commit ca6826bfc, not the stack branch (r3 LOW-1: that branch carries 14 commits not on upstream main, so on a base without the fork2 line it would pick fork-base commits; a commit source picks only this one); a security reviewer read the ca6826bf diff in r3 (rpiv-ask-user-question/index.ts identical to upstream PR head c445b9b7ce0a1b141441a9d773c6dcbd265e026f); fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); trial DONE: stack branch trial/pi-8326-6643-on-fork2 on frdminc/paseo, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb: our 8326 fix (906cbef77, 27701d707) then upstream #6643 c445b9b7c cherry-picked as ca6826bfc (one trivial test-file conflict in rpiv-ask-user-question/index.test.ts); local tests 173/173; SAFE FALLBACK: trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (switch this entry to a pinned branch with expected_head then); applies after paseo-pi-permission-selected-action (its commits already present are skipped)"
+
+[[pick]]
+id = "worktree-setup-sharp-global-libvips"
+component = "paseo"
+repo = "frdminc/paseo"
+commit = "b21068d965e144963e54ac9ab617c4e504887a2a"
+intent = "paseo.json worktree setup runs SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm ci so new worktrees do not fail on Macs with Homebrew vips"
+target = "desktop-build-2"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/issues/10539"
+trial_required = false
+order = 13
+notes = "branch fix/worktree-setup-sharp-global-libvips on frdminc/paseo, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74; build-2 check: a fresh worktree from the build-2 app completes its Setup tab; only worktrees whose base contains the commit benefit"
+
+[[pick]]
+id = "plugin-acp-elicitation-forms"
+component = "paseo"
+commit = "faa107e0cd0fe98c91dec53fb6a97f2a93e4fc12"
+local_path = "/Users/djbclark/src/paseo-plugin-elicitation-wt"
+intent = "Antigravity (agy acp) questions render as Paseo question cards: plugin ACP client advertises elicitation.form (opt-in) and implements createElicitation"
+target = "desktop-build-2"
+status = "queued"
+hold = "adversary APPROVE received (commit amended after it); held only for the live agy acp QA / trial in build 2"
+trial_required = true
+upstream = "https://github.com/getpaseo/paseo/discussions/7470"
+order = 45
+notes = "branch feat/plugin-acp-elicitation-forms in the local worktree /Users/djbclark/src/paseo-plugin-elicitation-wt, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74, local only (not pushed); also getpaseo/paseo issue 9355 (https://github.com/getpaseo/paseo/issues/9355); build-2 check: needs a live agy acp session in build 2, hence trial_required"
+
+[[pick]]
+id = "paseo-bump-wrangler-sharp-0-35"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "chore/bump-wrangler-sharp-0-35"
+expected_head = "1f06e8fb966fbf6ddc855cd7a6081c50175845e2"
+intent = "bump wrangler and sharp to 0.35 (parked: not for build 2)"
+target = "desktop-build-2"
+status = "dropped"
+order = 90
+notes = "PARKED, NOT FOR BUILD 2: status dropped so apply never selects it (the schema requires a target, desktop-build-2 here is a placeholder only); pending CI https://github.com/frdminc/paseo/actions/runs/45052130017 and the paseo lead afa869f0-0e51-4ab7-937e-ccdc72f2c3af ruling; when it is wanted, set status queued and a real target"

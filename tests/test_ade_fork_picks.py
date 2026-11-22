@@ -108,10 +108,21 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 9
+    assert len(by_id) == 12
     assert by_id["paseo-pi-permission-selected-action"]["order"] < by_id["paseo-pi-ask-user-question-scope"]["order"]
     assert by_id["paseo-sync-sidebar-order"]["pr"] == 9830 and by_id["paseo-sync-sidebar-order"]["trial_required"]
-    assert by_id["paseo-about-fork-marker"]["local_path"].startswith("/")
+    assert "local_path" not in by_id["paseo-about-fork-marker"]
+    assert by_id["paseo-about-fork-marker"]["repo"] == "frdminc/paseo"
+    assert "local only" not in by_id["paseo-about-fork-marker"]["notes"]
+    sharp = by_id["worktree-setup-sharp-global-libvips"]
+    assert sharp["commit"] == "b21068d965e144963e54ac9ab617c4e504887a2a" and sharp["targets"] == ["desktop-build-2"]
+    assert sharp["status"] == "queued" and sharp["trial_required"] is False
+    elic = by_id["plugin-acp-elicitation-forms"]
+    assert elic["hold"] and elic["trial_required"] and elic["local_path"].startswith("/") and "repo" not in elic
+    assert by_id["paseo-bump-wrangler-sharp-0-35"]["status"] == "dropped"
+    # r3 LOW-1: the Pi 6643 entry is its single commit, not the 14-commit stack branch
+    assert by_id["paseo-pi-ask-user-question-scope"]["commit"] == "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
+    assert "branch" not in by_id["paseo-pi-ask-user-question-scope"]
     assert by_id["paseo-shift-drag-copy"]["hold"] and by_id["paseo-sidebar-nav-divider"]["status"] == "carried"
     assert by_id["paseo-android-fork-release"]["status"] == "landed:main"
 
@@ -770,6 +781,33 @@ def test_line_separators_and_format_characters_are_refused_and_scrubbed(reg_work
     assert run_main(reg, "mark", "second", "--status", "carried", "--note", "one") == 0
     assert run_main(reg, "mark", "second", "--status", "dropped", "--note", "two") == 0
     assert {e["id"]: e for e in fp.load_registry(reg, FORKS)}["second"]["notes"] == "old note | one | two"
+
+
+def test_hand_edited_line_separator_in_a_string_does_not_break_mark(reg_worktree):
+    """r3 LOW-2: a raw U+2028 inside a TOML string must not split lines in the status edit."""
+    reg = reg_worktree["wt"] / "reg.toml"
+    text = reg.read_text().replace("old note", "old note")
+    reg.write_text(text)
+    assert " " in reg.read_text()
+    assert run_main(reg, "mark", "second", "--status", "dropped", "--note", "x") == 0
+    entries = {e["id"]: e for e in fp.load_registry(reg, FORKS)}
+    assert entries["second"]["status"] == "dropped" and entries["second"]["notes"].endswith("| x")
+    assert " " in reg.read_text()
+
+
+def test_large_plan_warning_fires_above_the_threshold(world, tmp_path, capsys):
+    """r3 LOW-1: a source with more than LARGE_PLAN commits is flagged in the text output."""
+    fork = world["fork"]
+    sh(fork, "checkout", "-q", "-b", "big", "main")
+    for i in range(fp.LARGE_PLAN + 1):
+        commit_file(fork, f"big{i}.txt", f"{i}\n", f"big {i}")
+    sh(fork, "checkout", "-q", "main")
+    path = registry(tmp_path, pick("bigone", branch="big"), pick("smallone", branch="feat", order=1))
+    assert run_main(path, "apply", "--dry-run", "--target", "desktop-build-2", "--workspace", str(world["wt"])) == 0
+    out = capsys.readouterr().out
+    assert out.count("LARGE plan") == 1
+    big_line = next(line for line in out.splitlines() if "bigone" in line)
+    assert "LARGE plan" in big_line
 
 
 def test_upstream_fetch_failure_happens_before_any_pick(world, tmp_path, monkeypatch, capsys):
