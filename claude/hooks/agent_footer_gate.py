@@ -17,7 +17,8 @@ means an earlier sub-agent of this session did not finish (2026-11-14: a lead's 
 harness said to resume the stopped adversary with SendMessage, the lead launched a new Agent with the same
 description instead and ~20 minutes of paid review were redone). That launch is denied with the order to
 SendMessage the earlier agent (its id is in the spawn result / task notification) "resume from where you
-stopped"; a deliberate fresh start carries a prompt line `Relaunch-reason: <why>`, which the hook allows and
+stopped"; a relaunch after a reasonable effort to resume has failed (operator 2026-11-22: resume sent, state
+confirmed, one retry) carries a prompt line `Relaunch-reason: <why>`, which the hook allows and
 logs to `<report dir>/<session>/relaunch.log`. The guard covers the path the hook would use and, for a prompt that
 already has the footer, the path the prompt labels ("Report path: ...") or its footer's delivery line names; it skips on any error (fail open).
 Fills `docs/dispatch-footer.md` inline (2026-11-09: no longer shells out to
@@ -110,13 +111,14 @@ RO_CONTEXT = (
 RELAUNCH_TOKEN = re.compile(r"(?m)^Relaunch-reason:[ \t]*(\S.*)$")    # column 0: an indented line is quoted or pasted text
 RESUME_REASON = (
     "{report} already exists and {report}.done does not: an earlier sub-agent of this session with this report "
-    "path did not finish (its process stopped or it is still running). Do not start a new one: resume it with "
-    "SendMessage to its agent id (the agentId in its spawn result or task notification; ListAgents shows it) "
-    "and the text \"resume from where you stopped\". Not an earlier agent of yours? If the path is another "
+    "path did not finish (its process stopped or it is still running). Resume it before relaunching: SendMessage "
+    "to its agent id (the agentId in its spawn result or task notification; ListAgents shows it) "
+    "with the text \"resume from where you stopped\". Not an earlier agent of yours? If the path is another "
     "agent's report named only as background, or two long descriptions cut to the same name, give this agent "
-    "its own `Report path: /abs/<name>-report.md` (or a distinct description). If you deliberately want a fresh "
-    "start, add a line `Relaunch-reason: <why>` (at the start of the line) to the prompt and launch again (the hook logs it, and the "
-    "earlier report is overwritten). Create `{report}.done` only for your own agent whose report is complete, "
+    "its own `Report path: /abs/<name>-report.md` (or a distinct description). Relaunch only after a reasonable effort "
+    "to resume has failed (the resume sent, the state confirmed, one retry); then add a line `Relaunch-reason: <why>` (at the "
+    "start of the line) to the prompt, tell the new agent which of the earlier report's work is finished, and launch again "
+    "(the hook logs it, and the earlier report is overwritten: keep a copy of it first). Create `{report}.done` only for your own agent whose report is complete, "
     "never for one still running.")
 
 
