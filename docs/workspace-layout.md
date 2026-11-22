@@ -57,7 +57,10 @@ maps both spellings onto LEAD, WORKER, OTHER); `ade-tidy` and `ade-worker-run` r
    (never from a possibly-unset `PASEO_WORKSPACE_ID`), refuses unless the window is named `LEAD …` and the caller is the lead
    (a `MAIN …` name is renamed to `LEAD …` by the launch), and never archives it. `ade-worker-run rename-lead --lead <id>
    [--window-middle <work>] [--repo <repo>]` (alias `rename-main`) names the lead's own window `LEAD <repo> (<work>)` (a WORKER or
-   OTHER window is refused; a legacy `MAIN <middle>` is renamed too).
+   OTHER window is refused; a legacy `MAIN <middle>` and a bare `LEAD <repo>` are renamed too). The repo is `--repo`, else the window cwd's
+   repo, never the home directory's name: a bare `LEAD tendcf` over a cwd that is not a git repo keeps `tendcf`, and a home-directory
+   cwd with no repo-like name is refused ("pass --repo"). A window already in the current form is corrected when `--repo` or
+   `--window-middle` differs from its name; only `rename-lead` corrects, a `--placement lead` launch takes a current name as it is.
 2. **`WORKER <repo> (<work>)`**: one box per lead and repo for **every** worker, reviewer and advisor the lead starts on its own
    initiative (the next section). Tab name: `worker <slice> <lead agent id>` (singular), with the **full** lead id, so a sidebar line
    names its owner, plus ` [wt: <worktree dir basename>]` when the worker writes in a worktree (below). Example: window `WORKER

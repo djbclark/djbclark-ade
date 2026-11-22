@@ -1361,7 +1361,7 @@ class Service:
                 # LEAD name yet, so the advice is given without a name to show
                 info.update(state='rename-advised', reason='successor-window-unresolved', command=command)
                 self.progress(f'the successor\'s window is new (not the predecessor\'s); run as the successor: {command}'
-                              ' [--window-middle "WORK"]')
+                              ' [--window-middle "WORK"] [--repo REPO]')
             elif not isinstance(name, str):
                 info['reason'] = 'window-not-listed'
             else:
@@ -1371,7 +1371,7 @@ class Service:
                 else:
                     info.update(state='rename-advised', command=command)
                     self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}'
-                                  ' [--window-middle "WORK"]')
+                                  ' [--window-middle "WORK"] [--repo REPO]')
         except SessionError as error:
             info['reason'] = bounded(str(error), MESSAGE_LIMIT)
         record['lead_window'] = info
