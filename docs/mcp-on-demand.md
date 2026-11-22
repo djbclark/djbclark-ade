@@ -681,11 +681,11 @@ for building the aggregator.
    `~/.local/state/lsp-guard/unguarded.log` (a line each time a guarded entry fell back because the guard was missing or failed
    `--check /`; from local-lsp 1.0.7 ([site-djbclark#294](https://github.com/djbclark/site-djbclark/pull/294)) a deliberate
    `ADE_LSP_ROOT_GUARD=off` is not logged, and 1.0.6 lines with the text "off, broken or not on PATH" count as unavailable): count
-   per server over the last `--days` (default 7, not negative) and the newest line (control characters removed), so a silent loss
+   per server over the last `--days` (default 7, not negative) and the newest line (control characters removed, as from server names and printed roots), so a silent loss
    of the RAM relief shows up in the census. The log is read from its last 1 MiB and only when it is a regular file (a FIFO,
    `/dev/zero` or a directory counts as empty); a line whose date is impossible is skipped. Because `off` leaves no log line,
    `--roots` also says whether `ADE_LSP_ROOT_GUARD=off` is set in `~/.claude/settings.json` `env` or in the census process's
-   environment (only that one key is read; its value is not a secret), so a forgotten switch shows up too. JSON: the key
+   environment (only that one key is read; its value is not a secret; the settings file is read like the log, regular file only and at most 1 MiB), so a forgotten switch shows up too. The "not off" line says what was checked: other settings layers (managed, project, `settings.local.json`) and the launch environment of running sessions are not read. JSON: the key
    `_unguarded_log` (not a process class: `total`, `by_server`, `newest`, `days`, `path`, and `switch` with `settings` and `env`).
    `--days`, `--unguarded-log` and `--claude-settings` without `--roots` earn a stderr note. Read-only; it starts and kills
    nothing. Tests: `tests/test_ram_census.py`.
