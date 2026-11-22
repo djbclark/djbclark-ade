@@ -236,17 +236,44 @@ def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
     return out
 
 
+def _state_copy(path: Path) -> dict | None:
+    """One Paseo state file as a dict, None when it cannot be read."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _owner_of(rec: dict) -> str | None:
+    labels = rec.get("labels")
+    owner = labels.get("ade.lead") if isinstance(labels, dict) else None
+    return owner if isinstance(owner, str) and owner else None
+
+
 def foreign_agents(wks: str, lead: str) -> list[str]:
     """Agents in window `wks` (closed ones too: a closed worker still says whose window it was) labelled
-    ade.lead=<another lead> (not this lead or one it replaced)."""
+    ade.lead=<another lead> (not this lead or one it replaced). An agent with several state files (Paseo writes a moved record's
+    new file before it unlinks the old one) is judged copy by copy, live or closed alike: it counts when a copy naming `wks`
+    carries another lead's label; copies that all name other windows put it elsewhere; a live agent with an unreadable copy has
+    an unknown window and counts (fail closed; adversary PR 926 r2 LOW-1)."""
     mine = lineage(lead)
     out = []
     for a in live_agents():
+        paths = state_paths(a["id"])
+        if len(paths) > 1:
+            copies = [_state_copy(p) for p in paths]
+            owners = [_owner_of(c) for c in copies if c and c.get("workspaceId") == wks]
+            other = next((o for o in owners if o and o not in mine), None)
+            if other:
+                out.append(f"{a['id']} (ade.lead={other}, two Paseo state files)")
+            elif a.get("status") != "closed" and any(c is None for c in copies):
+                out.append(f"{a['id']} ({a.get('status')}, two Paseo state files, one unreadable: its window is unknown, it may be in this one)")
+            continue
         st = state_file(a["id"])
         if not st or st.get("workspaceId") != wks:
             continue
-        labels = st.get("labels")
-        owner = labels.get("ade.lead") if isinstance(labels, dict) else None
+        owner = _owner_of(st)
         if owner and owner not in mine:
             out.append(f"{a['id']} (ade.lead={owner})")
     return out
@@ -451,15 +478,25 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
     return Found(row, new, owned_here)
 
 
-def state_file(agent_id: str) -> dict | None:
+def state_paths(agent_id: str) -> list[Path]:
     home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
-    for p in sorted((home / "agents").glob(f"*/{agent_id}.json")):
-        try:
-            data = json.loads(p.read_text())
-        except (OSError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
-    return None
+    return sorted((home / "agents").glob(f"*/{agent_id}.json"))
+
+
+def state_file(agent_id: str) -> dict | None:
+    """The agent's Paseo state record, or None when there is none, it cannot be read, or the id has MORE THAN ONE file: Paseo
+    writes a moved record's new file before it unlinks the old one and ignores an unlink error, so a stale copy can name another
+    window, and picking one of the two would let `archive-window` skip a running worker (adversary PR 910 LOW-2). None is an
+    unknown window: the archive check blocks on it, and so does `unclaimed_agents` for a live agent; `foreign_agents` reads each
+    copy instead and refuses only a window a copy names (adversary PR 926 LOW-2, r2 LOW-1)."""
+    files = state_paths(agent_id)
+    if len(files) != 1:
+        return None
+    try:
+        data = json.loads(files[0].read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def state_dir() -> Path:

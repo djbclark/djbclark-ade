@@ -506,6 +506,24 @@ a public repo) starts a review. Until confirmed, install the app only on private
 one outsider comment on a large fork diff could spend the balance. An unexpected Macroscope check run or comment on any
 PR is a possible spend incident: report it to the lead and the operator, do not triage it as an ordinary finding first.
 
+**Never wait on a stuck third-party reviewer check (operator ruling 2026-11-22: "We're out of cursor quota. You need to just
+route out those and you should have a plan that you should always route out things like that").** A vendor AI reviewer whose
+quota is out never finishes (the Cursor Approval Agent and Security Agent checks sat in progress for over 2 h on a site PR while
+a merge job waited on them). A merge wait therefore never blocks on a third-party AI reviewer check (Cursor's agents,
+CodeRabbit, Greptile, Copilot, Codex) that is still running: it is routed out of the wait, not waited out. `bin/ade-merge-ready`
+already does this for a listed bot: a running check younger than `pending_max_minutes` (15) blocks as `review_bot_pending`, one
+older is a `stalled` note and never blocks (a running check whose start time cannot be read stays `pending`: fail closed), and `merge_now` itself reads only `pytest-linux` and the `adversary-marker`, so an unlisted vendor check never gates it. A hand-rolled
+merge script or wait (site PRs, a lead's loop) applies the same cap and never polls such a check past it; when a vendor is known
+to be out of quota, the status post says so and the wait is skipped from the start. What this does and does not gate, as the code stands: `bin/ade-merge-ready` and `bin/review_bots.py` **do not read a check's
+conclusion**. A listed bot's completed check run, whatever its conclusion, and any completed commit status (`failure` and `error`
+too) read as `completed`; only an unresolved or untriaged finding and a still-running young check block. An unlisted vendor
+check never gates. So a finished check with a failing conclusion blocks nothing mechanically, and a bot that fails for its own
+reason (Codex's "usage limit reached" review reads `failed`) must not block either: the merging agent reads a finished failing
+check and judges it like a finding before `merge-now`. What still blocks mechanically: an untriaged listed-bot finding
+(above), a young running listed-bot check, `pytest-linux` and the `adversary-marker`. The adversary review, the tests and the
+listed-bot triage are the real gates, not a vendor check that cannot run. (Making a failed listed-bot check block would need a
+`failed` state in `bot_check_states`, a `BOT_CLASS` entry and tests, and would have to exempt quota failures; not done.)
+
 ```sh
 review-bot-findings --repo OWNER/NAME --pr N [--pr M] [--json] [--check]   # --check: exit 3 untriaged, 4 pending
 review-bot-findings --repo OWNER/NAME --merged-limit 20 --check          # hygiene over the newest merged PRs

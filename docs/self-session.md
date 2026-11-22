@@ -333,16 +333,21 @@ The successor inherits the predecessor's name (C-id), so a chain's agents all re
    (`writeStoredMetadata` spreads the stored record and keeps `archivedAt`; read at getpaseo/paseo a3aa8afaa, 2026-11-22), so it
    does not un-archive, whereas a rename before the archive would call a still-live agent `RETIRED` through the archive retries.
    The readback proves `Archived` still holds; if a Paseo version ever un-archived on rename, that is recorded, never "fixed" with a
-   second archive. The id sits in the title of an archived agent only: a title match (paseo#9668) can meet it as
-   `AGENT_ALREADY_ARCHIVED` and never archive a live lead. Outcome in `identity.checks.retire_rename` (`ok`, `skipped`, `failed`) and
+   second archive. The id sits in the title of an agent that is archived when renamed: while it stays archived a title match (paseo#9668)
+   meets it as `AGENT_ALREADY_ARCHIVED`; once an operator message revives it, a manual `agent archive|reload|detach <successor id>`
+   acts on it, as an ordinary agent, when the successor is missing from the listing (the class a `worker <slice> <lead id>` tab
+   already has), never on the live lead; ADE's own archive paths read full ids from a listing and `finish` refuses on `LISTING_GAP`. Outcome in `identity.checks.retire_rename` (`ok`, `skipped`, `failed`) and
    `identity.retire_rename` (`reason`, `name`, `native_error`): `renamed`; `already-retired` (ok; a name that already starts
    `RETIRED `, so nothing is renamed twice); `names-differ` (skipped, final: a `--title` or another name already tells them apart);
    `malformed-identity` (skipped, final); `predecessor-not-archived` (skipped, retried by a re-run); `native-error`,
    `rename-unarchived-predecessor`, `name-readback-mismatch` (failed, retried by a re-run of `finish`). A record from before st-01
    has no `identity` and is left alone. A later handoff never inherits a `RETIRED ...` name as a title (a revived retired agent
    handing off falls through to the chain record).
-2. **Advise the lead window.** `finish` reads `paseo workspace ls` and checks the successor's own window name (the record's
-   `workspace`) against `LEAD <repo> (<work>)`. The result is `lead_window` in the record and in `finish`'s JSON: `state` `ok`;
+2. **Advise the lead window.** `finish` reads `paseo workspace ls` and checks the successor's own window name against
+   `LEAD <repo> (<work>)`. The window is the record's `workspace` for an `existing` placement; for a `new-local` one (the
+   predecessor's workspace had vanished, so the successor has a window of its own) it is the `workspaceId` in the successor's daemon
+   state file `<home>/agents/*/<id>.json`, and when that cannot be read the advice is given anyway (`rename-advised`, `reason`
+   `successor-window-unresolved`, no `name`). The result is `lead_window` in the record and in `finish`'s JSON: `state` `ok`;
    `rename-advised` with the exact `command` (`ade-worker-run rename-lead --lead <successor id>`, also printed on stderr; add
    `--window-middle "WORK"` to choose the work part); or `unknown` (with `reason`: window not listed, listing failed). It only
    observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs

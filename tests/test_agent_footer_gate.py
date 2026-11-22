@@ -127,6 +127,8 @@ def test_relaunch_over_an_unfinished_report_is_denied_with_resume_instructions(t
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
     assert "SendMessage" in reason and "resume from where you stopped" in reason and "Relaunch-reason:" in reason
+    # operator 2026-11-22: relaunch only after a reasonable effort to resume (not "never")
+    assert "reasonable effort" in reason and "Do not start a new one" not in reason
 
 
 def test_a_finished_report_allows_the_launch(tmp_path):
@@ -1009,10 +1011,27 @@ def test_the_number_of_definition_files_read_is_capped(tmp_path):
     "tools: |\n  Read, Write, Bash\n",
     "tools: [Read,\n  Write, Bash]\n",
     "tools:\n  Read, Write\n",
+    # r3 LOW-4: one case per guard, so each is killed alone (the four above overlap: two guards catch every one of them)
+    "tools: Read,\n  Write, Bash\n",                  # continuation guard only: a plain multi-line scalar
+    "tools: >-\n",                                     # fold guard only: the frontmatter ends right after it
+    "tools: [Read, Grep,\n",                           # flow guard only: an unclosed `[` with no continuation line
 ])
 def test_unparsed_tools_yaml_keeps_the_standard_footer(tmp_path, tools_yaml):
     env = ro_env(tmp_path, {"w": "---\nname: w\n" + tools_yaml + "---\n"})
     out = run({"subagent_type": "w", "prompt": "q"}, env=env)
+    assert "## Delivery contract (test)" in out["updatedInput"]["prompt"] and "read-only" not in out["updatedInput"]["prompt"]
+
+
+def test_a_one_line_tools_value_that_crosses_the_cap_is_dropped_whole_not_cut_short(tmp_path):
+    """r3 LOW-4: the cut lands inside `tools: Read, Write, Bash`; without the cut at the last newline the hook would read
+    `Read, Wr` and class a writer read-only."""
+    head = "---\nname: big\ndescription: "
+    tools_line = "tools: Read, Write, Bash\n"
+    pad = "y" * (65536 - 9 - len(head) - 1) + "\n"            # the tools line starts 9 bytes before the cap: `tools: Re|ad, ...`
+    text = head + pad + tools_line + "---\n"
+    assert len(head + pad) < 65536 < len(head + pad + tools_line)
+    env = ro_env(tmp_path, {"big": text})
+    out = run({"subagent_type": "big", "prompt": "q"}, env=env, timeout=10)
     assert "## Delivery contract (test)" in out["updatedInput"]["prompt"] and "read-only" not in out["updatedInput"]["prompt"]
 
 

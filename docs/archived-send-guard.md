@@ -64,8 +64,10 @@ a. **The sender's own worker passes** (`ade_send_guard.owner_proof`). The sender
       a lineage member: a worker started natively (`paseo run`, `create_agent`) from the sender's session.
    **The sender must itself hold its role** (PR 907 review MED-1): a worker the previous incarnation launched is the successor's, so
    a sender that a completed handoff or an enrolled role holder replaced, one that has an `acknowledged` handoff in flight, or one
-   that is archived or unknown to `paseo agent inspect`, resumes nothing; the live successor does (its lineage holds the
-   predecessor). The ledger and the sender's record are read first, and an unreadable one is a refusal.
+   that is archived or unknown to `paseo agent inspect`, resumes nothing; once the handoff completes, the live successor does
+   (its lineage then holds the predecessor). While a handoff is only acknowledged, nobody but the operator resumes them (the
+   successor's lineage follows completed links only), and a crashed acknowledged successor leaves the predecessor refused until
+   the one-hour acknowledgement window runs out, although peers are routed to it again; both fail closed (PR 907 r2 LOW-3). The ledger and the sender's record are read first, and an unreadable one is a refusal.
    **Label trust** (LOW-1): before reading a lineage member's listing, `owner_proof` asks once for `ade.lead=<random uuid>` and
    trusts no listing unless that returns `[]` (a Paseo that stops honouring `--label` lists everything); a lineage member that is
    not a full lowercase id is never sent to Paseo.
