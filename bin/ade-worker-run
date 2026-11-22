@@ -707,16 +707,17 @@ REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.
 # The brief's OWN report path is read from labelled lines only (operator ruling 2026-11-22, PR 935 LOW-4): a path merely mentioned as an
 # input (another agent's `~/.local/state/agent-reports/x/old-report.md`) is not the report. Labels: a line-start `Report:` / `Report path:`
 # / `Report file:` (list marker, quote or markdown around it allowed), a `## Report path` heading with the path on the next line,
-# "write your report to <path>", and `{report} = <path>`. The path is absolute or `~/`; the first labelled one in the brief wins.
-_P = r"[ \t]*[`'\"]?(?P<p>(?:/|~/)[\w.@+~/-]+)"
+# "write your report to <path>", and `{report} = <path>`. The path is absolute, `~/` or `$HOME/`; the first labelled one in the brief wins.
+_PATH = r"(?P<p>(?:/|~/|\$HOME/)[\w.@+~/-]+)"  # a label counts only when a PATH follows it: absolute, ~/ or $HOME/
+_P = r"[ \t]*[`'\"]?" + _PATH
 _LIST = r"^[ \t>*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?"
 BRIEF_REPORT_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
-    _LIST + r"report(?:[ \t]+(?:path|file))?[*_`]*[ \t]*(?:is|:|=)[*_`]*" + _P,
+    _LIST + r"report\b(?:[ \t]+(?:path|file)\b)?[*_`]*[ \t]*(?:is\b|:|=)[*_`]*" + _P,
     r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n" + _P,
-    r"\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\s+[`'\"]?(?P<p>(?:/|~/)[\w.@+~/-]+)",
+    r"\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\s+[`'\"]?" + _PATH,
     r"\{report\}\s*[=:]" + _P)]
 BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
-    _LIST + r"done(?:[ \t]+(?:marker|file|path))?[*_`]*[ \t]*[:=][*_`]*" + _P,
+    _LIST + r"done\b(?:[ \t]+(?:marker|file|path)\b)?[*_`]*[ \t]*[:=][*_`]*" + _P,
     r"\{done\}\s*[=:]" + _P)]
 SAFE_PATH = re.compile(r"[\w./@+~-]+")  # no space or quote: the worker copies the path into a Write call as given
 VALUES_MARK = "Footer values:"
@@ -728,7 +729,7 @@ def _first_label(brief: str, labels: list) -> str | None:
     if not hits:
         return None
     raw = min(hits, key=lambda m: m.start()).group("p").rstrip(".,")
-    path = os.path.expanduser(raw)
+    path = os.path.expanduser("~/" + raw[len("$HOME/"):] if raw.startswith("$HOME/") else raw)
     if not os.path.isabs(path) or ".." in path.split("/") or has_control_char(path) or not SAFE_PATH.fullmatch(path):
         raise Refused(f"the brief's labelled report path {raw!r} is not a plain absolute path (no `..`, spaces or quotes)")
     return path
@@ -790,10 +791,13 @@ def reserve_report(values: dict[str, str]) -> None:
         f.write("STATUS: working\n")
 
 
-def add_footer_values(rest: list[str], values: dict[str, str]) -> list[str]:
-    """Append the `Footer values:` line after the footer pointer, so the worker never meets an unfilled {report} / {done} / {lead}."""
+def add_footer_values(rest: list[str], values: dict[str, str], created: bool = False) -> list[str]:
+    """Append the `Footer values:` line after the footer pointer, so the worker never meets an unfilled {report} / {done} / {lead}.
+    `created`: ade-worker-run reserves the report file (`STATUS: working`), so the line says to Read it before overwriting it (Claude
+    Code refuses a Write to an existing file the worker has not read)."""
     line = (f"{VALUES_MARK} " + "; ".join(f"{{{k}}} = {v}" for k, v in values.items())
-            + ". Use these wherever the footer says {report}, {done}, {lead}, {inbox} or {replies}.")
+            + ". Use these wherever the footer says {report}, {done}, {lead}, {inbox} or {replies}."
+            + (" The {report} file already exists with `STATUS: working`: Read it, then overwrite it (footer item 1)." if created else ""))
     return [*rest[:-1], f"{rest[-1]}\n\n{line}"]
 
 
@@ -940,12 +944,17 @@ def launch(opts, rest: list[str]) -> int:
     brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
     report_info: dict[str, str] | None = None
     report_generated = False
+    reserved = False  # the stub reserve_report created: removed again when the launch fails before an agent exists
+
+    def drop_stub() -> None:
+        if reserved and report_info:
+            Path(report_info["report"]).unlink(missing_ok=True)
     if not opts.no_footer:
         rest = add_footer(rest)
         report_info = brief_footer_values(lead, brief)  # a labelled report path in the brief is the report: nothing is generated
         if report_info is None:
             report_info, report_generated = footer_report_paths(lead, name), True
-        rest = add_footer_values(rest, report_info)
+        rest = add_footer_values(rest, report_info, created=report_generated)
     rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
     box = "OTHER" if opts.placement == "other" else "WORKER"  # the box the window is looked up or opened in (not the lead's own)
@@ -1053,6 +1062,7 @@ def launch(opts, rest: list[str]) -> int:
         if report_info:  # as late as possible: a launch refused above leaves nothing behind
             if report_generated:
                 reserve_report(report_info)
+                reserved = True
             sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
         rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
@@ -1060,13 +1070,16 @@ def launch(opts, rest: list[str]) -> int:
         if rc != 0:
             if win is None and "AGENT_CREATE_FAILED" in out + err:
                 cleanup_failed_workspace(err, before)
+            drop_stub()
             raise Refused(f"paseo run failed (rc {rc}): {out.strip()[:300]}")
         try:
             result = json.loads(out)
             agent_id = result["agentId"]
         except (ValueError, KeyError, TypeError):
+            drop_stub()
             raise Refused("paseo run printed no agentId; check `paseo ls -g --json` for the new agent")
         if not isinstance(agent_id, str) or not LEAD_RE.fullmatch(agent_id):
+            drop_stub()
             raise Refused("paseo run printed an unusable agentId (expected a UUID)")
         try:
             wks = resolve_window_id(win, result, err, agent_id)

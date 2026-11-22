@@ -27,7 +27,8 @@ def values_line(env, slice_name, lead=LEAD, report=None, done=None):
     """The `Footer values:` line ade-worker-run adds, built by hand (not by the code under test)."""
     r = report or f"{env.tmp}/reports/{lead}/{slice_name}-report.md"
     return (f"Footer values: {{lead}} = {lead}; {{report}} = {r}; {{done}} = {done or r + '.done'}; {{inbox}} = {r}.inbox.md; "
-            f"{{replies}} = {r}.replies.md. Use these wherever the footer says {{report}}, {{done}}, {{lead}}, {{inbox}} or {{replies}}.")
+            f"{{replies}} = {r}.replies.md. Use these wherever the footer says {{report}}, {{done}}, {{lead}}, {{inbox}} or {{replies}}."
+            + (" The {report} file already exists with `STATUS: working`: Read it, then overwrite it (footer item 1)." if report is None else ""))
 
 
 def ftail(env, slice_name):
@@ -2849,6 +2850,8 @@ HOME_OUT = os.path.expanduser("~/out/a.md")
     ("BRIEF\n## Report path\n/tmp/x/a-report.md", "/tmp/x/a-report.md"),
     ("BRIEF\nReport file: ~/out/a.md", HOME_OUT), ("BRIEF\nReport: ~/out/a.md", HOME_OUT),
     ("BRIEF\nWrite your report to ~/out/a.md", HOME_OUT), ("BRIEF\n## Report path\n~/out/a.md", HOME_OUT),
+    ("BRIEF\nReport: ~/out/a-report.md", os.path.expanduser("~/out/a-report.md")),
+    ("BRIEF\nReport path: $HOME/out/a-report.md", os.path.expanduser("~/out/a-report.md")),
     ("BRIEF\nReport: /tmp/x/p-report.md\nalso see ~/.local/state/agent-reports/z/old-report.md", "/tmp/x/p-report.md"),
 ])
 def test_footer_values_take_the_briefs_labelled_report_path(env, brief, report):
@@ -2874,6 +2877,9 @@ def test_a_labelled_done_marker_is_used(env):
     "BRIEF delta review of /Users/someone/.local/state/agent-reports/x/old-report.md",
     "BRIEF the deliverable is /tmp/x/a-report.md",
     "BRIEF\nReport: summarise the findings",
+    "BRIEF\nReport: one paragraph per finding",
+    "BRIEF\nReport issues you find to the lead",
+    "BRIEF\nReport is due soon; see /tmp/x/a-report.md",
 ])
 def test_a_path_only_mentioned_in_the_brief_is_not_the_report(env, brief):
     """(a): an input report path (or a label with no path) still gets the generated values."""
@@ -2998,3 +3004,20 @@ def test_reserve_report_never_overwrites_an_existing_report(env, monkeypatch):
     with pytest.raises(mod.Refused, match="appeared while"):
         mod.reserve_report(vals)
     assert Path(vals["report"]).read_text() == "WORK\n"
+
+
+def test_the_values_line_tells_the_worker_to_read_the_reserved_report_first(env):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 0, r.stderr
+    assert "already exists with `STATUS: working`: Read it, then overwrite it" in run_argv(env)[-1]
+    r = env.run("--lead", LEAD, "--slice", "b", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF\nReport: /tmp/x/b-report.md")
+    last = [c["argv"] for c in env.calls() if c["argv"][0] == "run"][-1][-1]
+    assert "/tmp/x/b-report.md" in last and "Read it, then overwrite" not in last  # a labelled path is the brief's own: nothing was created
+
+
+@pytest.mark.parametrize("failure", [{"run_rc": 1}, {"run_out": {"status": "running"}}, {"run_out": {"agentId": "not-a-uuid"}}])
+def test_a_launch_that_fails_before_an_agent_exists_removes_its_reserved_stub(env, failure):
+    env.data.update(failure)
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r.returncode == 1, r.stderr
+    assert not (env.tmp / "reports" / LEAD / "a-report.md").exists()
