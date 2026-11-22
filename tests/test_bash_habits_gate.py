@@ -1445,8 +1445,137 @@ def test_time_budget_deny_works_for_the_cursor_and_codex_forms_too():
     assert codex.returncode == 2 and "time budget" in codex.stderr
 
 
-@pytest.mark.parametrize("value", ["", "0", "-3", "abc"])
+@pytest.mark.parametrize("value", ["", "0", "-3", "abc", "nan", "-inf", "inf", "1e400", "1e12"])
 def test_an_unusable_budget_value_falls_back_to_the_default(value):
+    """`inf`, `1e400` and `1e12` used to crash the parent on every call (OverflowError in `select`): a crash lets the command run."""
     assert run("git status", env=_budget_env(value)) is None
     out = run("git push origin $C:refs/heads/x", env=_budget_env(value))
     assert out and out["permissionDecision"] == "deny" and "time budget" not in out["permissionDecisionReason"]
+
+
+def _load_hook():
+    from importlib import util
+    spec = util.spec_from_file_location("bhg_budget", HOOK)
+    mod = util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", 20.0), ("0", 20.0), ("-3", 20.0), ("abc", 20.0), ("nan", 20.0), ("-inf", 20.0),
+    ("0.5", 0.5), ("30", 30.0), ("45", 45.0), ("46", 45.0), ("100", 45.0), ("1e12", 45.0), ("inf", 45.0), ("1e400", 45.0),
+])
+def test_the_budget_is_clamped_below_the_hook_timeout(monkeypatch, value, expected):
+    """A large value must not move the deadline past the old 60 s hook timeout (that would bring back the old fail-open)."""
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", value)
+    mod = _load_hook()
+    assert mod._budget() == expected
+    assert mod.BUDGET_MAX < 60
+
+
+def test_a_budget_above_the_clamp_still_times_out_at_the_clamp_not_later(monkeypatch):
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", "1e12")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "BUDGET_MAX", 1.0)           # keep the test fast: the clamp is what decides the deadline
+    monkeypatch.setattr(mod, "check", lambda cmd: time.sleep(60))
+    started = time.monotonic()
+    reason, _ = mod.check_within_budget("echo x")
+    assert reason and "time budget" in reason and time.monotonic() - started < 10
+
+
+def test_the_forked_child_ends_itself_when_the_hook_parent_is_killed(tmp_path):
+    """The hook parent can be killed from outside (a user interrupt, a shorter hook timeout in another TUI): the child it forked
+    must not keep scanning as an orphan (adversary PR 918 r4 L-2). It arms SIGALRM at its default action: budget + 2 s."""
+    import signal
+    pidfile = tmp_path / "child.pid"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import importlib.util, os, time\n"
+        f"spec = importlib.util.spec_from_file_location('bhg', {str(HOOK)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "def slow(cmd):\n"
+        f"    open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "    time.sleep(120)\n"
+        "mod.check = slow\n"
+        "mod.check_within_budget('echo x')\n")
+    parent = subprocess.Popen([sys.executable, str(driver)], env=_budget_env(3))
+    child = None
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not (pidfile.exists() and pidfile.read_text().strip()):
+            time.sleep(0.02)
+        child = int(pidfile.read_text())
+        os.kill(parent.pid, signal.SIGKILL)               # killed well before its own 3 s deadline: nothing reaps the child
+        parent.wait(timeout=10)
+
+        def alive():
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return False
+            return True
+        end = time.monotonic() + 15                       # alarm: ceil(3) + 2 = 5 s
+        while alive() and time.monotonic() < end:
+            time.sleep(0.1)
+        assert not alive(), "the orphaned child is still running"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+        if child:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_child_killed_by_its_own_alarm_before_the_parents_deadline_is_denied_not_raised(monkeypatch):
+    """A delayed parent (load, a stopped hook, a clock jump) can see the child's SIGALRM fire before its own deadline: the
+    parent used to raise RuntimeError (hook exit 1, the command runs unchecked); it must deny (adversary PR 926 LOW-1)."""
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", "3")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "CHILD_GRACE", -2)            # the alarm (ceil(3) - 2 = 1 s) fires well before the parent's 3 s deadline
+    monkeypatch.setattr(mod, "check", lambda cmd: time.sleep(60))
+    started = time.monotonic()
+    reason, warn = mod.check_within_budget("echo x")
+    assert reason and "time budget" in reason and warn is None
+    assert time.monotonic() - started < 2.9                 # the child's alarm ended it, not the parent's deadline
+
+
+def test_a_child_that_dies_without_a_result_is_denied_not_raised(monkeypatch):
+    monkeypatch.setenv("BASH_HABITS_GATE_BUDGET", "5")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "check", lambda cmd: os._exit(3))
+    reason, warn = mod.check_within_budget("echo x")
+    assert reason and "could not finish checking" in reason and warn is None
+
+
+@pytest.mark.parametrize("fork_is", ["missing", "failing"])
+def test_without_a_usable_fork_the_check_error_still_passes_the_command_on_and_no_fd_leaks(monkeypatch, fork_is):
+    """The in-process fallback keeps main()'s old guard (a scan error passes the command on, exit 0) and closes the pipe."""
+    import re
+    mod = _load_hook()
+    pipes = []
+    real_pipe = os.pipe
+
+    def spy_pipe():
+        fds = real_pipe()
+        pipes.append(fds)
+        return fds
+    monkeypatch.setattr(mod.os, "pipe", spy_pipe)
+    if fork_is == "missing":
+        monkeypatch.delattr(mod.os, "fork")
+    else:
+        def no_fork():
+            raise OSError("EAGAIN")
+        monkeypatch.setattr(mod.os, "fork", no_fork)
+
+    def broken(cmd):
+        raise re.error("boom")
+    monkeypatch.setattr(mod, "check", broken)
+    assert mod.check_within_budget("echo x") == (None, None)
+    for fds in pipes:
+        for fd in fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)                              # both ends are closed
+    assert bool(pipes) is (fork_is == "failing")

@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "bin" / "ram-census"
 
@@ -214,6 +216,45 @@ def test_a_settings_file_that_could_not_be_read_is_never_reported_as_not_off(tmp
     _ = ok.write_text("{" + key + "}")
     out, sw = _switch(tmp_path, ok)
     assert sw["settings_status"] == "read" and sw["settings"] == "off" and "off is set in settings.json env" in out
+
+
+def test_a_settings_file_of_exactly_1_mib_is_read_whole_and_one_byte_more_is_not(tmp_path: Path) -> None:
+    m = _module()
+    head = '{"env":{"ADE_LSP_ROOT_GUARD":"off"},"pad":"'
+    tail = '"}'
+    exact = tmp_path / "exact.json"
+    _ = exact.write_text(head + "x" * ((1 << 20) - len(head) - len(tail)) + tail)
+    assert exact.stat().st_size == 1 << 20
+    assert m._read_bounded(str(exact), tail=False)[1] == ""  # `>=` instead of `>` would call a fully read file "over 1 MiB"
+    sw = m.guard_switch(str(exact))
+    assert sw["settings_status"] == "read" and sw["settings"] == "off"
+    over = tmp_path / "over.json"
+    _ = over.write_text(head + "x" * ((1 << 20) - len(head) - len(tail) + 1) + tail)
+    assert over.stat().st_size == (1 << 20) + 1
+    assert m._read_bounded(str(over), tail=False)[1] == "over 1 MiB"
+    assert m.guard_switch(str(over))["settings_status"] == "unreadable: over 1 MiB"
+
+
+def test_off_in_the_environment_and_an_unreadable_settings_file_says_settings_was_not_checked(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    _ = settings.write_text("{not json")
+    base = ["--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings", str(settings)]
+    r = _text(tmp_path, *base, env={"ADE_LSP_ROOT_GUARD": "off"})
+    assert r.returncode == 0 and "set in this process's environment" in r.stdout
+    assert "settings.json unreadable: not valid JSON or too large to parse, so it was not checked" in r.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file")
+def test_a_permission_denied_settings_file_gives_a_status_without_a_doubled_word(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    _ = settings.write_text(json.dumps({"env": {"ADE_LSP_ROOT_GUARD": "off"}}))
+    settings.chmod(0)
+    try:
+        out, sw = _switch(tmp_path, settings)
+    finally:
+        settings.chmod(0o600)
+    assert sw["settings_status"] == "unreadable: cannot be opened or read" and sw["settings"] is None
+    assert "unreadable: unreadable" not in out and "NOT checked" in out and "not off in settings.json" not in out
 
 
 def _module() -> Any:

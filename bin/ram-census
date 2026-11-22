@@ -135,7 +135,8 @@ def _clean(s: str) -> str:
 def _read_bounded(path: str, tail: bool) -> tuple[bytes, str]:
     """(data, problem): at most TAIL_BYTES of a regular file, the last ones when `tail` (a cut that lands inside a line
     drops that partial line), else the first ones. `problem` is "" when the whole file was read (or, in tail mode, when only
-    the old part was cut), "missing", "not a regular file", "over 1 MiB" (head mode: data is the first MiB) or "unreadable".
+    the old part was cut), "missing", "not a regular file", "over 1 MiB" (head mode: data is the first MiB) or "cannot be opened or read"
+    (permission denied or another I/O error; the status text reads `unreadable: cannot be opened or read`).
     The file is opened without blocking and without becoming a controlling terminal, and checked with `fstat` on the
     descriptor, so a FIFO swapped in after a path check cannot hang the census; the read is capped even when the file
     grows meanwhile."""
@@ -144,7 +145,7 @@ def _read_bounded(path: str, tail: bool) -> tuple[bytes, str]:
     except FileNotFoundError:
         return b"", "missing"
     except OSError:
-        return b"", "unreadable"
+        return b"", "cannot be opened or read"
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return b"", "not a regular file"
@@ -154,7 +155,7 @@ def _read_bounded(path: str, tail: bool) -> tuple[bytes, str]:
             _ = f.seek(max(0, start - 1))  # one byte before the cut tells whether it landed on a line start
             raw = f.read(TAIL_BYTES + (1 if start else 0))
     except OSError:
-        return b"", "unreadable"
+        return b"", "cannot be opened or read"
     finally:
         os.close(fd)
     if not start:

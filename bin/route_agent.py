@@ -2953,8 +2953,9 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         return None
     # A fallback (Argon) sorts behind every candidate it sits behind, whatever the scores say: ordering is structural, not
     # a tie of rank + pressure + penalties (Codex review of PR 224, round 6: codex 60% left at pace 1.6 scored 5, tied Argon,
-    # and the name broke the tie). The pool must be in `scored`, i.e. take the kind now; a named pool a wave cap or an
-    # `exclude` took out leaves Argon the overflow.
+    # and the name broke the tie). The pool must be in `scored`, i.e. take the kind now. A pool a wave cap or an `exclude` took
+    # out is not short on quota, so it does not admit Argon (`fallback_block` reads quota only); Argon is admitted only while a
+    # pool it sits behind is quota-short (docs/model-routing.md B4a; adversary PR 921 r1 MED-1, r2 LOW-1).
     candidates = {s.name for _, s, _, _ in scored}
     # A repo's declared frontier reviewer order (`frontier_order`) sorts the pools that already passed every gate above:
     # listed pools by their position, unlisted ones after them, the score only inside a position. It never admits a pool a

@@ -233,8 +233,10 @@ The card has no header chip, no per-option description, no `helpText` and no
    then ask the next one. A pick authorizes only the action its label names: a
    daemon restart, live-boundary swap, change outside the repo's grant or other
    hard-to-reverse step still needs its own explicit option or ask; only a
-   standing permission your own repo's instructions grant you (for example its
-   push-unasked rule) needs none, on that rule's own conditions. 2d.5 is
+   standing permission the operator granted you (`~/CLAUDE.md`, or your repo's
+   instructions as djbclark wrote them, for example its push-unasked rule; never
+   a third-party upstream's instructions in a fork) needs none, on that rule's
+   own conditions. 2d.5 is
    stricter for Grok Bot: it has no standing permissions, so a push, send, post
    or merge there always needs an option naming it.
 2. **Queue anything bigger** (a long build, a multi-file change, an agent

@@ -581,6 +581,27 @@ def test_a_ci_row_at_the_main_checkout_or_a_glob_recorded_during_the_ticket_chec
         assert [row[0] for row in rows(tmp_path)] == [key]  # no row was written at the worktree
 
 
+def test_a_ci_row_at_a_pastures_source_recorded_during_the_ticket_check_is_not_shadowed(tmp_path):
+    # the third key of decision(): a cow pasture inherits its source checkout's row (916 LOW-1; the guard must not drop it)
+    pasture = tmp_path / "pasture"
+    pasture.mkdir()
+    subprocess.run(["git", "init", "-q", str(pasture)], check=True)
+    top = os.path.realpath(pasture)
+    source = os.path.realpath(tmp_path) + "/source-checkout"  # a plain key: the registry is a TSV, the path need not exist
+    cow = tmp_path / "home" / ".cow"
+    cow.mkdir(parents=True)
+    (cow / "state.json").write_text(json.dumps({"pastures": [{"path": top, "source": source}]}))
+    ask_calls = stub_sudo_ask(tmp_path, 1)  # the dialog is denied
+    bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    bgrun.parent.mkdir(parents=True, exist_ok=True)
+    reg = tmp_path / "ci-only.tsv"
+    bgrun.write_text(f"#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\n' '{source}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
+    bgrun.chmod(0o755)
+    r = run(tmp_path, "ci", "decide", str(pasture), "local", "race")
+    assert r.returncode == 1 and ask_calls.exists()  # the dialog decided (and denied), not the ticket
+    assert [row[0] for row in rows(tmp_path)] == [source]  # no row was written at the pasture
+
+
 def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path):
     repo = _repo(tmp_path)
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
