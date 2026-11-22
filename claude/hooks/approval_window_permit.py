@@ -25,6 +25,7 @@ decides first applies"): the lead checks that live. docs/approval-window.md. Run
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -48,9 +49,15 @@ def decision_for(payload: object, grant_path: str | None = None, owner_uid: int 
     if not window.window_open(grant_path or window.GRANT_PATH, now, owner_uid):
         return None
     req = window.claude_hook_request(tool, payload.get("tool_input"))
-    agent = os.environ.get("PASEO_AGENT_ID") or str(payload.get("session_id") or "")
-    req = window.Request(agent_id=agent, request_id=str(payload.get("tool_use_id") or ""), provider=req.provider,
-                         name=req.name, kind=req.kind, title="", description="", input=req.input, detail=None, metadata=None)
+    session = str(payload.get("session_id") or "")
+    agent = os.environ.get("PASEO_AGENT_ID") or session
+    # PermissionRequest input carries no tool_use_id: tie the audit line to the call with the session and a short hash of the input
+    digest = hashlib.sha256(json.dumps(payload.get("tool_input"), sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    request_id = str(payload.get("tool_use_id") or "") or ((session + ":" if session else "") + "sha256-" + digest)
+    cwd = payload.get("cwd")
+    detail = {"cwd": cwd} if isinstance(cwd, str) and cwd.startswith("/") else None   # a relative rm is judged against it
+    req = window.Request(agent_id=agent, request_id=request_id, provider=req.provider,
+                         name=req.name, kind=req.kind, title="", description="", input=req.input, detail=detail, metadata=None)
     verdict = window.decide(req, home)
     log = window.AuditLog(log_path or window.default_log_path())
     log.decision(req, "allow" if verdict.allow else "hold", verdict.rule, verdict.subject)   # audit first

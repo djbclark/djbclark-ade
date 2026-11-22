@@ -53,10 +53,29 @@ or plan name (`AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`, `CodexPlanAppr
 list is copied from `bin/ade-auto-permit`). Allowing a question answers nothing and allowing a plan skips the review. Rules
 `kind:*`, `question:*`.
 
+***a2.*** *Our own gates' asks* (rules `gate:subagent`, `gate:ade`; adversary round 1, 2026-11-22): a Claude sub-agent launch (`Agent`,
+`Task`) is never answered, because `claude/hooks/frontier_agent_gate.py` returns `permissionDecision: "ask"` for a frontier
+sub-agent on purpose (scarce Fable, operator 2026-10-18) and Paseo does not forward the reason, so the policy cannot tell the
+gate's ask from an ordinary launch. Any request whose title, description, detail or metadata carries the gate's text
+(`Frontier sub-agent:`, pinned by a test against the hook's source) also stays pending. The other gates under `claude/hooks/`
+deny, they do not ask.
+
 ***b.*** *Unreadable* (rule `unreadable:*`): a command tool (Bash, CodexBash, `execute`, any request with a `command` field) with no
 command text, a file tool (Write, Edit, Read, `CodexFileChange`, ...) with no path, a request with no input, detail or title at
 all, or a string over 200,000 characters. `CodexFileChange` carries only a free-text reason, so Codex file-change prompts always
 stay pending.
+
+***b2.*** *A command line it cannot read with confidence* (rule `unreadable:unparsable:*`). The text is read with real shell quoting
+**first** (single and double quotes, backslashes, comments, here-documents), and only then split on `;` `&&` `||` `|` `&`,
+newlines and parentheses, so `zsh -lc 'cd /tmp && rm -rf ~/'` is one `zsh` command whose `-c` body is read again (`sh`, `bash`,
+`zsh`, `dash`, `ksh` and `env -S`, recursively, to depth 4; `$1` and `$@` after the body are filled in). Held: an unbalanced quote
+or parenthesis, nesting deeper than 4, `eval`, `source` or `.` of stdin or a substitution, a shell with no `-c` and no script (it reads
+stdin: `curl ... | sh`), a here-document or here-string fed to a shell, a command substitution or backtick **in the command word or in
+the arguments of a removal** (`rm`, `find -delete`, `chmod -R`, `rsync --delete`, ...), and a removal through `xargs` whose input
+is not an `echo`, `printf` or `find` it can read. **Decision (the lead may overrule):** a substitution elsewhere
+(`git commit -m "$(cat <<'EOF' ... EOF)"`, `echo $(date)`, `x=$(git rev-parse HEAD)`) is not held, because it is
+everyday agent text and holding it would defeat the window: its body is parsed and judged like any command line (so
+`echo $(rm -rf /)` is held), and an unquoted here-document body is scanned for substitutions too.
 
 ***c.*** *The sudo-ask denylist* (rule `denylist:*`), mirrored from the site helper's `PROTECTED`, `TRIPWIRE`, `ALWAYS_DENY` and
 verb lists: any string of the request (command, path, title, reason, raw ACP input; never file content or diff text) containing
@@ -65,21 +84,41 @@ verb lists: any string of the request (command, path, title, reason, raw ACP inp
 `Library/Keychains`, `.keychain` or `dslocal`; and a command that runs `visudo`, `csrutil`, `nvram`, `tccutil`, `fdesetup`,
 `pwpolicy`, `systemsetup`, `dseditgroup`, `sysadminctl`, `passwd`, `profiles`, `fdisk`, `gpt`, `asr`, `newfs_*`, `mkfs*`,
 `sudo-ask grant|revoke`, `diskutil` with any verb outside the read-only list (so `erase*`, `secureErase`, `apfs delete*`),
-`dscl` unless it only reads, or `security` unless its verb is read-only (so keychain edits stay pending). A word such as
+`dscl` unless it only reads, or `security` unless its verb is read-only (so keychain edits stay pending). Since the site head `f6dd14ba` (round 2 of its PR) the list also holds the persistence paths a root process could use to outlive
+the window, judged as paths (`~`, `..`, links, case and `--opt=PATH` forms resolved) for every command that is not read-only
+and for every redirection and file-tool path: `/Library/LaunchDaemons`, `/Library/LaunchAgents` (the root one; `~/Library/LaunchAgents`
+is user level and stays allowed), `/Library/StartupItems`, `/private/var/at`, `/usr/lib/cron`, `/private/etc/periodic`,
+`/private/etc/zshenv`, `zprofile`, `zshrc`, `profile`, `bashrc`, `/private/etc/paths` and `paths.d`, `/private/var/root`,
+`/private/etc/ssh`, `/Library/Security/SecurityAgentPlugins`, `/private/etc/ld.so.conf`, `/dev/disk*`, `login.keychain*`; and the
+programs `sntp`, `ntpdate`, `su`, `login`, `at`, `batch`, `chroot`, `crontab` (except `-l`),
+`launchctl submit|asuser|bootstrap|load|enable|kickstart` and `date` with a time to set. **Not mirrored on purpose** (they are the
+site's rules for what root may run, not for what a user-level agent may do): `ssh`, `tmux`, `screen`, `script`, `expect`, `parallel`,
+`watch`, `entr`, `osascript`, a bare `sudo-ask <command>`, the interpreter and agent-writable-path rules (`INVOKER_UID`, scripts and
+programs under writable directories) and the hard-link check. `tests/test_ade_approval_window.py` pins the lists to that head
+(`git show` of the site worktree; skipped where it is absent). A word such as
 `passwd` or `security` counts only where a command stands (first word, after `sudo`/`env`/`time`/...), so `echo passwd` and
 `cat /etc/passwd` do not trip it.
 
 ***d.*** *A critical-path removal* (rule `critical-rm:*`, or `critical-reason` when the card's own title or description says "critical
-path"): `rm`, `rmdir`, `unlink`, `srm`, `shred`, `find ... -delete`, or `chmod|chown|chgrp|chflags -R`, aimed at `/`, `~`, `$HOME`,
+path"): the removal family `rm`, `rmdir`, `unlink`, `srm`, `shred` (also GNU `grm`, `gfind` and the like, and any directory or `..`
+form of the program path), `find` with `-delete` or `-exec`, `-execdir`, `-ok`, `-okdir` running `rm` or a shell (roots, `-f ROOT` and the
+default `.` judged), `xargs rm` (the piped `echo`, `printf` or `find` input judged), `chmod|chown|chgrp|chflags -R`, `rsync --delete*`
+(the destination) and `git clean -f` (the directory, or `-C DIR`), aimed at `/`, `~`, `$HOME`,
 `/Users`, a home directory (`/Users/<name>`), `/System` (and its tree), `/usr`, `/etc`, `/var`, `/private`, `/Volumes/<volume>`,
 `/bin`, `/sbin`, `/opt`, `/opt/homebrew`, `/usr/local`, `/Library`, `/Applications`, `/tmp`, the system `bin`/`lib` trees,
 or `D/*` for any of them. Symlinks are resolved (`/etc` is `/private/etc`). Variables are modelled as **empty**, the failure Claude
 Code's own check warns about: `rm -rf $S/` is `rm -rf /` and stays pending, `rm -rf $S/*` is `rm -rf /*` and stays pending.
+`cd` is followed within one command line (and the request's own `cwd` is the start), so `cd ~ && rm -rf *` and `cd / && rm -rf ./*`
+are judged against `~` and `/`, and a glob or `.` at the top of a critical directory is held.
 
 ***2.*** **Allowed** (rule `allow:window`): everything else, any agent, any provider. In particular **the "possibly-empty variable"
 class from the screenshot is allowed**: `rm -f $S/all.done $S/*.log` models as `/all.done` and `/*.log`, which name no critical
 path. Allowed are also MCP tools, WebFetch, ordinary Bash and file edits, and the hold list of `bin/ade-auto-permit`
 (`respond_to_permission`, `set_agent_mode`, ...) is **not** applied: the operator's ruling is no prompts while the window is open.
+Also allowed by that ruling, and worth knowing: a Bash call with `dangerouslyDisableSandbox: true` (a sandbox escape), WebFetch of any
+URL, `mcp__paseo__create_agent` with `mode: bypassPermissions`, tools whose only argument sits under a content key
+(`{"text": "rm -rf /"}` on an unknown tool; content keys are not scanned), and, in non-interactive sessions, a call that would have been
+auto-denied for want of a hook decision.
 
 ***3.*** **Window closed** (missing, expired, revoked, or any check above fails): nothing at all. The responder does not contact
 the daemon, writes no log line, and the hook prints nothing.
@@ -112,7 +151,7 @@ window is re-read before **every** allow. One responder per audit path (a lock f
 Audit: `~/.local/state/djbclark-ade/approval-window/permits.jsonl` (mode 0600), one line per decision: `time` (UTC), `agent`,
 `provider`, `tool`, `request`, `command` (at most 200 characters, credential-looking text replaced by `<redacted>`), `decision`
 (`allow`, `hold`, `error`) and `rule`. The `allow` line is written **before** the answer is sent; a log that cannot be written
-means nothing is allowed. Held requests are logged once per `watch` run (a one-shot `respond` or a new run logs them again).
+means nothing is allowed. The hook's lines carry no tool id (Claude gives the PermissionRequest hook none), so its `request` is `<session>:sha256-<12 hex of the tool input>`. Held requests are logged once per `watch` run (a one-shot `respond` or a new run logs them again).
 
 ## V. Threat notes
 
@@ -127,7 +166,7 @@ inside a window the operator opened.
 injected into one agent can have its next Bash card answered. The window is the bound: pick the shortest duration that covers the
 work, and `sudo-ask --revoke` ends it.
 
-***4.*** **The denylist is a guard rail, not a sandbox.** It reads the text of the request. `sudo''ers`, a variable, a glob, a script
+***4.*** **The denylist is a guard rail, not a sandbox.** It reads the text of the request, with shell quoting and `//`, `.` and `..` in paths removed. A variable, a glob (`v?sudo`), a link to a denied program, a script
 the agent wrote first and ran later, or `python3 -c` that opens `/etc/sudoers` are not seen. The same limits the site helper
 documents for root commands apply. (The prompts replaced here belong to agents that run as the operator, not as root, so the
 worst case is the operator's own files, which a bypass-mode agent could already change.)
@@ -161,7 +200,7 @@ there and is the same policy either way.
 
 ***2.*** Codex file changes (`CodexFileChange`) and other requests that expose no path stay pending by rule (III 1b).
 
-***3.*** The grant schema and the denylist are mirrored from an unreleased site branch; when the site tool changes either,
+***3.*** The grant schema and the denylist are mirrored from the site branch `feat/sudo-ask-grant-window` (pinned head `f6dd14ba778bb76bbbb0df226659de9754e4993e`); when the site tool changes either,
 update `read_window` and the lists here in the same change (`tests/test_ade_approval_window.py` pins both).
 
 ***4.*** `ade-auto-permit` (a separate, name-only, always-on sweep, template only) is unchanged.

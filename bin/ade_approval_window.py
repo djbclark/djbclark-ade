@@ -28,7 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -207,7 +207,7 @@ TRIPWIRES = ("sudoers", "pam.d", "usr/lib/pam", "sudo.conf", "sudo-ask-grant", "
              "secretspec", "com.apple.tcc", "tcc.db", "library/keychains", ".keychain", "dslocal",
              "/usr/local/libexec", "/usr/local/sbin", "/var/log/sudo-ask")
 NAME_DENY = frozenset("visudo csrutil nvram tccutil fdesetup passwd pwpolicy profiles systemsetup dseditgroup sysadminctl "
-                      "fdisk gpt asr sudo-secretspec sudo-ask-granted".split())
+                      "fdisk gpt asr sudo-secretspec sudo-ask-granted sntp ntpdate su login at batch chroot".split())
 NAME_DENY_PREFIX = ("newfs_", "mkfs")
 SYSTEM_DIRS = frozenset({"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/opt/homebrew/bin",
                          "/usr/libexec", "/usr/local/libexec", "/System/Library/CoreServices", "/usr/lib"})
@@ -220,6 +220,23 @@ DSCL_WRITE = frozenset({"create", "delete", "change", "append", "merge", "passwd
 DSCL_READ = frozenset({"read", "readall", "readpl", "readpli", "list", "search", "ls", "cat"})
 SECURITY_OK = frozenset({"find-certificate", "find-identity", "show-keychain-info", "verify-cert", "error", "help",
                          "list-keychains"})
+LAUNCHCTL_RUNS = frozenset({"submit", "asuser", "bootstrap", "load", "enable", "kickstart"})
+# Path roots the site helper protects (site-public-djbclark roles/sudo_ask_grant/files/sudo-ask-granted at f6dd14ba, PROTECTED and
+# PROTECTED_RE, incl. the persistence paths a root process could use to outlive the window). Compared on a case-folded realpath.
+PROTECTED = (
+    "/private/etc/sudoers", "/private/etc/sudoers.d", "/private/etc/sudo.conf", "/private/etc/pam.d", "/usr/lib/pam",
+    "/private/var/db/sudo-ask", "/private/var/log/sudo-ask-grant.log", "/usr/local/libexec", "/usr/local/sbin",
+    "/private/var/db/dslocal", "/library/application support/com.apple.tcc", "/private/var/db/tcc", "/library/keychains",
+    "/library/launchdaemons", "/library/launchagents", "/library/startupitems", "/private/var/at", "/usr/lib/cron",
+    "/private/etc/periodic", "/private/etc/zshenv", "/private/etc/zprofile", "/private/etc/zshrc", "/private/etc/profile",
+    "/private/etc/bashrc", "/private/var/root", "/private/etc/ssh", "/library/security/securityagentplugins",
+    "/private/etc/ld.so.conf")
+PROTECTED_RE = (r"^/private/etc/paths(\.d(/|$)|$)", r"/users/[^/]+/library/application support/com\.apple\.tcc(/|$)",
+                r"/users/[^/]+/library/keychains(/|$)", r"(^|/)login\.keychain[^/]*$", r"^/dev/r?disk")
+# Commands the site helper treats as read-only (no protected-path check on their arguments; the tripwire strings still apply).
+READ_ONLY = frozenset("ls stat file cat head tail wc grep egrep fgrep rg readlink realpath du df basename dirname id whoami "
+                      "test [ echo printf true false : pwd ps lsof shasum md5 cmp diff strings hexdump uname sw_vers which "
+                      "mdfind sleep".split())
 
 # (a) critical-path removal.
 REMOVERS = frozenset({"rm", "rmdir", "unlink", "srm", "shred"})
@@ -304,27 +321,317 @@ def _unreadable(req: Request, commands: List[str], paths: List[str], texts: List
     return None
 
 
-def _segments(text: str, depth: int = 0) -> Iterable[List[str]]:
-    """Token lists of every command segment in `text`, descending into quoted `sh -c '...'` style arguments."""
-    if depth > 4:
-        return
-    for seg in re.split(r"[;&|\n`]+|\$\(|\)", text):
-        seg = seg.strip()
-        if not seg:
-            continue
-        try:
-            toks = shlex.split(seg, comments=False, posix=True)
-        except ValueError:
-            toks = seg.split()
-        yield toks
-        for tok in toks:
-            if len(tok) > 3 and re.search(r"[\s;&|]", tok):
-                for inner in _segments(tok, depth + 1):
-                    yield inner
+class Unparsable(Exception):
+    """A command line this module cannot read with confidence: the request stays pending."""
+
+
+@dataclass
+class Stmt:
+    """One simple command of a command line: its words with shell quoting removed."""
+    words: List[str] = field(default_factory=list)
+    subst: set = field(default_factory=set)            # indexes of words holding a command/process substitution
+    redirs: List[str] = field(default_factory=list)    # redirection targets (writes, as far as this module cares)
+    heredocs: List[list] = field(default_factory=list)  # [delimiter, quoted, body]
+    herestring: bool = False
+    sep: str = ""                                      # what ended the statement before this one: ; && || | & newline ( )
+
+
+_BLANK = " \t\r\f\v"
+_OPCHARS = ";&|()<>\n"
+MAX_DEPTH = 4
+
+
+def _match_paren(text: str, i: int) -> int:
+    """Index of the `)` that closes a `(` already consumed (i is the first character after it). Quote and heredoc aware."""
+    depth, n = 1, len(text)
+    pend: List[Tuple[str, bool]] = []
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                raise Unparsable("unbalanced quote")
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            if i >= n:
+                raise Unparsable("unbalanced quote")
+            i += 1
+        elif c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+            k = i + 2
+            strip = text[k:k + 1] == "-"
+            k += 1 if strip else 0
+            while k < n and text[k] in " \t":
+                k += 1
+            m = re.match(r"""'([^']*)'|"([^"]*)"|\\?([A-Za-z0-9_.\-]+)""", text[k:])
+            if m:
+                pend.append((next(g for g in m.groups() if g is not None), strip))
+                i = k + m.end()
+            else:
+                i += 2
+        elif c == "\n" and pend:
+            i += 1
+            for delim, strip in pend:
+                while i < n:
+                    j = text.find("\n", i)
+                    line = text[i:] if j < 0 else text[i:j]
+                    i = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if strip else line) == delim:
+                        break
+            pend = []
+        else:
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+    raise Unparsable("unbalanced parenthesis")
+
+
+def _match_backtick(text: str, i: int) -> int:
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == "`":
+            return i
+        else:
+            i += 1
+    raise Unparsable("unbalanced backtick")
+
+
+def _read_word(text: str, i: int, nested: List[str]) -> Tuple[str, int, bool, bool]:
+    """(word with quoting removed, next index, holds a substitution, was quoted). Substitution bodies go to `nested`."""
+    n, out, sub, quoted = len(text), [], False, False
+    while i < n:
+        c = text[i]
+        if c in _BLANK or c in _OPCHARS:
+            break
+        if c == "\\":
+            if i + 1 >= n:
+                out.append("\\")
+                i += 1
+            elif text[i + 1] == "\n":
+                i += 2
+            else:
+                out.append(text[i + 1])
+                i += 2
+                quoted = True
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                raise Unparsable("unbalanced quote")
+            out.append(text[i + 1:j])
+            i = j + 1
+            quoted = True
+        elif c == '"':
+            i += 1
+            quoted = True
+            while True:
+                if i >= n:
+                    raise Unparsable("unbalanced quote")
+                d = text[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == "\\" and i + 1 < n:
+                    e = text[i + 1]
+                    if e == "\n":
+                        i += 2
+                    elif e in '"\\$`':
+                        out.append(e)
+                        i += 2
+                    else:
+                        out.append("\\")
+                        i += 1
+                elif d == "$" and text[i + 1:i + 2] == "(":
+                    j = _match_paren(text, i + 2)
+                    nested.append(text[i + 2:j])
+                    out.append("$(SUB)")
+                    sub, i = True, j + 1
+                elif d == "`":
+                    j = _match_backtick(text, i + 1)
+                    nested.append(text[i + 1:j])
+                    out.append("$(SUB)")
+                    sub, i = True, j + 1
+                else:
+                    out.append(d)
+                    i += 1
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            j = _match_paren(text, i + 2)
+            nested.append(text[i + 2:j])
+            out.append("$(SUB)")
+            sub, i = True, j + 1
+        elif c == "`":
+            j = _match_backtick(text, i + 1)
+            nested.append(text[i + 1:j])
+            out.append("$(SUB)")
+            sub, i = True, j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), i, sub, quoted
+
+
+def _substitutions_in(text: str) -> List[str]:
+    """Bodies of `$(...)` and backtick substitutions in an unquoted here-document body (the shell runs those)."""
+    out, i = [], 0
+    while i < len(text):
+        if text.startswith("$(", i):
+            j = _match_paren(text, i + 2)
+            out.append(text[i + 2:j])
+            i = j + 1
+        elif text[i] == "`":
+            j = _match_backtick(text, i + 1)
+            out.append(text[i + 1:j])
+            i = j + 1
+        elif text[i] == "\\":
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _tokenize(text: str) -> Tuple[List[Stmt], List[str]]:
+    """Command line -> simple commands, read with the shell's quoting FIRST (so `sh -c 'a; b'` stays one word), plus the
+    bodies of every substitution and unquoted here-document substitution. Raises Unparsable on anything doubtful."""
+    stmts: List[Stmt] = []
+    nested: List[str] = []
+    pending: List[Tuple[list, bool]] = []
+    state = {"cur": Stmt(), "sep": ""}
+    n, i = len(text), 0
+
+    def end(new_sep: str) -> None:
+        cur = state["cur"]
+        if cur.words or cur.redirs or cur.heredocs or cur.herestring:
+            cur.sep = state["sep"]
+            stmts.append(cur)
+        state["cur"], state["sep"] = Stmt(), new_sep
+
+    def redirect_target(at: int) -> int:
+        while at < n and text[at] in _BLANK:
+            at += 1
+        if at < n and text[at] not in _OPCHARS:
+            word, at, sub, _ = _read_word(text, at, nested)
+            state["cur"].redirs.append(word)
+            if sub:
+                state["cur"].subst.add(-1)
+        return at
+
+    while i < n:
+        c = text[i]
+        cur = state["cur"]
+        if c in _BLANK:
+            i += 1
+        elif c == "\n":
+            end("\n")
+            i += 1
+            for hd, strip in pending:
+                lines: List[str] = []
+                while i < n:
+                    j = text.find("\n", i)
+                    line = text[i:] if j < 0 else text[i:j]
+                    i = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if strip else line) == hd[0]:
+                        break
+                    lines.append(line)
+                hd[2] = "\n".join(lines)
+                if not hd[1]:
+                    nested.extend(_substitutions_in(hd[2]))
+            pending = []
+        elif c == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c == ";":
+            end(";")
+            i += 1
+            while i < n and text[i] in ";&":
+                i += 1
+        elif c == "&":
+            if text[i + 1:i + 2] == ">":
+                i += 2
+                if text[i:i + 1] == ">":
+                    i += 1
+                i = redirect_target(i)
+            elif text[i + 1:i + 2] == "&":
+                end("&&")
+                i += 2
+            else:
+                end("&")
+                i += 1
+        elif c == "|":
+            if text[i + 1:i + 2] == "|":
+                end("||")
+                i += 2
+            else:
+                end("|")
+                i += 2 if text[i + 1:i + 2] == "&" else 1
+        elif c in "()":
+            end(c)
+            i += 1
+        elif c in "<>":
+            if text.startswith("<<<", i):
+                i += 3
+                while i < n and text[i] in _BLANK:
+                    i += 1
+                if i < n and text[i] not in _OPCHARS:
+                    _, i, _, _ = _read_word(text, i, nested)
+                cur.herestring = True
+            elif text.startswith("<<", i):
+                i += 2
+                strip = text[i:i + 1] == "-"
+                i += 1 if strip else 0
+                while i < n and text[i] in _BLANK:
+                    i += 1
+                delim, i, _, quoted = _read_word(text, i, [])
+                hd = [delim, quoted, ""]
+                cur.heredocs.append(hd)
+                pending.append((hd, strip))
+            elif text[i + 1:i + 2] == "(":
+                j = _match_paren(text, i + 2)
+                nested.append(text[i + 2:j])
+                cur.words.append("$(SUB)")
+                cur.subst.add(len(cur.words) - 1)
+                i = j + 1
+            else:
+                i += 1
+                while i < n and text[i] in "<>":
+                    i += 1
+                if text[i:i + 1] in ("&", "|") and text[i:i + 1]:
+                    i += 1
+                i = redirect_target(i)
+        else:
+            word, j, sub, quoted = _read_word(text, i, nested)
+            if j == i:
+                i += 1
+                continue
+            i = j
+            if word.isdigit() and not quoted and i < n and text[i] in "<>":
+                continue                      # a file descriptor prefix: 2>file
+            cur.words.append(word)
+            if sub:
+                cur.subst.add(len(cur.words) - 1)
+    end("")
+    return stmts, nested
+
+
+def _name(token: str) -> str:
+    """The program a word names: its basename, with GNU's leading `g` (grm, gfind) taken off when the rest is known."""
+    base = posixpath.basename(posixpath.normpath(token)) if token else ""
+    if len(base) > 1 and base[0] == "g" and base[1:] in G_STRIPPABLE:
+        return base[1:]
+    return base
 
 
 def _is_program(token: str, names: Iterable[str]) -> Optional[str]:
     """The program name when `token` is that bare name, or a path to it in a system/tool directory."""
+    token = posixpath.normpath(token) if token else token
     base = posixpath.basename(token)
     if base not in names:
         return None
@@ -333,79 +640,106 @@ def _is_program(token: str, names: Iterable[str]) -> Optional[str]:
 
 
 # Wrappers a command can hide behind, and the flags of theirs that take a value (so `sudo -u root visudo` finds visudo).
-WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D", "-R"}, "env": {"-u", "-C", "-S"},
+WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-T", "-U", "-D", "-R"}, "env": {"-u", "-C"},
             "nohup": set(), "time": set(), "nice": {"-n"}, "command": set(), "exec": set(), "caffeinate": {"-t", "-w"},
             "arch": {"-arch"}, "stdbuf": {"-i", "-o", "-e"}, "timeout": {"-s", "-k"}, "xargs": {"-n", "-I", "-L", "-P", "-s", "-E"},
             "sudo-ask": set(), "rtk": set(), "bgrun": set(), "bg": set()}
+G_STRIPPABLE = REMOVERS | RECURSIVE_CHANGERS | {"find", "xargs", "env", "nice", "timeout", "stdbuf", "date"}
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash"})
+KEYWORDS = frozenset({"{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "fi", "done", "esac", "case",
+                      "select", "function"})
+SHELL_VALUE_FLAGS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 # Names that are also ordinary words or arguments (`echo passwd`, `ls security`): judged only where a command would stand.
-COMMAND_POSITION_ONLY = frozenset({"passwd", "profiles", "gpt", "asr", "security", "diskutil", "dscl"})
+COMMAND_POSITION_ONLY = frozenset({"passwd", "profiles", "gpt", "asr", "security", "diskutil", "dscl", "su", "login", "at",
+                                   "batch", "chroot", "sntp", "ntpdate", "crontab", "launchctl", "date"})
 
 
-def _command_positions(toks: List[str]) -> set:
-    """Indexes in `toks` where a command may stand: the first word, the one after a wrapper (and its options),
-    and the one after find's -exec/-execdir/-ok/-okdir."""
-    positions: set = set()
-    i = 0
-    while i < len(toks):
-        while i < len(toks) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[i]):
-            i += 1
-        if i >= len(toks):
-            break
-        positions.add(i)
-        wrapper = posixpath.basename(toks[i])
-        if wrapper not in WRAPPERS:
-            break
+def _skip(words: List[str], i: int) -> int:
+    while i < len(words) and (words[i] in KEYWORDS or ASSIGNMENT.fullmatch(words[i])):
         i += 1
-        while i < len(toks) and (toks[i].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", toks[i])):
-            i += 2 if toks[i] in WRAPPERS[wrapper] else 1
-    for j, tok in enumerate(toks):
-        if tok in ("-exec", "-execdir", "-ok", "-okdir") and j + 1 < len(toks):
-            positions.add(j + 1)
-    return positions
+    return i
 
 
-def _denylist_hit(commands: List[str], paths: List[str], texts: List[str]) -> Optional[str]:
-    for text in texts:
-        low = text.casefold()
+def _chain(words: List[str]) -> Tuple[List[int], Optional[str]]:
+    """Indexes of the wrapper chain (`sudo -u x env A=b nice rm`) ending at the program, and an `env -S` string when one
+    names the real command line."""
+    chain: List[int] = []
+    n = len(words)
+    i = _skip(words, 0)
+    while i < n:
+        chain.append(i)
+        nm = _name(words[i])
+        if nm not in WRAPPERS:
+            break
+        j = i + 1
+        while j < n and (words[j].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", words[j])):
+            w = words[j]
+            if nm == "env" and (w == "-S" or w == "--split-string" or w.startswith(("--split-string=", "-S"))):
+                if w in ("-S", "--split-string"):
+                    inner, rest = (words[j + 1] if j + 1 < n else ""), words[j + 2:]
+                elif w.startswith("--split-string="):
+                    inner, rest = w.split("=", 1)[1], words[j + 1:]
+                else:
+                    inner, rest = w[2:], words[j + 1:]
+                return chain, inner + "".join(" " + shlex.quote(x) for x in rest)
+            j += 2 if w in WRAPPERS[nm] else 1
+        i = _skip(words, j)
+    return chain, None
+
+
+EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
+
+
+@dataclass
+class _Found:
+    deny: Optional[str] = None
+    crit: Optional[str] = None
+    unp: Optional[str] = None
+
+
+def _tripwire(text: str, found: _Found) -> None:
+    """Tripwire strings in `text`, as written, with shell quoting removed and with the path normalised (`/var/db//x`)."""
+    forms = {text.casefold()}
+    if "/" in text:
+        forms.add(posixpath.normpath(text).casefold())
+    for form in forms:
         for tripwire in TRIPWIRES:
-            if tripwire in low:
-                return tripwire
-    for text in commands + paths:
-        for toks in _segments(text):
-            at = _command_positions(toks)
-            for i, tok in enumerate(toks):
-                base = posixpath.basename(tok)
-                judged = i in at or base not in COMMAND_POSITION_ONLY
-                if not judged:
-                    continue
-                if _is_program(tok, NAME_DENY) or (_is_program(tok, [base]) and base.startswith(NAME_DENY_PREFIX)):
-                    if base in COMMAND_POSITION_ONLY and i not in at:
-                        continue
-                    return base
-                args = toks[i + 1:]
-                if i not in at:
-                    continue
-                if _is_program(tok, ["diskutil"]):
-                    verbs = [a.lower() for a in args if not a.startswith("-")]
-                    verb = verbs[0] if verbs else ""
-                    if verb in ("apfs", "cs", "appleraid", "corestorage"):
-                        verb = verbs[1] if len(verbs) > 1 else ""
-                        if verb not in DISKUTIL_SUB_OK:
-                            return "diskutil " + (verb or "?")
-                    elif verb not in DISKUTIL_OK:
-                        return "diskutil " + (verb or "?")
-                elif _is_program(tok, ["dscl"]):
-                    low = {a.lstrip("-").lower() for a in args}
-                    if low & DSCL_WRITE or not low & DSCL_READ:
-                        return "dscl write"
-                elif _is_program(tok, ["security"]):
-                    verbs = [a for a in args if not a.startswith("-")]
-                    verb = verbs[0] if verbs else ""
-                    if verb not in SECURITY_OK or (verb == "list-keychains" and any(a.startswith(("-s", "-d")) for a in args)):
-                        return "security " + (verb or "?")
-                elif tok == "sudo-ask" or tok.endswith("/sudo-ask"):
-                    if any(a in ("grant", "revoke", "--grant", "--revoke") for a in args):
-                        return "sudo-ask window change"
+            if tripwire in form:
+                found.deny = found.deny or tripwire
+                return
+
+
+def _is_under(p: str, root: str) -> bool:
+    return p == root or p.startswith(root.rstrip("/") + "/")
+
+
+def _protected(word: str, cwd: Optional[str], home: str) -> Optional[str]:
+    """The protected root or pattern a word names as a path (after `~`, `--opt=PATH`, `-oPATH`, `..`, links, case), else None.
+    Mirrors path_problem of the site helper (roles/sudo_ask_grant/files/sudo-ask-granted)."""
+    cands = {word}
+    if "=" in word:
+        cands.add(word.split("=", 1)[1])
+    if re.match(r"-[A-Za-z][^-]", word):
+        cands.add(word[2:])
+    for cand in cands:
+        if not cand or "\0" in cand:
+            continue
+        if cand == "~" or cand.startswith("~/"):
+            cand = home + cand[1:]
+        if "/" not in cand and cand not in (".", ".."):
+            continue
+        if not cand.startswith("/"):
+            if cwd is None:
+                continue
+            cand = posixpath.join(cwd, cand)
+        p = os.path.realpath(cand).casefold()
+        for root in PROTECTED:
+            if _is_under(p, root):
+                return root
+        for rx in PROTECTED_RE:
+            if re.search(rx, p):
+                return rx
     return None
 
 
@@ -423,11 +757,8 @@ def _expand(arg: str, home: str) -> Optional[str]:
     return arg
 
 
-def _critical_path(arg: str, home: str) -> Optional[str]:
-    expanded = _expand(arg, home)
-    if not expanded or not expanded.startswith("/"):
-        return None                          # empty or relative (no cwd known): not named as a critical path
-    core = re.sub(r"(?:/(?:\*\*|\.\*|\*))+/*$", "", expanded)   # `D/*`, `D/.*` and `D/**` reach everything in D
+def _critical_abs(path: str, home: str) -> Optional[str]:
+    core = re.sub(r"(?:/(?:\*\*|\.\*|\*))+/*$", "", path)   # `D/*`, `D/.*` and `D/**` reach everything in D
     core = core or "/"
     cands = {posixpath.normpath(core)}
     cands.add(os.path.realpath(core))        # /etc is /private/etc; a symlink cannot hide a target
@@ -444,33 +775,329 @@ def _critical_path(arg: str, home: str) -> Optional[str]:
     return None
 
 
-def _critical_removal(commands: List[str], home: str) -> Optional[str]:
-    for text in commands:
-        for toks in _segments(text):
-            for i, tok in enumerate(toks):
-                name = _is_program(tok, REMOVERS | RECURSIVE_CHANGERS | {"find"})
-                if not name:
-                    continue
-                args = toks[i + 1:]
-                flags = [a for a in args if a.startswith("-") and a != "--"]
-                operands = [a for a in args if not a.startswith("-")]
-                if name == "find":
-                    if "-delete" not in args:
-                        continue
-                    operands = []
-                    for a in args:
-                        if a.startswith(("-", "(", "!")):
-                            break
-                        operands.append(a)
-                elif name in RECURSIVE_CHANGERS:
-                    if not any(re.fullmatch(r"-[A-Za-z]*R[A-Za-z]*", f) or f == "--recursive" for f in flags):
-                        continue
-                    operands = [a for a in operands if a.startswith(("/", "~", "$"))]
-                for operand in operands:
-                    hit = _critical_path(operand, home)
+def _judge_path(operand: str, cwd: Optional[str], home: str) -> Optional[str]:
+    """The critical path an operand names, with a relative operand judged against the directory a `cd` left us in."""
+    exp = _expand(operand, home)
+    if not exp:
+        return None
+    if not exp.startswith("/"):
+        if cwd is None:
+            return None
+        exp = posixpath.join(cwd, exp)
+    return _critical_abs(exp, home)
+
+
+def _cd_target(args: List[str], cwd: Optional[str], home: str) -> Optional[str]:
+    ops = [a for a in args if a == "-" or not a.startswith("-")]
+    if not ops:
+        return home
+    target = ops[0]
+    if target == "-" or (target.startswith("$") and not re.match(r"\$(?:\{HOME\}|HOME\b)", target)):
+        return None                          # `cd -` and `cd $UNKNOWN`: the directory is not known
+    exp = _expand(target, home)
+    if not exp:
+        return None
+    if exp.startswith("/"):
+        return posixpath.normpath(exp)
+    return posixpath.normpath(posixpath.join(cwd, exp)) if cwd else None
+
+
+def _find_parts(args: List[str]) -> Tuple[List[str], bool, List[str]]:
+    """(roots, -delete present, programs run by -exec/-execdir/-ok/-okdir) of a find command line."""
+    i, roots = 0, []
+    while i < len(args):
+        a = args[i]
+        if a in ("-H", "-L", "-P", "-E", "-X", "-x", "-d", "-s") or re.fullmatch(r"-O[0-3]", a):
+            i += 1
+        elif a == "-f" and i + 1 < len(args):
+            roots.append(args[i + 1])
+            i += 2
+        else:
+            break
+    while i < len(args) and not (args[i].startswith("-") or args[i] in ("(", ")", "!", ",")):
+        roots.append(args[i])
+        i += 1
+    rest = args[i:]
+    execs = [_name(rest[k + 1]) for k, a in enumerate(rest) if a in EXEC_FLAGS and k + 1 < len(rest)]
+    return roots or ["."], "-delete" in rest, execs
+
+
+class _Scan:
+    def __init__(self, home: str) -> None:
+        self.home = home
+        self.found = _Found()
+
+    def note(self, kind: str, what: str) -> None:
+        if getattr(self.found, kind) is None:
+            setattr(self.found, kind, what)
+
+    def text(self, text: str, cwd: Optional[str], depth: int) -> None:
+        if depth > MAX_DEPTH:
+            self.note("unp", "nesting too deep")
+            return
+        try:
+            stmts, nested = _tokenize(text)
+        except Unparsable as exc:
+            self.note("unp", str(exc))
+            return
+        for body in nested:
+            self.text(body, cwd, depth + 1)
+        prev: Optional[Stmt] = None
+        for st in stmts:
+            cwd = self.stmt(st, prev, cwd, depth)
+            prev = st
+
+    def remove_operand(self, name: str, operand: str, idx: int, st: Stmt, cwd: Optional[str]) -> None:
+        if idx in st.subst:
+            self.note("unp", "substitution in a removal")
+            return
+        hit = _judge_path(operand, cwd, self.home)
+        if hit:
+            self.note("crit", "%s %s" % (name, hit))
+
+    def stmt(self, st: Stmt, prev: Optional[Stmt], cwd: Optional[str], depth: int) -> Optional[str]:
+        words, home = st.words, self.home
+        for w in words + st.redirs:
+            _tripwire(w, self.found)
+        chain, env_split = _chain(words)
+        if env_split is not None:
+            self.text(env_split, cwd, depth + 1)
+            return cwd
+        if not chain:
+            return cwd
+        pi = chain[-1]
+        prog, args = _name(words[pi]), words[pi + 1:]
+        at = set(chain)
+        for j, tok in enumerate(words):
+            if tok in EXEC_FLAGS and j + 1 < len(words):
+                at.add(j + 1)
+        self.denylist(words, at)
+        read_only = prog in READ_ONLY
+        for target in st.redirs:
+            root = _protected(target, cwd, home)
+            if root:
+                self.note("deny", "protected " + root)
+        if not read_only:
+            for w in args:
+                root = _protected(w, cwd, home)
+                if root:
+                    self.note("deny", "protected " + root)
+        sub_in_args = any(k >= pi for k in st.subst) or -1 in st.subst
+        if pi in st.subst:
+            self.note("unp", "substitution as the command")
+        idx0 = pi + 1                              # index in `words` of args[0]
+
+        def operands_of(arglist: List[str], first: int) -> List[Tuple[int, str]]:
+            out, end_of_opts = [], False
+            for k, a in enumerate(arglist):
+                if a == "--" and not end_of_opts:
+                    end_of_opts = True
+                elif end_of_opts or not a.startswith("-"):
+                    out.append((first + k, a))
+            return out
+
+        if prog in REMOVERS:
+            if "--no-preserve-root" in args:
+                self.note("crit", "%s --no-preserve-root" % prog)
+            for k, operand in operands_of(args, idx0):
+                self.remove_operand(prog, operand, k, st, cwd)
+            self.xargs_input(chain, words, st, prev, cwd)
+        elif prog == "find":
+            roots, delete, execs = _find_parts(args)
+            if delete or any(e in REMOVERS or e in SHELLS for e in execs):
+                if sub_in_args:
+                    self.note("unp", "substitution in a find that removes")
+                for root in roots:
+                    hit = _judge_path(root, cwd, home)
                     if hit:
-                        return "%s %s" % (name, hit)
+                        self.note("crit", "find %s" % hit)
+        elif prog in RECURSIVE_CHANGERS:
+            flags = [a for a in args if a.startswith("-") and a != "--"]
+            if any(re.fullmatch(r"-[A-Za-z]*R[A-Za-z]*", f) or f == "--recursive" for f in flags):
+                ops = operands_of(args, idx0)
+                if not any(f.startswith("--reference") for f in flags):
+                    ops = ops[1:]
+                for k, operand in ops:
+                    self.remove_operand(prog, operand, k, st, cwd)
+        elif prog == "rsync":
+            if any(a.startswith("--del") for a in args):
+                ops = [(k, a) for k, a in operands_of(args, idx0)]
+                if ops:
+                    self.remove_operand("rsync", ops[-1][1], ops[-1][0], st, cwd)
+        elif prog == "git":
+            self.git(args, idx0, st, cwd)
+        elif prog in SHELLS:
+            self.shell(st, args, cwd, depth)
+        elif prog == "eval":
+            self.note("unp", "eval")
+        elif prog in ("source", "."):
+            target = args[0] if args else ""
+            if not target or target == "-" or target.startswith(("/dev/stdin", "/dev/fd")) or idx0 in st.subst:
+                self.note("unp", "source of stdin or a substitution")
+        elif prog in ("cd", "pushd"):
+            return _cd_target(args, cwd, home)
+        elif prog in ("crontab", "launchctl", "date"):
+            pass
+        return cwd
+
+    def xargs_input(self, chain: List[int], words: List[str], st: Stmt, prev: Optional[Stmt], cwd: Optional[str]) -> None:
+        if not any(_name(words[c]) == "xargs" for c in chain[:-1]):
+            return
+        if prev is not None and st.sep == "|":
+            pchain, _ = _chain(prev.words)
+            if pchain:
+                pprog, pargs = _name(prev.words[pchain[-1]]), prev.words[pchain[-1] + 1:]
+                if pprog in ("echo", "printf"):
+                    for a in pargs:
+                        hit = _judge_path(a, cwd, self.home) if not a.startswith("-") else None
+                        if hit:
+                            self.note("crit", "xargs rm %s" % hit)
+                    return
+                if pprog == "find":
+                    for root in _find_parts(pargs)[0]:
+                        hit = _judge_path(root, cwd, self.home)
+                        if hit:
+                            self.note("crit", "xargs rm %s" % hit)
+                    return
+        self.note("unp", "xargs removal of unknown input")
+
+    def git(self, args: List[str], first: int, st: Stmt, cwd: Optional[str]) -> None:
+        gcwd, k, sub = cwd, 0, None
+        while k < len(args):
+            a = args[k]
+            if a == "-C" and k + 1 < len(args):
+                nxt = _cd_target([args[k + 1]], gcwd, self.home)
+                gcwd, k = nxt, k + 2
+            elif a in ("-c", "--git-dir", "--work-tree", "--namespace") and k + 1 < len(args):
+                k += 2
+            elif a.startswith("-"):
+                k += 1
+            else:
+                sub, k = a, k + 1
+                break
+        if sub != "clean":
+            return
+        rest = args[k:]
+        if not any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", x) or x == "--force" for x in rest):
+            return
+        if gcwd is not None:
+            hit = _critical_abs(gcwd, self.home)
+            if hit:
+                self.note("crit", "git clean %s" % hit)
+        for x in rest:
+            if not x.startswith("-"):
+                hit = _judge_path(x, gcwd, self.home)
+                if hit:
+                    self.note("crit", "git clean %s" % hit)
+
+    def shell(self, st: Stmt, args: List[str], cwd: Optional[str], depth: int) -> None:
+        if st.heredocs or st.herestring:
+            self.note("unp", "here-document fed to a shell")
+        k, body_at, script = 0, None, False
+        while k < len(args):
+            a = args[k]
+            if a == "--":
+                script = k + 1 < len(args)
+                break
+            if a in SHELL_VALUE_FLAGS:
+                k += 2
+                continue
+            if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+                body_at = k + 1
+                break
+            if not a.startswith("-") and not a.startswith("+"):
+                script = True
+                break
+            k += 1
+        if body_at is not None:
+            if body_at >= len(args):
+                self.note("unp", "shell -c without a command")
+                return
+            body = args[body_at]
+            params = args[body_at + 1:]
+            if params:                         # `sh -c 'rm -rf "$1"' _ /`: positional parameters name the operands
+                def fill(m: "re.Match[str]") -> str:
+                    key = m.group(1) or m.group(2)
+                    if key in ("@", "*"):
+                        return " ".join(params[1:])
+                    pos = int(key)
+                    return params[pos] if pos < len(params) else ""
+                body = re.sub(r"\$(?:\{([0-9]+|@|\*)\}|([0-9@*]))", fill, body)
+            self.text(body, cwd, depth + 1)
+        elif not script:
+            self.note("unp", "shell reads its commands from stdin")
+
+    def denylist(self, words: List[str], at: set) -> None:
+        for i, tok in enumerate(words):
+            base = posixpath.basename(posixpath.normpath(tok)) if tok else ""
+            if not (i in at or base not in COMMAND_POSITION_ONLY):
+                continue
+            if _is_program(tok, NAME_DENY) or (_is_program(tok, [base]) and base.startswith(NAME_DENY_PREFIX)):
+                if base in COMMAND_POSITION_ONLY and i not in at:
+                    continue
+                self.note("deny", base)
+                continue
+            if i not in at:
+                continue
+            args = words[i + 1:]
+            if _is_program(tok, ["diskutil"]):
+                verbs = [a.lower() for a in args if not a.startswith("-")]
+                verb = verbs[0] if verbs else ""
+                if verb in ("apfs", "cs", "appleraid", "corestorage"):
+                    verb = verbs[1] if len(verbs) > 1 else ""
+                    if verb not in DISKUTIL_SUB_OK:
+                        self.note("deny", "diskutil " + (verb or "?"))
+                elif verb not in DISKUTIL_OK:
+                    self.note("deny", "diskutil " + (verb or "?"))
+            elif _is_program(tok, ["dscl"]):
+                low = {a.lstrip("-").lower() for a in args}
+                if low & DSCL_WRITE or not low & DSCL_READ:
+                    self.note("deny", "dscl write")
+            elif _is_program(tok, ["security"]):
+                verbs = [a for a in args if not a.startswith("-")]
+                verb = verbs[0] if verbs else ""
+                if verb not in SECURITY_OK or (verb == "list-keychains" and any(a.startswith(("-s", "-d")) for a in args)):
+                    self.note("deny", "security " + (verb or "?"))
+            elif _is_program(tok, ["crontab"]):
+                if args != ["-l"]:
+                    self.note("deny", "crontab")
+            elif _is_program(tok, ["launchctl"]):
+                if args[:1] and args[0] in LAUNCHCTL_RUNS:
+                    self.note("deny", "launchctl " + args[0])
+            elif _is_program(tok, ["date"]):
+                if "-j" not in args and any(not a.startswith(("-", "+")) for a in args):
+                    self.note("deny", "date sets the clock")
+            elif tok == "sudo-ask" or tok.endswith("/sudo-ask"):
+                if any(a in ("grant", "revoke", "--grant", "--revoke") for a in args):
+                    self.note("deny", "sudo-ask window change")
+
+
+def _analyze(commands: List[str], paths: List[str], file_tool: bool, home: str, cwd: Optional[str]) -> _Found:
+    scan = _Scan(home)
+    for text in commands:
+        _tripwire(text, scan.found)
+        scan.text(text, cwd, 0)
+    for path in paths:
+        _tripwire(path, scan.found)
+        base = posixpath.basename(posixpath.normpath(path)) if path else ""
+        if base in NAME_DENY and base not in COMMAND_POSITION_ONLY and _is_program(path, NAME_DENY):
+            scan.note("deny", base)
+        if file_tool:
+            root = _protected(path, cwd, home)
+            if root:
+                scan.note("deny", "protected " + root)
+    return scan.found
+
+
+def _request_cwd(req: "Request") -> Optional[str]:
+    for part in (req.input, req.detail):
+        if isinstance(part, dict) and isinstance(part.get("cwd"), str) and part["cwd"].startswith("/"):
+            return posixpath.normpath(part["cwd"])
     return None
+
+
+GATE_MARKERS = ("Frontier sub-agent:",)          # the text of claude/hooks/frontier_agent_gate.py's ask (`_ask`)
+SUBAGENT_TOOLS = frozenset({"agent", "task"})   # Claude's sub-agent launch tools (the frontier gate matches "Agent", "Task")
 
 
 def decide(req: Request, home: Optional[str] = None) -> Decision:
@@ -491,18 +1118,30 @@ def decide(req: Request, home: Optional[str] = None) -> Decision:
     for stem in QUESTION_STEMS:
         if stem in compact:
             return hold("question:" + stem)
+    # Our own gates: the frontier sub-agent gate asks the operator on purpose (scarce Fable). Never answer it.
+    if compact in SUBAGENT_TOOLS:
+        return hold("gate:subagent")
+    reason_fields = json.dumps([req.title, req.description, req.detail, req.metadata], default=str)
+    if any(marker in reason_fields for marker in GATE_MARKERS):
+        return hold("gate:ade")
     why = _unreadable(req, commands, paths, texts)
     if why:
         return hold("unreadable:" + why)
-    hit = _denylist_hit(commands, paths, texts)
-    if hit:
-        return hold("denylist:" + hit)
+    file_tool = compact in {re.sub(r"[^a-z0-9]", "", n) for n in FILE_TOOL_NAMES} - {"read"} or "filechange" in compact
+    found = _analyze(commands, paths, file_tool, home, _request_cwd(req))
+    # raw tripwires over every other string (titles, reasons, metadata) as before
+    for text in texts:
+        if found.deny is None:
+            _tripwire(text, found)
+    if found.deny:
+        return hold("denylist:" + found.deny)
     reason_text = " ".join(t for t in (req.title, req.description) if t)
     if CRITICAL_REASON.search(reason_text):
         return hold("critical-reason")
-    crit = _critical_removal(commands, home)
-    if crit:
-        return hold("critical-rm:" + crit)
+    if found.crit:
+        return hold("critical-rm:" + found.crit)
+    if found.unp:
+        return hold("unreadable:unparsable:" + found.unp)
     return Decision(True, "allow:window", subject)
 
 
