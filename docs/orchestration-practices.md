@@ -241,14 +241,18 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    stops at `remaining < 500`; prefer one GraphQL query that batches many objects to one REST call each. The gate warns on
    `xargs -P`/`parallel` around `gh` calls. A second contributor to the 2026-11-14 outage was a lead's inventory script
    that fanned out thousands of `gh api` calls on 6 threads with no `rate_limit` check.
-10. **An interrupted worker is resumed, never relaunched (2026-11-14).** After a restart of the lead's process the harness
-   lists a stopped Agent-tool sub-agent and says to resume it; launching a new Agent with the same description throws away
-   its work (a lead adversary's ~20 minutes of review were redone). An interrupted Agent-tool sub-agent: `SendMessage` to its
+10. **An interrupted worker is resumed before it is relaunched (2026-11-14, amended 2026-11-22).** Operator, 2026-11-22: "It
+   shouldn't be never relaunch it should be only relaunch after making a reasonable effort to resume." After a restart of the
+   lead's process the harness lists a stopped Agent-tool sub-agent and says to resume it; launching a new Agent with the same
+   description first throws away its work (a lead adversary's ~20 minutes of review were redone). The reasonable effort: the
+   resume is sent, the target's state is confirmed (`paseo agent inspect <id> --json` for a Paseo agent), and one retry is made
+   once it is idle. Only then relaunch, reusing the dead agent's report, files and worktree, and tell the new agent what is
+   finished so it never redoes that work (`site-private/memory/feedback_resume_not_relaunch.md`). An interrupted Agent-tool sub-agent: `SendMessage` to its
    agent id (spawn result, task notification, `ListAgents`) with "resume from where you stopped". An interrupted Paseo agent:
    `paseo send` the same text (rule 5a, with the ack). A stateless waiter (a `wait-file`, a poll, a one-shot check) may be
    restarted, since it holds no work. `claude/hooks/agent_footer_gate.py` enforces the first case: an Agent launch whose
-   report path already exists without its `.done` is denied; a deliberate fresh start adds a prompt line
-   `Relaunch-reason: <why>` (allowed, logged to `<report dir>/<session>/relaunch.log`); a finished report carries its `.done`. In a prompt without the footer, the prompt's own `Report path:` / `Report file:` line (at the start of a line, markdown and list markers allowed) names this launch's report; a peer's report that is only labelled (`Worker report: ...`) is never this launch's, and `Relaunch-reason:` counts only at column 0 (an indented line is pasted text). Not checked (the guard skips, the launch proceeds, and a prompt without the footer gets a path the hook derives): a prompt naming two different report paths with no `Report path:` of its own, and a `~`, `$HOME`, relative or space-containing report path (only absolute paths are read).
+   report path already exists without its `.done` is denied with the order to resume it first; a relaunch after that effort
+   has failed adds a prompt line `Relaunch-reason: <why>` (allowed, logged to `<report dir>/<session>/relaunch.log`); a finished report carries its `.done`. In a prompt without the footer, the prompt's own `Report path:` / `Report file:` line (at the start of a line, markdown and list markers allowed) names this launch's report; a peer's report that is only labelled (`Worker report: ...`) is never this launch's, and `Relaunch-reason:` counts only at column 0 (an indented line is pasted text). Not checked (the guard skips, the launch proceeds, and a prompt without the footer gets a path the hook derives): a prompt naming two different report paths with no `Report path:` of its own, and a `~`, `$HOME`, relative or space-containing report path (only absolute paths are read).
 
 ## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-09)
 

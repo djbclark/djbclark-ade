@@ -111,6 +111,7 @@ their prefix from the lead's prefix or a per-slice override):
 
 This page covers ADE-managed agents. The operator's global instruction files
 (`~/.claude/CLAUDE.md` item 8, `cursor/home-agents.mdc`) are edited only by
-Claude Opus 5.5+ or Codex Astra (gpt-6-astra); the 2026-11-17 migration to this
+Claude Opus 5.5+, the newest Codex Astra (gpt-6-astra) or Gemini Neon (else Argon; operator
+2026-11-22: "We can also change that rule gemini neon and argon are allowed with neon taking precidnce"); the 2026-11-17 migration to this
 convention was applied by a Codex Astra agent, and `AGENTS.md` standing order 5
 is migrated in PR #778 (merge after this PR).

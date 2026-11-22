@@ -127,6 +127,8 @@ def test_relaunch_over_an_unfinished_report_is_denied_with_resume_instructions(t
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
     assert "SendMessage" in reason and "resume from where you stopped" in reason and "Relaunch-reason:" in reason
+    # operator 2026-11-22: relaunch only after a reasonable effort to resume (not "never")
+    assert "reasonable effort" in reason and "Do not start a new one" not in reason
 
 
 def test_a_finished_report_allows_the_launch(tmp_path):
