@@ -20,8 +20,8 @@ route trap, and how to confirm a run really ran.
 | Need | Pick | Why |
 | --- | --- | --- |
 | Linux gate / root acceptance (CFEngine, ~2.5 min) | local Apple container `cfengine-build:u24-xml`, `--network none` | fork CI cannot run it; needs root + debug |
-| macOS arm64 heavy build (bottle, desktop) | WarpBuild `warp-macos-26-arm64-6x` (if org+key set) else GitHub `macos-latest` | GitHub's arm64 Mac pool is the scarce one (see docs/ci-runners.md) |
-| Linux x64 CI (general) | GitHub `ubuntu-latest` or WarpBuild `warp-ubuntu-2404-x64-4x` | fastest; no local load |
+| macOS arm64 heavy build (bottle, desktop) | GitHub `macos-26` first (free, public repos); WarpBuild `warp-macos-26-arm64-6x` only if measured >= 1.5x faster and the job takes > 10 min (opt-in; org spend cap US$10/month) | GitHub's arm64 Mac pool is the scarce one; WarpBuild cost US$4.83/30d on 2026-11-22 (see docs/ci-runners.md) |
+| Linux x64 CI (general) | GitHub `ubuntu-latest` (WarpBuild `warp-ubuntu-2404-x64-4x` only on the same opt-in gate) | free on public repos; no local load |
 | MIT-hosted container site | Forgejo/Hyades (see the hyades-docker skill) | MIT hosting, not this Mac |
 | Full VM (nested kernel, macOS VM) | tart VM | Apple Virtualization; do NOT run while a container is up |
 

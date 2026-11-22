@@ -1,6 +1,18 @@
-# CI runners: WarpBuild for long jobs
+# CI runners: WarpBuild is opt-in only
 
-Snapshot **2026-11-13** (operator rulings, card answers). A GitHub Actions job moves to
+**Update 2026-11-22 (operator yes, "Yes, all four repos"; spend cap "$10/month"):** WarpBuild is **opt-in only**. Default is GitHub-hosted:
+`macos-26` for macOS and `ubuntu-latest` for Linux, both free on public repos. **GitHub `macos-26` first; WarpBuild only if measured >= 1.5x and
+> 10 min** (the gate below). A survey of the four `frdminc` repos with any WarpBuild job (`warpbuild-pilot`, `tendcf`, `paseo`,
+`sudo-secretspec`; all public) measured **US$4.83 in 30 days** (11 jobs, 71 billed minutes, 91% macOS 6x/12x, all from branch-only or one-off
+pilot workflows, none from default-branch CI). Moved to free runners that day: `sudo-secretspec` branch `ci/base` `linux-ci.yml` macOS job and
+`paseo` branch `local/main-desktop-v0171-20261122` `fork-desktop-build.yml` (both to `macos-26`; fall back to `warp-macos-26-arm64-6x` only if
+the Electron build OOMs or times out on the 3 vCPU/7 GB runner); `warpbuild-pilot` `test.yml` is `workflow_dispatch` only (no push or PR
+trigger); the `tendcf` branch `spike/macos-check8-warp` is deleted. The WarpBuild **spend cap is US$10/month** for the `frdminc` org, set in
+the console at <https://app.warpbuild.com> (the MCP sign-in was refused on 2026-11-22, so an agent could not set it: the operator does; per-job
+cost is on Insights > Spend, CI tab; whether the app has a hard cap or only budget alerts was not verified, so confirm the setting exists
+before relying on it). Billing rounds each job up to whole minutes with a 1-minute floor.
+
+Snapshot **2026-11-13** (operator rulings, card answers; superseded as the default by the update above, still the gate for any opt-in). A GitHub Actions job moves to
 [WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) runners only when **both** hold:
 
 1. It takes **more than 10 minutes** on GitHub-hosted runners.
@@ -13,6 +25,8 @@ operator's active repositories (not archived ones, third-party forks, or repos w
 (section C pilot: 1.07x Linux, 1.22x macOS) and stays on GitHub-hosted runners under `djbclark`.
 
 ## A. Labels (WarpBuild's own mapping, `mcp__warpbuild__suggest_runner_labels`)
+
+Use a `warp-*` label only for a job that passed the gate (opt-in); mapping `ubuntu-latest` to `warp-4x` for a job that did not costs more than free.
 
 | GitHub-hosted | WarpBuild |
 |---|---|
