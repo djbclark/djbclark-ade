@@ -47,11 +47,12 @@ OWN_ORGS = {"frdminc", "djbclark"}  # branches of these owners may be unpinned; 
 BAD_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 PR_RE = re.compile(r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+/pull/[0-9]+/?$")
 FIELDS = {"id", "component", "repo", "commit", "branch", "pr", "local_path", "expected_head", "intent",
-          "target", "targets", "status", "upstream", "order", "notes", "trial_required", "hold"}
+          "target", "targets", "status", "upstream", "order", "notes", "trial_required", "hold", "exclude"}
 REQUIRED = {"id", "component", "intent", "status"}
 STRING_FIELDS = ("id", "component", "repo", "intent", "target", "status", "commit", "branch", "upstream",
                  "notes", "local_path", "expected_head", "hold")
 
+TRAILER_RE = re.compile(r"^\(cherry picked from commit ([0-9a-f]{40})\)[ \t]*$", re.M)
 LARGE_PLAN = 20  # picks per entry above which the text output warns (a stacked or mis-based source)
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_STOPPED, EXIT_CANDIDATES = 0, 1, 2, 3, 4
 
@@ -126,6 +127,13 @@ def _validate_one(raw: dict[str, Any]) -> list[str]:
         raise RegistryError("branch has unsupported characters")
     if "pr" in raw and (type(raw["pr"]) is not int or raw["pr"] < 1):
         raise RegistryError("pr must be a positive integer")
+    if "exclude" in raw:
+        ex = raw["exclude"]
+        if "branch" not in raw and "pr" not in raw:
+            raise RegistryError("exclude applies to branch or pr sources only")
+        if not isinstance(ex, list) or not ex or len(set(map(str, ex))) != len(ex) \
+                or not all(isinstance(x, str) and COMMIT_RE.match(x) for x in ex):
+            raise RegistryError("exclude must be a non-empty list of unique full 40-hex commit ids")
     if "expected_head" in raw:
         if "commit" in raw:
             raise RegistryError("expected_head applies to branch or pr sources only")
@@ -334,30 +342,63 @@ def fetch_upstream_tip(wt: Path, url: str) -> str:
     return git_ok(wt, "rev-parse", "--verify", "FETCH_HEAD^{commit}").strip()
 
 
-def plan_commits(wt: Path, entry: dict[str, Any], tip: str,
-                 upstream_tip: str | None = None) -> tuple[list[str], list[str], list[str]]:
-    """(to_pick, already_present, excluded_upstream) for an entry whose tip is fetched.
+def trailer_sources(wt: Path, tip: str) -> set[str]:
+    """Shas named by `(cherry picked from commit X)` trailers (written by `cherry-pick -x`, which
+    apply uses) on the commits HEAD has beyond `tip`'s history: the picks an earlier run made, which
+    stay recognisable after a rebase changed their context and so their patch-id."""
+    log = git_ok(wt, "log", "--format=%B%x00", "--fixed-strings", "--grep=(cherry picked from commit ",
+                 "HEAD", "--not", tip)
+    return set(TRAILER_RE.findall(log))
+
+
+def plan_commits(wt: Path, entry: dict[str, Any], tip: str, upstream_tip: str | None = None) -> dict[str, Any]:
+    """The plan for an entry whose tip is fetched: keys `picks`, `present`, `present_by_trailer`,
+    `excluded_upstream`, `excluded_by_entry`, `exclude_unused`.
 
     Candidates are the non-merge commits on the tip that are not on HEAD (HEAD..tip), oldest
-    first. Of those, a commit with a patch-equivalent on HEAD's side since the merge-base
-    (`git rev-list --cherry-pick --right-only`, which compares patch-ids) is already present
-    and is not picked again. A branch or PR entry's own commits are those not reachable from
-    the component's upstream default branch (`upstream_tip`): when the source sits on a newer
-    upstream than the workspace, the upstream commits in between are excluded and reported,
-    never picked under the entry's name. A commit entry is just its one commit."""
+    first. Of those, a commit is already present when HEAD's side holds a patch-equivalent
+    (`git rev-list --cherry-pick --right-only`, which compares patch-ids) or a commit whose
+    `-x` trailer names it (patch-ids differ once a rebase changed the context); it is not picked
+    again. A branch or PR entry's own commits are those not reachable from the component's upstream
+    default branch (`upstream_tip`): when the source sits on a newer upstream than the workspace,
+    the upstream commits in between are excluded and reported, never picked under the entry's name.
+    The entry's own `exclude` list drops named commits that would otherwise be picked (a release
+    cut, say); each is reported, and an exclude that matches nothing is reported as unused.
+    A commit entry is just its one commit."""
     candidates = git_ok(wt, "rev-list", "--reverse", "--topo-order", "--no-merges",
                         f"HEAD..{tip}").split()
     fresh = git_ok(wt, "rev-list", "--reverse", "--topo-order", "--no-merges", "--cherry-pick",
                    "--right-only", f"HEAD...{tip}").split()
+    trailers = trailer_sources(wt, tip) if candidates else set()
+    plan: dict[str, Any] = {"picks": [], "present": [], "present_by_trailer": [], "excluded_upstream": [],
+                            "excluded_by_entry": [], "exclude_unused": []}
     if "commit" in entry:
         if len(git_ok(wt, "rev-list", "--parents", "-n", "1", tip).split()) > 2:
             raise ToolError(f"{entry['id']}: {tip} is a merge commit; register its commits instead")
-        if tip in fresh:
-            return [tip], [], []
-        return [], [tip], []
+        if tip in fresh and tip not in trailers:
+            plan["picks"] = [tip]
+        else:
+            plan["present"] = [tip]
+            plan["present_by_trailer"] = [tip] if tip in fresh else []
+        return plan
     own = set(git_ok(wt, "rev-list", "--no-merges", tip, "--not", upstream_tip).split())
-    present = [c for c in candidates if c not in set(fresh)]
-    return [c for c in fresh if c in own], present, [c for c in fresh if c not in own]
+    fresh_set = set(fresh)
+    plan["present"] = [c for c in candidates if c not in fresh_set]
+    exclude = entry.get("exclude", [])
+    for c in fresh:
+        if c not in own:
+            plan["excluded_upstream"].append(c)
+        elif c in trailers:
+            plan["present"].append(c)
+            plan["present_by_trailer"].append(c)
+        elif c in exclude:
+            subject = git_ok(wt, "show", "-s", "--format=%s", c).strip()
+            plan["excluded_by_entry"].append({"commit": c, "subject": scrub(subject, 100)})
+        else:
+            plan["picks"].append(c)
+    named = {x["commit"] for x in plan["excluded_by_entry"]}
+    plan["exclude_unused"] = [c for c in exclude if c not in named]
+    return plan
 
 
 def has_bad_chars(text: str) -> bool:
@@ -415,9 +456,15 @@ def do_apply(registry: Path, forks: Path, target: str, wt: Path, dry_run: bool,
         tips.append((entry, tip))
     for entry, tip in tips:
         upstream_tip = None if "commit" in entry else upstream_tips[entry["component"]]
-        picks, present, excluded = plan_commits(wt, entry, tip, upstream_tip)
-        row: dict[str, Any] = {"id": entry["id"], "tip": tip, "commits": picks, "already_present": not picks and not excluded,
-                               "already_present_commits": present, "excluded_upstream_commits": excluded}
+        plan = plan_commits(wt, entry, tip, upstream_tip)
+        picks = plan["picks"]
+        row: dict[str, Any] = {"id": entry["id"], "tip": tip, "commits": picks,
+                               "already_present": not picks and not plan["excluded_upstream"],
+                               "already_present_commits": plan["present"],
+                               "already_present_by_trailer": plan["present_by_trailer"],
+                               "excluded_upstream_commits": plan["excluded_upstream"],
+                               "excluded_by_entry": plan["excluded_by_entry"],
+                               "exclude_unused": plan["exclude_unused"]}
         report["applied"].append(row)
         if dry_run:
             continue
@@ -704,6 +751,9 @@ def main(argv: list[str] | None = None) -> int:
                      + (f" (EXCLUDED upstream: {len(r['excluded_upstream_commits'])}; the workspace may need a rebase onto"
                         " newer upstream)" if r["excluded_upstream_commits"] else "")
                      + (" (LARGE plan: check this source's base)" if len(r["commits"]) > LARGE_PLAN else "")
+                     + "".join(f"; EXCLUDED by entry {x['commit'][:9]} ({x['subject']})" for x in r["excluded_by_entry"])
+                     + (f"; exclude matched nothing: {', '.join(c[:9] for c in r['exclude_unused'])}"
+                        if r["exclude_unused"] else "")
                      for r in report["applied"]]
             lines += [f"skipped {s['id']} ({s['why']}{': ' + s['hold'] if s.get('hold') else ''})"
                       for s in report["skipped"]]

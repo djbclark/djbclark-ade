@@ -105,12 +105,13 @@ component = "paseo"
 repo = "frdminc/paseo"
 branch = "trial/pi-8326-6643-on-fork2"
 expected_head = "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
+exclude = ["f03734c402982fb0165a3b082a1e5da5cb1e2b04", "043f0995d4d7e91ab12f3eecef1afce055a81972"]
 intent = "Pi keeps an approved permission instead of turning it into a cancellation"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/issues/8326"
 order = 35
-notes = "STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; this entry applies the whole stack, so paseo-pi-ask-user-question-scope then reports already-present; earlier form: branch fix/pi-permission-selected-action @ 4a58d3e529c94aeec3c495dab08874da3027a1f5 (two commits on upstream/main ec22b8265, CI green https://github.com/frdminc/paseo/actions/runs/45044468003)"
+notes = "STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; exclude: v0.17.1 release-branch commits f03734c40 (changelog) and 043f0995d (cut 0.17.1, resets every package version) are in the stack range but must not be picked onto a newer base; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; this entry applies the whole stack, so paseo-pi-ask-user-question-scope then reports already-present; earlier form: branch fix/pi-permission-selected-action @ 4a58d3e529c94aeec3c495dab08874da3027a1f5 (two commits on upstream/main ec22b8265, CI green https://github.com/frdminc/paseo/actions/runs/45044468003)"
 
 [[pick]]
 id = "paseo-pi-ask-user-question-scope"
@@ -118,13 +119,14 @@ component = "paseo"
 repo = "frdminc/paseo"
 branch = "trial/pi-8326-6643-on-fork2"
 expected_head = "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
+exclude = ["f03734c402982fb0165a3b082a1e5da5cb1e2b04", "043f0995d4d7e91ab12f3eecef1afce055a81972"]
 intent = "DeepSeek via Pi gets the same question/permission behavior as Claude and Codex"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/6643"
 trial_required = false
 order = 40
-notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640): upstream #6643 c445b9b7c cherry-picked as ca6826bfc (a security reviewer read that diff in r3: identical to the upstream PR head); STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; registered as the same pinned branch as paseo-pi-permission-selected-action (order 35 applies first, this entry then has nothing left); the 940 single-commit form ca6826bfc98033bcc0a08362be264d9d2ca73cff is superseded because the lead wants the whole stack"
+notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640): upstream #6643 c445b9b7c cherry-picked as ca6826bfc (a security reviewer read that diff in r3: identical to the upstream PR head); STACK (final, 2026-11-22): branch trial/pi-8326-6643-on-fork2 on frdminc/paseo @ 43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb03e683ea2658908d075860d9fbeca04, CI green https://github.com/frdminc/paseo/actions/runs/45055496124; carries the 8326 fix, getpaseo#6643 (cherry-picked), the adapter selectedActionId fixes, the N1 label cap and steer-the-deny-reason; SAFE FALLBACK b720fd6b6773b3036c59dd54a2efa89436a24f76; adversary approved up to 6da4d94ec; the last two commits bb51377cb and 43d4fa958: Pi stack confirmed by the paseo lead (last two commits approved); nothing pins the startTurn clear at agent.ts:1339; a test commit may move the head; exclude: v0.17.1 release-branch commits f03734c40 (changelog) and 043f0995d (cut 0.17.1, resets every package version) are in the stack range but must not be picked onto a newer base; needs a build-2 base that contains 1c03220bb, else the LARGE plan warning fires; registered as the same pinned branch as paseo-pi-permission-selected-action (order 35 applies first, this entry then has nothing left); the 940 single-commit form ca6826bfc98033bcc0a08362be264d9d2ca73cff is superseded because the lead wants the whole stack"
 
 [[pick]]
 id = "worktree-setup-sharp-global-libvips"
