@@ -23,10 +23,10 @@ LEAD_WKS = "wks_lead01"
 FOOTER_LINE = f"Also follow every item of {ROOT}/docs/dispatch-footer.md."
 
 
-def values_line(env, slice_name, lead=LEAD):
+def values_line(env, slice_name, lead=LEAD, report=None, done=None):
     """The `Footer values:` line ade-worker-run adds, built by hand (not by the code under test)."""
-    r = f"{env.tmp}/reports/{lead}/{slice_name}-report.md"
-    return (f"Footer values: {{lead}} = {lead}; {{report}} = {r}; {{done}} = {r}.done; {{inbox}} = {r}.inbox.md; "
+    r = report or f"{env.tmp}/reports/{lead}/{slice_name}-report.md"
+    return (f"Footer values: {{lead}} = {lead}; {{report}} = {r}; {{done}} = {done or r + '.done'}; {{inbox}} = {r}.inbox.md; "
             f"{{replies}} = {r}.replies.md. Use these wherever the footer says {{report}}, {{done}}, {{lead}}, {{inbox}} or {{replies}}.")
 
 
@@ -2834,21 +2834,60 @@ def test_footer_values_are_appended_and_reported(env):
     assert (env.tmp / "reports" / LEAD).is_dir() and (env.tmp / "reports" / LEAD).stat().st_mode & 0o777 == 0o700
 
 
-@pytest.mark.parametrize("brief", ["BRIEF\nReport path: /x/a-report.md", "BRIEF {report} = /x/a-report.md", "BRIEF {report}: /x/a-report.md",
-                                   "BRIEF write to /home/u/.local/state/agent-reports/zz/a-report.md",
-                                   "BRIEF\nReport file: /tmp/x/a-report.md", "BRIEF\nReport: /tmp/x/a-report.md",
-                                   "BRIEF\n- **Report path:** /tmp/x/a-report.md", "BRIEF\n> Report file = /tmp/x/a-report.md",
-                                   "BRIEF\nWrite your report to /tmp/x/a-report.md, then touch the .done",
-                                   # no absolute path: only the label / phrase / heading rule can see these
-                                   "BRIEF\nReport file: ~/out/a.md", "BRIEF\nReport: ~/out/a.md", "BRIEF\nWrite your report to ~/out/a.md",
-                                   "BRIEF\n## Report path\n~/out/a.md",
-                                   "BRIEF\n## Report path\n/tmp/x/a-report.md", "BRIEF\nthe deliverable is /tmp/x/a-report.md"])
-def test_footer_values_not_added_when_the_brief_defines_them(env, brief):
+HOME_OUT = os.path.expanduser("~/out/a.md")
+
+
+@pytest.mark.parametrize("brief, report", [
+    ("BRIEF\nReport path: /x/a-report.md", "/x/a-report.md"),
+    ("BRIEF {report} = /x/a-report.md", "/x/a-report.md"),
+    ("BRIEF {report}: /x/a-report.md", "/x/a-report.md"),
+    ("BRIEF\nReport file: /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nReport: /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\n- **Report path:** /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\n> Report file = /tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nWrite your report to /tmp/x/a-report.md, then touch the .done", "/tmp/x/a-report.md"),
+    ("BRIEF\n## Report path\n/tmp/x/a-report.md", "/tmp/x/a-report.md"),
+    ("BRIEF\nReport file: ~/out/a.md", HOME_OUT), ("BRIEF\nReport: ~/out/a.md", HOME_OUT),
+    ("BRIEF\nWrite your report to ~/out/a.md", HOME_OUT), ("BRIEF\n## Report path\n~/out/a.md", HOME_OUT),
+    ("BRIEF\nReport: /tmp/x/p-report.md\nalso see ~/.local/state/agent-reports/z/old-report.md", "/tmp/x/p-report.md"),
+])
+def test_footer_values_take_the_briefs_labelled_report_path(env, brief, report):
+    """Labelled forms (c) and (b): {report} is that path, {done} is that path + .done; nothing is generated or created."""
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
     assert r.returncode == 0, r.stderr
-    got = run_argv(env)[-1]
-    assert got == f"{brief}\n\n{FOOTER_LINE}" and "Footer values:" not in got
-    assert "reportPath" not in json.loads(r.stdout) and not (env.tmp / "reports").exists()
+    assert run_argv(env)[-1] == f"{brief}\n\n{FOOTER_LINE}\n\n{values_line(env, 'a', report=report)}"
+    out = json.loads(r.stdout)
+    assert out["reportPath"] == report and out["donePath"] == report + ".done"
+    assert not (env.tmp / "reports").exists()
+
+
+def test_a_labelled_done_marker_is_used(env):
+    brief = "BRIEF\nReport: /tmp/x/p-report.md\nDone marker: /tmp/x/p.finished"
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    assert run_argv(env)[-1].endswith(values_line(env, "a", report="/tmp/x/p-report.md", done="/tmp/x/p.finished"))
+    assert json.loads(r.stdout)["donePath"] == "/tmp/x/p.finished"
+
+
+@pytest.mark.parametrize("brief", [
+    "BRIEF read the earlier review at ~/.local/state/agent-reports/x/old-report.md and repair",
+    "BRIEF delta review of /Users/someone/.local/state/agent-reports/x/old-report.md",
+    "BRIEF the deliverable is /tmp/x/a-report.md",
+    "BRIEF\nReport: summarise the findings",
+])
+def test_a_path_only_mentioned_in_the_brief_is_not_the_report(env, brief):
+    """(a): an input report path (or a label with no path) still gets the generated values."""
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 0, r.stderr
+    assert run_argv(env)[-1] == f"{brief}\n\n{ftail(env, 'a')}"
+    assert json.loads(r.stdout)["reportPath"] == f"{env.tmp}/reports/{LEAD}/a-report.md"
+    assert (env.tmp / "reports" / LEAD / "a-report.md").read_text() == "STATUS: working\n"
+
+
+@pytest.mark.parametrize("brief", ["BRIEF\nReport: /x/../etc/a-report.md"])
+def test_an_unusable_labelled_report_path_is_refused(env, brief):
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", brief)
+    assert r.returncode == 1 and "labelled report path" in r.stderr and not [c for c in env.calls() if c["argv"][0] == "run"]
 
 
 def test_footer_values_untouched_by_no_footer(env):

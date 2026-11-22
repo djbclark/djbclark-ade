@@ -32,16 +32,17 @@ is renamed to that) or the launch is refused (`rename-main` fixes that); never a
 Tab names: `worker <slice> <lead id>` plus ` [wt: <worktree dir>]` when --worktree DIR names the worktree the worker writes in or
 --cwd is a linked worktree (a hint, shortened to fit 100 characters; the brief still carries the path). Every launch carries
 `--label ade.lead=<lead>` and `--label slice=<NAME>`. One JSON line goes to stdout: {agentId, workspaceId, windowName, tabName}
-(plus reportPath and donePath when the footer values below were added).
+(plus reportPath and donePath unless --no-footer).
 Pass --no-wait to paseo. The last `--` argument (the brief) gets one line appended: `Also follow every item of <repo root>/docs/
-dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). Unless the brief already
-defines its report (an `agent-reports/` path, `{report} =`, any absolute `...-report.md` path, a line-start `Report:`/`Report path:`/
-`Report file:` label, or "write your report to"), a `Footer values:` line follows
-it that fills {lead}, {report}, {done}, {inbox} and {replies}: report = ~/.local/state/agent-reports/<lead id>/<slice>-report.md
-(or $AGENT_FOOTER_REPORT_DIR/<lead id>/..., the agent_footer_gate layout; `worker-` is prefixed to a slice starting with report/summary/
-findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done. A report or .done that exists is never reused: the
-next free `<slice>-N-report.md` is taken. The report is created exclusively (`STATUS: working`) in a 700 directory just before the
-launch, and the paths go to stderr and the JSON, so the lead can wait on the .done.
+dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). A `Footer values:` line
+always follows it and fills {lead}, {report}, {done}, {inbox} and {replies}. A report path the brief LABELS (a line-start `Report:`/
+`Report path:`/`Report file:`, a `## Report path` heading with the path below, "write your report to <path>", `{report} = <path>`)
+is used as {report} and nothing is generated or created; {done} is the brief's labelled `Done:`/`{done} =` path, else `<report>.done`.
+A path merely mentioned (an input report of another agent) is not a label. Otherwise report = ~/.local/state/agent-reports/<lead id>/
+<slice>-report.md (or $AGENT_FOOTER_REPORT_DIR/<lead id>/..., the agent_footer_gate layout; `worker-` is prefixed to a slice starting with
+report/summary/findings/analysis, whose .md Claude Code refuses to Write), done = <report>.done, and a report or .done that exists is
+never reused: the next free `<slice>-N-report.md` is taken. A generated report is created exclusively (`STATUS: working`) in a 700
+directory just before the launch. The chosen paths go to stderr and the JSON (reportPath, donePath), so the lead can wait on the .done.
 A box a launch opens is created in --cwd's primary checkout: the launch is refused unless the brief names --cwd by absolute path, and
 the JSON line then carries cwd and requestedCwd. --cwd must be the directory of the box the worker is placed in (`paseo run
 --workspace` ignores it, getpaseo/paseo#9699): a different --cwd is refused before anything is renamed or launched, and after every
@@ -703,25 +704,44 @@ def add_footer(rest: list[str]) -> list[str]:
 
 
 REFUSED_REPORT_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS)", re.IGNORECASE)  # Claude Code refuses a Write of these .md names
-# What counts as "the brief already says where its report goes", mirroring agent_footer_gate (REPORT_IN_PROMPT, REPORT_OWN,
-# REPORT_OWN_STRICT): an agent-reports/ path, `{report} =`, ANY absolute `...-report.md` path, a line-start `Report:` / `Report path:` /
-# `Report file:` label (list marker, quote or markdown around it allowed), a `## Report path` heading, or "write your report to".
-BRIEF_DEFINES_VALUES = re.compile(
-    r"agent-reports/|\{report\}\s*[=:]"
-    r"|(?<![\w.~$@+/-])/[\w.@~+/-]+-report\.md"
-    r"|^[ \t>*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?report(?:[ \t]+(?:path|file))?[*_`]*[ \t]*(?:is|:|=)"
-    r"|^#+[ \t]*report[ \t]+(?:path|file)\b"
-    r"|\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\b",
-    re.IGNORECASE | re.MULTILINE)
+# The brief's OWN report path is read from labelled lines only (operator ruling 2026-11-22, PR 935 LOW-4): a path merely mentioned as an
+# input (another agent's `~/.local/state/agent-reports/x/old-report.md`) is not the report. Labels: a line-start `Report:` / `Report path:`
+# / `Report file:` (list marker, quote or markdown around it allowed), a `## Report path` heading with the path on the next line,
+# "write your report to <path>", and `{report} = <path>`. The path is absolute or `~/`; the first labelled one in the brief wins.
+_P = r"[ \t]*[`'\"]?(?P<p>(?:/|~/)[\w.@+~/-]+)"
+_LIST = r"^[ \t>*#`_-]*(?:[A-Za-z]?\d+[a-z]?[.)][ \t]+)?"
+BRIEF_REPORT_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
+    _LIST + r"report(?:[ \t]+(?:path|file))?[*_`]*[ \t]*(?:is|:|=)[*_`]*" + _P,
+    r"^#+[ \t]*report[ \t]+(?:path|file)[ \t]*\n" + _P,
+    r"\bwrite\s+(?:your|the|a|its)\s+(?:full\s+)?(?:report|deliverable)\s+(?:to|at|in)\s+[`'\"]?(?P<p>(?:/|~/)[\w.@+~/-]+)",
+    r"\{report\}\s*[=:]" + _P)]
+BRIEF_DONE_LABELS = [re.compile(x, re.IGNORECASE | re.MULTILINE) for x in (
+    _LIST + r"done(?:[ \t]+(?:marker|file|path))?[*_`]*[ \t]*[:=][*_`]*" + _P,
+    r"\{done\}\s*[=:]" + _P)]
 SAFE_PATH = re.compile(r"[\w./@+~-]+")  # no space or quote: the worker copies the path into a Write call as given
 VALUES_MARK = "Footer values:"
 
 
-def brief_defines_footer_values(brief: str) -> bool:
-    """True when the brief already says where the report goes: it names an `agent-reports/` path, defines `{report} =` / `{report}:`,
-    or has a `Report path:` line (the label agent_footer_gate reads). Deliberately broad: a brief that sets its own report path must
-    never be given a second, conflicting one (a stray mention of the directory only skips the values, as before this feature)."""
-    return BRIEF_DEFINES_VALUES.search(brief) is not None
+def _first_label(brief: str, labels: list) -> str | None:
+    """The path of the earliest labelled match (any of `labels`), `~/` expanded, or None. Refused when it is not a plain absolute path."""
+    hits = [m for m in (rx.search(brief) for rx in labels) if m]
+    if not hits:
+        return None
+    raw = min(hits, key=lambda m: m.start()).group("p").rstrip(".,")
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path) or ".." in path.split("/") or has_control_char(path) or not SAFE_PATH.fullmatch(path):
+        raise Refused(f"the brief's labelled report path {raw!r} is not a plain absolute path (no `..`, spaces or quotes)")
+    return path
+
+
+def brief_footer_values(lead: str, brief: str) -> dict[str, str] | None:
+    """The footer values for a brief that labels its own report path (see BRIEF_REPORT_LABELS), else None. {done} is the brief's
+    labelled done marker, else `<report>.done`; {inbox} and {replies} sit beside the report. Nothing is generated or created."""
+    report = _first_label(brief, BRIEF_REPORT_LABELS)
+    if report is None:
+        return None
+    done = _first_label(brief, BRIEF_DONE_LABELS) or report + ".done"
+    return {"lead": lead, "report": report, "done": done, "inbox": report + ".inbox.md", "replies": report + ".replies.md"}
 
 
 def footer_report_paths(lead: str, slice_name: str) -> dict[str, str]:
@@ -919,11 +939,13 @@ def launch(opts, rest: list[str]) -> int:
     bi = brief_index(rest)  # before the footer line: the footer names paths of its own
     brief = rest[bi] if bi is not None else ""  # no identifiable brief names no worktree (a moved launch is then refused)
     report_info: dict[str, str] | None = None
+    report_generated = False
     if not opts.no_footer:
         rest = add_footer(rest)
-        if not brief_defines_footer_values(brief):  # a brief that sets its own report path keeps it
-            report_info = footer_report_paths(lead, name)
-            rest = add_footer_values(rest, report_info)
+        report_info = brief_footer_values(lead, brief)  # a labelled report path in the brief is the report: nothing is generated
+        if report_info is None:
+            report_info, report_generated = footer_report_paths(lead, name), True
+        rest = add_footer_values(rest, report_info)
     rest = preflight_mode(rest)
     main_place = opts.placement == "lead"
     box = "OTHER" if opts.placement == "other" else "WORKER"  # the box the window is looked up or opened in (not the lead's own)
@@ -1029,7 +1051,8 @@ def launch(opts, rest: list[str]) -> int:
             args.append("--json")
         before = {row_wks(r) for r in list_windows()} if win is None else set()
         if report_info:  # as late as possible: a launch refused above leaves nothing behind
-            reserve_report(report_info)
+            if report_generated:
+                reserve_report(report_info)
             sys.stderr.write(f"ade-worker-run: report {report_info['report']} (done marker {report_info['done']})\n")
         rc, out, err = paseo([*args, *rest], timeout=300)
         if err:
