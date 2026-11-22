@@ -3032,7 +3032,7 @@ def test_an_unreadable_new_local_window_still_gets_the_rename_advice(setup, cont
                     'command': f'ade-worker-run rename-lead --lead {SUCC}'}
 
 
-OTHER = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+DECOY = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 
 
 @pytest.mark.parametrize('with_own', [False, True])
@@ -3042,7 +3042,7 @@ def test_the_successor_window_is_read_from_its_own_state_file_only(setup, with_o
     agents = service.home / 'agents' / 'proj'
     agents.mkdir(parents=True, exist_ok=True)
     native.workspaces.append({'workspaceId': 'wks_fedcba9876543210', 'project': 'p', 'name': 'LEAD decoy (d)', 'cwd': '/x'})
-    (agents / (OTHER + '.json')).write_text(json.dumps({'workspaceId': 'wks_fedcba9876543210'}))
+    (agents / (DECOY + '.json')).write_text(json.dumps({'workspaceId': 'wks_fedcba9876543210'}))
     info = settle(service, native, record, path)['lead_window']
     if with_own:
         assert info['state'] == 'rename-advised' and info['name'] == 'MAIN q (z)'
