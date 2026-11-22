@@ -80,6 +80,15 @@ tabs still require the operator's yes for the named tab.
    report an unexpected prompt; switch remote debugging off when it is not needed.
 5. Never kill, reload or restart Chrome without the operator's yes (a restart closes windows).
 
+**Known failure: EPERM on `DevToolsActivePort` (observed 2026-11-22, macOS 27; queue Carried 119).** `--autoConnect` fails with
+EPERM reading `~/Library/Application Support/Google/Chrome/DevToolsActivePort`. macOS 27 App Data protection (TCC
+`kTCCServiceSystemPolicyAppDataDetailed`, kernel log "System Policy: deny file-read-data") denies the Paseo app (bundle
+`sh.paseo.desktop`, responsible for the Paseo Daemon and every agent) reading Chrome's data. `--browserUrl` is no
+workaround: in `chrome://inspect` remote-debugging mode Chrome's port 9222 `/json` endpoints answer 404. Likely cause: the
+patched Paseo 0.17.1 build (installed 2026-11-22) has a new code signature, so the earlier grant no longer matches. Fix: the
+operator grants the Paseo app access in System Settings > Privacy & Security (App Data / Files and Folders), then reconnects
+the MCP server (`/mcp`); no agent changes TCC.
+
 ## chrome-use: unattended tab control without Chrome's dialog (added 2026-11-17)
 
 Why: the "Allow remote debugging?" dialog above blocks any connection while the operator is away, and Chrome offers no
