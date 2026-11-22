@@ -614,6 +614,45 @@ def test_another_leads_live_agent_with_two_state_files_makes_the_window_unplacea
     assert r.returncode == 1 and "two Paseo state files" not in r.stderr
 
 
+def _dup_state(env, agent, wks_a, wks_b, lead=OTHER_LEAD, status="running", labels=True):
+    """An agent with two state files, one naming wks_a and one naming wks_b (Paseo's moved-record leftover)."""
+    env.data.setdefault("agents", []).append({"id": agent, "status": status, "labels": {"ade.lead": lead}})
+    lab = {"ade.lead": lead} if labels else {}
+    for sub, wks in (("proj", wks_a), ("aaa-old", wks_b)):
+        f = env.home / "agents" / sub / f"{agent}.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"id": agent, "workspaceId": wks, "labels": lab}))
+
+
+@pytest.mark.parametrize("who", ["other-lead", "unlabelled"])
+def test_a_duplicate_state_file_naming_only_other_windows_does_not_refuse_this_leads_box(window, who):
+    """Adversary PR 926 r2 LOW-1 (P1, P2): an agent whose copies both name other windows is in one of those, never in this box."""
+    member(window, "w1", "wks_win1")  # this lead's own worker in its box
+    _dup_state(window, "z9", "wks_elsewhere", "wks_else2", labels=who == "other-lead")
+    r = launch(window)
+    assert r.returncode == 0, r.stderr
+    assert any(v == ["run"] for v in window.verbs())
+    r = archive(window)                                          # the same box is archived by the same rule: no foreign refusal
+    assert "two Paseo state files" not in r.stderr
+
+
+@pytest.mark.parametrize("status", ["running", "closed"])
+def test_duplicate_state_files_both_naming_this_window_refuse_a_launch_closed_or_live(window, status):
+    """Adversary PR 926 r2 LOW-1 (P7, P8): another lead's agent whose copies both name this window is refused, closed included."""
+    _dup_state(window, "o9", "wks_win1", "wks_win1", status=status)
+    r = launch(window)
+    assert r.returncode == 1 and "another lead's agents" in r.stderr and "o9" in r.stderr and ["run"] not in window.verbs()
+
+
+def test_a_live_agent_with_an_unreadable_second_state_file_makes_the_window_unplaceable(window):
+    member(window, "o9", "wks_elsewhere", lead=OTHER_LEAD)
+    bad = window.home / "agents/aaa-old/o9.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("{not json")
+    r = launch(window)
+    assert r.returncode == 1 and "o9" in r.stderr and "unreadable" in r.stderr and ["run"] not in window.verbs()
+
+
 def test_window_holding_only_another_leads_closed_agent_is_refused(env):
     env.data["workspaces"] = [{"workspaceId": "wks_b1", "name": WIN, "cwd": "/repo"}]
     own(LEAD, "wks_b1")  # the lead's box (by its record) that once held another lead's worker
