@@ -687,6 +687,9 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                               f"parent {parent} waits for the next run")
             elif check_idle(parent):
                 moved = decision(parent)
+                if cfg.paseo_guard is not None and parent not in decisions:
+                    events.append(f"inspect cap reached before the send guard could be asked: parent {parent} waits for the next run")
+                    continue
                 if moved:
                     verdict = "refused by the send guard" if moved == parent else f"handed off to {moved}"
                     events.append(f"parent {parent} {verdict}: no message sent (a resume needs the predecessor's own session)")

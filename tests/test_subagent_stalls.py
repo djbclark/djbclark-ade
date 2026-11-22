@@ -776,6 +776,13 @@ def test_inspects_per_run_are_capped(w):
     assert len(w.calls(w.paseo)) == 3
 
 
+def test_no_send_when_the_cap_ends_before_the_guard_precheck(w):
+    """Adversary LOW: the idle probe used the last slot; the send must wait rather than go unchecked."""
+    stalled_world(w)                         # no hermes-ping configured: no probe at the ping stage, the idle check takes the only slot
+    _, events = run_notify(w, hermes_ping=None, max_inspects=1)
+    assert w.sends() == [] and any("inspect cap reached before the send guard" in e for e in events)
+
+
 def test_no_more_inspects_after_the_first_timeout(w, tmp_path):
     """LOW-5: a hung or missing paseo is tried once per run, not once per parent."""
     many_stalls(w, 5, parents=True)
