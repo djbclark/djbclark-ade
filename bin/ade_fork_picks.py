@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -41,7 +42,9 @@ STATUS_RE = re.compile(r"^(queued|carried|landed:([1-9][0-9]*|main)|upstreamed|d
 MARK_RE = re.compile(r"^(carried|landed:([1-9][0-9]*|main)|upstreamed|dropped)$")
 ACTIVE = ("queued", "carried")
 OWN_ORGS = {"frdminc", "djbclark"}  # branches of these owners may be unpinned; every other source must pin
-CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
+# Unicode categories never allowed in notes and replaced in third-party text: control, format (bidi
+# overrides, zero-width, BOM), line and paragraph separators (U+2028/9) and surrogates.
+BAD_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 PR_RE = re.compile(r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+/pull/[0-9]+/?$")
 FIELDS = {"id", "component", "repo", "commit", "branch", "pr", "local_path", "expected_head", "intent",
           "target", "targets", "status", "upstream", "order", "notes", "trial_required", "hold"}
@@ -49,6 +52,7 @@ REQUIRED = {"id", "component", "intent", "status"}
 STRING_FIELDS = ("id", "component", "repo", "intent", "target", "status", "commit", "branch", "upstream",
                  "notes", "local_path", "expected_head", "hold")
 
+LARGE_PLAN = 20  # picks per entry above which the text output warns (a stacked or mis-based source)
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_STOPPED, EXIT_CANDIDATES = 0, 1, 2, 3, 4
 
 
@@ -356,16 +360,23 @@ def plan_commits(wt: Path, entry: dict[str, Any], tip: str,
     return [c for c in fresh if c in own], present, [c for c in fresh if c not in own]
 
 
+def has_bad_chars(text: str) -> bool:
+    return any(unicodedata.category(ch) in BAD_CATEGORIES for ch in text)
+
+
 def scrub(text: str, limit: int = 300) -> str:
-    """Third-party text (git output, file names) as inert data: control characters become '?'."""
-    return CONTROL_RE.sub("?", text.strip())[:limit]
+    """Third-party text (git output, file names) as inert data: control, format and separator
+    characters (see BAD_CATEGORIES) become '?'."""
+    return "".join("?" if unicodedata.category(ch) in BAD_CATEGORIES else ch for ch in text.strip())[:limit]
 
 
 def abort_pick(wt: Path) -> dict[str, Any]:
     """Abort an interrupted cherry-pick and report, without assuming, whether the tree is clean."""
     result = git(wt, "cherry-pick", "--abort")
     pending = Path(git_ok(wt, "rev-parse", "--path-format=absolute", "--git-path", "CHERRY_PICK_HEAD").strip())
-    clean = not git_ok(wt, "status", "--porcelain", "--untracked-files=normal").strip() and not pending.exists()
+    lock = Path(git_ok(wt, "rev-parse", "--path-format=absolute", "--git-path", "index.lock").strip())
+    clean = (not git_ok(wt, "status", "--porcelain", "--untracked-files=normal").strip()
+             and not pending.exists() and not lock.exists())
     return {"abort_rc": result.returncode, "tree_clean": clean}
 
 
@@ -391,24 +402,21 @@ def do_apply(registry: Path, forks: Path, target: str, wt: Path, dry_run: bool,
                               "branch": branch, "dry_run": dry_run, "start_head": start,
                               "applied": [], "skipped": skipped, "conflict": None, "head": start}
     tips: list[tuple[dict[str, Any], str]] = []
-    for entry in entries:  # fetch everything and check heads before changing anything
+    upstream_urls = {row["id"]: row["upstream"] for row in _forks_rows(forks)}
+    upstream_tips: dict[str, str] = {}
+    for entry in entries:  # fetch everything (entries and upstream tips) and check heads before changing anything
         tip = fetch_entry(wt, entry)
         if "expected_head" in entry and tip != entry["expected_head"]:
             report["conflict"] = {"id": entry["id"], "reason": "head-moved", "files": [],
                                   "expected_head": entry["expected_head"], "actual_head": tip}
             return EXIT_STOPPED, report
+        if "commit" not in entry and entry["component"] not in upstream_tips:
+            upstream_tips[entry["component"]] = fetch_upstream_tip(wt, upstream_urls[entry["component"]])
         tips.append((entry, tip))
-    upstream_urls = {row["id"]: row["upstream"] for row in _forks_rows(forks)}
-    upstream_tips: dict[str, str] = {}
     for entry, tip in tips:
-        upstream_tip = None
-        if "commit" not in entry:
-            component = entry["component"]
-            if component not in upstream_tips:
-                upstream_tips[component] = fetch_upstream_tip(wt, upstream_urls[component])
-            upstream_tip = upstream_tips[component]
+        upstream_tip = None if "commit" in entry else upstream_tips[entry["component"]]
         picks, present, excluded = plan_commits(wt, entry, tip, upstream_tip)
-        row: dict[str, Any] = {"id": entry["id"], "tip": tip, "commits": picks, "already_present": not picks,
+        row: dict[str, Any] = {"id": entry["id"], "tip": tip, "commits": picks, "already_present": not picks and not excluded,
                                "already_present_commits": present, "excluded_upstream_commits": excluded}
         report["applied"].append(row)
         if dry_run:
@@ -452,7 +460,9 @@ def _entry_block(lines: list[str], pick_id: str) -> tuple[int, int]:
 
 
 def edit_status(text: str, pick_id: str, status: str, note: str | None, old_notes: str | None) -> str:
-    lines = text.splitlines(keepends=True)
+    lines = re.split(r"(?<=\n)", text)  # split on \n only (U+2028 is not a line break in TOML)
+    if lines and lines[-1] == "":
+        lines.pop()
     start, end = _entry_block(lines, pick_id)
     status_re = re.compile(r'^(\s*status\s*=\s*)"[^"\\\n]*"(.*)$', re.S)
     notes_re = re.compile(r'^(\s*notes\s*=\s*)"(?:[^"\\\n]|\\.)*"(.*)$', re.S)
@@ -495,7 +505,7 @@ def atomic_write(path: Path, text: str) -> None:
 def do_mark(registry: Path, forks: Path, pick_id: str, status: str, note: str | None) -> dict[str, Any]:
     if not MARK_RE.match(status):
         raise RegistryError("status must be carried, landed:N, landed:main, upstreamed or dropped")
-    if note is not None and (not note.strip() or CONTROL_RE.search(note)):
+    if note is not None and (not note.strip() or has_bad_chars(note)):
         raise RegistryError("note must be one non-empty line without control characters")
     registry = registry.resolve()
     primary = is_primary_checkout(registry.parent)
@@ -691,6 +701,9 @@ def main(argv: list[str] | None = None) -> int:
             verb = "would apply" if args.dry_run else "applied"
             lines = [f"{verb} {r['id']}: {len(r['commits'])} commit(s)"
                      + (f" (already-present: {len(r['already_present_commits'])})" if r["already_present_commits"] else "")
+                     + (f" (EXCLUDED upstream: {len(r['excluded_upstream_commits'])}; the workspace may need a rebase onto"
+                        " newer upstream)" if r["excluded_upstream_commits"] else "")
+                     + (" (LARGE plan: check this source's base)" if len(r["commits"]) > LARGE_PLAN else "")
                      for r in report["applied"]]
             lines += [f"skipped {s['id']} ({s['why']}{': ' + s['hold'] if s.get('hold') else ''})"
                       for s in report["skipped"]]

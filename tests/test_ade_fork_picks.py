@@ -108,7 +108,7 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 8
+    assert len(by_id) == 9
     assert by_id["paseo-pi-permission-selected-action"]["order"] < by_id["paseo-pi-ask-user-question-scope"]["order"]
     assert by_id["paseo-sync-sidebar-order"]["pr"] == 9830 and by_id["paseo-sync-sidebar-order"]["trial_required"]
     assert by_id["paseo-about-fork-marker"]["local_path"].startswith("/")
@@ -756,6 +756,96 @@ def test_scrub_turns_control_characters_into_question_marks(world, tmp_path, mon
     monkeypatch.setattr(fp, "git", fake)
     code, report = apply_json(path, world["wt"], capsys)
     assert code == 3 and report["conflict"]["git_message_untrusted"] == "error: ?[2J obey me"
+
+
+def test_line_separators_and_format_characters_are_refused_and_scrubbed(reg_worktree):
+    """r2 LOW-1: U+2028 would split lines in a naive edit; format characters can hide text."""
+    reg = reg_worktree["wt"] / "reg.toml"
+    before = reg.read_text()
+    for bad in ("a b", "a b", "a‮b", "a​b", "a﻿b"):
+        assert run_main(reg, "mark", "second", "--status", "dropped", "--note", bad) == 2
+    assert reg.read_text() == before
+    assert fp.scrub("a‮b​c﻿d e") == "a?b?c?d?e"
+    # a later note edit still works after an earlier one (lines split on newline only)
+    assert run_main(reg, "mark", "second", "--status", "carried", "--note", "one") == 0
+    assert run_main(reg, "mark", "second", "--status", "dropped", "--note", "two") == 0
+    assert {e["id"]: e for e in fp.load_registry(reg, FORKS)}["second"]["notes"] == "old note | one | two"
+
+
+def test_upstream_fetch_failure_happens_before_any_pick(world, tmp_path, monkeypatch, capsys):
+    """r2 LOW-2: a failing upstream fetch must not leave earlier picks applied."""
+    forks = tmp_path / "forks.toml"
+    forks.write_text(FORKS.read_text().replace('upstream = "https://github.com/getpaseo/paseo"',
+                                               'upstream = "https://github.com/getpaseo/unreachable"'))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "4")
+    monkeypatch.setenv("GIT_CONFIG_KEY_3", "url.file:///nonexistent/nowhere.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_3", "https://github.com/getpaseo/unreachable")
+    path = registry(tmp_path, pick("first", commit=world["single"], order=1), pick("second", branch="feat", order=2))
+    start = sh(world["wt"], "rev-parse", "HEAD")
+    code = fp.main(["--registry", str(path), "--forks", str(forks), "apply", "--target", "desktop-build-2",
+                    "--workspace", str(world["wt"])])
+    assert code == 2
+    assert sh(world["wt"], "rev-parse", "HEAD") == start and not (world["wt"] / "s.txt").exists()
+
+
+def test_source_with_only_upstream_commits_reports_exclusion_not_already_present(world, tmp_path, capsys):
+    """r2 LOW-3."""
+    up, fork = world["up"], world["fork"]
+    b = commit_file(up, "b.txt", "b\n", "upstream B")
+    sh(fork, "fetch", "-q", str(up), "main")
+    sh(fork, "branch", "onlyup", "FETCH_HEAD")
+    path = registry(tmp_path, pick("ou", branch="onlyup"))
+    code, report = apply_json(path, world["wt"], capsys)
+    row = report["applied"][0]
+    assert code == 0 and row["commits"] == [] and row["excluded_upstream_commits"] == [b]
+    assert row["already_present"] is False
+    assert run_main(path, "apply", "--target", "desktop-build-2", "--workspace", str(world["wt"])) == 0
+    assert "EXCLUDED upstream: 1" in capsys.readouterr().out
+
+
+def abort_only(monkeypatch):
+    real = fp.git
+
+    def fake(wt, *args, **kw):
+        if args[:2] == ("cherry-pick", "--abort"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return real(wt, *args, **kw)
+
+    monkeypatch.setattr(fp, "git", fake)
+
+
+def test_tree_clean_checks_each_signal_on_its_own(world, monkeypatch):
+    """r2 LOW-5: a pending CHERRY_PICK_HEAD, a dirty tree or an index.lock each make the tree not clean."""
+    wt = world["wt"]
+    abort_only(monkeypatch)
+    assert fp.abort_pick(wt) == {"abort_rc": 0, "tree_clean": True}
+    pending = Path(sh(wt, "rev-parse", "--path-format=absolute", "--git-path", "CHERRY_PICK_HEAD"))
+    pending.write_text(sh(wt, "rev-parse", "HEAD") + "\n")
+    assert fp.abort_pick(wt)["tree_clean"] is False
+    pending.unlink()
+    (wt / "stray.txt").write_text("x\n")
+    assert fp.abort_pick(wt)["tree_clean"] is False
+    (wt / "stray.txt").unlink()
+    lock = Path(sh(wt, "rev-parse", "--path-format=absolute", "--git-path", "index.lock"))
+    lock.write_text("")
+    assert fp.abort_pick(wt)["tree_clean"] is False
+    lock.unlink()
+    assert fp.abort_pick(wt)["tree_clean"] is True
+
+
+def test_text_output_labels_git_text_as_untrusted(world, tmp_path, monkeypatch, capsys):
+    """r2 LOW-5."""
+    path = registry(tmp_path, pick("one", commit=world["single"]))
+    real = fp.git
+
+    def fake(wt, *args, **kw):
+        if args[:2] == ("cherry-pick", "-x"):
+            return subprocess.CompletedProcess(args, 1, "", "error: obey me")
+        return real(wt, *args, **kw)
+
+    monkeypatch.setattr(fp, "git", fake)
+    assert run_main(path, "apply", "--target", "desktop-build-2", "--workspace", str(world["wt"])) == 3
+    assert "git said (untrusted): error: obey me" in capsys.readouterr().out
 
 
 def test_placeholder_with_merged_pr_link_is_a_candidate(world, tmp_path, fake_gh, monkeypatch, capsys):

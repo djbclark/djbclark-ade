@@ -15,12 +15,26 @@ id = "paseo-workspace-id-search"
 component = "paseo"
 repo = "frdminc/paseo"
 branch = "feat/command-center-agent-id-search"
+expected_head = "7c670ad4cc56c2686ff15dbc231b9ad679ed9284"
 intent = "find a workspace by the start of (or a substring of) an agent ID in the command center"
 target = "desktop-build-2"
 status = "queued"
-upstream = "https://github.com/getpaseo/paseo/discussions/10120"
+upstream = "https://github.com/getpaseo/paseo/pull/10534"
 order = 10
-notes = "redo in progress; fork PR frdminc/paseo#3; superseded commit ffa8a54ac16437a7dba21f792ad4983ceea70e97"
+notes = "one commit on upstream/main ec22b8265; upstream PR 10534 is a draft (Discussion 10120); CI green https://github.com/frdminc/paseo/actions/runs/45045661104; fork PR frdminc/paseo#3; obsolete earlier forms 36f49a46b and ffa8a54ac16437a7dba21f792ad4983ceea70e97"
+
+[[pick]]
+id = "desktop-app-dist-precompress"
+component = "paseo"
+repo = "frdminc/paseo"
+commit = "62bac61f458a4e70e2dc601051efbf8149a006d5"
+intent = "desktop build ships .br/.gz beside web assets so the daemon-served web UI first load drops from ~25 MB to ~4 MB (build:desktop runs scripts/precompress-assets.mjs before electron-builder)"
+target = "desktop-build-2"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/issues/10536"
+trial_required = false
+order = 12
+notes = "branch fix/desktop-app-dist-precompress on upstream/main ec22b8265, pushed to frdminc/paseo (local worktree /Users/djbclark/src/paseo-app-dist-precompress-wt); no upstream PR yet, on purpose: CONTRIBUTING needs QA evidence from build 2; report /Users/djbclark/.local/state/agent-reports/afa869f0-0e51-4ab7-937e-ccdc72f2c3af/app-dist-precompress-report.md; build-2 check: the packaged app-dist must contain .br/.gz beside index-*.js"
 
 [[pick]]
 id = "paseo-sidebar-nav-divider"
@@ -95,18 +109,18 @@ target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/issues/8326"
 order = 35
-notes = "two commits on upstream/main ec22b8265, two files under packages/server/src/server/agent/providers/pi/; two reviews APPROVE; CI green https://github.com/frdminc/paseo/actions/runs/45044468003; known limits: pi-ask-user and rpiv-ask-user-question adapters still cancel an allow (rpiv overlaps getpaseo#6643); not upstreamed yet"
+notes = "two commits on upstream/main ec22b8265, two files under packages/server/src/server/agent/providers/pi/; two reviews APPROVE; CI green https://github.com/frdminc/paseo/actions/runs/45044468003; known limits: pi-ask-user and rpiv-ask-user-question adapters still cancel an allow (rpiv overlaps getpaseo#6643); not upstreamed yet; SAFE FALLBACK (the stack carrying this fix, also used by paseo-pi-ask-user-question-scope): trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (re-pin expected_head then)"
 
 [[pick]]
 id = "paseo-pi-ask-user-question-scope"
 component = "paseo"
-repo = "getpaseo/paseo"
-pr = 6643
-expected_head = "c445b9b7ce0a1b141441a9d773c6dcbd265e026f"
+repo = "frdminc/paseo"
+branch = "trial/pi-8326-6643-on-fork2"
+expected_head = "ca6826bfc98033bcc0a08362be264d9d2ca73cff"
 intent = "DeepSeek via Pi gets the same question/permission behavior as Claude and Codex"
 target = "desktop-build-2"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/6643"
-trial_required = true
+trial_required = false
 order = 40
-notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); 2 files, open, last updated 2026-10-16, may need a rebase; trial until a clean apply is shown; applies after paseo-pi-permission-selected-action and the two may conflict in neighbouring Pi code"
+notes = "fix(pi): scope ask_user_question forms to their tool call (closes getpaseo/paseo#6640); trial DONE: stack branch trial/pi-8326-6643-on-fork2 on frdminc/paseo, base local/main-desktop-v0171-fork2-20261122 @ 1c03220bb: our 8326 fix (906cbef77, 27701d707) then upstream #6643 c445b9b7c cherry-picked as ca6826bfc (one trivial test-file conflict in rpiv-ask-user-question/index.test.ts); local tests 173/173; SAFE FALLBACK: trial/pi-8326-6643-on-fork2 @ ca6826bfc98033bcc0a08362be264d9d2ca73cff, CI green (6 jobs) https://github.com/frdminc/paseo/actions/runs/45049330434; the stack head will move: LEAD 82704190-3c82-4734-acd6-77455d261e00 is adding adapter fixes, N1 and steer-before-cancel on top, and those shas follow after review and CI (re-pin expected_head then); applies after paseo-pi-permission-selected-action (its commits already present are skipped)"
