@@ -1957,3 +1957,75 @@ def test_an_xargs_fed_mv_of_a_narrowed_feed_stays_allowed():
 def test_a_feed_positional_is_a_name_not_an_empty_string():
     assert held("find build -name '*.d' -print0 | xargs -0 -n1 sh -c 'rm -rf \"$0\"/*'").allow     # not `rm -rf /*`
     assert is_held("find ~ -print0 | xargs -0 -n1 sh -c 'rm -rf \"$0\"/*'")
+
+
+# ---------------------------------------------------------------- adversary round 8 (PR 939) LOW-1 & LOW-2
+
+@pytest.mark.parametrize("command", [
+    "find ~ -mindepth 1 -maxdepth 1 -exec rimraf {} +",
+    "find ~ -mindepth 1 -maxdepth 1 -exec rip {} +",
+    "find ~ -mindepth 1 -maxdepth 1 -exec del-cli {} +",
+    "find ~ -mindepth 1 -maxdepth 1 -exec trash {} +",
+    "find ~ -mindepth 1 -maxdepth 1 -exec trash-put {} +",
+    'find "$OUT"/ -mindepth 1 -maxdepth 1 -exec rimraf {} +',
+    'find "$OUT"/ -mindepth 1 -maxdepth 1 -exec trash {} +',
+])
+def test_find_exec_with_non_core_remover_names_is_held(command):
+    """PR 939 r8 LOW-1: REMOVER_NAMES outside REMOVERS must not slip past find -exec."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+def test_find_exec_with_non_core_remover_on_safe_target_stays_allowed():
+    assert held("find build -name '*.o' -exec trash {} +").allow
+    assert allowed_in("find build -name '*.o' -exec rimraf {} +", SRC_X)
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -mindepth 1 -maxdepth 1 -exec mv {} /tmp/old/ \\;",
+    'find "$OUT"/ -mindepth 1 -maxdepth 1 -exec mv {} /tmp/old/ \\;',
+    "find ~ -mindepth 1 -maxdepth 1 -exec gmv {} /tmp/old/ \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec chmod -R 777 {} \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec chown -R nobody {} \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec git -C {} clean -fdx \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec rsync -a --delete e/ {} \\;",
+    "find ~ -maxdepth 1 | parallel mv {} /tmp/old/",
+    "find ~ -maxdepth 1 | parallel -j4 gmv {} /tmp/old/",
+    "find ~ -maxdepth 1 | parallel chmod -R 777 {}",
+    "find ~ -maxdepth 1 | parallel -j 4 chown --recursive nobody {}",
+    "find ~ -maxdepth 1 | parallel git -C {} clean -fdx",
+    "find ~ -maxdepth 1 | parallel rsync -a --delete e/ {}",
+    "find ~ -maxdepth 1 | parallel 'mv {} /tmp/old/'",
+    "find ~ -maxdepth 1 | parallel 'chmod -R 777 {}'",
+    "find ~ -maxdepth 1 | parallel 'git -C {} clean -fdx'",
+    "find ~ -maxdepth 1 | xargs chmod -R 777",
+    "find ~ -maxdepth 1 | xargs -n1 rsync -a --delete e/",
+    "find ~ -maxdepth 1 | xargs -I{} git -C {} clean -fdx",
+    "xargs -I{} chmod -R 777 {}",
+    "xargs -I{} rsync -a --delete e/ {}",
+    "xargs -I{} git -C {} clean -fdx",
+])
+def test_fed_mv_recursive_changer_git_clean_and_rsync_delete_are_held(command):
+    """PR 939 r8 LOW-2: fed mv, chmod -R, git clean and rsync --delete are held in all three modes."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find build -name '*.o' -exec mv {} dist/ \\;",
+    "find build -name '*.sh' -exec chmod +x {} \\;",
+    "find build -name '*.d' -exec chmod -R 755 {} \\;",
+    "find build -name '*.d' -exec git -C {} status \\;",
+    "find build -name '*.d' -exec git -C {} clean -nd \\;",
+    "find build -name '*.d' -exec rsync -a --delete e/ {} \\;",
+    "find build -name '*.sh' | xargs chmod +x",
+    "find build -name '*.d' | xargs chmod -R 755",
+    "find build -name '*.d' | xargs -n1 rsync -a --delete e/",
+    "find ~ -maxdepth 1 | xargs -n1 rsync -a e/",
+    "find ~ -maxdepth 1 | xargs -I{} git -C {} status",
+    "find ~ -maxdepth 1 | xargs -I{} git -C {} clean -nd",
+    "find build | parallel echo {}",
+    "find build | parallel chmod +x {}",
+    "find build | parallel git -C {} status",
+    "find build | parallel rsync -a e/ {}",
+])
+def test_safe_non_destructive_find_xargs_and_parallel_shapes_stay_allowed(command):
+    assert allowed_in(command, SRC_X), (command, held(command).rule)

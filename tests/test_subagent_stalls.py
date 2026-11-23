@@ -798,3 +798,92 @@ def test_no_more_inspects_after_the_first_timeout(w, tmp_path):
     with mock.patch.object(ss, "_run", fake_run):
         _, events = run_notify(w)
     assert len(calls) == 1 and any("inspect cap or paseo unreachable" in e for e in events)
+
+
+# ---------------------------------------------------------------- PR 948 follow-up LOWs (2026-11-23)
+
+def test_send_cursor_rotates_past_permanently_busy_parents(w):
+    """PR 948 LOW-1: under a tight --max-inspects, busy earlier parents must not permanently starve a later idle parent."""
+    parents = [f"0000000{i}-aaaa-4bbb-8ccc-333333333333" for i in range(4)]
+    for i, pid in enumerate(parents):
+        sess = f"1111111{i}-aaaa-4bbb-8ccc-222222222222"
+        rep = w.stub(f"s{i}-report.md", session=sess)
+        w.transcript(rep, idle_min=60, agent=f"a00000000000000{i}", session=sess)
+        w.paseo_agent(session=sess, agent_id=pid)
+    # parent 3 is idle; parents 0, 1, 2 are permanently running
+    idle_parent = parents[3]
+    w.paseo.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\nhere = os.path.dirname(os.path.abspath(__file__))\n"
+        "argv = sys.argv[1:]\nwith open(os.path.join(here, 'calls.jsonl'), 'a') as f:\n"
+        "    f.write(json.dumps(argv) + '\\n')\n"
+        f"if argv[:2] == ['agent', 'inspect']:\n"
+        f"    pid = argv[-1]\n"
+        f"    status = 'idle' if pid == {idle_parent!r} else 'running'\n"
+        "    sys.stdout.write(json.dumps({'Id': pid, 'Archived': False, 'Status': status}))\n"
+        "sys.exit(0)\n"
+    )
+    # Run 1 (no hermes-ping so budget goes to send-stage probes): max_inspects=2 checks parents[0], parents[1] (both busy)
+    run_notify(w, hermes_ping=None, max_inspects=2)
+    assert w.sends() == []
+    seen = json.loads((w.home / ".local/state/djbclark-ade/subagent-stalls/seen.json").read_text())
+    assert seen.get("send_cursor") == parents[2]
+    # Run 2 starts at parents[2] (busy, 1 inspect), then parents[3] (idle, 1 inspect), then guard hits cap -> cursor stays on parents[3]
+    run_notify(w, now=NOW + 60, hermes_ping=None, max_inspects=2)
+    assert w.sends() == []
+    seen = json.loads((w.home / ".local/state/djbclark-ade/subagent-stalls/seen.json").read_text())
+    assert seen.get("send_cursor") == parents[3]
+    # Run 3 starts at parents[3] (idle + guard = 2 inspects) -> sends to parents[3]!
+    run_notify(w, now=NOW + 120, hermes_ping=None, max_inspects=2)
+    assert [c[4] for c in w.sends()] == [idle_parent]
+
+
+def test_guard_inspect_timeout_marks_paseo_down_for_rest_of_run(w, monkeypatch):
+    """PR 948 LOW-2: a failed/timed-out in-process guard inspect sets run_state['down'] so no further probes run."""
+    many_stalls(w, 4, parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: w.home))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(w.home / "self-session"))
+    monkeypatch.setenv("PASEO_HOME", str(w.home / "paseo-home"))
+    monkeypatch.setenv("ADE_SEND_GUARD_LOG", str(w.home / "send-guard.log"))
+    # Fake paseo exits non-zero with a non-not-found error (same Decision reason as TimeoutExpired inside ade_send_guard.decide)
+    w.paseo.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\nhere = os.path.dirname(os.path.abspath(__file__))\n"
+        "argv = sys.argv[1:]\nwith open(os.path.join(here, 'calls.jsonl'), 'a') as f:\n"
+        "    f.write(json.dumps(argv) + '\\n')\n"
+        "sys.stderr.write('daemon timed out\\n')\nsys.exit(1)\n"
+    )
+    _, events = run_notify(w, redirect_probe=None)
+    inspects = [c for c in w.calls(w.paseo) if c[:2] == ["agent", "inspect"]]
+    assert len(inspects) == 1
+    assert w.sends() == []
+    assert any("send guard could not inspect" in e for e in events)
+    assert any("inspect cap or paseo unreachable" in e for e in events)
+
+
+def test_brief_sourced_link_ranks_below_prompt_label_and_brief_mention_below_owned_brief(w):
+    """PR 948 LOW-3: a finished reviewer mentioning the writer's *-brief.md must not hide the dead writer."""
+    # Case (a): writer has a direct Report: label (no footer line); finished reviewer names writer's brief
+    report1 = w.stub("direct-report.md")
+    brief1 = w.reports / SESSION / "direct-brief.md"
+    brief1.write_text(f"Do the work.\nReport path: {report1}\n")
+    w.transcript(None, idle_min=60, agent="awriter1", prompt=f"Build the fix.\nReport: {report1}\n")
+    w.transcript(None, idle_min=1, tail="final", agent="areviewer1",
+                 prompt=f"Review the work of {brief1}.\nBrief: {brief1}\n")
+    s1 = [x for x in ss.scan(w.cfg()).stalled if x.report == report1]
+    assert [x.agent_id for x in s1] == ["awriter1"]
+
+    # Case (b): writer owns the brief ("Your brief is the file ..."); finished reviewer only mentions it as input
+    report2 = w.stub("brief-owned-report.md")
+    brief2 = w.reports / SESSION / "owned-brief.md"
+    brief2.write_text(f"Do the work.\nReport path: {report2}\n")
+    w.transcript(
+        None, idle_min=60, agent="awriter2",
+        prompt=(f"Your brief is the file {brief2}.\n\n## Delivery contract\n\n"
+                f"1. Write the full deliverable to `{w.reports}/{SESSION}/other-footer-report.md`.\n"),
+    )
+    w.transcript(
+        None, idle_min=1, tail="final", agent="areviewer2",
+        prompt=(f"Review the work described in {brief2}.\n\n## Delivery contract\n\n"
+                f"1. Write the full deliverable to `{w.reports}/{SESSION}/rev-footer-report.md`.\n"),
+    )
+    s2 = [x for x in ss.scan(w.cfg()).stalled if x.report == report2]
+    assert [x.agent_id for x in s2] == ["awriter2"]

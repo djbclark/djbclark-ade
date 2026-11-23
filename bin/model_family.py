@@ -185,6 +185,7 @@ class Resolution:
     newest: str | None = None   # the newest catalog match, when the catalog was readable and matched
     note: str = ""              # a sentence for plan output; empty for a plain catalog or literal resolution
     thinking: str | None = None # effort inferred from a legacy `-<effort>` suffix via catalog thinkingOptionIds
+    newest_thinking: str | None = None # effort inferred for `newest` (persisted in state even when a hold overrides `model`)
 
     @property
     def resolved(self) -> bool:
@@ -205,10 +206,17 @@ def resolve(family: str, ids: list[str] | None, *, holds: dict[str, Hold] | None
         if today <= hold.until:
             why = f": {hold.reason}" if hold.reason else ""
             ahead = f"; newest catalog id is {top}" if top and top != hold.model else ""
-            eff_warn = check_effort(hold.model, effort, thinking_options)
+            hold_thinking = (
+                inferred
+                if (inferred and thinking_options and not hold.model.endswith(f"-{inferred}")
+                    and inferred in thinking_options.get(hold.model, ()))
+                else None
+            )
+            eff_warn = check_effort(hold.model, effort or hold_thinking, thinking_options)
             tail = f"; {eff_warn}" if eff_warn else ""
             return Resolution(family, hold.model, "hold", top,
-                              f"{family} held at {hold.model} until {hold.until.isoformat()}{why}{ahead}{tail}")
+                              f"{family} held at {hold.model} until {hold.until.isoformat()}{why}{ahead}{tail}",
+                              thinking=hold_thinking, newest_thinking=inferred)
         hold_note = f"hold on {family} ({hold.model}) expired {hold.until.isoformat()}; "
     if top is not None:
         eff_warn = check_effort(top, effort or inferred, thinking_options)
@@ -217,7 +225,7 @@ def resolve(family: str, ids: list[str] | None, *, holds: dict[str, Hold] | None
             notes.append(f"{hold_note}{family} -> {top}")
         if eff_warn:
             notes.append(eff_warn)
-        return Resolution(family, top, "catalog", top, "; ".join(notes), thinking=inferred)
+        return Resolution(family, top, "catalog", top, "; ".join(notes), thinking=inferred, newest_thinking=inferred)
     why = "catalog unreadable" if ids is None else "no catalog id matches"
     if last:
         return Resolution(family, last, "state", None,
