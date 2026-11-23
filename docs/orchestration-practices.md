@@ -324,6 +324,13 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    archived agent (the PATH shim and the hook do, docs/archived-send-guard.md; a lead's own archived worker is the one case they let through, ruling 2026-11-21): a message un-archives it, and the resurrected ex-lead then competes with its successor (2026-11-14:
    ex-lead 994234ba was resurrected twice by other repos' leads). A handoff can still land between the inspect and the
    send; if it does, tell the successor (it re-archives the ex-lead) and re-send to it.
+8. **Self-archiving finished sessions (operator ruling 2026-11-22; recorded 2026-11-23).** Operator ruling: *"sessions that
+   are no longer needed should always archive themselves"*. Empirical Paseo behavior: plain `paseo agent archive <own id>`
+   from inside a running session fails (`rc=1`, agent is currently running), while `paseo agent archive --force <own id>`
+   immediately interrupts and terminates the running turn, dropping any output or tool calls after it. Therefore, for normal
+   workers and finished sessions, once the final report and `done:` notice are delivered and acknowledged (or when finishing
+   cleanly), archive via the non-destructive archive-request path (`bin/ade-request-archive`, PR #954) or let the lead archive
+   the session once it is idle; never run `paseo agent archive --force` before final output is delivered and flushed.
 
 The session-finder relay shim (`relay.py`) was deleted 2026-11-14: send with `paseo send`.
 

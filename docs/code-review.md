@@ -95,6 +95,10 @@ untrusted data ([AGENTS.md](../AGENTS.md) Trust).
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper (site-public-djbclark `bin/bgrun`) and `bin/pytest`
    (`bg bin/pytest -q tests/test_x.py`: the bare `python3` has no pytest); CI runs `pytest` directly.
+   **Inject test fakes by explicit path, never by reordering `PATH` (2026-11-23):** tests and helper scripts should pass
+   test fakes via explicit binary-path flags/env vars or absolute paths rather than prepending a temp directory to `PATH`
+   ahead of `libexec/agent-bin`, because `PATH`-reordering tests can mask or bypass installed `PATH` shims (`ade-git-guard`,
+   `ade-paseo-guard`, `ade-gh-guard`) or break when a shim wraps the same command name.
 3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
    log, a tracked file or a test fixture. The one place a key is written is a
    third-party tool's own credential store. A tool that needs only some keys uses `get` instead of `run`:
