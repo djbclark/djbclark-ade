@@ -113,6 +113,21 @@ class RouterTest(unittest.TestCase):
             self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
             self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", code)
 
+    def test_http_202_with_long_markdown_stays_on_primary(self):
+        long_md = "Real IEEE Xplore full paper content. " * 600  # > 20 KiB
+        self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
+            "markdown": long_md, "metadata": {"statusCode": 202}}})
+        self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
+        self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")
+        self.assertEqual(self.f.seen, [])
+
+    def test_http_202_with_empty_or_short_markdown_falls_back(self):
+        for md in ("", "   \n  ", "short challenge"):
+            self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
+                "markdown": md, "metadata": {"statusCode": 202}}})
+            self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
+            self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", repr(md))
+
     def test_challenge_body_with_status_200_falls_back(self):
         for text in ("Just a moment...\nEnable JavaScript and cookies to continue",
                      "Please enable JS and disable any ad blocker",
@@ -478,6 +493,30 @@ class LLMFormatsTest(unittest.TestCase):
         self.assertEqual([r.name for r in ex.rungs], ["sipb", "gemini-free", "gemini-free-lite"])
         self.assertTrue(ex.rungs[0].check_truncation)
         self.assertEqual(ex.rungs[0].base, "http://127.0.0.1:8890/api")
+        self.assertFalse(ex.prefer_oneshot)
+
+    def test_llm_order_litellm_first_and_oneshot_first(self):
+        ex_lite = fr.build_extractor({"FIRECRAWL_ROUTER_LLM_ORDER": "litellm,sipb"})
+        self.assertEqual([r.name for r in ex_lite.rungs], ["gemini-free", "gemini-free-lite", "sipb"])
+        self.assertFalse(ex_lite.prefer_oneshot)
+
+        ex_os = fr.build_extractor({"FIRECRAWL_ROUTER_LLM_ORDER": "oneshot-first"})
+        self.assertEqual([r.name for r in ex_os.rungs], ["sipb", "gemini-free", "gemini-free-lite"])
+        self.assertTrue(ex_os.prefer_oneshot)
+
+        # Short page uses sipb first; long page (> sipb.one_shot) uses big one-shot first.
+        rungs = [fr.Rung("sipb", self.llm_a.base, "k", "m", 200, 150, check_truncation=True),
+                 fr.Rung("big", self.llm_b.base, "k", "m2", 10_000, 5_000)]
+        router = fr.Router(fr.Backend("primary", self.fc.base, ""), None, timeout=5, log=io.StringIO(),
+                           extractor=fr.Extractor(rungs, deadline=30, call_timeout=5, prefer_oneshot=True))
+        self.page = "Short page about lean."
+        r1, doc1 = self.scrape(router, {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r1.headers["X-Firecrawl-LLM"], "sipb")
+        self.assertEqual(doc1["data"]["answer"], "lean")
+        self.page = "Long academic paper content. " * 40  # > 200 chars, <= 10_000
+        r2, doc2 = self.scrape(router, {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r2.headers["X-Firecrawl-LLM"], "big")
+        self.assertEqual(doc2["data"]["answer"], "lean (b)")
 
 
 class EndpointTest(unittest.TestCase):
@@ -787,6 +826,496 @@ class ChildEnvTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(child))
         self.assertTrue(child["FIRECRAWL_API_URL"].startswith("http://127.0.0.1:"))
         self.assertGreater(len(child["FIRECRAWL_API_KEY"]), 20)  # the per-process router token
+
+
+def _make_snapshot_bytes(domains, *, sha_override=None):
+    import base64
+    import hashlib
+    raw = b'{"acls":[]}'
+    policy = {
+        "nodeAttrs": [
+            {
+                "target": ["*"],
+                "app": {
+                    "tailscale.com/app-connectors": [
+                        {"name": "mitnet-required", "connectors": ["tag:mitnet-connector"], "domains": list(domains)}
+                    ]
+                },
+            }
+        ]
+    }
+    doc = {
+        "tailnet": "example.com",
+        "revision": {
+            "raw": base64.b64encode(raw).decode("ascii"),
+            "policy": policy,
+            "etag": '"rev1"',
+            "sha256": sha_override or hashlib.sha256(raw).hexdigest(),
+        },
+    }
+    return json.dumps(doc).encode("utf-8")
+
+
+def _write_exec(path: Path, body: str) -> str:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o700)
+    return str(path)
+
+
+class MitBridgeTest(unittest.TestCase):
+    """Mac-side MIT Libraries bridge (Slices 1a + 1b): fail-closed, scrubbed env, converters, concurrency."""
+
+    def setUp(self):
+        import os
+        import socket
+        import tempfile
+        self._os = os
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.state_dir = self.root / "state"
+        self.snap = self.root / "enrolled-snapshot.json"
+        self.snap.write_bytes(_make_snapshot_bytes(["www.nature.com", "www.cambridge.org"]))
+        self.snap.chmod(0o600)
+        self.log_dir = self.root / "logs"
+        self.log_dir.mkdir(mode=0o700)
+
+        # Fake listening SOCKS port for browser pre-flight (closed cleanly in tearDown).
+        self.socks_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socks_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socks_srv.bind(("127.0.0.1", 0))
+        self.socks_srv.listen(4)
+        self.socks_port = self.socks_srv.getsockname()[1]
+
+        self.primary = Backend2(lambda b, p: (200, {"success": True, "data": {
+            "markdown": "Client Challenge",
+            "metadata": {"statusCode": 200, "contentType": "text/html", "url": "https://idp.nature.com/auth"},
+        }}))
+        self.fallback = Backend2(lambda b, p: (200, {"success": True, "data": {
+            "markdown": "commercial", "metadata": {"statusCode": 200},
+        }}))
+
+        self.fetch_bin = _write_exec(self.root / "fake_fetch.py", f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+argv = sys.argv[1:]
+Path({str(self.log_dir / 'fetch_argv.json')!r}).write_text(json.dumps(argv))
+Path({str(self.log_dir / 'fetch_env.json')!r}).write_text(json.dumps(dict(os.environ)))
+out_dir = Path(argv[argv.index("--output") + 1])
+run = out_dir / "run-sub"
+run.mkdir(mode=0o700, parents=True, exist_ok=True)
+pdf = run / "mit.body"
+pdf.write_bytes(b"%PDF-1.7 fake body")
+print(json.dumps({{
+    "verdict": "enrolled",
+    "mit": {{"class": "ok", "status": 200, "content_is_pdf": True}},
+    "evidence": {{"body_dir": str(run), "mit_body": str(pdf)}},
+}}))
+""")
+        self.browser_bin = _write_exec(self.root / "fake_browser.py", f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+argv = sys.argv[1:]
+Path({str(self.log_dir / 'browser_argv.json')!r}).write_text(json.dumps(argv))
+Path({str(self.log_dir / 'browser_env.json')!r}).write_text(json.dumps(dict(os.environ)))
+out_dir = Path(argv[argv.index("--output") + 1])
+run = out_dir / "run-sub"
+run.mkdir(mode=0o700, parents=True, exist_ok=True)
+if "--artifact" in argv:
+    pdf = run / "article.pdf"
+    pdf.write_bytes(b"%PDF-1.7 browser pdf")
+    print(json.dumps({{
+        "class": "ok", "status": 200, "content_is_pdf": True,
+        "evidence": {{"body_dir": str(run), "body": str(pdf), "text": None}},
+    }}))
+else:
+    h = run / "page.html"
+    t = run / "page.txt"
+    h.write_text("<html><head><title>Cambridge Paper</title></head><body><h1>Title</h1><p>Body</p></body></html>")
+    t.write_text("Fallback plain text from Cambridge Paper")
+    print(json.dumps({{
+        "class": "ok", "status": 200, "content_is_pdf": False,
+        "evidence": {{"body_dir": str(run), "body": str(h), "text": str(t)}},
+    }}))
+""")
+        self.pdftotext_bin = _write_exec(self.root / "fake_pdftotext", f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+Path({str(self.log_dir / 'pdftotext_argv.json')!r}).write_text(json.dumps(sys.argv[1:]))
+Path({str(self.log_dir / 'pdftotext_env.json')!r}).write_text(json.dumps(dict(os.environ)))
+sys.stdout.write("# Nature Paper\\n\\nExtracted PDF text.\\n")
+""")
+        self.pdfinfo_bin = _write_exec(self.root / "fake_pdfinfo", f"""#!{sys.executable}
+import sys
+sys.stdout.write("Title:          Deep Learning\\nPages:          12\\n")
+""")
+        self.pandoc_bin = _write_exec(self.root / "fake_pandoc", f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+Path({str(self.log_dir / 'pandoc_argv.json')!r}).write_text(json.dumps(sys.argv[1:]))
+Path({str(self.log_dir / 'pandoc_env.json')!r}).write_text(json.dumps(dict(os.environ)))
+data = sys.stdin.read()
+assert "--sandbox" in sys.argv[1:]
+sys.stdout.write("# Cambridge Markdown\\n\\nConverted from HTML.\\n")
+""")
+
+    def tearDown(self):
+        self.socks_srv.close()
+        self.primary.close()
+        self.fallback.close()
+        self._td.cleanup()
+
+    def _bridge(self, mode="all", **overrides):
+        mb = fr._MIT_BRIDGE_MOD
+        kw = dict(
+            mode=mode,
+            snapshot_path=str(self.snap),
+            fetch_bin=self.fetch_bin,
+            browser_bin=self.browser_bin,
+            python_bin=sys.executable,
+            socks_host="127.0.0.1",
+            socks_port=self.socks_port,
+            state_dir=str(self.state_dir),
+            pdftotext_bin=self.pdftotext_bin,
+            pdfinfo_bin=self.pdfinfo_bin,
+            pandoc_bin=self.pandoc_bin,
+            cooldown_s=60.0,
+            fetch_sem_timeout=0.2,
+            browser_sem_timeout=0.2,
+        )
+        kw.update(overrides)
+        return mb.MitBridge(mb.MitBridgeConfig(**kw), log=io.StringIO(), reply_cls=fr.Reply)
+
+    def _router(self, bridge=None, with_fallback=True, extractor=None):
+        return fr.Router(
+            fr.Backend("primary", self.primary.base, "pk"),
+            fr.Backend("fallback", self.fallback.base, "fk") if with_fallback else None,
+            timeout=5,
+            log=io.StringIO(),
+            extractor=extractor,
+            mit_bridge=bridge,
+        )
+
+    def _post(self, router, path, body):
+        return router.handle("POST", path, {"Content-Type": "application/json"}, json.dumps(body).encode())
+
+    def test_default_off_never_reads_snapshot_or_spawns(self):
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": self.primary.base}, "")
+        self.assertIsNone(r.mit_bridge)
+        reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((reply.status, backend), (200, "primary"))
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+
+    def test_non_enrolled_host_never_bridged(self):
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "blocked", "metadata": {"statusCode": 429}}})
+        router = self._router(self._bridge(mode="all"), with_fallback=False)
+        reply, backend = self._post(router, "/v2/scrape", {"url": "https://evil.example/paper.pdf"})
+        self.assertEqual(backend, "primary")
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+        self.assertFalse((self.log_dir / "browser_argv.json").exists())
+
+    def test_snapshot_refusals_fail_closed(self):
+        mb = fr._MIT_BRIDGE_MOD
+        # missing
+        r = self._router(self._bridge(snapshot_path=str(self.root / "missing.json")), with_fallback=False)
+        reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual(backend, "primary")
+        self.assertEqual(reply.headers.get("X-Firecrawl-MIT-Bridge"), "skipped:snapshot-missing")
+
+        # symlink
+        link = self.root / "link.json"
+        link.symlink_to(self.snap)
+        r = self._router(self._bridge(snapshot_path=str(link)), with_fallback=False)
+        reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:snapshot-symlink"))
+
+        # group/world writable (0664, 0666, 0646)
+        for mode in (0o664, 0o666, 0o646):
+            p = self.root / f"w_{oct(mode)}.json"
+            p.write_bytes(_make_snapshot_bytes(["www.nature.com"]))
+            p.chmod(mode)
+            r = self._router(self._bridge(snapshot_path=str(p)), with_fallback=False)
+            reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+            self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:snapshot-writable"))
+
+        # wrong owner
+        with unittest.mock.patch.object(mb.os, "getuid", return_value=self._os.getuid() + 1):
+            r = self._router(self._bridge(), with_fallback=False)
+            reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+            self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:snapshot-owner"))
+
+        # stale (> 7d)
+        stale = self.root / "stale.json"
+        stale.write_bytes(_make_snapshot_bytes(["www.nature.com"]))
+        stale.chmod(0o600)
+        old = time.time() - 8 * 86400
+        self._os.utime(stale, (old, old))
+        r = self._router(self._bridge(snapshot_path=str(stale)), with_fallback=False)
+        reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:snapshot-stale"))
+
+        # duplicate JSON key, bad checksum, empty domains
+        for name, raw, want in (
+            ("dup", _make_snapshot_bytes(["www.nature.com"])[:-1] + b', "tailnet": "dup"}', "skipped:snapshot-invalid"),
+            ("badsha", _make_snapshot_bytes(["www.nature.com"], sha_override="0" * 64), "skipped:snapshot-invalid"),
+            ("empty", _make_snapshot_bytes([]), "skipped:snapshot-empty"),
+        ):
+            p = self.root / f"{name}.json"
+            p.write_bytes(raw)
+            p.chmod(0o600)
+            r = self._router(self._bridge(snapshot_path=str(p)), with_fallback=False)
+            reply, backend = self._post(r, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+            self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", want), name)
+
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+
+    def test_url_and_ssrf_refusals_never_spawn(self):
+        router = self._router(self._bridge(mode="all"), with_fallback=False)
+        bad_urls = (
+            "http://127.0.0.1/a.pdf",
+            "http://169.254.169.254/a.pdf",
+            "https://www.nature.com@evil.example/a.pdf",
+            "https://www.nature.com.evil.example/a.pdf",
+            "https://WWW.NATURE.COM/a.pdf",
+            "https://www.nature.com./a.pdf",
+            "https://www%2enature.com/a.pdf",
+            "https://www.nature.com\\evil.example/a.pdf",
+        )
+        for u in bad_urls:
+            reply, backend = self._post(router, "/v2/scrape", {"url": u})
+            self.assertEqual(backend, "primary", u)
+        # Non-443 port refused by browser lane
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
+        reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.cambridge.org:8443/article"})
+        self.assertEqual(backend, "primary")
+        self.assertEqual(reply.headers.get("X-Firecrawl-MIT-Bridge"), "skipped:browser-requires-https-443")
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+        self.assertFalse((self.log_dir / "browser_argv.json").exists())
+
+    def test_non_scrape_routes_never_bridged(self):
+        router = self._router(self._bridge(mode="all"), with_fallback=False)
+        for route in ("/v2/crawl", "/v2/batch/scrape", "/v2/map", "/v2/search", "/v1/crawl"):
+            reply, backend = self._post(router, route, {"url": "https://www.nature.com/articles/x.pdf"})
+            self.assertEqual(backend, "primary", route)
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+
+    def test_happy_path_pdf_mit_fetch_and_cleanup(self):
+        router = self._router(self._bridge(mode="pdf"))
+        for route in ("/v2/scrape", "/v1/scrape"):
+            reply, backend = self._post(router, route, {
+                "url": "https://www.nature.com/articles/nature14539.pdf?token=SUPERSECRET",
+                "pdfOptions": {"maxPages": 15},
+                "headers": {"Cookie": "evil=1"},
+                "proxy": "stealth",
+            })
+            self.assertEqual((reply.status, backend), (200, "mit-fetch"), route)
+            doc = reply.json()
+            self.assertTrue(doc["success"])
+            self.assertIn("Extracted PDF text", doc["data"]["markdown"])
+            meta = doc["data"]["metadata"]
+            self.assertEqual(meta["statusCode"], 200)
+            self.assertEqual(meta["contentType"], "application/pdf")
+            self.assertEqual(meta["numPages"], 12)
+            self.assertEqual(meta["title"], "Deep Learning")
+            self.assertEqual(meta["proxyUsed"], "mit-bridge")
+            self.assertEqual(meta["sourceURL"], "https://www.nature.com/articles/nature14539.pdf")
+            self.assertNotIn("SUPERSECRET", json.dumps(doc))
+        # Verify fetch.py received --enrolled-only and -- before URL, and pdftotext received -l 15
+        f_argv = json.loads((self.log_dir / "fetch_argv.json").read_text())
+        self.assertIn("--enrolled-only", f_argv)
+        self.assertIn("--artifact", f_argv)
+        self.assertEqual(f_argv[-2], "--")
+        self.assertNotIn("Cookie", json.dumps(f_argv))
+        p_argv = json.loads((self.log_dir / "pdftotext_argv.json").read_text())
+        self.assertEqual(p_argv[p_argv.index("-l") + 1], "15")
+        # Verify temp run dir was removed and no commercial fallback called
+        self.assertEqual(list(self.state_dir.glob("run-*")), [])
+        self.assertEqual(self.fallback.bodies, [])
+        # Log redaction: no query token or article text
+        self.assertNotIn("SUPERSECRET", router.log.getvalue())
+        self.assertNotIn("Extracted PDF text", router.log.getvalue())
+
+    def test_happy_path_html_mit_browser_and_pandoc_fallback(self):
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {
+            "markdown": "Just a moment...", "metadata": {"statusCode": 429},
+        }})
+        router = self._router(self._bridge(mode="all"))
+        url = "https://www.cambridge.org/core/journals/jfm/article/test"
+        reply, backend = self._post(router, "/v2/scrape", {"url": url, "formats": ["markdown", "html"]})
+        self.assertEqual((reply.status, backend), (200, "mit-browser"))
+        doc = reply.json()
+        self.assertIn("Cambridge Markdown", doc["data"]["markdown"])
+        self.assertIn("<h1>Title</h1>", doc["data"]["html"])
+        self.assertNotIn("rawHtml", doc["data"])
+        self.assertEqual(doc["data"]["metadata"]["title"], "Cambridge Paper")
+        self.assertEqual(doc["data"]["metadata"]["proxyUsed"], "mit-bridge")
+        self.assertIn("--sandbox", json.loads((self.log_dir / "pandoc_argv.json").read_text()))
+        self.assertEqual(list(self.state_dir.glob("run-*")), [])
+
+        # When pandoc fails, fall back cleanly to page.txt
+        bad_pandoc = _write_exec(self.root / "bad_pandoc", f"#!{sys.executable}\nimport sys; sys.exit(1)\n")
+        router2 = self._router(self._bridge(mode="all", pandoc_bin=bad_pandoc))
+        reply2, backend2 = self._post(router2, "/v2/scrape", {"url": url})
+        self.assertEqual((reply2.status, backend2), (200, "mit-browser"))
+        doc2 = reply2.json()
+        self.assertIn("Fallback plain text", doc2["data"]["markdown"])
+        self.assertIn("plain text fallback", doc2["data"]["warning"])
+        self.assertNotIn("html", doc2["data"])
+
+    def test_working_mit_html_stays_on_primary(self):
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {
+            "markdown": "# Nature HTML Article\n\n" + ("Full text. " * 200),
+            "metadata": {"statusCode": 200, "contentType": "text/html"},
+        }})
+        router = self._router(self._bridge(mode="all"))
+        reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.nature.com/articles/nature14539"})
+        self.assertEqual((reply.status, backend), (200, "primary"))
+        self.assertFalse((self.log_dir / "fetch_argv.json").exists())
+        self.assertFalse((self.log_dir / "browser_argv.json").exists())
+
+    def test_fetch_botwall_falls_through_to_browser_pdf_in_all_mode(self):
+        wall_fetch = _write_exec(self.root / "wall_fetch.py", f"""#!{sys.executable}
+import json
+print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "botwall", "status": 403, "content_is_pdf": False}}, "evidence": {{"mit_body": None}}}}))
+""")
+        router = self._router(self._bridge(mode="all", fetch_bin=wall_fetch))
+        reply, backend = self._post(router, "/v2/scrape", {
+            "url": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/S0022112067000400",
+        })
+        self.assertEqual((reply.status, backend), (200, "mit-browser"))
+        self.assertIn("Extracted PDF text", reply.json()["data"]["markdown"])
+        self.assertIn("--artifact", json.loads((self.log_dir / "browser_argv.json").read_text()))
+
+    def test_fail_closed_errors_and_process_group_kill_and_no_commercial_fallback(self):
+        # 1. Timeout kills child + grandchild process group
+        pid_file = self.root / "grandchild.pid"
+        hang_fetch = _write_exec(self.root / "hang_fetch.py", f"""#!{sys.executable}
+import subprocess, sys, time
+from pathlib import Path
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+Path({str(pid_file)!r}).write_text(str(p.pid))
+time.sleep(30)
+""")
+        router = self._router(self._bridge(mode="pdf", fetch_bin=hang_fetch, fetch_kill_timeout=0.4))
+        reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual(backend, "primary")
+        self.assertEqual(reply.headers.get("X-Firecrawl-MIT-Bridge"), "skipped:fetch-timeout")
+        self.assertEqual(self.fallback.bodies, [])  # enrolled URL NEVER goes to commercial fallback
+        self.assertEqual(list(self.state_dir.glob("run-*")), [])
+        if pid_file.exists():
+            gpid = int(pid_file.read_text())
+            time.sleep(0.1)
+            with self.assertRaises(ProcessLookupError):
+                self._os.kill(gpid, 0)
+
+        # 2. Oversized PDF (> 32 MiB) & non-PDF magic & path traversal
+        escape_fetch = _write_exec(self.root / "escape_fetch.py", f"""#!{sys.executable}
+import json
+print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pdf": True}}, "evidence": {{"mit_body": "/etc/passwd"}}}}))
+""")
+        router_esc = self._router(self._bridge(mode="pdf", fetch_bin=escape_fetch))
+        reply, backend = self._post(router_esc, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:path-escape"))
+
+        bad_pdf_fetch = _write_exec(self.root / "bad_pdf_fetch.py", f"""#!{sys.executable}
+import json, sys
+from pathlib import Path
+out_dir = Path(sys.argv[sys.argv.index("--output") + 1])
+p = out_dir / "mit.body"
+p.write_bytes(b"<html>not a pdf</html>")
+print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pdf": True}}, "evidence": {{"mit_body": str(p)}}}}))
+""")
+        router_np = self._router(self._bridge(mode="pdf", fetch_bin=bad_pdf_fetch))
+        reply, backend = self._post(router_np, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:not-pdf-magic"))
+
+        # 3. Tunnel down fails fast (<1s) without spawning browserfetch
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
+        router_td = self._router(self._bridge(mode="all", socks_port=9))
+        reply, backend = self._post(router_td, "/v2/scrape", {"url": "https://www.cambridge.org/core/article"})
+        self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:tunnel-down"))
+        self.assertFalse((self.log_dir / "browser_argv.json").exists())
+        # Second hit within 60s hits cooldown
+        reply2, backend2 = self._post(router_td, "/v2/scrape", {"url": "https://www.cambridge.org/core/article2"})
+        self.assertEqual((backend2, reply2.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:cooldown"))
+
+    def test_concurrency_semaphore_isolation(self):
+        self.primary.reply = lambda b, p: (
+            (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
+            if "cambridge.org" in b.get("url", "")
+            else (200, {"success": True, "data": {"markdown": "ok", "metadata": {"statusCode": 200}}})
+        )
+        bridge = self._bridge(mode="all", max_browser=1, browser_sem_timeout=0.05)
+        router = self._router(bridge, with_fallback=False)
+        # Hold the single browser semaphore slot
+        self.assertTrue(bridge.browser_sem.acquire(blocking=False))
+        try:
+            r_busy, b_busy = self._post(router, "/v2/scrape", {"url": "https://www.cambridge.org/core/article"})
+            self.assertEqual((b_busy, r_busy.headers.get("X-Firecrawl-MIT-Bridge")), ("primary", "skipped:busy"))
+            # Concurrent non-enrolled request still succeeds on primary immediately
+            r_other, b_other = self._post(router, "/v2/scrape", {"url": "https://example.com/page"})
+            self.assertEqual((r_other.status, b_other), (200, "primary"))
+        finally:
+            bridge.browser_sem.release()
+
+    def test_subprocess_env_is_scrubbed(self):
+        secrets_env = {
+            "FIRECRAWL_SELFHOST_API_KEY": "secret-hyades",
+            "FIRECRAWL_API_KEY": "secret-commercial",
+            "FIRECRAWL_ROUTER_SIPB_KEY": "secret-sipb",
+            "FIRECRAWL_ROUTER_LITELLM_KEY": "secret-litellm",
+            "SSH_AUTH_SOCK": "/tmp/fake-ssh.sock",
+        }
+        with unittest.mock.patch.dict(self._os.environ, secrets_env):
+            router = self._router(self._bridge(mode="all"))
+            self._post(router, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+            self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
+            self._post(router, "/v2/scrape", {"url": "https://www.cambridge.org/core/article"})
+
+        for name, allow_ssh in (
+            ("fetch_env.json", True),
+            ("browser_env.json", False),
+            ("pdftotext_env.json", False),
+            ("pandoc_env.json", False),
+        ):
+            env = json.loads((self.log_dir / name).read_text())
+            for k in ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_API_KEY",
+                      "FIRECRAWL_ROUTER_SIPB_KEY", "FIRECRAWL_ROUTER_LITELLM_KEY"):
+                self.assertNotIn(k, env, (name, k))
+            self.assertNotIn("secret-", json.dumps(env), name)
+            if allow_ssh:
+                self.assertEqual(env.get("SSH_AUTH_SOCK"), "/tmp/fake-ssh.sock")
+            else:
+                self.assertNotIn("SSH_AUTH_SOCK", env, name)
+
+    def test_llm_query_on_bridged_content_uses_normal_extractor_ladder(self):
+        # Operator ruling 2026-11-22: no SIPB-only guard; normal sipb -> litellm ladder runs on bridged content.
+        llm_sipb = Backend2(lambda b, p: (500, {"error": "sipb down"}))
+        llm_lite = Backend2(lambda b, p: llm_ok("answer from litellm"))
+        self.addCleanup(llm_sipb.close)
+        self.addCleanup(llm_lite.close)
+        ex = fr.Extractor([
+            fr.Rung("sipb", llm_sipb.base, "ks", "qwen", 10_000, 5_000, check_truncation=True),
+            fr.Rung("gemini-free", llm_lite.base, "kl", "gemini-free", 600_000, 400_000),
+        ], deadline=30, call_timeout=5)
+        router = self._router(self._bridge(mode="pdf"), extractor=ex)
+        reply, backend = self._post(router, "/v2/scrape", {
+            "url": "https://www.nature.com/articles/x.pdf",
+            "formats": [{"type": "query", "prompt": "summary?"}],
+        })
+        self.assertEqual((reply.status, backend), (200, "mit-fetch"))
+        self.assertEqual(reply.headers.get("X-Firecrawl-LLM"), "gemini-free")
+        self.assertEqual(reply.json()["data"]["answer"], "answer from litellm")
+
+    def test_startup_sweeps_orphan_run_dirs_only(self):
+        self.state_dir.mkdir(mode=0o700, parents=True)
+        orphan = self.state_dir / "run-orphan"
+        orphan.mkdir(mode=0o700)
+        (orphan / "stale.pdf").write_bytes(b"%PDF")
+        keep = self.state_dir / "keep.txt"
+        keep.write_text("keep")
+        _ = self._bridge(mode="pdf")
+        self.assertFalse(orphan.exists())
+        self.assertTrue(keep.exists())
 
 
 if __name__ == "__main__":
