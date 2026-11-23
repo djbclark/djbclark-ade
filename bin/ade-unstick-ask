@@ -1,0 +1,707 @@
+#!/usr/bin/env -S python3 -I
+"""ade-unstick-ask: detect and recover Antigravity agents hung in ask_question without ACP elicitation (dry-run by default; --apply tries steer then stop).
+
+Usage:
+  ade-unstick-ask [--check | --apply] [--min-stuck SECONDS] [--steer-wait SECONDS]
+                  [--poll-interval SECONDS] [--only-agent UUID] [--paseo-bin PATH] [--json]
+
+Implements the 2026-11-23 operator recovery ruling ("2 then 1"):
+  1. Fail-closed detection via `paseo ls -g --json`, `paseo agent inspect <id> --json`,
+     and structured `paseo logs <id> --json` confirming the latest pending tool call
+     in the active turn is `ask_question` (or `[Ask question]`) with no subsequent
+     tool result or assistant reply, no other running tool, `Provider == "antigravity"`,
+     `Archived is False`, `Status == "running"`, `PendingPermissions == []`, and a
+     timezone-aware `UpdatedAt` at least `--min-stuck` seconds in the past.
+  2. With `--apply`, sends `paseo send --json --no-wait --behavior steer` first and
+     waits up to `--steer-wait` seconds for `UpdatedAt`, `Status`, or the timeline to
+     advance (`recovered-by-steer`).
+  3. Only if steer does not unstick the agent, re-verifies it is still stuck on the
+     same `ask_question` and runs `paseo agent stop <id> --json` (never `archive` or
+     `kill`), recording `recovered-by-cancel` or `cancel-failed`.
+
+Exit codes:
+  0  Scan completed with no operational errors
+  1  Operational error (Paseo listing/steer/re-verify/cancel failure)
+  2  Usage or argument validation error
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+from typing import Any
+import uuid
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+
+CLI_TIMEOUT = 15
+DEFAULT_MIN_STUCK = 300.0
+DEFAULT_STEER_WAIT = 15.0
+DEFAULT_POLL_INTERVAL = 1.0
+
+STEER_PROMPT = (
+    "ask_question hung without ACP elicitation; abandon the ask_question call "
+    "and continue with numbered text options instead."
+)
+
+ASK_TOOL_NAMES = frozenset({"ask_question", "[ask question]"})
+PENDING_TOOL_STATUSES = frozenset({"running", "pending", "in_progress", "waiting"})
+FINISHED_TOOL_STATUSES = frozenset({"completed", "failed", "error", "cancelled", "canceled"})
+SEND_ERROR_STATUSES = frozenset({"error", "failed", "not_found", "rejected"})
+
+
+class PaseoError(RuntimeError):
+    """Raised when a Paseo CLI call fails or returns malformed output."""
+
+
+def parse_uuid(value: str, flag_name: str) -> str:
+    """Validate and normalize a full UUID string."""
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{flag_name} must be a valid UUID, got {value!r}") from exc
+
+
+def parse_nonneg_float(value: str, flag_name: str, *, allow_zero: bool = True) -> float:
+    """Parse a finite non-negative (or positive) float CLI argument."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{flag_name} must be a number, got {value!r}") from exc
+    if not math.isfinite(parsed) or parsed < 0 or (not allow_zero and parsed <= 0):
+        bound = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{flag_name} must be finite and {bound}, got {value!r}")
+    return parsed
+
+
+def parse_iso_timestamp(value: Any) -> float | None:
+    """Return UTC epoch seconds for a timezone-aware ISO-8601 string, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    ts = dt.timestamp()
+    return ts if math.isfinite(ts) else None
+
+
+def normalize_self_id(raw: str | None) -> str:
+    """Normalize PASEO_AGENT_ID if present."""
+    if not raw or not raw.strip():
+        return ""
+    stripped = raw.strip()
+    try:
+        return str(uuid.UUID(stripped))
+    except ValueError:
+        return stripped
+
+
+def _extract_call_id(item: dict[str, Any]) -> str | None:
+    for key in ("callId", "toolCallId", "id"):
+        val = item.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def analyze_hung_ask(logs_data: Any, expected_agent_id: str) -> tuple[dict[str, Any] | None, str]:
+    """Fail-closed inspection of structured `paseo logs <id> --json` output.
+
+    Returns `(match_dict, "hung-ask-question")` only when the latest pending/unanswered
+    tool call in the active turn is `ask_question` (or `[Ask question]`), no other tool
+    in the active turn is running/pending, and no subsequent activity (tool result,
+    assistant reply, reasoning, or another tool call) follows it.
+    """
+    if not isinstance(logs_data, dict):
+        return None, "unreadable-logs"
+    if logs_data.get("agentId") != expected_agent_id:
+        return None, "unreadable-logs-agent-mismatch"
+    items = logs_data.get("items")
+    if not isinstance(items, list):
+        return None, "unreadable-logs"
+    if not items:
+        return None, "empty-logs"
+    if any(not isinstance(it, dict) for it in items):
+        return None, "unreadable-logs"
+
+    last_user_idx: int | None = None
+    for idx, item in enumerate(items):
+        if item.get("type") == "user_message":
+            last_user_idx = idx
+    turn_start = (last_user_idx + 1) if last_user_idx is not None else 0
+    turn_items = items[turn_start:]
+    if not turn_items:
+        return None, "no-active-turn-items"
+
+    # Map tool_result entries (if emitted separately) by callId and position.
+    result_call_ids: dict[str, int] = {}
+    result_positions: list[int] = []
+    for pos, item in enumerate(turn_items):
+        if item.get("type") == "tool_result":
+            result_positions.append(pos)
+            cid = _extract_call_id(item)
+            if cid is not None:
+                result_call_ids[cid] = pos
+
+    tool_calls: list[tuple[int, dict[str, Any], str, bool]] = []
+    for pos, item in enumerate(turn_items):
+        if item.get("type") != "tool_call":
+            continue
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            return None, "unreadable-tool-call"
+        norm_name = raw_name.strip().lower()
+        cid = _extract_call_id(item)
+
+        has_later_result = False
+        if cid is not None and cid in result_call_ids and result_call_ids[cid] > pos:
+            has_later_result = True
+        elif cid is None and any(rpos > pos for rpos in result_positions):
+            has_later_result = True
+
+        status = item.get("status")
+        if status is not None:
+            if not isinstance(status, str):
+                return None, "unreadable-tool-status"
+            st = status.strip().lower()
+            if st in FINISHED_TOOL_STATUSES:
+                pending = False
+            elif st in PENDING_TOOL_STATUSES:
+                pending = (item.get("error") is None) and (not has_later_result)
+            else:
+                return None, f"unknown-tool-status:{st}"
+        else:
+            detail = item.get("detail")
+            has_output = isinstance(detail, dict) and detail.get("output") is not None
+            pending = (
+                item.get("error") is None
+                and not has_output
+                and not has_later_result
+            )
+
+        if pending and norm_name not in ASK_TOOL_NAMES:
+            return None, f"other-running-tool:{raw_name.strip()}"
+        tool_calls.append((pos, item, raw_name.strip(), pending))
+
+    if not tool_calls:
+        return None, "no-tool-call"
+
+    last_pos, last_item, last_name, last_pending = tool_calls[-1]
+    if last_name.lower() not in ASK_TOOL_NAMES:
+        return None, f"latest-tool-not-ask:{last_name}"
+    if not last_pending:
+        return None, "ask-not-pending"
+
+    # Fail closed if ANY item appears after the pending ask_question call
+    # (assistant reply, tool_result, reasoning, another tool_call, etc.).
+    if last_pos != len(turn_items) - 1:
+        trailing_types = sorted({str(it.get("type")) for it in turn_items[last_pos + 1 :]})
+        return None, f"subsequent-activity:{','.join(trailing_types)}"
+
+    return (
+        {
+            "call_id": _extract_call_id(last_item),
+            "tool_name": last_name,
+            "index": turn_start + last_pos,
+            "items_len": len(items),
+        },
+        "hung-ask-question",
+    )
+
+
+def is_same_hung_ask(
+    logs_data: Any,
+    expected_agent_id: str,
+    orig_match: dict[str, Any],
+) -> bool:
+    """Return True only if logs still show the exact same pending ask_question."""
+    match, _ = analyze_hung_ask(logs_data, expected_agent_id)
+    if match is None:
+        return False
+    return (
+        match["call_id"] == orig_match["call_id"]
+        and match["index"] == orig_match["index"]
+        and match["items_len"] == orig_match["items_len"]
+    )
+
+
+class PaseoClient:
+    """Thin subprocess wrapper over an explicit paseo executable (no PATH mutation)."""
+
+    def __init__(self, paseo_bin: str, timeout: int = CLI_TIMEOUT) -> None:
+        self.paseo_bin = paseo_bin
+        self.timeout = timeout
+
+    def run_raw(self, *args: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                [self.paseo_bin, *args],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PaseoError(f"{self.paseo_bin} {' '.join(args[:2])} failed: {exc}") from exc
+
+    def run_json(self, *args: str) -> Any:
+        proc = self.run_raw(*args)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()[:200]
+            raise PaseoError(
+                f"{self.paseo_bin} {' '.join(args[:2])} exited {proc.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise PaseoError(f"{self.paseo_bin} {' '.join(args[:2])} invalid JSON") from exc
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        data = self.run_json("ls", "-g", "--json")
+        if isinstance(data, dict) and isinstance(data.get("agents"), list):
+            rows = data["agents"]
+        elif isinstance(data, list):
+            rows = data
+        else:
+            raise PaseoError("paseo ls -g --json returned unexpected JSON shape")
+        if any(not isinstance(r, dict) for r in rows):
+            raise PaseoError("paseo ls -g --json returned non-object row")
+        return rows
+
+    def inspect_agent(self, aid: str) -> dict[str, Any]:
+        data = self.run_json("agent", "inspect", aid, "--json")
+        if not isinstance(data, dict) or data.get("Id") != aid:
+            raise PaseoError(f"paseo agent inspect {aid} returned invalid payload")
+        return data
+
+    def logs(self, aid: str) -> Any:
+        return self.run_json("logs", aid, "--json")
+
+    def send_steer(self, aid: str, prompt: str) -> tuple[bool, int, str]:
+        proc = self.run_raw(
+            "send", "--json", "--no-wait", "--behavior", "steer", "--", aid, prompt
+        )
+        if proc.returncode not in (0, 5):
+            detail = (proc.stderr or proc.stdout).strip()[:200]
+            return False, proc.returncode, detail or f"exit {proc.returncode}"
+        raw_out = proc.stdout.strip()
+        if raw_out:
+            try:
+                payload = json.loads(raw_out)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                st = str(payload.get("status") or "").strip().lower()
+                if payload.get("error") or st in SEND_ERROR_STATUSES:
+                    return False, proc.returncode, str(payload.get("error") or st)[:200]
+        return True, proc.returncode, ""
+
+    def stop_agent(self, aid: str) -> tuple[bool, int, str]:
+        proc = self.run_raw("agent", "stop", aid, "--json")
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()[:200]
+            return False, proc.returncode, detail or f"exit {proc.returncode}"
+        return True, 0, ""
+
+
+def inspect_eligibility(
+    record: dict[str, Any],
+    *,
+    min_stuck: float,
+    now: float,
+) -> tuple[bool, str, float | None]:
+    """Fail-closed eligibility check on a `paseo agent inspect` record."""
+    if record.get("Provider") != "antigravity":
+        return False, f"provider:{record.get('Provider')}", None
+    if record.get("Archived") is not False:
+        return False, "archived-or-unknown", None
+    if record.get("Status") != "running":
+        return False, f"status:{record.get('Status')}", None
+    pending = record.get("PendingPermissions")
+    if not isinstance(pending, list) or len(pending) != 0:
+        return False, "pending-permissions", None
+
+    updated_ts = parse_iso_timestamp(record.get("UpdatedAt"))
+    if updated_ts is None:
+        return False, "invalid-updated-at", None
+    age = now - updated_ts
+    if not math.isfinite(age):
+        return False, "invalid-updated-at", None
+    if age < 0:
+        return False, "future-updated-at", age
+    if age < min_stuck:
+        return False, "recent-updated-at", age
+    return True, "eligible", age
+
+
+def recover_agent(
+    client: PaseoClient,
+    aid: str,
+    orig_record: dict[str, Any],
+    orig_match: dict[str, Any],
+    *,
+    steer_wait: float,
+    poll_interval: float,
+) -> tuple[dict[str, Any], bool]:
+    """Execute the operator's "2 then 1" recovery: steer first, then stop only if still stuck."""
+    orig_updated_at = orig_record["UpdatedAt"]
+    entry: dict[str, Any] = {
+        "agent_id": aid,
+        "name": orig_record.get("Name"),
+        "updated_at": orig_updated_at,
+        "call_id": orig_match["call_id"],
+        "tool_name": orig_match["tool_name"],
+    }
+
+    # Step 1: steer first.
+    try:
+        ok, rc, err = client.send_steer(aid, STEER_PROMPT)
+    except PaseoError as exc:
+        entry.update({"action": "steer-failed", "error": str(exc)})
+        return entry, True
+
+    entry["steer_exit_code"] = rc
+    if not ok:
+        entry.update({"action": "steer-failed", "error": err})
+        return entry, True
+
+    # Poll up to steer_wait seconds to see if steer unstuck the agent.
+    deadline = time.monotonic() + steer_wait
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(poll_interval, remaining))
+        try:
+            cur_rec = client.inspect_agent(aid)
+        except PaseoError:
+            cur_rec = None
+        if cur_rec is not None:
+            if (
+                cur_rec.get("Archived") is not False
+                or cur_rec.get("Status") != "running"
+                or cur_rec.get("PendingPermissions") != []
+                or cur_rec.get("UpdatedAt") != orig_updated_at
+            ):
+                entry.update(
+                    {
+                        "action": "recovered-by-steer",
+                        "reason": "inspect-state-changed",
+                        "post_status": cur_rec.get("Status"),
+                        "post_updated_at": cur_rec.get("UpdatedAt"),
+                    }
+                )
+                return entry, False
+        try:
+            cur_logs = client.logs(aid)
+        except PaseoError:
+            cur_logs = None
+        if cur_logs is not None and not is_same_hung_ask(cur_logs, aid, orig_match):
+            entry.update(
+                {
+                    "action": "recovered-by-steer",
+                    "reason": "timeline-advanced",
+                }
+            )
+            return entry, False
+
+        if time.monotonic() >= deadline:
+            break
+
+    # Step 2: cancel fallback ONLY after re-verifying the agent is STILL stuck on the same ask_question.
+    try:
+        reverify_rec = client.inspect_agent(aid)
+    except PaseoError as exc:
+        entry.update({"action": "reverify-failed", "error": str(exc)})
+        return entry, True
+
+    if (
+        reverify_rec.get("Provider") != "antigravity"
+        or reverify_rec.get("Archived") is not False
+        or reverify_rec.get("Status") != "running"
+        or not isinstance(reverify_rec.get("PendingPermissions"), list)
+        or len(reverify_rec["PendingPermissions"]) != 0
+        or reverify_rec.get("UpdatedAt") != orig_updated_at
+    ):
+        entry.update(
+            {
+                "action": "recovered-by-steer",
+                "reason": "unstuck-before-cancel",
+                "post_status": reverify_rec.get("Status"),
+                "post_updated_at": reverify_rec.get("UpdatedAt"),
+            }
+        )
+        return entry, False
+
+    try:
+        reverify_logs = client.logs(aid)
+    except PaseoError as exc:
+        entry.update({"action": "reverify-failed", "error": str(exc)})
+        return entry, True
+
+    if not is_same_hung_ask(reverify_logs, aid, orig_match):
+        entry.update(
+            {
+                "action": "recovered-by-steer",
+                "reason": "timeline-moved-before-cancel",
+            }
+        )
+        return entry, False
+
+    try:
+        stop_ok, stop_rc, stop_err = client.stop_agent(aid)
+    except PaseoError as exc:
+        entry.update({"action": "cancel-failed", "error": str(exc)})
+        return entry, True
+
+    entry["cancel_exit_code"] = stop_rc
+    if stop_ok:
+        entry["action"] = "recovered-by-cancel"
+        return entry, False
+    entry.update({"action": "cancel-failed", "error": stop_err})
+    return entry, True
+
+
+def scan(
+    client: PaseoClient,
+    *,
+    apply: bool,
+    min_stuck: float,
+    steer_wait: float,
+    poll_interval: float,
+    only_agent: str | None,
+    self_id: str,
+) -> tuple[dict[str, Any], int]:
+    """Scan candidates, detect hung ask_question turns, and optionally recover."""
+    checked: list[str] = []
+    detected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    candidates: list[str] = []
+    if only_agent is not None:
+        if self_id and only_agent == self_id:
+            skipped.append({"agent_id": only_agent, "reason": "self"})
+        else:
+            candidates.append(only_agent)
+    else:
+        try:
+            rows = client.list_agents()
+        except PaseoError as exc:
+            errors.append({"stage": "list", "error": str(exc)})
+            return (
+                {
+                    "mode": "apply" if apply else "dry-run",
+                    "min_stuck": min_stuck,
+                    "steer_wait": steer_wait,
+                    "checked": checked,
+                    "detected": detected,
+                    "skipped": skipped,
+                    "results": results,
+                    "errors": errors,
+                },
+                EXIT_ERROR,
+            )
+        for row in rows:
+            raw_id = row.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            aid = raw_id.strip()
+            if self_id and aid == self_id:
+                skipped.append({"agent_id": aid, "reason": "self"})
+                continue
+            if row.get("archived") is True or row.get("Archived") is True:
+                skipped.append({"agent_id": aid, "reason": "archived"})
+                continue
+            prov = str(row.get("provider") or row.get("Provider") or "")
+            if prov != "antigravity" and not prov.startswith("antigravity/"):
+                skipped.append({"agent_id": aid, "reason": f"provider:{prov or 'unknown'}"})
+                continue
+            ls_status = row.get("status")
+            if isinstance(ls_status, str) and ls_status and ls_status != "running":
+                skipped.append({"agent_id": aid, "reason": f"status:{ls_status}"})
+                continue
+            candidates.append(aid)
+
+    for aid in candidates:
+        checked.append(aid)
+        try:
+            record = client.inspect_agent(aid)
+        except PaseoError as exc:
+            skipped.append({"agent_id": aid, "reason": "inspect-failed", "error": str(exc)})
+            continue
+
+        eligible, reason, age = inspect_eligibility(record, min_stuck=min_stuck, now=time.time())
+        if not eligible:
+            skipped.append({"agent_id": aid, "reason": reason})
+            continue
+
+        try:
+            logs_data = client.logs(aid)
+        except PaseoError as exc:
+            skipped.append({"agent_id": aid, "reason": "logs-failed", "error": str(exc)})
+            continue
+
+        match, log_reason = analyze_hung_ask(logs_data, aid)
+        if match is None:
+            skipped.append({"agent_id": aid, "reason": log_reason})
+            continue
+
+        det = {
+            "agent_id": aid,
+            "name": record.get("Name"),
+            "updated_at": record.get("UpdatedAt"),
+            "stuck_seconds": round(age, 1) if age is not None else None,
+            "call_id": match["call_id"],
+            "tool_name": match["tool_name"],
+        }
+        detected.append(det)
+
+        if not apply:
+            results.append({**det, "action": "would-recover"})
+            continue
+
+        res, had_error = recover_agent(
+            client,
+            aid,
+            record,
+            match,
+            steer_wait=steer_wait,
+            poll_interval=poll_interval,
+        )
+        results.append(res)
+        if had_error:
+            errors.append({"agent_id": aid, "action": res["action"], "error": res.get("error", "")})
+
+    payload = {
+        "mode": "apply" if apply else "dry-run",
+        "min_stuck": min_stuck,
+        "steer_wait": steer_wait,
+        "checked": checked,
+        "detected": detected,
+        "skipped": skipped,
+        "results": results,
+        "errors": errors,
+    }
+    return payload, (EXIT_ERROR if errors else EXIT_OK)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ade-unstick-ask",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="dry-run mode (default): detect stuck agents without mutating",
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help='execute "2 then 1" recovery (steer first, stop only if still stuck)',
+    )
+    p.add_argument(
+        "--paseo-bin",
+        default=None,
+        help="path to paseo CLI executable (overrides ADE_PASEO_BIN; default: paseo)",
+    )
+    p.add_argument(
+        "--min-stuck",
+        default=str(DEFAULT_MIN_STUCK),
+        help=f"minimum UpdatedAt age in seconds before acting (default: {int(DEFAULT_MIN_STUCK)})",
+    )
+    p.add_argument(
+        "--steer-wait",
+        default=str(DEFAULT_STEER_WAIT),
+        help=f"seconds to wait after steer before cancel fallback (default: {int(DEFAULT_STEER_WAIT)})",
+    )
+    p.add_argument(
+        "--poll-interval",
+        default=str(DEFAULT_POLL_INTERVAL),
+        help=f"polling interval in seconds during --steer-wait (default: {DEFAULT_POLL_INTERVAL})",
+    )
+    p.add_argument(
+        "--only-agent",
+        metavar="UUID",
+        default=None,
+        help="check only this specific Paseo agent UUID",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit machine-readable JSON on stdout",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+
+    if args.check and args.apply:
+        print("ade-unstick-ask: --check and --apply are mutually exclusive", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        min_stuck = parse_nonneg_float(args.min_stuck, "--min-stuck", allow_zero=True)
+        steer_wait = parse_nonneg_float(args.steer_wait, "--steer-wait", allow_zero=True)
+        poll_interval = parse_nonneg_float(args.poll_interval, "--poll-interval", allow_zero=False)
+        only_agent = parse_uuid(args.only_agent, "--only-agent") if args.only_agent is not None else None
+    except ValueError as exc:
+        print(f"ade-unstick-ask: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    paseo_bin = args.paseo_bin or os.environ.get("ADE_PASEO_BIN") or "paseo"
+    self_id = normalize_self_id(os.environ.get("PASEO_AGENT_ID"))
+    client = PaseoClient(paseo_bin=paseo_bin)
+
+    payload, rc = scan(
+        client,
+        apply=args.apply,
+        min_stuck=min_stuck,
+        steer_wait=steer_wait,
+        poll_interval=poll_interval,
+        only_agent=only_agent,
+        self_id=self_id,
+    )
+
+    if args.as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for res in payload["results"]:
+            reason = f" ({res['reason']})" if res.get("reason") else ""
+            err = f" error={res['error']}" if res.get("error") else ""
+            print(f"{res['action']:20s} {res['agent_id']}{reason}{err}")
+        for err_row in payload["errors"]:
+            if "agent_id" not in err_row:
+                print(f"error ({err_row.get('stage', 'scan')}): {err_row['error']}", file=sys.stderr)
+        print(
+            f"ade-unstick-ask ({payload['mode']}): {len(payload['detected'])} detected, "
+            f"{len(payload['results'])} result(s), {len(payload['skipped'])} skipped, "
+            f"{len(payload['errors'])} error(s)"
+        )
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

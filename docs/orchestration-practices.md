@@ -97,9 +97,11 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 5. **Output format:** the report shape, `CHANGED:` / `SKIPPED:` / `NOTES:`.
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
-8. **Names with ids (2026-10-23, from the load watcher):** wherever a brief, message or report names a Paseo
-   workspace, give the name the GUI shows (a workers box: `WORKER <repo> (<work>)`; its tabs `worker <slice> <lead agent id>`, optionally ` [wt: <worktree>]`) and its id (`wks_…`); for an agent, its agent id too. A GUI
-   rename makes a name alone unreliable, and an id alone is unreadable.
+8. **Names with ids (2026-10-23; strengthened by operator ruling 2026-11-23):** whenever a brief, reply, message, or report
+   references a Paseo agent or tab, **always** give all four fields: the **full agent ID** (UUID), **workspace ID** (`wks_…`),
+   **window name** (e.g. `WORKER <repo> (<work>)`), and **tab name** (e.g. `worker <slice> <lead agent id> [wt: <worktree>]`) —
+   never a bare short ID such as `5023c6fe`. A GUI rename makes a name alone unreliable, and a bare short ID is unreadable
+   and ambiguous (see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
    `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
@@ -253,6 +255,19 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    restarted, since it holds no work. `claude/hooks/agent_footer_gate.py` enforces the first case: an Agent launch whose
    report path already exists without its `.done` is denied with the order to resume it first; a relaunch after that effort
    has failed adds a prompt line `Relaunch-reason: <why>` (allowed, logged to `<report dir>/<session>/relaunch.log`); a finished report carries its `.done`. In a prompt without the footer, the prompt's own `Report path:` / `Report file:` line (at the start of a line, markdown and list markers allowed) names this launch's report; a peer's report that is only labelled (`Worker report: ...`) is never this launch's, and `Relaunch-reason:` counts only at column 0 (an indented line is pasted text). Not checked (the guard skips, the launch proceeds, and a prompt without the footer gets a path the hook derives): a prompt naming two different report paths with no `Report path:` of its own, and a `~`, `$HOME`, relative or space-containing report path (only absolute paths are read).
+11. **Research paper-access failures are bugs (operator directive 2026-11-23).** When an agent conducting research cannot
+    access a site it should have access to for retrieving papers (for example, MIT Libraries or scholarly publisher sites via
+    shared Hyades Firecrawl or the MITnet bridge), treat the failure as a bug rather than silently skipping the source or
+    declaring it "unfetchable". Surface the failure explicitly (URL, host/publisher, error) and offer to coordinate fixing it
+    (e.g. with the MITnet routing lead to enroll the domain or repair the fetch path); see `skills/research/SKILL.md` item 7a
+    and [docs/mcp-servers.md](mcp-servers.md).
+12. **Recovering Antigravity sessions hung in `ask_question` (`"2 then 1"` ruling, 2026-11-23).** On Paseo builds without ACP
+    `elicitationForms` (build 1), Antigravity's `ask_question` can hang indefinitely in `Status=running` with
+    `PendingPermissions=[]`, blocking queued `paseo send` delivery (Paseo fork build 2+ `v0.17.3` with ACP `elicitationForms`
+    supports native `ask_question` live; see `skills/steps/SKILL.md` rule 3a). Use `bin/ade-unstick-ask` (dry-run by default;
+    `--apply` to act), which fails closed on non-`ask_question` or unreadable logs and enforces the operator's `"2 then 1"`
+    order: send `paseo send --json --no-wait --behavior steer` first, wait `--steer-wait` seconds for progress, and only
+    re-verify and fall back to `paseo agent stop` (never `archive` or `kill`) if steer does not unstick the turn.
 
 ## 5a. Messages between agents (AGENTS.md order 10, re-based 2026-11-09)
 

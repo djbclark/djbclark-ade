@@ -25,7 +25,7 @@ Each doc carries its own summary.
 | [docs/model-routing.md](docs/model-routing.md) | which provider, model and effort for what work; numbers are dated, re-probe (`route_agent.py show`) |
 | [docs/dynamic-model-effort.md](docs/dynamic-model-effort.md) | design (2026-11-10): measured token efficiency → route/effort policy; gates; no live auto-route / no Jev nudge / no Pi acceptance writes (queue #24) |
 | [docs/dated-quota-overrides.md](docs/dated-quota-overrides.md) | design (2026-11-21): which agy models share a Google quota window (on Ultra 20x: one Gemini pool, one Claude/GPT pool, no per-model window, so the Argon row has no reading); operator-entered dated price/menu/floor changes in a proposed `config/dated-changes.toml` with a separate-pool guard; Claude 5.5 via agy as a relief pool (proposal); no live wiring |
-| [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, report classes, messaging, the stagger rule |
+| [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every fan-out follows: briefs, report classes, messaging, the stagger rule, paper-access bug handling, and hung Antigravity `ask_question` recovery (`bin/ade-unstick-ask`, 2026-11-23) |
 | [docs/slim/PLAN.md](docs/slim/PLAN.md), [docs/slim/log.md](docs/slim/log.md), [docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md) | the slim-down (2026-11-06/07): the plan, its rulings and the per-wave record of what was lost on purpose; Wave 6 follow-up deletion checklist (the three shims and the gate tools `bin/wave6-delete-check` and `bin/wave6-mac-proof-capture` were deleted 2026-11-14) |
 | [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the Paseo-only plan of 2026-10-30; the phases the slim-down superseded are marked |
 | [docs/queue.md](docs/queue.md) | carried work and blockers, one line each: check it before proposing new work |
@@ -126,6 +126,9 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    `ref <BOT>` or `ref-append <BOT> FILE`; never invent or reuse an id (the Claude Code
    Stop hook `claude/hooks/ref_integrity_gate.py` checks it; `ref lookup ID` reads one). Follow
    the document's short-progress/emoji exceptions (operator, 2026-11-17).
+   **Full Paseo agent/tab references (operator ruling 2026-11-23):** whenever referencing a
+   Paseo agent or tab in replies or reports, always give the **full agent ID, workspace ID,
+   window name, and tab name** — never bare short IDs such as `5023c6fe` ([docs/ref-labels.md](docs/ref-labels.md)).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `bin/route_agent.py policy --md`, the one copy of the numbers (2026-11-07: built

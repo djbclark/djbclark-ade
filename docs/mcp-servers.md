@@ -216,6 +216,15 @@ Koyeb) for the microVMs: only Playwright and devsearch fit them, and each needs 
 2. `Unsupported protocol version: 2026-07-28` in `firecrawl-mcp.log`: a client probing a newer MCP protocol version than the
    firecrawl-mcp server accepts; the client falls back and the call succeeds.
 
+## Firecrawl and research paper access (operator directive 2026-11-23)
+
+Shared Hyades Firecrawl (`bin/firecrawl-router`) and the MITnet bridge provide institutional access to MIT Libraries and
+scholarly publisher sites during research. If an agent cannot access a site it should have access to in order to retrieve
+papers, that **must be treated as a bug** — never silently skipped or declared "unfetchable". The agent must surface the
+failure explicitly (URL, host/publisher, and observed error) and offer to coordinate fixing it (for example, with the MITnet
+routing lead to enroll the domain or repair the fetch path). See [skills/research/SKILL.md](../skills/research/SKILL.md)
+item 7a and [docs/orchestration-practices.md](orchestration-practices.md) section 5 item 11.
+
 ## Hermes (added 2026-08-23)
 
 `hermes` (`~/.local/bin/hermes`) is the **Hermes Agent** — Nous Research's

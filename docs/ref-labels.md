@@ -81,6 +81,16 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    the decisions log cover the questions that come up. Write one when a second
    TUI gets enforcement.
 
+## Paseo agent and tab references (operator ruling 2026-11-23)
+
+Whenever referencing a Paseo agent or tab in replies or reports, **always** give
+all four fields:
+
+1. **Full agent ID** (full UUID, never a bare short ID such as `5023c6fe`)
+2. **Workspace ID** (`wks_…`)
+3. **Window name** (the Paseo workspace/window title, e.g. `WORKER djbclark-ade (post-hold)`)
+4. **Tab name** (the agent tab title, e.g. `worker <slice> <lead-id> [wt: <worktree>]`)
+
 ## Install
 
 - `bin/ref` (issues; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
