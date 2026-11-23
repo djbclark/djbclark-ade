@@ -18,7 +18,10 @@ Selection (zero-token, idempotent, fail-closed):
      - Retirement proof still holds on the fresh inspect (`Name` starts with `RETIRED ` or a
        completed handoff record exists).
   4. Never archive the standing load watcher (`$LW_STATE_DIR/watcher.json`, fail-closed when the
-     file exists and is unreadable or malformed) or any UUID listed via `--exclude` /
+     file exists and is unreadable, non-regular/symlink, malformed, has a channel other than
+     `"paseo"`/`"relay"`, has a non-UUID `paseo` target, or has an invalid/mismatched
+     `paseo_home`), any candidate with a live non-`RETIRED `, non-`baton-writer=1` child in
+     `paseo ls -g --json` (`labels["paseo.parent-agent-id"]`), or any UUID listed via `--exclude` /
      `~/.local/state/ade/helper-prune.exclude` (`ADE_HELPER_PRUNE_EXCLUDE`, fail-closed on
      unreadable/malformed file).
   5. Archive via `paseo agent archive <aid> --json` (no `--force`, 30 s timeout) and verify readback
@@ -137,6 +140,10 @@ def default_watcher_file() -> Path:
     return lw / "watcher.json"
 
 
+def default_paseo_home() -> Path:
+    return Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+
+
 def load_excludes(cli: list[str] | tuple[str, ...], path: Path) -> set[str]:
     """Read CLI excludes plus exclude file (one full UUID per line, `#` comments).
 
@@ -159,15 +166,18 @@ def load_excludes(cli: list[str] | tuple[str, ...], path: Path) -> set[str]:
     return ids
 
 
-def load_watcher(path: Path) -> tuple[str | None, str | None]:
-    """Read load-watch `watcher.json`.
+def load_watcher(path: Path, active_paseo_home: Path | None = None) -> tuple[str | None, str | None]:
+    """Read load-watch `watcher.json` fail-closed.
 
     Returns `(watcher_agent_id_lower, error_reason)`.
     - Missing file -> `(None, None)`.
-    - Valid `channel == "paseo"` with non-empty string `target` -> `(target.lower(), None)`.
-    - Valid non-paseo channel (e.g. legacy `relay`) -> `(None, None)`.
-    - Unreadable, symlink, non-regular, oversized, corrupt JSON, non-dict, missing channel, or
-      paseo channel without valid string target -> `(None, error_reason)` (fail closed).
+    - Exact `channel == "relay"` -> `(None, None)`.
+    - Exact `channel == "paseo"` with full-UUID `target` and `paseo_home` matching the active
+      `PASEO_HOME` (`None` resolves to `~/.paseo`, or an absolute path string) ->
+      `(target.strip().lower(), None)`.
+    - Anything else (unreadable, symlink, non-regular, oversized, corrupt JSON, non-dict,
+      unknown/padded channel, non-UUID `paseo` target, malformed/relative/mismatched `paseo_home`)
+      -> `(None, error_reason)` (fail closed).
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -193,14 +203,60 @@ def load_watcher(path: Path) -> tuple[str | None, str | None]:
     if not isinstance(data, dict):
         return None, f"watcher JSON is not an object ({path})"
     channel = data.get("channel")
-    if not isinstance(channel, str) or not channel.strip():
-        return None, f"watcher missing valid channel ({path})"
-    if channel == "paseo":
-        target = data.get("target")
-        if not isinstance(target, str) or not target.strip():
-            return None, f"watcher paseo channel missing valid target ({path})"
-        return target.strip().lower(), None
-    return None, None
+    if not isinstance(channel, str) or channel not in ("paseo", "relay"):
+        return None, f"watcher has invalid channel ({path})"
+    if channel == "relay":
+        return None, None
+    target = data.get("target")
+    if not isinstance(target, str):
+        return None, f"watcher paseo channel missing valid target ({path})"
+    norm_target = target.strip().lower()
+    if not UUID_RE.fullmatch(norm_target):
+        return None, f"watcher paseo target is not a full UUID ({path})"
+    raw_home = data.get("paseo_home")
+    if raw_home is None:
+        watcher_home_path = Path.home() / ".paseo"
+    elif isinstance(raw_home, str) and raw_home and os.path.isabs(raw_home):
+        watcher_home_path = Path(raw_home)
+    else:
+        return None, f"watcher paseo_home is invalid ({path})"
+    try:
+        watcher_home = watcher_home_path.resolve()
+        expected_home = (active_paseo_home or default_paseo_home()).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"watcher paseo_home unresolvable ({path}): {clean(str(exc), 120)}"
+    if watcher_home != expected_home:
+        return None, f"watcher paseo_home mismatch ({path})"
+    return norm_target, None
+
+
+def parents_with_live_children(rows: list) -> set[str]:
+    """Return lowercase parent UUIDs referenced by any live non-RETIRED, non-baton-writer=1 child."""
+    parents: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("archived") is True or bool(row.get("archivedAt")):
+            continue
+        name = row.get("name")
+        if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
+            continue
+        labels = row.get("labels")
+        if isinstance(labels, dict):
+            if str(labels.get("baton-writer") or "") == "1":
+                continue
+            parent = labels.get("paseo.parent-agent-id")
+        else:
+            parent = None
+        if not isinstance(parent, str) or not parent.strip():
+            parent = row.get("parentAgentId")
+        if not isinstance(parent, str):
+            continue
+        norm_parent = parent.strip().lower()
+        row_id = str(row.get("id") or "").strip().lower()
+        if norm_parent and norm_parent != row_id:
+            parents.add(norm_parent)
+    return parents
 
 
 def parse_aware_iso(value) -> float | None:
@@ -382,6 +438,7 @@ def run_sweep(
             return summary, 1
 
         self_id = (os.environ.get("PASEO_AGENT_ID") or "").strip().lower()
+        live_parents = parents_with_live_children(rows)
         log_path = state_dir / "archive-retired.log"
         log_checked = False
 
@@ -412,6 +469,9 @@ def run_sweep(
             if aid.lower() in excludes:
                 summary["skipped"].append({"id": aid, "reason": "excluded"})
                 continue
+            if aid.lower() in live_parents:
+                summary["skipped"].append({"id": aid, "reason": "has-children"})
+                continue
 
             ins_rc, ins_data, ins_err = run_paseo_json(
                 paseo_bin, ["agent", "inspect", aid, "--json"], timeout=INSPECT_TIMEOUT
@@ -425,8 +485,8 @@ def run_sweep(
                 summary["skipped"].append({"id": aid, "reason": skip_reason or "inspect-failed"})
                 continue
 
-            summary["selected"].append(item)
             if not apply_:
+                summary["selected"].append(item)
                 continue
 
             if not log_checked:
@@ -454,6 +514,8 @@ def run_sweep(
             if fresh_watcher_id is not None and aid.lower() == fresh_watcher_id:
                 summary["skipped"].append({"id": aid, "reason": "load-watcher"})
                 continue
+
+            summary["selected"].append(item)
 
             arc_rc, _arc_data, arc_err = run_paseo_json(
                 paseo_bin, ["agent", "archive", aid, "--json"], timeout=ARCHIVE_TIMEOUT

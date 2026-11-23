@@ -41,6 +41,9 @@ if argv[:1] == ["ls"]:
 
 if argv[:2] == ["agent", "inspect"]:
     aid = argv[2]
+    hook = data.get("on_inspect_write", {}).get(aid)
+    if hook:
+        Path(hook["path"]).write_text(hook["content"], encoding="utf-8")
     rc = data.get("inspect_rc", {}).get(aid, 0)
     if rc != 0:
         sys.stderr.write(f"inspect failed for {aid}\\n")
@@ -135,8 +138,12 @@ class Env:
         inspect_name: str | None = None,
         inspect_id: str | None = None,
         omit_keys: tuple[str, ...] = (),
+        labels: dict | None = None,
     ) -> str:
-        self.data["agents"].append({"id": aid, "name": name, "status": status})
+        row: dict = {"id": aid, "name": name, "status": status}
+        if labels is not None:
+            row["labels"] = labels
+        self.data["agents"].append(row)
         ins: dict = {
             "Id": aid if inspect_id is None else inspect_id,
             "Name": name if inspect_name is None else inspect_name,
@@ -168,6 +175,7 @@ class Env:
         json_out: bool = True,
         self_agent_id: str | None = None,
         use_env_bin: bool = False,
+        paseo_home_env: str | None = "__default__",
     ) -> subprocess.CompletedProcess:
         self.data_path.write_text(json.dumps(self.data), encoding="utf-8")
         env = {
@@ -175,12 +183,15 @@ class Env:
             "HOME": str(self.tmp),
             "FAKE_DATA": str(self.data_path),
             "FAKE_CALLS": str(self.calls_path),
-            "PASEO_HOME": str(self.home),
             "ADE_SELF_SESSION_STATE": str(self.self_state),
             "ADE_ARCHIVE_RETIRED_STATE": str(self.state_dir),
             "ADE_HELPER_PRUNE_EXCLUDE": str(self.exclude_file),
             "LW_STATE_DIR": str(self.lw_dir),
         }
+        if paseo_home_env == "__default__":
+            env["PASEO_HOME"] = str(self.home)
+        elif paseo_home_env is not None:
+            env["PASEO_HOME"] = paseo_home_env
         if self_agent_id is not None:
             env["PASEO_AGENT_ID"] = self_agent_id
         argv = [sys.executable, "-I", str(SCRIPT)]
@@ -262,7 +273,10 @@ def test_skips_unsafe_candidates_fail_closed(tmp_path: Path):
     inspect_fail = env.add_agent(uid(17), "RETIRED inspect-err", status="idle")
     env.data["inspect_rc"][inspect_fail] = 1
 
-    (env.lw_dir / "watcher.json").write_text(json.dumps({"channel": "paseo", "target": watcher_aid}), encoding="utf-8")
+    (env.lw_dir / "watcher.json").write_text(
+        json.dumps({"channel": "paseo", "target": watcher_aid, "paseo_home": str(env.home)}),
+        encoding="utf-8",
+    )
     env.exclude_file.write_text(f"# protect this one\n{excl_file_aid}\n", encoding="utf-8")
 
     res = env.run("--exclude", excl_cli_aid, apply=True, self_agent_id=self_aid)
@@ -296,15 +310,152 @@ def test_skips_unsafe_candidates_fail_closed(tmp_path: Path):
 def test_corrupt_watcher_json_fails_closed(tmp_path: Path):
     env = Env(tmp_path)
     aid = env.add_agent(uid(1), "RETIRED tab", status="idle")
-    for bad in ("{not json", "[]", "{}", json.dumps({"channel": "paseo"})):
-        (env.lw_dir / "watcher.json").write_text(bad, encoding="utf-8")
+    other_home = tmp_path / "other-paseo-home"
+    other_home.mkdir()
+    bad_payloads = [
+        "{not json",
+        "[]",
+        "{}",
+        json.dumps({"channel": "paseo"}),
+        # Non-UUID targets (short ID, name, empty)
+        json.dumps({"channel": "paseo", "target": "cf860294", "paseo_home": str(env.home)}),
+        json.dumps({"channel": "paseo", "target": "Load watcher", "paseo_home": str(env.home)}),
+        json.dumps({"channel": "paseo", "target": "", "paseo_home": str(env.home)}),
+        # Invalid, padded, uppercase, or unknown channels
+        json.dumps({"channel": "paseo ", "target": uid(99), "paseo_home": str(env.home)}),
+        json.dumps({"channel": " paseo", "target": uid(99), "paseo_home": str(env.home)}),
+        json.dumps({"channel": "PASEO", "target": uid(99), "paseo_home": str(env.home)}),
+        json.dumps({"channel": "paseoo", "target": uid(99), "paseo_home": str(env.home)}),
+        json.dumps({"channel": "smoke", "target": uid(99), "paseo_home": str(env.home)}),
+        json.dumps({"channel": 123, "target": uid(99), "paseo_home": str(env.home)}),
+        # paseo_home mismatch or malformed
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": str(other_home)}),
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": None}),  # HOME/.paseo != env.home
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": "relative/paseo"}),
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": ""}),
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": 42}),
+    ]
+    watcher_path = env.lw_dir / "watcher.json"
+    for bad in bad_payloads:
+        watcher_path.write_text(bad, encoding="utf-8")
         env.calls_path.unlink(missing_ok=True)
         res = env.run(apply=True)
-        assert res.returncode == 1
+        assert res.returncode == 1, f"expected fail-closed rc=1 for {bad!r}"
         s = json.loads(res.stdout)
         assert s["archived"] == []
         assert s["skipped"] == [{"id": aid, "reason": "watcher-unreadable"}]
         assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+    # Symlink watcher.json must fail closed
+    real_target = tmp_path / "real-watcher.json"
+    real_target.write_text(
+        json.dumps({"channel": "paseo", "target": uid(99), "paseo_home": str(env.home)}),
+        encoding="utf-8",
+    )
+    watcher_path.unlink()
+    watcher_path.symlink_to(real_target)
+    env.calls_path.unlink(missing_ok=True)
+    res_sym = env.run(apply=True)
+    assert res_sym.returncode == 1
+    assert json.loads(res_sym.stdout)["archived"] == []
+    assert json.loads(res_sym.stdout)["skipped"] == [{"id": aid, "reason": "watcher-unreadable"}]
+    assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+    # Non-regular watcher.json (directory) must fail closed
+    watcher_path.unlink()
+    watcher_path.mkdir()
+    env.calls_path.unlink(missing_ok=True)
+    res_dir = env.run(apply=True)
+    assert res_dir.returncode == 1
+    assert json.loads(res_dir.stdout)["archived"] == []
+    assert json.loads(res_dir.stdout)["skipped"] == [{"id": aid, "reason": "watcher-unreadable"}]
+    assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+
+def test_watcher_valid_default_home_and_relay_channel(tmp_path: Path):
+    # paseo_home=None resolves to ~/.paseo and matches when PASEO_HOME is unset.
+    env = Env(tmp_path)
+    (tmp_path / ".paseo").mkdir()
+    watcher_aid = env.add_agent(uid(1), "RETIRED watcher", status="idle")
+    other_aid = env.add_agent(uid(2), "RETIRED other", status="idle")
+    (env.lw_dir / "watcher.json").write_text(
+        json.dumps({"channel": "paseo", "target": watcher_aid, "paseo_home": None}),
+        encoding="utf-8",
+    )
+    res = env.run(apply=True, paseo_home_env=None)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert [x["id"] for x in s["archived"]] == [other_aid]
+    assert s["skipped"] == [{"id": watcher_aid, "reason": "load-watcher"}]
+
+    # Exact legacy channel == "relay" is accepted as non-paseo and does not block archiving.
+    relay_tmp = tmp_path / "relay_case"
+    relay_tmp.mkdir()
+    env2 = Env(relay_tmp)
+    a2 = env2.add_agent(uid(3), "RETIRED tab", status="idle")
+    (env2.lw_dir / "watcher.json").write_text(
+        json.dumps({"channel": "relay", "target": "sess-1"}),
+        encoding="utf-8",
+    )
+    res2 = env2.run(apply=True)
+    assert res2.returncode == 0, res2.stderr
+    assert [x["id"] for x in json.loads(res2.stdout)["archived"]] == [a2]
+
+
+def test_apply_recheck_failure_does_not_double_account_selected(tmp_path: Path):
+    env = Env(tmp_path)
+    excl_mid = env.add_agent(uid(1), "RETIRED excl-mid", status="idle")
+    watch_mid = env.add_agent(uid(2), "RETIRED watch-mid", status="idle")
+    # Mutate exclude file and watcher.json during inspect (after initial scan, before pre-archive re-check).
+    env.data["on_inspect_write"] = {
+        excl_mid: {"path": str(env.exclude_file), "content": f"{excl_mid}\n"},
+        watch_mid: {
+            "path": str(env.lw_dir / "watcher.json"),
+            "content": json.dumps({"channel": "paseo", "target": watch_mid, "paseo_home": str(env.home)}),
+        },
+    }
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert s["selected"] == []
+    assert s["archived"] == []
+    assert {x["id"]: x["reason"] for x in s["skipped"]} == {
+        excl_mid: "excluded",
+        watch_mid: "load-watcher",
+    }
+    assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+
+def test_skips_candidate_with_live_non_retired_non_baton_child(tmp_path: Path):
+    env = Env(tmp_path)
+    parent_live_child = env.add_agent(uid(1), "RETIRED parent with live child", status="idle")
+    parent_retired_child = env.add_agent(uid(2), "RETIRED parent with retired child", status="idle")
+    parent_baton_child = env.add_agent(uid(3), "RETIRED parent with baton child", status="idle")
+
+    env.add_agent(
+        uid(10),
+        "worker active-slice",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent_live_child},
+    )
+    env.add_agent(
+        uid(11),
+        "RETIRED old child",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent_retired_child},
+    )
+    env.add_agent(
+        uid(12),
+        "[Handoff writer]",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent_baton_child, "baton-writer": "1"},
+    )
+
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert s["skipped"] == [{"id": parent_live_child, "reason": "has-children"}]
+    assert {x["id"] for x in s["archived"]} == {parent_retired_child, parent_baton_child, uid(11)}
 
 
 def test_corrupt_exclude_file_fails_closed(tmp_path: Path):

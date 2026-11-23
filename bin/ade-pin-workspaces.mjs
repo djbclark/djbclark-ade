@@ -12,8 +12,9 @@
 //
 // Classification is by the WINDOW name, which the ADE window scheme makes unambiguous
 // (docs/workspace-layout.md): a window titled `WORKER <repo> (<work>)` is a worker box and is never
-// pinned; `LEAD …`, `OTHER …`, and any other window (operator-started or a lead with a custom name)
-// are pinned. Background and archived workspaces are skipped. Already-pinned windows are a no-op.
+// pinned, and any window titled `RETIRED …` is skipped (2026-11-23); `LEAD …`, `OTHER …`, and any
+// other active window (operator-started or a lead with a custom name) are pinned. Background and
+// archived workspaces are skipped. Already-pinned windows are a no-op.
 //
 // Exit codes: 0 pinned (or nothing to do), 1 error, 2 usage, 69 macOS only (the launcher reports
 // helper-missing before we run).
