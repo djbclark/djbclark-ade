@@ -115,14 +115,16 @@ def test_shipped_registry_is_valid():
     assert by_id["paseo-settings-search"]["trial_required"] is True
     assert by_id["paseo-pi-permission-selected-action"]["order"] < by_id["paseo-pi-ask-user-question-scope"]["order"]
     assert by_id["paseo-sync-sidebar-order"]["pr"] == 9830 and by_id["paseo-sync-sidebar-order"]["trial_required"]
+    assert by_id["paseo-sync-sidebar-order"]["targets"] == ["desktop-build-2", "android-build-2"]
+    assert "android-build-2" in by_id["paseo-sync-sidebar-order"]["notes"]
     assert "local_path" not in by_id["paseo-about-fork-marker"]
     assert by_id["paseo-about-fork-marker"]["repo"] == "frdminc/paseo"
     assert "local only" not in by_id["paseo-about-fork-marker"]["notes"]
     sharp = by_id["worktree-setup-sharp-global-libvips"]
     assert sharp["commit"] == "b21068d965e144963e54ac9ab617c4e504887a2a" and sharp["targets"] == ["desktop-build-2"]
-    assert sharp["status"] == "queued" and sharp["trial_required"] is False
+    assert sharp["status"] == "landed:2" and sharp["trial_required"] is False
     elic = by_id["plugin-acp-elicitation-forms"]
-    assert elic["hold"] and elic["trial_required"] and elic["local_path"].startswith("/") and "repo" not in elic
+    assert "hold" not in elic and elic["trial_required"] is False and elic["local_path"].startswith("/") and "repo" not in elic
     assert by_id["paseo-bump-wrangler-sharp-0-35"]["status"] == "dropped"
     # 2026-11-22: every Pi entry is the whole stack branch at one pinned head
     for pid in ("paseo-pi-permission-selected-action", "paseo-pi-ask-user-question-scope"):
@@ -131,6 +133,18 @@ def test_shipped_registry_is_valid():
         assert "b720fd6b6773b3036c59dd54a2efa89436a24f76" in by_id[pid]["notes"]
     assert "hold" not in by_id["paseo-shift-drag-copy"] and by_id["paseo-shift-drag-copy"]["trial_required"] is False and by_id["paseo-sidebar-nav-divider"]["status"] == "carried"
     assert by_id["paseo-android-fork-release"]["status"] == "landed:main"
+    for pid in (
+        "paseo-workspace-id-search",
+        "desktop-app-dist-precompress",
+        "worktree-setup-sharp-global-libvips",
+        "paseo-about-fork-marker",
+        "paseo-shift-drag-copy",
+        "paseo-sync-sidebar-order",
+        "paseo-pi-permission-selected-action",
+        "paseo-pi-ask-user-question-scope",
+        "plugin-acp-elicitation-forms",
+    ):
+        assert by_id[pid]["status"] == "landed:2"
 
 
 @pytest.mark.parametrize("kwargs, needle", [
