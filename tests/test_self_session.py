@@ -71,6 +71,8 @@ class Native:
         self.update_result = None   # (returncode, stdout, stderr) replacing the `agent update` answer
         self.rename_unarchives = False  # an `agent update` of the predecessor flips it back to unarchived
         self.rename_ignored = False     # an `agent update` of the predecessor answers ok but changes nothing
+        self.providers = None           # optional full `provider ls` list for cross-provider tests
+        self.successor_modes = None     # optional `AvailableModes` list assigned to SUCC on `agent run`
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
@@ -96,7 +98,8 @@ class Native:
         assert argv[:4] == ['paseo', '--home', kwargs['env']['PASEO_HOME'], '--json']
         args = argv[4:]
         if args == ['provider', 'ls']:
-            data = [{'provider': self.rows[PRED]['Provider'], 'enabled': 'Enabled', 'status': 'available', 'modes': 'display labels only'}]
+            data = (copy.deepcopy(self.providers) if self.providers is not None else
+                    [{'provider': self.rows[PRED]['Provider'], 'enabled': 'Enabled', 'status': 'available', 'modes': 'display labels only'}])
         elif args == ['workspace', 'ls']:
             data = self.workspaces
         elif args[:2] == ['agent', 'inspect']:
@@ -111,7 +114,11 @@ class Native:
                                'Mode': args[args.index('--mode') + 1] if '--mode' in args else 'default'}
             provider, model = args[args.index('--provider') + 1].split('/', 1)
             self.rows[SUCC].update(Provider=provider, Model=model)
-            if provider == 'pi':
+            if '--thinking' in args:
+                self.rows[SUCC]['Thinking'] = args[args.index('--thinking') + 1]
+            if self.successor_modes is not None:
+                self.rows[SUCC]['AvailableModes'] = copy.deepcopy(self.successor_modes)
+            elif provider == 'pi':
                 self.rows[SUCC]['AvailableModes'] = []
             self.labelled = [{'id': SUCC}]
             title = next((a.split('=', 1)[1] for a in args if a.startswith('--title=')), None)
@@ -3048,3 +3055,386 @@ def test_the_successor_window_is_read_from_its_own_state_file_only(setup, with_o
         assert info['state'] == 'rename-advised' and info['name'] == 'MAIN q (z)'
     else:
         assert info['state'] == 'rename-advised' and info['reason'] == 'successor-window-unresolved'
+
+
+# --- 2026-11-23: cross-provider operator-authorized handoffs (--provider PROVIDER/MODEL) -----------------------------
+
+LIVE_PROVIDERS = [
+    {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available',
+     'modes': 'Plan Mode, Always Ask, Accept File Edits, Auto mode, Bypass'},
+    {'provider': 'codex', 'enabled': 'Enabled', 'status': 'available',
+     'modes': 'Default Permissions, Auto-review, Full Access'},
+    {'provider': 'antigravity', 'enabled': 'Enabled', 'status': 'available',
+     'modes': 'Default, Accept edits, Auto, Plan, Full access'},
+    {'provider': 'pi', 'enabled': 'Enabled', 'status': 'available', 'modes': ''},
+    {'provider': 'cursor', 'enabled': 'Enabled', 'status': 'available', 'modes': 'Agent, Plan, Ask'},
+    {'provider': 'hermes', 'enabled': 'Enabled', 'status': 'available',
+     'modes': "Default, Accept Edits, Don't Ask"},
+    {'provider': 'opencode', 'enabled': 'Disabled', 'status': 'unavailable', 'modes': ''},
+]
+
+
+def _cross_setup(setup, *, pred_provider='claude', pred_model='claude-opus-5-5', pred_mode='bypassPermissions',
+                 pred_modes=None, providers=None, succ_modes=None):
+    service, native, checkpoint = setup
+    service.planner = service.verifier = None
+    native.rows[PRED].update(
+        Provider=pred_provider, Model=pred_model, Mode=pred_mode, Name='Lead djbclark-ade',
+        AvailableModes=pred_modes if pred_modes is not None else [{'id': pred_mode, 'label': pred_mode}],
+    )
+    native.providers = copy.deepcopy(LIVE_PROVIDERS if providers is None else providers)
+    native.successor_modes = succ_modes
+    return service, native, checkpoint
+
+
+@pytest.mark.parametrize('catalog_kind', ['display-labels', 'structured'])
+def test_cross_provider_claude_to_antigravity_full_lifecycle(setup, tmp_path, catalog_kind):
+    """claude -> antigravity/gemini-4-neon --thinking high: handoff, send-guard, accept, finish, claims, supervisor, RETIRED."""
+    import ade_claims
+    import ade_send_guard as send_guard
+
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    if catalog_kind == 'structured':
+        for row in providers:
+            if row['provider'] == 'antigravity':
+                row['modes'] = [{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}]
+    service, native, checkpoint = _cross_setup(
+        setup, providers=providers,
+        succ_modes=[{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}],
+    )
+    _claim('c-cross', PRED, tmp_path)
+    lead_file = _lead_file(tmp_path, PRED + '\n')
+
+    record = service.handoff(
+        checkpoint, quiesced=True,
+        requested_provider='antigravity/gemini-4-neon', requested_thinking='high',
+    )
+    path = Path(record['record'])
+    call = run_args(native)
+    assert call[call.index('--provider') + 1] == 'antigravity/gemini-4-neon'
+    assert call[call.index('--mode') + 1] == 'full-access'
+    assert call[call.index('--thinking') + 1] == 'high'
+    assert record['schema_version'] == 1
+    assert record['status'] == 'awaiting-ack'
+    assert record['provider'] == 'antigravity' and record['model'] == 'gemini-4-neon'
+    assert record['thinking'] == 'high'
+    assert record['mode_plan']['provider'] == 'antigravity' and record['mode_plan']['mode_id'] == 'full-access'
+    assert record['predecessor_provider'] == 'claude'
+    assert record['predecessor_model'] == 'claude-opus-5-5'
+    assert record['cross_provider'] is True
+
+    # Before accept, send-guard passes to predecessor; from acknowledged onward, it redirects to successor.
+    def inspect_fn(aid):
+        if aid not in native.rows:
+            raise LookupError(aid)
+        return copy.deepcopy(native.rows[aid])
+
+    assert send_guard.decide(PRED, inspect_fn, state_dir=service.state, home=service.home).action == send_guard.PASS
+    acked = accept(service, record, path)
+    assert acked['status'] == 'acknowledged'
+    redirected = send_guard.decide(PRED, inspect_fn, state_dir=service.state, home=service.home)
+    assert (redirected.action, redirected.target) == (send_guard.REDIRECT, SUCC)
+
+    native.rows[PRED]['Status'] = 'idle'
+    finished = service.finish(path)
+    assert finished['status'] == 'archived'
+    assert native.rows[PRED]['Archived'] is True
+    assert finished['rebound_claims'] == ['c-cross']
+    assert ade_claims.read_claim('c-cross')['owner']['agent'] == SUCC
+    assert finished['supervisor_lead'] == 'repointed'
+    assert lead_file.read_text() == SUCC + '\n'
+    assert finished['identity']['checks']['retire_rename'] == 'ok'
+    assert native.rows[PRED]['Name'] == f'RETIRED Lead djbclark-ade (-> {SUCC})'
+    after = send_guard.decide(PRED, inspect_fn, state_dir=service.state, home=service.home)
+    assert (after.action, after.target) == (send_guard.REDIRECT, SUCC)
+
+
+@pytest.mark.parametrize(('pred_provider', 'pred_model', 'pred_mode', 'target', 'expected_mode', 'succ_modes'), [
+    ('claude', 'claude-opus-5-5', 'bypassPermissions', 'codex/gpt-6-astra', 'full-access',
+     [{'id': 'default'}, {'id': 'full-access'}]),
+    ('antigravity', 'gemini-4-neon', 'full-access', 'claude/claude-opus-5-5', 'bypassPermissions',
+     [{'id': 'auto'}, {'id': 'plan'}, {'id': 'bypassPermissions'}]),
+])
+def test_cross_provider_codex_and_antigravity_to_claude(setup, pred_provider, pred_model, pred_mode, target, expected_mode, succ_modes):
+    service, native, checkpoint = _cross_setup(
+        setup, pred_provider=pred_provider, pred_model=pred_model, pred_mode=pred_mode, succ_modes=succ_modes,
+    )
+    record = service.handoff(checkpoint, quiesced=True, requested_provider=target)
+    target_provider, target_model = target.split('/', 1)
+    call = run_args(native)
+    assert call[call.index('--provider') + 1] == target
+    assert call[call.index('--mode') + 1] == expected_mode
+    assert record['provider'] == target_provider and record['model'] == target_model
+    assert record['mode_plan']['provider'] == target_provider and record['mode_plan']['mode_id'] == expected_mode
+    assert record['predecessor_provider'] == pred_provider and record['predecessor_model'] == pred_model
+    assert record['cross_provider'] is True
+    path = Path(record['record'])
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+
+
+def test_same_provider_model_override_uses_predecessor_modes_and_records_predecessor_model(setup):
+    service, native, checkpoint = _cross_setup(setup)
+    record = service.handoff(checkpoint, quiesced=True, requested_provider='claude/claude-sonnet-5-5')
+    assert record['provider'] == 'claude' and record['model'] == 'claude-sonnet-5-5'
+    assert record['mode_plan']['mode_id'] == 'bypassPermissions'
+    assert record['mode_plan']['evidence'] == 'source-and-catalog'
+    assert record['predecessor_provider'] == 'claude' and record['predecessor_model'] == 'claude-opus-5-5'
+    assert 'cross_provider' not in record
+
+
+def test_cross_provider_accept_verifies_target_mode_provider_model_and_thinking(setup):
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'full-access'}],
+    )
+    record = service.handoff(
+        checkpoint, quiesced=True,
+        requested_provider='antigravity/gemini-4-neon', requested_thinking='high',
+    )
+    path = Path(record['record'])
+    # Mode drifted to default -> refused.
+    native.rows[SUCC]['Mode'] = 'default'
+    with pytest.raises(ss.SessionError, match='unattended mode not verified'):
+        accept(service, record, path)
+    native.rows[SUCC]['Mode'] = 'full-access'
+    # AvailableModes missing planned mode -> refused.
+    native.rows[SUCC]['AvailableModes'] = [{'id': 'default'}]
+    with pytest.raises(ss.SessionError, match='unattended mode not verified'):
+        accept(service, record, path)
+    native.rows[SUCC]['AvailableModes'] = [{'id': 'default'}, {'id': 'full-access'}]
+    # Thinking level mismatch -> refused.
+    native.rows[SUCC]['Thinking'] = 'low'
+    with pytest.raises(ss.SessionError, match='thinking level readback mismatch'):
+        accept(service, record, path)
+    native.rows[SUCC]['Thinking'] = 'high'
+    # Provider or model mismatch -> refused.
+    native.rows[SUCC]['Provider'] = 'claude'
+    with pytest.raises(ss.SessionError, match='readback mismatch'):
+        accept(service, record, path)
+    native.rows[SUCC]['Provider'] = 'antigravity'
+    assert accept(service, record, path)['status'] == 'acknowledged'
+
+
+@pytest.mark.parametrize('bad', [
+    '', 'antigravity', 'antigravity/', '/gemini-4-neon', 'antigravity/a/b',
+    'antigravity/default', 'antigravity/DEFAULT', 'antigravity/-',
+    ' antigravity/gemini-4-neon', 'antigravity/gemini-4-neon ',
+    'antigravity/gemini 4', 'antigravity/gemini\n4', 'antigravity/gemini\x004',
+    'antigravity/gemini-*', 'antigravity/gemini-?', 'antigravity/gemini-[4]',
+    '-claude/opus', 'claude/-opus', 'claude/opus;rm',
+    'Antigravity/gemini-4-neon', 'Claude/claude-opus-5-5', 'CODEX/gpt-6-astra', 42,
+])
+def test_invalid_provider_flag_refused_before_any_native_call(setup, bad):
+    service, native, checkpoint = _cross_setup(setup)
+    with pytest.raises(ss.SessionError, match='PROVIDER/MODEL'):
+        service.handoff(checkpoint, quiesced=True, requested_provider=bad)
+    assert native.calls == [] and native.created == 0
+    assert not list(service.state.glob('handoff-*.json'))
+
+
+def test_provider_and_route_kind_are_mutually_exclusive(setup):
+    service, native, checkpoint = _cross_setup(setup)
+    with pytest.raises(ss.SessionError, match='mutually exclusive'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', route_kind='judgment')
+    assert native.calls == [] and native.created == 0
+
+
+@pytest.mark.parametrize('retired', [
+    'opencode/x', 'omp/x', 'crush/x', 'agy/x', 'grok/x',
+    'OpenCode/x', 'OPENCODE/x', 'AGY/gemini-4-neon', 'OMP/x', 'Grok/x', 'Crush/x',
+])
+@pytest.mark.parametrize('mode', [None, 'plan'])
+def test_retired_provider_refused_before_any_native_call(setup, retired, mode):
+    service, native, checkpoint = _cross_setup(setup)
+    with pytest.raises(ss.SessionError, match='retired provider'):
+        service.handoff(checkpoint, quiesced=True, requested_provider=retired, requested_mode=mode)
+    assert native.calls == [] and native.created == 0
+
+
+@pytest.mark.parametrize('placeholder', ['-', ' - ', ',', ' , ', '-,-'])
+@pytest.mark.parametrize('mode', [None, 'plan'])
+def test_placeholder_label_modes_refused_for_cross_provider_handoff(setup, placeholder, mode):
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    for row in providers:
+        if row['provider'] == 'antigravity':
+            row['modes'] = placeholder
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode=mode)
+    assert native.created == 0
+
+
+@pytest.mark.parametrize('bad_modes', [
+    [{'id': 'plan'}, {'id': 'plan'}],
+    [{'id': 'plan'}, 'bad'],
+    [{'id': 'plan'}, {'id': ''}],
+])
+def test_malformed_or_duplicate_target_structured_modes_refused_even_for_restrictive_mode(setup, bad_modes):
+    providers = [
+        {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available', 'modes': [{'id': 'bypassPermissions'}]},
+        {'provider': 'antigravity', 'enabled': 'Enabled', 'status': 'available', 'modes': bad_modes},
+    ]
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode='plan')
+    assert native.created == 0
+
+
+@pytest.mark.parametrize('catalog_kind', ['display-labels', 'structured'])
+@pytest.mark.parametrize('bad_mode', ['', 'auto', 'foo', 'full-access'])
+def test_non_restrictive_requested_mode_refused_uniformly_on_cross_provider_handoff(setup, catalog_kind, bad_mode):
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    if catalog_kind == 'structured':
+        for row in providers:
+            if row['provider'] == 'antigravity':
+                row['modes'] = [{'id': 'default'}, {'id': 'auto'}, {'id': 'plan'}, {'id': 'full-access'}]
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode=bad_mode)
+    assert native.created == 0
+
+
+@pytest.mark.parametrize('target', ['pi/test-model', 'cursor/composer-2.5', 'hermes/hermes-4'])
+def test_modeless_and_unsupported_target_providers_refused(setup, target):
+    service, native, checkpoint = _cross_setup(setup)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider=target)
+    assert native.created == 0
+
+
+def test_cross_provider_thinking_inheritance_follows_existing_rules(setup):
+    service, native, checkpoint = _cross_setup(setup, succ_modes=[{'id': 'full-access'}])
+    native.rows[PRED]['Thinking'] = 'high'
+    record = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon')
+    call = run_args(native)
+    assert call[call.index('--thinking') + 1] == 'high'
+    assert record['thinking'] == 'high'
+    accept(service, record, Path(record['record']))
+
+
+def test_cross_provider_cannot_combine_with_routed_retry(setup):
+    service, native, record, path = routed_start(setup)
+    service.env['PASEO_AGENT_ID'] = PRED
+    native.rows[SUCC]['Status'] = 'error'
+    service.verify_turn(path)
+    # First: retry fails planning so status stays retry-ready -> --provider refused.
+    with pytest.raises(ss.SessionError, match='excluded pool'):
+        service.retry(path)
+    assert service.status(path)['status'] == 'retry-ready'
+    with pytest.raises(ss.SessionError, match='routed handoff retry'):
+        service.handoff(Path(record['checkpoint']), quiesced=True, requested_provider='antigravity/gemini-4-neon')
+    # Next: router picks go-account-b, creation refuses -> routed creation-refused also rejects --provider.
+    native.route_choice = {'service': 'go-account-b', 'agent': 'pi', 'model': 'opencode-go-account-b/test-model'}
+    native.run_result = (1, '', envelope('INVALID_THINKING_OPTION', 'bad level'))
+    native.labelled = []
+    refused = service.handoff(Path(record['checkpoint']), quiesced=True)
+    assert refused['status'] == 'creation-refused' and refused['route_kind'] == 'judgment'
+    with pytest.raises(ss.SessionError, match='routed handoff retry'):
+        service.handoff(Path(refused['checkpoint']), quiesced=True, requested_provider='antigravity/gemini-4-neon')
+
+
+def test_modeless_pi_refused_even_with_restrictive_mode_and_list_catalog(setup):
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    for row in providers:
+        if row['provider'] == 'pi':
+            row['modes'] = []
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    for mode in (None, 'plan'):
+        with pytest.raises(ss.SessionError, match='supported unattended'):
+            service.handoff(checkpoint, quiesced=True, requested_provider='pi/test-model', requested_mode=mode)
+    assert native.created == 0
+
+
+@pytest.mark.parametrize(('target', 'providers_patch'), [
+    ('go/some-model', None),
+    ('unknown/model-1', None),
+    ('antigravity/gemini-4-neon', [{'provider': 'antigravity', 'enabled': 'Disabled', 'status': 'unavailable', 'modes': ''}]),
+    ('antigravity/gemini-4-neon', [{'provider': 'antigravity', 'enabled': 'Enabled', 'status': 'error', 'modes': 'Full access'}]),
+    ('antigravity/gemini-4-neon', []),
+])
+def test_unknown_or_unavailable_target_provider_refused(setup, target, providers_patch):
+    service, native, checkpoint = _cross_setup(setup, providers=LIVE_PROVIDERS if providers_patch is None else providers_patch)
+    with pytest.raises(ss.SessionError, match='provider unavailable'):
+        service.handoff(checkpoint, quiesced=True, requested_provider=target)
+    assert native.created == 0
+
+
+def test_duplicate_handoff_with_different_provider_refused(setup):
+    service, native, checkpoint = _cross_setup(setup, succ_modes=[{'id': 'full-access'}])
+    first = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon')
+    calls = len(native.calls)
+    with pytest.raises(ss.SessionError, match='different requested provider/model'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='codex/gpt-6-astra')
+    with pytest.raises(ss.SessionError, match='different requested provider/model'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-carbon')
+    assert service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon') == first
+    assert service.handoff(checkpoint, quiesced=True) == first
+    assert len(native.calls) == calls and native.created == 1
+
+
+def test_explicit_restrictive_mode_validated_against_target_catalog(setup):
+    providers = [
+        {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available',
+         'modes': [{'id': 'bypassPermissions'}, {'id': 'plan'}, {'id': 'read-only'}]},
+        {'provider': 'antigravity', 'enabled': 'Enabled', 'status': 'available',
+         'modes': [{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}]},
+    ]
+    service, native, checkpoint = _cross_setup(
+        setup,
+        pred_modes=[{'id': 'bypassPermissions'}, {'id': 'plan'}, {'id': 'read-only'}],
+        providers=providers,
+        succ_modes=[{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}],
+    )
+    # Predecessor supports read-only, target does NOT -> refused before launch!
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode='read-only')
+    assert native.created == 0
+    # Target supports plan -> accepted and verified end-to-end!
+    record = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode='plan')
+    assert record['mode_plan']['status'] == 'exempt' and record['mode_plan']['mode_id'] == 'plan'
+    assert run_args(native)[run_args(native).index('--mode') + 1] == 'plan'
+    accept(service, record, Path(record['record']))
+
+
+def test_label_only_restrictive_mode_still_verified_at_accept(setup):
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}],
+    )
+    record = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode='read-only')
+    assert record['mode_plan']['status'] == 'exempt' and record['mode_plan']['mode_id'] == 'read-only'
+    # Live successor lacks read-only in AvailableModes -> accept fails closed!
+    with pytest.raises(ss.SessionError, match='unattended mode not verified'):
+        accept(service, record, Path(record['record']))
+
+
+def test_creation_refused_replay_after_fixing_provider_works_cleanly(setup):
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'full-access'}],
+    )
+    native.run_result = (1, '', envelope('INVALID_MODEL', 'Unknown model bad-model'))
+    native.labelled = []
+    refused = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/bad-model')
+    assert refused['status'] == 'creation-refused'
+    assert refused['native_error']['code'] == 'INVALID_MODEL'
+    assert refused['provider'] == 'antigravity' and refused['model'] == 'bad-model'
+
+    # Fix --provider and replay cleanly (label probe confirms no agent was created).
+    native.run_result = None
+    retried = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_thinking='high')
+    assert retried['status'] == 'awaiting-ack'
+    assert retried['provider'] == 'antigravity' and retried['model'] == 'gemini-4-neon'
+    assert retried['refused_before'] == refused['native_error']
+    path = Path(retried['record'])
+    accept(service, retried, path)
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+
+
+def test_cli_exposes_provider_on_handoff_only():
+    cli = str(REPO / 'bin' / 'ade-self-session')
+    ok = subprocess.run([cli, 'handoff', '--help'], capture_output=True, text=True, check=False)
+    assert ok.returncode == 0 and '--provider' in ok.stdout
+    bad = subprocess.run([cli, 'compact', '--checkpoint', '/x', '--request-id', 'r', '--provider', 'antigravity/gemini-4-neon'],
+                         capture_output=True, text=True, check=False)
+    assert bad.returncode == 2
