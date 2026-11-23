@@ -63,3 +63,36 @@ def test_explicit_restriction_is_exempt_but_still_requires_exact_live_readback()
 
 def test_malformed_ready_plan_cannot_be_success():
     assert not y.verify_unattended_snapshot({'status':'ready','provider':'claude'},snapshot())['ok']
+
+
+@pytest.mark.parametrize('provider,mode', [
+    ('claude', 'bypassPermissions'), ('codex', 'full-access'),
+    ('antigravity', 'full-access'), ('copilot', 'allow-all'),
+])
+def test_plan_launch_config_handles_label_only_and_structured_catalogs(provider, mode):
+    labels = {'provider': provider, 'enabled': 'Enabled', 'status': 'available', 'modes': 'Default, Full access'}
+    plan = y.plan_launch_config(provider, labels)
+    assert plan['status'] == 'ready' and plan['mode_id'] == mode and plan['evidence'] == 'source-pending-readback'
+    assert y.verify_unattended_snapshot(plan, snapshot(provider, mode), agent_id='agent-1')['ok']
+    assert y.plan_launch_config(provider, labels, requested='plan')['status'] == 'exempt'
+    structured = catalog(provider, [mode, 'plan'])
+    assert y.plan_launch_config(provider, structured)['evidence'] == 'source-and-catalog'
+    assert y.plan_launch_config(provider, structured, requested='plan')['status'] == 'exempt'
+    assert y.plan_launch_config(provider, structured, requested='read-only')['status'] == 'unavailable'
+
+
+@pytest.mark.parametrize('provider,modes', [
+    ('pi', ''), ('pi', []), ('cursor', 'Agent, Plan, Ask'), ('hermes', 'Default, Accept Edits'),
+    ('opencode', 'Default'), ('omp', 'Full'),
+])
+def test_plan_launch_config_refuses_modeless_unsupported_and_retired(provider, modes):
+    row = {'provider': provider, 'enabled': 'Enabled', 'status': 'available', 'modes': modes}
+    assert y.plan_launch_config(provider, row)['status'] == 'unavailable'
+    assert y.plan_launch_config(provider, row, requested='plan')['status'] == 'unavailable'
+
+
+@pytest.mark.parametrize('retired', sorted(y.RETIRED_PROVIDERS))
+def test_retired_providers_refused_even_with_restrictive_mode(retired):
+    assert y.plan_unattended_config(retired, catalog(retired, ['plan']), requested='plan')['status'] == 'unavailable'
+    with pytest.raises(y.ModeUnavailable):
+        y.resolve_launch_mode(retired, requested='plan')

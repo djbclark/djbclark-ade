@@ -203,6 +203,32 @@ def workspace_ident(value: str) -> str:
     return value
 
 
+def _paseo_yolo():
+    """Lazy sibling import so standalone `compact` copies keep working without paseo_yolo."""
+    import paseo_yolo
+    return paseo_yolo
+
+
+# Concrete `PROVIDER/MODEL` for `--provider` (2026-11-23): single `/`, no whitespace/control chars,
+# no wildcards, no leading `-`, concrete non-default model. Retired providers are rejected via
+# `paseo_yolo.RETIRED_PROVIDERS` before any native call.
+PROVIDER_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+MODEL_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}')
+
+
+def provider_model_ident(value: str) -> tuple[str, str]:
+    if (not isinstance(value, str) or not value or any(c.isspace() or not c.isprintable() for c in value)
+            or value.count('/') != 1):
+        raise SessionError('a concrete PROVIDER/MODEL (single /, no whitespace or control characters) is required')
+    provider, model = value.split('/', 1)
+    if (PROVIDER_RE.fullmatch(provider) is None or MODEL_RE.fullmatch(model) is None
+            or model.lower() == 'default' or model in ('', '-')):
+        raise SessionError('a concrete PROVIDER/MODEL (no wildcards, leading hyphens or default model) is required')
+    if provider in _paseo_yolo().RETIRED_PROVIDERS:
+        raise SessionError(f'retired provider {provider!r} is not supported for handoff')
+    return provider, model
+
+
 def thinking_ident(value: str) -> str:
     # A Paseo thinking option ID (observed 2026-11-14: low, medium, high, auto, ultracode);
     # a conservative identifier shape, since the native catalog decides what exists.
@@ -462,32 +488,42 @@ class Service:
         write_atomic(target, data)
         return str(target), digest(data)
 
-    def mode_plan(self, source, requested=None):
-        # Same-provider/model succession only: source modes are live native IDs,
-        # not reconstructed from provider-ls's comma-joined display labels.
-        planner = self.planner
-        if planner is None:
-            from paseo_yolo import plan_unattended_config
-            planner = plan_unattended_config
+    def mode_plan(self, source, requested=None, *, target_provider=None):
+        # Same-provider succession evaluates the predecessor's live native AvailableModes IDs.
+        # Cross-provider succession evaluates the target provider's own `provider ls` row (never
+        # the predecessor's AvailableModes), deferring exact ID readback to `verify_successor`
+        # when `provider ls` exposes comma-joined display labels only.
+        provider = source['Provider'] if target_provider is None else target_provider
+        same_provider = (provider == source['Provider'])
         providers = self.native('provider', 'ls')
         if not isinstance(providers, list):
             raise SessionError('native provider registry unavailable')
-        row = next((r for r in providers if isinstance(r, dict) and r.get('provider') == source['Provider']), None)
-        if not row or row.get('status') not in ('available', 'ready') or row.get('enabled') not in (True, 'Enabled'):
-            raise SessionError('provider unavailable')
-        catalog = {**row, 'modes': source.get('AvailableModes')}
-        plan = planner(source['Provider'], catalog, requested=requested)
+        matching = [r for r in providers if isinstance(r, dict) and r.get('provider') == provider]
+        row = matching[0] if len(matching) == 1 else None
+        if (not row or row.get('status') not in ('available', 'ready')
+                or row.get('enabled') not in (True, 'Enabled') or row.get('error')):
+            raise SessionError(f'provider unavailable: {provider}')
+        catalog = {**row, 'modes': source.get('AvailableModes')} if same_provider else dict(row)
+        planner = self.planner
+        if planner is None:
+            yolo = _paseo_yolo()
+            planner = yolo.plan_unattended_config if same_provider else yolo.plan_launch_config
+        plan = planner(provider, catalog, requested=requested)
+        modes = catalog.get('modes')
+        has_exact_modes = isinstance(modes, list)
+        has_label_modes = (not same_provider and isinstance(modes, str) and bool(modes.strip()))
         if (plan.get('status') not in ('ready', 'exempt') or not plan.get('mode_id')
-                or plan.get('provider_options') or not isinstance(catalog['modes'], list)
-                or not any(isinstance(m, dict) and m.get('id') == plan['mode_id'] for m in catalog['modes'])):
+                or plan.get('provider_options')
+                or plan.get('provider') not in (None, provider)
+                or not (has_exact_modes or has_label_modes)
+                or (has_exact_modes and not any(isinstance(m, dict) and m.get('id') == plan['mode_id'] for m in modes))):
             raise SessionError('supported unattended successor mode unavailable: ' + str(plan.get('reason') or 'no reason'))
         return plan
 
     def verify_successor(self, record, *, allow_failed=False):
         verifier = self.verifier
         if verifier is None:
-            from paseo_yolo import verify_unattended_snapshot
-            verifier = verify_unattended_snapshot
+            verifier = _paseo_yolo().verify_unattended_snapshot
         row = self.inspect(record['successor'])
         # A correctly placed successor can still have failed its provider turn.
         # Only classify native fields: error text may contain credentials.
@@ -499,6 +535,12 @@ class Service:
                 or row.get('Provider') != record['provider'] or row.get('Model') != record['model']
                 or row.get('ParentAgentId') is not None or row.get('PendingPermissions') != []):
             raise SessionError('successor identity, placement, parent or permission readback mismatch')
+        expected_thinking = record.get('thinking')
+        observed_thinking = row.get('Thinking')
+        if (isinstance(expected_thinking, str) and expected_thinking not in NO_INHERITED_THINKING
+                and isinstance(observed_thinking, str) and observed_thinking not in ('', '-')
+                and observed_thinking != expected_thinking):
+            raise SessionError('successor thinking level readback mismatch')
         if record.get('requires_first_turn') and record['provider'] == 'pi':
             if row.get('AvailableModes') != []:
                 raise SessionError('Pi modeless catalog changed; preserve predecessor')
@@ -509,12 +551,15 @@ class Service:
         return row
 
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
-                requested_title=None, requested_role=None, route_kind=None):
+                requested_title=None, requested_role=None, route_kind=None, requested_provider=None):
         predecessor = self.actor()
         role_for = _coord().role_for
         CoordinationError = _coord().CoordinationError
         if role_for(predecessor) is not None:
             raise SessionError("enrolled handoff blocked: runtime/resource census and shared operation reconciliation required; --quiesced is insufficient")
+        if requested_provider is not None and route_kind is not None:
+            raise SessionError('--provider and --route-kind are mutually exclusive')
+        explicit_provider = None if requested_provider is None else provider_model_ident(requested_provider)
         explicit_thinking = None if requested_thinking is None else thinking_ident(requested_thinking)
         explicit_title = None if requested_title is None else title_ident(requested_title)
         explicit_role = None if requested_role is None else role_ident(requested_role)
@@ -528,6 +573,8 @@ class Service:
                     and existing.get('home') == str(self.home) and existing.get('kind') == 'handoff'
                     and existing.get('predecessor') == predecessor and existing.get('successor') is None
                     and isinstance(existing.get('native_error'), dict)):
+                if explicit_provider is not None and existing.get('route_kind') is not None:
+                    raise SessionError('--provider cannot be combined with a routed handoff retry')
                 # Replace only when the token's label lists no agent: a probe that fails or finds one keeps the record.
                 rows = self.native('agent', 'ls', '-a', '-g', '--label', 'ade.handoff=' + existing['token'])
                 if not isinstance(rows, list) or rows:
@@ -542,6 +589,8 @@ class Service:
             if isinstance(existing, dict) and existing.get('status') == 'retry-ready':
                 if existing.get('home') != str(self.home) or existing.get('predecessor') != predecessor:
                     raise SessionError('retry identity mismatch')
+                if explicit_provider is not None:
+                    raise SessionError('--provider cannot be combined with a routed handoff retry')
                 retry_history = existing.get('attempts', [])
                 excluded = existing.get('excluded_pools', [])
                 route_kind = existing['route_kind']
@@ -553,6 +602,8 @@ class Service:
                 saved = existing.get('mode_plan') if isinstance(existing.get('mode_plan'), dict) else {}
                 if (saved.get('mode_id') if saved.get('status') == 'exempt' else None) != requested_mode:
                     raise SessionError('existing transaction has a different requested mode; no create replayed')
+                if explicit_provider is not None and (existing.get('provider'), existing.get('model')) != explicit_provider:
+                    raise SessionError('existing transaction has a different requested provider/model; no create replayed')
                 if explicit_thinking is not None and existing.get('thinking') != explicit_thinking:
                     raise SessionError('existing transaction has a different requested thinking level; no create replayed')
                 prior = existing.get('identity') if isinstance(existing.get('identity'), dict) else None
@@ -586,6 +637,10 @@ class Service:
                 launch_source = {**source, 'Provider': 'pi', 'Model': route['model']}
                 plan = {'status': 'ready', 'provider': 'pi', 'mode_id': None,
                         'mechanism': 'first-real-turn', 'evidence': 'source-modeless', 'provider_options': {}}
+            elif explicit_provider is not None:
+                target_provider, target_model = explicit_provider
+                launch_source = {**source, 'Provider': target_provider, 'Model': target_model}
+                plan = self.mode_plan(source, requested_mode, target_provider=target_provider)
             else:
                 plan = self.mode_plan(source, requested_mode)
             thinking = explicit_thinking or (route.get('thinking') if route else None)
@@ -606,6 +661,12 @@ class Service:
                       'model': launch_source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
+            if explicit_provider is not None and (
+                    launch_source['Provider'] != source['Provider'] or launch_source['Model'] != source['Model']):
+                record['predecessor_provider'] = source['Provider']
+                record['predecessor_model'] = source['Model']
+                if launch_source['Provider'] != source['Provider']:
+                    record['cross_provider'] = True
             if route:
                 record.update(requires_first_turn=True, route_kind=route_kind, pool=route['service'],
                               route=route, attempts=retry_history, excluded_pools=excluded)

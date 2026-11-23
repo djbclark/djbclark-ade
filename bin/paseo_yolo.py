@@ -39,6 +39,15 @@ RESTRICTIVE_MODE_IDS = frozenset({
     "dontAsk",
 })
 
+# Retired clients: never an ordinary dispatch or self-handoff route.
+RETIRED_PROVIDERS = frozenset({
+    "omp",
+    "opencode",
+    "crush",
+    "agy",
+    "grok",
+})
+
 # Legacy ID vocabulary only; membership here never proves a provider mode.
 UNATTENDED_MODE_IDS = frozenset({
     "bypassPermissions",
@@ -76,13 +85,16 @@ def resolve_launch_mode(
     ``fallback`` is retained for caller compatibility, but never grants unattended
     authority. Dynamic providers require ``plan_unattended_config``.
     """
+    pid = provider_id(provider)
+    if pid in RETIRED_PROVIDERS:
+        raise ModeUnavailable(f"retired provider {pid!r} is not an ordinary dispatch route")
     req = (requested or "").strip() or None
     if req and req in RESTRICTIVE_MODE_IDS:
         return req
     yolo = yolo_mode(provider)
     if yolo:
         return yolo
-    raise ModeUnavailable(f"no verified unattended mode for {provider_id(provider)!r}; "
+    raise ModeUnavailable(f"no verified unattended mode for {pid!r}; "
                           "inspect the native catalog/control API instead of using defaultMode")
 
 
@@ -106,12 +118,12 @@ def plan_unattended_config(
     if scope not in {"ordinary", "external-security-critical", "operator-restrictive"}:
         result["reason"] = "unknown work scope"
         return result
+    if pid in RETIRED_PROVIDERS:
+        result["reason"] = "retired client is not an ordinary dispatch route"
+        return result
     if scope != "ordinary" or requested in RESTRICTIVE_MODE_IDS:
         result.update(status="exempt", mode_id=requested, evidence="explicit-restriction",
                       reason="preserve explicit restrictive/external-security-critical scope")
-        return result
-    if pid in {"omp", "opencode", "crush", "agy", "grok"}:
-        result["reason"] = "retired client is not an ordinary dispatch route"
         return result
     if not isinstance(catalog, dict) or catalog.get("provider") != pid:
         return result
@@ -160,6 +172,61 @@ def plan_unattended_config(
         result["evidence"] = "source-modeless"
         return result
     result["reason"] = "no source-backed/catalog-marked unattended mode or supported control"
+    return result
+
+
+def plan_launch_config(provider: str, catalog: dict, *, requested: str | None = None) -> dict:
+    """Plan a fresh launch from a `paseo provider ls --json` catalog row.
+
+    When `catalog["modes"]` is a structured list of `{id: ...}` dicts, delegates to
+    `plan_unattended_config` and also requires an explicit restrictive `requested` mode to
+    exist in that catalog.
+
+    Current `paseo provider ls --json` flattens `modes` to a comma-joined string of display
+    labels (or `""` for modeless providers such as Pi). Never infer mode IDs from display
+    labels: an empty string fails closed as modeless (`[]`), and a nonempty string admits only
+    providers in `YOLO_MODE_BY_PROVIDER` (ordinary unattended or explicit restrictive),
+    deferring exact `AvailableModes` + `Mode` readback to `verify_unattended_snapshot`.
+    """
+    pid = provider_id(provider)
+    result = {"status": "unavailable", "provider": pid, "mode_id": None,
+              "provider_options": {}, "evidence": "none", "reason": "invalid native catalog"}
+    if pid in RETIRED_PROVIDERS:
+        result["reason"] = "retired client is not an ordinary dispatch route"
+        return result
+    if not isinstance(catalog, dict) or catalog.get("provider") != pid:
+        return result
+    if (not (catalog.get("enabled") is True or catalog.get("enabled") == "Enabled")
+            or catalog.get("status") not in ("ready", "available") or catalog.get("error")):
+        result["reason"] = "provider is not positively enabled and available"
+        return result
+    modes = catalog.get("modes")
+    if isinstance(modes, list):
+        plan = plan_unattended_config(pid, catalog, requested=requested)
+        if plan.get("status") == "exempt":
+            if (not isinstance(plan.get("mode_id"), str) or not plan["mode_id"]
+                    or not any(isinstance(m, dict) and m.get("id") == plan["mode_id"] for m in modes)):
+                return {**result, "reason": "requested restrictive mode absent from native catalog"}
+        return plan
+    if isinstance(modes, str):
+        if not modes.strip():
+            return plan_launch_config(pid, {**catalog, "modes": []}, requested=requested)
+        yolo = YOLO_MODE_BY_PROVIDER.get(pid)
+        if not yolo:
+            result["reason"] = "no source-backed unattended mode for provider with display-label-only catalog"
+            return result
+        if requested is not None:
+            if requested in RESTRICTIVE_MODE_IDS:
+                result.update(status="exempt", mode_id=requested, evidence="explicit-restriction",
+                              reason="preserve explicit restrictive scope; target provider ls returned display labels only")
+                return result
+            result["reason"] = "unsupported requested mode"
+            return result
+        result.update(status="ready", mode_id=yolo, mechanism="mode",
+                      evidence="source-pending-readback",
+                      reason="source-backed unattended mode; target provider ls returned display labels only")
+        return result
+    result["reason"] = "native mode catalog unavailable or malformed"
     return result
 
 

@@ -3,7 +3,8 @@
 2026-11-12. Explicit agent-invoked operations restore the functionality requested
 in the slim-down audit. These are same-host operations against an already
 running local Paseo daemon. They do not deploy tools, install plugins, restart
-a daemon, select a new provider/model, transfer files between computers or decide
+a daemon, pick a new provider/model unasked (operator-authorized cross-provider
+handoffs pass `--provider PROVIDER/MODEL`, Section C), transfer files between computers or decide
 unattended crash recovery. Tests use fake native commands; live acceptance remains
 unverified. Ordinary successors use positively supported unattended modes.
 Modeless providers (Pi, Go) expose no verified unattended mode and are blocked for
@@ -65,7 +66,7 @@ performs it itself, including successor launch; no operator typing is required.
 Finish other writes/background jobs and prepare the briefing, then:
 
 ```
-bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--title TEXT] [--role ROLE]
+bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--provider PROVIDER/MODEL] [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ```
 
 `--quiesced` attests that other jobs/writes are finished. A running predecessor
@@ -73,19 +74,50 @@ can request the handoff, then end its turn; it must stop scheduling project
 writes. The helper preserves the checkpoint and creation intent before launching
 one top-level successor in the explicit existing workspace. It scrubs ambient
 caller-agent/workspace variables, labels the successor with a unique token,
-keeps the exact provider/model and passes a positively catalogued unattended
+keeps the exact provider/model by default and passes a positively catalogued unattended
 mode. It never silently falls back to Always Ask. Unsupported modeless/control
 providers are blocked rather than assigned an invented mode. An explicit
 `--mode plan|read-only|dontAsk` is retained only when the actual catalog supports
 it; this is for operator-requested restrictive work, not the ordinary default.
+
+**Cross-provider override (`--provider PROVIDER/MODEL`, 2026-11-23).** When the
+operator authorizes a handoff to a different provider or model (for example
+Claude Opus to Antigravity Gemini 4 Neon: `--provider antigravity/gemini-4-neon`),
+pass `--provider PROVIDER/MODEL` instead of falling back to manual C1 so the
+transaction record, `ade_send_guard` redirect, claim rebind, `supervisor/lead`
+repoint and `RETIRED` rename all run automatically. Validation runs before any
+native call: `--provider` must split cleanly on a single `/` into non-empty
+concrete `provider` and `model` (no whitespace, control characters, wildcards,
+leading hyphens or `default` model), is mutually exclusive with `--route-kind`,
+and rejects retired providers (`paseo_yolo.RETIRED_PROVIDERS`). Mode planning
+evaluates the **target** provider's own `paseo provider ls --json` entry via
+`paseo_yolo.plan_launch_config` (never the predecessor's `AvailableModes`):
+structured mode lists are checked for exact membership before launch (including
+restrictive `--mode` requests), empty/modeless catalogs (`pi`, `go`) stay
+fail-closed (they remain on `--route-kind` / `appoint`), and live `provider ls`
+entries that expose display labels only admit providers in
+`paseo_yolo.YOLO_MODE_BY_PROVIDER` (`claude`, `codex`, `antigravity`, `copilot`)
+with exact native `AvailableModes` + `Mode` readback verified by `accept` and
+`finish`. A duplicate `handoff` call with a different `--provider` is refused
+(unless replacing a terminal `creation-refused` record after confirming no
+labelled agent exists). When `--provider` overrides the predecessor's provider or
+model, the record stays `schema_version: 1` and adds `predecessor_provider`,
+`predecessor_model`, and `cross_provider: true` (when the provider changes).
+`compact` has no `--provider` option.
+
 The successor's thinking level is set with `--thinking LEVEL` (an identifier such
 as `high`, passed to `agent run --thinking`; a malformed value is refused before
 any native call). Without it the successor inherits the predecessor's own level
 when `agent inspect` reports an explicit one; an unknown, `auto`, `default` or
 unusable source level launches with no flag, as before (2026-11-14: a `high` lead
-had been handed off to an `auto` successor). The level is recorded in the
-transaction record as `thinking`; a duplicate call with a different explicit level
-is refused, never replayed. `compact` has no such option.
+had been handed off to an `auto` successor). On a cross-provider handoff, the
+same inheritance rule applies (`high` transfers cleanly between Claude and
+Antigravity; if the predecessor's level is unsupported by the target model,
+Paseo rejects it pre-create with `INVALID_THINKING_OPTION` -> `creation-refused`,
+which replays cleanly once `--thinking` is passed). The level is recorded in the
+transaction record as `thinking` and checked against live `Thinking` readback
+at `accept`/`finish` when concrete and reported; a duplicate call with a
+different explicit level is refused, never replayed. `compact` has no such option.
 
 ### C-id. The successor keeps the predecessor's title and chain labels (st-01, 2026-11-14)
 
@@ -397,8 +429,11 @@ fallback. Never retry an uncertain write by launching a second successor.
 
 Read the current provider/model and existing workspace from native inspect and
 verify the provider's unattended mode via `paseo agent mode ID --list`.
-Preserve any explicit operator restrictions. Use the trusted checkout's routing
-policy for a separately authorized model change. Launch with concrete values:
+Preserve any explicit operator restrictions. For an operator-authorized
+cross-provider or model change, prefer Section C's `--provider PROVIDER/MODEL`
+(2026-11-23) so the transaction record, `ade_send_guard` redirect, claim rebind,
+`supervisor/lead` repoint and `RETIRED` rename run automatically; use C1 only
+when the helper itself refuses before creation. Launch with concrete values:
 
 ```bash
 env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID \
