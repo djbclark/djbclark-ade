@@ -20,7 +20,7 @@ a pick's `component` is an enrolled component and to find the component's `upstr
 | exactly one of `commit`, `branch`, `pr` | `commit`: full 40-hex. `branch`: a branch of `repo`. `pr`: a PR number of `repo`; apply fetches `refs/pull/N/head` and treats it like a branch. **None of them** makes the entry a *placeholder* (a reserved slot for work that has no branch yet): it is valid only with `hold`, `list` shows "placeholder (no source yet)", `apply` always skips it (even with `--include-held`) and `check-upstream` checks only its `upstream` PR link |
 | `local_path` | optional, absolute path of a local repo or worktree; with `commit` only. apply (and check-upstream's patch check) fetch the commit from there instead of `repo` |
 | `expected_head` | 40-hex, for `branch`/`pr`. If the fetched head differs, apply stops with reason `head-moved` before changing anything. **Required** for an active `pr` entry and for an active `branch` entry whose repo owner is not `frdminc` or `djbclark`: a third party's head is never applied unpinned. A pin records the head you reviewed, not that it is safe; `apply --dry-run` prints each entry's current `tip` so it can be pinned |
-| `exclude` | optional list of unique full 40-hex ids, `branch`/`pr` sources only. Commits in the range that apply must **not** pick (a v0.17.x release-branch changelog or version-cut commit that rides in a stack cut from a release branch). Each excluded commit is named in the output (`excluded_by_entry`: sha and scrubbed subject); an id that matched nothing is listed as `exclude_unused`, never dropped silently. Explicit on purpose: no subject-pattern guess about which commits are release commits |
+| `exclude` | optional list of unique full 40-hex ids, `branch`/`pr` sources only. Commits in the range that apply must **not** pick (a v0.17.x release-branch changelog or version-cut commit that rides in a stack cut from a release branch). Each excluded commit is named in the output (`excluded_by_entry`: sha and scrubbed subject); an id outside the source's history stops the run before any pick (`exclude-unknown`), and one that needs no excluding is listed as `exclude_unused`, never dropped silently. Explicit on purpose: no subject-pattern guess about which commits are release commits |
 | `intent` | one line |
 | `target` or `targets` | one string or a list; each is `PLATFORM-build-N` (lowercase platform, build number from 1), e.g. `desktop-build-2`, `android-build-2` |
 | `status` | `queued`, `carried`, `landed:N` (landed in build N), `landed:main` (merged to the fork's main), `upstreamed`, `dropped` |
@@ -70,9 +70,16 @@ bin/ade-fork-picks check-upstream [--component C] [--json]
   commits; those shas are also listed as `already_present_by_trailer`). Picks made before `-x` was used have no trailer and
   fall back to (1) only. An entry whose commits are all present reports `already_present: true`. A commit that is an
   ancestor of HEAD counts too. Why the trailer and not a recorded "landed as" sha: apply already writes it, it needs no
-  registry edit after a build, and it works for every pick of every run.
+  registry edit after a build, and it works for every pick of every run. Only the **last** such line of a commit message's
+  final paragraph counts (the line `-x` appends), so a line copied from a picked commit's own body names nothing; the sha must
+  be the full lowercase 40-hex id. A pick that was later **reverted** on HEAD still counts as present (a blind spot of both
+  rules; the patch-id rule had it for same-context picks, the trailer rule widens it to rebased ones): re-apply it by hand
+  or `git revert` the revert.
 - **`exclude`** (entry field, above): listed commits are not picked and are named in the text output
-  (`EXCLUDED by entry <sha> (<subject>)`) and in the JSON.
+  (`EXCLUDED by entry <sha> (<subject>)`) and in the JSON. An id that is **not in the source tip's history** (a typo, or
+  another branch's commit) stops the run before any pick, dry run included (`conflict.reason` `exclude-unknown`, exit 3,
+  `unknown_excludes`), because the commit it was meant to drop would be applied. An id in the history that needs no excluding
+  (already present, or excluded as upstream) is only listed as `exclude_unused` ("exclude not needed").
 - **Stops on the first conflict** (or a cherry-pick timeout, reason `cherry-pick-timeout`): runs `git cherry-pick
   --abort`, then checks the result instead of assuming it: `abort_rc` and `tree_clean` (no changes, no
   `CHERRY_PICK_HEAD`, no `index.lock`) are in the report. Reports the entry, commit and conflicted files, exit 3. Entries applied before the conflict stay applied; `start_head` in the JSON is where to

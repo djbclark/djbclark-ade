@@ -3239,6 +3239,16 @@ def test_a_write_label_with_the_path_on_the_next_line_still_counts(env):
     assert r.returncode == 0 and json.loads(r.stdout)["reportPath"] == "/tmp/x/a-report.md"
 
 
+def test_a_write_label_accepts_crlf_and_one_blank_line_only(env):
+    """PR 944 review LOW-1/2: one blank line (two newlines) is the bound the docs now state; CRLF briefs label like LF ones."""
+    ok = "BRIEF\r\nWrite your report to\r\n\r\n/tmp/x/a-report.md"
+    r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", ok)
+    assert r.returncode == 0 and json.loads(r.stdout)["reportPath"] == "/tmp/x/a-report.md"
+    far = "BRIEF\nWrite your report to\n\n\n/tmp/x/b-report.md"
+    r = env.run("--lead", LEAD, "--slice", "b", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", far)
+    assert r.returncode == 0 and json.loads(r.stdout)["reportPath"] == f"{env.tmp}/reports/{LEAD}/b-report.md"
+
+
 def test_a_bare_lead_name_that_is_the_home_directorys_name_is_not_a_repo(main_env):
     """LOW-D: `LEAD djbclark` over $HOME keeps asking for --repo; a real repo name is still taken from the name."""
     home_name = Path(HOME_DIR).name

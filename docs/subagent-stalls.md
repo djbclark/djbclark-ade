@@ -74,6 +74,16 @@ For each **new** stall (state `~/.local/state/djbclark-ade/subagent-stalls/seen.
    successor and an archived one refused (docs/archived-send-guard.md). A busy parent is never sent to (a sourceless send to a running agent
    interrupts its turn) and an archived one never woken; the send is retried on the next run until it goes through. Between the inspect and the
    send a parent can start a turn and be interrupted: the window is a few milliseconds and cannot be closed from outside.
+   Before sending, the tool asks the guard in-process (`ade_send_guard.guard`, with `PASEO_AGENT_ID`, `ADE_ALLOW_ARCHIVED_SEND` and
+   `ADE_ALLOW_REPLACED_SEND` removed from its environment and from the shim's): a parent that was handed off (completed or acknowledged
+   handoff) gets **no send**, because the shim would redirect it to a successor nobody checked for idleness and the resume needs the
+   predecessor's own session; the hermes ping then says "parent was handed off to X". A refusal also sends nothing. Either is decided once
+   and not retried every run. The shim stays the backstop. `paseo agent inspect` and guard probes are capped at `--max-inspects` (default
+   40) per run, and none follow the first timeout of a run.
+   A stub is linked to its transcript through the footer's delivery line, a `Report:` label, a bare mention or the description slug, and only
+   the strongest kind present counts, so a finished reviewer that merely lists the writer's report as `Report:` context does not hide the
+   dead writer. A prompt that names a `*-brief.md` under the reports directory also links the stubs that brief labels (64 KiB read, at most 3
+   briefs).
 
 Each action repeats for the same stall at most once per `--repeat-h` (default 6) and at most `--max-notices` times in all (default 2: the first
 announcement and one repeat, then silence). A failed ping or send is not recorded, so it is retried. A stall that is no longer stalled is
@@ -84,9 +94,9 @@ the run that switches the watcher on (otherwise the first run pings every orphan
 paths `~/.local/bin/hermes-ping` and `~/.local/bin/paseo` (override: `--hermes-ping`, `--paseo`); nothing looks at PATH (the guard shim gets a
 fixed one, `/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`, for its python3). `suggested_action` is a shell-quoted command (`shlex.join`).
 
-## Hook-in (site-private)
+## Hook-in (site-public)
 
-`fleet-watch` lives in `~/ops/site-private-djbclark/bin` (another repo; not edited from here: `~/CLAUDE.md` item 13 and AGENTS order 11, so
+`fleet-watch` lives in `~/ops/site-public-djbclark/bin/fleet-watch` (another repo; not edited from here: `~/CLAUDE.md` item 13 and AGENTS order 11, so
 the hook-in waits for the operator's yes). Once, to start quiet:
 
 ```

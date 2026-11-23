@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -66,7 +67,8 @@ class World:
         (self.paseo.parent / "inspect.json").write_text(json.dumps({"Archived": archived, "Status": status}))
 
     def cfg(self, **over) -> ss.Config:
-        base = {"now": NOW, "hermes_ping": self.hermes, "paseo": self.paseo, "paseo_guard": self.guard}
+        base = {"now": NOW, "hermes_ping": self.hermes, "paseo": self.paseo, "paseo_guard": self.guard,
+                "redirect_probe": lambda cfg, parent, warnings: None}      # the real probe has its own tests (handoff section below)
         base.update(over)
         return ss.make_config(self.home, **base)
 
@@ -106,6 +108,9 @@ class World:
         elif tail == "synthetic_tool_use":     # an inner tool call of the REPL tool
             recs.append({"type": "assistant", "message": {"model": "<synthetic>", "stop_reason": "stop_sequence",
                                                            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "bgrun x"}}]}})
+        elif tail == "synthetic_text":         # a synthetic text ending that lacks isApiErrorMessage: only `model` marks it
+            recs.append({"type": "assistant", "message": {"model": "<synthetic>", "stop_reason": "stop_sequence",
+                                                           "content": [{"type": "text", "text": "No response requested."}]}})
         elif tail == "real_stop_sequence":
             recs.append({"type": "assistant", "message": {"model": "claude-sonnet-5-5", "stop_reason": "stop_sequence",
                                                            "content": [{"type": "text", "text": "written: x"}]}})
@@ -655,3 +660,141 @@ def test_the_send_goes_through_the_real_guard_shim_by_absolute_path(w, monkeypat
     run_notify(w, paseo_guard=ROOT / "libexec/agent-bin/paseo")
     sends = [c for c in w.calls(w.paseo) if c[0] == "send"]
     assert len(sends) == 1 and sends[0][:5] == ["send", "--json", "--no-wait", "--", PARENT_PASEO]
+
+
+# ---------------------------------------------------------------- PR 938 round-2 LOWs (2026-11-22)
+
+SUCCESSOR = "88888888-aaaa-4bbb-8ccc-444444444444"
+
+
+def handoff_world(w, monkeypatch, status="acknowledged"):
+    """A parent whose self-handoff record names SUCCESSOR; the fake paseo reports every agent live, idle, with the asked Id."""
+    from datetime import datetime, timezone
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_ade_lead_succession import write_link
+    state, phome = w.home / "self-session", w.home / "paseo-home"
+    write_link(state, phome, PARENT_PASEO, SUCCESSOR, status=status,
+               acknowledged_at=datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(state))
+    monkeypatch.setenv("PASEO_HOME", str(phome))
+    monkeypatch.setenv("ADE_SEND_GUARD_LOG", str(w.home / "send-guard.log"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: w.home))
+    (w.paseo.parent / "inspect.json").unlink()
+    w.paseo.write_text(w.paseo.read_text().replace(
+        "sys.stdout.write(open(os.path.join(here, 'inspect.json')).read())",
+        "sys.stdout.write(json.dumps({'Id': argv[2] if argv[2] != '--json' else argv[-1], 'Archived': False, 'Status': 'idle'}))"))
+
+
+def test_a_handed_off_parent_gets_no_send_and_the_ping_names_the_successor(w, monkeypatch):
+    """LOW-1: the shim would redirect to the successor without an idle check; the tool decides first and sends nothing."""
+    stalled_world(w)
+    handoff_world(w, monkeypatch)
+    res, events = run_notify(w, redirect_probe=None)
+    assert w.sends() == []
+    pings = w.calls(w.hermes)
+    assert len(pings) == 1 and f"handed off to {SUCCESSOR}" in pings[0][0]
+    assert any(f"handed off to {SUCCESSOR}" in e and "no message sent" in e for e in events)
+    run_notify(w, now=NOW + 60, redirect_probe=None)
+    assert w.sends() == [] and len(w.calls(w.hermes)) == 1          # decided once, not retried every run
+
+
+def test_a_refused_parent_gets_no_send(w, monkeypatch):
+    stalled_world(w)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: w.home))
+    monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(w.home / "self-session"))
+    monkeypatch.setenv("PASEO_HOME", str(w.home / "paseo-home"))
+    monkeypatch.setenv("ADE_SEND_GUARD_LOG", str(w.home / "send-guard.log"))
+    (w.paseo.parent / "inspect.json").write_text(json.dumps({"Id": PARENT_PASEO, "Archived": False, "Status": "idle"}))
+    import ade_send_guard as sg
+    monkeypatch.setattr(sg, "guard", lambda parent, **kw: sg.Decision(sg.REFUSE, parent, "test"))
+    _, events = run_notify(w, redirect_probe=None)
+    assert w.sends() == [] and any("refused by the send guard" in e for e in events)
+
+
+def test_the_send_environment_drops_the_sender_identity_and_the_operator_overrides(w, monkeypatch):
+    """LOW-1: an exported override or a launcher id in the calling shell must not apply to an automated send."""
+    for name in ss.SENDER_OVERRIDE_ENV:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("KEEP_ME", "1")
+    argv, env = ss._send_argv_env(w.cfg(), PARENT_PASEO, "text")
+    assert env is not None and env["KEEP_ME"] == "1" and not any(n in env for n in ss.SENDER_OVERRIDE_ENV)
+    assert env["PATH"] == ss.SHIM_PATH and argv[-2:] == [PARENT_PASEO, "text"]
+
+
+def test_a_labelled_mention_by_a_finished_reviewer_does_not_hide_the_dead_writer(w):
+    """LOW-2: the reviewer lists `- Report: <writer's report>` as context and has its own footer; it finished, the writer died."""
+    report = w.stub()
+    w.transcript(report, idle_min=60, agent="awriter")
+    own = f"{w.reports}/{SESSION}/review-report.md"
+    prompt = (f"Review the diff.\n- Report: {report}\n\n## Delivery contract\n\n"
+              f"1. Write the full deliverable to `{own}`. Create it early.\n")
+    w.transcript(None, idle_min=1, tail="final", agent="areviewer", prompt=prompt)
+    s = ss.scan(w.cfg()).stalled
+    assert [x.agent_id for x in s] == ["awriter"]
+
+
+def test_a_relaunch_with_the_same_footer_path_is_still_covered(w):
+    """LOW-2: every footer-linked transcript counts: a finished relaunch hides the dead first run only when it finished the report."""
+    report = w.stub()
+    w.transcript(report, idle_min=60, agent="afirst")
+    w.transcript(report, idle_min=1, tail="final", agent="asecond")
+    assert ss.scan(w.cfg()).stalled == []
+
+
+def test_a_brief_file_names_the_report_the_footer_does_not(w):
+    """LOW-3: "Your brief is the file X-brief.md" with another path in the footer: the brief's `Report path:` links the stub."""
+    report = w.stub("real-report.md")
+    brief = w.reports / SESSION / "task-brief.md"
+    brief.write_text(f"Do the review.\nReport path: {report}\n")
+    prompt = (f"Your brief is the file {brief}.\n\n## Delivery contract\n\n"
+              f"1. Write the full deliverable to `{w.reports}/{SESSION}/footer-report.md`.\n")
+    w.transcript(None, idle_min=60, prompt=prompt)
+    res = ss.scan(w.cfg())
+    assert [x.report for x in res.stalled] == [report] and res.unlinked == []
+
+
+def test_a_brief_outside_the_reports_dir_is_not_read(w, tmp_path):
+    report = w.stub("real-report.md")
+    brief = tmp_path / "elsewhere-brief.md"
+    brief.write_text(f"Report path: {report}\n")
+    w.transcript(None, idle_min=60, prompt=f"Your brief is the file {brief}.\n")
+    res = ss.scan(w.cfg())
+    assert res.stalled == [] and res.unlinked == [report]
+
+
+def test_a_synthetic_text_record_without_the_api_error_flag_is_an_api_error(w):
+    """LOW-4: the `model == "<synthetic>"` clause stands alone (a mutant that kept only `isApiErrorMessage` survived)."""
+    p = w.transcript(w.stub(), idle_min=60, tail="synthetic_text")
+    assert ss.last_message(p).kind == "api_error"
+
+
+def test_inspects_per_run_are_capped(w):
+    """LOW-5: a parent that is not idle uses no send slot, so the probes need their own cap."""
+    many_stalls(w, 6, parents=True)
+    w.set_parent_state(archived=False, status="running")
+    run_notify(w, max_inspects=8)          # the five pinged parents each use one guard probe (the injected probe still counts), 3 are left
+    assert len(w.calls(w.paseo)) == 3
+
+
+def test_no_send_when_the_cap_ends_before_the_guard_precheck(w):
+    """Adversary LOW: the idle probe used the last slot; the send must wait rather than go unchecked."""
+    stalled_world(w)                         # no hermes-ping configured: no probe at the ping stage, the idle check takes the only slot
+    _, events = run_notify(w, hermes_ping=None, max_inspects=1)
+    assert w.sends() == [] and any("inspect cap reached before the send guard" in e for e in events)
+
+
+def test_no_more_inspects_after_the_first_timeout(w, tmp_path):
+    """LOW-5: a hung or missing paseo is tried once per run, not once per parent."""
+    many_stalls(w, 5, parents=True)
+    calls = []
+    real = ss._run
+    def fake_run(argv, warnings):
+        if "inspect" in argv:
+            calls.append(argv)
+            warnings.append("paseo failed: timed out")
+            return None
+        return real(argv, warnings)
+    import unittest.mock as mock
+    with mock.patch.object(ss, "_run", fake_run):
+        _, events = run_notify(w)
+    assert len(calls) == 1 and any("inspect cap or paseo unreachable" in e for e in events)
