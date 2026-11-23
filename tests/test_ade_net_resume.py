@@ -1664,3 +1664,106 @@ def test_billing_identity_follows_the_gemini_version(fake):
                         ("gemini-4.1-neon-high", "gemini"), ("gemini-5-neon-high", "gemini")):
         got = scanner.billing_identity({"Provider": "antigravity", "Model": model})
         assert got == ("antigravity", want, None), model
+
+
+# --- 2026-11-23: --lead-file per-tick lead tracking ------------------------------------------------------------------
+
+def test_lead_file_reads_first_nonempty_line_and_tracks_updates_each_tick(fake, tmp_path):
+    data, _, sent, state = fake
+    lead_file = tmp_path / "lead"
+    lead_file.write_text(f"\n  \n{LEAD}\nignored trailing line\n")
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps(data))
+
+    scanner = Scanner(state=state, apply=True, lead_file=lead_file)
+    assert scanner.scan() == 0
+    assert len(sent.read_text().splitlines()) == 1
+
+    # Manual / cross-provider takeover (no self-handoff link): rewrite lead file to NEW_LEAD with a new child.
+    new_child = "00000000-0000-0000-0000-000000000099"
+    data["agents"][LEAD]["Archived"] = True
+    data["agents"][NEW_LEAD] = {"Id": NEW_LEAD, "ParentAgentId": None, "Archived": False, "Status": "running", "Provider": "antigravity"}
+    data["agents"][new_child] = {"Id": new_child, "ParentAgentId": NEW_LEAD, "Archived": False, "Status": "error",
+                                 "Provider": "antigravity", "UpdatedAt": "2026-11-12T20:00:00Z"}
+    fixture.write_text(json.dumps(data))
+    lead_file.write_text(NEW_LEAD + "\n")
+
+    assert scanner.scan() == 0
+    sends = [json.loads(line) for line in sent.read_text().splitlines()]
+    assert len(sends) == 2 and sends[1][4] == new_child
+    assert json.loads((state / "events.jsonl").read_text().splitlines()[-1])["lead"] == NEW_LEAD
+
+
+def test_lead_file_combines_with_completed_succession_chain(handed_off, tmp_path):
+    data, _, sent, state, ledger, home = handed_off
+    fixture = tmp_path / "fixture.json"
+    lead_file = tmp_path / "lead"
+    link(ledger, home, LEAD, NEW_LEAD)
+
+    # Case 1: lead file still names archived LEAD -> effective_lead follows to NEW_LEAD and covers CHILD of LEAD.
+    lead_file.write_text(LEAD + "\n")
+    fixture.write_text(json.dumps(data))
+    assert Scanner(state=state, apply=True, lead_file=lead_file).scan() == 0
+    assert json.loads(sent.read_text()) == ["send", "--json", "--no-wait", "--", CHILD, M["PROMPT"]]
+
+    # Case 2: lead file already updated to NEW_LEAD -> lineage() still covers CHILD whose ParentAgentId is LEAD.
+    sent.unlink()
+    data["agents"][CHILD]["UpdatedAt"] = "2026-11-12T19:59:59Z"
+    lead_file.write_text(NEW_LEAD + "\n")
+    fixture.write_text(json.dumps(data))
+    assert Scanner(state=state, apply=True, lead_file=lead_file).scan() == 0
+    assert json.loads(sent.read_text()) == ["send", "--json", "--no-wait", "--", CHILD, M["PROMPT"]]
+
+
+@pytest.mark.parametrize("case", ["missing", "symlink", "directory", "oversized", "empty", "malformed", "bad-utf8"])
+def test_lead_file_fails_closed_on_invalid_inputs(fake, tmp_path, case):
+    _, _, _, state = fake
+    target = tmp_path / f"lead-{case}"
+    if case == "symlink":
+        real = tmp_path / "real-lead"
+        real.write_text(LEAD + "\n")
+        target.symlink_to(real)
+    elif case == "directory":
+        target.mkdir()
+    elif case == "oversized":
+        target.write_text(LEAD + "\n" + ("x" * 5000))
+    elif case == "empty":
+        target.write_text("   \n\n")
+    elif case == "malformed":
+        target.write_text("not-a-uuid\n")
+    elif case == "bad-utf8":
+        target.write_bytes(b"\xff\xfe" + LEAD.encode())
+
+    scanner = Scanner(state=state, apply=False, lead_file=target)
+    with pytest.raises(M["ScanError"]):
+        scanner.scan()
+    assert M["main"](["--lead-file", str(target), "--state-dir", str(state)]) == 2
+
+
+def test_cli_lead_and_lead_file_mutually_exclusive_and_one_required(fake, tmp_path):
+    data, _, _, state = fake
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps(data))
+    lead_file = tmp_path / "lead"
+    lead_file.write_text(LEAD + "\n")
+
+    with pytest.raises(SystemExit) as e1:
+        M["main"](["--state-dir", str(state)])
+    assert e1.value.code == 2
+    with pytest.raises(SystemExit) as e2:
+        M["main"](["--lead", LEAD, "--lead-file", str(lead_file), "--state-dir", str(state)])
+    assert e2.value.code == 2
+    assert M["main"](["--lead-file", str(lead_file), "--state-dir", str(state)]) == 0
+
+
+def test_lead_file_retired_lead_skips_with_lead_file_hint(handed_off, tmp_path, capsys):
+    data, _, sent, state, _, _ = handed_off
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps(data))
+    lead_file = tmp_path / "lead"
+    lead_file.write_text(LEAD + "\n")
+
+    assert Scanner(state=state, apply=True, lead_file=lead_file).scan() == 0
+    assert not sent.exists()
+    err = capsys.readouterr().err
+    assert "update lead file" in err and str(lead_file) in err

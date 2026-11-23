@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """Explicit native self-session operations (local daemon only).
 
-ade-self-session handoff --checkpoint FILE --quiesced [--provider PROVIDER/MODEL] [--thinking LEVEL] [--title TEXT] [--role ROLE]
+ade-self-session handoff --checkpoint FILE --quiesced [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ade-self-session compact --checkpoint FILE --request-id TOKEN
 ade-self-session status|reconcile --record FILE
 ade-self-session finish --record FILE [--stable S] [--wait-timeout S] [--poll S]
@@ -36,7 +36,8 @@ def main():
         q.add_argument('--checkpoint', required=True, type=Path)
         if command == 'handoff':
             q.add_argument('--mode', choices=('plan', 'read-only', 'dontAsk'), help='explicit operator-requested restrictive successor mode; must exist in native catalog')
-            q.add_argument('--provider', metavar='PROVIDER/MODEL', help='operator-authorized target provider/model (for example antigravity/gemini-4-neon); default: keep the predecessor\'s own provider/model; mutually exclusive with --route-kind')
+            q.add_argument('--provider', metavar='PROVIDER/MODEL', help='operator-authorized target provider/model (for example antigravity/gemini-4-neon); default: keep the predecessor\'s own provider/model (subject to the quota-floor guard); mutually exclusive with --route-kind')
+            q.add_argument('--allow-scarce-pool', action='store_true', help='explicitly allow cloning the predecessor\'s provider/model even when its pool headroom is below the router quota floor')
             q.add_argument('--thinking', metavar='LEVEL', help='successor thinking option ID (for example high); default: the predecessor\'s own level when it has an explicit one')
             q.add_argument('--title', help='successor title; default: the predecessor\'s own name (a lead keeps its name through every handoff)')
             q.add_argument('--role', help='ade.role label for the successor; default: the one the predecessor\'s handoff record carried (Paseo\'s CLI cannot read labels back, so a chain\'s first handoff names it here)')
@@ -65,7 +66,8 @@ def main():
             result = service.handoff(a.checkpoint, quiesced=a.quiesced, requested_mode=a.mode,
                                      requested_thinking=a.thinking, requested_title=a.title,
                                      requested_role=a.role, route_kind=a.route_kind,
-                                     requested_provider=a.provider)
+                                     requested_provider=a.provider,
+                                     allow_scarce_pool=a.allow_scarce_pool)
         elif a.command == 'appoint':
             result = service.appoint(a.record, appointed=a.appointed, pool=a.pool,
                                      operator_appointed=a.operator_appointed, quiesced=a.quiesced)

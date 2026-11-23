@@ -21,6 +21,13 @@ for an operator-authorized cross-provider or model-override handoff, e.g.
 `--provider antigravity/gemini-4-neon`, 2026-11-23; add `--thinking LEVEL` to set
 the successor's thinking level, otherwise the successor inherits yours) and the
 [acknowledged successor protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
+**Quota-floor guard (2026-11-23):** without `--provider` or `--route-kind`, `handoff`
+checks the predecessor pool's headroom against the router floors before cloning it.
+If the predecessor's pool is under its floor, `handoff` automatically routes via
+`route_agent.py plan` to an eligible unattended-mode-capable alternative (recording
+`quota_reroute`), or refuses cleanly with a non-zero exit if no eligible alternative
+is available (pass `--provider PROVIDER/MODEL` or `--allow-scarce-pool` to override;
+an explicit `--provider` logs a warning if scarce and is never blocked).
 If the helper refuses before creation, launch the top-level successor yourself
 with the documented unattended fallback. Verify its acknowledgement and idle-only
 retirement (a predecessor in `error` status is retired at once after the ack, ruling 2026-11-21); operator typing is never the fallback. Partial transfers keep the
@@ -30,9 +37,8 @@ A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_A
 paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead agent id>`; without it
 `bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
 and runs the watcher with `--lead <its id>` (2026-11-13). After an acknowledged `ade-self-session` handoff nothing pinned to the
-predecessor's id needs a hand step (2026-11-14): `ade-worker-run` adopts its windows and labelled workers, and the installed
-`ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0a). A manual
-handoff that never runs `finish` records no chain: re-point those jobs by hand.
+predecessor's id needs a hand step (2026-11-14; automatic `ade-net-resume` tracking strengthened 2026-11-23): `ade-worker-run` adopts its windows and labelled workers, `finish` repoints both `~/.local/state/djbclark-ade/supervisor/lead` and any legacy `--lead <predecessor>` `com.djbclark.ade-net-resume.plist` (and `--lead-file` installs read `supervisor/lead` each tick), and the installed `ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0, C0a). A manual
+handoff that never runs `finish` records no chain: update `supervisor/lead` (for `--lead-file` installs) or re-point those jobs by hand.
 
 Placement differs: workers go in the lead's one `WORKER <repo> (<work>)` box, and workers the operator asks for
 interactively in the lead's own `LEAD <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a

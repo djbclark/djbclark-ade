@@ -1,7 +1,7 @@
 # Network recovery for a lead's agents
 
 `bin/ade-net-resume` (2026-11-12) scans `paseo ls -g --background --json` for error-status
-descendants of an explicit full `--lead` UUID. Background workspaces are included. Unresolvable unrelated agents are skipped. Ancestry uses inspect's
+descendants of an explicit full `--lead` UUID or a `--lead-file` path (2026-11-23). Background workspaces are included. Unresolvable unrelated agents are skipped. Ancestry uses inspect's
 `ParentAgentId` and verified completed self-session links from eligible workers (whose successors
 are top-level too); missing records, cycles, archived agents and unknown providers
 cannot authorize a resume. PR 585's auto-permit helper was not on master when
@@ -9,6 +9,7 @@ this tool was built, so this command has its own small ancestry walk.
 
 ```
 bin/ade-net-resume --lead LEAD_UUID
+bin/ade-net-resume --lead-file ~/.local/state/djbclark-ade/supervisor/lead --apply
 bin/ade-net-resume --lead LEAD_UUID --apply
 bin/ade-net-resume --lead LEAD_UUID --apply --watch 600 --interval 30
 ```
@@ -91,12 +92,15 @@ The scheduler render fixtures supply `__LEAD__` using the same substitution
 contract as the merged auto-permit template (2026-11-12); unfilled placeholders
 are still refused. This PR installs or loads nothing.
 
-**Lead handoff (2026-11-14).** The installed job keeps the `--lead` it was rendered with. When that lead was replaced through
-`ade-self-session` (a completed `finish`), each scan follows the chain to the current lead and also resumes the descendants of the
-archived predecessors, so the job needs no reinstall. If the chain ends at an archived or unknown lead the scan appends a
+**Lead handoff and automatic lead tracking (2026-11-14; `--lead-file` and plist sync 2026-11-23).** Two complementary layers keep `ade-net-resume` pointed at the active lead without manual plist edits:
+
+1. **File-backed lead (`--lead-file PATH`, mutually exclusive with `--lead`).** Reads the first non-empty line of a bounded (<= 4 KiB) regular file (no symlinks; missing, non-regular, oversized, non-UTF-8 or non-UUID contents fail closed with exit 2) on **every scan tick**, then still runs `ade_lead_succession.effective_lead()` and `lineage()`. Pointing `--lead-file` at `~/.local/state/djbclark-ade/supervisor/lead` follows both `ade-self-session finish` updates and manual lead takeovers with zero plist edits and zero `launchctl` churn.
+2. **Legacy `--lead <UUID>` installs.** When the pinned lead is replaced through `ade-self-session finish`, each scan follows the completed chain to the current lead and also resumes the descendants of the archived predecessors, AND `ade-self-session finish` automatically rewrites a legacy `~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist` carrying `--lead <predecessor>` to `--lead <successor>` (reloading via `launchctl bootout` + `bootstrap` on macOS; leaving `--lead-file` plists and other chains untouched).
+
+If the resolved chain ends at an archived or unknown lead the scan appends a
 `skip-lead-retired` event (one row per pinned/current lead pair, so the minute-by-minute launchd job adds one row, not 1,440 a day), prints one stderr line and exits 0: a retired lead used to exit 2 every minute until
-`load-watch` stopped the job. A Paseo outage (the lead is unreadable and `ls -a` fails too), an unreadable-but-listed lead and a cyclic ledger are still exit 2. Exit 0 hides a retired lead from `load-watch`: watch the `skip-lead-retired` row. Details:
-[self-session.md](self-session.md) C0a.
+`load-watch` stopped the job. A Paseo outage (the lead is unreadable and `ls -a` fails too), an unreadable-but-listed lead, an unreadable/malformed `--lead-file`, and a cyclic ledger are still exit 2. Exit 0 hides a retired lead from `load-watch`: watch the `skip-lead-retired` row. Details:
+[self-session.md](self-session.md) C0 and C0a.
 
 ## Transitions before exhaustion (`--transition-below`, 2026-11-16)
 

@@ -109,9 +109,14 @@ subprocess.run(["bin/ade-sched", "--set", "__LEAD__=LEAD_UUID", "--set",
 PYTHON
 ```
 
-A `--lead` that is later replaced by an acknowledged self-handoff needs no reinstall (the job follows the completed
-`ade-self-session` chain, [self-session.md](self-session.md) C0a); one retired without a completed handoff logs one
-`skip-lead-retired` row and exits 0 on every run until the job is reinstalled with a live lead.
+A `--lead` that is later replaced by an acknowledged self-handoff needs no reinstall: the job follows the completed
+`ade-self-session` chain ([self-session.md](self-session.md) C0a), and since 2026-11-23 `ade-self-session finish`
+also automatically rewrites and reloads a legacy `~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist` that
+pins `--lead <predecessor>` (leaving `--lead-file` plists and other chains untouched). Alternatively, `bin/ade-net-resume`
+accepts `--lead-file PATH` (mutually exclusive with `--lead`, e.g. `~/.local/state/djbclark-ade/supervisor/lead`,
+matching `com.djbclark.ade-supervisor-scan`), re-reading the file each tick and still following completed handoff
+chains with zero plist churn. A lead retired without a completed handoff (or lead-file update) logs one
+`skip-lead-retired` row and exits 0 on every run until the lead file is updated or the job is reinstalled with a live lead.
 
 Set `TRANSITION_REMAINING_PERCENT` explicitly to an approved measured margin before this command.
 There is no default; missing or invalid input refuses installation. This command activates sends. See

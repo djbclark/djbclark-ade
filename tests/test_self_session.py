@@ -73,10 +73,22 @@ class Native:
         self.rename_ignored = False     # an `agent update` of the predecessor answers ok but changes nothing
         self.providers = None           # optional full `provider ls` list for cross-provider tests
         self.successor_modes = None     # optional `AvailableModes` list assigned to SUCC on `agent run`
+        self.route_plan_fn = None       # optional callable(argv, kwargs) -> CompletedProcess for route_agent.py
+        self.launchctl_calls = []       # argv lists passed to launchctl
+        self.launchctl_result = None    # optional callable(argv) or (rc, out, err) for launchctl
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
-        if 'route_agent.py' in argv[1]:
+        if argv and argv[0] == 'launchctl':
+            self.launchctl_calls.append(list(argv))
+            if callable(self.launchctl_result):
+                return self.launchctl_result(argv)
+            if self.launchctl_result is not None:
+                return subprocess.CompletedProcess(argv, *self.launchctl_result)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        if len(argv) > 1 and 'route_agent.py' in argv[1]:
+            if self.route_plan_fn is not None:
+                return self.route_plan_fn(argv, kwargs)
             data = {'stale': False, 'slices': [getattr(self, 'route_choice',
                     {'service': 'go-account-a', 'agent': 'pi', 'model': 'opencode-go-account-a/test-model'})]}
             return subprocess.CompletedProcess(argv, 0, json.dumps(data), '')
@@ -186,6 +198,22 @@ def isolated_claims(tmp_path, monkeypatch):
 def isolated_supervisor(tmp_path, monkeypatch):
     """finish repoints the supervisor's lead file: never the live one."""
     monkeypatch.setenv('ADE_SUPERVISOR_STATE_DIR', str(tmp_path / 'supervisor'))
+
+
+@pytest.fixture(autouse=True)
+def isolated_net_resume_plist(tmp_path, monkeypatch):
+    """finish repoints the legacy net-resume plist: never the live one."""
+    monkeypatch.setenv('ADE_NET_RESUME_PLIST', str(tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'))
+
+
+@pytest.fixture(autouse=True)
+def isolated_quota(tmp_path, monkeypatch):
+    """handoff checks quota headroom: never read live aiuse/paseo in offline tests."""
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE', 'off')
+    monkeypatch.setenv('ROUTE_AGENT_PASEO', 'off')
+    monkeypatch.setenv('AIUSE_SNAPSHOT', str(tmp_path / 'no-aiuse-snapshot.json'))
+    monkeypatch.delenv('ROUTE_AGENT_AIUSE_JSON', raising=False)
+    monkeypatch.delenv('ROUTE_AGENT_PASEO_USAGE_JSON', raising=False)
 
 
 @pytest.fixture
@@ -3653,3 +3681,409 @@ def test_cli_exposes_provider_on_handoff_only():
     bad = subprocess.run([cli, 'compact', '--checkpoint', '/x', '--request-id', 'r', '--provider', 'antigravity/gemini-4-neon'],
                          capture_output=True, text=True, check=False)
     assert bad.returncode == 2
+
+
+# --- 2026-11-23: quota-floor guard on handoff ------------------------------------------------------------------------
+
+def _canned_aiuse(tmp_path, available):
+    path = tmp_path / 'canned-aiuse.json'
+    path.write_text(json.dumps({
+        'collected_at': '2026-11-23T15:00:00Z',
+        'fresh': True,
+        'available': available,
+    }))
+    return path
+
+
+def test_quota_guard_auto_reroutes_scarce_predecessor_via_route_agent(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 9.0, 'binding_window': 'weekly',
+         'windows': [{'id': 'weekly', 'remaining_percent': 9.0, 'used_percent': 91.0}]},
+        {'provider': 'antigravity', 'pool_family': 'gemini', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 82.0, 'binding_window': '5h',
+         'windows': [{'id': '5h', 'remaining_percent': 82.0, 'used_percent': 18.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    messages = []
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'plan'}, {'id': 'full-access'}],
+    )
+    service.progress = messages.append
+    native.route_choice = {
+        'service': 'antigravity-neon', 'agent': 'antigravity',
+        'model': 'gemini-4-neon --effort high', 'remaining': 82.0,
+    }
+
+    record = service.handoff(checkpoint, quiesced=True)
+    call = run_args(native)
+    assert call[call.index('--provider') + 1] == 'antigravity/gemini-4-neon'
+    assert call[call.index('--mode') + 1] == 'full-access'
+    assert call[call.index('--thinking') + 1] == 'high'
+    assert record['provider'] == 'antigravity' and record['model'] == 'gemini-4-neon'
+    assert record['predecessor_provider'] == 'claude' and record['predecessor_model'] == 'claude-opus-5-5'
+    assert record['cross_provider'] is True
+    assert record['quota_reroute'] == {
+        'source_pool': 'claude',
+        'source_remaining_pct': 9.0,
+        'floor_pct': 15.0,
+        'routed_to': 'antigravity/gemini-4-neon',
+        'target_service': 'antigravity-neon',
+        'route_kind': 'judgment',
+        'target_remaining_pct': 82.0,
+    }
+    route_argv = next(a for a, _ in native.calls if len(a) > 1 and 'route_agent.py' in a[1])
+    assert route_argv[route_argv.index('--exclude') + 1] == 'claude'
+    assert any('quota-floor guard' in m and 'antigravity/gemini-4-neon' in m for m in messages)
+
+    path = Path(record['record'])
+    assert accept(service, record, path)['status'] == 'acknowledged'
+    native.rows[PRED]['Status'] = 'idle'
+    assert service.finish(path)['status'] == 'archived'
+
+
+def test_quota_guard_skips_non_unattended_routed_candidate_and_picks_next(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 8.0, 'binding_window': 'weekly',
+         'windows': [{'id': 'weekly', 'remaining_percent': 8.0, 'used_percent': 92.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'full-access'}],
+    )
+    seen_excludes = []
+
+    def plan_fn(argv, kwargs):
+        ex = [argv[i + 1] for i, a in enumerate(argv) if a == '--exclude']
+        seen_excludes.append(ex)
+        if 'cursor-auto' not in ex:
+            choice = {'service': 'cursor-auto', 'agent': 'cursor', 'model': 'default', 'remaining': 70.0}
+        elif 'zai' not in ex:
+            choice = {'service': 'zai', 'agent': 'pi', 'model': 'zai/glm-5.3-flash --effort high', 'remaining': 90.0}
+        else:
+            choice = {'service': 'antigravity-neon', 'agent': 'antigravity', 'model': 'gemini-4-neon --effort high', 'remaining': 75.0}
+        return subprocess.CompletedProcess(argv, 0, json.dumps({'stale': False, 'slices': [choice]}), '')
+
+    native.route_plan_fn = plan_fn
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['provider'] == 'antigravity' and record['model'] == 'gemini-4-neon'
+    assert record['quota_reroute']['routed_to'] == 'antigravity/gemini-4-neon'
+    assert any('cursor-auto' in ex and 'zai' in ex and 'claude' in ex for ex in seen_excludes)
+
+
+def test_quota_guard_refuses_cleanly_when_no_alternative_available(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 9.0, 'binding_window': 'weekly',
+         'windows': [{'id': 'weekly', 'remaining_percent': 9.0, 'used_percent': 91.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    service, native, checkpoint = _cross_setup(setup)
+    native.route_choice = {'service': None, 'agent': None, 'model': None, 'remaining': None}
+
+    with pytest.raises(ss.SessionError) as exc:
+        service.handoff(checkpoint, quiesced=True)
+    msg = str(exc.value)
+    assert 'claude' in msg and '9%' in msg and '15%' in msg
+    assert '--provider PROVIDER/MODEL' in msg and '--allow-scarce-pool' in msg
+    assert native.created == 0
+    assert not list(service.state.glob('handoff-*.json'))
+
+
+def test_quota_guard_allow_scarce_pool_overrides_and_clones_source(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 9.0, 'binding_window': 'weekly',
+         'windows': [{'id': 'weekly', 'remaining_percent': 9.0, 'used_percent': 91.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    messages = []
+    service, native, checkpoint = _cross_setup(setup)
+    service.progress = messages.append
+
+    record = service.handoff(checkpoint, quiesced=True, allow_scarce_pool=True)
+    assert record['provider'] == 'claude' and record['model'] == 'claude-opus-5-5'
+    assert record['allow_scarce_pool'] is True
+    assert 'quota_reroute' not in record
+    assert not any(len(a) > 1 and 'route_agent.py' in a[1] for a, _ in native.calls)
+    assert any('--allow-scarce-pool' in m for m in messages)
+
+
+def test_quota_guard_healthy_predecessor_clones_without_reroute(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 45.0, 'binding_window': 'weekly',
+         'windows': [{'id': 'weekly', 'remaining_percent': 45.0, 'used_percent': 55.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    service, native, checkpoint = _cross_setup(setup)
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['provider'] == 'claude' and record['model'] == 'claude-opus-5-5'
+    assert 'quota_reroute' not in record
+    assert not any(len(a) > 1 and 'route_agent.py' in a[1] for a, _ in native.calls)
+
+
+def test_quota_guard_explicit_provider_warns_if_scarce_but_never_blocks(setup, tmp_path, monkeypatch):
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'antigravity', 'pool_family': 'gemini', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 5.0, 'binding_window': '5h',
+         'windows': [{'id': '5h', 'remaining_percent': 5.0, 'used_percent': 95.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    messages = []
+    service, native, checkpoint = _cross_setup(
+        setup, succ_modes=[{'id': 'default'}, {'id': 'full-access'}],
+    )
+    service.progress = messages.append
+    record = service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon')
+    assert record['provider'] == 'antigravity' and record['model'] == 'gemini-4-neon'
+    assert 'quota_reroute' not in record
+    assert any('honoring explicit --provider' in m and '5%' in m for m in messages)
+
+
+def test_quota_guard_fails_safe_on_corrupt_aiuse(setup, tmp_path, monkeypatch):
+    bad = tmp_path / 'corrupt-aiuse.json'
+    bad.write_text('{not valid json')
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(bad))
+    service, native, checkpoint = _cross_setup(setup)
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['provider'] == 'claude' and record['model'] == 'claude-opus-5-5'
+    assert 'quota_reroute' not in record
+
+
+def test_quota_guard_fable_sublimit_and_codex_floor(setup, tmp_path, monkeypatch):
+    # Claude Fable model: weekly is 50%, but Fable sublimit is 8% (< 15% frontier1_min_left).
+    canned = _canned_aiuse(tmp_path, [
+        {'provider': 'claude', 'pool_family': 'default', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 50.0, 'binding_window': 'weekly',
+         'windows': [
+             {'id': 'weekly', 'remaining_percent': 50.0, 'used_percent': 50.0},
+             {'id': 'fable', 'pool_family': 'fable', 'quota_scope': 'model_sublimit',
+              'remaining_percent': 8.0, 'used_percent': 92.0},
+         ]},
+        {'provider': 'codex', 'pool_family': 'openai_api', 'age_seconds': 30,
+         'usable_now': True, 'headroom_percent': 18.0, 'binding_window': 'credits',
+         'windows': [{'id': 'credits', 'remaining_percent': 18.0, 'used_percent': 82.0}]},
+    ])
+    monkeypatch.setenv('ROUTE_AGENT_AIUSE_JSON', str(canned))
+    service, native, checkpoint = _cross_setup(
+        setup, pred_model='claude-fable-5-2', succ_modes=[{'id': 'full-access'}],
+    )
+    native.route_choice = {
+        'service': 'antigravity-neon', 'agent': 'antigravity',
+        'model': 'gemini-4-neon --effort high', 'remaining': 80.0,
+    }
+    record = service.handoff(checkpoint, quiesced=True)
+    assert record['quota_reroute']['window'] == 'fable'
+    assert record['quota_reroute']['source_remaining_pct'] == 8.0
+
+    # Codex gpt-6.2-sol at 18% (< 25% codex:judgment estimate floor) also reads scarce.
+    codex_status = service.check_pool_headroom('codex', 'gpt-6.2-sol', str(tmp_path))
+    assert codex_status['pool'] == 'codex' and codex_status['scarce'] is True and codex_status['floor'] == 25.0
+
+
+def test_cli_exposes_allow_scarce_pool_on_handoff_only():
+    cli = str(REPO / 'bin' / 'ade-self-session')
+    ok = subprocess.run([cli, 'handoff', '--help'], capture_output=True, text=True, check=False)
+    assert ok.returncode == 0 and '--allow-scarce-pool' in ok.stdout
+    bad = subprocess.run([cli, 'compact', '--checkpoint', '/x', '--request-id', 'r', '--allow-scarce-pool'],
+                         capture_output=True, text=True, check=False)
+    assert bad.returncode == 2
+
+
+# --- 2026-11-23: automatic legacy com.djbclark.ade-net-resume.plist repoint in finish() ------------------------------
+
+def _write_net_resume_plist(path: Path, argv, *, label='com.djbclark.ade-net-resume', mode=0o644):
+    import plistlib
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        'Label': label,
+        'ProgramArguments': list(argv),
+        'StartInterval': 60,
+        'RunAtLoad': False,
+        'EnvironmentVariables': {'PATH': '/usr/local/bin:/usr/bin:/bin'},
+    }
+    path.write_bytes(plistlib.dumps(doc, fmt=plistlib.FMT_XML, sort_keys=False))
+    path.chmod(mode)
+    return path
+
+
+def test_finish_repoints_legacy_net_resume_plist_atomically_and_reloads(setup, tmp_path):
+    import plistlib
+    plist_path = tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'
+    orig_argv = ['/opt/ade/bin/ade-job-run', '--lock-dir', '/tmp/adm', 'com.djbclark.ade-net-resume', '--',
+                 '/opt/ade/bin/ade-net-resume', '--lead', PRED, '--quota', '--apply']
+    _write_net_resume_plist(plist_path, orig_argv, mode=0o644)
+    reloaded = []
+    service, native, path = finished_up_to_archive(setup)
+    service.net_resume_plist = plist_path
+    service.net_resume_reloader = lambda p, lbl: reloaded.append((p, lbl))
+
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['net_resume_plist'] == 'repointed' and 'net_resume_plist_error' not in out
+    doc = plistlib.loads(plist_path.read_bytes())
+    assert doc['ProgramArguments'] == [
+        '/opt/ade/bin/ade-job-run', '--lock-dir', '/tmp/adm', 'com.djbclark.ade-net-resume', '--',
+        '/opt/ade/bin/ade-net-resume', '--lead', SUCC, '--quota', '--apply',
+    ]
+    assert '--transition-below' not in doc['ProgramArguments']
+    assert doc['StartInterval'] == 60 and doc['EnvironmentVariables'] == {'PATH': '/usr/local/bin:/usr/bin:/bin'}
+    assert (plist_path.stat().st_mode & 0o777) == 0o644
+    assert [p.name for p in plist_path.parent.iterdir()] == ['com.djbclark.ade-net-resume.plist']
+    assert reloaded == [(plist_path, 'com.djbclark.ade-net-resume')]
+
+    # Idempotent re-run: keeps outcome, does not reload again.
+    again = service.finish(path)
+    assert again['net_resume_plist'] == 'repointed' and len(reloaded) == 1
+
+
+def test_finish_net_resume_plist_darwin_runner_calls_bootout_and_bootstrap(setup, tmp_path, monkeypatch):
+    plist_path = tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead', PRED, '--quota', '--apply'])
+    monkeypatch.setattr(ss.sys, 'platform', 'darwin')
+    service, native, path = finished_up_to_archive(setup)
+    service.net_resume_plist = plist_path
+
+    out = service.finish(path)
+    assert out['net_resume_plist'] == 'repointed'
+    uid = os.getuid()
+    assert native.launchctl_calls == [
+        ['launchctl', 'bootout', f'gui/{uid}/com.djbclark.ade-net-resume'],
+        ['launchctl', 'bootstrap', f'gui/{uid}', str(plist_path)],
+    ]
+
+
+def test_finish_net_resume_plist_leaves_lead_file_and_other_chains_and_symlinks_alone(setup, tmp_path):
+    plist_path = tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'
+    reloaded = []
+    service, native, path = finished_up_to_archive(setup)
+    service.net_resume_plist = plist_path
+    service.net_resume_reloader = lambda p, lbl: reloaded.append((p, lbl))
+
+    # Absent plist -> absent, nothing created.
+    out = service.finish(path)
+    assert out['net_resume_plist'] == 'absent' and not plist_path.exists() and not reloaded
+
+    # --lead-file plist -> uses-lead-file, untouched.
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead-file', '/tmp/lead', '--apply'])
+    before = plist_path.read_bytes()
+    assert service.finish(path)['net_resume_plist'] == 'uses-lead-file'
+    assert plist_path.read_bytes() == before and not reloaded
+
+    # Another chain's lead -> unchanged-not-predecessor.
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead', OTHER, '--apply'])
+    before = plist_path.read_bytes()
+    assert service.finish(path)['net_resume_plist'] == 'unchanged-not-predecessor'
+    assert plist_path.read_bytes() == before and not reloaded
+
+    # Already naming successor -> already-successor, no reload.
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead', SUCC, '--apply'])
+    assert service.finish(path)['net_resume_plist'] == 'already-successor' and not reloaded
+
+    # Symlink -> unchanged-not-regular, never followed.
+    target = tmp_path / 'real.plist'
+    _write_net_resume_plist(target, ['/opt/ade/bin/ade-net-resume', '--lead', PRED, '--apply'])
+    plist_path.unlink()
+    plist_path.symlink_to(target)
+    before = target.read_bytes()
+    assert service.finish(path)['net_resume_plist'] == 'unchanged-not-regular'
+    assert plist_path.is_symlink() and target.read_bytes() == before and not reloaded
+
+
+def test_finish_net_resume_plist_reload_failure_and_malformed_xml_are_non_fatal(setup, tmp_path):
+    plist_path = tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead', PRED, '--apply'])
+    service, native, path = finished_up_to_archive(setup)
+    service.net_resume_plist = plist_path
+
+    def boom(p, lbl):
+        raise RuntimeError('launchctl bootstrap exited 5')
+
+    service.net_resume_reloader = boom
+    out = service.finish(path)
+    assert out['status'] == 'archived' and out['net_resume_plist'] == 'error'
+    assert 'launchctl bootstrap exited 5' in out['net_resume_plist_error']
+
+    # Re-run retries reload cleanly once launchctl recovers.
+    retried = []
+    service.net_resume_reloader = lambda p, lbl: retried.append((p, lbl))
+    again = service.finish(path)
+    assert again['net_resume_plist'] == 'repointed' and 'net_resume_plist_error' not in again
+    assert retried == [(plist_path, 'com.djbclark.ade-net-resume')]
+
+    # Malformed XML plist is recorded as error without failing finish.
+    plist_path.write_text('not xml at all')
+    bad = service.finish(path)
+    assert bad['status'] == 'archived' and bad['net_resume_plist'] == 'error'
+
+
+def test_failed_archive_never_touches_net_resume_plist(setup, tmp_path):
+    plist_path = tmp_path / 'LaunchAgents' / 'com.djbclark.ade-net-resume.plist'
+    _write_net_resume_plist(plist_path, ['/opt/ade/bin/ade-net-resume', '--lead', PRED, '--apply'])
+    before = plist_path.read_bytes()
+    service, native, path = finished_up_to_archive(setup)
+    service.net_resume_plist = plist_path
+    native.archive_result = (1, '', envelope('ARCHIVE_FAILED', 'busy'))
+    with pytest.raises(ss.NativeError):
+        service.finish(path)
+    assert plist_path.read_bytes() == before
+    assert 'net_resume_plist' not in json.loads(path.read_text())
+
+
+# --- 2026-11-23: PR #955 carried review LOWs (1-4) -------------------------------------------------------------------
+
+@pytest.mark.parametrize('val', ['N/A', 'n/a', 'na', 'NA', 'TBD', 'tbd', 'unknown', 'Unknown'])
+def test_pr955_low1_frontmatter_null_tokens_return_none(tmp_path, val):
+    cp = tmp_path / 'cp.md'
+    cp.write_text(f'---\nrepo: {val}\n---\nbody\n')
+    assert ss.checkpoint_frontmatter_repo(str(cp)) is None
+
+
+def test_pr955_low2_resolve_sibling_resolves_symlinked_module_first(tmp_path, monkeypatch):
+    real_dir = tmp_path / 'real_bin'
+    link_dir = tmp_path / 'link_bin'
+    real_dir.mkdir()
+    link_dir.mkdir()
+    real_mod = real_dir / 'ade_self_session.py'
+    real_mod.write_text('# stub\n')
+    real_worker = real_dir / 'ade-worker-run'
+    real_worker.write_text('#!/bin/sh\n')
+    link_mod = link_dir / 'ade_self_session.py'
+    link_mod.symlink_to(real_mod)
+    monkeypatch.setattr(ss, '__file__', str(link_mod))
+    cmd, _, _ = ss.build_rename_lead_command({'successor': SUCC})
+    assert cmd.startswith(str(real_worker.resolve()) + ' ')
+
+
+def test_pr955_low3_frontmatter_multiline_blank_line_continuation(tmp_path):
+    cp_cont = tmp_path / 'cont.md'
+    cp_cont.write_text('---\nrepo: stayturgid\n\n  other-repo\n---\n')
+    assert ss.checkpoint_frontmatter_repo(str(cp_cont)) is None
+
+    cp_ok = tmp_path / 'ok.md'
+    cp_ok.write_text('---\nrepo: stayturgid\n\nother: value\n---\n')
+    assert ss.checkpoint_frontmatter_repo(str(cp_ok)) == 'stayturgid'
+
+
+def test_pr955_low4_advise_lead_window_guards_resolve_and_unexpected_errors(setup, monkeypatch):
+    # _resolve_sibling falls back to os.path.abspath when Path.resolve raises OSError/RuntimeError.
+    orig_resolve = Path.resolve
+
+    def fail_resolve(self, *args, **kwargs):
+        if self.name in ('ade_self_session.py', 'ade-worker-run'):
+            raise RuntimeError('symlink loop')
+        return orig_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'resolve', fail_resolve)
+    cmd, _, _ = ss.build_rename_lead_command({'successor': SUCC})
+    assert 'ade-worker-run rename-lead --lead ' + SUCC in cmd
+    monkeypatch.setattr(Path, 'resolve', orig_resolve)
+
+    # Unexpected non-SessionError inside advise_lead_window is caught and recorded without failing finish.
+    service, native, path = finished_up_to_archive(setup)
+    monkeypatch.setattr(ss, 'build_rename_lead_command', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
+    out = service.finish(path)
+    assert out['status'] == 'archived'
+    assert out['lead_window']['state'] == 'unknown'
+    assert 'RuntimeError: boom' in out['lead_window']['reason']

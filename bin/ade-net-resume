@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -124,11 +125,52 @@ def done_line(text, expected=None):
     return False
 
 
+LEAD_FILE_LIMIT = 4096
+
+
 def agent_id(value):
     try:
         return str(uuid.UUID(value))
     except (ValueError, TypeError, AttributeError) as exc:
         raise ScanError("expected full agent UUID") from exc
+
+
+def read_lead_file(path):
+    """Read the first non-empty line of a bounded regular lead file (no symlinks) as a full agent UUID."""
+    p = Path(path).expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(p, flags)
+    except OSError as exc:
+        raise ScanError(f"lead file unreadable ({exc.strerror or type(exc).__name__})") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ScanError("lead file must be a regular file")
+        if st.st_size > LEAD_FILE_LIMIT:
+            raise ScanError("lead file is too large")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, LEAD_FILE_LIMIT + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > LEAD_FILE_LIMIT:
+                raise ScanError("lead file is too large")
+    except OSError as exc:
+        raise ScanError(f"lead file unreadable ({exc.strerror or type(exc).__name__})") from exc
+    finally:
+        os.close(fd)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ScanError("lead file is not valid UTF-8") from exc
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first:
+        raise ScanError("lead file is empty")
+    return agent_id(first)
 
 
 def final_lines(provider, logs):
@@ -151,11 +193,19 @@ def transient(provider, logs):
 
 
 class Scanner:
-    def __init__(self, lead, state, apply=False, duration=120, max_error_age_minutes=30, quota=False,
+    def __init__(self, lead=None, state=None, apply=False, duration=120, max_error_age_minutes=30, quota=False,
                  only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None,
-                 transition_below=None):
-        self.pinned = self.lead = agent_id(lead)  # --lead as installed; scan() follows it to the current lead
-        self.leads = frozenset({self.lead})  # the current lead and the archived leads it replaced
+                 transition_below=None, lead_file=None):
+        if (lead is None) == (lead_file is None):
+            raise ScanError("provide exactly one of --lead or --lead-file")
+        self.lead_file = Path(lead_file).expanduser() if lead_file is not None else None
+        if self.lead_file is not None:
+            self.pinned = None
+            self.lead = None
+            self.leads = frozenset()
+        else:
+            self.pinned = self.lead = agent_id(lead)  # --lead as installed; scan() follows it to the current lead
+            self.leads = frozenset({self.lead})  # the current lead and the archived leads it replaced
         self.state = state
         self.apply = apply
         self.max_error_age = max_error_age_minutes * 60
@@ -192,10 +242,13 @@ class Scanner:
         return data
 
     def resolve_lead(self):
-        """Follow `--lead` through completed self-handoffs (bin/ade_lead_succession.py) to the agent that holds the role now.
+        """Follow `--lead` (or the UUID freshly read from `--lead-file` each tick) through completed self-handoffs
+        (bin/ade_lead_succession.py) to the agent that holds the role now.
         Returns its record, or None when that agent is archived or no longer exists: a lead retired without a successor must
         end the scheduled job quietly, not crash-loop it (2026-11-14: exit 2 every minute until load-watch stopped it).
-        A Paseo outage still raises ScanError."""
+        A Paseo outage or unreadable/malformed `--lead-file` still raises ScanError."""
+        if self.lead_file is not None:
+            self.pinned = read_lead_file(self.lead_file)
         try:
             self.lead = succ.effective_lead(self.pinned)
             self.leads = frozenset(succ.lineage(self.lead)) | {self.pinned}
@@ -951,8 +1004,10 @@ class Scanner:
                     if not (last and last.get("lead") == self.lead):
                         # once per (pinned, lead) in the ledger: launchd starts a process every minute
                         self.event(history, None, "skip-lead-retired", pinned=self.pinned)
+                        hint = (f"update lead file {self.lead_file} with a live lead UUID"
+                                if self.lead_file is not None else "reinstall the job with a live --lead")
                         print(f"ade-net-resume: lead {self.lead} (pinned {self.pinned}) is archived or unknown and no "
-                              "completed self-handoff replaced it; nothing to resume (reinstall the job with a live --lead)",
+                              f"completed self-handoff replaced it; nothing to resume ({hint})",
                               file=sys.stderr)
                     return 0
                 agents = json.loads(self.cli("ls", "-g", "--background", "--json"))
@@ -1026,7 +1081,10 @@ class Scanner:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lead", required=True, help="full UUID; every live agent in this chain is eligible")
+    lead_group = parser.add_mutually_exclusive_group(required=True)
+    lead_group.add_argument("--lead", help="full UUID; every live agent in this chain is eligible")
+    lead_group.add_argument("--lead-file", type=Path, metavar="PATH",
+                            help="regular file (no symlinks) whose first non-empty line holds the lead UUID; re-read each tick")
     parser.add_argument("--apply", action="store_true", help="send the fixed continuation prompt")
     parser.add_argument("--state-dir", type=Path, default=Path.home()/".local/state/ade/net-resume",
                         help="shared cap ledger and lock; use the same directory for every invocation")
@@ -1062,7 +1120,7 @@ def main(argv=None):
     try:
         scanner = Scanner(args.lead, args.state_dir, args.apply, args.watch or 120, args.max_error_age_minutes,
                           args.quota, args.only_agent, args.quota_per_pool, args.quota_grace_seconds,
-                          transition_below=args.transition_below)
+                          transition_below=args.transition_below, lead_file=args.lead_file)
         while True:
             rc = scanner.scan()
             if not args.watch:

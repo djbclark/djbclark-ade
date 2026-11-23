@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import plistlib
 import re
 import shlex
 import stat
@@ -80,6 +81,15 @@ WAIT_CODES = (AGENT_RUNNING, 'PREDECESSOR_NOT_IDLE')  # kept equal to ade_lead_s
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
 SUPERVISOR_STATE_ENV = 'ADE_SUPERVISOR_STATE_DIR'  # bin/ade-supervisor-scan's state dir; its `lead` file names the lead
+NET_RESUME_PLIST_ENV = 'ADE_NET_RESUME_PLIST'  # optional override for ~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist
+DEFAULT_NET_RESUME_PLIST = Path('Library/LaunchAgents/com.djbclark.ade-net-resume.plist')
+DEFAULT_QUOTA_FLOOR = 15.0  # matches route_agent.py default min_headroom
+MAX_AUTO_ROUTE_ATTEMPTS = 6
+_QUOTA_ENV_KEYS = (
+    'ROUTE_AGENT_AIUSE', 'ROUTE_AGENT_AIUSE_JSON', 'ROUTE_AGENT_AIUSE_BIN', 'ROUTE_AGENT_AIUSE_TIMEOUT',
+    'AIUSE_SNAPSHOT', 'ROUTE_AGENT_PASEO', 'ROUTE_AGENT_PASEO_BIN', 'ROUTE_AGENT_PASEO_TIMEOUT',
+    'ROUTE_AGENT_PASEO_USAGE_JSON',
+)
 STDERR_CAP = 64 * 1024
 _KEYWORDS = (r'(?:token|secret|password|passwd|authorization|bearer|api[_-]?key|access[_-]?key|private[_-]?key'
              r'|credential)\w*')
@@ -256,10 +266,18 @@ WS_REPO_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 WS_NAME_LIMIT = 100
 WS_BARE_LEAD_RE = re.compile(r'LEAD [A-Za-z0-9][A-Za-z0-9._-]*')
 WS_DEFAULT_REPO_RESERVE = 32  # room left for an inferred repo name when `--repo` is not emitted
-_FRONTMATTER_NULLS = frozenset(('null', 'none', 'true', 'false', '~'))
+_FRONTMATTER_NULLS = frozenset(('null', 'none', 'true', 'false', '~', 'n/a', 'na', 'tbd', 'unknown'))
 _FRONTMATTER_REPO_LINE = re.compile(r'^repo:[ \t]*(.*)$')
 _QUOTED_DOUBLE = re.compile(r'^"([^"\n]*)"(?:[ \t]+#.*)?$')
 _QUOTED_SINGLE = re.compile(r"^'([^'\n]*)'(?:[ \t]+#.*)?$")
+
+
+def _resolve_sibling(name: str) -> str:
+    """Resolve a sibling script in this module's canonical directory, falling back to abspath on OSError/RuntimeError."""
+    try:
+        return str(Path(__file__).resolve().with_name(name).resolve())
+    except (OSError, RuntimeError):
+        return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), name))
 
 
 def checkpoint_frontmatter_repo(checkpoint_path):
@@ -293,8 +311,11 @@ def checkpoint_frontmatter_repo(checkpoint_path):
     for idx in range(1, end):
         m = _FRONTMATTER_REPO_LINE.match(lines[idx])
         if m:
-            if (idx + 1 < end and lines[idx + 1][:1] in (' ', '\t')
-                    and lines[idx + 1].strip() and not lines[idx + 1].lstrip().startswith('#')):
+            nxt = idx + 1
+            while nxt < end and not lines[nxt].strip():
+                nxt += 1
+            if (nxt < end and lines[nxt][:1] in (' ', '\t')
+                    and not lines[nxt].lstrip().startswith('#')):
                 return None
             matches.append(m.group(1))
     if len(matches) != 1:
@@ -380,7 +401,7 @@ def advise_window_middle(record, repo=None, row=None):
 
 def build_rename_lead_command(record, row=None):
     """Build `(command, repo, middle)` for `ade-worker-run rename-lead` using its resolved absolute path."""
-    worker_run = str(Path(__file__).with_name('ade-worker-run').resolve())
+    worker_run = _resolve_sibling('ade-worker-run')
     argv = [worker_run, 'rename-lead', '--lead', str(record.get('successor'))]
     repo = checkpoint_frontmatter_repo(record.get('checkpoint'))
     if repo is not None:
@@ -487,7 +508,8 @@ def write_atomic(path: Path, data: bytes, mode=None) -> None:
 
 class Service:
     def __init__(self, state: Path, home: Path, *, env=None, runner=None,
-                 planner=None, verifier=None, clock=None, sleep=None, progress=None, evidence_reader=None):
+                 planner=None, verifier=None, clock=None, sleep=None, progress=None, evidence_reader=None,
+                 quota_checker=None, net_resume_plist=None, net_resume_reloader=None):
         self.state = state.resolve()
         self.home = home.resolve()
         self.env = dict(os.environ if env is None else env)
@@ -495,6 +517,9 @@ class Service:
         self.planner = planner
         self.verifier = verifier
         self.evidence_reader = evidence_reader
+        self.quota_checker = quota_checker
+        self.net_resume_plist = net_resume_plist
+        self.net_resume_reloader = net_resume_reloader
         self.clock = clock or time.monotonic  # injected in tests so a wait never sleeps for real
         self.sleep = sleep or time.sleep
         self.progress = progress or (lambda message: None)
@@ -695,8 +720,136 @@ class Service:
             raise SessionError('successor unattended mode not verified')
         return row
 
+    def check_pool_headroom(self, provider, model, cwd):
+        """Evaluate `provider`/`model` pool headroom against router floors; fail-safe (returns None) if unreadable.
+
+        Uses an injected `quota_checker` when provided, else `route_agent` (`load_snapshot`, `dispatch_service_name`,
+        router floors: `DEFAULT_QUOTA_FLOOR`, `reserve_floor`, `plenty_min`, `estimate_floor`, and Fable sublimit).
+        Missing/unreadable `aiuse` or unmeasured pools return `scarce: False` (or None) so offline runs never break.
+        """
+        if self.quota_checker is not None:
+            try:
+                return self.quota_checker(provider, model, cwd)
+            except Exception:  # noqa: BLE001 - fail-safe when quota probe errors
+                return None
+        try:
+            import route_agent
+        except Exception:  # noqa: BLE001 - standalone copy or import failure
+            return None
+        saved_env = {}
+        try:
+            for key in _QUOTA_ENV_KEYS:
+                if key in self.env and os.environ.get(key) != self.env[key]:
+                    saved_env[key] = os.environ.get(key)
+                    os.environ[key] = self.env[key]
+            quota, _age = route_agent.load_snapshot(bypass_memo=True)
+            if not isinstance(quota, dict) or not quota:
+                return None
+            pool = route_agent.dispatch_service_name(provider, model)
+            svc = route_agent.BY_NAME.get(pool)
+            role_kind = 'judgment'
+            if svc is not None and 'judgment' not in (svc.good_at or {}) and 'code' in (svc.good_at or {}):
+                role_kind = 'code'
+            floor = DEFAULT_QUOTA_FLOOR
+            info = quota.get(pool) if isinstance(quota.get(pool), dict) else {}
+            if svc is not None:
+                floor = max(floor, float(svc.reserve_floor or 0.0))
+                if role_kind in (svc.plenty_kinds or ()):
+                    floor = max(floor, float(route_agent.PLENTY_MIN))
+                repo = route_agent.repo_of(cwd)
+                est_floor, _cap = route_agent.estimate_floor(svc, role_kind, info, repo)
+                floor = max(floor, float(est_floor or 0.0))
+            raw_rem = info.get('remaining')
+            remaining = (
+                float(raw_rem)
+                if isinstance(raw_rem, (int, float)) and not isinstance(raw_rem, bool) and math.isfinite(raw_rem)
+                else None
+            )
+            scarce = remaining is not None and remaining < floor
+            window = None
+            if pool == 'claude' and isinstance(model, str) and 'fable' in model.lower():
+                fable_raw = (info.get('sublimits') or {}).get('fable')
+                fable_rem = (
+                    float(fable_raw)
+                    if isinstance(fable_raw, (int, float)) and not isinstance(fable_raw, bool) and math.isfinite(fable_raw)
+                    else None
+                )
+                fable_floor = float((route_agent.frontier_gate() or {}).get('frontier1_min_left', DEFAULT_QUOTA_FLOOR))
+                if fable_rem is not None and fable_rem < fable_floor:
+                    if not scarce or (remaining is not None and fable_rem < remaining):
+                        remaining, floor, scarce, window = fable_rem, fable_floor, True, 'fable'
+            return {'pool': pool, 'remaining': remaining, 'floor': floor, 'scarce': scarce, 'window': window}
+        except Exception:  # noqa: BLE001 - fail-safe on unreadable quota/snapshot
+            return None
+        finally:
+            for key, old in saved_env.items():
+                if old is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old
+
+    def auto_route_scarce(self, source, source_pool, requested_mode, cwd):
+        """Find an eligible unattended-mode-capable alternative pool via `route_agent.py plan --json`.
+
+        Tries `judgment` first, then `code`, always excluding `source_pool` and any candidate whose provider/model
+        lacks a verified concrete identifier or unattended mode plan. Returns a candidate dict or None.
+        """
+        route_script = _resolve_sibling('route_agent.py')
+        base_excluded = set()
+        if isinstance(source_pool, str) and re.fullmatch(r'[a-zA-Z0-9_.-]+', source_pool):
+            base_excluded.add(source_pool)
+        for kind in ('judgment', 'code'):
+            excluded = set(base_excluded)
+            for _ in range(MAX_AUTO_ROUTE_ATTEMPTS):
+                argv = [sys.executable, route_script, 'plan', '--kinds', kind, '--json',
+                        '--lead', self.actor(), '--slice', 'self-handoff', '--cwd', cwd]
+                for pool in sorted(excluded):
+                    argv.extend(('--exclude', pool))
+                try:
+                    result = self.runner(argv, env=self.env, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        break
+                    data = json.loads(result.stdout)
+                    slices = data.get('slices')
+                    if data.get('stale') is not False or not isinstance(slices, list) or len(slices) != 1:
+                        break
+                    row = slices[0]
+                    if not isinstance(row, dict):
+                        break
+                except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+                    break
+                svc_name = row.get('service')
+                agent = row.get('agent')
+                raw_model = row.get('model')
+                if (not isinstance(svc_name, str) or not svc_name or svc_name in excluded
+                        or not re.fullmatch(r'[a-zA-Z0-9_.-]+', svc_name)):
+                    break
+                if not isinstance(agent, str) or not isinstance(raw_model, str) or not raw_model.strip():
+                    excluded.add(svc_name)
+                    continue
+                try:
+                    spec = shlex.split(raw_model)
+                    if not spec or len(spec) not in (1, 3) or (len(spec) == 3 and spec[1] != '--effort'):
+                        raise SessionError('invalid routed model spec')
+                    target_provider, target_model = provider_model_ident(f'{agent}/{spec[0]}')
+                    effort = thinking_ident(spec[2]) if len(spec) == 3 else None
+                    if target_provider == source.get('Provider') and target_model == source.get('Model'):
+                        raise SessionError('candidate matches scarce predecessor')
+                    candidate_plan = self.mode_plan(source, requested_mode, target_provider=target_provider)
+                except (SessionError, ValueError):
+                    excluded.add(svc_name)
+                    continue
+                rem = row.get('remaining')
+                remaining = float(rem) if isinstance(rem, (int, float)) and not isinstance(rem, bool) and math.isfinite(rem) else None
+                return {
+                    'service': svc_name, 'provider': target_provider, 'model': target_model,
+                    'thinking': effort, 'remaining': remaining, 'kind': kind, 'mode_plan': candidate_plan,
+                }
+        return None
+
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
-                requested_title=None, requested_role=None, route_kind=None, requested_provider=None):
+                requested_title=None, requested_role=None, route_kind=None, requested_provider=None,
+                allow_scarce_pool=False):
         predecessor = self.actor()
         role_for = _coord().role_for
         CoordinationError = _coord().CoordinationError
@@ -776,6 +929,8 @@ class Service:
             placement = 'existing' if self.workspace_exists(workspace) else 'new-local'
             route = self.route_successor(route_kind, excluded, cwd) if route_kind else None
             launch_source = source
+            auto_route = None
+            quota_reroute = None
             if route:
                 if requested_mode is not None:
                     raise SessionError('routed Pi handoff cannot preserve a restrictive mode')
@@ -786,9 +941,62 @@ class Service:
                 target_provider, target_model = explicit_provider
                 launch_source = {**source, 'Provider': target_provider, 'Model': target_model}
                 plan = self.mode_plan(source, requested_mode, target_provider=target_provider)
+                target_quota = self.check_pool_headroom(target_provider, target_model, cwd)
+                if isinstance(target_quota, dict) and target_quota.get('scarce'):
+                    self.progress(
+                        f'warning: requested target {target_provider}/{target_model} '
+                        f'(pool {target_quota["pool"]}) is under the router quota floor '
+                        f'({target_quota["remaining"]:.0f}% remaining < {target_quota["floor"]:.0f}% floor); '
+                        'honoring explicit --provider'
+                    )
             else:
-                plan = self.mode_plan(source, requested_mode)
-            thinking = explicit_thinking or (route.get('thinking') if route else None)
+                source_quota = self.check_pool_headroom(source['Provider'], source['Model'], cwd)
+                if isinstance(source_quota, dict) and source_quota.get('scarce'):
+                    if allow_scarce_pool:
+                        self.progress(
+                            f'quota-floor guard bypassed via --allow-scarce-pool: predecessor pool '
+                            f'{source_quota["pool"]} at {source_quota["remaining"]:.0f}% remaining '
+                            f'(< {source_quota["floor"]:.0f}% floor)'
+                        )
+                        plan = self.mode_plan(source, requested_mode)
+                    else:
+                        auto_route = self.auto_route_scarce(source, source_quota['pool'], requested_mode, cwd)
+                        if auto_route is None:
+                            raise SessionError(
+                                f'predecessor pool {source_quota["pool"]} is under the router quota floor '
+                                f'({source_quota["remaining"]:.0f}% remaining < {source_quota["floor"]:.0f}% floor) '
+                                'and no eligible unattended alternative pool is available; '
+                                'pass --provider PROVIDER/MODEL or --allow-scarce-pool to override'
+                            )
+                        launch_source = {**source, 'Provider': auto_route['provider'], 'Model': auto_route['model']}
+                        plan = auto_route['mode_plan']
+                        routed_to = f"{auto_route['provider']}/{auto_route['model']}"
+                        quota_reroute = {
+                            'source_pool': source_quota['pool'],
+                            'source_remaining_pct': source_quota['remaining'],
+                            'floor_pct': source_quota['floor'],
+                            'routed_to': routed_to,
+                            'target_service': auto_route['service'],
+                            'route_kind': auto_route['kind'],
+                        }
+                        if source_quota.get('window'):
+                            quota_reroute['window'] = source_quota['window']
+                        if auto_route.get('remaining') is not None:
+                            quota_reroute['target_remaining_pct'] = auto_route['remaining']
+                        rem_note = (f', {auto_route["remaining"]:.0f}% remaining'
+                                    if auto_route.get('remaining') is not None else '')
+                        self.progress(
+                            f'quota-floor guard: predecessor pool {source_quota["pool"]} at '
+                            f'{source_quota["remaining"]:.0f}% remaining (< {source_quota["floor"]:.0f}% floor); '
+                            f'auto-routed successor to {routed_to} (service {auto_route["service"]}{rem_note})'
+                        )
+                else:
+                    plan = self.mode_plan(source, requested_mode)
+            thinking = (
+                explicit_thinking
+                or (route.get('thinking') if route else None)
+                or (auto_route.get('thinking') if auto_route else None)
+            )
             if thinking is None:
                 # Inherit the predecessor's own level (2026-11-14: a lead at `high` handed off to
                 # a successor at `auto`). Unknown, unusable or `auto` source: launch as before.
@@ -806,12 +1014,16 @@ class Service:
                       'model': launch_source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
                       'checkpoint': preserved, 'checkpoint_sha256': sha,
                       'status': 'creation-unknown', 'ack': None, 'record': str(path)}
-            if explicit_provider is not None and (
+            if (explicit_provider is not None or auto_route is not None) and (
                     launch_source['Provider'] != source['Provider'] or launch_source['Model'] != source['Model']):
                 record['predecessor_provider'] = source['Provider']
                 record['predecessor_model'] = source['Model']
                 if launch_source['Provider'] != source['Provider']:
                     record['cross_provider'] = True
+            if quota_reroute is not None:
+                record['quota_reroute'] = quota_reroute
+            if allow_scarce_pool:
+                record['allow_scarce_pool'] = True
             if route:
                 record.update(requires_first_turn=True, route_kind=route_kind, pool=route['service'],
                               route=route, attempts=retry_history, excluded_pools=excluded)
@@ -1353,6 +1565,7 @@ class Service:
             if record['status'] == 'archived':
                 self.rebind_claims(record, target)  # idempotent: a re-run after a failed rebind retries it
                 self.repoint_supervisor_lead(record, target)  # idempotent: a re-run after a failed write retries it
+                self.repoint_net_resume_plist(record, target)  # idempotent: a re-run after a failed write/reload retries it
                 self.retire_predecessor_name(record, target)  # a re-run after a failed or skipped-too-early rename retries it
                 self.advise_lead_window(record, target)
                 return record
@@ -1468,6 +1681,7 @@ class Service:
             self.save(target, record)
             self.rebind_claims(record, target)
             self.repoint_supervisor_lead(record, target)
+            self.repoint_net_resume_plist(record, target)
             self.retire_predecessor_name(record, target)
             self.advise_lead_window(record, target)
             return record
@@ -1582,8 +1796,11 @@ class Service:
                     suffix = (' ' + ' '.join(hints)) if hints else ''
                     info.update(state='rename-advised', command=command)
                     self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}{suffix}')
-        except SessionError as error:
-            info['reason'] = bounded(str(error), MESSAGE_LIMIT)
+        except Exception as error:  # noqa: BLE001 - recorded, never raised
+            info['reason'] = bounded(
+                str(error) if isinstance(error, SessionError) else f'{type(error).__name__}: {error}',
+                MESSAGE_LIMIT,
+            )
         record['lead_window'] = info
         self.save(target, record)
 
@@ -1631,6 +1848,101 @@ class Service:
             record['supervisor_lead_error'] = error
         else:
             record.pop('supervisor_lead_error', None)
+        self.save(target, record)
+
+    def net_resume_plist_file(self):
+        """Legacy launchd plist for `com.djbclark.ade-net-resume`: injected path, else `$ADE_NET_RESUME_PLIST`
+        (Service env first, then process env), else `~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist`."""
+        if self.net_resume_plist is not None:
+            return Path(self.net_resume_plist)
+        override = self.env.get(NET_RESUME_PLIST_ENV) or os.environ.get(NET_RESUME_PLIST_ENV)
+        return Path(override).expanduser() if override else Path.home() / DEFAULT_NET_RESUME_PLIST
+
+    def _reload_net_resume_plist(self, path: Path, label: str) -> None:
+        if self.net_resume_reloader is not None:
+            self.net_resume_reloader(path, label)
+            return
+        if sys.platform != 'darwin':
+            return
+        uid = os.getuid()
+        self.runner(['launchctl', 'bootout', f'gui/{uid}/{label}'],
+                    env=self.env, capture_output=True, text=True, timeout=30)
+        boot = self.runner(['launchctl', 'bootstrap', f'gui/{uid}', str(path)],
+                           env=self.env, capture_output=True, text=True, timeout=30)
+        if boot.returncode != 0:
+            detail = bounded((boot.stderr or boot.stdout or '').strip(), 200)
+            raise RuntimeError(f'launchctl bootstrap exited {boot.returncode}' + (f': {detail}' if detail else ''))
+
+    def repoint_net_resume_plist(self, record, target):
+        """Sync a legacy `--lead <predecessor>` `com.djbclark.ade-net-resume.plist` to the successor (2026-11-23).
+
+        Only when the plist exists, is a regular file (never symlink), parses via `plistlib`, has no `--lead-file`
+        argument, and carries a single `--lead` argument naming the archived predecessor: another chain's lead or a
+        `--lead-file` plist is never modified. Rewrites atomically (preserving mode and every other key/arg verbatim,
+        never adding `--transition-below`), then reloads via `launchctl bootout` + `launchctl bootstrap` on macOS.
+        Outcome in `record['net_resume_plist']`: `repointed`, `already-successor`, `uses-lead-file`,
+        `unchanged-not-predecessor`, `unchanged-not-regular`, `absent`, or `error` (reason in
+        `net_resume_plist_error`). Never fails `finish`; a re-run retries an error."""
+        outcome, error = 'absent', None
+        try:
+            successor, predecessor = record.get('successor'), record.get('predecessor')
+            path = self.net_resume_plist_file()
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                outcome = 'unchanged-not-regular'
+            elif path.exists():
+                raw = read_regular(path, 262144)
+                fmt = plistlib.FMT_BINARY if raw.startswith(b'bplist') else plistlib.FMT_XML
+                doc = plistlib.loads(raw)
+                argv = doc.get('ProgramArguments') if isinstance(doc, dict) else None
+                if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
+                    outcome, error = 'error', 'plist missing string ProgramArguments'
+                elif any(a == '--lead-file' or a.startswith('--lead-file=') for a in argv):
+                    outcome = 'uses-lead-file'
+                else:
+                    matches = []
+                    for i, arg in enumerate(argv):
+                        if arg == '--lead' and i + 1 < len(argv):
+                            matches.append(('pair', i + 1, argv[i + 1]))
+                        elif arg.startswith('--lead='):
+                            matches.append(('eq', i, arg.split('=', 1)[1]))
+                    if len(matches) > 1:
+                        outcome, error = 'error', 'multiple --lead arguments in plist'
+                    elif not matches:
+                        outcome = 'unchanged-not-predecessor'
+                    else:
+                        kind_flag, idx, current_lead = matches[0]
+                        label = doc.get('Label')
+                        safe_label = (label if isinstance(label, str) and re.fullmatch(r'[A-Za-z0-9._-]+', label)
+                                      else 'com.djbclark.ade-net-resume')
+                        if current_lead == successor:
+                            if record.get('net_resume_plist') == 'error' and record.get('net_resume_plist_rewritten') is True:
+                                self._reload_net_resume_plist(path, safe_label)
+                                record.pop('net_resume_plist_rewritten', None)
+                                outcome = 'repointed'
+                            else:
+                                outcome = 'repointed' if record.get('net_resume_plist') == 'repointed' else 'already-successor'
+                        elif current_lead != predecessor:
+                            outcome = 'unchanged-not-predecessor'
+                        else:
+                            ident(successor)  # must be a valid full UUID
+                            updated = list(argv)
+                            updated[idx] = successor if kind_flag == 'pair' else ('--lead=' + successor)
+                            doc['ProgramArguments'] = updated
+                            mode = stat.S_IMODE(path.stat().st_mode)
+                            write_atomic(path, plistlib.dumps(doc, fmt=fmt, sort_keys=False), mode)
+                            record['net_resume_plist_rewritten'] = True
+                            self._reload_net_resume_plist(path, safe_label)
+                            record.pop('net_resume_plist_rewritten', None)
+                            outcome = 'repointed'
+        except Exception as exc:  # noqa: BLE001 - recorded, never raised
+            outcome, error = 'error', bounded(f'{type(exc).__name__}: {exc}', MESSAGE_LIMIT)
+        if outcome == 'repointed' and record.get('net_resume_plist') != 'repointed':
+            self.progress(f'net-resume plist {self.net_resume_plist_file()} now names the successor {record["successor"]}')
+        record['net_resume_plist'] = outcome
+        if error:
+            record['net_resume_plist_error'] = error
+        else:
+            record.pop('net_resume_plist_error', None)
         self.save(target, record)
 
     def rebind_claims(self, record, target):
