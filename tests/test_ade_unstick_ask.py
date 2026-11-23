@@ -104,21 +104,31 @@ if argv and argv[0] == "send":
     if rc not in (0, 5):
         sys.stderr.write(data.get("send_err", "send failed"))
         sys.exit(rc)
+    target = argv[argv.index("--") + 1] if "--" in argv else argv[-2]
     # Apply optional post-steer state mutation
     if "after_steer_inspect" in data:
         data["inspect"].update(data["after_steer_inspect"])
     if "after_steer_logs" in data:
         data["logs"].update(data["after_steer_logs"])
     save()
-    print(json.dumps(data.get("send_out", {"status": "queued" if rc == 5 else "sent"})))
+    if "send_raw_out" in data:
+        sys.stdout.write(data["send_raw_out"])
+    else:
+        default_out = {"agentId": target, "status": "queued" if rc == 5 else "sent"}
+        print(json.dumps(data.get("send_out", default_out)))
     sys.exit(rc)
 
 if len(argv) >= 3 and argv[0] == "agent" and argv[1] == "stop":
     rc = data.get("stop_rc", 0)
+    if data.get("stop_err"):
+        sys.stderr.write(data["stop_err"])
     if rc != 0:
-        sys.stderr.write(data.get("stop_err", "stop failed"))
         sys.exit(rc)
-    print(json.dumps({"stopped": True, "agentId": argv[2]}))
+    if "stop_raw_out" in data:
+        sys.stdout.write(data["stop_raw_out"])
+    else:
+        default_stop = {"stoppedCount": 1, "agentIds": [argv[2]]}
+        print(json.dumps(data.get("stop_out", default_stop)))
     sys.exit(0)
 
 sys.stderr.write(f"unexpected argv: {argv!r}\\n")
@@ -442,7 +452,8 @@ def test_apply_steer_succeeds_and_never_cancels(tmp_path):
         "logs": {A_STUCK: make_hung_logs(A_STUCK)},
         "send_rc": 5,  # agent-to-agent accepted/queued exit code
         "after_steer_inspect": {
-            A_STUCK: make_inspect(A_STUCK, status="running", updated_at=later_ts),
+            # Real agent-side progress: Status left running -> idle
+            A_STUCK: make_inspect(A_STUCK, status="idle", updated_at=later_ts),
         },
     }
     fake = FakePaseo(tmp_path, state)
@@ -459,6 +470,140 @@ def test_apply_steer_succeeds_and_never_cancels(tmp_path):
     assert send_calls[0][:7] == ["send", "--json", "--no-wait", "--behavior", "steer", "--", A_STUCK]
     assert "ask_question hung without ACP elicitation" in send_calls[0][7]
     assert not any(c[:2] == ["agent", "stop"] for c in calls)
+
+
+def test_apply_steer_updated_at_bump_and_user_message_still_cancels(tmp_path):
+    """MED-1 regression: Paseo's recordSubmittedPrompt immediately bumps UpdatedAt and appends
+    our steer user_message even when ask_question stays hung; ade-unstick-ask must still stop."""
+    orig_ts = iso_offset(600)
+    bumped_ts = iso_offset(1)
+    hung_logs = make_hung_logs(A_STUCK)
+    after_steer_logs = {
+        "agentId": A_STUCK,
+        "items": [
+            *hung_logs["items"],
+            {
+                "type": "user_message",
+                "text": "ask_question hung without ACP elicitation; abandon the ask_question call and continue with numbered text options instead.",
+            },
+        ],
+    }
+    state = {
+        "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
+        "inspect": {A_STUCK: make_inspect(A_STUCK, updated_at=orig_ts)},
+        "logs": {A_STUCK: hung_logs},
+        "after_steer_inspect": {
+            A_STUCK: make_inspect(A_STUCK, status="running", updated_at=bumped_ts),
+        },
+        "after_steer_logs": {A_STUCK: after_steer_logs},
+        "send_rc": 5,
+        "stop_rc": 0,
+    }
+    fake = FakePaseo(tmp_path, state)
+    rc, data, err = fake.run("--apply", "--steer-wait", "0.04", "--poll-interval", "0.01")
+    assert rc == 0, err
+    assert data["errors"] == []
+    assert len(data["results"]) == 1
+    assert data["results"][0]["action"] == "recovered-by-cancel"
+    assert data["results"][0]["cancel_exit_code"] == 0
+
+    calls = fake.calls()
+    send_idx = next(i for i, c in enumerate(calls) if c[0] == "send")
+    stop_idx = next(i for i, c in enumerate(calls) if c[:2] == ["agent", "stop"])
+    assert send_idx < stop_idx
+    assert calls[stop_idx] == ["agent", "stop", A_STUCK, "--json"]
+
+
+def test_apply_stop_exit_zero_with_zero_stopped_count_fails_closed(tmp_path):
+    """MED-2 regression: Paseo agent stop exits 0 with stoppedCount=0 + stderr warning on failure."""
+    sub1 = tmp_path / "zero_count"
+    sub1.mkdir()
+    state1 = {
+        "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
+        "inspect": {A_STUCK: make_inspect(A_STUCK)},
+        "logs": {A_STUCK: make_hung_logs(A_STUCK)},
+        "send_rc": 0,
+        "stop_rc": 0,
+        "stop_out": {"stoppedCount": 0, "agentIds": []},
+        "stop_err": "Warning: Failed to stop agent 11111111: cancel timed out\n",
+    }
+    fake1 = FakePaseo(sub1, state1)
+    rc1, data1, _ = fake1.run("--apply", "--steer-wait", "0", "--poll-interval", "0.01")
+    assert rc1 == 1
+    assert data1["results"][0]["action"] == "cancel-failed"
+    assert "Warning: Failed to stop agent" in data1["results"][0]["error"]
+    assert len(data1["errors"]) == 1
+
+    # Also fail closed on exit-0 wrong agentIds or malformed JSON
+    sub2 = tmp_path / "wrong_id"
+    sub2.mkdir()
+    state2 = {
+        "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
+        "inspect": {A_STUCK: make_inspect(A_STUCK)},
+        "logs": {A_STUCK: make_hung_logs(A_STUCK)},
+        "send_rc": 0,
+        "stop_rc": 0,
+        "stop_out": {"stoppedCount": 1, "agentIds": [A_OTHER]},
+    }
+    fake2 = FakePaseo(sub2, state2)
+    rc2, data2, _ = fake2.run("--apply", "--steer-wait", "0", "--poll-interval", "0.01")
+    assert rc2 == 1
+    assert data2["results"][0]["action"] == "cancel-failed"
+
+
+def test_apply_steer_malformed_json_or_redirected_agent_id_fails_closed(tmp_path):
+    """LOW-2 regression: fail closed on unparseable stdout (e.g. shim redirect) or mismatched agentId."""
+    sub1 = tmp_path / "shim_text"
+    sub1.mkdir()
+    state1 = {
+        "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
+        "inspect": {A_STUCK: make_inspect(A_STUCK)},
+        "logs": {A_STUCK: make_hung_logs(A_STUCK)},
+        "send_rc": 0,
+        "send_raw_out": (
+            f"ade-paseo-guard: {A_STUCK} was replaced by {A_OTHER}; sending to {A_OTHER}\n"
+            f'{{"agentId": "{A_OTHER}", "status": "sent"}}\n'
+        ),
+    }
+    fake1 = FakePaseo(sub1, state1)
+    rc1, data1, _ = fake1.run("--apply", "--steer-wait", "0", "--poll-interval", "0.01")
+    assert rc1 == 1
+    assert data1["results"][0]["action"] == "steer-failed"
+    assert "malformed JSON" in data1["results"][0]["error"]
+    assert not any(c[:2] == ["agent", "stop"] for c in fake1.calls())
+
+    sub2 = tmp_path / "wrong_target"
+    sub2.mkdir()
+    state2 = {
+        "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
+        "inspect": {A_STUCK: make_inspect(A_STUCK)},
+        "logs": {A_STUCK: make_hung_logs(A_STUCK)},
+        "send_rc": 0,
+        "send_out": {"agentId": A_OTHER, "status": "sent"},
+    }
+    fake2 = FakePaseo(sub2, state2)
+    rc2, data2, _ = fake2.run("--apply", "--steer-wait", "0", "--poll-interval", "0.01")
+    assert rc2 == 1
+    assert data2["results"][0]["action"] == "steer-failed"
+    assert A_OTHER in data2["results"][0]["error"]
+    assert not any(c[:2] == ["agent", "stop"] for c in fake2.calls())
+
+
+def test_only_agent_inspect_or_logs_failure_exits_one(tmp_path):
+    """LOW-2 regression: targeted --only-agent inspect/logs failures record errors and exit 1."""
+    sub1 = tmp_path / "inspect_fail"
+    sub1.mkdir()
+    fake1 = FakePaseo(sub1, {"inspect": {}, "logs": {}})
+    rc1, data1, _ = fake1.run("--only-agent", A_STUCK)
+    assert rc1 == 1
+    assert len(data1["errors"]) == 1 and data1["errors"][0]["stage"] == "inspect"
+
+    sub2 = tmp_path / "logs_fail"
+    sub2.mkdir()
+    fake2 = FakePaseo(sub2, {"inspect": {A_STUCK: make_inspect(A_STUCK)}, "logs": {}})
+    rc2, data2, _ = fake2.run("--only-agent", A_STUCK)
+    assert rc2 == 1
+    assert len(data2["errors"]) == 1 and data2["errors"][0]["stage"] == "logs"
 
 
 def test_apply_steer_fails_to_unstick_reverifies_then_cancels(tmp_path):

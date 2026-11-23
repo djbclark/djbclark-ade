@@ -8,16 +8,13 @@ not just a nickname.
 
 Always give:
 
-- **agent id** — the full Paseo id (or the session id) of the agent.
-- **workspace name** — Paseo `workspace ls` `name`, or the herdr workspace
-  `label`.
+- **agent id** — the full Paseo id (UUID, never a bare short ID such as `5023c6fe`) or the session id of the agent.
+- **workspace ID** (`wks_…`, added by operator ruling 2026-11-23 for Paseo agents) and **workspace name** — Paseo `workspace ls` `name`, or the herdr workspace `label`.
 
 Then give the placement fields for the harness the agent actually runs in:
 
-- A **Paseo** agent (a Paseo GUI/window agent): the window name (its workspace
-  name) and the tab name it lives in.
-- A **herdr** terminal agent (Claude Code in a herdr pane): the herdr workspace
-  label, the tab label, and the pane id.
+- A **Paseo** agent (a Paseo GUI/window agent): **full agent ID, workspace ID (`wks_…`), window name** (its workspace name), and **tab name** (operator ruling 2026-11-23; see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
+- A **herdr** terminal agent (Claude Code in a herdr pane): the herdr workspace label, the tab label, and the pane id.
 
 A field that does not apply or cannot be resolved is written `?`, never invented
 and never omitted silently.
@@ -36,8 +33,8 @@ agent that has only two.
 
 | Field | Paseo agent | herdr pane |
 |---|---|---|
-| workspace | `workspaceId` in `~/.paseo/agents/<cwd-slug>/<id>.json`, named by `paseo workspace ls --json` | herdr workspace `label` |
-| window / tab | the workspace name (Paseo window) | herdr tab `label` |
+| workspace ID | `workspaceId` (`wks_…`) from `paseo ls -g --json` or `~/.paseo/agents/<cwd-slug>/<id>.json` | — |
+| workspace / window | `name` from `paseo workspace ls --json` for that `workspaceId` (the Paseo window name) | herdr workspace `label` / tab `label` |
 | tab / pane | `Name` from `paseo agent inspect <id> --json` (the tab title) | herdr `pane_id` |
 
 `paseo agent inspect --json` carries no workspace field (its keys are `Archived`,

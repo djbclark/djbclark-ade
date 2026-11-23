@@ -84,7 +84,7 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
 ## Paseo agent and tab references (operator ruling 2026-11-23)
 
 Whenever referencing a Paseo agent or tab in replies or reports, **always** give
-all four fields:
+all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/agent-id`):
 
 1. **Full agent ID** (full UUID, never a bare short ID such as `5023c6fe`)
 2. **Workspace ID** (`wks_…`)

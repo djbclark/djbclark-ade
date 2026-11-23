@@ -13,15 +13,21 @@ Implements the 2026-11-23 operator recovery ruling ("2 then 1"):
      `Archived is False`, `Status == "running"`, `PendingPermissions == []`, and a
      timezone-aware `UpdatedAt` at least `--min-stuck` seconds in the past.
   2. With `--apply`, sends `paseo send --json --no-wait --behavior steer` first and
-     waits up to `--steer-wait` seconds for `UpdatedAt`, `Status`, or the timeline to
-     advance (`recovered-by-steer`).
-  3. Only if steer does not unstick the agent, re-verifies it is still stuck on the
-     same `ask_question` and runs `paseo agent stop <id> --json` (never `archive` or
-     `kill`), recording `recovered-by-cancel` or `cancel-failed`.
+     waits up to `--steer-wait` seconds for real agent-side progress (`Archived` or
+     `Status` or `PendingPermissions` changing, the original `ask_question` call
+     resolving, or any non-`user_message` agent timeline item appearing after it) ->
+     `recovered-by-steer`. Paseo's own `UpdatedAt` bump and steer `user_message`
+     submission are ignored so a still-hung agent is never misclassified as unstuck.
+  3. Only if steer does not unstick the agent, re-verifies `Provider == "antigravity"`,
+     `Archived is False`, `Status == "running"`, `PendingPermissions == []`, the
+     original `ask_question` call is still pending, and any trailing items are only
+     `user_message`, then runs `paseo agent stop <id> --json` (never `archive` or
+     `kill`), requiring `stoppedCount >= 1` with `<id>` in `agentIds` ->
+     `recovered-by-cancel` (else `cancel-failed`).
 
 Exit codes:
   0  Scan completed with no operational errors
-  1  Operational error (Paseo listing/steer/re-verify/cancel failure)
+  1  Operational error (Paseo listing/--only-agent inspect or logs/steer/re-verify/cancel failure)
   2  Usage or argument validation error
 """
 from __future__ import annotations
@@ -117,6 +123,29 @@ def _extract_call_id(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _tool_call_pending_state(
+    item: dict[str, Any],
+    *,
+    has_later_result: bool,
+) -> tuple[bool | None, str]:
+    """Return `(pending_bool, reason)` for a `tool_call` item, or `(None, reason)` if unreadable."""
+    status = item.get("status")
+    if status is not None:
+        if not isinstance(status, str):
+            return None, "unreadable-tool-status"
+        st = status.strip().lower()
+        if st in FINISHED_TOOL_STATUSES:
+            return False, "finished"
+        if st in PENDING_TOOL_STATUSES:
+            pending = (item.get("error") is None) and (not has_later_result)
+            return pending, "pending" if pending else "resolved"
+        return None, f"unknown-tool-status:{st}"
+    detail = item.get("detail")
+    has_output = isinstance(detail, dict) and detail.get("output") is not None
+    pending = item.get("error") is None and not has_output and not has_later_result
+    return pending, "pending" if pending else "resolved"
+
+
 def analyze_hung_ask(logs_data: Any, expected_agent_id: str) -> tuple[dict[str, Any] | None, str]:
     """Fail-closed inspection of structured `paseo logs <id> --json` output.
 
@@ -172,25 +201,9 @@ def analyze_hung_ask(logs_data: Any, expected_agent_id: str) -> tuple[dict[str, 
         elif cid is None and any(rpos > pos for rpos in result_positions):
             has_later_result = True
 
-        status = item.get("status")
-        if status is not None:
-            if not isinstance(status, str):
-                return None, "unreadable-tool-status"
-            st = status.strip().lower()
-            if st in FINISHED_TOOL_STATUSES:
-                pending = False
-            elif st in PENDING_TOOL_STATUSES:
-                pending = (item.get("error") is None) and (not has_later_result)
-            else:
-                return None, f"unknown-tool-status:{st}"
-        else:
-            detail = item.get("detail")
-            has_output = isinstance(detail, dict) and detail.get("output") is not None
-            pending = (
-                item.get("error") is None
-                and not has_output
-                and not has_later_result
-            )
+        pending, pending_reason = _tool_call_pending_state(item, has_later_result=has_later_result)
+        if pending is None:
+            return None, pending_reason
 
         if pending and norm_name not in ASK_TOOL_NAMES:
             return None, f"other-running-tool:{raw_name.strip()}"
@@ -222,20 +235,67 @@ def analyze_hung_ask(logs_data: Any, expected_agent_id: str) -> tuple[dict[str, 
     )
 
 
-def is_same_hung_ask(
+def check_hung_ask_progress(
     logs_data: Any,
     expected_agent_id: str,
     orig_match: dict[str, Any],
-) -> bool:
-    """Return True only if logs still show the exact same pending ask_question."""
-    match, _ = analyze_hung_ask(logs_data, expected_agent_id)
-    if match is None:
-        return False
-    return (
-        match["call_id"] == orig_match["call_id"]
-        and match["index"] == orig_match["index"]
-        and match["items_len"] == orig_match["items_len"]
-    )
+) -> tuple[str, str]:
+    """Compare structured logs against `orig_match` ignoring steer `user_message` appends.
+
+    Returns `(state, reason)` where `state` is:
+      - `"still-hung"`: original ask_question at `orig_match["index"]` (matching
+        `call_id` and `tool_name`) is still pending and every trailing item (if any)
+        is strictly `user_message`.
+      - `"progressed"`: real agent-side progress occurred (original ask_question
+        resolved/replaced, received a `tool_result`, or any non-`user_message` item
+        appeared after `orig_match["index"]`).
+      - `"unreadable"`: logs payload or tool status is malformed (fail closed).
+    """
+    if not isinstance(logs_data, dict):
+        return "unreadable", "unreadable-logs"
+    if logs_data.get("agentId") != expected_agent_id:
+        return "unreadable", "unreadable-logs-agent-mismatch"
+    items = logs_data.get("items")
+    if not isinstance(items, list) or any(not isinstance(it, dict) for it in items):
+        return "unreadable", "unreadable-logs"
+
+    orig_idx = orig_match["index"]
+    if orig_idx < 0 or orig_idx >= len(items):
+        return "progressed", "orig-ask-replaced"
+
+    orig_item = items[orig_idx]
+    if orig_item.get("type") != "tool_call":
+        return "progressed", "orig-ask-replaced"
+    raw_name = orig_item.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return "unreadable", "unreadable-tool-call"
+    if (
+        raw_name.strip().lower() != orig_match["tool_name"].strip().lower()
+        or _extract_call_id(orig_item) != orig_match["call_id"]
+    ):
+        return "progressed", "orig-ask-replaced"
+
+    trailing = items[orig_idx + 1 :]
+    orig_cid = orig_match["call_id"]
+    has_later_result = False
+    for it in trailing:
+        if it.get("type") == "tool_result":
+            rcid = _extract_call_id(it)
+            if orig_cid is None or rcid == orig_cid:
+                has_later_result = True
+                break
+
+    pending, pending_reason = _tool_call_pending_state(orig_item, has_later_result=has_later_result)
+    if pending is None:
+        return "unreadable", pending_reason
+    if not pending:
+        return "progressed", "ask-resolved"
+
+    non_user_types = sorted({str(it.get("type")) for it in trailing if it.get("type") != "user_message"})
+    if non_user_types:
+        return "progressed", f"agent-progress:{','.join(non_user_types)}"
+
+    return "still-hung", "still-hung"
 
 
 class PaseoClient:
@@ -303,18 +363,46 @@ class PaseoClient:
             try:
                 payload = json.loads(raw_out)
             except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict):
-                st = str(payload.get("status") or "").strip().lower()
-                if payload.get("error") or st in SEND_ERROR_STATUSES:
-                    return False, proc.returncode, str(payload.get("error") or st)[:200]
+                return False, proc.returncode, f"malformed JSON from paseo send: {raw_out[:120]}"
+            if not isinstance(payload, dict):
+                return False, proc.returncode, "unexpected non-object JSON from paseo send"
+            target_id = payload.get("agentId")
+            if target_id is not None and target_id != aid:
+                return False, proc.returncode, f"paseo send targeted {target_id!r}, expected {aid!r}"
+            st = str(payload.get("status") or "").strip().lower()
+            if payload.get("error") or st in SEND_ERROR_STATUSES:
+                return False, proc.returncode, str(payload.get("error") or st)[:200]
         return True, proc.returncode, ""
 
     def stop_agent(self, aid: str) -> tuple[bool, int, str]:
         proc = self.run_raw("agent", "stop", aid, "--json")
+        stderr_detail = proc.stderr.strip()[:200]
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()[:200]
             return False, proc.returncode, detail or f"exit {proc.returncode}"
+        raw_out = proc.stdout.strip()
+        if not raw_out:
+            msg = "empty stdout from paseo agent stop --json"
+            return False, proc.returncode, f"{msg}; {stderr_detail}" if stderr_detail else msg
+        try:
+            payload = json.loads(raw_out)
+        except json.JSONDecodeError:
+            msg = f"malformed JSON from paseo agent stop: {raw_out[:120]}"
+            return False, proc.returncode, f"{msg}; {stderr_detail}" if stderr_detail else msg
+        if not isinstance(payload, dict):
+            msg = "unexpected non-object JSON from paseo agent stop"
+            return False, proc.returncode, f"{msg}; {stderr_detail}" if stderr_detail else msg
+        stopped_count = payload.get("stoppedCount")
+        agent_ids = payload.get("agentIds")
+        valid_count = (
+            isinstance(stopped_count, int)
+            and not isinstance(stopped_count, bool)
+            and stopped_count >= 1
+        )
+        valid_ids = isinstance(agent_ids, list) and aid in agent_ids
+        if not (valid_count and valid_ids):
+            msg = f"stop did not confirm {aid} (stoppedCount={stopped_count!r}, agentIds={agent_ids!r})"
+            return False, proc.returncode, f"{msg}; {stderr_detail}" if stderr_detail else msg
         return True, 0, ""
 
 
@@ -379,7 +467,9 @@ def recover_agent(
         entry.update({"action": "steer-failed", "error": err})
         return entry, True
 
-    # Poll up to steer_wait seconds to see if steer unstuck the agent.
+    # Poll up to steer_wait seconds to see if steer produced real agent-side progress.
+    # Ignore UpdatedAt bumps and steer user_message appends (Paseo's recordSubmittedPrompt
+    # writes both immediately on submission even when ask_question stays hung).
     deadline = time.monotonic() + steer_wait
     while True:
         remaining = deadline - time.monotonic()
@@ -394,7 +484,6 @@ def recover_agent(
                 cur_rec.get("Archived") is not False
                 or cur_rec.get("Status") != "running"
                 or cur_rec.get("PendingPermissions") != []
-                or cur_rec.get("UpdatedAt") != orig_updated_at
             ):
                 entry.update(
                     {
@@ -409,14 +498,17 @@ def recover_agent(
             cur_logs = client.logs(aid)
         except PaseoError:
             cur_logs = None
-        if cur_logs is not None and not is_same_hung_ask(cur_logs, aid, orig_match):
-            entry.update(
-                {
-                    "action": "recovered-by-steer",
-                    "reason": "timeline-advanced",
-                }
-            )
-            return entry, False
+        if cur_logs is not None:
+            log_state, log_reason = check_hung_ask_progress(cur_logs, aid, orig_match)
+            if log_state == "progressed":
+                entry.update(
+                    {
+                        "action": "recovered-by-steer",
+                        "reason": "timeline-advanced",
+                        "detail": log_reason,
+                    }
+                )
+                return entry, False
 
         if time.monotonic() >= deadline:
             break
@@ -428,13 +520,20 @@ def recover_agent(
         entry.update({"action": "reverify-failed", "error": str(exc)})
         return entry, True
 
+    if reverify_rec.get("Provider") != "antigravity":
+        entry.update(
+            {
+                "action": "reverify-failed",
+                "error": f"provider changed to {reverify_rec.get('Provider')!r}",
+            }
+        )
+        return entry, True
+
     if (
-        reverify_rec.get("Provider") != "antigravity"
-        or reverify_rec.get("Archived") is not False
+        reverify_rec.get("Archived") is not False
         or reverify_rec.get("Status") != "running"
         or not isinstance(reverify_rec.get("PendingPermissions"), list)
         or len(reverify_rec["PendingPermissions"]) != 0
-        or reverify_rec.get("UpdatedAt") != orig_updated_at
     ):
         entry.update(
             {
@@ -452,11 +551,16 @@ def recover_agent(
         entry.update({"action": "reverify-failed", "error": str(exc)})
         return entry, True
 
-    if not is_same_hung_ask(reverify_logs, aid, orig_match):
+    reverify_state, reverify_reason = check_hung_ask_progress(reverify_logs, aid, orig_match)
+    if reverify_state == "unreadable":
+        entry.update({"action": "reverify-failed", "error": reverify_reason})
+        return entry, True
+    if reverify_state == "progressed":
         entry.update(
             {
                 "action": "recovered-by-steer",
                 "reason": "timeline-moved-before-cancel",
+                "detail": reverify_reason,
             }
         )
         return entry, False
@@ -543,6 +647,8 @@ def scan(
             record = client.inspect_agent(aid)
         except PaseoError as exc:
             skipped.append({"agent_id": aid, "reason": "inspect-failed", "error": str(exc)})
+            if only_agent is not None:
+                errors.append({"agent_id": aid, "stage": "inspect", "error": str(exc)})
             continue
 
         eligible, reason, age = inspect_eligibility(record, min_stuck=min_stuck, now=time.time())
@@ -554,6 +660,8 @@ def scan(
             logs_data = client.logs(aid)
         except PaseoError as exc:
             skipped.append({"agent_id": aid, "reason": "logs-failed", "error": str(exc)})
+            if only_agent is not None:
+                errors.append({"agent_id": aid, "stage": "logs", "error": str(exc)})
             continue
 
         match, log_reason = analyze_hung_ask(logs_data, aid)
