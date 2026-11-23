@@ -59,10 +59,12 @@ class FakePaseo:
         self.send_stderr = send_stderr
         self.archive_rc = archive_rc
         self.archive_receipt_id = archive_receipt_id
+        self.archive_raw_stdout: str | None = None
         self.archive_updates_state = archive_updates_state
         self.watcher_rc = watcher_rc
         self.watcher_payload = watcher_payload
         self.calls: list[list[str]] = []
+        self.call_envs: list[dict[str, str] | None] = []
 
     def __call__(
         self,
@@ -75,6 +77,7 @@ class FakePaseo:
         check: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
+        self.call_envs.append(dict(env) if env is not None else None)
         prog = Path(argv[0]).name
 
         if prog == "load-watch" and argv[1:4] == ["watcher", "show", "--json"]:
@@ -120,6 +123,8 @@ class FakePaseo:
                     )
                 if self.archive_updates_state and aid in self.agents:
                     self.agents[aid]["Archived"] = True
+                if self.archive_raw_stdout is not None:
+                    return subprocess.CompletedProcess(argv, 0, self.archive_raw_stdout, "")
                 receipt_id = self.archive_receipt_id if self.archive_receipt_id is not None else aid
                 return subprocess.CompletedProcess(argv, 0, json.dumps({"agentId": receipt_id}), "")
 
@@ -844,4 +849,292 @@ def test_request_refuses_symlink_record_target(tmp_path: Path) -> None:
         svc.request_archive(explicit_to=EXPLICIT_ID)
     assert victim.read_text(encoding="utf-8") == "original"
     assert not any(c[1:2] == ["send"] for c in fake.calls)
+
+
+# ---- Round 1 adversary findings regression tests (HIGH-1, MED-1..3, LOW-1..3) --------------------
+
+
+def _write_ack_handoff(state_dir: Path, home: Path, pred: str, succ_id: str) -> None:
+    from datetime import datetime, timezone
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "kind": "handoff",
+        "predecessor": pred,
+        "successor": succ_id,
+        "home": str(home.resolve()),
+        "status": "acknowledged",
+        "acknowledged_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ack": {"agent_id": succ_id},
+    }
+    p = state_dir / f"handoff-{pred}.json"
+    p.write_text(json.dumps(rec), encoding="utf-8")
+    os.chmod(p, 0o600)
+
+
+def test_high1_sweep_fails_closed_on_cyclic_watcher_succession(tmp_path: Path) -> None:
+    w1, w2 = WATCHER_ID, OTHER_ID
+    _seed_request(tmp_path, w2, EXPLICIT_ID)
+    _write_handoff(tmp_path / "self-session", tmp_path / "paseo-home", w1, w2)
+    _write_handoff(tmp_path / "self-session", tmp_path / "paseo-home", w2, w1)
+    fake = FakePaseo(
+        agents={w2: _agent(w2, status="idle")},
+        listed=[w2],
+        watcher_payload={"channel": "paseo", "target": w1},
+    )
+    svc = _make_service(tmp_path, fake, env={"PASEO_AGENT_ID": EXPLICIT_ID})
+    with pytest.raises(ara.ArchiveRequestRefused, match="cyclic"):
+        svc.sweep(apply=True, all_requests=True)
+    assert not any(c[1:3] == ["agent", "archive"] for c in fake.calls)
+
+
+def test_high1_read_watcher_id_fails_closed_on_corrupt_or_symlink_watcher_json(tmp_path: Path) -> None:
+    lw_dir = tmp_path / "lw-state"
+    lw_dir.mkdir(parents=True)
+    wf = lw_dir / "watcher.json"
+
+    # Case A: fallback branch, corrupt JSON -> PaseoUnavailableError
+    wf.write_text("{not valid json", encoding="utf-8")
+    os.chmod(wf, 0o600)
+    fake = FakePaseo(agents={SELF_ID: _agent(SELF_ID)})
+    svc_fb = _make_service(tmp_path, fake, load_watch_bin=tmp_path / "missing-lw")
+    with pytest.raises(ara.PaseoUnavailableError, match="corrupt"):
+        svc_fb.read_watcher_id()
+
+    # Case B: load-watch returns rc=1 when watcher.json is corrupt -> still fails closed!
+    fake_rc1 = FakePaseo(agents={SELF_ID: _agent(SELF_ID)}, watcher_rc=1)
+    svc_lw = _make_service(tmp_path, fake_rc1, load_watch_bin=LOAD_WATCH)
+    with pytest.raises(ara.PaseoUnavailableError, match="corrupt"):
+        svc_lw.read_watcher_id()
+
+    # Case C: broken symlink at watcher.json -> fails closed in both branches
+    wf.unlink()
+    wf.symlink_to(tmp_path / "nonexistent-target.json")
+    with pytest.raises(ara.PaseoUnavailableError, match="symlink"):
+        svc_fb.read_watcher_id()
+    with pytest.raises(ara.PaseoUnavailableError, match="symlink"):
+        svc_lw.read_watcher_id()
+
+    # Case D: valid retired channel="relay" with load-watch rc=1 -> returns None cleanly
+    wf.unlink()
+    wf.write_text(json.dumps({"channel": "relay", "target": "pane-1"}), encoding="utf-8")
+    os.chmod(wf, 0o600)
+    assert svc_lw.read_watcher_id() is None
+    assert svc_fb.read_watcher_id() is None
+
+    # Case E: channel="paseo" with invalid target or invalid paseo_home -> fails closed
+    fake_bad_target = FakePaseo(watcher_payload={"channel": "paseo", "target": "not-a-uuid"})
+    assert_svc = _make_service(tmp_path, fake_bad_target)
+    with pytest.raises(ara.PaseoUnavailableError, match="invalid paseo target"):
+        assert_svc.read_watcher_id()
+
+    fake_bad_home = FakePaseo(
+        watcher_payload={"channel": "paseo", "target": WATCHER_ID, "paseo_home": "/tmp/a\x00b"}
+    )
+    assert_svc2 = _make_service(tmp_path, fake_bad_home)
+    with pytest.raises(ara.PaseoUnavailableError, match="invalid paseo_home"):
+        assert_svc2.read_watcher_id()
+
+
+def test_med1_sweep_rejects_missing_relative_nonstring_and_nul_home(tmp_path: Path) -> None:
+    d = tmp_path / "archive-requests"
+    d.mkdir(parents=True, exist_ok=True)
+    cases = [
+        ("11111111-1111-1111-1111-111111111121", None, True),  # missing key
+        ("11111111-1111-1111-1111-111111111122", "", False),
+        ("11111111-1111-1111-1111-111111111123", ".", False),
+        ("11111111-1111-1111-1111-111111111124", 123, False),
+        ("11111111-1111-1111-1111-111111111125", "/tmp/bad\x00home", False),
+    ]
+    agents = {WATCHER_ID: _agent(WATCHER_ID, status="running")}
+    listed = [WATCHER_ID]
+    for aid, home_val, omit in cases:
+        rec: dict[str, Any] = {
+            "schema_version": 1,
+            "agent_id": aid,
+            "target_id": WATCHER_ID,
+            "target_kind": "watcher",
+            "request_id": "12345678-1234-1234-1234-1234567890ab",
+            "reason": "test",
+            "requested_at": "2026-11-23T14:55:00Z",
+            "status": "pending",
+        }
+        if not omit:
+            rec["home"] = home_val
+        p = d / f"{aid}.json"
+        p.write_text(json.dumps(rec), encoding="utf-8")
+        os.chmod(p, 0o600)
+        agents[aid] = _agent(aid, status="idle")
+        listed.append(aid)
+
+    fake = FakePaseo(agents=agents, listed=listed)
+    svc = _make_service(tmp_path, fake, env={"PASEO_AGENT_ID": WATCHER_ID})
+    out = svc.sweep(apply=True)
+    assert out["errors"] == 0
+    assert all(r["action"] == "skip" and r["reason"] == "malformed-record" for r in out["results"])
+    assert not any(c[1:3] == ["agent", "archive"] for c in fake.calls)
+
+
+def test_med2_fail_closed_when_archived_field_missing_or_non_bool(tmp_path: Path) -> None:
+    # request_archive: caller with missing Archived field fails closed
+    bad_self = {"Id": SELF_ID, "Status": "running", "PendingPermissions": []}
+    fake1 = FakePaseo(agents={SELF_ID: bad_self, EXPLICIT_ID: _agent(EXPLICIT_ID, status="idle")})
+    svc1 = _make_service(tmp_path, fake1)
+    with pytest.raises(ara.ArchiveRequestRefused, match="Archived status is unknown"):
+        svc1.request_archive(explicit_to=EXPLICIT_ID)
+
+    # sweep: requester with missing or string Archived field fails closed as archived-unknown
+    _seed_request(tmp_path, SELF_ID, WATCHER_ID)
+    bad_req = {"Id": SELF_ID, "Status": "idle", "PendingPermissions": []}
+    fake2 = FakePaseo(agents={SELF_ID: bad_req, WATCHER_ID: _agent(WATCHER_ID)}, listed=[SELF_ID, WATCHER_ID])
+    svc2 = _make_service(tmp_path, fake2, env={"PASEO_AGENT_ID": WATCHER_ID})
+    out = svc2.sweep(apply=True)
+    assert out["errors"] == 0
+    assert out["results"] == [
+        {"file": f"{SELF_ID}.json", "agent_id": SELF_ID, "action": "skip", "reason": "archived-unknown"}
+    ]
+    assert not any(c[1:3] == ["agent", "archive"] for c in fake2.calls)
+
+
+def test_med3_paseo_send_sets_paseo_agent_id_to_self_id(tmp_path: Path) -> None:
+    fake = FakePaseo(
+        agents={SELF_ID: _agent(SELF_ID), EXPLICIT_ID: _agent(EXPLICIT_ID, status="idle")}
+    )
+    # Ambient env has NO PASEO_AGENT_ID (or a different one) while --self SELF_ID is passed.
+    svc = _make_service(tmp_path, fake, env={"PASEO_AGENT_ID": OTHER_ID})
+    svc.request_archive(explicit_self=SELF_ID, explicit_to=EXPLICIT_ID)
+    send_idx = next(i for i, c in enumerate(fake.calls) if c[:2] == ["paseo", "send"])
+    assert fake.call_envs[send_idx] is not None
+    assert fake.call_envs[send_idx]["PASEO_AGENT_ID"] == SELF_ID
+
+    svc_unset = _make_service(tmp_path, fake, env={})
+    svc_unset.request_archive(explicit_self=SELF_ID, explicit_to=EXPLICIT_ID)
+    send_indices = [i for i, c in enumerate(fake.calls) if c[:2] == ["paseo", "send"]]
+    assert fake.call_envs[send_indices[-1]]["PASEO_AGENT_ID"] == SELF_ID
+
+
+def test_low1_sweep_rejects_missing_or_non_json_archive_receipt(tmp_path: Path) -> None:
+    p = _seed_request(tmp_path, SELF_ID, WATCHER_ID)
+    fake = FakePaseo(agents={SELF_ID: _agent(SELF_ID, status="idle")}, listed=[SELF_ID])
+    fake.archive_raw_stdout = "{}"  # missing agentId
+    svc = _make_service(tmp_path, fake, env={"PASEO_AGENT_ID": WATCHER_ID})
+    out = svc.sweep(apply=True)
+    assert out["errors"] == 1
+    assert out["results"][0]["action"] == "error"
+    assert out["results"][0]["reason"] == "ARCHIVE_RECEIPT_UNREADABLE"
+    assert json.loads(p.read_text(encoding="utf-8"))["status"] == "pending"
+
+    fake.archive_raw_stdout = "not-json"
+    fake.agents[SELF_ID]["Archived"] = False
+    out2 = svc.sweep(apply=True)
+    assert out2["errors"] == 1
+    assert out2["results"][0]["reason"] == "ARCHIVE_RECEIPT_UNREADABLE"
+
+
+def test_low2_write_atomic_json_wraps_oserror_closes_fd_and_sweep_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. fchmod raising OSError closes fd and raises ArchiveRequestError (not raw OSError)
+    closed_fds: list[int] = []
+    real_close = os.close
+
+    def track_close(fd: int) -> None:
+        closed_fds.append(fd)
+        real_close(fd)
+
+    def boom_fchmod(fd: int, mode: int) -> None:
+        raise PermissionError("fchmod denied")
+
+    monkeypatch.setattr(os, "fchmod", boom_fchmod)
+    monkeypatch.setattr(os, "close", track_close)
+    with pytest.raises(ara.ArchiveRequestError, match="fchmod denied"):
+        ara.write_atomic_json(tmp_path / "x.json", {"a": 1})
+    assert len(closed_fds) == 1
+    monkeypatch.undo()
+
+    # 2. Per-record write failure inside sweep() records error and continues to next record
+    id_a = "11111111-1111-1111-1111-111111111131"
+    id_b = "11111111-1111-1111-1111-111111111132"
+    p_a = _seed_request(tmp_path, id_a, WATCHER_ID)
+    p_b = _seed_request(tmp_path, id_b, WATCHER_ID)
+    fake = FakePaseo(
+        agents={
+            id_a: _agent(id_a, status="idle"),
+            id_b: _agent(id_b, status="idle"),
+            WATCHER_ID: _agent(WATCHER_ID, status="running"),
+        },
+        listed=[id_a, id_b, WATCHER_ID],
+    )
+    real_write = ara.write_atomic_json
+
+    def fail_on_a(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None:
+        if path == p_a:
+            raise ara.ArchiveRequestError("simulated write failure")
+        real_write(path, payload, mode=mode)
+
+    monkeypatch.setattr(ara, "write_atomic_json", fail_on_a)
+    svc = _make_service(tmp_path, fake, env={"PASEO_AGENT_ID": WATCHER_ID})
+    out = svc.sweep(apply=True)
+    assert out["errors"] == 1
+    by_id = {r["agent_id"]: r for r in out["results"]}
+    assert by_id[id_a]["action"] == "error"
+    assert by_id[id_a]["reason"].startswith("record-write-failed:")
+    assert by_id[id_b]["action"] == "archived"
+    assert json.loads(p_b.read_text(encoding="utf-8"))["status"] == "archived"
+
+
+def test_low3_fresh_acknowledged_handoffs_followed_in_request_watcher_and_sweep(tmp_path: Path) -> None:
+    # 1. resolve_target follows fresh ACKNOWLEDGED handoff LEAD_OLD -> LEAD_NEW (live)
+    _write_agent_label(tmp_path / "paseo-home", SELF_ID, LEAD_OLD)
+    _write_ack_handoff(tmp_path / "self-session", tmp_path / "paseo-home", LEAD_OLD, LEAD_NEW)
+    fake = FakePaseo(
+        agents={
+            SELF_ID: _agent(SELF_ID),
+            LEAD_OLD: _agent(LEAD_OLD, status="idle", archived=False),
+            LEAD_NEW: _agent(LEAD_NEW, status="idle", archived=False),
+        }
+    )
+    svc = _make_service(tmp_path, fake)
+    out = svc.request_archive(reason="mid-handoff lead")
+    assert out["record"]["target_id"] == LEAD_NEW
+    assert out["record"]["target_kind"] == "lead"
+
+    # 2. _owns_target lets LEAD_NEW sweep a pending request originally targeting LEAD_OLD
+    _seed_request(tmp_path, OTHER_ID, LEAD_OLD)
+    fake2 = FakePaseo(
+        agents={
+            OTHER_ID: _agent(OTHER_ID, status="idle"),
+            LEAD_OLD: _agent(LEAD_OLD, status="idle", archived=False),
+            LEAD_NEW: _agent(LEAD_NEW, status="running", archived=False),
+        },
+        listed=[OTHER_ID, LEAD_OLD, LEAD_NEW],
+    )
+    svc_lead_new = _make_service(tmp_path, fake2, env={"PASEO_AGENT_ID": LEAD_NEW})
+    out_sw = svc_lead_new.sweep(apply=True, all_requests=False)
+    assert out_sw["errors"] == 0
+    by_id = {r["agent_id"]: r for r in out_sw["results"]}
+    assert by_id[OTHER_ID]["action"] == "archived"
+
+    # 3. Standing watcher with fresh ACKNOWLEDGED handoff WATCHER_ID -> EXPLICIT_ID protects BOTH
+    _write_ack_handoff(tmp_path / "self-session", tmp_path / "paseo-home", WATCHER_ID, EXPLICIT_ID)
+    _seed_request(tmp_path, EXPLICIT_ID, LEAD_NEW)
+    fake3 = FakePaseo(
+        agents={
+            WATCHER_ID: _agent(WATCHER_ID, status="idle", archived=False),
+            EXPLICIT_ID: _agent(EXPLICIT_ID, status="idle", archived=False),
+            LEAD_NEW: _agent(LEAD_NEW, status="running", archived=False),
+        },
+        listed=[WATCHER_ID, EXPLICIT_ID, LEAD_NEW],
+        watcher_payload={"channel": "paseo", "target": WATCHER_ID},
+    )
+    svc_ex = _make_service(tmp_path, fake3, env={"PASEO_AGENT_ID": EXPLICIT_ID})
+    with pytest.raises(ara.ArchiveRequestRefused, match="standing watcher"):
+        svc_ex.request_archive(explicit_to=LEAD_NEW)
+
+    svc_sw = _make_service(tmp_path, fake3, env={"PASEO_AGENT_ID": LEAD_NEW})
+    out_w = svc_sw.sweep(apply=True, all_requests=True)
+    by_w = {r["agent_id"]: r for r in out_w["results"]}
+    assert by_w[EXPLICIT_ID]["action"] == "skip"
+    assert by_w[EXPLICIT_ID]["reason"] == "standing-watcher"
+
 

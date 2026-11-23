@@ -160,12 +160,16 @@ def write_atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) ->
     """Atomically write JSON to `path` with `mode` (default 0o600), refusing a symlink target."""
     if path.is_symlink():
         raise ArchiveRequestError(f"refusing to overwrite symlink: {path}")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    tmp_name: str | None = None
+    fd: int | None = None
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as fh:
+        fh = os.fdopen(fd, "wb")
+        fd = None
+        with fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
@@ -175,8 +179,15 @@ def write_atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) ->
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+    except OSError as exc:
+        raise ArchiveRequestError(f"failed to write {path}: {exc}") from exc
     finally:
-        if os.path.exists(tmp_name):
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_name is not None and os.path.exists(tmp_name):
             try:
                 os.unlink(tmp_name)
             except OSError:
@@ -354,6 +365,48 @@ class ArchiveRequestService:
             raise ArchiveRequestRefused(f"lead succession returned invalid agent id for {lead_id}")
         return resolved
 
+    def _follow_lead_chain(self, lead_id: str) -> list[str]:
+        """Follow completed handoffs (`effective_lead`) and fresh live `ACKNOWLEDGED` hops
+        (matching `ade_send_guard._follow`), returning all visited IDs with the current holder last."""
+        current = self._effective_lead(lead_id)
+        visited = [lead_id]
+        if current != lead_id:
+            visited.append(current)
+        seen = set(visited)
+        while True:
+            nxt = succ.successor_of(
+                current,
+                state_dir=self.self_session_state,
+                home=self.home,
+                statuses=succ.ACKNOWLEDGED,
+            )
+            if nxt is None:
+                return visited
+            try:
+                live = self.inspect_agent(nxt)
+            except (AgentNotFoundError, PaseoUnavailableError):
+                return visited
+            if live.get("Archived") is not False:
+                return visited
+            end = self._effective_lead(nxt)
+            if end != nxt:
+                try:
+                    end_live = self.inspect_agent(end)
+                except (AgentNotFoundError, PaseoUnavailableError):
+                    return visited
+                if end_live.get("Archived") is not False:
+                    return visited
+            if nxt in seen or end in seen:
+                raise ArchiveRequestRefused(f"cyclic lead succession ledger for {lead_id}")
+            visited.append(nxt)
+            if end != nxt:
+                visited.append(end)
+            seen.update((nxt, end))
+            current = end
+
+    def _follow_lead(self, lead_id: str) -> str:
+        return self._follow_lead_chain(lead_id)[-1]
+
     def read_ade_lead_label(self, agent_id: str) -> str | None:
         """Read `labels['ade.lead']` from `${PASEO_HOME}/agents/*/<agent_id>.json`."""
         agents_root = self.home / "agents"
@@ -372,9 +425,11 @@ class ArchiveRequestService:
 
     def read_watcher_id(self) -> str | None:
         """Resolve the standing watch/unstick Paseo agent ID via `load-watch watcher show --json`,
-        falling back to `$LW_STATE_DIR/watcher.json` only when `load-watch` is unavailable."""
+        failing closed if `$LW_STATE_DIR/watcher.json` exists but is corrupt, unreadable, a symlink,
+        or has an invalid Paseo target/home."""
         lw_env = dict(self.env)
         lw_env[LW_STATE_DIR_ENV] = str(self.lw_state_dir)
+        watcher_file = self.lw_state_dir / "watcher.json"
         data: dict[str, Any] | None = None
         if self.load_watch_bin and os.access(self.load_watch_bin, os.X_OK):
             proc = self._run_cmd(
@@ -391,8 +446,20 @@ class ArchiveRequestService:
                     raise PaseoUnavailableError("load-watch watcher show --json did not return an object")
                 data = parsed
             elif proc.returncode == 1:
-                # Exit 1 is load-watch's documented "no load watcher registered" / retired relay channel.
-                return None
+                # load-watch exits 1 for missing, retired relay, OR corrupt/unreadable watcher.json.
+                # Verify disk state so corrupt/symlinked/malformed watcher.json fails closed.
+                if not os.path.lexists(watcher_file):
+                    return None
+                disk = read_regular_json(watcher_file)
+                if disk is None:
+                    raise PaseoUnavailableError(
+                        f"watcher record exists but is corrupt, unreadable, non-regular, or a symlink: {watcher_file}"
+                    )
+                if disk.get("channel") != "paseo":
+                    return None
+                raise PaseoUnavailableError(
+                    f"watcher record has channel 'paseo' but invalid or missing target: {watcher_file}"
+                )
             else:
                 detail = bounded_text(proc.stderr or proc.stdout)
                 raise PaseoUnavailableError(
@@ -400,25 +467,30 @@ class ArchiveRequestService:
                     + (f": {detail}" if detail else "")
                 )
         else:
-            watcher_file = self.lw_state_dir / "watcher.json"
-            if not watcher_file.exists():
+            if not os.path.lexists(watcher_file):
                 return None
             data = read_regular_json(watcher_file)
             if data is None:
-                return None
+                raise PaseoUnavailableError(
+                    f"watcher record exists but is corrupt, unreadable, non-regular, or a symlink: {watcher_file}"
+                )
 
         if data.get("channel") != "paseo":
             return None
         target = data.get("target")
         if not isinstance(target, str) or not UUID_RE.fullmatch(target.strip()):
-            return None
+            raise PaseoUnavailableError(f"watcher record has invalid paseo target: {target!r}")
         w_home = data.get("paseo_home")
-        if isinstance(w_home, str) and w_home.strip():
-            try:
-                if Path(w_home).expanduser().resolve() != self.home:
+        if w_home is not None:
+            if not isinstance(w_home, str):
+                raise PaseoUnavailableError("watcher record has non-string paseo_home")
+            if w_home.strip():
+                try:
+                    resolved_w_home = Path(w_home).expanduser().resolve()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise PaseoUnavailableError(f"watcher record has invalid paseo_home: {exc}") from exc
+                if resolved_w_home != self.home:
                     return None
-            except OSError:
-                return None
         return target.strip()
 
     def read_supervisor_lead_id(self) -> str | None:
@@ -435,14 +507,12 @@ class ArchiveRequestService:
         return None
 
     def _is_standing_watcher(self, agent_id: str) -> tuple[bool, str | None]:
-        """Return (is_watcher, resolved_watcher_id_or_None)."""
+        """Return (is_watcher, resolved_watcher_id_or_None), covering completed and fresh ACKNOWLEDGED handoffs."""
         raw_watcher = self.read_watcher_id()
         if raw_watcher is None:
             return False, None
-        if raw_watcher == agent_id:
-            return True, raw_watcher
-        resolved = self._effective_lead(raw_watcher)
-        return (resolved == agent_id), resolved
+        chain = self._follow_lead_chain(raw_watcher)
+        return (agent_id in chain), chain[-1]
 
     def _check_live_target(self, target_id: str, label: str, *, strict: bool) -> tuple[bool, str]:
         """Inspect `target_id`; return (is_live, reason_if_not). Raises on Paseo outage or strict refusal."""
@@ -488,10 +558,10 @@ class ArchiveRequestService:
             self._check_live_target(target, "explicit target", strict=True)
             return target, "explicit"
 
-        # 2. Owning LEAD: --lead, else ade.lead label, else ParentAgentId, followed through effective_lead()
+        # 2. Owning LEAD: --lead, else ade.lead label, else ParentAgentId, followed through succession + fresh ACKNOWLEDGED
         if explicit_lead is not None:
             raw_lead = validate_uuid(explicit_lead, "--lead id")
-            resolved_lead = self._effective_lead(raw_lead)
+            resolved_lead = self._follow_lead(raw_lead)
             if resolved_lead == self_id:
                 raise ArchiveRequestRefused(
                     f"refusing self-target: --lead {raw_lead} resolved to caller {self_id}"
@@ -506,7 +576,7 @@ class ArchiveRequestService:
                 discovered_lead = parent.strip()
 
         if discovered_lead is not None:
-            resolved_lead = self._effective_lead(discovered_lead)
+            resolved_lead = self._follow_lead(discovered_lead)
             if resolved_lead == self_id:
                 reasons.append(f"owning lead {discovered_lead} resolved to caller itself")
             else:
@@ -531,7 +601,7 @@ class ArchiveRequestService:
         # 3b. Fallback: supervisor/lead (only if watcher absent/archived and supervisor/lead != self)
         raw_sup = self.read_supervisor_lead_id()
         if raw_sup is not None:
-            resolved_sup = self._effective_lead(raw_sup)
+            resolved_sup = self._follow_lead(raw_sup)
             if resolved_sup == self_id:
                 reasons.append(f"supervisor/lead {resolved_sup} is the caller itself")
             else:
@@ -556,7 +626,7 @@ class ArchiveRequestService:
         """Validate caller, check standing-watcher guard, resolve live target, persist record, and send."""
         self_id = self.resolve_caller(explicit_self)
 
-        # Verify caller is a real, non-archived Paseo agent.
+        # Verify caller is a real, non-archived Paseo agent (fail closed on missing/non-bool Archived).
         try:
             self_info = self.inspect_agent(self_id)
         except AgentNotFoundError:
@@ -565,6 +635,8 @@ class ArchiveRequestService:
             ) from None
         if self_info.get("Archived") is True:
             raise ArchiveRequestRefused(f"caller {self_id} is already archived")
+        if self_info.get("Archived") is not False:
+            raise ArchiveRequestRefused(f"caller {self_id} Archived status is unknown (expected false)")
 
         # Never allow a standing watcher to request its own archive.
         is_watcher, resolved_watcher = self._is_standing_watcher(self_id)
@@ -602,7 +674,9 @@ class ArchiveRequestService:
 
         message = build_archive_message(self_id, request_id, clean_reason, record_path)
         argv = [self.paseo_bin, "send", "--json", "--no-wait", "--", target_id, message]
-        proc = self._run_cmd(argv, env=self._paseo_env(), timeout=60)
+        send_env = self._paseo_env()
+        send_env["PASEO_AGENT_ID"] = self_id
+        proc = self._run_cmd(argv, env=send_env, timeout=60)
         if proc.returncode not in (0, 5):
             err_detail = bounded_text(proc.stderr or proc.stdout)
             record["send_status"] = "failed"
@@ -628,10 +702,7 @@ class ArchiveRequestService:
     def _owns_target(self, target_id: str, caller_id: str) -> bool:
         if target_id == caller_id:
             return True
-        try:
-            return self._effective_lead(target_id) == caller_id
-        except ArchiveRequestRefused:
-            return False
+        return self._follow_lead(target_id) == caller_id
 
     def sweep(
         self,
@@ -649,14 +720,11 @@ class ArchiveRequestService:
                 "sweep requires PASEO_AGENT_ID (or --self ID) to check target ownership; pass --all only as the watch lead"
             )
 
+        # Fail closed if the standing watcher record or its succession ledger is broken/cyclic.
         watcher_ids: set[str] = set()
         raw_watcher = self.read_watcher_id()
         if raw_watcher is not None:
-            watcher_ids.add(raw_watcher)
-            try:
-                watcher_ids.add(self._effective_lead(raw_watcher))
-            except ArchiveRequestRefused:
-                pass
+            watcher_ids.update(self._follow_lead_chain(raw_watcher))
 
         results: list[dict[str, Any]] = []
         errors = 0
@@ -671,9 +739,14 @@ class ArchiveRequestService:
                 "errors": errors,
             }
 
+        try:
+            entries = sorted(self.state_dir.iterdir())
+        except OSError as exc:
+            raise ArchiveRequestError(f"failed to list {self.state_dir}: {exc}") from exc
+
         listed_ids: set[str] | None = None
 
-        for path in sorted(self.state_dir.iterdir()):
+        for path in entries:
             if not path.name.endswith(".json") or path.name.startswith("."):
                 continue
             stem = path.stem
@@ -693,14 +766,16 @@ class ArchiveRequestService:
                 continue
 
             rec_home = record.get("home")
-            if isinstance(rec_home, str) and rec_home:
-                try:
-                    if Path(rec_home).resolve() != self.home:
-                        results.append({"file": path.name, "agent_id": agent_id, "action": "skip", "reason": "other-home"})
-                        continue
-                except OSError:
+            if not isinstance(rec_home, str) or not os.path.isabs(rec_home):
+                results.append({"file": path.name, "agent_id": agent_id, "action": "skip", "reason": "malformed-record"})
+                continue
+            try:
+                if Path(rec_home).resolve() != self.home:
                     results.append({"file": path.name, "agent_id": agent_id, "action": "skip", "reason": "other-home"})
                     continue
+            except (OSError, RuntimeError, ValueError):
+                results.append({"file": path.name, "agent_id": agent_id, "action": "skip", "reason": "malformed-record"})
+                continue
 
             status = record.get("status")
             if status == "archived":
@@ -712,7 +787,21 @@ class ArchiveRequestService:
 
             if not all_requests:
                 assert caller_id is not None
-                if not self._owns_target(target_id, caller_id):
+                try:
+                    owned = self._owns_target(target_id, caller_id)
+                except ArchiveRequestRefused as exc:
+                    errors += 1
+                    results.append(
+                        {
+                            "file": path.name,
+                            "agent_id": agent_id,
+                            "target_id": target_id,
+                            "action": "error",
+                            "reason": bounded_text(exc),
+                        }
+                    )
+                    continue
+                if not owned:
                     results.append(
                         {
                             "file": path.name,
@@ -749,13 +838,36 @@ class ArchiveRequestService:
                     record["status"] = "archived"
                     record.setdefault("archived_at", self.clock())
                     record.setdefault("archived_by", caller_id or "already-archived")
-                    write_atomic_json(path, record, mode=0o600)
+                    try:
+                        write_atomic_json(path, record, mode=0o600)
+                    except ArchiveRequestError as exc:
+                        errors += 1
+                        results.append(
+                            {
+                                "file": path.name,
+                                "agent_id": agent_id,
+                                "action": "error",
+                                "reason": f"record-write-failed:{bounded_text(exc)}",
+                            }
+                        )
+                        continue
                 results.append(
                     {
                         "file": path.name,
                         "agent_id": agent_id,
                         "action": "already-archived",
                         "reason": "already-archived-in-paseo",
+                    }
+                )
+                continue
+
+            if info.get("Archived") is not False:
+                results.append(
+                    {
+                        "file": path.name,
+                        "agent_id": agent_id,
+                        "action": "skip",
+                        "reason": "archived-unknown",
                     }
                 )
                 continue
@@ -837,19 +949,22 @@ class ArchiveRequestService:
                 receipt = json.loads(proc.stdout or "")
             except ValueError:
                 receipt = None
-            if isinstance(receipt, dict):
-                archived_id = receipt.get("agentId")
-                if archived_id is not None and archived_id != agent_id:
-                    errors += 1
-                    results.append(
-                        {
-                            "file": path.name,
-                            "agent_id": agent_id,
-                            "action": "error",
-                            "reason": f"ARCHIVED_OTHER_AGENT:{bounded_text(archived_id, 64)}",
-                        }
-                    )
-                    continue
+            if not isinstance(receipt, dict) or receipt.get("agentId") != agent_id:
+                errors += 1
+                archived_id = receipt.get("agentId") if isinstance(receipt, dict) else None
+                if isinstance(archived_id, str) and archived_id and archived_id != agent_id:
+                    reason_str = f"ARCHIVED_OTHER_AGENT:{bounded_text(archived_id, 64)}"
+                else:
+                    reason_str = "ARCHIVE_RECEIPT_UNREADABLE"
+                results.append(
+                    {
+                        "file": path.name,
+                        "agent_id": agent_id,
+                        "action": "error",
+                        "reason": reason_str,
+                    }
+                )
+                continue
 
             # Verify Archived: true readback before marking fulfilled.
             try:
@@ -881,7 +996,19 @@ class ArchiveRequestService:
             record["status"] = "archived"
             record["archived_at"] = self.clock()
             record["archived_by"] = caller_id or "sweep"
-            write_atomic_json(path, record, mode=0o600)
+            try:
+                write_atomic_json(path, record, mode=0o600)
+            except ArchiveRequestError as exc:
+                errors += 1
+                results.append(
+                    {
+                        "file": path.name,
+                        "agent_id": agent_id,
+                        "action": "error",
+                        "reason": f"record-write-failed:{bounded_text(exc)}",
+                    }
+                )
+                continue
             results.append(
                 {
                     "file": path.name,

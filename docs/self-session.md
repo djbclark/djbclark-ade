@@ -622,8 +622,9 @@ action before ending its turn:
    2. Owning lead: `--lead <id>`, else `ade.lead` label from
       `${PASEO_HOME:-~/.paseo}/agents/*/<self>.json`, else `ParentAgentId` from
       `paseo agent inspect <self> --json`, followed through
-      `ade_lead_succession.effective_lead()` so a handed-off lead forwards to
-      its live successor (never self).
+      `ade_lead_succession.effective_lead()` and fresh live `ACKNOWLEDGED`
+      handoffs (as `ade_send_guard._follow` does) so a handed-off or
+      handing-off lead forwards to its live successor (never self).
    3. When the caller has no live owning lead (for example a top-level lead
       finishing), the standing watch/unstick agent from
       `bin/load-watch watcher show --json` (or `$LW_STATE_DIR/watcher.json`
