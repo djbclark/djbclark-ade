@@ -2246,7 +2246,7 @@ def test_approve_post_dialog_names_repo_and_every_pr_head(tmp_path: Path, monkey
     assert rc == 0, err
     assert len(calls) == 1
     argv = calls[0]
-    assert argv[:3] == [str(ask), "-k", "/usr/bin/printf"]
+    assert argv[:4] == [str(ask), "--no-window", "-k", "/usr/bin/printf"]
     text = argv[-1]
     assert APPROVE_REPO in text
     for n, h in TWO_PRS.items():
@@ -2392,7 +2392,7 @@ def test_sudo_ask_path_comes_from_the_account_not_home(monkeypatch) -> None:
 def test_approve_post_always_prompts_with_k_even_when_approval_gate_is_open(
     tmp_path: Path, monkeypatch, capsys, with_sudo_ask: bool
 ) -> None:
-    """2026-11-23: ade-merge-ready-approve-post is pinned to always-prompt; an open approval-gate window must never bypass `-k`."""
+    """2026-11-23: ade-merge-ready-approve-post is pinned to always-prompt; an open approval-gate window must never bypass `--no-window -k`."""
     mod = _load_module()
     gate = tmp_path / "fakes" / "approval-gate"
     gate.parent.mkdir(parents=True, exist_ok=True)
@@ -2413,22 +2413,23 @@ def test_approve_post_always_prompts_with_k_even_when_approval_gate_is_open(
         ask.write_text("#!/bin/sh\n")
         ask.chmod(0o755)
         monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
-        expected_prefix = [str(ask), "-k", "/usr/bin/printf"]
+        expected_prefix = [str(ask), "--no-window", "-k", "/usr/bin/printf"]
     else:
         monkeypatch.setattr(mod, "SUDO_ASK", str(tmp_path / "no-such-sudo-ask"))
         expected_prefix = ["/usr/bin/sudo", "-k", "/usr/bin/true"]
 
-    # Refused prompt still refuses and posts nothing even though approval-gate reports open
-    calls: list = []
-    _fake_auth_run(mod, monkeypatch, calls, rc=1)
+    # Refused prompt (and an older sudo-ask rejecting --no-window with exit 2) fails closed, makes 1 call, posts nothing
     gh, log = _approve_world(tmp_path, TWO_PRS)
-    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
-    assert rc == 3 and not log.exists()
-    assert len(calls) == 1 and calls[0][: len(expected_prefix)] == expected_prefix
-    assert not gate_calls.exists()
+    for fail_rc in (1, 2):
+        calls: list = []
+        _fake_auth_run(mod, monkeypatch, calls, rc=fail_rc)
+        rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+        assert rc == 3 and not log.exists()
+        assert len(calls) == 1 and calls[0][: len(expected_prefix)] == expected_prefix
+        assert not gate_calls.exists()
 
-    # Accepted prompt runs with -k and never consults approval-gate
-    calls.clear()
+    # Accepted prompt runs with --no-window -k (or sudo -k) and never consults approval-gate
+    calls = []
     AUTH_KWARGS.clear()
     _fake_auth_run(mod, monkeypatch, calls, rc=0)
     rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)

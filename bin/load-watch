@@ -114,7 +114,7 @@ through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` 
 approval (operator, 2026-11-15: `sudo-ask` Allow dialog + Touch ID, as `bg approve-local`; fails closed; logged in ~/.local/state/bg/approvals.log);
 a live any-command `bgrun approve-local` ticket covering the directory (`bgrun approve-local check DIR` exits 0) stands in for the dialog for `local` only (operator, 2026-11-21; logged `lw-local-ticket` with `ticket=ID`).
 That row is time-limited: its text starts `[ticket ID]` (the ticket that recorded it), and `ci check` treats it as undecided as soon as no live any-command ticket covers the directory (`bgrun approve-local check` fails; any covering ticket keeps it alive, not only ID), or when the directory asked about (a linked worktree) is outside every ticket. A ticket never overwrites a `ci` decision and never records a `DIR/*` glob row.
-Otherwise, for the exact same non-glob, non-`ci`-override `local` scope, an open sudo-ask approval window (`approval-gate check --gate load-watch-ci-local`, exit 0; binary from `ADE_APPROVAL_GATE_BIN` or `~/.local/bin/approval-gate`, fail closed; 2026-11-23) also stands in for the dialog (logged `lw-local-approval-window`).
+Otherwise, for the exact same non-glob, non-`ci`-override `local` scope, an open sudo-ask approval window (`approval-gate check --gate load-watch-ci-local`, exit 0 with valid `ttl >= 1` and `expires_epoch > now`; binary from `ADE_APPROVAL_GATE_BIN` or `~/.local/bin/approval-gate`, fail closed; 2026-11-23) also stands in for the dialog (logged `lw-local-approval-window`). That row is time-limited too: its text starts `[window <expires_epoch>] `, `ci check` treats it as undecided once `now >= expires_epoch` or `approval-gate check` no longer succeeds (expired or revoked), and editing its note cannot promote it to permanent. Any fallback dialog runs `sudo-ask --no-window -k` (failing closed if an older `sudo-ask` rejects `--no-window`), so excluded or fail-closed decisions never silently bypass via `--gate sudo-ask`.
 `pending`: runs here but `bg` reminds the agent to investigate (repos seeded from 7 days of `bg` use); recording one is gated exactly like `local`
 (operator, 2026-11-15; an existing row of the same mode only changes its note; `ci` is never gated).
 No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
@@ -1952,6 +1952,7 @@ def helper_env():
 
 TICKET_ID = re.compile(r"[0-9a-f]{8}")
 TICKET_ROW = re.compile(r"\[ticket ([0-9a-f]{8})\] ")  # the text of a registry row recorded under a ticket
+WINDOW_ROW = re.compile(r"\[window ([0-9]+)\] ")  # the text of a registry row recorded under an approval window (expires_epoch)
 
 
 def live_bgrun_ticket(top):
@@ -1972,46 +1973,66 @@ def live_bgrun_ticket(top):
 
 
 def approval_gate_covers(gate_name=APPROVAL_GATE_NAME):
-    """True when `approval-gate check --gate <gate_name>` exits 0 (open sudo-ask approval window covers this gate), else False.
+    """Validated `expires_epoch` (int) when `approval-gate check --gate <gate_name>` exits 0 and prints valid
+    `ttl=<int >= 1>` and `expires_epoch=<int > now>`, else None.
     Resolves the binary from `ADE_APPROVAL_GATE_BIN` (explicit absolute path for tests, never PATH lookup) or `HOME/.local/bin/approval-gate`.
-    Fails closed on missing/non-executable/non-absolute binary, non-zero exit, timeout, or any subprocess/OS error."""
+    Fails closed on missing/non-executable/non-absolute binary, non-zero exit, missing/invalid stdout fields, timeout, or any subprocess/OS error."""
     if not gate_name:
-        return False
+        return None
     override = os.environ.get("ADE_APPROVAL_GATE_BIN", "").strip()
     gate_bin = Path(override) if override else (HOME / ".local/bin/approval-gate")
     try:
         if not (gate_bin.is_absolute() and gate_bin.is_file() and os.access(gate_bin, os.X_OK)):
-            return False
+            return None
         r = subprocess.run([str(gate_bin), "check", "--gate", gate_name], stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=APPROVAL_GATE_TIMEOUT_S, env=helper_env())
     except (OSError, subprocess.SubprocessError, ValueError):
-        return False
-    return r.returncode == 0
+        return None
+    if r.returncode != 0:
+        return None
+    vals = {}
+    for raw in r.stdout.splitlines():
+        if "=" not in raw:
+            continue
+        k, v = raw.split("=", 1)
+        k = k.strip()
+        if k in vals:
+            return None
+        vals[k] = v.strip()
+    ttl_s, exp_s = vals.get("ttl", ""), vals.get("expires_epoch", "")
+    if not (re.fullmatch(r"[0-9]+", ttl_s) and re.fullmatch(r"[0-9]+", exp_s)):
+        return None
+    ttl, exp = int(ttl_s), int(exp_s)
+    if ttl < 1 or exp <= int(now()):
+        return None
+    return exp
 
 
 def approve_local_decision(top, text, mode="local"):
     """Recording `pending` is gated exactly like `local` (operator, 2026-11-15; lead adversary, PR 744 B2): `bg` runs both here, so an ungated `pending` was a
     way round the dialog (replace a `ci` row, or plant a `/*` glob). Recording `local` skips the CI-first rule for every later build here, so djbclark must approve it afresh (operator, 2026-11-15):
-    `sudo-ask -k` shows an Allow dialog (command and directory, mouse click only), then sudo asks for Touch ID or the password; `-k` ignores
-    any cached sudo credential. Guards honest mistakes, not evasion, as in `bg`: $HOME picks the helper, LW_REGISTRY the registry, and a
+    `sudo-ask --no-window -k` shows an Allow dialog (command and directory, mouse click only), then sudo asks for Touch ID or the password; `--no-window`
+    refuses silent window bypass via `--gate sudo-ask` (2026-11-23; fails closed if an older `sudo-ask` rejects it) and `-k` ignores any cached sudo credential.
+    Guards honest mistakes, not evasion, as in `bg`: $HOME picks the helper, LW_REGISTRY the registry, ADE_APPROVAL_GATE_BIN overrides approval-gate for tests, and a
     user-owned file can be edited. Fails closed: helper missing or not executable, no GUI session, Deny, a timeout or any error all mean no.
     A live any-command `bgrun approve-local` ticket covering `top` (one Touch ID good for N hours; operator, 2026-11-21) stands in for the dialog, for
     `local` only: a ticket is bgrun's approval of local runs, and `pending` is a reminder row, not that approval. It never covers a `DIR/*` glob
     (the PR 744 B2 class) or a directory that already has a `ci` decision (overriding it needs the dialog). For that exact same non-glob,
     non-`ci`-override `local` scope, an open sudo-ask approval window (`approval-gate check --gate load-watch-ci-local`, 2026-11-23) also stands in
-    for the dialog (fails closed). Returns the ticket id (8-hex string) for a ticket, `"approval-window"` for an approval window, True for the
-    dialog; the caller records ticket rows as time-limited and re-checks the `ci` race guard for both non-dialog paths. No ticket/window or any doubt: ask as before."""
+    for the dialog (fails closed unless exit 0 with valid `ttl >= 1` and `expires_epoch > now`). Returns the ticket id (8-hex string) for a ticket,
+    `"window:<expires_epoch>"` for an approval window, True for the dialog; the caller records both ticket and window rows as time-limited and
+    re-checks the `ci` race guard for both non-dialog paths. No ticket/window or any doubt: ask via `sudo-ask --no-window -k`."""
     if mode == "local" and not top.endswith("/*") and ((decision(top, registry())[1] or [""])[0] != "ci"):
         if (ticket := live_bgrun_ticket(top)) is not None:
             local_approval_log("lw-local-ticket", top, text, mode, ticket=ticket[0])
             print(f"load-watch: a `local` decision for {top} is covered by a live bgrun approval ticket ({ticket[1]}); the row lasts only while a live ticket covers the directory; "
                   "no dialog was shown.", file=sys.stderr)
             return ticket[0]
-        if approval_gate_covers(APPROVAL_GATE_NAME):
+        if (window_exp := approval_gate_covers(APPROVAL_GATE_NAME)) is not None:
             local_approval_log("lw-local-approval-window", top, text, mode, detail=f"gate={APPROVAL_GATE_NAME}")
-            print(f"load-watch: a `local` decision for {top} is covered by an open approval-window (gate {APPROVAL_GATE_NAME}); "
-                  "no dialog was shown.", file=sys.stderr)
-            return "approval-window"
+            print(f"load-watch: a `local` decision for {top} is covered by an open approval-window (gate {APPROVAL_GATE_NAME}, expires {window_exp}); "
+                  "the row lasts only while the approval window stays open; no dialog was shown.", file=sys.stderr)
+            return f"window:{window_exp}"
     msg = f"load-watch ci decide: record {mode.upper()} (skip CI-first) for {top} because: {text}"
     if not (SUDO_ASK.is_file() and os.access(SUDO_ASK, os.X_OK)):
         local_approval_log(f"lw-{mode}-unavailable", top, text, mode)
@@ -2020,7 +2041,7 @@ def approve_local_decision(top, text, mode="local"):
         return False
     print(f"load-watch: asking djbclark to approve a `{mode}` decision for {top}", file=sys.stderr)
     try:
-        r = subprocess.run([str(SUDO_ASK), "-k", "/usr/bin/printf", "%s\\n", msg], stdout=subprocess.DEVNULL, timeout=SUDO_ASK_TIMEOUT_S,
+        r = subprocess.run([str(SUDO_ASK), "--no-window", "-k", "/usr/bin/printf", "%s\\n", msg], stdout=subprocess.DEVNULL, timeout=SUDO_ASK_TIMEOUT_S,
                            env=helper_env())
         ok = r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -2060,6 +2081,13 @@ def cmd_ci(a):
             print(f"load-watch: the `local` decision for {key} was recorded under a bgrun approval ticket, and no live ticket covers {top} now (expired or "
                   "revoked); treating it as undecided", file=sys.stderr)
             return 1
+        # a window row lasts only until its recorded expires_epoch AND while the approval window remains open (so revocation invalidates it too)
+        if row[0] == "local" and (wm := WINDOW_ROW.match(row[1])):
+            win_exp = int(wm.group(1))
+            if now() >= win_exp or approval_gate_covers(APPROVAL_GATE_NAME) is None:
+                print(f"load-watch: the `local` decision for {key} was recorded under an approval window (expires {win_exp}), and that window is no longer "
+                      "open (expired or revoked); treating it as undecided", file=sys.stderr)
+                return 1
         print(f"{row[0]}\t{row[1]}\t{key}")
         return 0
     if a.op == "decide":
@@ -2070,27 +2098,33 @@ def cmd_ci(a):
             print("load-watch ci decide: the directory and the text must not hold a control character (tab, newline, ...)", file=sys.stderr)
             return 2
         approved = False
-        ticket_id = ""
+        row_prefix = ""
         covered_without_dialog = False
 
         def change(rows):
-            nonlocal approved, ticket_id, covered_without_dialog
+            nonlocal approved, row_prefix, covered_without_dialog
             # `local` and `pending` both run here, so both are gated (operator 2026-11-15); an existing row of the same mode at this key
             # may only change its reason or note; `ci` is never gated
-            # a row recorded under a ticket is not a plain `local` row: changing its note must not make it permanent
-            if a.mode in ("local", "pending") and not approved and ((rows.get(top) or [""])[0] != a.mode or TICKET_ROW.match((rows.get(top) or ["", ""])[1])):
+            # a row recorded under a ticket or approval window is not a plain `local` row: changing its note must not make it permanent
+            existing = rows.get(top) or ["", ""]
+            if a.mode in ("local", "pending") and not approved and (existing[0] != a.mode or TICKET_ROW.match(existing[1]) or WINDOW_ROW.match(existing[1])):
                 check_registry_rows(rows)  # a damaged row refuses now, not after djbclark has clicked Allow and touched the sensor
                 return "ask"
             if covered_without_dialog and (decision(top, rows)[1] or [""])[0] == "ci":  # a `ci` decision landed while the ticket or window was checked: only the dialog may replace it
-                approved, ticket_id, covered_without_dialog = False, "", False
+                approved, row_prefix, covered_without_dialog = False, "", False
                 return "ask"
-            rows[top] = [a.mode, (f"[ticket {ticket_id}] " if ticket_id else "") + a.text, time.strftime("%Y-%m-%d")]
+            rows[top] = [a.mode, row_prefix + a.text, time.strftime("%Y-%m-%d")]
 
         while (r := mutate_registry(change)) == "ask":  # ask djbclark WITHOUT the lock or a snapshot, then re-read and set only this row
             if not (ok := approve_local_decision(top, a.text, a.mode)):
                 return 1
             covered_without_dialog = isinstance(ok, str)
-            ticket_id = ok if (isinstance(ok, str) and TICKET_ID.fullmatch(ok)) else ""
+            if isinstance(ok, str) and TICKET_ID.fullmatch(ok):
+                row_prefix = f"[ticket {ok}] "
+            elif isinstance(ok, str) and ok.startswith("window:") and re.fullmatch(r"[0-9]+", ok[7:]):
+                row_prefix = f"[window {ok[7:]}] "
+            else:
+                row_prefix = ""
             approved = True
         if r is not None:
             return r
