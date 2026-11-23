@@ -1,4 +1,4 @@
-# The approval window also answers agent permission prompts (2026-11-22)
+# The approval window also answers agent permission prompts (2026-11-22; installed live on bigmac 2026-11-23)
 
 Operator ruling, 2026-11-22: "we want our limited-duration token to also avoid prompts such as this". The "token" is the
 sudo-ask approval window (site-public-djbclark, `sudo-ask grant [DURATION]`: one Touch ID opens a timed window, 1 minute to 24
@@ -290,18 +290,23 @@ audit log, an unreadable request: nothing is allowed.
 ***6.*** No `ade.kind=external-review` hold (`bin/ade-auto-permit` has one): the operator's rule here is "any agent". No launcher sets
 that label today.
 
-## VI. Enabling it (nothing is installed by the change that added this)
+## VI. Enabling it (installed live on bigmac 2026-11-23)
 
-***1.*** Open a window: `sudo-ask grant 2h` (the site tool; Touch ID). Check: `bin/ade-approval-window status`.
+Live status (2026-11-23): with operator approval, `djbclark-ade` PR #939 was installed live on `bigmac` —
+`~/.claude/hooks/approval_window_permit.py` symlink, the `PermissionRequest` hook entry in `~/.claude/settings.json`, and
+launchd `com.djbclark.ade-approval-window` (60 s interval). The `sudo-ask-grant` root window itself is installed via
+`site-djbclark`. The hook's effect on an already-showing prompt still needs a live check (section VII 1).
+
+***1.*** Open a window: `sudo-ask grant 2h` (the site tool, installed via `site-djbclark`; Touch ID). Check: `bin/ade-approval-window status`.
 
 ***2.*** Paseo agents: either run `bin/ade-approval-window watch` in a Paseo terminal, or render the launchd template
-`config/launchd/com.djbclark.ade-approval-window.plist` (`bin/ade-sched render`, then install after the operator's yes; it is a
-template, no inventory row selects it, and its log directory must exist). It runs `watch --duration 50` every 60 s (an
+`config/launchd/com.djbclark.ade-approval-window.plist` (`bin/ade-sched render`, then install after the operator's yes; its
+log directory must exist; installed live on `bigmac` on 2026-11-23). It runs `watch --duration 50` every 60 s (an
 `ade-job-run` admission lock covers the whole run, so a reconcile defers while one runs).
 
 ***3.*** Non-Paseo Claude Code: the hook is registered in `agents/claude/settings.json.tmpl` under `PermissionRequest` (matcher `*`, behind
-`hook-deadline 8`, outer timeout 15, after Orca's own entry); it takes effect when the operator
-applies the template (`bin/ade-settings-apply`) and `ade update` links the hook.
+`hook-deadline 8`, outer timeout 15, after Orca's own entry); on a new host it takes effect when the operator
+applies the template (`bin/ade-settings-apply`) and `ade update` links the hook (installed live on `bigmac` on 2026-11-23).
 
 ## VII. Open items (live checks the lead makes)
 

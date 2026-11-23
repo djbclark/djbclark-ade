@@ -102,7 +102,9 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
     outside allowlist (`SAFE_OUTSIDE_CMDS = SAFE_HEREDOC_SINKS | {echo, printf, true, false, cd, mkdir,
     pwd, ls, stat, test, [, touch, rm}`) — bare names or direct paths in `/bin`, `/usr/bin`,
     `/opt/homebrew/bin`, or `/usr/local/bin` only (blocking `./cat` and `/tmp/cat` spoofing), excluding
-    `python`/`python3` `-c`/`-m`/script-file operands and `git -c*`/`--config-env`/`--exec-path` — still
+    `python`/`python3` `-c`/`-m`/script-file operands, `git -c*`/`--config-env`/`--exec-path`,
+    `sort --compress-program*`, and sensitive inline env assignments (`GIT_*`, `PATH`, `LD_*`, `DYLD_*`,
+    `BASH_ENV`, `ENV`, `IFS`, `PYTHON*`; 2026-11-23) — still
     have every literal (non-glob) word checked against the policy **and** every glob word checked with
     the pattern-only engine (`glob_pattern_only`, zero filesystem scans, so `~/.ssh/id_*`, `*.key`, and
     `.env*` still block even inside `python3 - <<'EOF'`), skipping only the filesystem glob walk so

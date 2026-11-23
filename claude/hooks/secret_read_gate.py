@@ -1157,6 +1157,8 @@ COMPOUND_KEYWORDS = frozenset({
     "do", "done", "case", "esac", "coproc", "select", "function",
 })
 SHELL_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+UNSAFE_ASSIGN_EXACT = frozenset({"PATH", "BASH_ENV", "ENV", "IFS"})
+UNSAFE_ASSIGN_PREFIXES = ("GIT_", "LD_", "DYLD_", "PYTHON")
 PYTHON_EXEC_FLAG = re.compile(r"^-[A-Za-z]*[cm]")
 REDIR_TOKENS = frozenset({"<", ">", ">>", ">|", "<>", "<<<", "<<", "<&", ">&", "&>", "&>>"})
 OUT_REDIR_TOKENS = frozenset({">", ">>", ">|", "&>", "&>>"})
@@ -1262,9 +1264,10 @@ def _tokenize_pipeline(pipe_text: str):
 
 
 def _parse_stage(stage_toks: list):
-    """(cmd_word, args, targets, unsafe_redir, has_compound) for one stage's tokens.
+    """(cmd_word, args, assigns, targets, unsafe_redir, has_compound) for one stage's tokens.
 
     Strips redirections (including any fd digit immediately before a redirection operator, regardless of position).
+    Returns leading inline `SHELL_ASSIGN` tokens (`assigns = words[:k]`) instead of dropping them.
     """
     words = []
     targets = set()
@@ -1291,8 +1294,9 @@ def _parse_stage(stage_toks: list):
     k = 0
     while k < len(words) and SHELL_ASSIGN.match(words[k]):
         k += 1
+    assigns = words[:k]
     if k >= len(words):
-        return "", [], targets, unsafe_redir, has_compound
+        return "", [], assigns, targets, unsafe_redir, has_compound
     head = words[k]
     args = words[k + 1:]
     if os.path.basename(head) == "tee":
@@ -1301,7 +1305,16 @@ def _parse_stage(stage_toks: list):
                 continue
             if not a.startswith("-") and a != "-":
                 targets.add(a)
-    return head, args, targets, unsafe_redir, has_compound
+    return head, args, assigns, targets, unsafe_redir, has_compound
+
+
+def _has_unsafe_assigns(assigns: list) -> bool:
+    """True when any inline assignment sets a sensitive execution-hook env var."""
+    for tok in assigns:
+        name = tok.split("=", 1)[0]
+        if name in UNSAFE_ASSIGN_EXACT or name.startswith(UNSAFE_ASSIGN_PREFIXES):
+            return True
+    return False
 
 
 def _is_allowlisted_cmd(head: str, allowlist) -> bool:
@@ -1326,13 +1339,19 @@ def _is_unsafe_stage_flags(base: str, args: list) -> bool:
         return False
     if base == "git":
         return any(a.startswith("-c") or a.startswith("--config-env") or a.startswith("--exec-path") for a in args)
+    if base == "sort":
+        return any(
+            a.startswith("--compress-program")
+            or (a.startswith("--co") and "--compress-program".startswith(a.split("=", 1)[0]))
+            for a in args
+        )
     return False
 
 
 def _stage_is_safe_sink(stage_toks: list):
     """(is_safe_sink, targets) for one stage of a heredoc's own pipeline (strict allowlist + safe path)."""
-    head, args, targets, unsafe_redir, has_compound = _parse_stage(stage_toks)
-    if not head or unsafe_redir or has_compound:
+    head, args, assigns, targets, unsafe_redir, has_compound = _parse_stage(stage_toks)
+    if not head or unsafe_redir or has_compound or _has_unsafe_assigns(assigns):
         return False, targets
     if not _is_allowlisted_cmd(head, SAFE_HEREDOC_SINKS):
         return False, targets
@@ -1361,7 +1380,8 @@ def _outside_is_safe(cleaned_outside: str):
     Uses a tight allowlist (`SAFE_OUTSIDE_CMDS` + `SAFE_BIN_DIRS`): returns `(False, set())` (fail closed on every
     heredoc) if the outside command cannot be tokenized cleanly, contains compound keywords, non-allowlisted
     commands or custom paths (`./cat`, `/tmp/cat`, `install`, `ln`, `osascript`, `rbash`, shells, wrappers, etc.),
-    unsafe redirections, or code-executing flags on `python`/`git`.
+    unsafe redirections, sensitive inline env assignments (`GIT_*`, `PATH`, `LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`,
+    `IFS`, `PYTHON*`), or code-executing flags on `python`/`git`/`sort`.
     """
     stages = _tokenize_pipeline(cleaned_outside)
     if stages is None:
@@ -1369,8 +1389,8 @@ def _outside_is_safe(cleaned_outside: str):
     all_cmd_words = set()
     for st in stages:
         tick()
-        head, args, _, unsafe_redir, has_compound = _parse_stage(st)
-        if has_compound or unsafe_redir:
+        head, args, assigns, _, unsafe_redir, has_compound = _parse_stage(st)
+        if has_compound or unsafe_redir or _has_unsafe_assigns(assigns):
             return False, set()
         if not head:
             continue

@@ -1371,6 +1371,53 @@ def test_adversary_r2_safe_bin_dir_path_still_allowed(monkeypatch, tmp_path):
     assert ck._scanned == 0
 
 
+# ---- Adversary round 3 LOW follow-up regression tests (R3-L1, R3-L2) -----------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    # R3-L1: inline GIT_* env-var alias injection on git
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!sh' git x <<'EOF'\ncat *\nEOF\n",
+    "GIT_CONFIG_PARAMETERS=\"'alias.x=!sh'\" git x <<'EOF'\ncat *\nEOF\n",
+    "cat > g.sh <<'EOF'\ncat *\nEOF\nGIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!sh' git x\n",
+    # R3-L1: other sensitive execution-hook env vars (`PATH`, `LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `IFS`, `PYTHON*`)
+    "PATH=/tmp/evil cat <<'EOF'\ncat *\nEOF\n",
+    "LD_PRELOAD=/tmp/evil.so cat <<'EOF'\ncat *\nEOF\n",
+    "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib cat <<'EOF'\ncat *\nEOF\n",
+    "BASH_ENV=/tmp/evil.sh cat <<'EOF'\ncat *\nEOF\n",
+    "ENV=/tmp/evil.sh cat <<'EOF'\ncat *\nEOF\n",
+    "IFS=/ cat <<'EOF'\ncat *\nEOF\n",
+    "PYTHONSTARTUP=/tmp/evil.py python3 - <<'EOF'\ncat *\nEOF\n",
+    "PYTHONPATH=/tmp/evil python3 - <<'EOF'\ncat *\nEOF\n",
+    "cat > notes.md <<'EOF'\ncat *\nEOF\nPATH=/tmp/evil\n",
+    # R3-L2: GNU sort `--compress-program` (both `=` and space forms, plus unambiguous `--comp` prefix)
+    "sort --compress-program=sh <<'EOF'\ncat *\nEOF\n",
+    "sort --compress-program sh <<'EOF'\ncat *\nEOF\n",
+    "sort --comp=sh <<'EOF'\ncat *\nEOF\n",
+    "cat > notes.md <<'EOF'\ncat *\nEOF\nsort --compress-program=sh notes.md\n",
+])
+def test_adversary_r3_l1_l2_sensitive_assigns_and_sort_compress_program_blocked(env, cmd):
+    """Adversary PR 951 Round 3 LOWs: sensitive inline env assignments (`GIT_*`, `PATH`, `LD_*`, `DYLD_*`,
+    `BASH_ENV`, `ENV`, `IFS`, `PYTHON*`) and `sort --compress-program` must fail closed to full fs glob analysis."""
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_adversary_r3_l1_l2_benign_inline_assigns_and_sort_flags_still_allowed(monkeypatch, tmp_path):
+    """Benign inline assignments (`LC_ALL=C sort`, `FOO=bar cat`) and normal `sort` flags still skip fs walks."""
+    hook = load_hook()
+    for i in range(30):
+        (tmp_path / ("f%03d.txt" % i)).write_text("x\n")
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    body = _markdown_with_bold_tokens(40)
+    for cmd in [
+        "LC_ALL=C sort -u <<'EOF'\n" + body + "\nEOF\n",
+        "FOO=bar TZ=UTC cat > notes.md <<'EOF'\n" + body + "\nEOF\n",
+        "sort --check=quiet <<'EOF'\n" + body + "\nEOF\n",
+    ]:
+        ck = checker(hook, tmp_path)
+        assert hook.check_command(ck, cmd) is None, cmd
+        assert ck._scanned == 0, cmd
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"

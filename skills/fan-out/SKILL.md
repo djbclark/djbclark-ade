@@ -238,6 +238,12 @@ A lead that makes the claim before the worker exists runs `new --path <worktree>
   The worker ends its turn immediately after sending. Requesters prove delivery via dual routes (operator ruling 2026-11-12):
   (a) prompt `ack <worker id> <msg-id>` sent via `paseo send` only once `paseo agent inspect <id> --json` confirms status is `idle`;
   (b) atomic write of `{done}.ack` on disk next to the worker's done file (`bin/completion-notice --lead-ack --worker <id> --msg-id <msg-id> --done <done-path>`).
+- **Self-archiving finished sessions (operator ruling 2026-11-22; recorded 2026-11-23):** *"sessions that are no longer needed
+  should always archive themselves"*. Empirical Paseo behavior: plain `paseo agent archive <own id>` from inside a running
+  session fails (`rc=1`, currently running), and `paseo agent archive --force <own id>` immediately interrupts/terminates the
+  running turn (dropping anything after it). Once the final report and `done:` notice are delivered and acknowledged (or when
+  finishing cleanly), archive via the non-destructive archive-request path (`bin/ade-request-archive`, PR #954) or let the lead
+  archive the worker once idle; never run `--force` before final output is delivered and flushed.
 - Verify each result against the artifact (the diff, the tests), then record outcomes for
   `route_agent.py calibrate` (ci / review / merged fields in the measured history).
 
