@@ -688,13 +688,15 @@ class Router:
             return reply, b.name
         first = call(self.primary, method, path, headers, body, timeout)
         reason = fallback_reason(path, first)
+        bridge_log_note = ""
         if self.mit_bridge is not None and self.mit_bridge.enabled:
-            enrolled = self.mit_bridge.is_enrolled_request(method, path, body)
-            b_reply, b_backend, b_note = self.mit_bridge.maybe_bridge(method, path, body, first, reason, Reply)
+            b_reply, b_backend, b_note, was_enrolled = self.mit_bridge.maybe_bridge(
+                method, path, body, first, reason, Reply
+            )
             if b_reply is not None and b_backend:
                 self._log(method, path, b_backend, b_reply, t0, b_note)
                 return b_reply, b_backend
-            if enrolled:
+            if was_enrolled:
                 if b_note and b_note != "primary-ok":
                     first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
                                   first.body, first.error)
@@ -702,17 +704,26 @@ class Router:
                         else (reason and f"{reason}; enrolled"))
                 self._log(method, path, "primary", first, t0, note)
                 return self.rewrite(first, "primary"), "primary"
-            if b_note and b_note != "primary-ok":
-                first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
-                              first.body, first.error)
+            if b_note.startswith("snapshot-"):
+                bridge_log_note = f"mit-bridge skipped:{b_note}"
+                if _MIT_BRIDGE_MOD is None or _MIT_BRIDGE_MOD.needs_browser_bridge(first, reason):
+                    first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
+                                  first.body, first.error)
         if not reason or not self.fallback:
-            self._log(method, path, "primary", first, t0, reason and f"{reason}; no fallback")
+            note = reason and f"{reason}; no fallback"
+            if bridge_log_note:
+                note = f"{note}; {bridge_log_note}" if note else bridge_log_note
+            self._log(method, path, "primary", first, t0, note)
             return self.rewrite(first, "primary"), "primary"
         second = call(self.fallback, method, path, headers, body, timeout)
         if 200 <= second.status < 300 or first.status == 0:
-            self._log(method, path, "fallback", second, t0, reason)
+            note = f"{reason}; {bridge_log_note}" if bridge_log_note else reason
+            self._log(method, path, "fallback", second, t0, note)
             return self.rewrite(second, "fallback"), "fallback"
-        self._log(method, path, "primary", first, t0, f"{reason}; fallback HTTP {second.status or second.error}")
+        note = f"{reason}; fallback HTTP {second.status or second.error}"
+        if bridge_log_note:
+            note = f"{note}; {bridge_log_note}"
+        self._log(method, path, "primary", first, t0, note)
         return self.rewrite(first, "primary"), "primary"
 
     def _log(self, method, path, backend, reply, t0, note) -> None:
@@ -789,7 +800,14 @@ def build_router(env, token: str) -> Router:
         fb_url = (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/")
         fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url), fb_key)
     search_timeout = float(env.get("FIRECRAWL_ROUTER_SEARCH_TIMEOUT") or 35)
-    mit_bridge = _MIT_BRIDGE_MOD.build_mit_bridge(env) if _MIT_BRIDGE_MOD is not None else None
+    mit_mode = (env.get("FIRECRAWL_ROUTER_MIT_BRIDGE") or "off").strip().lower()
+    if _MIT_BRIDGE_MOD is not None:
+        mit_bridge = _MIT_BRIDGE_MOD.build_mit_bridge(env)
+    else:
+        mit_bridge = None
+        if mit_mode in ("pdf", "all"):
+            print("firecrawl-router: FIRECRAWL_ROUTER_MIT_BRIDGE enabled but firecrawl_mit_bridge.py is missing; failing closed",
+                  file=sys.stderr, flush=True)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
                   extractor=build_extractor(env), search_timeout=search_timeout, mit_bridge=mit_bridge)
 

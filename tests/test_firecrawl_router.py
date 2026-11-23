@@ -894,9 +894,14 @@ class MitBridgeTest(unittest.TestCase):
             "markdown": "commercial", "metadata": {"statusCode": 200},
         }}))
 
+        # Sibling helper module proving -E -s keeps script directory on sys.path (F1).
+        (self.root / "bridge_test_sibling.py").write_text('MARKER = "sibling-ok"\n', encoding="utf-8")
+
         self.fetch_bin = _write_exec(self.root / "fake_fetch.py", f"""#!{sys.executable}
 import json, os, sys
 from pathlib import Path
+import bridge_test_sibling
+assert bridge_test_sibling.MARKER == "sibling-ok"
 argv = sys.argv[1:]
 Path({str(self.log_dir / 'fetch_argv.json')!r}).write_text(json.dumps(argv))
 Path({str(self.log_dir / 'fetch_env.json')!r}).write_text(json.dumps(dict(os.environ)))
@@ -914,6 +919,8 @@ print(json.dumps({{
         self.browser_bin = _write_exec(self.root / "fake_browser.py", f"""#!{sys.executable}
 import json, os, sys
 from pathlib import Path
+import bridge_test_sibling
+assert bridge_test_sibling.MARKER == "sibling-ok"
 argv = sys.argv[1:]
 Path({str(self.log_dir / 'browser_argv.json')!r}).write_text(json.dumps(argv))
 Path({str(self.log_dir / 'browser_env.json')!r}).write_text(json.dumps(dict(os.environ)))
@@ -1079,10 +1086,22 @@ sys.stdout.write("# Cambridge Markdown\\n\\nConverted from HTML.\\n")
             "https://www.nature.com./a.pdf",
             "https://www%2enature.com/a.pdf",
             "https://www.nature.com\\evil.example/a.pdf",
+            "HTTPS://www.nature.com/a.pdf",
+            "HTTP://www.nature.com/a.pdf",
         )
         for u in bad_urls:
             reply, backend = self._post(router, "/v2/scrape", {"url": u})
             self.assertEqual(backend, "primary", u)
+            self.assertNotIn("X-Firecrawl-MIT-Bridge", reply.headers, u)
+        # Lane 1 (mit-fetch) refuses non-443 ports and plaintext http:// (F2)
+        for body in (
+            {"url": "https://www.nature.com:8443/a.pdf"},
+            {"url": "http://www.nature.com/a.pdf"},
+            {"url": "http://www.nature.com:6379/article", "parsers": ["pdf"]},
+        ):
+            reply, backend = self._post(router, "/v2/scrape", body)
+            self.assertEqual((backend, reply.headers.get("X-Firecrawl-MIT-Bridge")),
+                             ("primary", "skipped:fetch-requires-https-443"), body)
         # Non-443 port refused by browser lane
         self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
         reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.cambridge.org:8443/article"})
@@ -1258,7 +1277,9 @@ print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pd
             bridge.browser_sem.release()
 
     def test_subprocess_env_is_scrubbed(self):
+        real_home = "/tmp/operator-home"
         secrets_env = {
+            "HOME": real_home,
             "FIRECRAWL_SELFHOST_API_KEY": "secret-hyades",
             "FIRECRAWL_API_KEY": "secret-commercial",
             "FIRECRAWL_ROUTER_SIPB_KEY": "secret-sipb",
@@ -1271,11 +1292,11 @@ print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pd
             self.primary.reply = lambda b, p: (200, {"success": True, "data": {"markdown": "wall", "metadata": {"statusCode": 429}}})
             self._post(router, "/v2/scrape", {"url": "https://www.cambridge.org/core/article"})
 
-        for name, allow_ssh in (
-            ("fetch_env.json", True),
-            ("browser_env.json", False),
-            ("pdftotext_env.json", False),
-            ("pandoc_env.json", False),
+        for name, allow_ssh, isolate_home in (
+            ("fetch_env.json", True, False),
+            ("browser_env.json", False, True),
+            ("pdftotext_env.json", False, True),
+            ("pandoc_env.json", False, True),
         ):
             env = json.loads((self.log_dir / name).read_text())
             for k in ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_API_KEY",
@@ -1286,6 +1307,11 @@ print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pd
                 self.assertEqual(env.get("SSH_AUTH_SOCK"), "/tmp/fake-ssh.sock")
             else:
                 self.assertNotIn("SSH_AUTH_SOCK", env, name)
+            if isolate_home:
+                self.assertEqual(env.get("HOME"), env.get("TMPDIR"), name)
+                self.assertNotEqual(env.get("HOME"), real_home, name)
+            else:
+                self.assertEqual(env.get("HOME"), real_home, name)
 
     def test_llm_query_on_bridged_content_uses_normal_extractor_ladder(self):
         # Operator ruling 2026-11-22: no SIPB-only guard; normal sipb -> litellm ladder runs on bridged content.
@@ -1311,11 +1337,111 @@ print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "ok", "content_is_pd
         orphan = self.state_dir / "run-orphan"
         orphan.mkdir(mode=0o700)
         (orphan / "stale.pdf").write_bytes(b"%PDF")
+        old = time.time() - 900
+        self._os.utime(orphan, (old, old))
+        active = self.state_dir / "run-active"
+        active.mkdir(mode=0o700)
+        (active / "live.pdf").write_bytes(b"%PDF")
         keep = self.state_dir / "keep.txt"
         keep.write_text("keep")
         _ = self._bridge(mode="pdf")
         self.assertFalse(orphan.exists())
+        self.assertTrue(active.exists())
         self.assertTrue(keep.exists())
+
+    def test_single_snapshot_load_and_non_enrolled_header_hygiene(self):
+        # F3: snapshot.load() called once per request; healthy non-enrolled scrapes get no bridge header;
+        # stale snapshot is logged clearly even on non-enrolled scrapes.
+        bridge = self._bridge(mode="pdf")
+        router = self._router(bridge, with_fallback=False)
+        with unittest.mock.patch.object(bridge.snapshot, "load", wraps=bridge.snapshot.load) as spy:
+            reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual((reply.status, backend), (200, "mit-fetch"))
+        self.assertEqual(spy.call_count, 1)
+
+        # Healthy non-enrolled scrape with valid snapshot or mixed-case URL: no X-Firecrawl-MIT-Bridge header.
+        self.primary.reply = lambda b, p: (200, {"success": True, "data": {
+            "markdown": "# Example\n\nReal content.", "metadata": {"statusCode": 200},
+        }})
+        for url in ("https://example.com/page", "https://GitHub.com/foo"):
+            r_ok, b_ok = self._post(router, "/v2/scrape", {"url": url})
+            self.assertEqual((r_ok.status, b_ok), (200, "primary"), url)
+            self.assertNotIn("X-Firecrawl-MIT-Bridge", r_ok.headers, url)
+
+        # Stale snapshot: logged on primary, no header on healthy 200 example.com, header on failing scrape.
+        stale = self.root / "stale_log.json"
+        stale.write_bytes(_make_snapshot_bytes(["www.nature.com"]))
+        stale.chmod(0o600)
+        old = time.time() - 8 * 86400
+        self._os.utime(stale, (old, old))
+        router_stale = self._router(self._bridge(mode="pdf", snapshot_path=str(stale)), with_fallback=False)
+        r_healthy, _ = self._post(router_stale, "/v2/scrape", {"url": "https://example.com/ok"})
+        self.assertNotIn("X-Firecrawl-MIT-Bridge", r_healthy.headers)
+        self.assertIn("mit-bridge skipped:snapshot-stale", router_stale.log.getvalue())
+
+    def test_stdout_cap_kills_stubborn_grandchild_in_process_group(self):
+        # F4: leader exits on SIGTERM while grandchild ignores SIGTERM; SIGKILL reaps grandchild cleanly.
+        mb = fr._MIT_BRIDGE_MOD
+        pid_file = self.root / "stubborn.pid"
+        flooder = _write_exec(self.root / "flooder.py", f"""#!{sys.executable}
+import signal, subprocess, sys, time
+from pathlib import Path
+p = subprocess.Popen([sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"])
+Path({str(pid_file)!r}).write_text(str(p.pid))
+sys.stdout.write("A" * 200000)
+sys.stdout.flush()
+time.sleep(5)
+""")
+        res = mb.run_bounded(
+            [sys.executable, "-E", "-s", flooder],
+            env=mb.scrubbed_env(),
+            timeout=5.0,
+            max_stdout=4096,
+            kill_on_stdout_cap=True,
+        )
+        self.assertTrue(res.stdout_truncated)
+        self.assertEqual(len(res.stdout), 4096)
+        gpid = int(pid_file.read_text())
+        time.sleep(0.15)
+        with self.assertRaises(ProcessLookupError):
+            self._os.kill(gpid, 0)
+
+    def test_header_injection_in_subprocess_class_is_normalized(self):
+        # F6: CR/LF or arbitrary text in subprocess class normalizes to "unknown".
+        bad_fetch = _write_exec(self.root / "inj_fetch.py", f"""#!{sys.executable}
+import json
+print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "bad\\r\\nInjected: 1", "content_is_pdf": False}}, "evidence": {{"mit_body": None}}}}))
+""")
+        router = self._router(self._bridge(mode="pdf", fetch_bin=bad_fetch), with_fallback=False)
+        reply, backend = self._post(router, "/v2/scrape", {"url": "https://www.nature.com/articles/x.pdf"})
+        self.assertEqual(backend, "primary")
+        hdr = reply.headers.get("X-Firecrawl-MIT-Bridge", "")
+        self.assertEqual(hdr, "skipped:fetch-not-pdf-unknown")
+        self.assertNotIn("\r", hdr)
+        self.assertNotIn("\n", hdr)
+
+    def test_cooldown_validation_and_missing_bridge_module_warning(self):
+        # F8: non-finite/out-of-range cooldown falls back to default; missing module logs warning.
+        mb = fr._MIT_BRIDGE_MOD
+        for bad_cd in ("inf", "-inf", "nan", "-5", "99999"):
+            b = mb.build_mit_bridge({
+                "FIRECRAWL_ROUTER_MIT_BRIDGE": "pdf",
+                "FIRECRAWL_ROUTER_MIT_SNAPSHOT": str(self.snap),
+                "FIRECRAWL_ROUTER_MIT_STATE_DIR": str(self.state_dir),
+                "FIRECRAWL_ROUTER_MIT_COOLDOWN_S": bad_cd,
+            }, log=io.StringIO())
+            self.assertEqual(b.config.cooldown_s, mb.DEFAULT_COOLDOWN_S, bad_cd)
+
+        err = io.StringIO()
+        with unittest.mock.patch.object(fr, "_MIT_BRIDGE_MOD", None), unittest.mock.patch.object(sys, "stderr", err):
+            r = fr.build_router({
+                "FIRECRAWL_SELFHOST_URL": self.primary.base,
+                "FIRECRAWL_ROUTER_MIT_BRIDGE": "pdf",
+                "FIRECRAWL_ROUTER_MIT_SNAPSHOT": str(self.snap),
+            }, "")
+        self.assertIsNone(r.mit_bridge)
+        self.assertIn("firecrawl_mit_bridge.py is missing", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -86,6 +87,8 @@ MAX_FETCH_CAP = 4
 DEFAULT_MAX_BROWSER = 1
 MAX_BROWSER_CAP = 2
 DEFAULT_COOLDOWN_S = 60.0
+MAX_COOLDOWN_S = 3600.0
+ORPHAN_MIN_AGE_S = 600.0
 
 DEFAULT_FETCH_BIN = os.path.expanduser("~/src/xvm-debian-howto/scripts/mitnet-routing/fetch.py")
 DEFAULT_BROWSER_BIN = os.path.expanduser("~/src/xvm-debian-howto/scripts/mitnet-routing/browserfetch.py")
@@ -94,6 +97,7 @@ DEFAULT_SOCKS_HOST = "127.0.0.1"
 DEFAULT_SOCKS_PORT = 18830
 
 MIT_HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+SAFE_CLASS_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -137,9 +141,12 @@ def valid_host(host: str) -> str | None:
 
 def parse_url(url: str) -> tuple[str, str, int] | None:
     """(scheme, host, port) for a CANONICAL plain http(s) URL, else None.
-    Canonical means the host exactly as written is already the validated host
-    (lowercase ASCII, no trailing dot) and any explicit port is 1-65535."""
+    Canonical means lowercase scheme, the host exactly as written is already
+    the validated host (lowercase ASCII, no trailing dot), and any explicit
+    port is 1-65535."""
     if not isinstance(url, str) or len(url) > 4096:
+        return None
+    if not url.startswith(("http://", "https://")):
         return None
     if any(ord(ch) <= 32 or ord(ch) == 127 for ch in url) or "\\" in url:
         return None
@@ -341,13 +348,14 @@ def scrubbed_env(
     *,
     include_ssh_auth_sock: bool = False,
     tmpdir: str | None = None,
+    home: str | None = None,
 ) -> dict[str, str]:
     """Minimal allowlisted environment for bridge subprocesses.
     Zero FIRECRAWL_*, LITELLM_*, MIT_SIPB_*, or other daemon credentials."""
     src = os.environ if base_env is None else base_env
     env = {
         "PATH": src.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "HOME": src.get("HOME", ""),
+        "HOME": home if home is not None else src.get("HOME", ""),
         "LANG": src.get("LANG") or "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8",
     }
@@ -360,33 +368,9 @@ def scrubbed_env(
     return env
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """Terminate an entire subprocess session cleanly (SIGTERM -> SIGKILL)."""
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-    try:
-        proc.wait(timeout=2.0)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-    try:
-        proc.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
-        pass
+def _safe_class(val: object) -> str:
+    s = str(val or "")
+    return s if SAFE_CLASS_RE.fullmatch(s) else "unknown"
 
 
 @dataclass
@@ -408,7 +392,7 @@ def run_bounded(
     stdin_bytes: bytes | None = None,
     kill_on_stdout_cap: bool = True,
 ) -> BoundedResult:
-    """Run argv (shell=False, new session) with bounded stdout/stderr and killpg timeout."""
+    """Run argv (shell=False, new session) with bounded stdout/stderr and synchronized killpg teardown."""
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
@@ -417,9 +401,44 @@ def run_bounded(
         env=env,
         start_new_session=True,
     )
+    pgid = proc.pid
     out_buf = bytearray()
     err_buf = bytearray()
-    state = {"out_trunc": False, "killed_cap": False}
+    buf_lock = threading.Lock()
+    kill_lock = threading.Lock()
+    killed_event = threading.Event()
+    state = {"out_trunc": False}
+
+    def _terminate_group() -> None:
+        with kill_lock:
+            if killed_event.is_set():
+                return
+            killed_event.set()
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            # Always SIGKILL the process group so grandchildren that ignored SIGTERM
+            # cannot survive even when the session leader exited promptly.
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def _read_stream(stream, buf: bytearray, cap: int, is_stdout: bool) -> None:
         try:
@@ -427,21 +446,20 @@ def run_bounded(
                 chunk = stream.read(65536)
                 if not chunk:
                     break
-                if len(buf) < cap:
-                    take = min(len(chunk), cap - len(buf))
-                    buf.extend(chunk[:take])
-                    if take < len(chunk) and is_stdout:
+                should_kill = False
+                with buf_lock:
+                    if len(buf) < cap:
+                        take = min(len(chunk), cap - len(buf))
+                        buf.extend(chunk[:take])
+                        if take < len(chunk) and is_stdout:
+                            state["out_trunc"] = True
+                            should_kill = kill_on_stdout_cap
+                    elif is_stdout:
                         state["out_trunc"] = True
-                        if kill_on_stdout_cap:
-                            state["killed_cap"] = True
-                            _kill_process_group(proc)
-                            break
-                elif is_stdout:
-                    state["out_trunc"] = True
-                    if kill_on_stdout_cap:
-                        state["killed_cap"] = True
-                        _kill_process_group(proc)
-                        break
+                        should_kill = kill_on_stdout_cap
+                if should_kill:
+                    _terminate_group()
+                    break
         except OSError:
             pass
         finally:
@@ -476,21 +494,26 @@ def run_bounded(
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _kill_process_group(proc)
+        _terminate_group()
     finally:
         if t_in is not None:
             t_in.join(timeout=2.0)
         t_out.join(timeout=2.0)
         t_err.join(timeout=2.0)
         if proc.poll() is None:
-            _kill_process_group(proc)
+            _terminate_group()
+
+    with buf_lock:
+        out_bytes = bytes(out_buf)
+        err_bytes = bytes(err_buf)
+        out_trunc = state["out_trunc"]
 
     return BoundedResult(
         returncode=proc.returncode if proc.returncode is not None else -1,
-        stdout=bytes(out_buf),
-        stderr=bytes(err_buf),
+        stdout=out_bytes,
+        stderr=err_bytes,
         timed_out=timed_out,
-        stdout_truncated=state["out_trunc"],
+        stdout_truncated=out_trunc,
     )
 
 
@@ -579,12 +602,6 @@ def _decode_capped_utf8(raw: bytes, max_bytes: int) -> tuple[str, bool]:
     sliced = raw[:max_bytes]
     # errors="ignore" cleanly drops any trailing partial multi-byte UTF-8 sequence.
     return sliced.decode("utf-8", "ignore"), truncated
-
-
-def _sanitize_stderr(raw: bytes) -> str:
-    txt = raw[:MAX_STDERR_BYTES].decode("utf-8", "replace")
-    txt = CONTROL_CHARS_RE.sub("", txt)
-    return " ".join(txt.split())[:200]
 
 
 # ---- Request & Hyades-reply inspection helpers -----------------------------
@@ -781,7 +798,8 @@ def build_mit_bridge(env: dict[str, str], log=sys.stderr) -> MitBridge | None:
     max_fetch = _parse_int_clamped(env.get("FIRECRAWL_ROUTER_MIT_MAX_FETCH"), DEFAULT_MAX_FETCH, 1, MAX_FETCH_CAP)
     max_browser = _parse_int_clamped(env.get("FIRECRAWL_ROUTER_MIT_MAX_BROWSER"), DEFAULT_MAX_BROWSER, 1, MAX_BROWSER_CAP)
     try:
-        cooldown_s = max(0.0, float(env.get("FIRECRAWL_ROUTER_MIT_COOLDOWN_S") or DEFAULT_COOLDOWN_S))
+        raw_cd = float(env.get("FIRECRAWL_ROUTER_MIT_COOLDOWN_S") or DEFAULT_COOLDOWN_S)
+        cooldown_s = raw_cd if (math.isfinite(raw_cd) and 0.0 <= raw_cd <= MAX_COOLDOWN_S) else DEFAULT_COOLDOWN_S
     except ValueError:
         cooldown_s = DEFAULT_COOLDOWN_S
 
@@ -843,9 +861,10 @@ class MitBridge:
         except OSError:
             return False
 
-    def sweep_orphans(self) -> None:
-        """Delete leftover run-* dirs from a prior crash/SIGKILL."""
+    def sweep_orphans(self, min_age_s: float = ORPHAN_MIN_AGE_S) -> None:
+        """Delete leftover run-* dirs older than min_age_s from a prior crash/SIGKILL."""
         base = self.config.state_dir
+        now = time.time()
         try:
             st = os.lstat(base)
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
@@ -860,7 +879,11 @@ class MitBridge:
                 continue
             try:
                 est = entry.stat(follow_symlinks=False)
-                if stat.S_ISDIR(est.st_mode) and est.st_uid == os.getuid():
+                if (
+                    stat.S_ISDIR(est.st_mode)
+                    and est.st_uid == os.getuid()
+                    and now - est.st_mtime > min_age_s
+                ):
                     shutil.rmtree(entry.path, ignore_errors=True)
             except OSError:
                 pass
@@ -938,68 +961,72 @@ class MitBridge:
         primary_reply,
         fallback_reason_str: str,
         reply_cls=None,
-    ) -> tuple[object | None, str | None, str]:
+    ) -> tuple[object | None, str | None, str, bool]:
         """Try bridging an enrolled scrape after Hyades returned `primary_reply`.
 
+        Loads the snapshot at most ONCE per request (no TOCTOU split).
+
         Returns:
-          (Reply, backend_name, note) when bridged successfully;
-          (None, None, reason_tag) when skipped or failed closed (caller returns primary_reply).
+          (Reply, backend_name, note, True) when bridged successfully;
+          (None, None, reason_tag, was_enrolled) when skipped or failed closed.
         """
         rcls = reply_cls or self._reply_cls or type(primary_reply)
         if not self.enabled:
-            return None, None, ""
+            return None, None, "", False
         if method != "POST":
-            return None, None, ""
+            return None, None, "", False
         route = path.split("?", 1)[0].rstrip("/")
         if route not in SCRAPE_ROUTES:
-            return None, None, ""
+            return None, None, "", False
         try:
             req_doc = json.loads(body or b"{}")
         except (ValueError, UnicodeDecodeError):
-            return None, None, ""
+            return None, None, "", False
         if not isinstance(req_doc, dict) or not isinstance(req_doc.get("url"), str):
-            return None, None, ""
+            return None, None, "", False
         url = req_doc["url"]
         parsed = parse_url(url)
         if parsed is None:
-            return None, None, "url-refused"
+            return None, None, "url-refused", False
         scheme, host, port = parsed
 
         domains, snap_err = self.snapshot.load()
         if domains is None:
-            return None, None, snap_err
+            return None, None, snap_err, False
         if host not in domains:
-            return None, None, ""
+            return None, None, "", False
 
         pdf_target = is_pdf_target(url, req_doc)
         try:
-            # Lane 1: PDF via fetch.py
+            # Lane 1: PDF via fetch.py (https:443 only, matching Lane 2 & pacgen.py)
             if pdf_target and needs_pdf_bridge(primary_reply, host):
+                if scheme != "https" or port != 443:
+                    return None, None, "fetch-requires-https-443", True
                 reply, reason = self._run_fetch_lane(url, host, req_doc, rcls)
                 if reply is not None:
-                    return reply, "mit-fetch", "pdf-bridged"
+                    return reply, "mit-fetch", "pdf-bridged", True
                 # If fetch.py failed and browser lane is enabled, fall through on https:443.
-                if self.config.mode == "all" and scheme == "https" and port == 443:
+                if self.config.mode == "all":
                     b_reply, b_reason = self._run_browser_lane(url, host, req_doc, True, rcls)
                     if b_reply is not None:
-                        return b_reply, "mit-browser", "browser-pdf-bridged"
-                    return None, None, f"{reason};{b_reason}"
-                return None, None, reason
+                        return b_reply, "mit-browser", "browser-pdf-bridged", True
+                    return None, None, f"{reason};{b_reason}", True
+                return None, None, reason, True
 
             # Lane 2: Cloudflare / bot-walled HTML (or non-PDF) via browserfetch.py
             if needs_browser_bridge(primary_reply, fallback_reason_str):
                 if self.config.mode != "all":
-                    return None, None, "mode-pdf-only"
+                    return None, None, "mode-pdf-only", True
                 if scheme != "https" or port != 443:
-                    return None, None, "browser-requires-https-443"
+                    return None, None, "browser-requires-https-443", True
                 b_reply, b_reason = self._run_browser_lane(url, host, req_doc, pdf_target, rcls)
                 if b_reply is not None:
-                    return b_reply, "mit-browser", "browser-bridged"
-                return None, None, b_reason
+                    return b_reply, "mit-browser", "browser-bridged", True
+                return None, None, b_reason, True
 
-            return None, None, "primary-ok"
+            return None, None, "primary-ok", True
         except Exception:  # noqa: BLE001 - fail closed unconditionally
-            return None, None, "internal-error"
+            return None, None, "internal-error", True
 
     # -- Lane 1: fetch.py -> pdftotext / pdfinfo
 
@@ -1020,7 +1047,8 @@ class MitBridge:
             os.chmod(run_dir, 0o700)
             argv = [
                 self.config.python_bin,
-                "-I",
+                "-E",
+                "-s",
                 self.config.fetch_bin,
                 "fetch",
                 "--artifact",
@@ -1057,7 +1085,7 @@ class MitBridge:
             ev = meta.get("evidence")
             if not isinstance(mit, dict) or not isinstance(ev, dict):
                 return None, "fetch-bad-json"
-            mit_cls = str(mit.get("class") or "unknown")
+            mit_cls = _safe_class(mit.get("class"))
             if mit_cls in ("botwall", "transport"):
                 self._set_cooldown(host, "mit-fetch")
                 return None, f"fetch-{mit_cls}"
@@ -1099,7 +1127,8 @@ class MitBridge:
             os.chmod(run_dir, 0o700)
             argv = [
                 self.config.python_bin,
-                "-I",
+                "-E",
+                "-s",
                 self.config.browser_bin,
                 "--enrolled-snapshot",
                 self.config.snapshot_path,
@@ -1113,7 +1142,7 @@ class MitBridge:
             if self.config.chrome_bin:
                 argv.extend(["--chrome", self.config.chrome_bin])
             argv.extend(["--", url])
-            env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir)
+            env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir, home=run_dir)
             res = run_bounded(
                 argv,
                 env=env,
@@ -1133,7 +1162,7 @@ class MitBridge:
                     meta = None
             if not isinstance(meta, dict):
                 return None, f"browser-rc-{res.returncode}"
-            cls = str(meta.get("class") or "unknown")
+            cls = _safe_class(meta.get("class"))
             if cls in ("botwall", "transport"):
                 self._set_cooldown(host, "mit-browser")
                 return None, f"browser-{cls}"
@@ -1172,7 +1201,7 @@ class MitBridge:
         reply_cls,
     ) -> tuple[object | None, str]:
         max_pages = requested_pdf_max_pages(req_doc)
-        env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir)
+        env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir, home=run_dir)
         argv = [
             self.config.pdftotext_bin,
             "-q",
@@ -1263,7 +1292,7 @@ class MitBridge:
         reply_cls,
     ) -> tuple[object | None, str]:
         html_bytes, html_err = _safe_read_inside(run_dir, html_path, MAX_HTML_BYTES)
-        env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir)
+        env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir, home=run_dir)
         md = ""
         truncated = False
         used_fallback_txt = False
