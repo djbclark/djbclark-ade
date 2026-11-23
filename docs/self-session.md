@@ -605,3 +605,63 @@ For a completed chain, the incumbent becomes the continuation predecessor and
 must run `verify-turn` externally after the appointed lead ends its first turn.
 This is coordinated takeover, not autonomous recovery of an unavailable or dead
 incumbent; such a case remains blocked without a separate verified observer.
+
+## G. Finish without a successor: scripted archive request (2026-11-23)
+
+A running Paseo agent cannot archive itself, and `/quit` in a Paseo composer is
+plain text. A session ending cleanly with no successor runs
+`bin/ade-request-archive` (module `bin/ade_request_archive.py`) as its final
+action before ending its turn:
+
+```bash
+~/src/djbclark-ade/bin/ade-request-archive --reason "loose finish"
+```
+
+1. **Caller & standing-watcher guard.** Resolves the caller's full lowercase UUID
+   from `$PASEO_AGENT_ID` (or `--self ID` for testing), verifies it via
+   `paseo agent inspect <self> --json`, and refuses if missing, invalid, already
+   archived, or if the caller holds the registered standing watch/unstick role
+   (`bin/load-watch watcher show --json`, mirroring `skills/loose/SKILL.md` Rule 4).
+2. **Deterministic target resolution.** Resolves the archiver in order:
+   1. Explicit `--to <id>` (validated UUID; never self; fails closed if archived
+      or unreachable).
+   2. Owning lead: `--lead <id>`, else `ade.lead` label from
+      `${PASEO_HOME:-~/.paseo}/agents/*/<self>.json`, else `ParentAgentId` from
+      `paseo agent inspect <self> --json`, followed through
+      `ade_lead_succession.effective_lead()` and fresh live `ACKNOWLEDGED`
+      handoffs (as `ade_send_guard._follow` does) so a handed-off or
+      handing-off lead forwards to its live successor (never self).
+   3. When the caller has no live owning lead (for example a top-level lead
+      finishing), the standing watch/unstick agent from
+      `bin/load-watch watcher show --json` (or `$LW_STATE_DIR/watcher.json`
+      fallback), falling back to
+      `${ADE_SUPERVISOR_STATE_DIR:-~/.local/state/djbclark-ade/supervisor}/lead`
+      only when the watcher is absent/archived and `supervisor/lead` is not
+      `<self>`.
+   The resolved target must read `Archived: false` from
+   `paseo agent inspect <target> --json` (fail closed; never un-archives a
+   retired agent).
+3. **Durable request & send.** Atomically writes (`0o600`, temp + `fsync` +
+   `os.replace`, `schema_version: 1`) a request record under
+   `${ADE_ARCHIVE_REQUEST_DIR:-~/.local/state/djbclark-ade/archive-requests}/<self-id>.json`
+   (`agent_id`, `target_id`, `target_kind`, `request_id`, `reason`,
+   `requested_at`, `home`, `status`), then sends the request via
+   `paseo send --json --no-wait -- <target> "<message>"` (no `--behavior`),
+   asking the target to archive `<self-id>` without `--force` once idle with no
+   pending permissions and ending `Please reply: ack <self-id> <request-id>`.
+   End the turn immediately afterwards so the session goes idle.
+4. **Fulfillment (`sweep`).** The target lead or standing watcher runs:
+   ```bash
+   ~/src/djbclark-ade/bin/ade-request-archive sweep [--apply] [--all] [--state-dir DIR] [--paseo-home DIR] [--json]
+   ```
+   Observe-only unless `--apply`. Enforces `target_id` ownership (including
+   completed-handoff lineage) unless `--all` is passed by the standing watch
+   lead. For each pending request, verifies exact presence in
+   `paseo ls -g --json` (guards against `getpaseo/paseo#9668`), checks
+   `paseo agent inspect <id> --json` reads `Status` in (`idle`, `closed`),
+   `Archived: false`, and `PendingPermissions == []`, runs
+   `paseo agent archive <id> --json` (never `--force`, never workspace archive),
+   verifies `Archived: true` readback, and atomically updates the record to
+   `status: "archived"`.
+5. **Exit codes.** `0` request sent / sweep clean; `1` operational, Paseo, send
+   or sweep error; `2` usage or UUID validation error; `4` refused/blocked.

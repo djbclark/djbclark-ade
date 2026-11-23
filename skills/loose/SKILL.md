@@ -239,16 +239,20 @@ reports.
 
 **Never offer or run finish for a session that holds a standing watcher role** (the load, CFEngine and Paseo watchers
 are such sessions; 2026-10-25: a /baton-resumed load watcher queued its own archive). The load watcher's holder is
-recorded by `load-watch watcher` (`skills/watch` section 3); for the other roles, check yourself. Offer handoff and continue, or
+recorded by `load-watch watcher` (`skills/watch` section 3); for the other roles, check yourself. `bin/ade-request-archive`
+also refuses when called by the registered standing watcher. Offer handoff and continue, or
 keep working; to end it, hand the role over first.
 
 **Finish** (operator, 2026-10-20: "if there is nothing to continue to just clear context but in a way that the human
-can still read the final results"): write the final results as the last message so they stay readable, finish
-everything first (commits pushed, no pending reads), then end the turn with one line for the operator: the session is
-done and can be archived (`paseo agent archive <this agent's id>` once it is idle; it stays under "Archived agents" and
-the final message stays readable). A running agent cannot archive itself, and `/quit` typed into a Paseo composer
-reaches Claude as plain text. If the handoff was chosen and it was run document-only, offer the finish prompt again
-once it is written.
+can still read the final results"; updated 2026-11-23): finish everything first (commits pushed, no pending reads), run
+`~/src/djbclark-ade/bin/ade-request-archive --reason "loose finish"` as the final action before ending the turn (it
+persists the request and messages the owning lead or standing watch/unstick lead to archive this session without
+`--force` once idle; see `docs/self-session.md` section G), then write the final results as the last message and end
+the turn immediately so the session goes idle (it stays under "Archived agents" and the final results stay readable).
+A running agent cannot archive itself, and `/quit` typed into a Paseo composer reaches Claude as plain text; if
+`bin/ade-request-archive` refuses or no live archiver is reachable, leave a one-line note for the operator
+(`paseo agent archive <this agent's id>` once idle). If the handoff was chosen and it was run document-only, offer the
+finish prompt again once it is written.
 
 **Compaction**: when the context prompt's compact tier fires (+140k since the start or last compaction, or 217k total)
 or the operator picks it, write down what the next turn needs and compact without asking, with

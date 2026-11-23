@@ -56,6 +56,7 @@ Each doc carries its own summary.
 | [docs/context-hygiene.md](docs/context-hygiene.md) | `bin/context-watch` and `bin/context-budget-check`: how full a session is, and what a fresh one costs |
 | [docs/secret-deny.md](docs/secret-deny.md), [docs/claude-denyread-trial.md](docs/claude-denyread-trial.md), [docs/pr-policy.md](docs/pr-policy.md) | the secret-read deny list and its renderer; Claude `sandbox.filesystem.denyRead` operator trial (no live `~/.claude` apply); who may open PRs on djbclark's repositories |
 | [docs/dispatch-footer.md](docs/dispatch-footer.md) | the delivery footer every brief carries (`bin/ade-worker-run` and the Agent-tool footer hook append it) |
+| [docs/self-session.md](docs/self-session.md) | native self-compaction, acknowledged self-handoff (`bin/ade-self-session`), and scripted finish-archive requests (`bin/ade-request-archive`, 2026-11-23) |
 | [docs/skill-everywhere.md](docs/skill-everywhere.md), [docs/skills.md](docs/skills.md) | how skills are linked into every TUI; the skill inventory. [skills/](skills/) is the canonical copy: **edit and add skills here**, never via a TUI path |
 | [docs/mcp-on-demand.md](docs/mcp-on-demand.md) | design (2026-11-21): every MCP server in every client (registry schema, measured footprint, 30-day usage via the unwired `bin/mcp-usage`), on-demand options (trim graft and chrome-devtools first; no shared aggregator yet), `bin/mcp-find` capability lookup, the Google Photos verdict; proposals only, no live config |
 | [docs/mcp-servers.md](docs/mcp-servers.md), [docs/hand-alias.md](docs/hand-alias.md), [docs/post-edit-check.md](docs/post-edit-check.md), [docs/opencode-plugin-v2.md](docs/opencode-plugin-v2.md) | the MCP roster; the `/hand` alias per TUI; the post-edit syntax hook; OpenCode 2's plugin contract |
@@ -218,6 +219,14 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
     live only once the operator amends this order to say so, and "enrolled" means that amendment names the agent by role or repo (ids change at every launch and handoff); until
     then, `/steps`; after it, an enrolled agent's question goes there and independent work continues. Detail:
     `site-private/memory/feedback_questions_run_steps.md`; home rules item 46.
+
+14. **Keep the standing watch/unstick agent live (`djbclark-ade` LEAD responsibility, operator directive 2026-11-23).**
+    The `djbclark-ade` LEAD verifies that the standing watch/unstick agent is always live: check
+    `bin/load-watch watcher show --json` and `paseo agent inspect <id> --json` to confirm `Archived: false` and a
+    healthy `Status` (not `closed` or `error`). If no watcher is registered or the registered agent is archived, closed,
+    or errored, start a fresh standing watch/unstick session and re-register it with
+    `bin/load-watch watcher set --paseo <id>` so load-watch incidents and `bin/ade-request-archive` finish requests
+    always have a live receiver.
 
 ## Machine context
 

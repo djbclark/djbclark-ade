@@ -1,0 +1,3 @@
+### Added
+
+- Added `bin/ade-request-archive` and `bin/ade_request_archive.py` so finishing Paseo agents can atomically record and send a non-forced archive request to their owning lead (followed through `ade_lead_succession.effective_lead()`), standing watch/unstick agent, or `supervisor/lead`, plus a safe observe-by-default `sweep [--apply] [--all]` subcommand with `paseo ls -g` (`getpaseo/paseo#9668`) and `Archived: true` readback guards; wired the script into `skills/loose/SKILL.md` Rule 4, `docs/self-session.md` section G, `docs/dispatch-footer.md` rule 30, `skills/watch/SKILL.md` section 3a, and `AGENTS.md` standing order 14 (standing watch/unstick liveness responsibility for the `djbclark-ade` lead) (#954)

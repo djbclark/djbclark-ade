@@ -1,0 +1,176 @@
+#!/usr/bin/env -S python3 -I
+"""Request or sweep clean non-forced Paseo agent archives for finishing sessions (2026-11-23).
+
+Usage:
+  ade-request-archive [--reason TEXT] [--to ID] [--lead ID] [--self ID]
+                      [--state-dir DIR] [--paseo-home DIR] [--json]
+  ade-request-archive request [--reason TEXT] [--to ID] [--lead ID] [--self ID]
+                              [--state-dir DIR] [--paseo-home DIR] [--json]
+  ade-request-archive sweep [--apply] [--all] [--self ID]
+                            [--state-dir DIR] [--paseo-home DIR] [--json]
+
+Exit codes:
+  0  Request persisted and sent (or sweep finished with no errors)
+  1  Operational / Paseo / send / sweep error
+  2  Usage or UUID validation error
+  4  Refused (standing watcher, not a Paseo agent, self-target, archived target, no live target)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ade_request_archive import (  # noqa: E402
+    ArchiveRequestError,
+    ArchiveRequestRefused,
+    ArchiveRequestService,
+    ArchiveRequestUsageError,
+    EXIT_ERROR,
+    EXIT_OK,
+    EXIT_REFUSED,
+    EXIT_USAGE,
+)
+
+_VALUE_FLAGS = frozenset({
+    "--reason",
+    "--to",
+    "--lead",
+    "--self",
+    "--state-dir",
+    "--paseo-home",
+    "--self-session-state",
+    "--lw-state-dir",
+    "--supervisor-state-dir",
+    "--paseo",
+    "--load-watch",
+})
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--self", dest="self_id", metavar="ID", help="caller Paseo UUID (testing override for PASEO_AGENT_ID)")
+    parser.add_argument("--state-dir", type=Path, help="archive-requests state dir (default: $ADE_ARCHIVE_REQUEST_DIR or ~/.local/state/djbclark-ade/archive-requests)")
+    parser.add_argument("--paseo-home", type=Path, help="Paseo home directory (default: $PASEO_HOME or ~/.paseo)")
+    parser.add_argument("--self-session-state", type=Path, help="ade-self-session state dir for lead succession lookup")
+    parser.add_argument("--lw-state-dir", type=Path, help="load-watch state dir (default: $LW_STATE_DIR or ~/.local/state/load-watch)")
+    parser.add_argument("--supervisor-state-dir", type=Path, help="supervisor state dir (default: $ADE_SUPERVISOR_STATE_DIR or ~/.local/state/djbclark-ade/supervisor)")
+    parser.add_argument("--paseo", default="paseo", help="path to paseo CLI (default: paseo)")
+    parser.add_argument("--load-watch", type=Path, help="path to load-watch executable")
+    parser.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON on stdout")
+
+
+def _detect_mode(argv: list[str]) -> tuple[str, list[str]]:
+    """Detect optional `sweep` or `request` subcommand without misreading option values."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            break
+        if tok in _VALUE_FLAGS:
+            i += 2
+            continue
+        if any(tok.startswith(f + "=") for f in _VALUE_FLAGS):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if tok in ("sweep", "request"):
+            return tok, argv[:i] + argv[i + 1 :]
+        break
+    return "request", argv
+
+
+def _build_request_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ade-request-archive", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--reason", default="session finished", help="short reason recorded in the request and sent to the archiver")
+    p.add_argument("--to", dest="to_id", metavar="ID", help="explicit archiver Paseo UUID")
+    p.add_argument("--lead", dest="lead_id", metavar="ID", help="explicit owning lead Paseo UUID")
+    _add_common_args(p)
+    return p
+
+
+def _build_sweep_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ade-request-archive sweep", description="Observe or fulfill pending archive requests.")
+    p.add_argument("--apply", action="store_true", help="actually run non-forced `paseo agent archive` and update records (default: observe-only)")
+    p.add_argument("--all", action="store_true", dest="all_requests", help="process pending requests regardless of target_id (for the standing watch lead)")
+    _add_common_args(p)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    mode, rest = _detect_mode(raw_argv)
+    parser = _build_sweep_parser() if mode == "sweep" else _build_request_parser()
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else EXIT_USAGE
+        return code
+
+    service = ArchiveRequestService(
+        state_dir=args.state_dir,
+        paseo_home=args.paseo_home,
+        self_session_state=args.self_session_state,
+        lw_state_dir=args.lw_state_dir,
+        supervisor_state_dir=args.supervisor_state_dir,
+        paseo_bin=args.paseo,
+        load_watch_bin=args.load_watch,
+    )
+
+    try:
+        if mode == "sweep":
+            out = service.sweep(
+                apply=args.apply,
+                all_requests=args.all_requests,
+                explicit_self=args.self_id,
+            )
+            if args.as_json:
+                print(json.dumps(out, indent=2, sort_keys=True))
+            else:
+                if not out["results"]:
+                    print("ade-request-archive sweep: no archive requests found")
+                for row in out["results"]:
+                    reason = f" ({row['reason']})" if row.get("reason") else ""
+                    print(f"{row['action']:16s} {row['agent_id']}{reason}")
+            return EXIT_ERROR if out["errors"] else EXIT_OK
+
+        out = service.request_archive(
+            explicit_self=args.self_id,
+            explicit_to=args.to_id,
+            explicit_lead=args.lead_id,
+            reason=args.reason,
+        )
+        rec = out["record"]
+        if args.as_json:
+            print(json.dumps(out, indent=2, sort_keys=True))
+        else:
+            print(
+                f"archive requested: agent={rec['agent_id']} target={rec['target_id']} "
+                f"({rec['target_kind']}) request_id={rec['request_id']} "
+                f"send={rec.get('send_status', 'unknown')} record={out['record_path']}"
+            )
+        return EXIT_OK
+    except ArchiveRequestUsageError as exc:
+        if getattr(args, "as_json", False):
+            print(json.dumps({"status": "usage-error", "error": str(exc)}, sort_keys=True))
+        print(f"ade-request-archive: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except ArchiveRequestRefused as exc:
+        if getattr(args, "as_json", False):
+            print(json.dumps({"status": "refused", "error": str(exc)}, sort_keys=True))
+        print(f"ade-request-archive: refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except ArchiveRequestError as exc:
+        if getattr(args, "as_json", False):
+            print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        print(f"ade-request-archive: error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
