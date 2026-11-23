@@ -1134,13 +1134,644 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
     return None
 
 
-def shell_words(cmd: str) -> list:
+SHELL_INTERPRETERS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "pdksh", "ash",
+    "csh", "tcsh", "fish", "rc", "nu", "nushell", "elvish", "xonsh",
+    "osh", "ysh", "pwsh", "eval", "source", ".",
+})
+SHELL_WRAPPERS = frozenset({
+    "env", "genv", "command", "exec", "builtin", "time", "nice", "gnice",
+    "ionice", "nohup", "gnohup", "setsid", "sudo", "doas", "su",
+    "timeout", "gtimeout", "xargs", "stdbuf", "gstdbuf", "caffeinate",
+    "rtk", "bg", "bgrun", "ts", "chronic", "flock", "taskpolicy", "arch",
+    "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx",
+    "mise", "watch", "script", "parallel", "find", "ssh", "mosh",
+    "docker", "podman", "kubectl", "chroot", "busybox", "nix", "nix-shell",
+    "noglob", "nocorrect", "unbuffer", "deadline",
+})
+SHELL_RESERVED = frozenset({
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "(", ")", "coproc", "time",
+})
+SHELL_READ_BUILTINS = frozenset({"read", "mapfile", "readarray"})
+SHELL_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+REDIR_TOKENS = frozenset({"<", ">", ">>", ">|", "<>", "<<<", "<<", "<&", ">&", "&>", "&>>"})
+OUT_REDIR_TOKENS = frozenset({">", ">>", ">|", "&>", "&>>"})
+SHLEX_PUNCT = ";&|()<>"
+FALLBACK_SPLIT = re.compile(r"[\s();<>|&,]+")
+
+
+def _parse_heredoc_delim(line: str, pos: int):
+    """Parse a POSIX/bash heredoc delimiter word right after `<<` or `<<-`.
+
+    Returns `(delim, quoted, end_pos)` or `None` when missing, empty, unterminated, or ambiguous
+    (`$'...'` / CRLF / trailing backslash), so the caller fails closed.
+    """
+    n = len(line)
+    while pos < n and line[pos] in " \t":
+        pos += 1
+    if pos >= n or line[pos] in ";|&()<>#\n\r":
+        return None
+    chars = []
+    quoted = False
+    while pos < n:
+        ch = line[pos]
+        if ch in " \t;|&()<>\n\r":
+            break
+        if ch == "'":
+            quoted = True
+            k = line.find("'", pos + 1)
+            if k < 0:
+                return None
+            chars.append(line[pos + 1:k])
+            pos = k + 1
+        elif ch == '"':
+            quoted = True
+            pos += 1
+            while pos < n and line[pos] != '"':
+                if line[pos] == "\\":
+                    if pos + 1 >= n:
+                        return None
+                    nxt = line[pos + 1]
+                    chars.append(nxt if nxt in '\\"$`' else "\\" + nxt)
+                    pos += 2
+                else:
+                    chars.append(line[pos])
+                    pos += 1
+            if pos >= n:
+                return None
+            pos += 1
+        elif ch == "\\":
+            if pos + 1 >= n:
+                return None
+            quoted = True
+            chars.append(line[pos + 1])
+            pos += 2
+        elif ch == "$" and pos + 1 < n and line[pos + 1] in ("'", '"'):
+            return None   # `$'...'` / `$"..."` in delimiter: fail closed
+        else:
+            chars.append(ch)
+            pos += 1
+    if pos < n and line[pos] == "\r":
+        return None
+    delim = "".join(chars)
+    if not delim:
+        return None
+    return delim, quoted, pos
+
+
+def _heredoc_terminates(line: str, delim: str, strip_tabs: bool) -> bool:
+    """Exact POSIX heredoc terminator match; only `<<-` strips leading tabs (never spaces)."""
+    return (line.lstrip("\t") if strip_tabs else line) == delim
+
+
+def _is_word_boundary(text: str, pos: int, length: int) -> bool:
+    before_ok = pos == 0 or text[pos - 1] in " \t\r\n;&|(){"
+    end = pos + length
+    after_ok = end >= len(text) or text[end] in " \t\r\n;&|()}"
+    return before_ok and after_ok
+
+
+def _tokenize_pipeline(pipe_text: str):
+    """Split a pipeline string into stages of tokens with shlex (POSIX unquoting), or None on error."""
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex = shlex.shlex(pipe_text, posix=True, punctuation_chars=SHLEX_PUNCT)
         lex.whitespace_split = True
+        lex.commenters = "#"
         toks = list(lex)
     except ValueError:
-        toks = cmd.split()
+        return None
+    stages, cur = [], []
+    for tok in toks:
+        if tok in REDIR_TOKENS:
+            cur.append(tok)
+        elif tok and set(tok) <= set(SHLEX_PUNCT):
+            if cur:
+                stages.append(cur)
+                cur = []
+        else:
+            cur.append(tok)
+    if cur:
+        stages.append(cur)
+    return stages
+
+
+def _analyze_stage(stage_toks: list):
+    """(is_shell, output_targets, command_word) for one pipeline stage's tokens."""
+    words = []
+    targets = set()
+    i, n = 0, len(stage_toks)
+    while i < n:
+        tok = stage_toks[i]
+        if tok in REDIR_TOKENS:
+            if tok in OUT_REDIR_TOKENS and i + 1 < n:
+                targets.add(stage_toks[i + 1])
+            i += 2
+            continue
+        # Leading fd number attached to a redirection (`2>/dev/null bash` -> `['2', '>', '/dev/null', 'bash']`).
+        if not words and tok.isdigit() and i + 1 < n and stage_toks[i + 1] in REDIR_TOKENS:
+            i += 1
+            continue
+        words.append(tok)
+        i += 1
+    k = 0
+    while k < len(words) and (SHELL_ASSIGN.match(words[k]) or words[k] in SHELL_RESERVED):
+        k += 1
+    if k >= len(words):
+        return True, targets, ""   # no recognizable command word (e.g. bare redirection): fail closed
+    head = words[k]
+    base = os.path.basename(head)
+    if base == "tee":
+        for a in words[k + 1:]:
+            if a == "--":
+                continue
+            if not a.startswith("-") and a != "-":
+                targets.add(a)
+    if base in SHELL_INTERPRETERS or base in SHELL_READ_BUILTINS:
+        return True, targets, head
+    if "$" in head or "`" in head:
+        return True, targets, head   # dynamic command name: fail closed
+    if base in SHELL_WRAPPERS:
+        rest = words[k + 1:]
+        saw_cmd = False
+        for w in rest:
+            if SHELL_ASSIGN.match(w):
+                continue
+            sub_words = w.split() if (" " in w or "\t" in w) else (w,)
+            for sw in sub_words:
+                wb = os.path.basename(sw)
+                if wb in SHELL_INTERPRETERS or wb in SHELL_READ_BUILTINS:
+                    return True, targets, head
+            if "$" in w or "`" in w:
+                return True, targets, head
+            if not w.startswith("-"):
+                saw_cmd = True
+        if not saw_cmd:
+            return True, targets, head   # e.g. `exec <<'EOF'` / `exec 3<<'EOF'`: fail closed
+    return False, targets, head
+
+
+def _pipeline_info(pipe_text: str):
+    """(is_shell, output_targets) for a heredoc's pipeline; fails closed (True, set()) on parse error."""
+    stages = _tokenize_pipeline(pipe_text)
+    if not stages:
+        return True, set()
+    is_shell = False
+    targets = set()
+    for st in stages:
+        st_shell, st_targets, _ = _analyze_stage(st)
+        targets.update(st_targets)
+        if st_shell:
+            is_shell = True
+    return is_shell, targets
+
+
+def _later_executes_target(outside_after: str, targets: set) -> bool:
+    """True when commands after a heredoc invoke a shell on a file the heredoc wrote, or execute it directly."""
+    if not targets or not outside_after.strip():
+        return False
+    target_names = set()
+    for t in targets:
+        if t and t != "/dev/null":
+            target_names.add(t)
+            b = os.path.basename(t)
+            if b:
+                target_names.add(b)
+    if not target_names:
+        return False
+    dynamic_target = any("$" in t or "`" in t for t in targets)
+    stages = _tokenize_pipeline(outside_after)
+    if stages is None:
+        return True   # unparseable tail after writing a file: fail closed
+    for st in stages:
+        st_shell, _, cmd_word = _analyze_stage(st)
+        if cmd_word and (cmd_word in target_names or os.path.basename(cmd_word) in target_names):
+            return True
+        if st_shell and (dynamic_target or any(w in target_names or os.path.basename(w) in target_names for w in st)):
+            return True
+    return False
+
+
+def split_quoted_heredocs(cmd: str):
+    """Split a shell command into `(full_text, literal_only_bodies)`.
+
+    `full_text` holds everything that needs full (literal + glob) analysis: all outside command/redirection lines,
+    unquoted heredocs, quoted heredocs fed to a shell interpreter (directly, via wrappers, via pipe, or written to a
+    file executed later in the same command), and any unterminated or unparseable heredocs (fail closed).
+
+    `literal_only_bodies` holds bodies of properly terminated quoted-delimiter heredocs fed to non-shell commands:
+    their literal words are still checked against the secret-deny policy, while their glob-shaped prose (such as
+    markdown `**bold**` or Python `**kwargs`) skips filesystem glob analysis.
+    """
+    lines = cmd.split("\n")
+    n_lines = len(lines)
+    outside_parts = []      # list of (line_index, text)
+    heredocs = []           # list of dicts for parsed, terminated heredocs
+    pending_pipe = []       # heredocs from previous logical line ending in `|` / `|&`
+    stack = []
+    i = 0
+
+    def fail_closed_rest(start_idx: int):
+        for hd in pending_pipe:
+            hd["force_full"] = True
+        pending_pipe.clear()
+        outside_parts.append((start_idx, "\n".join(lines[start_idx:])))
+
+    while i < n_lines:
+        tick()
+        orig_i = i
+        raw_lines = [lines[i]]
+        buf = lines[i]
+        pos = 0
+        pipe_start = 0
+        group_depth = 0
+        line_hds = []
+        first_pipe_end = None
+        parse_failed = False
+
+        while True:
+            n = len(buf)
+            if pos >= n:
+                break
+            ch = buf[pos]
+            top = stack[-1] if stack else None
+
+            # Backslash-newline line continuation (outside `'...'` and `$'...'`).
+            if ch == "\\" and top not in ("'", "$'") and pos + 1 == n and i + 1 < n_lines:
+                i += 1
+                raw_lines.append(lines[i])
+                buf = buf[:pos] + lines[i]
+                continue
+
+            if top == "'":
+                if ch == "'":
+                    stack.pop()
+                pos += 1
+                continue
+            if top == "$'":
+                if ch == "\\":
+                    pos += 2
+                    continue
+                if ch == "'":
+                    stack.pop()
+                pos += 1
+                continue
+            if top == '"':
+                if ch == "\\":
+                    pos += 2
+                    continue
+                if ch == '"':
+                    stack.pop()
+                    pos += 1
+                    continue
+                if buf.startswith("$((", pos):
+                    stack.append("$((")
+                    pos += 3
+                    continue
+                if buf.startswith("$(", pos):
+                    stack.append("$(")
+                    pos += 2
+                    continue
+                if buf.startswith("${", pos):
+                    stack.append("${")
+                    pos += 2
+                    continue
+                if ch == "`":
+                    stack.append("`")
+                pos += 1
+                continue
+            if top == "`":
+                if ch == "\\":
+                    pos += 2
+                    continue
+                if ch == "`":
+                    stack.pop()
+                    pos += 1
+                    continue
+                if ch == "'":
+                    stack.append("'")
+                elif ch == '"':
+                    stack.append('"')
+                pos += 1
+                continue
+            if top in ("$((", "(("):
+                if ch == "\\":
+                    pos += 2
+                    continue
+                if ch == "'":
+                    stack.append("'")
+                elif ch == '"':
+                    stack.append('"')
+                elif buf.startswith("((", pos):
+                    stack.append("((")
+                    pos += 2
+                    continue
+                elif ch == "(":
+                    stack.append("(")
+                elif ch == ")":
+                    if pos + 1 < n and buf[pos + 1] == ")":
+                        stack.pop()
+                        pos += 2
+                        continue
+                    # Not arithmetic: `$((a); b)` is `$(` + `(a)` and `((a); b)` is `(` + `(a)`.
+                    stack[-1] = "$(" if top == "$((" else "("
+                pos += 1
+                continue
+            if top == "${":
+                if ch == "\\":
+                    pos += 2
+                    continue
+                if ch == "}":
+                    stack.pop()
+                    pos += 1
+                    continue
+                if ch == "'" and pos > 0 and buf[pos - 1] == "$":
+                    stack.append("$'")
+                elif ch == "'":
+                    stack.append("'")
+                elif ch == '"':
+                    stack.append('"')
+                elif buf.startswith("$((", pos):
+                    stack.append("$((")
+                    pos += 3
+                    continue
+                elif buf.startswith("$(", pos):
+                    stack.append("$(")
+                    pos += 2
+                    continue
+                elif buf.startswith("${", pos):
+                    stack.append("${")
+                    pos += 2
+                    continue
+                elif ch == "`":
+                    stack.append("`")
+                pos += 1
+                continue
+
+            # Now either `top is None` (top level) or `top in ("$(", "<(", ">(", "(")`.
+            if ch == "\\":
+                pos += 2
+                continue
+            if ch == "#" and (pos == 0 or buf[pos - 1] in " \t\r;&|()"):
+                if top is None:
+                    for hd in line_hds:
+                        if hd["pipe_end"] is None:
+                            hd["pipe_end"] = pos
+                    if first_pipe_end is None:
+                        first_pipe_end = pos
+                break
+            if ch == "'" and pos > 0 and buf[pos - 1] == "$":
+                stack.append("$'")
+                pos += 1
+                continue
+            if ch == "'":
+                stack.append("'")
+                pos += 1
+                continue
+            if ch == '"':
+                stack.append('"')
+                pos += 1
+                continue
+            if ch == "`":
+                stack.append("`")
+                pos += 1
+                continue
+            if buf.startswith("$((", pos):
+                stack.append("$((")
+                pos += 3
+                continue
+            if buf.startswith("$(", pos):
+                stack.append("$(")
+                pos += 2
+                continue
+            if buf.startswith("${", pos):
+                stack.append("${")
+                pos += 2
+                continue
+            if buf.startswith("<(", pos):
+                stack.append("<(")
+                pos += 2
+                continue
+            if buf.startswith(">(", pos):
+                stack.append(">(")
+                pos += 2
+                continue
+            if buf.startswith("((", pos):
+                stack.append("((")
+                pos += 2
+                continue
+
+            if top is not None:
+                # Inside `$(...)` / `<(...)` / `>(...)` / `(...)`: `case` has unmatched `)`, fail closed.
+                if top in ("$(", "<(", ">(") and buf.startswith("case", pos) and _is_word_boundary(buf, pos, 4):
+                    parse_failed = True
+                    break
+                if ch == "(":
+                    stack.append("(")
+                elif ch == ")":
+                    stack.pop()
+                pos += 1
+                continue
+
+            # Top level (`stack` is empty).
+            if ch == "(":
+                group_depth += 1
+                pos += 1
+                continue
+            if ch == ")":
+                if group_depth > 0:
+                    group_depth -= 1
+                pos += 1
+                continue
+            if ch == "{" and _is_word_boundary(buf, pos, 1):
+                group_depth += 1
+                pos += 1
+                continue
+            if ch == "}" and _is_word_boundary(buf, pos, 1):
+                if group_depth > 0:
+                    group_depth -= 1
+                pos += 1
+                continue
+
+            # Pipeline-ending operators at top level outside groups (`;` / `&&` / `||` / standalone `&`).
+            if group_depth == 0:
+                if buf.startswith("&&", pos) or buf.startswith("||", pos):
+                    for hd in line_hds:
+                        if hd["pipe_end"] is None:
+                            hd["pipe_end"] = pos
+                    if first_pipe_end is None:
+                        first_pipe_end = pos
+                    pos += 2
+                    pipe_start = pos
+                    continue
+                if ch == ";":
+                    for hd in line_hds:
+                        if hd["pipe_end"] is None:
+                            hd["pipe_end"] = pos
+                    if first_pipe_end is None:
+                        first_pipe_end = pos
+                    pos += 1
+                    pipe_start = pos
+                    continue
+                if ch == "&":
+                    prev_ch = buf[pos - 1] if pos > 0 else ""
+                    next_ch = buf[pos + 1] if pos + 1 < n else ""
+                    if prev_ch not in "<>|" and next_ch not in ">&":
+                        for hd in line_hds:
+                            if hd["pipe_end"] is None:
+                                hd["pipe_end"] = pos
+                        if first_pipe_end is None:
+                            first_pipe_end = pos
+                        pos += 1
+                        pipe_start = pos
+                        continue
+
+            # Heredoc introducer `<<` or `<<-` (never `<<<`).
+            if ch == "<" and buf.startswith("<<", pos) and not buf.startswith("<<<", pos) and (
+                    pos == 0 or buf[pos - 1] != "<"):
+                hd_start = pos
+                # Include optional attached fd digits before `<<` (`0<<'EOF'`) so blanking removes them too.
+                while hd_start > pipe_start and buf[hd_start - 1].isdigit():
+                    hd_start -= 1
+                if hd_start > pipe_start and buf[hd_start - 1] not in " \t;&|(){":
+                    hd_start = pos   # digits were part of a word like `foo0<<'EOF'`, not an fd
+                p = pos + 2
+                strip_tabs = p < n and buf[p] == "-"
+                if strip_tabs:
+                    p += 1
+                parsed = _parse_heredoc_delim(buf, p)
+                if parsed is None:
+                    parse_failed = True
+                    break
+                delim, quoted, end_pos = parsed
+                line_hds.append({
+                    "delim": delim,
+                    "quoted": quoted,
+                    "strip_tabs": strip_tabs,
+                    "pipe_start": pipe_start,
+                    "pipe_end": None,
+                    "span": (hd_start, end_pos),
+                    "continues_pipe": False,
+                    "force_full": False,
+                    "body": "",
+                    "pipe_text": "",
+                    "end_line": orig_i,
+                })
+                pos = end_pos
+                continue
+
+            pos += 1
+
+        if parse_failed:
+            fail_closed_rest(orig_i)
+            break
+
+        code_end = pos
+        if first_pipe_end is None:
+            first_pipe_end = code_end
+        for hd in line_hds:
+            if hd["pipe_end"] is None:
+                hd["pipe_end"] = code_end
+
+        # Blank all heredoc introducer spans when building each introducer's pipeline text so
+        # `<<- 'EOF' bash` tokenizes cleanly as `['bash']` without `-` / `'EOF'` confusing shlex.
+        cleaned_buf = list(buf)
+        for hd in line_hds:
+            a, b = hd["span"]
+            for idx in range(a, b):
+                cleaned_buf[idx] = " "
+        cleaned_line = "".join(cleaned_buf)
+
+        # Check if the final pipeline on this logical line ends in `|` or `|&` (continues after heredoc body).
+        tail_stripped = buf[pipe_start:code_end].rstrip(" \t")
+        trailing_pipe = (tail_stripped.endswith("|") and not tail_stripped.endswith("||")
+                         and not tail_stripped.endswith(">|")) or tail_stripped.endswith("|&")
+
+        # Resolve any trailing-pipe continuation from a previous logical line (blank/comment lines keep waiting;
+        # a chained trailing `|` keeps waiting on the next line too).
+        if pending_pipe:
+            cont_seg = cleaned_line[:first_pipe_end]
+            if cont_seg.strip():
+                for hd in pending_pipe:
+                    hd["pipe_text"] = hd["pipe_text"] + " " + cont_seg
+                if not (trailing_pipe and first_pipe_end == code_end and pipe_start == 0):
+                    pending_pipe.clear()
+
+        outside_parts.append((orig_i, "\n".join(raw_lines)))
+
+        # Consume each heredoc body in order.
+        unterminated = False
+        for hd in line_hds:
+            hd["pipe_text"] = cleaned_line[hd["pipe_start"]:hd["pipe_end"]]
+            if trailing_pipe and hd["pipe_start"] == pipe_start:
+                hd["continues_pipe"] = True
+            j = i + 1
+            while j < n_lines and not _heredoc_terminates(lines[j], hd["delim"], hd["strip_tabs"]):
+                j += 1
+            if j >= n_lines:
+                # Unterminated heredoc: fail closed on everything from here to EOF.
+                outside_parts.append((i + 1, "\n".join(lines[i + 1:])))
+                unterminated = True
+                break
+            hd["body"] = "\n".join(lines[i + 1:j])
+            hd["end_line"] = j
+            i = j
+            heredocs.append(hd)
+            if hd["continues_pipe"]:
+                pending_pipe.append(hd)
+
+        if unterminated:
+            for hd in pending_pipe:
+                hd["force_full"] = True
+            pending_pipe.clear()
+            break
+
+        i += 1
+
+    # A trailing `|` that never saw a continuation command fails closed.
+    for hd in pending_pipe:
+        hd["force_full"] = True
+
+    full_chunks = [text for _, text in outside_parts]
+    literal_only_bodies = []
+    for hd in heredocs:
+        if not hd["quoted"] or hd["force_full"]:
+            full_chunks.append(hd["body"])
+            continue
+        is_shell, targets = _pipeline_info(hd["pipe_text"])
+        if is_shell:
+            full_chunks.append(hd["body"])
+            continue
+        if targets:
+            after_text = "\n".join(text for line_idx, text in outside_parts if line_idx > hd["end_line"])
+            if _later_executes_target(after_text, targets):
+                full_chunks.append(hd["body"])
+                continue
+        literal_only_bodies.append(hd["body"])
+
+    return "\n".join(full_chunks), literal_only_bodies
+
+
+def _shlex_tokens(text: str) -> list:
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        toks = []
+        for line in text.split("\n"):
+            try:
+                lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+                lex.whitespace_split = True
+                toks.extend(lex)
+            except ValueError:
+                toks.extend(p for p in FALLBACK_SPLIT.split(line) if p)
+            if len(toks) >= MAX_TOKENS:
+                break
+        return toks
+
+
+def shell_words(cmd: str) -> list:
+    toks = _shlex_tokens(cmd)
     out = []
     for tok in toks[:MAX_TOKENS]:
         tok = tok.strip("`'\"").lstrip("<>")
@@ -1206,7 +1837,11 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
         found = ck.path(p)
         if found:
             return found
-    words = shell_words(shell)
+    if shell_tool and "<<" in shell:
+        full_text, literal_only_bodies = split_quoted_heredocs(shell)
+    else:
+        full_text, literal_only_bodies = shell, []
+    words = shell_words(full_text)
     globs = []
     for w in words:
         if is_glob(w):
@@ -1215,6 +1850,13 @@ def check_command(ck: Checker, cmd: str, shell_tool: bool = True):
         found = ck.word(w)
         if found:
             return found
+    for body in literal_only_bodies:
+        for w in shell_words(body):
+            if is_glob(w):
+                continue
+            found = ck.word(w)
+            if found:
+                return found
     globs.sort(key=lambda w: "**" in w)   # stable: cheap glob words first, in command order
     first_until = time.monotonic() + FIRST_PASS_S
     try:

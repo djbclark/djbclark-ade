@@ -94,7 +94,15 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
     absolute/tilde-expanded (completing slow dummies can start and exhaust that clock under the per-word
     budget while the first-pass cap equals it, or burn the entry bound while a later secret glob still has
     rem; absolute deep globs keep the pattern fallback only when that shared budget did not truncate),
-    fails closed (C7).
+    fails closed (C7). Quoted-delimiter heredoc bodies (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`, `<<\EOF`,
+    `<<E'O'F`) fed to non-shell commands (`cat`, `tee`, `gh`, `python3`, `pbcopy`, `clip`, …) still have
+    every literal (non-glob) word checked against the policy, but skip filesystem glob analysis so
+    markdown `**bold**` / `*italic*` or Python `**kwargs` prose does not exhaust the glob budget
+    (2026-11-22). Quoted-delimiter heredocs fed to a shell interpreter (`sh`, `bash`, `zsh`, `dash`,
+    `ksh`, `fish`, `eval`, `source`, `.`, directly, through wrappers such as `env`/`sudo`/`timeout`,
+    piped into a shell, or written to a file executed later in the same command), unquoted heredocs
+    (`<<EOF`, `<<-EOF`), unterminated or unparseable heredocs, redirection headers, and commands after
+    the terminator all keep full literal + glob analysis (fail closed).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
