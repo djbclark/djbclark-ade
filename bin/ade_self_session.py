@@ -251,6 +251,147 @@ TITLE_LIMIT = 200  # Paseo's MAX_EXPLICIT_AGENT_TITLE_CHARS
 # name (st-01), so without it the sidebar shows the live lead and every retired one under one name.
 RETIRED_PREFIX = 'RETIRED '
 LEAD_WINDOW = re.compile(r'LEAD \S+ \(.+\)')  # the current window name `ade-worker-run rename-lead` gives a lead
+# Matches `bin/ade_ws_names.py` (`REPO_RE` and `NAME_LIMIT`) so advised `rename-lead` flags are always accepted.
+WS_REPO_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+WS_NAME_LIMIT = 100
+WS_BARE_LEAD_RE = re.compile(r'LEAD [A-Za-z0-9][A-Za-z0-9._-]*')
+WS_DEFAULT_REPO_RESERVE = 32  # room left for an inferred repo name when `--repo` is not emitted
+_FRONTMATTER_NULLS = frozenset(('null', 'none', 'true', 'false', '~'))
+_FRONTMATTER_REPO_LINE = re.compile(r'^repo:[ \t]*(.*)$')
+_QUOTED_DOUBLE = re.compile(r'^"([^"\n]*)"(?:[ \t]+#.*)?$')
+_QUOTED_SINGLE = re.compile(r"^'([^'\n]*)'(?:[ \t]+#.*)?$")
+
+
+def checkpoint_frontmatter_repo(checkpoint_path):
+    """Extract a single validated repo name from top-of-file YAML frontmatter (`repo:`), else None.
+
+    Accepts `repo` or `owner/repo` (optional single/double quotes and trailing `#` comment) where each
+    segment matches `ade_ws_names.REPO_RE` and fits in `LEAD <repo> (x)` under `WS_NAME_LIMIT`. Multi-repo
+    strings, paths, shell metacharacters, symlinks, missing/unreadable/oversized files all return None.
+    """
+    if not isinstance(checkpoint_path, str) or not checkpoint_path:
+        return None
+    try:
+        path = Path(checkpoint_path)
+        if not path.is_absolute() or path.is_symlink():
+            return None
+        text = read_regular(path, 1024 * 1024).decode('utf-8')
+    except (OSError, UnicodeDecodeError, SessionError, ValueError):
+        return None
+    text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
+    lines = text.split('\n')
+    if not lines or lines[0].rstrip(' \t') != '---':
+        return None
+    end = None
+    for idx in range(1, len(lines)):
+        if lines[idx].rstrip(' \t') in ('---', '...'):
+            end = idx
+            break
+    if end is None:
+        return None
+    matches = []
+    for idx in range(1, end):
+        m = _FRONTMATTER_REPO_LINE.match(lines[idx])
+        if m:
+            if (idx + 1 < end and lines[idx + 1][:1] in (' ', '\t')
+                    and lines[idx + 1].strip() and not lines[idx + 1].lstrip().startswith('#')):
+                return None
+            matches.append(m.group(1))
+    if len(matches) != 1:
+        return None
+    raw = matches[0].strip()
+    if not raw:
+        return None
+    quoted = False
+    if raw[0] == '"':
+        qm = _QUOTED_DOUBLE.match(raw)
+        if not qm:
+            return None
+        val, quoted = qm.group(1).strip(), True
+    elif raw[0] == "'":
+        qm = _QUOTED_SINGLE.match(raw)
+        if not qm:
+            return None
+        val, quoted = qm.group(1).strip(), True
+    else:
+        val = re.sub(r'[ \t]+#.*$', '', raw).strip()
+    if not val or (not quoted and val.lower() in _FRONTMATTER_NULLS):
+        return None
+    parts = val.split('/')
+    if len(parts) == 1:
+        repo = parts[0]
+    elif len(parts) == 2 and WS_REPO_RE.fullmatch(parts[0]):
+        repo = parts[1]
+    else:
+        return None
+    if not WS_REPO_RE.fullmatch(repo) or len(repo) > WS_NAME_LIMIT - len('LEAD  (x)'):
+        return None
+    return repo
+
+
+def advise_window_middle(record, repo=None, row=None):
+    """Derive a clean, bounded `--window-middle` value from `record['identity']['title']`, else None.
+
+    Skips placeholder, bootstrap, retired, derived, and bare `LEAD <repo>` titles, strips non-printable
+    characters, collapses whitespace, and bounds length so `LEAD <repo> (<middle>)` fits `WS_NAME_LIMIT`.
+    """
+    identity = record.get('identity')
+    if not isinstance(identity, dict):
+        return None
+    if identity.get('title_source') == 'derived':
+        return None
+    raw = identity.get('title')
+    if not isinstance(raw, str):
+        return None
+    text = ' '.join(''.join(c if c.isprintable() else ' ' for c in raw).split())
+    if not text or text == '-':
+        return None
+    if re.match(r'(?i)Self-handoff\b', text):
+        return None
+    if text.startswith(RETIRED_PREFIX) or text == 'RETIRED':
+        return None
+    if text.casefold() == 'lead (self-handoff successor)':
+        return None
+    if LEAD_WINDOW.fullmatch(text) or WS_BARE_LEAD_RE.fullmatch(text):
+        return None
+    if repo is not None and text.casefold() in (repo.casefold(), f'lead {repo}'.casefold(), f'main {repo}'.casefold()):
+        return None
+    labels = identity.get('labels')
+    role = labels.get('ade.role') if isinstance(labels, dict) else None
+    if isinstance(role, str) and role and text.casefold() == f'lead {role}'.casefold():
+        return None
+    if repo is not None:
+        repo_budget = len(repo)
+    else:
+        inferred = 0
+        for candidate in (row.get('cwd') if isinstance(row, dict) else None, record.get('cwd')):
+            if isinstance(candidate, str) and candidate:
+                inferred = max(inferred, len(Path(candidate).name))
+        repo_budget = max(WS_DEFAULT_REPO_RESERVE, inferred)
+    max_work = WS_NAME_LIMIT - len('LEAD  ()') - repo_budget
+    if max_work < 1:
+        return None
+    if len(text) > max_work:
+        text = text[:max_work].rstrip()
+    if not text or text == '-' or text != text.strip() or not text.isprintable():
+        return None
+    return text
+
+
+def build_rename_lead_command(record, row=None):
+    """Build `(command, repo, middle)` for `ade-worker-run rename-lead` using its resolved absolute path."""
+    worker_run = str(Path(__file__).with_name('ade-worker-run').resolve())
+    argv = [worker_run, 'rename-lead', '--lead', str(record.get('successor'))]
+    repo = checkpoint_frontmatter_repo(record.get('checkpoint'))
+    if repo is not None:
+        argv.extend(['--repo', repo])
+    middle = advise_window_middle(record, repo=repo, row=row)
+    if middle is not None:
+        if middle.startswith('-'):
+            argv.append('--window-middle=' + middle)
+        else:
+            argv.extend(['--window-middle', middle])
+    return shlex.join(argv), repo, middle
 
 
 def role_ident(value):
@@ -1412,9 +1553,7 @@ class Service:
         Observe and advise only: `ade-worker-run rename-lead` resolves the window from the calling lead's agent record and holds its own
         lock, and the name is the operator's sidebar. Recorded as `lead_window` (`state` `ok`, `rename-advised` or `unknown`, `name`,
         `command`, `reason`); read-only, never fails finish, recomputed on every run."""
-        successor = record.get('successor')
         info = {'state': 'unknown'}
-        command = f'ade-worker-run rename-lead --lead {successor}'
         try:
             workspace = self.successor_workspace(record)
             rows = self.native('workspace', 'ls') if workspace else None
@@ -1424,9 +1563,12 @@ class Service:
             if workspace is None:
                 # a new-local successor sits in a window of its own that the record does not name: it certainly has no
                 # LEAD name yet, so the advice is given without a name to show
+                command, repo, middle = build_rename_lead_command(record)
+                hints = ([h for h, missing in (('[--window-middle "WORK"]', middle is None),
+                                               ('[--repo REPO]', repo is None)) if missing])
+                suffix = (' ' + ' '.join(hints)) if hints else ''
                 info.update(state='rename-advised', reason='successor-window-unresolved', command=command)
-                self.progress(f'the successor\'s window is new (not the predecessor\'s); run as the successor: {command}'
-                              ' [--window-middle "WORK"] [--repo REPO]')
+                self.progress(f'the successor\'s window is new (not the predecessor\'s); run as the successor: {command}{suffix}')
             elif not isinstance(name, str):
                 info['reason'] = 'window-not-listed'
             else:
@@ -1434,9 +1576,12 @@ class Service:
                 if LEAD_WINDOW.fullmatch(name):
                     info['state'] = 'ok'
                 else:
+                    command, repo, middle = build_rename_lead_command(record, row=row)
+                    hints = ([h for h, missing in (('[--window-middle "WORK"]', middle is None),
+                                                   ('[--repo REPO]', repo is None)) if missing])
+                    suffix = (' ' + ' '.join(hints)) if hints else ''
                     info.update(state='rename-advised', command=command)
-                    self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}'
-                                  ' [--window-middle "WORK"] [--repo REPO]')
+                    self.progress(f'window {info["name"]!r} is not LEAD <repo> (<work>); run as the successor: {info["command"]}{suffix}')
         except SessionError as error:
             info['reason'] = bounded(str(error), MESSAGE_LIMIT)
         record['lead_window'] = info

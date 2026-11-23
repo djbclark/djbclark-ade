@@ -1,0 +1,3 @@
+### Fixed
+
+- `ade-self-session finish` `lead_window` advice (`bin/ade_self_session.py`, `docs/self-session.md` C0b): emit the resolved absolute path to `ade-worker-run` via `shlex.join` instead of bare `ade-worker-run` (avoiding `rc=127` when `bin/` is not on `PATH`), auto-populate `--repo` from a clean single `repo:` field in the preserved checkpoint's YAML frontmatter and `--window-middle` from a clean non-placeholder `identity.title` (validated and length-bounded to match `ade_ws_names`), and only print `[--window-middle "WORK"]` / `[--repo REPO]` stderr hints for flags not already filled in (#PR)
