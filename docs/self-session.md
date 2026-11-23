@@ -66,7 +66,7 @@ performs it itself, including successor launch; no operator typing is required.
 Finish other writes/background jobs and prepare the briefing, then:
 
 ```
-bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--provider PROVIDER/MODEL] [--thinking LEVEL] [--title TEXT] [--role ROLE]
+bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ```
 
 `--quiesced` attests that other jobs/writes are finished. A running predecessor
@@ -105,7 +105,36 @@ verified by `accept` and `finish`. A duplicate `handoff` call with a different `
 labelled agent exists). When `--provider` overrides the predecessor's provider or
 model, the record stays `schema_version: 1` and adds `predecessor_provider`,
 `predecessor_model`, and `cross_provider: true` (when the provider changes).
-`compact` has no `--provider` option.
+Explicit `--provider` still honors the operator-directed target even if its pool
+is scarce (logging a stderr warning only, never silently blocking).
+`compact` has no `--provider` or `--allow-scarce-pool` option.
+
+**Quota-floor guard (2026-11-23).** On an ordinary same-provider `handoff`
+(neither `--route-kind` nor `--provider` passed), `ade-self-session` checks the
+predecessor pool's headroom against the router floors (`route_agent`: default
+15% `min_headroom`, service `reserve_floor`, `plenty_min`, `estimate_floor`, and
+Claude's Fable sublimit when running a Fable model) before cloning the
+predecessor's provider/model. If `aiuse` / the quota snapshot is missing or
+unreadable, or the pool has no reading, the check fails safe and keeps the
+predecessor's provider/model. When the predecessor's pool is under its router
+floor (or exhausted):
+
+- Unless `--allow-scarce-pool` is passed, `handoff` asks `route_agent.py plan`
+  (`judgment`, then `code`, excluding the scarce pool) for an eligible
+  unattended-mode-capable alternative verified through `mode_plan`. When found,
+  it auto-routes the successor there, logs the reroute to stderr, sets
+  `predecessor_provider` / `predecessor_model` / `cross_provider` (when the
+  provider changes), and records `quota_reroute` (`source_pool`,
+  `source_remaining_pct`, `floor_pct`, `routed_to`, `target_service`,
+  `route_kind`, plus `target_remaining_pct` / `window` when present) in the
+  transaction record.
+- If no eligible unattended alternative pool is available (or the router plan is
+  stale/unavailable), `handoff` refuses cleanly (exit 1, no transaction written,
+  no agent created) explaining the scarce headroom vs floor and suggesting
+  `--provider PROVIDER/MODEL` or `--allow-scarce-pool` — it never silently
+  clones onto a scarce pool.
+- Passing `--allow-scarce-pool` explicitly opts into cloning the predecessor's
+  scarce pool (logged to stderr and recorded as `allow_scarce_pool: true`).
 
 The successor's thinking level is set with `--thinking LEVEL` (an identifier such
 as `high`, passed to `agent run --thinking`; a malformed value is refused before
@@ -350,8 +379,24 @@ created); `error` (the reason in `supervisor_lead_error`; it never fails `finish
 retries). Nothing is written unless the archive is confirmed. The state dir honours `ADE_SUPERVISOR_STATE_DIR` from the
 `Service` env, then the process env (tests point it at a tmp dir).
 
-The launchd `ade-net-resume` job needs no such repoint: its pinned `--lead <id>` already follows the ledger (C0a item 2), so a stale
-pin is harmless (it only shows an old id in `launchctl print`). `ade-supervisor-scan` also follows a replaced lead through the send guard.
+**Legacy `com.djbclark.ade-net-resume` plist sync (2026-11-23).** New installs
+can pass `--lead-file ~/.local/state/djbclark-ade/supervisor/lead` to
+`bin/ade-net-resume` (see [net-resume.md](net-resume.md) and
+[scheduling.md](scheduling.md)) so the job follows both `supervisor/lead`
+updates and completed self-handoff chains with zero plist edits. For legacy
+installs whose `~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist`
+(overridable via `ADE_NET_RESUME_PLIST`) still pins `--lead <UUID>`, `finish`
+now also syncs the plist after the archive is confirmed (and retries on re-run):
+only when the plist exists, is a regular file (never a symlink), parses via
+`plistlib`, carries no `--lead-file` flag, and has a single `--lead` argument
+naming the archived predecessor. It atomically rewrites only that UUID to the
+successor (preserving file mode and every other key/argument verbatim, never
+adding `--transition-below`) and reloads the job on macOS via
+`launchctl bootout` + `launchctl bootstrap`. The outcome is recorded in
+`net_resume_plist` (`repointed`, `already-successor`, `uses-lead-file`,
+`unchanged-not-predecessor`, `unchanged-not-regular`, `absent`, or `error` with
+`net_resume_plist_error`), never failing `finish`. `ade-supervisor-scan` also
+follows a replaced lead through the send guard.
 
 ### C0b. The retired predecessor is renamed; the lead window is advised (2026-11-22)
 The successor inherits the predecessor's name (C-id), so a chain's agents all read the same in the sidebar: on 2026-11-22
