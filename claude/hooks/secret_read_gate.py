@@ -1134,6 +1134,9 @@ def check_grep(ck: Checker, policy: Policy, ti: dict, cwd: str):
     return None
 
 
+# Standard system binary directories allowed when an allowlisted command is invoked by path (prevents `./cat`
+# or `/tmp/cat` spoofing an allowlisted sink/outside command).
+SAFE_BIN_DIRS = frozenset({"/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"})
 # Tight allowlist of non-shell data sinks whose properly terminated quoted-delimiter heredoc bodies may skip
 # filesystem glob walks (literal path checks and `glob_pattern_only` still run on every word in the body).
 SAFE_HEREDOC_SINKS = frozenset({
@@ -1142,32 +1145,19 @@ SAFE_HEREDOC_SINKS = frozenset({
     "uniq", "tr", "cut", "base64", "shasum", "sha256sum", "md5",
     "md5sum", "git", "diff",
 })
-# Commands / builtins / wrappers anywhere in the outside command text that disqualify skipping filesystem walks
-# on any heredoc body in that command (fail closed).
-UNSAFE_OUTSIDE_CMDS = frozenset({
-    # Shells and shell-executing builtins
-    "sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "pdksh", "ash",
-    "csh", "tcsh", "fish", "rc", "nu", "nushell", "elvish", "xonsh",
-    "osh", "ysh", "pwsh", "eval", "source", ".", "exec", "alias", "unalias",
-    "shopt", "setopt", "read", "mapfile", "readarray", "repeat",
-    # Wrappers, indirect runners, and execution/IPC helpers
-    "env", "genv", "command", "builtin", "time", "nice", "gnice",
-    "ionice", "nohup", "gnohup", "setsid", "sudo", "doas", "su",
-    "timeout", "gtimeout", "xargs", "stdbuf", "gstdbuf", "caffeinate",
-    "rtk", "bg", "bgrun", "ts", "chronic", "flock", "taskpolicy", "arch",
-    "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx",
-    "mise", "watch", "script", "parallel", "find", "ssh", "mosh",
-    "docker", "podman", "kubectl", "chroot", "busybox", "nix", "nix-shell",
-    "noglob", "nocorrect", "unbuffer", "deadline",
-    "mkfifo", "mknod", "chmod", "make", "gmake", "dd",
-    "awk", "gawk", "mawk", "nawk", "perl", "ruby", "node", "lua", "php",
+# Tight allowlist of simple outside commands permitted alongside a quoted-delimiter heredoc (anything else —
+# shells, wrappers, `install`, `ln`, `cp`, `mv`, `osascript`, `rbash`, `exec`, `alias`, `make`, arbitrary scripts —
+# fails closed to full literal + filesystem glob analysis).
+SAFE_OUTSIDE_CMDS = SAFE_HEREDOC_SINKS | frozenset({
+    "echo", "printf", "true", "false", "cd", "mkdir", "pwd", "ls",
+    "stat", "test", "[", "touch", "rm",
 })
 COMPOUND_KEYWORDS = frozenset({
     "if", "then", "else", "elif", "fi", "for", "while", "until",
     "do", "done", "case", "esac", "coproc", "select", "function",
 })
 SHELL_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-PYTHON_C_FLAG = re.compile(r"^-[A-Za-z]*c")
+PYTHON_EXEC_FLAG = re.compile(r"^-[A-Za-z]*[cm]")
 REDIR_TOKENS = frozenset({"<", ">", ">>", ">|", "<>", "<<<", "<<", "<&", ">&", "&>", "&>>"})
 OUT_REDIR_TOKENS = frozenset({">", ">>", ">|", "&>", "&>>"})
 SHLEX_PUNCT = ";&|()<>\n"
@@ -1314,26 +1304,39 @@ def _parse_stage(stage_toks: list):
     return head, args, targets, unsafe_redir, has_compound
 
 
+def _is_allowlisted_cmd(head: str, allowlist) -> bool:
+    """True only for a bare allowlisted name or a direct path in SAFE_BIN_DIRS (blocks `./cat`, `/tmp/cat`)."""
+    if not head or "$" in head or "`" in head:
+        return False
+    if "/" not in head:
+        return head in allowlist
+    return "//" not in head and os.path.dirname(head) in SAFE_BIN_DIRS and os.path.basename(head) in allowlist
+
+
 def _is_unsafe_stage_flags(base: str, args: list) -> bool:
-    """True when an allowlisted command carries flags that execute inline code or external helpers."""
+    """True when an allowlisted command carries flags/operands that execute inline code, scripts, or helpers."""
     if base in ("python", "python3"):
-        return any(PYTHON_C_FLAG.match(a) for a in args)
+        for a in args:
+            if PYTHON_EXEC_FLAG.match(a):
+                return True
+            if a == "--":
+                return True
+            if not a.startswith("-") and a != "-":
+                return True   # script file operand (e.g. `python3 s.py`)
+        return False
     if base == "git":
-        return any(a == "-c" or a.startswith("--config-env") or a.startswith("--exec-path") for a in args)
+        return any(a.startswith("-c") or a.startswith("--config-env") or a.startswith("--exec-path") for a in args)
     return False
 
 
 def _stage_is_safe_sink(stage_toks: list):
-    """(is_safe_sink, targets) for one stage of a heredoc's own pipeline (strict allowlist)."""
+    """(is_safe_sink, targets) for one stage of a heredoc's own pipeline (strict allowlist + safe path)."""
     head, args, targets, unsafe_redir, has_compound = _parse_stage(stage_toks)
     if not head or unsafe_redir or has_compound:
         return False, targets
-    if "$" in head or "`" in head:
+    if not _is_allowlisted_cmd(head, SAFE_HEREDOC_SINKS):
         return False, targets
-    base = os.path.basename(head)
-    if base not in SAFE_HEREDOC_SINKS:
-        return False, targets
-    if _is_unsafe_stage_flags(base, args):
+    if _is_unsafe_stage_flags(os.path.basename(head), args):
         return False, targets
     return True, targets
 
@@ -1355,9 +1358,10 @@ def _pipeline_is_safe_sink(pipe_text: str):
 def _outside_is_safe(cleaned_outside: str):
     """Single O(N) pass over all non-heredoc lines: `(safe, all_cmd_words)`.
 
-    Returns `(False, set())` (fail closed on every heredoc) if the outside command cannot be tokenized cleanly,
-    contains compound keywords, dynamic command names, unsafe commands/shells/wrappers/builtins, or inline-code
-    flags on `python`/`git`.
+    Uses a tight allowlist (`SAFE_OUTSIDE_CMDS` + `SAFE_BIN_DIRS`): returns `(False, set())` (fail closed on every
+    heredoc) if the outside command cannot be tokenized cleanly, contains compound keywords, non-allowlisted
+    commands or custom paths (`./cat`, `/tmp/cat`, `install`, `ln`, `osascript`, `rbash`, shells, wrappers, etc.),
+    unsafe redirections, or code-executing flags on `python`/`git`.
     """
     stages = _tokenize_pipeline(cleaned_outside)
     if stages is None:
@@ -1370,10 +1374,10 @@ def _outside_is_safe(cleaned_outside: str):
             return False, set()
         if not head:
             continue
-        if "$" in head or "`" in head or head.endswith("()"):
+        if not _is_allowlisted_cmd(head, SAFE_OUTSIDE_CMDS):
             return False, set()
         base = os.path.basename(head)
-        if base in UNSAFE_OUTSIDE_CMDS or _is_unsafe_stage_flags(base, args):
+        if _is_unsafe_stage_flags(base, args):
             return False, set()
         all_cmd_words.add(head)
         if base:
@@ -1386,10 +1390,12 @@ def split_quoted_heredocs(cmd: str):
 
     `full_text` holds everything needing full (literal + filesystem glob walk + pattern) analysis.
     `literal_only_bodies` holds bodies of properly terminated quoted-delimiter heredocs belonging to simple
-    top-level allowlisted data-sink pipelines (`SAFE_HEREDOC_SINKS`) when the command has no shells, wrappers,
-    compound constructs, process substitutions, backticks, unclosed quotes/groups, or target execution. Words in
-    `literal_only_bodies` still undergo literal path checks and pattern-only glob checks (`glob_pattern_only`),
-    skipping only filesystem glob walks.
+    top-level allowlisted data-sink pipelines (`SAFE_HEREDOC_SINKS`) when all outside commands are in
+    `SAFE_OUTSIDE_CMDS` (and `SAFE_BIN_DIRS` if qualified by path) and the command contains no command
+    substitutions (`$(`, `` ` ``), process substitutions (`<(`, `>(`), arithmetic (`((`, `$((`), subshells or
+    brace groups (`(`, `)`, `{`, `}`), compound constructs, unclosed quotes/expansions, or target execution.
+    Words in `literal_only_bodies` still undergo literal path checks and pattern-only glob checks
+    (`glob_pattern_only`), skipping only filesystem glob walks.
 
     Any parse ambiguity, nested/compound construct, unterminated heredoc, or unclosed state fails closed (`(cmd, [])`).
     """
@@ -1399,14 +1405,12 @@ def split_quoted_heredocs(cmd: str):
     cleaned_outside = []    # same lines with heredoc introducer spans blanked for single-pass command check
     heredocs = []           # parsed, terminated heredocs
     pending_pipe = []       # heredocs from a logical line ending in `|` / `|&`
-    stack = []
-    group_depth = 0         # persistent across lines: multi-line `(` / `{` fails closed
+    stack = []              # only "'", "$'", '"', "${" — $(, ((, `, <(, >( fail closed immediately
     steps = 0
     i = 0
 
     while i < n_lines:
         tick()
-        orig_i = i
         raw_lines = [lines[i]]
         # Accumulate logical-line segments in a list (O(N), never quadratic string concat).
         seg = lines[i]
@@ -1418,7 +1422,7 @@ def split_quoted_heredocs(cmd: str):
         first_pipe_end = None
         parse_failed = False
         # Track the previous UNESCAPED character on this logical line: "" at start of line, None immediately after
-        # any `\x` escape (so `\$'`, `\ #`, `\; #`, `\<<<` can never trigger predecessor lookbacks).
+        # any `\x` escape or completed heredoc delimiter (never merges with a following `<`, `#`, or `'`).
         prev_ch = ""
 
         while True:
@@ -1434,8 +1438,6 @@ def split_quoted_heredocs(cmd: str):
 
             # Backslash-newline line continuation (outside `'...'` and `$'...'`).
             if ch == "\\" and top not in ("'", "$'") and col + 1 == n and i + 1 < n_lines:
-                # Only continue cleanly after whitespace or start of line; splitting a token/operator (`<\`, `$\`)
-                # across a line continuation fails closed.
                 if prev_ch not in ("", " ", "\t"):
                     parse_failed = True
                     break
@@ -1475,19 +1477,9 @@ def split_quoted_heredocs(cmd: str):
                     prev_ch = ch
                     col += 1
                     continue
-                if ch == "`":
-                    parse_failed = True   # backticks in a command with `<<`: fail closed
+                if ch == "`" or seg.startswith("$(", col):
+                    parse_failed = True   # command substitution / arithmetic inside `"..."`: fail closed
                     break
-                if seg.startswith("$((", col):
-                    stack.append("$((")
-                    prev_ch = "("
-                    col += 3
-                    continue
-                if seg.startswith("$(", col):
-                    stack.append("$(")
-                    prev_ch = "("
-                    col += 2
-                    continue
                 if seg.startswith("${", col):
                     stack.append("${")
                     prev_ch = "{"
@@ -1496,45 +1488,13 @@ def split_quoted_heredocs(cmd: str):
                 prev_ch = ch
                 col += 1
                 continue
-            if top in ("$((", "(("):
-                if ch == "\\":
-                    col += 2
-                    prev_ch = None
-                    continue
-                if ch == "`":
-                    parse_failed = True
-                    break
-                if ch == "<" and seg.startswith("<<", col) and not seg.startswith("<<<", col) and prev_ch != "<":
-                    parse_failed = True   # `<<` inside non-empty stack: fail closed
-                    break
-                if ch == "'":
-                    stack.append("'")
-                elif ch == '"':
-                    stack.append('"')
-                elif seg.startswith("((", col):
-                    stack.append("((")
-                    prev_ch = "("
-                    col += 2
-                    continue
-                elif ch == "(":
-                    stack.append("(")
-                elif ch == ")":
-                    if col + 1 < n and seg[col + 1] == ")":
-                        stack.pop()
-                        prev_ch = ")"
-                        col += 2
-                        continue
-                    stack[-1] = "$(" if top == "$((" else "("
-                prev_ch = ch
-                col += 1
-                continue
             if top == "${":
                 if ch == "\\":
                     col += 2
                     prev_ch = None
                     continue
-                if ch == "`":
-                    parse_failed = True
+                if ch == "`" or seg.startswith("$(", col):
+                    parse_failed = True   # command substitution / arithmetic inside `${...}`: fail closed
                     break
                 if ch == "}":
                     stack.pop()
@@ -1554,16 +1514,6 @@ def split_quoted_heredocs(cmd: str):
                     stack.append("'")
                 elif ch == '"':
                     stack.append('"')
-                elif seg.startswith("$((", col):
-                    stack.append("$((")
-                    prev_ch = "("
-                    col += 3
-                    continue
-                elif seg.startswith("$(", col):
-                    stack.append("$(")
-                    prev_ch = "("
-                    col += 2
-                    continue
                 elif seg.startswith("${", col):
                     stack.append("${")
                     prev_ch = "{"
@@ -1573,21 +1523,20 @@ def split_quoted_heredocs(cmd: str):
                 col += 1
                 continue
 
-            # Now either `top is None` (top level) or `top in ("$(", "(")`.
+            # Top level (`stack` is empty).
             if ch == "\\":
                 col += 2
                 prev_ch = None
                 continue
             if ch == "`":
-                parse_failed = True       # backticks in a command with `<<`: fail closed
+                parse_failed = True       # backticks: fail closed
                 break
             if ch == "#" and (prev_ch == "" or (prev_ch is not None and prev_ch in " \t\r;&|()")):
-                if top is None:
-                    for hd in line_hds:
-                        if hd["pipe_end"] is None:
-                            hd["pipe_end"] = pos
-                    if first_pipe_end is None:
-                        first_pipe_end = pos
+                for hd in line_hds:
+                    if hd["pipe_end"] is None:
+                        hd["pipe_end"] = pos
+                if first_pipe_end is None:
+                    first_pipe_end = pos
                 seg_chunks.append(seg[:col])
                 break
             if ch == "'" and prev_ch == "$":
@@ -1605,87 +1554,43 @@ def split_quoted_heredocs(cmd: str):
                 prev_ch = ch
                 col += 1
                 continue
-            if seg.startswith("<(", col) or seg.startswith(">(", col):
-                parse_failed = True       # process substitution: fail closed
+            if (seg.startswith("$(", col) or seg.startswith("((", col)
+                    or seg.startswith("<(", col) or seg.startswith(">(", col)):
+                parse_failed = True       # command/process substitution or arithmetic: fail closed
                 break
-            if seg.startswith("$((", col):
-                stack.append("$((")
-                prev_ch = "("
-                col += 3
-                continue
-            if seg.startswith("$(", col):
-                stack.append("$(")
-                prev_ch = "("
-                col += 2
-                continue
             if seg.startswith("${", col):
                 stack.append("${")
                 prev_ch = "{"
                 col += 2
                 continue
-            if seg.startswith("((", col):
-                stack.append("((")
-                prev_ch = "("
+            if ch in "()" or (ch in "{}" and _is_word_boundary(seg, col, 1)):
+                parse_failed = True       # subshell, function def, case arm, or brace group: fail closed
+                break
+
+            # Pipeline-ending operators at top level (`;` / `&&` / `||` / standalone `&`).
+            if seg.startswith("&&", col) or seg.startswith("||", col):
+                for hd in line_hds:
+                    if hd["pipe_end"] is None:
+                        hd["pipe_end"] = pos
+                if first_pipe_end is None:
+                    first_pipe_end = pos
+                prev_ch = ch
                 col += 2
+                pipe_start = seg_offset + col
                 continue
-
-            if top is not None:
-                # Inside `$(...)` or `(...)`: `case` (unmatched `)`) or `<<` (nested heredoc) fails closed.
-                if seg.startswith("case", col) and _is_word_boundary(seg, col, 4):
-                    parse_failed = True
-                    break
-                if ch == "<" and seg.startswith("<<", col) and not seg.startswith("<<<", col) and prev_ch != "<":
-                    parse_failed = True
-                    break
-                if ch == "(":
-                    stack.append("(")
-                elif ch == ")":
-                    stack.pop()
+            if ch == ";":
+                for hd in line_hds:
+                    if hd["pipe_end"] is None:
+                        hd["pipe_end"] = pos
+                if first_pipe_end is None:
+                    first_pipe_end = pos
                 prev_ch = ch
                 col += 1
+                pipe_start = seg_offset + col
                 continue
-
-            # Top level (`stack` is empty).
-            if ch == "(":
-                group_depth += 1
-                prev_ch = ch
-                col += 1
-                continue
-            if ch == ")":
-                if group_depth == 0:
-                    parse_failed = True   # unmatched `)` (e.g. case arm): fail closed
-                    break
-                group_depth -= 1
-                prev_ch = ch
-                col += 1
-                continue
-            if ch == "{" and _is_word_boundary(seg, col, 1):
-                group_depth += 1
-                prev_ch = ch
-                col += 1
-                continue
-            if ch == "}" and _is_word_boundary(seg, col, 1):
-                if group_depth == 0:
-                    parse_failed = True
-                    break
-                group_depth -= 1
-                prev_ch = ch
-                col += 1
-                continue
-
-            # Pipeline-ending operators at top level outside groups (`;` / `&&` / `||` / standalone `&`).
-            if group_depth == 0:
-                if seg.startswith("&&", col) or seg.startswith("||", col):
-                    for hd in line_hds:
-                        if hd["pipe_end"] is None:
-                            hd["pipe_end"] = pos
-                    if first_pipe_end is None:
-                        first_pipe_end = pos
-                    prev_ch = ch
-                    col += 2
-                    pipe_start = seg_offset + col
-                    continue
-                if ch == ";":
+            if ch == "&":
+                next_ch = seg[col + 1] if col + 1 < n else ""
+                if (prev_ch is None or prev_ch not in "<>|") and next_ch not in ">&":
                     for hd in line_hds:
                         if hd["pipe_end"] is None:
                             hd["pipe_end"] = pos
@@ -1695,24 +1600,9 @@ def split_quoted_heredocs(cmd: str):
                     col += 1
                     pipe_start = seg_offset + col
                     continue
-                if ch == "&":
-                    next_ch = seg[col + 1] if col + 1 < n else ""
-                    if (prev_ch is None or prev_ch not in "<>|") and next_ch not in ">&":
-                        for hd in line_hds:
-                            if hd["pipe_end"] is None:
-                                hd["pipe_end"] = pos
-                        if first_pipe_end is None:
-                            first_pipe_end = pos
-                        prev_ch = ch
-                        col += 1
-                        pipe_start = seg_offset + col
-                        continue
 
             # Heredoc introducer `<<` or `<<-` (never `<<<`).
             if ch == "<" and seg.startswith("<<", col) and not seg.startswith("<<<", col) and prev_ch != "<":
-                if group_depth > 0:
-                    parse_failed = True   # heredoc inside `(...)` or `{ ... }`: fail closed
-                    break
                 hd_col_start = col
                 # Include optional attached fd digits before `<<` (`0<<'EOF'`) so blanking removes them too.
                 while hd_col_start > 0 and seg[hd_col_start - 1].isdigit():
@@ -1740,7 +1630,8 @@ def split_quoted_heredocs(cmd: str):
                     "body": "",
                     "pipe_text": "",
                 })
-                prev_ch = seg[end_col - 1]
+                # Delimiter word is complete: never let its trailing char (e.g. `<` in `<<\<`) merge with `<<'REAL'`.
+                prev_ch = None
                 col = end_col
                 continue
 
@@ -1800,11 +1691,11 @@ def split_quoted_heredocs(cmd: str):
 
         i += 1
 
-    # Unclosed quote/substitution, unclosed group, or dangling trailing `|` at EOF: fail closed.
-    if stack or group_depth or pending_pipe or not heredocs:
+    # Unclosed quote/expansion or dangling trailing `|` at EOF: fail closed.
+    if stack or pending_pipe or not heredocs:
         return cmd, []
 
-    # Single O(N) safety pass over all outside command lines.
+    # Single O(N) allowlist pass over all outside command lines.
     outside_ok, all_cmd_words = _outside_is_safe("\n".join(cleaned_outside))
     if not outside_ok:
         return cmd, []

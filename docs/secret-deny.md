@@ -96,22 +96,27 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
     rem; absolute deep globs keep the pattern fallback only when that shared budget did not truncate),
     fails closed (C7). Quoted-delimiter heredoc bodies (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`, `<<\EOF`,
     `<<E'O'F`) belonging to simple top-level pipelines whose every stage command is in a tight data-sink
-    allowlist (`cat`, `tee`, `gh`, `clip`, `pbcopy`, `xclip`, `xsel`, `wl-copy`, `jq`, `yq`, `python3`,
-    `python`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `cut`, `base64`, `shasum`, `sha256sum`, `md5`,
-    `md5sum`, `git`, `diff`, excluding `python`/`python3 -c` and `git -c`/`--config-env`/`--exec-path`)
-    still have every literal (non-glob) word checked against the policy **and** every glob word checked
-    with the pattern-only engine (`glob_pattern_only`, zero filesystem scans, so `~/.ssh/id_*`, `*.key`,
-    and `.env*` still block even inside `python3 - <<'EOF'`), skipping only the filesystem glob walk so
+    allowlist (`SAFE_HEREDOC_SINKS`: `cat`, `tee`, `gh`, `clip`, `pbcopy`, `xclip`, `xsel`, `wl-copy`,
+    `jq`, `yq`, `python3`, `python`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `cut`, `base64`,
+    `shasum`, `sha256sum`, `md5`, `md5sum`, `git`, `diff`) and whose outside commands are all in a tight
+    outside allowlist (`SAFE_OUTSIDE_CMDS = SAFE_HEREDOC_SINKS | {echo, printf, true, false, cd, mkdir,
+    pwd, ls, stat, test, [, touch, rm}`) — bare names or direct paths in `/bin`, `/usr/bin`,
+    `/opt/homebrew/bin`, or `/usr/local/bin` only (blocking `./cat` and `/tmp/cat` spoofing), excluding
+    `python`/`python3` `-c`/`-m`/script-file operands and `git -c*`/`--config-env`/`--exec-path` — still
+    have every literal (non-glob) word checked against the policy **and** every glob word checked with
+    the pattern-only engine (`glob_pattern_only`, zero filesystem scans, so `~/.ssh/id_*`, `*.key`, and
+    `.env*` still block even inside `python3 - <<'EOF'`), skipping only the filesystem glob walk so
     markdown `**bold**` / `*italic*` or Python `**kwargs` prose does not exhaust the glob budget
     (2026-11-22). Everything else fails closed to full literal + filesystem glob walk + pattern analysis:
-    any command not in the allowlist, any command whose outside lines contain a shell interpreter,
-    wrapper, compound keyword (`if`/`for`/`while`/`until`/`case`/`fi`/`done`/`esac`/`coproc`/`select`/
-    `function`), subshell or brace group around `<<`, process substitution (`<(`/ `>(`), backtick,
-    nested `<<`, `exec`/`alias`/`mkfifo`/`chmod`/`make`/`read`/scripting-interpreter runner, non-stdout/
-    stderr fd duplication (`>&3`), dynamic command name, execution of a file written by a heredoc,
-    unquoted heredocs (`<<EOF`, `<<-EOF`), unterminated or unparseable heredocs, unclosed quotes/groups
-    at EOF, redirection headers, commands after the terminator, or a heredoc scanner timeout (`OutOfTime`
-    raises `GlobBudgetExceeded`, fail closed). Python 3.9 compatible (`ast.parse(..., feature_version=(3, 9))`).
+    any command outside those allowlists (shells, wrappers, `install`, `ln`, `cp`, `mv`, `osascript`,
+    `rbash`, `exec`, `alias`, `mkfifo`, `make`, arbitrary scripts), any command substitution (`$(` or
+    backticks, including inside double quotes or `${...}`), arithmetic (`((` / `$((`), process
+    substitution (`<(`/ `>(`), subshell or brace group (`(`, `)`, `{`, `}`), compound keyword, nested
+    `<<`, non-stdout/stderr fd duplication (`>&3`), dynamic command name, execution of a file written by
+    a heredoc, unquoted heredocs (`<<EOF`, `<<-EOF`), unterminated or unparseable heredocs, unclosed
+    quotes/expansions at EOF, redirection headers, commands after the terminator, or a heredoc scanner
+    timeout (`OutOfTime` raises `GlobBudgetExceeded`, fail closed). Python 3.9 compatible
+    (`ast.parse(..., feature_version=(3, 9))`).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a

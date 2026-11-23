@@ -1307,6 +1307,70 @@ def test_adversary_m1_unclosed_stack_at_eof_and_many_heredocs_linear(tmp_path):
     assert ck2._scanned == 0
 
 
+# ---- Adversary round 2 regression tests (R2-H1, R2-H2, R2-H3, R2-L1) -----------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    # R2-H1: heredoc delimiter ending in `<` (`<<\<`) must not merge with adjacent `<<'REAL'`
+    "cat >/dev/null <<\\<<<'REAL'\n<\ncat >/dev/null <<'true'\nREAL\ncat *\ntrue\n",
+    # R2-H2: `$((case ...))` / `((...))` inside quotes must fail closed
+    'cat >/dev/null "$((case a in a) : ;; esac); cat " <<\'true\' " )"\ncat *\ntrue\n',
+    # R2-H3: double-quoted `$(...)` command substitutions in outside lines
+    "cat > s1.sh <<'EOF'\ncat *\nEOF\necho \"$(bash s1.sh)\"\n",
+    "cat > s2.sh <<'EOF'\ncat *\nEOF\nX=\"$(bash s2.sh)\"\necho \"$X\"\n",
+    "cat > s7.sh <<'EOF'\ncat *\nEOF\ncat <<< \"$(sh s7.sh)\"\n",
+    "cat > s17.sh <<'EOF'\ncat *\nEOF\nprintf '%s\\n' \"$(bash s17.sh)\"\n",
+    "cat > s20.sh <<'EOF'\ncat *\nEOF\necho \"${x:-$(bash s20.sh)}\"\n",
+    # R2-H3: non-allowlisted outside commands (`install`, `ln`, `osascript`, `rbash`, script execution)
+    "cat > s3.sh <<'EOF'\n#!/bin/sh\ncat *\nEOF\ninstall -m 755 s3.sh run3.sh && run3.sh\n",
+    "cat > s14.sh <<'EOF'\ncat *\nEOF\nln -sf /bin/sh mysh && mysh s14.sh\n",
+    "cat > s5.scpt <<'EOF'\ndo shell script \"cat \" & \"*\"\nEOF\nosascript s5.scpt\n",
+    "rbash <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\nrbash s.sh\n",
+    "cat > s.py <<'EOF'\nimport glob; print(glob.glob('*'))\nEOF\npython3 s.py\n",
+    # R2-H3: path spoofing (`./cat`, `/tmp/cat` outside SAFE_BIN_DIRS)
+    "./cat <<'EOF'\ncat *\nEOF\n",
+    "/tmp/cat <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\n./cat s.sh\n",
+    # R2-L1: attached `git -c<key>=<val>` form
+    "git -calias.x='!sh' status <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\ngit -ccore.pager=sh status\n",
+])
+def test_adversary_r2_h1_h2_h3_l1_bypasses_blocked(env, cmd):
+    """Adversary PR 951 Round 2: delimiter-end `<`, `$((case ...))`, double-quoted `$(...)`, non-allowlisted
+    outside commands (`install`, `ln`, `osascript`, `rbash`, `python3 s.py`), path spoofing (`./cat`, `/tmp/cat`),
+    and attached `git -c...` must all fail closed to full filesystem glob analysis."""
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_adversary_r2_osascript_and_allowlist_paths_fail_closed():
+    """Verify exact osascript repro fails closed in split_quoted_heredocs and path spoofing is rejected."""
+    hook = load_hook()
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    osa = "cat > s5.scpt <<'EOF'\ndo shell script \"cat *\"\nEOF\nosascript s5.scpt\n"
+    assert hook.split_quoted_heredocs(osa) == (osa, [])
+    for h, want in [
+        ("cat", True), ("/bin/cat", True), ("/usr/bin/cat", True),
+        ("/opt/homebrew/bin/gh", True), ("/usr/local/bin/jq", True),
+        ("./cat", False), ("/tmp/cat", False), ("/bin/./cat", False),
+        ("/bin/../tmp/cat", False), ("/bin//cat", False), ("/bin/bash", False),
+        ("rbash", False), ("install", False), ("ln", False), ("osascript", False),
+    ]:
+        assert hook._is_allowlisted_cmd(h, hook.SAFE_OUTSIDE_CMDS) is want, h
+
+
+def test_adversary_r2_safe_bin_dir_path_still_allowed(monkeypatch, tmp_path):
+    """Allowlisted commands invoked via SAFE_BIN_DIRS (`/bin/cat`, `/usr/bin/tee`) still skip fs walks."""
+    hook = load_hook()
+    for i in range(30):
+        (tmp_path / ("f%03d.txt" % i)).write_text("x\n")
+    ck = checker(hook, tmp_path)
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    cmd = "/bin/cat > notes.md <<'EOF'\n" + _markdown_with_bold_tokens(40) + "\nEOF\n/bin/echo ok\n"
+    assert hook.check_command(ck, cmd) is None
+    assert ck._scanned == 0
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"
