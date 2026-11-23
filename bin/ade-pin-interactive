@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """ade-pin-interactive — tag non-worker (human-interaction) agents so they are easy to find.
 
 Operator request 2026-11-20: non-worker agents — leads and operator-started agents that can require
@@ -9,28 +9,85 @@ ade.interactive=1` lists them in one command.
 Why a label and not Paseo's native "pin": Paseo's sidebar pin is the workspace `pinnedAt` field, set
 only by the desktop UI through the `workspace.pin.set` RPC — neither `paseo workspace` (CLI) nor the
 plugin SDK (`PaseoWorkspaceHandle` has setTitle/archive, no pin) exposes it. Filed upstream (see
-docs/upstream-issues.md draft 23). The real sidebar pin is now applied by `bin/ade-pin-workspaces pin` (the bundled-CLI-client path); this tool stays as the durable, queryable label.
+docs/upstream-issues.md draft 23). The real sidebar pin is now applied by `bin/ade-pin-workspaces pin`
+(the bundled-CLI-client path); this tool stays as the durable, queryable label.
 
-Classification (read from `paseo ls -a -g --json`; the row omits arbitrary labels, so the signal is
-the name and lifecycle, matching `ade-worker-run`'s own conventions):
+Classification (read from `paseo ls -g --json`; 2026-11-23 dropped `-a` so archived agents are not
+listed, and added explicit archived/`RETIRED `/completed-handoff guards):
   - worker: name starts `worker `, or name == "Herald summary", or `background` is true.
-  - non-worker (tag): status != closed, not archived, and not a worker.
+  - retired/archived (skip): `archived` is true, `archivedAt` is set, name starts `RETIRED `, or a
+    completed `ade-self-session` handoff replaced the agent (`ade_lead_succession.successor_of`).
+  - non-worker (tag): status != closed, not archived, not retired, and not a worker.
 
 Only adds the label (no unpin of anything it did not tag); idempotent. Never archives, renames, or
 touches any other field. Read-only except the label writes.
 
+Options:
+  --check            report who would be tagged; change nothing.
+  --paseo-bin PATH   paseo executable (default: ADE_PASEO_BIN or `paseo`).
+
 Exit 0 tagged/none needed; 1 a `paseo` call failed.
 """
+from __future__ import annotations
+
 import argparse
+import importlib.util
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 LABEL = "ade.interactive=1"
+RETIRED_PREFIX = "RETIRED "
 
 
-def paseo_json(*argv):
-    proc = subprocess.run(["paseo", *argv, "--json"], capture_output=True, text=True, timeout=120)
+def _load_succession():
+    """Load sibling bin/ade_lead_succession.py by absolute path (works under `python3 -I`)."""
+    path = Path(__file__).resolve().with_name("ade_lead_succession.py")
+    if not path.is_file():
+        return None
+    key = "_ade_pin_interactive_lead_succession"
+    found = sys.modules.get(key)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    spec = importlib.util.spec_from_file_location(key, path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        return None
+    return module
+
+
+def has_completed_handoff(aid: str) -> bool:
+    """True when `aid` has a completed `ade-self-session` handoff (`status == "archived"` on this PASEO_HOME)."""
+    mod = _load_succession()
+    if mod is None:
+        return False
+    try:
+        return mod.successor_of(aid) is not None
+    except Exception:
+        # Fail safe: an unreadable/cyclic succession ledger should not cause us to pin a possibly-retired lead.
+        return True
+
+
+def resolve_paseo_bin(cli_value: str | None = None) -> str:
+    if cli_value:
+        return cli_value
+    env_val = os.environ.get("ADE_PASEO_BIN", "").strip()
+    return env_val or "paseo"
+
+
+def paseo_json(*argv: str, paseo_bin: str = "paseo"):
+    try:
+        proc = subprocess.run([paseo_bin, *argv, "--json"], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"paseo {' '.join(argv)} failed: {exc}") from exc
     if proc.returncode != 0:
         raise SystemExit(f"paseo {' '.join(argv)} failed (rc {proc.returncode}): {proc.stderr.strip()[:300]}")
     try:
@@ -39,40 +96,89 @@ def paseo_json(*argv):
         raise SystemExit(f"paseo {' '.join(argv)} printed no JSON: {exc}") from exc
 
 
-def is_worker(row):
+def is_worker(row: dict) -> bool:
     name = row.get("name") or ""
     if row.get("background") is True:
         return True
     if name == "Herald summary":
         return True
-    return name.startswith("worker ")
+    return isinstance(name, str) and name.startswith("worker ")
 
 
-def non_worker_ids(rows):
-    return [r["id"] for r in rows
-            if r.get("status") != "closed" and r.get("id") and not is_worker(r)]
+def is_archived(row: dict) -> bool:
+    return row.get("archived") is True or bool(row.get("archivedAt"))
 
 
-def main():
+def is_retired(row: dict) -> bool:
+    name = row.get("name") or ""
+    if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
+        return True
+    aid = row.get("id")
+    if isinstance(aid, str) and aid and has_completed_handoff(aid):
+        return True
+    return False
+
+
+def non_worker_ids(rows) -> list[str]:
+    out: list[str] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        aid = r.get("id")
+        if not isinstance(aid, str) or not aid:
+            continue
+        if r.get("status") == "closed":
+            continue
+        if is_archived(r):
+            continue
+        if is_worker(r):
+            continue
+        if is_retired(r):
+            continue
+        out.append(aid)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report who would be tagged; change nothing")
-    args = ap.parse_args()
-    rows = paseo_json("ls", "-a", "-g")
+    ap.add_argument("--paseo-bin", default=None, help="paseo executable (default: ADE_PASEO_BIN or 'paseo')")
+    args = ap.parse_args(argv)
+    paseo_bin = resolve_paseo_bin(args.paseo_bin)
+    rows = paseo_json("ls", "-g", paseo_bin=paseo_bin)
+    if not isinstance(rows, list):
+        raise SystemExit("paseo ls -g did not return a JSON list")
     ids = non_worker_ids(rows)
+    id_set = set(ids)
     if args.check:
         for r in rows:
-            if r.get("id") in ids:
+            if isinstance(r, dict) and r.get("id") in id_set:
                 print(f"would-tag {r['id']} {(r.get('name') or '')[:60]}")
         print(f"{len(ids)} non-worker agents")
         return 0
     tagged = 0
+    failed = 0
     for aid in ids:
-        subprocess.run(["paseo", "agent", "update", aid, "--label", LABEL],
-                       capture_output=True, text=True, timeout=60, check=False)
+        try:
+            proc = subprocess.run(
+                [paseo_bin, "agent", "update", aid, "--label", LABEL],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"ade-pin-interactive: update {aid} failed: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        if proc.returncode != 0:
+            print(
+                f"ade-pin-interactive: update {aid} rc={proc.returncode}: {proc.stderr.strip()[:200]}",
+                file=sys.stderr,
+            )
+            failed += 1
+            continue
         tagged += 1
     print(f"tagged {tagged} non-worker agents {LABEL}")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

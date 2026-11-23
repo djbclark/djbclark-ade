@@ -37,6 +37,7 @@ const isWorkerBox = (w) => {
   // `WORKER <repo>` (current) and `WORKERS <repo>` (the pre-2026-11-14 name) are worker boxes.
   return n.startsWith("WORKER ") || n.startsWith("WORKERS ");
 };
+const isRetiredWindow = (w) => String(effectiveName(w)).startsWith("RETIRED ");
 
 let client;
 let code = 1;
@@ -52,7 +53,7 @@ async function work() {
   const ws = await client.fetchWorkspaces({});
   const entries = Array.isArray(ws?.entries) ? ws.entries : [];
   const targets = entries.filter((w) =>
-    !w.background && !w.archivingAt && !w.archivedAt && !isWorkerBox(w));
+    !w.background && !w.archivingAt && !w.archivedAt && !isWorkerBox(w) && !isRetiredWindow(w));
   const todo = targets.filter((w) => !w.pinnedAt);
   if (check) {
     for (const w of targets) {

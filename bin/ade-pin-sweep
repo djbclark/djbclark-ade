@@ -1,11 +1,14 @@
 #!/usr/bin/env -S python3 -I
-"""ade-pin-sweep: re-apply the non-worker pin (label + native sidebar pin) on an interval.
+"""ade-pin-sweep: re-archive revived retired tabs and re-apply the non-worker pin on an interval.
 
-Runs bin/ade-pin-interactive (the `ade.interactive=1` label tag) then bin/ade-pin-workspaces pin
-(the native workspace pin), both idempotent. A launchd job runs this every 15 minutes so a new lead
-or operator-started agent is pinned shortly after it appears, with no operator typing.
+Runs bin/ade-archive-retired --apply first (safely re-archiving idle/closed `RETIRED ` tabs and
+completed-handoff predecessors that Paseo un-archived on a late message), then
+bin/ade-pin-interactive (the `ade.interactive=1` label tag) and bin/ade-pin-workspaces pin
+(the native workspace pin), all idempotent. A launchd job runs this every 15 minutes so revived
+retired tabs are re-archived before pinning and new leads or operator-started agents are pinned
+shortly after they appear, with no operator typing.
 
-Zero-token: no model call. Exit 0 both steps ok, 1 one of them failed (their stderr is preserved).
+Zero-token: no model call. Exit 0 all steps ok, 1 one of them failed (their stderr is preserved).
 """
 from __future__ import annotations
 
@@ -33,9 +36,10 @@ def run(name: str, *argv: str) -> int:
 
 
 def main() -> int:
+    r = run("ade-archive-retired", "--apply")
     a = run("ade-pin-interactive")
     b = run("ade-pin-workspaces", "pin")
-    return 0 if a == 0 and b == 0 else 1
+    return 0 if r == 0 and a == 0 and b == 0 else 1
 
 
 if __name__ == "__main__":
