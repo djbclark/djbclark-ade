@@ -705,3 +705,48 @@ class TestThinkingOptionIdsCatalog:
         assert "gemini-*-argon" in out and "gemini-4-argon" in out
         assert "state" not in out and "unresolved" not in out
         assert r.model_family_lines(changed_only=True) == []
+
+    def test_active_hold_on_legacy_suffix_family_preserves_thinking_and_state(self, catalog, monkeypatch):
+        """PR 950 LOW-1: an active hold on a legacy `-<effort>` family keeps thinking on a compatible bare hold id and
+        never erases `thinking` when recording `res.newest` in state."""
+        agy_two = {"antigravity": [
+            {"id": "gemini-4-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4.5-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+        ]}
+        # 1. Normal resolution records newest + thinking
+        catalog(agy_two)
+        spec, res = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert (spec, res.model, res.thinking, res.newest, res.newest_thinking) == (
+            "gemini-4.5-neon --effort high", "gemini-4.5-neon", "high", "gemini-4.5-neon", "high"
+        )
+        assert mf.last_entry("antigravity", "gemini-*-neon-high") == ("gemini-4.5-neon", "high")
+
+        # 2. Active hold to bare id supporting `high` preserves `--effort high` and keeps state's `thinking`
+        hold = {"gemini-*-neon-high": mf.Hold("gemini-4-neon", date(2999, 1, 1), "testing hold")}
+        monkeypatch.setattr(r, "model_holds", lambda: hold)
+        r.MODEL_RESOLUTIONS.clear()
+        spec_h, res_h = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert (spec_h, res_h.source, res_h.model, res_h.thinking, res_h.newest, res_h.newest_thinking) == (
+            "gemini-4-neon --effort high", "hold", "gemini-4-neon", "high", "gemini-4.5-neon", "high"
+        )
+        assert mf.last_entry("antigravity", "gemini-*-neon-high") == ("gemini-4.5-neon", "high")
+
+        # 3. Active hold to legacy embedded-effort id (not in thinking_options) omits thinking on hold but STILL keeps
+        # `thinking` in state for `res.newest`
+        legacy_hold = {"gemini-*-neon-high": mf.Hold("gemini-4-neon-high", date(2999, 1, 1), "legacy id")}
+        monkeypatch.setattr(r, "model_holds", lambda: legacy_hold)
+        r.MODEL_RESOLUTIONS.clear()
+        spec_lh, res_lh = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert (spec_lh, res_lh.source, res_lh.model, res_lh.thinking, res_lh.newest_thinking) == (
+            "gemini-4-neon-high", "hold", "gemini-4-neon-high", None, "high"
+        )
+        assert mf.last_entry("antigravity", "gemini-*-neon-high") == ("gemini-4.5-neon", "high")
+
+        # 4. After hold expiry + catalog outage, state fallback still emits `--effort high`
+        expired_hold = {"gemini-*-neon-high": mf.Hold("gemini-4-neon", date(2020, 1, 1), "expired")}
+        monkeypatch.setattr(r, "model_holds", lambda: expired_hold)
+        catalog({})
+        spec_fb, res_fb = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert (spec_fb, res_fb.source, res_fb.model, res_fb.thinking) == (
+            "gemini-4.5-neon --effort high", "state", "gemini-4.5-neon", "high"
+        )

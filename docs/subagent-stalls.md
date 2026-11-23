@@ -78,12 +78,15 @@ For each **new** stall (state `~/.local/state/djbclark-ade/subagent-stalls/seen.
    `ADE_ALLOW_REPLACED_SEND` removed from its environment and from the shim's): a parent that was handed off (completed or acknowledged
    handoff) gets **no send**, because the shim would redirect it to a successor nobody checked for idleness and the resume needs the
    predecessor's own session; the hermes ping then says "parent was handed off to X". A refusal also sends nothing. Either is decided once
-   and not retried every run. The shim stays the backstop. `paseo agent inspect` and guard probes are capped at `--max-inspects` (default
-   40) per run, and none follow the first timeout of a run.
-   A stub is linked to its transcript through the footer's delivery line, a `Report:` label, a bare mention or the description slug, and only
-   the strongest kind present counts, so a finished reviewer that merely lists the writer's report as `Report:` context does not hide the
-   dead writer. A prompt that names a `*-brief.md` under the reports directory also links the stubs that brief labels (64 KiB read, at most 3
-   briefs).
+   and not retried every run. The shim stays the backstop. `paseo agent inspect` and in-process send-guard probes are capped at
+   `--max-inspects` (default 40) per run, and none follow the first timeout or unreachable-Paseo failure of a run (including a
+   timed-out or failed in-process guard inspect); when the cap or unreachable stop cuts a run short, `seen.json` records a
+   `send_cursor` so the next run resumes from the first waiting parent instead of starving later parents.
+   A stub is linked to its transcript through the prompt's own footer delivery line, its own `Report:` label, a label in an owned
+   `*-brief.md` (`Your brief ...` / `Brief:`), a label in a `*-brief.md` merely mentioned as input or a bare path mention, or the
+   description slug, and only the strongest kind present counts, so a finished reviewer that merely lists the writer's report as
+   `Report:` context or mentions the writer's `*-brief.md` does not hide the dead writer (64 KiB read per brief under the reports
+   directory, at most 3 briefs).
 
 Each action repeats for the same stall at most once per `--repeat-h` (default 6) and at most `--max-notices` times in all (default 2: the first
 announcement and one repeat, then silence). A failed ping or send is not recorded, so it is retried. A stall that is no longer stalled is

@@ -1789,7 +1789,7 @@ def resolve_family(provider: str, family: str, *, effort: str | None = None) -> 
         res = _family.resolve(family, ids, holds=model_holds(), last=last_mid,
                               thinking_options=thinking, last_thinking=last_think)
         if res.newest:
-            _family.record(provider, family, res.newest, thinking=res.thinking)
+            _family.record(provider, family, res.newest, thinking=res.newest_thinking)
         MODEL_RESOLUTIONS[key] = res
     base = MODEL_RESOLUTIONS[key]
     if effort:

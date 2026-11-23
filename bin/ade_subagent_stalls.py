@@ -204,22 +204,24 @@ def description_of(t: Transcript) -> str | None:
 
 
 BRIEF_PATH = re.compile(_LEFT + r"(/[\w.@~+/-]+-brief\.md)" + _END)
+OWN_BRIEF_PATH = re.compile(
+    r"(?im)(?:^[ \t>]{0,6}(?:(?:[A-Za-z]?\d+[a-z]?[.)]|[-*])[ \t]+)?[*_`]*brief(?:[ \t]+(?:path|file))?[*_`]*[ \t]*(?:is|:|=)[*_`]*[ \t]*`?"
+    r"|\byour[ \t]+brief\b[^\n`/:=]{0,40}[:=]?[ \t]*`?)"
+    + _LEFT + r"(/[\w.@~+/-]+-brief\.md)" + _END
+)
 MAX_BRIEF_BYTES = 64 * 1024
 MAX_BRIEFS = 3
 
 
-def with_brief_text(text: str, reports_dir: Path | None) -> str:
-    """The prompt plus the text of the `*-brief.md` files it names under `reports_dir` (PR 938 round 2, LOW-3): a prompt "Your brief
-    is the file X-brief.md" carries the real `Report path:` label in that file, while its own footer names another path, so without
-    the brief the stub the worker writes is `unlinked` and its death is never announced. Bounded, regular files only."""
-    if reports_dir is None:
-        return text
+def _read_brief_paths(paths: list[str], reports_dir: Path | None) -> str:
+    if reports_dir is None or not paths:
+        return ""
     try:
         root = reports_dir.resolve()
     except OSError:
-        return text
+        return ""
     extra = []
-    for name in list(dict.fromkeys(BRIEF_PATH.findall(text)))[:MAX_BRIEFS]:
+    for name in list(dict.fromkeys(paths))[:MAX_BRIEFS]:
         try:
             p = Path(name).resolve()
             if root not in p.parents or not p.is_file():
@@ -228,6 +230,23 @@ def with_brief_text(text: str, reports_dir: Path | None) -> str:
                 extra.append(f.read(MAX_BRIEF_BYTES).decode("utf-8", "replace"))
         except OSError:
             continue
+    return "\n".join(extra)
+
+
+def brief_texts(text: str, reports_dir: Path | None) -> tuple[str, str]:
+    """(text of briefs the prompt claims as its own, text of briefs only mentioned as input) under `reports_dir`."""
+    own_paths = list(dict.fromkeys(OWN_BRIEF_PATH.findall(text)))
+    own_set = set(own_paths)
+    other_paths = [p for p in dict.fromkeys(BRIEF_PATH.findall(text)) if p not in own_set]
+    return _read_brief_paths(own_paths, reports_dir), _read_brief_paths(other_paths, reports_dir)
+
+
+def with_brief_text(text: str, reports_dir: Path | None) -> str:
+    """The prompt plus the text of the `*-brief.md` files it names under `reports_dir` (PR 938 round 2, LOW-3): a prompt "Your brief
+    is the file X-brief.md" carries the real `Report path:` label in that file, while its own footer names another path, so without
+    the brief the stub the worker writes is `unlinked` and its death is never announced. Bounded, regular files only."""
+    own, other = brief_texts(text, reports_dir)
+    extra = [part for part in (own, other) if part]
     return text + "\n" + "\n".join(extra) if extra else text
 
 
@@ -236,41 +255,56 @@ def own_reports(text: str) -> tuple[set[str], set[str], set[str]]:
     return set(FOOTER_DELIVERY.findall(text)), set(REPORT_LABEL.findall(text)), set(ANY_REPORT_PATH.findall(text))
 
 
-# link strength, highest first: the footer's delivery line (always the launch's own), a label, a bare mention, the description slug
-_LINK_RANK = {"footer": 3, "label": 2, "path-mention": 1, "session+description": 0}
+# link strength, highest first: the prompt's own footer delivery line, the prompt's own Report: label, a label in an owned
+# brief (`Your brief ...` / `Brief:`), a label in a brief merely mentioned as input or a bare path mention, the description slug.
+_LINK_RANK = {"footer": 4, "label": 3, "brief-label": 2, "brief-mention": 1, "path-mention": 1, "session+description": 0}
 
 
-def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, str | None],
+def link_stub(stub: Stub, transcripts: list[Transcript], prompts: dict[Path, Any],
               reports_dir: Path | None = None) -> list[tuple[Transcript, str]]:
     """Every transcript the stub links to, as (transcript, how). Empty = unlinked. Only the strongest kind of link present is
-    kept (PR 938 LOW-2, round 2): a reviewer whose list line `Report: <the writer's report>` is context must not hide the dead
-    writer when it finishes. A relaunch gets the same footer path, so every footer-linked transcript still counts."""
+    kept (PR 938 LOW-2, round 2; PR 948 LOW-3): a reviewer whose list line `Report: <the writer's report>` or mention of the
+    writer's `*-brief.md` is context must not hide the dead writer when it finishes. A relaunch gets the same footer path, so
+    every footer-linked transcript still counts."""
     found = []
     for t in transcripts:
         if t.mtime < stub.mtime - LINK_MTIME_SLACK_S:
             continue
         if t.path not in prompts:
             raw = prompt_text(t)
-            prompts[t.path] = None if raw is None else with_brief_text(raw, reports_dir)
-        text = prompts[t.path]
-        if text is None:
+            prompts[t.path] = None if raw is None else (raw, *brief_texts(raw, reports_dir))
+        entry = prompts[t.path]
+        if entry is None:
             continue
-        footer, labels, named = own_reports(text)
+        if isinstance(entry, tuple):
+            raw, own_brief, other_brief = entry
+        else:
+            raw, own_brief, other_brief = entry, "", ""
+        footer, labels, named = own_reports(raw)
+        ob_footer, ob_labels, ob_named = own_reports(own_brief) if own_brief else (set(), set(), set())
+        mb_footer, mb_labels, mb_named = own_reports(other_brief) if other_brief else (set(), set(), set())
+        all_labels = footer | labels | ob_footer | ob_labels | mb_footer | mb_labels
+        all_named = named | ob_named | mb_named
         if stub.path in footer:
             found.append((t, "footer"))
         elif stub.path in labels:
             found.append((t, "label"))
-        elif not (footer | labels) and named == {stub.path}:
+        elif stub.path in (ob_footer | ob_labels):
+            found.append((t, "brief-label"))
+        elif stub.path in (mb_footer | mb_labels):
+            found.append((t, "brief-mention"))
+        elif not all_labels and all_named == {stub.path}:
             found.append((t, "path-mention"))          # a prompt whose only report path is this one, with no label
-        elif not named and t.session == stub.session:
+        elif not all_named and t.session == stub.session:
             desc = description_of(t)
             if desc is not None and slug(desc) + "-report.md" == stub.name:
                 found.append((t, "session+description"))
     if found:
-        # An agent that merely read the stub's path (a footerless prompt "read X-report.md") must not mask the writer's death
-        # when it finishes: weaker links are dropped once a stronger one exists (PR 938 LOW-2, both rounds).
+        # An agent that merely read the stub's path or mentioned the writer's brief must not mask the writer's death
+        # when it finishes: weaker links are dropped once a stronger one exists (PR 938 LOW-2, PR 948 LOW-3).
         best = max(_LINK_RANK[how] for _, how in found)
-        found = [(t, "path" if how in ("footer", "label") else how) for t, how in found if _LINK_RANK[how] == best]
+        found = [(t, "path" if how in ("footer", "label", "brief-label", "brief-mention") else how)
+                 for t, how in found if _LINK_RANK[how] == best]
     return found
 
 
@@ -544,10 +578,12 @@ def _scrubbed_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in SENDER_OVERRIDE_ENV}
 
 
-def handed_off_to(cfg: Config, parent: str, warnings: list[str]) -> str | None:
+def handed_off_to(cfg: Config, parent: str, warnings: list[str], run_state: dict | None = None) -> str | None:
     """The agent the send guard would redirect a send to `parent` to (a completed or acknowledged self-handoff), decided here before
     anything is sent: the shim redirects without checking the successor is idle, which would interrupt the new lead's turn and name
-    the wrong recipient in the log (PR 938 round 2, LOW-1). A refusal also returns the parent itself: nothing is sent."""
+    the wrong recipient in the log (PR 938 round 2, LOW-1). A refusal also returns the parent itself: nothing is sent. When the
+    guard reports that Paseo could not inspect `parent` (timeout or unreachable daemon), sets `run_state["down"] = True` so no
+    further probes run this pass (PR 948 LOW-2)."""
     if cfg.paseo is None:
         return None
     try:
@@ -555,6 +591,11 @@ def handed_off_to(cfg: Config, parent: str, warnings: list[str]) -> str | None:
         d = guard_mod.guard(parent, paseo=str(cfg.paseo), env=_scrubbed_env())
     except Exception as exc:  # noqa: BLE001 - the shim stays as the backstop
         warnings.append(f"send guard precheck failed for {parent}: {exc}")
+        return None
+    if d.action == guard_mod.PASS and "could not inspect" in (d.reason or ""):
+        if run_state is not None:
+            run_state["down"] = True
+        warnings.append(f"send guard could not inspect {parent}: {d.reason}")
         return None
     if d.action == guard_mod.REDIRECT:
         return d.target
@@ -640,7 +681,13 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                 if cfg.paseo_guard is None or cfg.dry_run or not may_inspect():
                     return None
                 run_state["inspects"] += 1
-                decisions[parent] = (cfg.redirect_probe or handed_off_to)(cfg, parent, events)
+                if cfg.redirect_probe is not None:
+                    res = cfg.redirect_probe(cfg, parent, events)
+                else:
+                    res = handed_off_to(cfg, parent, events, run_state)
+                if run_state["down"]:
+                    return None
+                decisions[parent] = res
             return decisions[parent]
 
         def check_idle(parent: str) -> bool:
@@ -676,18 +723,33 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
             if s.parent_paseo_agent_id and s.parent_live and _due(entry, "paseo_send", cfg):
                 by_parent.setdefault(s.parent_paseo_agent_id, []).append((s, entry))
         sends = 0
-        for parent, group in by_parent.items():
+        parents = sorted(by_parent)
+        cursor = data.get("send_cursor")
+        if isinstance(cursor, str) and parents:
+            start = next((i for i, p in enumerate(parents) if p >= cursor), 0)
+            ordered_parents = parents[start:] + parents[:start]
+        else:
+            ordered_parents = parents
+        next_cursor: str | None = None
+        for parent in ordered_parents:
+            group = by_parent[parent]
             items = [(s.agent_id, s.report) for s, _ in group]
             if cfg.dry_run:
                 events.append(f"dry-run: would paseo send {parent} if idle ({len(items)} sub-agent(s))")
             elif sends >= cfg.max_pings:
+                if next_cursor is None:
+                    next_cursor = parent
                 events.append(f"send cap ({cfg.max_pings} per run): parent {parent} waits for the next run")
             elif not may_inspect():
+                if next_cursor is None:
+                    next_cursor = parent
                 events.append(f"inspect cap or paseo unreachable ({run_state['inspects']} of {cfg.max_inspects} used): "
                               f"parent {parent} waits for the next run")
             elif check_idle(parent):
                 moved = decision(parent)
                 if cfg.paseo_guard is not None and parent not in decisions:
+                    if next_cursor is None:
+                        next_cursor = parent
                     events.append(f"inspect cap reached before the send guard could be asked: parent {parent} waits for the next run")
                     continue
                 if moved:
@@ -707,6 +769,11 @@ def notify(cfg: Config, stalls: list[Stall]) -> list[str]:
                     events.append(f"paseo send rc={proc.returncode} to {parent}: {(proc.stderr or '').strip()[:200]}")
             else:
                 events.append(f"parent {parent} is not an idle live agent: not messaged (retried next run)")
+        if not cfg.dry_run:
+            if next_cursor is not None:
+                data["send_cursor"] = next_cursor
+            else:
+                data.pop("send_cursor", None)
         if not cfg.dry_run:
             for s in stalls:
                 entry = seen.get(stall_key(s))

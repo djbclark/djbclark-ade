@@ -693,6 +693,25 @@ def test_a_trailer_line_copied_from_a_picked_body_does_not_suppress_another_entr
     assert (wt / "f1.txt").exists()
 
 
+def test_final_paragraph_with_two_cherry_pick_trailers_counts_only_the_last(world, tmp_path, capsys):
+    """PR 948 review LOW-4: re-`-x` produces two trailer lines in the final paragraph; only the last line counts."""
+    wt = world["wt"]
+    sh(wt, "fetch", "-q", str(world["fork"]), "feat")
+    f1, f2 = world["f1"], world["f2"]
+    tip = sh(wt, "rev-parse", "HEAD")
+    commit_file(
+        wt, "other.txt", "re-picked\n",
+        f"re-picked commit\n\n(cherry picked from commit {f1})\n(cherry picked from commit {f2})",
+    )
+    assert fp.trailer_sources(wt, tip) == {f2}
+    path = registry(tmp_path, pick("br", branch="feat"))
+    code, report = apply_json(path, wt, capsys)
+    assert code == 0
+    assert report["applied"][0]["commits"] == [f1]
+    assert report["applied"][0]["already_present_by_trailer"] == [f2]
+    assert (wt / "f1.txt").exists() and not (wt / "f2.txt").exists()
+
+
 
 def test_apply_already_present_when_commit_is_ancestor(world, tmp_path, capsys):
     sh(world["wt"], "fetch", "-q", str(world["fork"]), "single")

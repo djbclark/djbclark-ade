@@ -177,9 +177,11 @@ frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
 # Models that MAY take a `frontier` slice without being a `frontier_models` model (operator 2026-11-21: Neon is frontier r3); the cursor-grok service's newest Grok likewise.
 # `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
 # estimate floor, and a Neon judgment/code slice is not a frontier model; the per-wave frontier cap still counts a Neon
-# `frontier` slice, because it is keyed on the kind and the pool, not on the model. A token matches the WHOLE model id (`grok-*` is
-# grok-4.7, not grok-4.7-fast or grok-3-mini); both `gemini-*-neon` (separated `--effort`, Paseo `thinkingOptionIds`) and
-# legacy `gemini-*-neon-high` are kept so either id shape matches while `gemini-*-neon-xhigh` stays excluded.
+# `frontier` slice, because it is keyed on the kind and the pool, not on the model. `_slice_token_matches` matches the WHOLE
+# model-id token (ignoring separated `--effort` flags, like `is_frontier_model`: `grok-*` is grok-4.7, not grok-4.7-fast or
+# grok-3-mini); both `gemini-*-neon` (separated `--effort`, Paseo `thinkingOptionIds`) and legacy `gemini-*-neon-high` are
+# kept so either id shape matches — legacy `gemini-*-neon-xhigh` stays excluded, while separated-effort specs match on the
+# base model id (`gemini-*-neon`).
 frontier_slice_models = ["gemini-*-neon", "gemini-*-neon-high", "grok-*"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
