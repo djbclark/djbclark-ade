@@ -156,6 +156,20 @@ order = 45
 notes = "branch feat/plugin-acp-elicitation-forms in the local worktree /Users/djbclark/src/paseo-plugin-elicitation-wt, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74, local only (not pushed); also getpaseo/paseo issue 9355 (https://github.com/getpaseo/paseo/issues/9355); build-2 check: needs a live agy acp session in build 2, hence trial_required"
 
 [[pick]]
+id = "paseo-settings-search"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 9875
+expected_head = "084d2be0cc12e38bb961684bf45fac7de34e50c6"
+intent = "search bar in Settings to filter sections and groups (open upstream, by andheiberg)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/9875"
+trial_required = true
+order = 50
+notes = "24 files (+1235/-109), app-only, related Discussion https://github.com/getpaseo/paseo/discussions/8552; pinned to head seen 2026-11-23; trial_required: merge-tree against v0.17.3 (dd7c0499a) conflicts in packages/app/src/screens/settings-screen.tsx (due to provider detail page commits d5d385afa and 3914893aa); also check mobile detail pageTitle while search is active and Windows oxfmt.cmd invocation in generate-settings-search-source.mjs before landing"
+
+[[pick]]
 id = "paseo-bump-wrangler-sharp-0-35"
 component = "paseo"
 repo = "frdminc/paseo"
