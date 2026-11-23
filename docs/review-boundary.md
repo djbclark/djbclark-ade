@@ -318,12 +318,16 @@ operator comments a marker.
 is required with `--yes`. After #484, skip `approve-post` for owner-authored
 tips — the gate trusts them without a marker.
 
-**Fresh confirmation before any post (ap-01, operator ruling 2026-11-15).** `approve-post` posts an owner-authored APPROVE
+**Fresh confirmation before any post (ap-01, operator ruling 2026-11-15; pinned `always-prompt` 2026-11-23).** `approve-post` posts an owner-authored APPROVE
 comment through djbclark's own `gh` login, which the `adversary-marker` gate counts, so `--i-reviewed --yes` alone let an
-agent approve its own PR. A real (non-dry-run) run now, after the PRs and tip heads are selected and the checks above have
-passed and before the first post, asks djbclark once for Touch ID/password: `~/.local/bin/sudo-ask -k /usr/bin/printf …`
-(an Allow dialog listing the repo and every `PR N head <40-hex>` about to receive an APPROVE, then sudo's prompt), else
-`/usr/bin/sudo -k /usr/bin/true` when sudo-ask is missing; the same design as site-public's `bg approve-local`. Refusal,
+agent approve its own PR. PR merge sign-off is pinned strictly to `always-prompt` (site-public-djbclark
+`config/approval-gates.toml` gate `ade-merge-ready-approve-post`): `approve-post` never consults `approval-gate` and
+never accepts an open sudo-ask approval window. A real (non-dry-run) run, after the PRs and tip heads are selected and
+the checks above have passed and before the first post, asks djbclark once for Touch ID/password:
+`~/.local/bin/sudo-ask --no-window -k /usr/bin/printf …` (`--no-window` skips sudo-ask's approval-window bypass and
+fails closed if an older `sudo-ask` rejects the flag; the Allow dialog lists the repo and every `PR N head <40-hex>`
+about to receive an APPROVE, then sudo prompts afresh), else `/usr/bin/sudo -k /usr/bin/true` when sudo-ask is missing;
+the same design as site-public's `bg approve-local`. Refusal,
 failure, timeout (700 s), or a selection whose dialog sudo-ask would cut off at 700 characters (about nine PRs; select
 fewer with `--prs`) posts nothing and exits 3. Dry-run, `approve-paste`, classify and the other subcommands are unchanged.
 There is no flag, env var or config that skips it; tests stub the function or `subprocess.run` in their own process. The helper runs with a scrubbed environment (adversary round 1: `BASH_ENV=<file with exit 0>` made sudo-ask exit 0 before its dialog) and its path comes from the password database, not `$HOME`.
@@ -332,7 +336,7 @@ There is no flag, env var or config that skips it; tests stub the function or `s
 directly; `claude/hooks/adversary_marker_gate.py` denies that for Claude sessions only, docs/code-review.md rule 14) or one that can write `~/.local/bin/sudo-ask`.
 **Manual probe (the live scrubbed-env path; no CI test can show it, every test stubs `subprocess.run`; ap-01 review B3, am-02).** The real
 Allow dialog and Touch ID under the scrubbed environment are checked once by djbclark, by hand (an agent never runs the dialog): in
-a terminal, `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" PATH=/usr/bin:/bin:/usr/sbin:/sbin ~/.local/bin/sudo-ask -k /usr/bin/true`, which
+a terminal, `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" PATH=/usr/bin:/bin:/usr/sbin:/sbin ~/.local/bin/sudo-ask --no-window -k /usr/bin/true`, which
 must show the Allow dialog and then the Touch ID sheet and exit 0 after both (a missing `TMPDIR`, `__CF*` or XPC variable would show
 here as a dialog that never appears or an error); or one real `approve-post --yes` for a PR that needs it. **It fails closed:** if
 the dialog or Touch ID does not work without the caller's environment, `approve-post` posts nothing and exits 3 every time, which

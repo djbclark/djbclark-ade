@@ -2246,7 +2246,7 @@ def test_approve_post_dialog_names_repo_and_every_pr_head(tmp_path: Path, monkey
     assert rc == 0, err
     assert len(calls) == 1
     argv = calls[0]
-    assert argv[:3] == [str(ask), "-k", "/usr/bin/printf"]
+    assert argv[:4] == [str(ask), "--no-window", "-k", "/usr/bin/printf"]
     text = argv[-1]
     assert APPROVE_REPO in text
     for n, h in TWO_PRS.items():
@@ -2386,6 +2386,58 @@ def test_sudo_ask_path_comes_from_the_account_not_home(monkeypatch) -> None:
     monkeypatch.setenv("HOME", "/nonexistent-fake-home")
     mod = _load_module()
     assert mod.SUDO_ASK == str(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "bin" / "sudo-ask")
+
+
+@pytest.mark.parametrize("with_sudo_ask", [True, False])
+def test_approve_post_always_prompts_with_k_even_when_approval_gate_is_open(
+    tmp_path: Path, monkeypatch, capsys, with_sudo_ask: bool
+) -> None:
+    """2026-11-23: ade-merge-ready-approve-post is pinned to always-prompt; an open approval-gate window must never bypass `--no-window -k`."""
+    mod = _load_module()
+    gate = tmp_path / "fakes" / "approval-gate"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate_calls = tmp_path / "approval-gate-calls"
+    gate.write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{gate_calls}"\n'
+        "printf 'ttl=3600\\nexpires_epoch=9999999999\\nexpires_utc=2099-01-01T00:00:00Z\\n'\nexit 0\n"
+    )
+    gate.chmod(0o755)
+    home_gate = tmp_path / "home" / ".local" / "bin" / "approval-gate"
+    home_gate.parent.mkdir(parents=True, exist_ok=True)
+    home_gate.symlink_to(gate)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    if with_sudo_ask:
+        ask = tmp_path / "sudo-ask"
+        ask.write_text("#!/bin/sh\n")
+        ask.chmod(0o755)
+        monkeypatch.setattr(mod, "SUDO_ASK", str(ask))
+        expected_prefix = [str(ask), "--no-window", "-k", "/usr/bin/printf"]
+    else:
+        monkeypatch.setattr(mod, "SUDO_ASK", str(tmp_path / "no-such-sudo-ask"))
+        expected_prefix = ["/usr/bin/sudo", "-k", "/usr/bin/true"]
+
+    # Refused prompt (and an older sudo-ask rejecting --no-window with exit 2) fails closed, makes 1 call, posts nothing
+    gh, log = _approve_world(tmp_path, TWO_PRS)
+    for fail_rc in (1, 2):
+        calls: list = []
+        _fake_auth_run(mod, monkeypatch, calls, rc=fail_rc)
+        rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+        assert rc == 3 and not log.exists()
+        assert len(calls) == 1 and calls[0][: len(expected_prefix)] == expected_prefix
+        assert not gate_calls.exists()
+
+    # Accepted prompt runs with --no-window -k (or sudo -k) and never consults approval-gate
+    calls = []
+    AUTH_KWARGS.clear()
+    _fake_auth_run(mod, monkeypatch, calls, rc=0)
+    rc, out, err = _approve_post_inproc(mod, capsys, monkeypatch, tmp_path, gh, TWO_PRS)
+    assert rc == 0, err
+    assert len(calls) == 1 and calls[0][: len(expected_prefix)] == expected_prefix
+    assert "ADE_APPROVAL_GATE_BIN" not in AUTH_KWARGS[0]["env"]
+    assert not gate_calls.exists()
+    assert "pr comment 334" in log.read_text()
 
 
 def test_dialog_cost_counts_non_ascii_as_octal_escapes() -> None:

@@ -31,6 +31,26 @@ policy below allows, for any agent.
 returns the documented allow decision under the same policy and window check. It prints nothing otherwise, so the normal prompt
 is shown.
 
+***4.*** **`approval-gate` CLI gates in `djbclark-ade` (2026-11-23)**:
+
+***a.*** *`load-watch ci decide DIR local` (`load-watch-ci-local`, `policy = "window-ok"`)*: for the same non-glob,
+non-`ci`-override `local` scope that a live `bgrun` ticket covers, `bin/load-watch` checks
+`approval-gate check --gate load-watch-ci-local` (binary resolved from `ADE_APPROVAL_GATE_BIN` or
+`~/.local/bin/approval-gate`, 5 s timeout, scrubbed environment, fail closed unless exit 0 with valid `ttl >= 1` and
+`expires_epoch > now` on stdout). When valid, the row is recorded as time-limited `[window <expires_epoch>] <text>`
+without a dialog and logged as `lw-local-approval-window` in `~/.local/state/bg/approvals.log` (a concurrent `ci` row
+still forces the dialog). `load-watch ci check` treats a `[window <expires_epoch>]` row as undecided as soon as
+`now >= expires_epoch` or `approval-gate check` no longer succeeds (so both natural expiry and `sudo-ask --revoke`
+invalidate it immediately), and editing its note (or an expired `[ticket ID]` row's note) cannot promote a temporary
+row to permanent. Non-eligible decisions (`pending`, `DIR/*` globs, overriding an existing `ci` row) and any fail-closed
+fallback never consult `approval-gate` (or fail closed out of it) and prompt via `sudo-ask --no-window -k` (failing
+closed if an older `sudo-ask` rejects `--no-window`, so `--gate sudo-ask` can never silently bypass them).
+
+***b.*** *`ade-merge-ready approve-post` (`ade-merge-ready-approve-post`, `policy = "always-prompt"`)*: PR merge sign-off is
+pinned strictly to `always-prompt` (`config/approval-gates.toml`) — `bin/ade-merge-ready` never consults `approval-gate`
+and never accepts an open approval window; it always prompts afresh via `sudo-ask --no-window -k` (failing closed if an
+older `sudo-ask` rejects `--no-window`) or `/usr/bin/sudo -k`.
+
 ## II. The window file
 
 `/var/db/sudo-ask/grant` (directory `root:wheel 0755`, file `root:wheel 0644`), JSON `{expires_utc, granted_utc,

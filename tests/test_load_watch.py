@@ -15,7 +15,10 @@ LW = Path(__file__).resolve().parent.parent / "bin" / "load-watch"
 
 def lw_env(tmp_path, **extra_env):
     # HOME is a scratch directory: a `local` decision asks `$HOME/.local/bin/sudo-ask` (djbclark's Touch ID dialog), never the real one
-    return dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **extra_env)
+    env = dict(os.environ, HOME=str(tmp_path / "home"), LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"))
+    env.pop("ADE_APPROVAL_GATE_BIN", None)
+    env.update(extra_env)
+    return env
 
 
 def run(tmp_path, *args, **extra_env):
@@ -184,7 +187,7 @@ def test_local_decision_approved_is_recorded_and_logged(tmp_path):
     assert r.returncode == 0, r.stderr
     assert [x[:3] for x in rows(tmp_path)] == [[os.path.realpath(repo), "local", "needs Xcode"]]
     ask = calls.read_text().splitlines()
-    assert len(ask) == 1 and ask[0].startswith("-k /usr/bin/printf")  # fresh auth (-k), not a cached sudo ticket
+    assert len(ask) == 1 and ask[0].startswith("--no-window -k /usr/bin/printf")  # fresh auth (--no-window -k), neither open window nor cached sudo ticket
     assert os.path.realpath(repo) in ask[0] and "needs Xcode" in ask[0]  # djbclark sees the directory and the reason
     (log,) = approvals_log(tmp_path)
     assert log[1:2] == ["lw-local-approved"] and log[3] == os.path.realpath(repo) and log[4] == "load-watch"
@@ -420,6 +423,7 @@ def test_approval_log_escapes_the_directory_and_uses_bgs_timestamp(tmp_path, mon
 
 def test_local_decision_helper_timeout_or_crash_is_a_refusal(tmp_path, monkeypatch):
     lw = load_module()
+    monkeypatch.delenv("ADE_APPROVAL_GATE_BIN", raising=False)
     monkeypatch.setattr(lw, "HOME", tmp_path / "home")
     monkeypatch.setattr(lw, "BGRUN_BIN", tmp_path / "no-bgrun")  # never the real bgrun (and so never a real ticket)
     slow = tmp_path / "sudo-ask"
@@ -447,6 +451,7 @@ def stub_bgrun(path, rc, out="", sleep=0):
 def ticket_module(tmp_path, monkeypatch, bgrun_rc=None, ask_rc=0, **kw):
     """load-watch with HOME, SUDO_ASK and BGRUN_BIN all in tmp_path; returns (module, bgrun calls file, sudo-ask calls file)."""
     lw = load_module()
+    monkeypatch.delenv("ADE_APPROVAL_GATE_BIN", raising=False)
     monkeypatch.setattr(lw, "HOME", tmp_path / "home")
     monkeypatch.setattr(lw, "REGISTRY", tmp_path / "ci-only.tsv")  # never the real registry
     ask_calls = stub_sudo_ask(tmp_path, ask_rc)
@@ -621,6 +626,303 @@ def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path)
     # and the other way round: covered at the worktree but not at the row's own directory
     bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(repo)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
     assert run(tmp_path, "ci", "check", str(wt)).returncode == 1
+
+
+def stub_approval_gate(path, rc, out="", sleep=0, extra_body=""):
+    """A fake `approval-gate`: records its argv next to itself, optionally runs `extra_body`, prints `out`, exits `rc`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    calls = path.parent / (path.name + "-calls")
+    body = f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{calls}"\n'
+    if extra_body:
+        body += extra_body.rstrip("\n") + "\n"
+    if sleep:
+        body += f"sleep {sleep}\n"
+    if out:
+        body += "cat <<'GATE_OUT_EOF'\n" + out.rstrip("\n") + "\nGATE_OUT_EOF\n"
+    body += f"exit {rc}\n"
+    path.write_text(body)
+    path.chmod(0o755)
+    return calls
+
+
+def _gate_ok_out(ttl=1800, expires_epoch=None):
+    exp = int(time.time()) + ttl if expires_epoch is None else expires_epoch
+    return f"ttl={ttl}\nexpires_epoch={exp}\nexpires_utc=2099-01-01T00:00:00Z", exp
+
+
+def test_approval_gate_covers_local_decision_without_sudo_ask(tmp_path, monkeypatch, capsys):
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    gate = tmp_path / "fakes" / "approval-gate"
+    out, exp = _gate_ok_out(1800)
+    gate_calls = stub_approval_gate(gate, 0, out=out)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    assert lw.approve_local_decision("/some/repo", "needs macOS") == f"window:{exp}"
+    assert gate_calls.read_text().splitlines() == ["check --gate load-watch-ci-local"]
+    assert not ask_calls.exists()
+    err = capsys.readouterr().err
+    assert "approval-window" in err and "load-watch-ci-local" in err and str(exp) in err and "no dialog" in err
+    log_rows = approvals_log(tmp_path)
+    assert [row[1] for row in log_rows] == ["lw-local-approval-window"]
+    assert log_rows[0][-1] == "gate=load-watch-ci-local"
+
+    # End-to-end subprocess `ci decide DIR local` via ADE_APPROVAL_GATE_BIN (no PATH reordering)
+    repo = _repo(tmp_path)
+    ask_calls.unlink(missing_ok=True)
+    gate_calls.unlink(missing_ok=True)
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "needs macOS", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r.returncode == 0, r.stderr
+    assert not ask_calls.exists()
+    assert gate_calls.read_text().splitlines() == ["check --gate load-watch-ci-local"]
+    assert rows(tmp_path)[0][:3] == [os.path.realpath(repo), "local", f"[window {exp}] needs macOS"]
+    assert "approval-window" in r.stderr
+    chk = run(tmp_path, "ci", "check", str(repo), ADE_APPROVAL_GATE_BIN=str(gate))
+    assert chk.returncode == 0 and chk.stdout.startswith(f"local\t[window {exp}] needs macOS\t")
+
+
+def test_approval_gate_default_home_symlink_resolution(tmp_path, monkeypatch):
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    target = tmp_path / "real" / "approval-gate-impl"
+    out, exp = _gate_ok_out(600)
+    gate_calls = stub_approval_gate(target, 0, out=out)
+    link = tmp_path / "home" / ".local" / "bin" / "approval-gate"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    assert lw.approval_gate_covers("load-watch-ci-local") == exp
+    assert lw.approve_local_decision("/some/repo", "why") == f"window:{exp}"
+    assert not ask_calls.exists()
+    assert gate_calls.read_text().splitlines() == ["check --gate load-watch-ci-local", "check --gate load-watch-ci-local"]
+
+
+def test_approval_gate_env_is_scrubbed_preserving_home(tmp_path, monkeypatch):
+    lw, _, _ = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    seen = tmp_path / "seen-env"
+    gate = tmp_path / "fakes" / "approval-gate"
+    out, exp = _gate_ok_out(600)
+    stub_approval_gate(gate, 0, out=out, extra_body=f'printf "HOME=%s\\nBASH_ENV=%s\\nTMPDIR=%s\\n" "$HOME" "${{BASH_ENV:-}}" "${{TMPDIR:-}}" > "{seen}"')
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    monkeypatch.setenv("BASH_ENV", "/tmp/evil-bash-env")
+    monkeypatch.setenv("TMPDIR", "/tmp/evil-tmpdir")
+    assert lw.approval_gate_covers("load-watch-ci-local") == exp
+    got = dict(line.split("=", 1) for line in seen.read_text().splitlines())
+    assert got == {"HOME": str(tmp_path / "home"), "BASH_ENV": "", "TMPDIR": ""}
+
+
+def test_approval_gate_stdout_validation_fails_closed(tmp_path, monkeypatch):
+    """LOW-1: exit 0 without valid ttl>=1 and expires_epoch>now fails closed and prompts via sudo-ask --no-window -k."""
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    now_t = 1_800_000_000
+    monkeypatch.setattr(lw, "now", lambda: float(now_t))
+    gate = tmp_path / "fakes" / "approval-gate"
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    bad_outputs = [
+        "",  # e.g. /usr/bin/true: exit 0, empty stdout
+        "ttl=1800",  # missing expires_epoch
+        f"expires_epoch={now_t + 1800}",  # missing ttl
+        f"ttl=0\nexpires_epoch={now_t + 1800}",  # ttl < 1
+        f"ttl=-5\nexpires_epoch={now_t + 1800}",  # negative ttl
+        f"ttl=abc\nexpires_epoch={now_t + 1800}",  # non-int ttl
+        "ttl=600\nexpires_epoch=notanint",  # non-int expires_epoch
+        f"ttl=600\nexpires_epoch={now_t}",  # already expired (== now)
+        f"ttl=600\nexpires_epoch={now_t - 10}",  # already expired (< now)
+        f"ttl=600\nttl=600\nexpires_epoch={now_t + 600}",  # duplicate key
+    ]
+    for bad_out in bad_outputs:
+        stub_approval_gate(gate, 0, out=bad_out)
+        ask_calls.unlink(missing_ok=True)
+        assert lw.approval_gate_covers("load-watch-ci-local") is None, repr(bad_out)
+        assert lw.approve_local_decision("/some/repo", "why") is False, repr(bad_out)
+        asked = ask_calls.read_text().splitlines()
+        assert len(asked) == 1 and asked[0].startswith("--no-window -k /usr/bin/printf "), repr(bad_out)
+
+    # Valid ttl>=1 and expires_epoch>now succeeds
+    stub_approval_gate(gate, 0, out=f"ttl=600\nexpires_epoch={now_t + 600}\nexpires_utc=2027-01-01T00:00:00Z")
+    assert lw.approval_gate_covers("load-watch-ci-local") == now_t + 600
+
+
+def test_approval_gate_fail_closed_falls_through_to_sudo_ask(tmp_path, monkeypatch):
+    # Non-zero exit codes (1, 2, 127) fail closed and prompt via sudo-ask --no-window -k
+    for rc in (1, 2, 127):
+        lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=0)
+        gate = tmp_path / f"gate-rc-{rc}"
+        out, _ = _gate_ok_out(600)
+        stub_approval_gate(gate, rc, out=out)  # valid-looking stdout with non-zero exit must still fail closed
+        monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+        assert lw.approve_local_decision("/some/repo", "why") is True
+        asked = ask_calls.read_text().splitlines()
+        assert len(asked) == 1 and asked[0].startswith("--no-window -k /usr/bin/printf ")
+        ask_calls.unlink()
+        # Denied or older sudo-ask rejecting --no-window (rc=2): fails closed with 1 call, never retries without --no-window
+        for ask_rc in (1, 2):
+            stub_sudo_ask(tmp_path, ask_rc)
+            assert lw.approve_local_decision("/some/repo", "why") is False
+            asked = ask_calls.read_text().splitlines()
+            assert len(asked) == 1 and asked[0].startswith("--no-window -k /usr/bin/printf ")
+            ask_calls.unlink()
+
+    # Missing binary fails closed
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=0)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(tmp_path / "no-such-approval-gate"))
+    assert lw.approve_local_decision("/some/repo", "why") is True
+    assert ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+    ask_calls.unlink()
+
+    # Non-absolute env override is rejected (no PATH or cwd lookup)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", "approval-gate")
+    assert lw.approval_gate_covers("load-watch-ci-local") is None
+    assert lw.approve_local_decision("/some/repo", "why") is True
+    assert ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+    ask_calls.unlink()
+
+    # Non-executable file and directory fail closed
+    nonexec = tmp_path / "nonexec-gate"
+    nonexec.write_text("#!/bin/sh\nexit 0\n")
+    nonexec.chmod(0o644)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(nonexec))
+    assert lw.approval_gate_covers("load-watch-ci-local") is None
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(tmp_path))
+    assert lw.approval_gate_covers("load-watch-ci-local") is None
+
+    # Exec format error (OSError) fails closed
+    bad = tmp_path / "bad-gate"
+    bad.write_text("not an executable script\n")
+    bad.chmod(0o755)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(bad))
+    assert lw.approve_local_decision("/some/repo", "why") is True
+    assert ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+    ask_calls.unlink()
+
+    # Timeout fails closed
+    slow = tmp_path / "slow-gate"
+    out, _ = _gate_ok_out(600)
+    stub_approval_gate(slow, 0, out=out, sleep=30)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(slow))
+    monkeypatch.setattr(lw, "APPROVAL_GATE_TIMEOUT_S", 0.5)
+    assert lw.approve_local_decision("/some/repo", "why") is True
+    assert ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+
+
+def test_window_row_expires_revokes_and_cannot_promote_to_permanent(tmp_path, monkeypatch):
+    """HIGH-2: [window <expires_epoch>] rows expire on now>=expires_epoch OR revocation, and note edits never promote them (nor expired tickets) to permanent."""
+    repo = _repo(tmp_path)
+    top = os.path.realpath(repo)
+    ask_calls = stub_sudo_ask(tmp_path, 1)  # dialog denied
+    gate = tmp_path / "fakes" / "approval-gate"
+    out1, exp1 = _gate_ok_out(1800)
+    stub_approval_gate(gate, 0, out=out1)
+
+    # Record under open window -> tagged [window <exp1>] and honoured by ci check
+    r = run(tmp_path, "ci", "decide", str(repo), "local", "offline tests", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r.returncode == 0, r.stderr
+    assert rows(tmp_path)[0][:3] == [top, "local", f"[window {exp1}] offline tests"]
+    assert not ask_calls.exists()
+    assert run(tmp_path, "ci", "check", str(repo), ADE_APPROVAL_GATE_BIN=str(gate)).returncode == 0
+
+    # Revocation: approval-gate exits 1 -> ci check immediately treats row as undecided even though now < exp1
+    stub_approval_gate(gate, 1)
+    revoked = run(tmp_path, "ci", "check", str(repo), ADE_APPROVAL_GATE_BIN=str(gate))
+    assert revoked.returncode == 1 and revoked.stdout == "" and "expired or revoked" in revoked.stderr
+
+    # Note-edit with window closed cannot promote [window ...] row to permanent (forces sudo-ask --no-window -k, which denies)
+    ask_calls.unlink(missing_ok=True)
+    edit_closed = run(tmp_path, "ci", "decide", str(repo), "local", "edited note", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert edit_closed.returncode == 1
+    assert ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+    assert rows(tmp_path)[0][2] == f"[window {exp1}] offline tests"
+
+    # Note-edit with a new open window stays [window <exp2>] (never promoted to permanent)
+    out2, exp2 = _gate_ok_out(3600)
+    stub_approval_gate(gate, 0, out=out2)
+    ask_calls.unlink(missing_ok=True)
+    edit_open = run(tmp_path, "ci", "decide", str(repo), "local", "edited note", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert edit_open.returncode == 0 and not ask_calls.exists()
+    assert rows(tmp_path)[0][2] == f"[window {exp2}] edited note"
+
+    # Natural expiry: a past [window <past>] row is undecided even if a brand-new approval window is open!
+    (tmp_path / "ci-only.tsv").write_text(f"{top}\tlocal\t[window 1000] old window row\t2026-11-23\n")
+    expired = run(tmp_path, "ci", "check", str(repo), ADE_APPROVAL_GATE_BIN=str(gate))
+    assert expired.returncode == 1 and expired.stdout == "" and "expired or revoked" in expired.stderr
+
+    # Deterministic boundary check: now() == win_exp is already expired (in-process cmd_ci check)
+    lw, _, _ = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    monkeypatch.setattr(lw, "REGISTRY", tmp_path / "ci-only.tsv")
+    (tmp_path / "ci-only.tsv").write_text(f"{top}\tlocal\t[window 2000] boundary\t2026-11-23\n")
+    stub_approval_gate(gate, 0, out="ttl=600\nexpires_epoch=2600\nexpires_utc=2027-01-01T00:00:00Z")
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    ns = type("A", (), {"op": "check", "dir": str(repo)})()
+    monkeypatch.setattr(lw, "now", lambda: 1999.0)
+    assert lw.cmd_ci(ns) == 0
+    monkeypatch.setattr(lw, "now", lambda: 2000.0)
+    assert lw.cmd_ci(ns) == 1
+
+    # Expired [ticket ID] row + note edit under an open approval window becomes [window <exp2>], NEVER permanent!
+    bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    stub_bgrun(bgrun, 1)  # ticket expired
+    (tmp_path / "ci-only.tsv").write_text(f"{top}\tlocal\t[ticket 0badc0de] old ticket note\t2026-11-23\n")
+    stub_approval_gate(gate, 0, out=out2)
+    r_promote = run(tmp_path, "ci", "decide", str(repo), "local", "new note", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r_promote.returncode == 0
+    assert rows(tmp_path)[0][2] == f"[window {exp2}] new note"
+    # And revoking that window immediately invalidates the row
+    stub_approval_gate(gate, 1)
+    assert run(tmp_path, "ci", "check", str(repo), ADE_APPROVAL_GATE_BIN=str(gate)).returncode == 1
+
+
+def test_approval_gate_never_covers_non_eligible_decisions(tmp_path, monkeypatch):
+    # Direct approve_local_decision: pending and ci never consult approval-gate
+    lw, _, ask_calls = ticket_module(tmp_path, monkeypatch, bgrun_rc=1, ask_rc=1)
+    gate = tmp_path / "fakes" / "approval-gate"
+    out, _ = _gate_ok_out(1800)
+    gate_calls = stub_approval_gate(gate, 0, out=out)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    assert lw.approve_local_decision("/some/repo", "why", "pending") is False
+    assert lw.approve_local_decision("/some/repo", "why", "ci") is False
+    assert not gate_calls.exists()
+    asked = ask_calls.read_text().splitlines()
+    assert len(asked) == 2 and all(line.startswith("--no-window -k /usr/bin/printf ") for line in asked)
+
+    # Subprocess ci decide: pending, DIR/* glob, and overriding an existing ci row all prompt sudo-ask --no-window -k
+    repo = _repo(tmp_path)
+    ask_calls = stub_sudo_ask(tmp_path, 1)
+    ask_calls.unlink(missing_ok=True)
+    r_pending = run(tmp_path, "ci", "decide", str(repo), "pending", "note", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r_pending.returncode == 1 and ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ") and not gate_calls.exists()
+
+    ask_calls.unlink(missing_ok=True)
+    r_glob = run(tmp_path, "ci", "decide", str(tmp_path) + "/*", "local", "everywhere", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r_glob.returncode == 1 and ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ") and not gate_calls.exists()
+    assert all(r[0] != str(tmp_path) + "/*" for r in rows(tmp_path))
+
+    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    ask_calls.unlink(missing_ok=True)
+    r_override = run(tmp_path, "ci", "decide", str(repo), "local", "flip", ADE_APPROVAL_GATE_BIN=str(gate))
+    assert r_override.returncode == 1 and ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ") and not gate_calls.exists()
+    assert rows(tmp_path)[0][1] == "ci"
+
+    # TOCTOU race: a ci decision lands while approval-gate is running -> dialog (--no-window -k) must still decide
+    (tmp_path / "ci-only.tsv").unlink()
+    top = os.path.realpath(repo)
+    reg = tmp_path / "ci-only.tsv"
+    race_gate = tmp_path / "fakes" / "race-gate"
+    stub_approval_gate(
+        race_gate,
+        0,
+        out=out,
+        extra_body=f"printf '%s\\t%s\\t%s\\t%s\\n' '{top}' ci scripts/ci-run 2026-11-23 > '{reg}'",
+    )
+    ask_calls.unlink(missing_ok=True)
+    r_race = run(tmp_path, "ci", "decide", str(repo), "local", "race", ADE_APPROVAL_GATE_BIN=str(race_gate))
+    assert r_race.returncode == 1 and ask_calls.read_text().splitlines()[0].startswith("--no-window -k /usr/bin/printf ")
+    assert rows(tmp_path)[0][1] == "ci"
+
+
+def test_live_ticket_takes_precedence_over_approval_gate(tmp_path, monkeypatch):
+    lw, bg_calls, ask_calls = ticket_module(tmp_path, monkeypatch, 0, out="7f3a9c01 until 2026-11-23 18:00 EST")
+    gate = tmp_path / "fakes" / "approval-gate"
+    out, _ = _gate_ok_out(1800)
+    gate_calls = stub_approval_gate(gate, 0, out=out)
+    monkeypatch.setenv("ADE_APPROVAL_GATE_BIN", str(gate))
+    assert lw.approve_local_decision("/some/repo", "why") == "7f3a9c01"
+    assert bg_calls.exists() and not gate_calls.exists() and not ask_calls.exists()
 
 
 def test_ci_only_add_still_records_ci_without_a_dialog(tmp_path):

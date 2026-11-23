@@ -31,8 +31,9 @@ so a body append would report success and leave the check red). `--via body` / `
 head — each marker names the tip `headRefOid` just collected.
 **Fresh operator confirmation (ap-01, 2026-11-15).** A real `approve-post` (`--yes`) posts nothing until djbclark
 authenticates afresh: after the PRs and tip heads are selected and every check above has passed (operator login,
-`--i-reviewed`, `--yes`, `--expect-head`), and before the first post, it runs `~/.local/bin/sudo-ask -k /usr/bin/printf …`
-(an Allow dialog naming the repo and every `PR N head <40-hex>` about to receive an APPROVE, then sudo's Touch ID/password),
+`--i-reviewed`, `--yes`, `--expect-head`), and before the first post, it runs `~/.local/bin/sudo-ask --no-window -k /usr/bin/printf …`
+(an Allow dialog naming the repo and every `PR N head <40-hex>` about to receive an APPROVE, then sudo's Touch ID/password;
+`--no-window` (2026-11-23) refuses silent approval-window bypass and fails closed if an older `sudo-ask` rejects it),
 else `/usr/bin/sudo -k /usr/bin/true` when sudo-ask is absent (the design of site-public's `bg approve-local`). A refusal,
 a failure, a timeout, or a selection too long for one dialog posts nothing and exits 3. Dry-run, `approve-paste`, classify
 and the other subcommands never ask. There is deliberately **no flag, env var or config that skips it** (tests stub
@@ -1067,9 +1068,9 @@ def require_expect_heads(
 
 
 # Fresh operator authentication before `approve-post` posts anything (ap-01, 2026-11-15). Same design as site-public's
-# `bg approve-local`: djbclark's Touch ID helper `sudo-ask -k` (an Allow dialog that shows the text, then sudo's Touch
-# ID/password, ignoring any cached sudo ticket), else `sudo -k /usr/bin/true`. There is deliberately no flag, env var or
-# config that skips it; tests stub `confirm_approve_post` or `subprocess.run` inside their own process.
+# `bg approve-local`: djbclark's Touch ID helper `sudo-ask --no-window -k` (an Allow dialog that shows the text, then
+# sudo's Touch ID/password, ignoring both any open approval window and any cached sudo ticket), else `sudo -k /usr/bin/true`.
+# There is deliberately no flag, env var or config that skips it; tests stub `confirm_approve_post` or `subprocess.run` inside their own process.
 def _account_home() -> str:
     """The account's home directory from the password database, never `$HOME` (an agent can repoint that)."""
     import pwd
@@ -1135,10 +1136,14 @@ def confirm_approve_post(repo: str, rows: list[dict]) -> None:
             f"approve-post: {len(rows)} PRs do not fit in one confirmation dialog (it would be cut off); "
             "select fewer with --prs; nothing was posted"
         )
+    # 2026-11-23: PR merge sign-off is pinned to `always-prompt` (site-public-djbclark `config/approval-gates.toml`
+    # gate `ade-merge-ready-approve-post`, `policy = "always-prompt"`): never consult `approval-gate` or accept an
+    # open approval window; always prompt afresh via `sudo-ask --no-window -k` (failing closed if an older `sudo-ask`
+    # rejects `--no-window`) or `sudo -k`.
     print(f"ade-merge-ready: asking djbclark to confirm: {text}", file=sys.stderr)
     if os.path.isfile(SUDO_ASK) and os.access(SUDO_ASK, os.X_OK):
-        # The Allow dialog shows `text` (mouse click only); sudo then asks for Touch ID or the password.
-        argv = [SUDO_ASK, "-k", PRINTF, "%s\\n", text]
+        # `--no-window` skips sudo-ask's window bypass; the Allow dialog shows `text` (mouse click only), then sudo asks for Touch ID/password.
+        argv = [SUDO_ASK, "--no-window", "-k", PRINTF, "%s\\n", text]
     else:
         # -k with a command: ask afresh, run /usr/bin/true, leave the machine's sudo ticket as it was.
         argv = [SUDO, "-k", TRUE]
