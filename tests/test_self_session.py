@@ -2962,6 +2962,9 @@ def test_a_revived_retired_name_is_never_inherited_as_the_next_title(setup):
     assert record['identity']['title'] == 'Lead (self-handoff successor)' and record['identity']['title_source'] == 'derived'
 
 
+WORKER_RUN = str(Path(ss.__file__).with_name('ade-worker-run').resolve())
+
+
 @pytest.mark.parametrize('window, state', [('MAIN p (w)', 'rename-advised'), ('p chat', 'rename-advised'),
                                            ('LEAD p (w)', 'ok'), ('LEAD fork-release-alerts (CVE watch)', 'ok'),
                                            ('LEAD p (w) stray', 'rename-advised'), ('xLEAD p (w)', 'rename-advised')])
@@ -2974,7 +2977,7 @@ def test_finish_advises_the_exact_rename_lead_command_when_the_window_is_not_a_l
     if state == 'ok':
         assert 'command' not in info
     else:
-        assert info['command'] == f'ade-worker-run rename-lead --lead {SUCC}'
+        assert info['command'] == f'{WORKER_RUN} rename-lead --lead {SUCC} --window-middle fork-release-alerts'
     assert json.loads(path.read_text())['lead_window'] == info
     assert not [a for a, _ in native.calls if a[4:6] == ['workspace', 'rename']]  # observe and advise only
 
@@ -3024,7 +3027,8 @@ def test_the_window_advice_follows_a_new_local_successor_to_its_own_workspace(se
     info = settle(service, native, record, path)['lead_window']
     assert info['state'] == state and info['name'] == window  # WS2 (the successor's), not WS (the predecessor's, gone)
     if state == 'rename-advised':
-        assert info['command'] == f'ade-worker-run rename-lead --lead {SUCC}' and 'reason' not in info
+        assert info['command'] == f'{WORKER_RUN} rename-lead --lead {SUCC} --window-middle fork-release-alerts'
+        assert 'reason' not in info
 
 
 @pytest.mark.parametrize('content', [None, 'not json', '[]', '{"workspaceId": "nope"}', '[' * 200000])
@@ -3036,7 +3040,7 @@ def test_an_unreadable_new_local_window_still_gets_the_rename_advice(setup, cont
         (agents / (SUCC + '.json')).write_text(content)
     info = settle(service, native, record, path)['lead_window']
     assert info == {'state': 'rename-advised', 'reason': 'successor-window-unresolved',
-                    'command': f'ade-worker-run rename-lead --lead {SUCC}'}
+                    'command': f'{WORKER_RUN} rename-lead --lead {SUCC} --window-middle fork-release-alerts'}
 
 
 DECOY = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
@@ -3055,6 +3059,217 @@ def test_the_successor_window_is_read_from_its_own_state_file_only(setup, with_o
         assert info['state'] == 'rename-advised' and info['name'] == 'MAIN q (z)'
     else:
         assert info['state'] == 'rename-advised' and info['reason'] == 'successor-window-unresolved'
+
+
+# --- 2026-11-23: rename-lead advice uses absolute path + safe --repo + --window-middle -------------------------------
+
+@pytest.mark.parametrize('frontmatter_repo, expected_repo', [
+    ('djbclark/stayturgid', 'stayturgid'),
+    ('stayturgid', 'stayturgid'),
+    ('"djbclark/stayturgid"', 'stayturgid'),
+    ("'stayturgid'", 'stayturgid'),
+    ('djbclark/stayturgid  # primary repo', 'stayturgid'),
+    ('frdminc/paseo.dev_1-test', 'paseo.dev_1-test'),
+])
+def test_lead_window_advice_extracts_single_frontmatter_repo(setup, frontmatter_repo, expected_repo):
+    import shlex
+    service, native, checkpoint = setup
+    messages = []
+    service.progress = messages.append
+    checkpoint.write_text(f'---\nrepo: {frontmatter_repo}\nbranch: master\n---\n# Handoff\n')
+    native.rows[PRED]['Name'] = 'stayturgid fleet hardening (341 fix in flight)'
+    record = service.handoff(checkpoint, quiesced=True)
+    finished = settle(service, native, record, Path(record['record']))
+    cmd = finished['lead_window']['command']
+    assert shlex.split(cmd) == [
+        WORKER_RUN, 'rename-lead', '--lead', SUCC,
+        '--repo', expected_repo,
+        '--window-middle', 'stayturgid fleet hardening (341 fix in flight)',
+    ]
+    assert "'stayturgid fleet hardening (341 fix in flight)'" in cmd
+    advice_lines = [m for m in messages if 'run as the successor:' in m]
+    assert len(advice_lines) == 1
+    assert WORKER_RUN in advice_lines[0]
+    assert '[--window-middle "WORK"]' not in advice_lines[0]
+    assert '[--repo REPO]' not in advice_lines[0]
+
+
+@pytest.mark.parametrize('frontmatter', [
+    '---\nrepo: djbclark/djbclark-ade (lead), djbclark/site-djbclark (ops)\n---\nbody\n',
+    '---\nrepo: djbclark/a, djbclark/b\n---\nbody\n',
+    '---\nrepo: stayturgid; rm -rf /\n---\nbody\n',
+    '---\nrepo: $(whoami)/stayturgid\n---\nbody\n',
+    '---\nrepo: stayturgid#evil\n---\nbody\n',
+    '---\nrepo: -bad-leading-hyphen\n---\nbody\n',
+    '---\nrepo: /Users/djbclark/src/stayturgid\n---\nbody\n',
+    '---\nrepo: null\n---\nbody\n',
+    '---\nrepo: ""\n---\nbody\n',
+    '---\nrepo: "a" "b"\n---\nbody\n',
+    '---\nrepo: a\nrepo: b\n---\nbody\n',
+    '---\nrepo: ' + 'r' * 95 + '\n---\nbody\n',
+    '---\nrepo: stayturgid\n  and other-repo\n---\nbody\n',
+    '---\nbranch: master\n---\nrepo: stayturgid\n',
+    'repo: stayturgid\nno frontmatter\n',
+    '---\nrepo: stayturgid\nunclosed frontmatter\n',
+])
+def test_lead_window_advice_omits_repo_on_multi_or_malformed_frontmatter(setup, frontmatter):
+    import shlex
+    service, native, checkpoint = setup
+    messages = []
+    service.progress = messages.append
+    checkpoint.write_text(frontmatter)
+    native.rows[PRED]['Name'] = 'stayturgid fleet hardening'
+    record = service.handoff(checkpoint, quiesced=True)
+    finished = settle(service, native, record, Path(record['record']))
+    cmd = finished['lead_window']['command']
+    argv = shlex.split(cmd)
+    assert argv == [WORKER_RUN, 'rename-lead', '--lead', SUCC, '--window-middle', 'stayturgid fleet hardening']
+    advice_lines = [m for m in messages if 'run as the successor:' in m]
+    assert len(advice_lines) == 1
+    assert '[--repo REPO]' in advice_lines[0]
+    assert '[--window-middle "WORK"]' not in advice_lines[0]
+
+
+def test_lead_window_advice_survives_missing_or_symlinked_checkpoint(setup, tmp_path):
+    import shlex
+    service, native, checkpoint = setup
+    checkpoint.write_text('---\nrepo: stayturgid\n---\nbody\n')
+    native.rows[PRED]['Name'] = 'fleet work'
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    finished = settle(service, native, record, path)
+    assert '--repo' in shlex.split(finished['lead_window']['command'])
+
+    # Missing preserved checkpoint still advises safely without failing finish.
+    preserved = Path(record['checkpoint'])
+    preserved.unlink()
+    service.advise_lead_window(finished, path)
+    assert shlex.split(finished['lead_window']['command']) == [
+        WORKER_RUN, 'rename-lead', '--lead', SUCC, '--window-middle', 'fleet work',
+    ]
+
+    # Symlinked preserved checkpoint is never followed.
+    target = tmp_path / 'elsewhere.md'
+    target.write_text('---\nrepo: stayturgid\n---\n')
+    preserved.symlink_to(target)
+    service.advise_lead_window(finished, path)
+    assert '--repo' not in shlex.split(finished['lead_window']['command'])
+
+    # Embedded NUL in checkpoint path never fails finish/advice.
+    finished['checkpoint'] = '/tmp/bad\x00path.md'
+    service.advise_lead_window(finished, path)
+    assert '--repo' not in shlex.split(finished['lead_window']['command'])
+
+
+@pytest.mark.parametrize('title, title_source, frontmatter_repo, role', [
+    ('', 'predecessor-name', 'stayturgid', None),
+    ('-', 'predecessor-name', 'stayturgid', None),
+    ('Self-handoff abc-123', 'predecessor-name', 'stayturgid', None),
+    ('RETIRED old-lead (-> ' + PRED + ')', 'predecessor-name', 'stayturgid', None),
+    ('Lead (self-handoff successor)', 'derived', 'stayturgid', None),
+    ('Lead (self-handoff successor)', 'predecessor-name', 'stayturgid', None),
+    ('Lead stayturgid', 'derived', 'stayturgid', 'stayturgid'),
+    ('Lead stayturgid', 'predecessor-name', 'stayturgid', None),
+    ('LEAD stayturgid', 'predecessor-name', 'stayturgid', None),
+    ('LEAD ops', 'predecessor-name', None, None),
+    ('stayturgid', 'predecessor-name', 'stayturgid', None),
+    ('LEAD stayturgid (existing work)', 'predecessor-name', 'stayturgid', None),
+    ('Lead ops-chain', 'predecessor-name', None, 'ops-chain'),
+])
+def test_lead_window_advice_skips_placeholder_bootstrap_retired_and_generic_titles(
+        setup, title, title_source, frontmatter_repo, role):
+    import shlex
+    service, native, checkpoint = setup
+    messages = []
+    service.progress = messages.append
+    if frontmatter_repo:
+        checkpoint.write_text(f'---\nrepo: {frontmatter_repo}\n---\nbody\n')
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    labels = {'ade.chain': PRED, 'ade.predecessor': PRED}
+    if role:
+        labels['ade.role'] = role
+    record['identity'] = {'title': title, 'title_source': title_source, 'role_source': 'requested' if role else None,
+                          'labels': labels, 'checks': {'create': 'requested'}}
+    service.advise_lead_window(record, path)
+    cmd = record['lead_window']['command']
+    argv = shlex.split(cmd)
+    expected = [WORKER_RUN, 'rename-lead', '--lead', SUCC]
+    if frontmatter_repo:
+        expected += ['--repo', frontmatter_repo]
+    assert argv == expected
+    advice_lines = [m for m in messages if 'run as the successor:' in m]
+    assert len(advice_lines) == 1
+    assert '[--window-middle "WORK"]' in advice_lines[0]
+    if frontmatter_repo:
+        assert '[--repo REPO]' not in advice_lines[0]
+    else:
+        assert '[--repo REPO]' in advice_lines[0]
+
+
+@pytest.mark.parametrize('raw_title, frontmatter_repo', [
+    ('stayturgid fleet hardening (341 fix in flight)', 'djbclark/stayturgid'),
+    ('  line1\n\tline2\x07  (parens & $var `tick`)  ', 'djbclark/stayturgid'),
+    ('-leading-hyphen work', 'stayturgid'),
+    ('x' * 180, 'djbclark/stayturgid'),
+    ('y' * 180, None),
+])
+def test_lead_window_advice_command_parses_and_passes_ade_worker_run_rename_lead(
+        setup, tmp_path, raw_title, frontmatter_repo):
+    """The emitted command argv is accepted end-to-end by `bin/ade-worker-run rename-lead` without rejection."""
+    import shlex
+    import ade_ws_names as wsn
+
+    service, native, checkpoint = setup
+    if frontmatter_repo:
+        checkpoint.write_text(f'---\nrepo: {frontmatter_repo}\n---\nbody\n')
+    record = service.handoff(checkpoint, quiesced=True)
+    path = Path(record['record'])
+    record['identity'] = {'title': raw_title, 'title_source': 'predecessor-name', 'role_source': None,
+                          'labels': {'ade.chain': PRED, 'ade.predecessor': PRED}, 'checks': {'create': 'requested'}}
+    service.advise_lead_window(record, path)
+    cmd = record['lead_window']['command']
+    argv = shlex.split(cmd)
+    assert argv[0] == WORKER_RUN and argv[1:4] == ['rename-lead', '--lead', SUCC]
+
+    # Run the real `bin/ade-worker-run` with a fake `paseo` stub and verify it renames cleanly (rc == 0).
+    paseo_home = tmp_path / 'paseo-home'
+    state_dir = tmp_path / 'worker-run-state'
+    fake_bin = tmp_path / 'fake-bin'
+    fake_bin.mkdir()
+    agent_dir = paseo_home / 'agents' / 'proj'
+    agent_dir.mkdir(parents=True)
+    (agent_dir / f'{SUCC}.json').write_text(json.dumps({'workspaceId': WS}))
+    repo_dir = tmp_path / 'ops'
+    repo_dir.mkdir()
+    fake_paseo = fake_bin / 'paseo'
+    fake_paseo.write_text(
+        '#!/usr/bin/env python3\n'
+        'import json, sys\n'
+        'args = sys.argv[1:]\n'
+        f'if args == ["workspace", "ls", "--json"]:\n'
+        f'    print(json.dumps([{{"workspaceId": {WS!r}, "name": "MAIN ops (stale)", "cwd": {str(repo_dir)!r}}}]))\n'
+        'elif args[:2] == ["workspace", "rename"]:\n'
+        '    print("{}")\n'
+        'else:\n'
+        '    sys.stderr.write("unexpected: " + repr(args) + "\\n")\n'
+        '    sys.exit(1)\n'
+    )
+    fake_paseo.chmod(0o755)
+    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ.get("PATH", "")}',
+           'PASEO_HOME': str(paseo_home), 'PASEO_AGENT_ID': SUCC,
+           'ADE_WORKER_RUN_STATE': str(state_dir)}
+    res = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
+    assert res.returncode == 0, f'ade-worker-run rejected advised command: {cmd}\nstderr={res.stderr}'
+    out = json.loads(res.stdout)
+    assert out['renamed'] is True
+    parsed = wsn.parse(out['windowName'])
+    assert parsed is not None and parsed.kind == 'LEAD'
+    assert len(out['windowName']) <= wsn.NAME_LIMIT
+    if frontmatter_repo:
+        assert parsed.repo == 'stayturgid'
+    else:
+        assert parsed.repo == 'ops'
 
 
 # --- 2026-11-23: cross-provider operator-authorized handoffs (--provider PROVIDER/MODEL) -----------------------------

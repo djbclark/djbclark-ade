@@ -377,13 +377,19 @@ The successor inherits the predecessor's name (C-id), so a chain's agents all re
    `rename-unarchived-predecessor`, `name-readback-mismatch` (failed, retried by a re-run of `finish`). A record from before st-01
    has no `identity` and is left alone. A later handoff never inherits a `RETIRED ...` name as a title (a revived retired agent
    handing off falls through to the chain record).
-2. **Advise the lead window.** `finish` reads `paseo workspace ls` and checks the successor's own window name against
+2. **Advise the lead window (updated 2026-11-23).** `finish` reads `paseo workspace ls` and checks the successor's own window name against
    `LEAD <repo> (<work>)`. The window is the record's `workspace` for an `existing` placement; for a `new-local` one (the
    predecessor's workspace had vanished, so the successor has a window of its own) it is the `workspaceId` in the successor's daemon
    state file `<home>/agents/*/<id>.json`, and when that cannot be read the advice is given anyway (`rename-advised`, `reason`
    `successor-window-unresolved`, no `name`). The result is `lead_window` in the record and in `finish`'s JSON: `state` `ok`;
-   `rename-advised` with the exact `command` (`ade-worker-run rename-lead --lead <successor id>`, also printed on stderr; add
-   `--window-middle "WORK"` to choose the work part, `--repo REPO` to correct the repo); or `unknown` (with `reason`: window not listed, listing failed). It only
+   `rename-advised` with the exact `command` (`shlex.join` starting with the resolved absolute path of `ade-worker-run` beside
+   `ade_self_session.py`, since `ade-worker-run` is not on `PATH` in a normal shell, plus `rename-lead --lead <successor id>`, also
+   printed on stderr); or `unknown` (with `reason`: window not listed, listing failed). When the preserved checkpoint's top YAML
+   frontmatter (`---` ... `---`) carries a clean single `repo:` value (`repo` or `owner/repo` matching `ade_ws_names.REPO_RE` and
+   fitting within `NAME_LIMIT`; multi-repo, malformed, missing, symlinked or unreadable files omit it without failing `finish`),
+   `command` appends `--repo <repo>`. When `identity.title` is a non-placeholder, non-derived, non-bootstrap, non-`RETIRED`, non-bare-`LEAD <repo>`
+   title, `command` appends a cleaned, `NAME_LIMIT`-bounded, shell-quoted `--window-middle <middle>`. The stderr progress hint only
+   appends optional `[--window-middle "WORK"]` and/or `[--repo REPO]` placeholders for whichever flags were not already filled in. It only
    observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs
    it itself (SKILL `handoff`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
 
