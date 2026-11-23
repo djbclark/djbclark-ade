@@ -358,19 +358,19 @@ def test_skips_non_empty_or_missing_pending_permissions(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "updated_at,expected_reason",
+    "updated_at_factory,expected_reason",
     [
-        (iso_offset(30), "recent-updated-at"),
-        (iso_offset(-120), "future-updated-at"),
-        ("2026-11-23T15:00:00", "invalid-updated-at"),  # naive timestamp
-        ("", "invalid-updated-at"),
-        (None, "invalid-updated-at"),
-        ("not-a-timestamp", "invalid-updated-at"),
+        pytest.param(lambda: iso_offset(30), "recent-updated-at", id="recent-30s"),
+        pytest.param(lambda: iso_offset(-120), "future-updated-at", id="future-120s"),
+        pytest.param(lambda: "2026-11-23T15:00:00", "invalid-updated-at", id="naive"),
+        pytest.param(lambda: "", "invalid-updated-at", id="empty"),
+        pytest.param(lambda: None, "invalid-updated-at", id="none"),
+        pytest.param(lambda: "not-a-timestamp", "invalid-updated-at", id="garbage"),
     ],
 )
-def test_skips_recent_future_naive_or_missing_updated_at(tmp_path, updated_at, expected_reason):
+def test_skips_recent_future_naive_or_missing_updated_at(tmp_path, updated_at_factory, expected_reason):
     rec = make_inspect(A_STUCK)
-    rec["UpdatedAt"] = updated_at
+    rec["UpdatedAt"] = updated_at_factory()
     state = {
         "ls": [{"id": A_STUCK, "provider": "antigravity/gemini-4-neon", "status": "running"}],
         "inspect": {A_STUCK: rec},
