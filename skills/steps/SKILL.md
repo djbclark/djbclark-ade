@@ -68,19 +68,27 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    questions, sleeping, or claiming a choice is waiting in a visible picker.
    Keep unanswered decisions pending. A preselected option or elapsed time is
    not an answer. Honor the native tool's question schema and limits.
-3a. **Antigravity under Paseo:** its `ask_question` has no working picker here.
-   getpaseo/paseo#9355 asked for one and was closed by getpaseo/paseo#10193
-   (0.17.0-beta.1, which moved Paseo to `agy acp`), but #10193 shipped without
-   native question forms (its non-goals defer them to follow-up work). The open
-   tracker is getpaseo/paseo#7470 (Discussion "Support ACP form elicitation"; the
-   server-side adapter is PR getpaseo/paseo#8236). The ACP client sends
-   `clientCapabilities: {}` without `createElicitation`, so `ask_question` returns
-   an empty `A1: ` in about 1 s. An Antigravity session hosted under Paseo skips
-   `ask_question` and goes straight to rule 4's numbered text walk until ACP
-   elicitation is wired.
+3a. **Antigravity under Paseo (updated 2026-11-23):**
+   - On **Paseo fork build 2+ (`v0.17.3` with ACP `elicitationForms`)**, native
+     `ask_question` works live (both single-select and multi-select, verified
+     2026-11-23); use it when ACP elicitation is present.
+   - On Paseo builds or hosts **lacking ACP elicitation** (such as Paseo build 1
+     without `elicitationForms`; upstream tracker getpaseo/paseo#7470 /
+     getpaseo/paseo#8236), calling `ask_question` under Antigravity can **hang
+     indefinitely in `Status=running` with `PendingPermissions=[]`** (observed
+     on `cf860294-66f9-4421-a013-a29eea3800f1` at `2026-11-23T15:41:58Z`),
+     blocking queued `paseo send` delivery and keeping quiet gates stuck —
+     contradicting the earlier assumption that it returns an empty `A1:` in
+     ~1 s. Fall back to rule 4's numbered text walk whenever ACP elicitation is
+     absent or unproven.
+   - **Recovery (`"2 then 1"` ruling, 2026-11-23):** to recover a session stuck
+     in a hung `ask_question` turn, run `bin/ade-unstick-ask` (dry-run by
+     default; `--apply` to act), which tries `paseo send --behavior steer`
+     first and only falls back to canceling the active turn
+     (`paseo agent stop`) if steer does not unstick it.
 4. **No native chooser (no `AskUserQuestion`/`clarify` tool in the
-   function list, or Antigravity under Paseo, rule 3a, whose `ask_question` returns
-   empty; and not Grok Bot, which has rule 5):** the walk falls back
+   function list, or Antigravity under a Paseo build/host where ACP elicitation
+   is absent or unproven, rule 3a; and not Grok Bot, which has rule 5):** the walk falls back
    to a numbered text walk, still one
    item per message, still recommendation first. Do NOT refuse with a one-line
    "I cannot prompt" and stop. Instead:

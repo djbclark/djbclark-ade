@@ -295,3 +295,11 @@ pages. On a host with the `model-routing` skill (effort folded into it 2026-11-0
    or gate step runs while a needed source is missing**; resume the same slice
    once the provider recovers. A page that a later rung did return is fine;
    note the rung. See [web access](references/web-access.md): exits 5 and 6 both require this pause.
+7a. **Institutional paper-access failures are bugs (operator directive 2026-11-23).**
+   If, during research, an agent cannot access a site it should have access to
+   in order to get papers (for example, MIT Libraries or scholarly publisher
+   sites via shared Hyades Firecrawl or the MITnet bridge), that **must be
+   treated as a bug** — never silently skipped or declared "unfetchable".
+   Surface the failure explicitly (URL, host/publisher, and error) and offer to
+   coordinate fixing it (for example, coordinating with the MITnet routing lead
+   to enroll the domain or repair the fetch path).
