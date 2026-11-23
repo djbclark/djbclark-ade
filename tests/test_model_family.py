@@ -13,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import model_family as mf  # noqa: E402
 import route_agent as r  # noqa: E402
 
-AGY = {"antigravity": ["gemini-4-neon-high", "gemini-4-argon-high"]}
+AGY = {
+    "antigravity": [
+        {"id": "gemini-4-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-argon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+    ]
+}
+AGY_LEGACY = {"antigravity": ["gemini-4-neon-high", "gemini-4-argon-high"]}
 CODEX = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-5.6-sol",
          "gpt-6-luna"]
 
@@ -158,12 +164,13 @@ def svc(name):
 
 class TestRouteAgentResolution:
     def test_roster_families_resolve_to_the_newest_catalog_id(self, catalog):
-        catalog({"codex": CODEX, "antigravity": ["gemini-4-neon-high", "gemini-4-argon-high"]})
+        catalog({"codex": CODEX, **AGY})
         assert r.suggest_model(svc("codex"), "frontier", {}) == "gpt-6.2-astra --effort high"
         assert r.suggest_model(svc("codex"), "judgment", {}) == "gpt-6.2-sol --effort high"
         assert r.suggest_model(svc("codex"), "code", {}) == "gpt-6.2-sol --effort medium"
         assert r.suggest_model(svc("codex-subscription"), "bulk", {}) == "gpt-6-luna --effort low"
-        assert r.suggest_model(svc("antigravity-neon"), "frontier", {}) == "gemini-4-neon-high"
+        assert r.suggest_model(svc("antigravity-neon"), "frontier", {}) == "gemini-4-neon --effort high"
+        assert r.suggest_model(svc("antigravity-argon"), "frontier", {}) == "gemini-4-argon --effort high"
 
     def test_a_release_during_a_wave_needs_no_config_edit(self, catalog):
         catalog({"codex": ["gpt-6-astra", "gpt-6.1-sol"]})
@@ -448,9 +455,11 @@ class TestCursorGrokRoute:
             assert r.is_frontier_slice_model(model), model
         for model in ("grok-4.7-fast", "grok-3-mini", "cursor/grok-4", "xgrok-4", "grok-4-mini --effort high", "grok-bot"):
             assert not r.is_frontier_slice_model(model), model
-        for model in ("gemini-4-neon-high", "gemini-4.1-neon-high --effort high", "gemini-*-neon-high"):
+        for model in ("gemini-4-neon", "gemini-4-neon --effort high", "gemini-*-neon", "gemini-*-neon --effort high",
+                      "gemini-4-neon-high", "gemini-4.1-neon-high --effort high", "gemini-*-neon-high"):
             assert r.is_frontier_slice_model(model), model
-        for model in ("gemini-4-neon-xhigh", "gemini-4-neon", "antigravity/gemini-4-neon-high"):
+        for model in ("gemini-4-neon-xhigh", "gemini-4-neon-preview", "antigravity/gemini-4-neon",
+                      "antigravity/gemini-4-neon-high"):
             assert not r.is_frontier_slice_model(model), model
 
     def test_an_underspent_cursor_pool_does_not_lift_grok_to_the_first_frontier_pick(self, catalog):
@@ -576,3 +585,123 @@ class TestCursorGrokRoute:
             assert got is not None and got.service.name == "cursor-grok", kind
             assert got.model.split()[0] == "grok-4.7"
             q["cursor-grok"] = {"remaining": 0.0, "age_s": 0, "windows": {"weekly": 0.0}}
+
+
+class TestThinkingOptionIdsCatalog:
+    """Paseo separated effort out of antigravity model ids into `thinkingOptionIds` (2026-11-23)."""
+
+    def test_parse_catalog_accepts_strings_dicts_and_mixed(self):
+        parsed = mf.parse_catalog([
+            "gpt-6-astra",
+            {"id": "gemini-4-neon", "model": "Gemini 4 Neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4-argon", "thinkingOptionIds": []},
+            {"model": "fallback-name-only", "thinkingOptionIds": ["high", "high"]},
+        ])
+        assert parsed is not None
+        ids, thinking = parsed
+        assert ids == ["gpt-6-astra", "gemini-4-neon", "gemini-4-argon", "fallback-name-only"]
+        assert thinking == {
+            "gemini-4-neon": ("low", "medium", "high", "xhigh"),
+            "fallback-name-only": ("high",),
+        }
+        assert mf.parse_catalog("not-a-list") is None
+
+    def test_new_catalog_with_separated_effort_emits_provider_and_thinking(self, catalog):
+        catalog(AGY)
+        model = r.suggest_model(svc("antigravity-neon"), "frontier", {})
+        assert model == "gemini-4-neon --effort high"
+        c = r.Choice(svc("antigravity-neon"), 50.0, 0.0, model=model, kind="frontier")
+        assert "--provider antigravity/gemini-4-neon --thinking high" in c.dispatch
+        assert not any("thinkingOptionIds" in w for w in c.dispatch_warnings)
+        assert not any("did not resolve" in w for w in c.dispatch_warnings)
+
+    def test_legacy_suffix_family_maps_via_thinking_options_not_state_fallback(self, catalog):
+        catalog(AGY)
+        spec, res = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert res is not None
+        assert (res.model, res.source, res.thinking, res.newest) == ("gemini-4-neon", "catalog", "high", "gemini-4-neon")
+        assert spec == "gemini-4-neon --effort high"
+        c = r.Choice(svc("antigravity-neon"), 50.0, 0.0, model=spec, kind="frontier")
+        assert "--provider antigravity/gemini-4-neon --thinking high" in c.dispatch
+        # works for other thinking options like -low too
+        spec_low, res_low = r.resolve_spec("antigravity", "gemini-*-argon-low")
+        assert (spec_low, res_low.model, res_low.thinking, res_low.source) == (
+            "gemini-4-argon --effort low", "gemini-4-argon", "low", "catalog"
+        )
+        # state fallback after a catalog outage preserves inferred thinking
+        catalog({})
+        spec_state, res_state = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert (spec_state, res_state.source, res_state.thinking) == ("gemini-4-neon --effort high", "state", "high")
+
+    def test_legacy_catalog_shape_still_matches_directly(self, catalog):
+        catalog(AGY_LEGACY)
+        spec, res = r.resolve_spec("antigravity", "gemini-*-neon-high")
+        assert res is not None
+        assert (spec, res.model, res.source, res.thinking) == ("gemini-4-neon-high", "gemini-4-neon-high", "catalog", None)
+        c = r.Choice(svc("antigravity-neon"), 50.0, 0.0, model=spec, kind="frontier")
+        assert "--provider antigravity/gemini-4-neon-high" in c.dispatch
+        assert "--thinking" not in c.dispatch
+
+    def test_suffix_not_in_thinking_options_does_not_falsely_strip_or_match(self):
+        ids, thinking = mf.parse_catalog([
+            {"id": "gemini-4-neon", "thinkingOptionIds": ["low", "medium", "high"]},
+            {"id": "gemini-4-argon", "thinkingOptionIds": []},
+        ])
+        assert mf.newest_with_thinking("gemini-*-neon-preview", ids, thinking) == (None, None)
+        assert mf.newest_with_thinking("gemini-*-neon-xhigh", ids, thinking) == (None, None)
+        assert mf.newest_with_thinking("gemini-*-argon-high", ids, thinking) == (None, None)
+        res = mf.resolve("gemini-*-neon-preview", ids, thinking_options=thinking)
+        assert res.source == "unresolved" and res.model == "gemini-*-neon-preview" and res.thinking is None
+
+    def test_legacy_suffix_picks_newest_entry_that_supports_that_thinking_option(self):
+        ids, thinking = mf.parse_catalog([
+            {"id": "gemini-4-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4.5-neon", "thinkingOptionIds": ["low", "medium"]},
+        ])
+        assert mf.newest_with_thinking("gemini-*-neon-high", ids, thinking) == ("gemini-4-neon", "high")
+        assert mf.newest_with_thinking("gemini-*-neon-medium", ids, thinking) == ("gemini-4.5-neon", "medium")
+
+    def test_version_ordering_ignores_preview_in_bare_id_catalog(self):
+        ids, thinking = mf.parse_catalog([
+            {"id": "gemini-4-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4.5-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4-neon-preview", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-5-preview-neon", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+            {"id": "gemini-4.5-neon-preview", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
+        ])
+        assert mf.newest("gemini-*-neon", ids) == "gemini-4.5-neon"
+        assert mf.newest_with_thinking("gemini-*-neon-high", ids, thinking) == ("gemini-4.5-neon", "high")
+
+    def test_unsupported_effort_warns_without_poisoning_cached_family_resolution(self, catalog):
+        catalog(AGY)
+        spec_bad, res_bad = r.resolve_spec("antigravity", "gemini-*-neon --effort ultra")
+        assert spec_bad == "gemini-4-neon --effort ultra"
+        assert res_bad is not None and "thinkingOptionIds" in res_bad.note and "'ultra'" in res_bad.note
+        c = r.Choice(svc("antigravity-neon"), 50.0, 0.0, model=spec_bad, kind="frontier")
+        assert any("thinkingOptionIds" in w and "'ultra'" in w for w in c.dispatch_warnings)
+        # subsequent valid effort on the same family is clean (cache was not polluted)
+        spec_ok, res_ok = r.resolve_spec("antigravity", "gemini-*-neon --effort high")
+        assert spec_ok == "gemini-4-neon --effort high"
+        assert res_ok is not None and res_ok.note == ""
+
+    def test_frontier_matching_for_separated_effort_and_legacy_ids(self, catalog):
+        assert r.is_frontier_slice_model("gemini-*-neon --effort high")
+        assert r.is_frontier_slice_model("gemini-4-neon --effort high")
+        assert r.is_frontier_slice_model("gemini-4.5-neon --effort high")
+        assert r.is_frontier_slice_model("gemini-4-neon-high")
+        assert not r.is_frontier_slice_model("gemini-4-neon-xhigh")
+        assert not r.is_frontier_slice_model("gemini-4-neon-preview")
+        assert not r.is_frontier_model("gemini-*-neon --effort high")
+        assert not r.is_frontier_model("gemini-4-neon --effort high")
+        assert r.is_frontier_model("gemini-*-argon --effort high")
+        assert r.is_frontier_model("gemini-4-argon --effort high")
+        assert r.is_frontier_model("gemini-4-argon-high")
+
+    def test_models_and_show_stay_quiet_against_new_antigravity_catalog(self, catalog, capsys):
+        catalog({"codex": CODEX, "cursor": ["grok-4.7"], **AGY})
+        assert r.main(["models"]) == 0
+        out = capsys.readouterr().out
+        assert "gemini-*-neon" in out and "gemini-4-neon" in out and "[catalog, antigravity]" in out
+        assert "gemini-*-argon" in out and "gemini-4-argon" in out
+        assert "state" not in out and "unresolved" not in out
+        assert r.model_family_lines(changed_only=True) == []

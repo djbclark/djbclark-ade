@@ -69,7 +69,7 @@ pace_penalty_judgment_factor = 0.5
 # 2026-11-21 (operator, Neon A7/H3): code 10 -> 8, so zai (22) and cursor-cloud (24) sit outside the band of the r12 best; ui-automation 6.
 quality_max_rank_gap = { code = 8, judgment = 10, ui-automation = 6 }
 # Model families (operator 2026-11-21: "the newest version of agents are always used ... astra should have automatically routed
-# to 6.2, not 6.0, as soon as 6.2 was released"). A `[[service]].models` id with `*` or `?` (`gpt-*-astra`, `gemini-*-neon-high`)
+# to 6.2, not 6.0, as soon as 6.2 was released"). A `[[service]].models` id with `*` or `?` (`gpt-*-astra`, `gemini-*-neon`)
 # names a FAMILY: `route_agent.py plan`/`route` resolve it to the newest id `paseo provider models <agent> --json` lists, by
 # version order (6.2 > 6.1 > 6, 4 > 3.8; bin/model_family.py), never lexical, with no canary or eval gate for a newer release.
 # Catalog unreadable: the last id recorded in state (and the plan says so). `route_agent.py models` (and `show`) report a family
@@ -178,8 +178,9 @@ frontier_models = ["gpt-*-astra", "fable", "gemini-*-argon"]
 # `route_agent.py adjust` accepts them under its never-downgrade rule; unlike `frontier_models` they carry no frontier
 # estimate floor, and a Neon judgment/code slice is not a frontier model; the per-wave frontier cap still counts a Neon
 # `frontier` slice, because it is keyed on the kind and the pool, not on the model. A token matches the WHOLE model id (`grok-*` is
-# grok-4.7, not grok-4.7-fast or grok-3-mini), so it is written as the id family, effort word included.
-frontier_slice_models = ["gemini-*-neon-high", "grok-*"]
+# grok-4.7, not grok-4.7-fast or grok-3-mini); both `gemini-*-neon` (separated `--effort`, Paseo `thinkingOptionIds`) and
+# legacy `gemini-*-neon-high` are kept so either id shape matches while `gemini-*-neon-xhigh` stays excluded.
+frontier_slice_models = ["gemini-*-neon", "gemini-*-neon-high", "grok-*"]
 # Optional hard cap per service. Empty on purpose (operator 2026-10-18: the in-flight quota reservation replaced
 # `codex = 1`). Since 2026-11-14 nothing enforces this table (`route_agent.py policy` only prints it) and nothing
 # reads `ACP_DISPATCH_INFLIGHT`: the reservation and the cap went with bin/acp-dispatch (docs/slim/log.md, Lost on purpose).
@@ -516,14 +517,14 @@ window = "Gemini 4 Argon weekly"
 max_parallel = 1
 access = "cli-only"
 agent = "antigravity"
-# Paseo's antigravity provider folds the effort into the model id (`paseo provider models antigravity`: gemini-4-argon-high);
-# the bare id is "Unknown Antigravity model" (2026-11-10), so the row names the full id and the deleted acp-dispatch used to map a bare one, so write the full id.
-models = { frontier = "gemini-*-argon-high", research = "gemini-*-argon-high" }
+# Paseo's antigravity provider exposes bare model ids with `thinkingOptionIds` (`paseo provider models antigravity`:
+# `gemini-4-argon` + `thinkingOptionIds: ["low", "medium", "high", "xhigh"]`), so `--effort high` maps to `--thinking high`.
+models = { frontier = "gemini-*-argon --effort high", research = "gemini-*-argon --effort high" }
 
 [[service]]
 name = "antigravity-neon"
 cli = "antigravity (Gemini 4 Neon at high: frontier r3, judgment r2, ui-automation r2, research r11, code r13)"
-# Promoted 2026-11-21 (operator, Neon A3/A4 + Q3; canary passed 2026-11-21, lead 8ec213c7): neon-high (not xhigh) is a normal pool,
+# Promoted 2026-11-21 (operator, Neon A3/A4 + Q3; canary passed 2026-11-21, lead 8ec213c7): neon at high (not xhigh) is a normal pool,
 # no longer a fallback behind codex and claude (`fallback_after` dropped) nor a last-resort research pool (`fallback_kinds` dropped;
 # research r11 competes on rank). Added 2026-11-19 at argon's ranks.
 good_at = { frontier = 3, judgment = 2, code = 13, research = 11, ui-automation = 2 }
@@ -535,7 +536,7 @@ window = "Gemini 5-hour"
 max_parallel = 1
 access = "cli-only"
 agent = "antigravity"
-models = { frontier = "gemini-*-neon-high", judgment = "gemini-*-neon-high", code = "gemini-*-neon-high", research = "gemini-*-neon-high", ui-automation = "gemini-*-neon-high" }
+models = { frontier = "gemini-*-neon --effort high", judgment = "gemini-*-neon --effort high", code = "gemini-*-neon --effort high", research = "gemini-*-neon --effort high", ui-automation = "gemini-*-neon --effort high" }
 
 [[service]]
 name = "clinepass"

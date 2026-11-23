@@ -127,7 +127,7 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -1564,6 +1564,7 @@ PASEO_LOADING_RETRIES = 2      # `provider ls` rows still `loading`: re-read thi
 PASEO_LOADING_WAIT = 3.0       # ... this many seconds apart (6 s in all), then absent
 _PASEO_USAGE_MEMO: dict[tuple[Any, ...], tuple[float, tuple[list[Any] | None, str]]] = {}
 _PROVIDER_MODELS: dict[str, list[str] | None] = {}
+_PROVIDER_THINKING: dict[str, dict[str, tuple[str, ...]]] = {}
 _PROVIDER_ROWS: list[list[dict[str, Any]]] = []       # one `provider ls` result per process (empty: not read yet)
 
 
@@ -1583,6 +1584,7 @@ def _reset_paseo_cache() -> None:
     """Forget memoised Paseo reads (tests; each process reads at most once per TTL otherwise)."""
     _PASEO_USAGE_MEMO.clear()
     _PROVIDER_MODELS.clear()
+    _PROVIDER_THINKING.clear()
     _PROVIDER_ROWS.clear()
     _PASEO_LS_MEMO.clear()
     MODEL_RESOLUTIONS.clear()
@@ -1713,31 +1715,61 @@ def _without_antigravity(ids: list[str] | None) -> list[str] | None:
 
 def provider_models(provider: str) -> list[str] | None:
     """Model ids `paseo provider models <provider> --json` lists, or None when Paseo cannot say. Cached per process.
-    The Pi provider's list is corrected by Pi's own catalog (`_pi_models`): Paseo's copy goes stale."""
+    The Pi provider's list is corrected by Pi's own catalog (`_pi_models`): Paseo's copy goes stale.
+    Also caches `thinkingOptionIds` per model id for `provider_thinking_options`."""
     if provider not in _PROVIDER_MODELS:
         data, _ = _paseo_json(["provider", "models", provider])
-        ids = None
-        if isinstance(data, list):
-            ids = [str(m.get("id") or m.get("model")) for m in data
-                   if isinstance(m, dict) and (m.get("id") or m.get("model"))]
-        _PROVIDER_MODELS[provider] = _without_antigravity(_pi_models(ids)) if provider == "pi" else ids
+        parsed = _family.parse_catalog(data)
+        ids: list[str] | None = parsed[0] if parsed is not None else None
+        thinking: dict[str, tuple[str, ...]] = parsed[1] if parsed is not None else {}
+        if provider == "pi":
+            ids = _without_antigravity(_pi_models(ids))
+            allowed = set(ids or ())
+            thinking = {m: opts for m, opts in thinking.items() if m in allowed}
+        _PROVIDER_MODELS[provider] = ids
+        _PROVIDER_THINKING[provider] = thinking
     return _PROVIDER_MODELS[provider]
+
+
+def provider_thinking_options(provider: str) -> dict[str, tuple[str, ...]]:
+    """`{model_id: (thinking_option_ids...)}` from `paseo provider models <provider> --json` (cached with `provider_models`)."""
+    provider_models(provider)
+    return dict(_PROVIDER_THINKING.get(provider) or {})
 
 
 MODEL_RESOLUTIONS: dict[tuple[str, str], _family.Resolution] = {}   # (provider, family) -> resolved this process
 
 
-def family_catalog(provider: str) -> list[str] | None:
-    """The ids a model family resolves against: `ROUTE_AGENT_MODEL_CATALOG_JSON=<path>` (a JSON object {provider: [ids]};
-    tests, wins over ROUTE_AGENT_PASEO=off) or `provider_models`. None when the catalog cannot be read."""
+def family_catalog_info(provider: str) -> tuple[list[str] | None, dict[str, tuple[str, ...]]]:
+    """`(ids, thinking_options)` a model family resolves against: `ROUTE_AGENT_MODEL_CATALOG_JSON=<path>` (a JSON object
+    mapping provider to a list of id strings and/or `{id, thinkingOptionIds}` dicts; tests, wins over ROUTE_AGENT_PASEO=off)
+    or `provider_models` + `provider_thinking_options`. `(None, {})` when the catalog cannot be read."""
     canned = os.environ.get("ROUTE_AGENT_MODEL_CATALOG_JSON")
     if canned:
         try:
-            ids = json.loads(Path(canned).read_text()).get(provider)
+            raw = json.loads(Path(canned).read_text()).get(provider)
         except (OSError, ValueError, AttributeError):
-            return None
-        return [str(i) for i in ids] if isinstance(ids, list) else None
-    return provider_models(provider)
+            return None, {}
+        parsed = _family.parse_catalog(raw)
+        return parsed if parsed is not None else (None, {})
+    ids = provider_models(provider)
+    return ids, (dict(_PROVIDER_THINKING.get(provider) or {}) if ids is not None else {})
+
+
+def family_catalog(provider: str) -> list[str] | None:
+    """The ids a model family resolves against: `ROUTE_AGENT_MODEL_CATALOG_JSON=<path>` (a JSON object {provider: [ids]};
+    tests, wins over ROUTE_AGENT_PASEO=off) or `provider_models`. None when the catalog cannot be read."""
+    return family_catalog_info(provider)[0]
+
+
+def _spec_effort(spec: str) -> str | None:
+    """Extract the effort level after `--effort` in a model spec (`<model> [--effort L]`), or None."""
+    toks = spec.split()
+    if "--effort" in toks:
+        idx = toks.index("--effort")
+        if idx + 1 < len(toks):
+            return toks[idx + 1]
+    return None
 
 
 def model_holds() -> dict[str, _family.Hold]:
@@ -1745,27 +1777,42 @@ def model_holds() -> dict[str, _family.Hold]:
     return _family.parse_holds((POLICY.get("routing") or {}).get("model_holds"))
 
 
-def resolve_family(provider: str, family: str) -> _family.Resolution:
+def resolve_family(provider: str, family: str, *, effort: str | None = None) -> _family.Resolution:
     """The newest catalog id of `family` for `provider` (operator 2026-11-21: newest version always, no eval gate), once per
     process. A readable catalog's newest id is recorded in state so a change is reported (`route_agent.py models`);
-    an unreadable one falls back to the last recorded id and says so."""
+    an unreadable one falls back to the last recorded id and says so. When `effort` is given and the resolved model
+    declares non-empty `thinkingOptionIds` that omit `effort`, the returned resolution carries a warning note."""
     key = (provider, family)
+    ids, thinking = family_catalog_info(provider)
     if key not in MODEL_RESOLUTIONS:
-        ids = family_catalog(provider)
-        res = _family.resolve(family, ids, holds=model_holds(), last=_family.last_id(provider, family))
+        last_mid, last_think = _family.last_entry(provider, family)
+        res = _family.resolve(family, ids, holds=model_holds(), last=last_mid,
+                              thinking_options=thinking, last_thinking=last_think)
         if res.newest:
-            _family.record(provider, family, res.newest)
+            _family.record(provider, family, res.newest, thinking=res.thinking)
         MODEL_RESOLUTIONS[key] = res
-    return MODEL_RESOLUTIONS[key]
+    base = MODEL_RESOLUTIONS[key]
+    if effort:
+        warn = _family.check_effort(base.model, effort, thinking)
+        if warn and warn not in base.note:
+            note = f"{base.note}; {warn}" if base.note else warn
+            return replace(base, note=note)
+    return base
 
 
 def resolve_spec(provider: str, spec: str) -> tuple[str, _family.Resolution | None]:
-    """`spec` ("<model> [--effort L]") with a family in the model slot replaced by its newest id; (spec, None) for a literal id."""
+    """`spec` ("<model> [--effort L]") with a family in the model slot replaced by its newest id; (spec, None) for a literal id.
+    When a legacy `-<effort>` family suffix is mapped onto a base id via catalog `thinkingOptionIds` and no explicit `--effort`
+    is already present, appends `--effort <thinking>` so `Choice.dispatch` emits `--thinking <thinking>`."""
     parts = spec.split(None, 1)
     if not parts or not _family.is_family(parts[0]):
         return spec, None
-    res = resolve_family(provider, parts[0])
-    return " ".join([res.model, *parts[1:]]), res
+    effort = _spec_effort(spec)
+    res = resolve_family(provider, parts[0], effort=effort)
+    tail = parts[1:]
+    if res.thinking and effort is None:
+        tail = [*tail, "--effort", res.thinking]
+    return " ".join([res.model, *tail]), res
 
 
 def paseo_usage(bypass_memo: bool = False) -> tuple[list[Any] | None, str]:
@@ -2403,9 +2450,18 @@ class Choice:
             return []                   # a cloud agent: no Paseo workspace to place it in
         pl = self.placement
         out = []
-        if _family.is_family(self.model.split()[0] if self.model.split() else ""):
-            out.append(f"model family {self.model.split()[0]} did not resolve (catalog unreadable and no id in state): "
+        words = self.model.split()
+        mid = words[0] if words else ""
+        if _family.is_family(mid):
+            out.append(f"model family {mid} did not resolve (catalog unreadable and no id in state): "
                        f"replace it with an id from `paseo provider models {self.service.acp_agent}`")
+        elif mid:
+            effort = _spec_effort(self.model)
+            if effort:
+                _, thinking = family_catalog_info(self.service.acp_agent)
+                warn = _family.check_effort(mid, effort, thinking)
+                if warn:
+                    out.append(f"{self.service.acp_agent}/{mid}: {warn}")
         if pl is None:
             return [*out, "bare `paseo run` template with no placement: launch through "
                     f"{WORKER_RUN} --lead <lead id> --slice <name> --cwd <window directory> -- <these arguments>, "
@@ -2518,7 +2574,8 @@ def model_note(svc: Service, kind: str) -> str:
     res = resolve_spec(svc.acp_agent, svc.models.get(kind, ""))[1]
     if res is None:
         return ""
-    return res.note or f"{res.family} -> {res.model} (newest in `paseo provider models {svc.acp_agent}`)"
+    target = f"{res.model} --effort {res.thinking}" if res.thinking else res.model
+    return res.note or f"{res.family} -> {target} (newest in `paseo provider models {svc.acp_agent}`)"
 
 
 def quality_best(kind: str, services: list[Service],
@@ -4000,6 +4057,7 @@ def model_family_rows() -> list[dict[str, Any]]:
     """One row per (provider, family) the roster's `models` name, resolved now: the newest catalog id, its source, and the
     recorded change (previous id and when). Literal ids are not families and have no row."""
     seen: dict[tuple[str, str], dict[str, Any]] = {}
+    efforts: dict[tuple[str, str], list[str]] = {}
     for svc in SERVICES:
         if svc.retired or svc.acp_agent == "cursor-cloud":
             continue
@@ -4010,10 +4068,21 @@ def model_family_rows() -> list[dict[str, Any]]:
             key = (svc.acp_agent, parts[0])
             row = seen.setdefault(key, {"provider": svc.acp_agent, "family": parts[0], "uses": []})
             row["uses"].append(f"{svc.name}:{kind}")
+            eff = _spec_effort(spec)
+            if eff and eff not in efforts.setdefault(key, []):
+                efforts[key].append(eff)
     for (provider, family), row in seen.items():
         res = resolve_family(provider, family)
+        _, thinking = family_catalog_info(provider)
+        eff_warns = [w for eff in efforts.get((provider, family), ())
+                     if (w := _family.check_effort(res.model, eff, thinking))]
+        note = res.note
+        if eff_warns:
+            joined = "; ".join(eff_warns)
+            note = f"{note}; {joined}" if note else joined
         rec = _family.load_state().get(_family.state_key(provider, family)) or {}
-        row.update(model=res.model, source=res.source, newest=res.newest, note=res.note,
+        row.update(model=res.model, source=res.source, newest=res.newest, note=note,
+                   thinking=res.thinking, thinking_warning=bool(eff_warns),
                    previous=rec.get("previous"), changed_at=rec.get("changed_at"))
     return sorted(seen.values(), key=lambda r: (r["provider"], r["family"]))
 
@@ -4023,10 +4092,11 @@ def model_family_lines(changed_only: bool = False) -> list[str]:
     out = []
     for r in model_family_rows():
         changed = bool(r["previous"])
-        trouble = r["source"] in ("state", "unresolved", "hold")
+        trouble = r["source"] in ("state", "unresolved", "hold") or bool(r.get("thinking_warning"))
         if changed_only and not (changed or trouble):
             continue
-        line = f"  model family {r['family']:24} -> {r['model']}  [{r['source']}, {r['provider']}]"
+        target = f"{r['model']} --effort {r['thinking']}" if r.get("thinking") else r["model"]
+        line = f"  model family {r['family']:24} -> {target}  [{r['source']}, {r['provider']}]"
         if changed:
             line += f"  CHANGED from {r['previous']} at {r['changed_at']}"
         if r["note"]:
@@ -4320,15 +4390,24 @@ def main(argv: list[str] | None = None) -> int:
             if svc.retired or svc.access == "api" or svc.name == "cursor-cloud" or not svc.models:
                 continue                    # api pools and Cursor Cloud are not Paseo providers
             listed = provider_models(svc.acp_agent)
+            thinking = provider_thinking_options(svc.acp_agent) if listed is not None else {}
             for kind, spec in sorted(svc.models.items()):
                 model = spec.split()[0]
+                effort = _spec_effort(spec)
                 if _family.is_family(model):
-                    if listed is not None and _family.newest(model, listed) is None:
-                        print(f"  MISSING {svc.name} {kind}: no id in `paseo provider models {svc.acp_agent}` matches family {model}")
-                        missing = True
-                    elif listed is None:
+                    if listed is None:
                         print(f"  ? {svc.name} {kind}: {model} (paseo provider models {svc.acp_agent} unreadable)")
                         unreadable = True
+                        continue
+                    matched, inferred = _family.newest_with_thinking(model, listed, thinking)
+                    if matched is None:
+                        print(f"  MISSING {svc.name} {kind}: no id in `paseo provider models {svc.acp_agent}` matches family {model}")
+                        missing = True
+                        continue
+                    warn = _family.check_effort(matched, effort or inferred, thinking)
+                    if warn:
+                        print(f"  MISSING {svc.name} {kind}: {warn}")
+                        missing = True
                     continue
                 if listed is None:
                     print(f"  ? {svc.name} {kind}: {model} (paseo provider models {svc.acp_agent} unreadable)")
@@ -4336,6 +4415,12 @@ def main(argv: list[str] | None = None) -> int:
                 elif model not in listed and f"{svc.acp_agent}/{model}" not in listed:
                     print(f"  MISSING {svc.name} {kind}: {model} is not in `paseo provider models {svc.acp_agent}`")
                     missing = True
+                else:
+                    matched_id = model if model in listed else f"{svc.acp_agent}/{model}"
+                    warn = _family.check_effort(matched_id, effort, thinking)
+                    if warn:
+                        print(f"  MISSING {svc.name} {kind}: {warn}")
+                        missing = True
         if not (missing or unreadable):
             print("  every suggested model is listed by its Paseo provider")
         return 1 if missing else 2 if unreadable else 0

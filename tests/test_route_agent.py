@@ -297,7 +297,7 @@ def sources(rows=()):
 
 
 # The suite's canned model catalog (tests/conftest.py ROUTE_AGENT_MODEL_CATALOG_JSON): what a model family resolves against.
-FAMILY_CATALOG: dict[str, list[str]] = json.loads((Path(__file__).parent / "fixtures" / "model_catalog.json").read_text())
+FAMILY_CATALOG: dict[str, list[Any]] = json.loads((Path(__file__).parent / "fixtures" / "model_catalog.json").read_text())
 
 
 @contextlib.contextmanager
@@ -431,17 +431,53 @@ class TestDiscoverySources(unittest.TestCase):
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps({"codex": ["gpt-6-luna"]}), FAKE_PI_LIST=self.PI_TABLE):
             self.assertEqual(r.provider_models("codex"), ["gpt-6-luna"])
 
+    def test_provider_models_captures_thinking_option_ids(self):
+        agy = [
+            {"model": "Gemini 4 Neon", "id": "gemini-4-neon",
+             "thinkingOptionIds": ["low", "medium", "high", "xhigh"], "defaultThinkingOptionId": "high"},
+            {"model": "Gemini 4 Argon", "id": "gemini-4-argon",
+             "thinkingOptionIds": ["low", "medium", "high", "xhigh"], "defaultThinkingOptionId": "high"},
+        ]
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps({"antigravity": agy})):
+            self.assertEqual(r.provider_models("antigravity"), ["gemini-4-neon", "gemini-4-argon"])
+            self.assertEqual(
+                r.provider_thinking_options("antigravity"),
+                {
+                    "gemini-4-neon": ("low", "medium", "high", "xhigh"),
+                    "gemini-4-argon": ("low", "medium", "high", "xhigh"),
+                },
+            )
+
     def test_services_check_models_flags_a_suggestion_paseo_does_not_list(self):
-        listed: dict[str, list[str]] = {}
+        listed: dict[str, list[Any]] = {}
         for s in r.SERVICES:                      # cursor-auto and cursor share the cursor provider
-            # a model family (`gpt-*-astra`) is listed as the id it resolves to (2026-11-21)
-            ids = {r._family.newest(m.split()[0], FAMILY_CATALOG.get(s.acp_agent, [])) or m.split()[0]
+            raw = FAMILY_CATALOG.get(s.acp_agent, [])
+            parsed = r._family.parse_catalog(raw) or ([], {})
+            cat_ids, cat_thinking = parsed
+            # a model family (`gpt-*-astra`, `gemini-*-neon`) is listed as the id it resolves to (2026-11-21)
+            ids = {r._family.newest_with_thinking(m.split()[0], cat_ids, cat_thinking)[0] or m.split()[0]
                    if r._family.is_family(m.split()[0]) else m.split()[0] for m in s.models.values()}
-            listed[s.acp_agent] = sorted(set(listed.get(s.acp_agent, [])) | ids)
+            existing = {e["id"] if isinstance(e, dict) else e: e for e in listed.get(s.acp_agent, [])}
+            for mid in sorted(ids):
+                if mid in cat_thinking:
+                    existing[mid] = {"id": mid, "model": mid, "thinkingOptionIds": list(cat_thinking[mid])}
+                elif mid not in existing:
+                    existing[mid] = mid
+            listed[s.acp_agent] = [existing[k] for k in sorted(existing)]
         out = io.StringIO()
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
             self.assertEqual(r.main(["services", "--check-models"]), 0, out.getvalue())
         self.assertIn("every suggested model is listed", out.getvalue())
+        # an unsupported thinkingOptionId is flagged by --check-models too
+        bad_thinking = dict(listed)
+        bad_thinking["antigravity"] = [
+            {"id": "gemini-4-neon", "model": "Gemini 4 Neon", "thinkingOptionIds": ["low", "medium"]},
+            {"id": "gemini-4-argon", "model": "Gemini 4 Argon", "thinkingOptionIds": ["low", "medium", "high"]},
+        ]
+        out = io.StringIO()
+        with fake_paseo(FAKE_PASEO_MODELS=json.dumps(bad_thinking)), contextlib.redirect_stdout(out):
+            self.assertEqual(r.main(["services", "--check-models"]), 1, out.getvalue())
+        self.assertIn("thinkingOptionIds", out.getvalue())
         listed["codex"] = [m for m in listed["codex"] if m != "gpt-6-astra"]
         out = io.StringIO()
         with fake_paseo(FAKE_PASEO_MODELS=json.dumps(listed)), contextlib.redirect_stdout(out):
@@ -3195,7 +3231,7 @@ class TestArgonFrontierFallback(unittest.TestCase):
         self.assertEqual(
             (c.service.name, c.dispatch),
             ("antigravity-argon",
-             ("paseo run --provider antigravity/gemini-4-argon-high --mode full-access "
+             ("paseo run --provider antigravity/gemini-4-argon --thinking high --mode full-access "
               "--label ade.kind=frontier --no-wait")),
         )
         q.pop("antigravity-argon")

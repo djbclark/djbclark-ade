@@ -138,7 +138,8 @@ def run(args):
         out(rows)
     if verb == "provider" and rest[:1] == ["models"]:
         models = json.loads(os.environ.get("FAKE_PASEO_MODELS") or "{}").get(rest[1] if len(rest) > 1 else "", [])
-        out([{"model": m, "id": m, "description": "", "thinkingOptionIds": [], "defaultThinkingOptionId": None}
+        out([m if isinstance(m, dict)
+             else {"model": m, "id": m, "description": "", "thinkingOptionIds": [], "defaultThinkingOptionId": None}
              for m in models])
     if verb == "workspace" and rest and rest[0] == "ls":
         persist_workspaces_from_env()
