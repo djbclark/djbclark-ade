@@ -350,8 +350,9 @@ def scrubbed_env(
     tmpdir: str | None = None,
     home: str | None = None,
 ) -> dict[str, str]:
-    """Minimal allowlisted environment for bridge subprocesses.
-    Zero FIRECRAWL_*, LITELLM_*, MIT_SIPB_*, or other daemon credentials."""
+    """Minimal allowlisted environment for bridge/OA subprocesses.
+    Zero FIRECRAWL_*, LITELLM_*, MIT_SIPB_*, OPENALEX_API_KEY, FIRECRAWL_ROUTER_OPENALEX_KEY,
+    or other daemon credentials."""
     src = os.environ if base_env is None else base_env
     env = {
         "PATH": src.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
@@ -365,6 +366,8 @@ def scrubbed_env(
         env["TMPDIR"] = src["TMPDIR"]
     if include_ssh_auth_sock and src.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = src["SSH_AUTH_SOCK"]
+    for hidden_key in ("OPENALEX_API_KEY", "FIRECRAWL_ROUTER_OPENALEX_KEY"):
+        env.pop(hidden_key, None)
     return env
 
 
