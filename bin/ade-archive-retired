@@ -1,0 +1,623 @@
+#!/usr/bin/env -S python3 -I
+"""ade-archive-retired: safely re-archive idle RETIRED and completed-handoff agents that Paseo un-archived.
+
+Operator ruling (2026-11-23): `RETIRED ` tabs (and completed `ade-self-session` handoff
+predecessors) that Paseo un-archives on a late message should be re-archived automatically and
+safely. Dry-run by default; pass `--apply` to archive.
+
+Selection (zero-token, idempotent, fail-closed):
+  1. List live/unarchived agents via `paseo ls -g --json`.
+  2. Candidate requires a full lowercase UUID not equal to `PASEO_AGENT_ID`, plus positive retired
+     proof: name starts with `RETIRED ` OR `ade_lead_succession.successor_of(aid)` returns a
+     completed handoff successor UUID (`status == "archived"` on this `PASEO_HOME`).
+  3. Re-verify directly via `paseo agent inspect <aid> --json` right before archiving:
+     - `Id == aid`, `Archived is False`, `Status in ("idle", "closed")`, `PendingPermissions == []`
+       (explicit empty list; missing/non-list/non-empty fails closed).
+     - `UpdatedAt` is a valid timezone-aware ISO timestamp at least `--min-idle` seconds (default
+       120, finite non-negative) in the past and not in the future.
+     - Retirement proof still holds on the fresh inspect (`Name` starts with `RETIRED ` or a
+       completed handoff record exists).
+  4. Never archive the standing load watcher (`$LW_STATE_DIR/watcher.json`, fail-closed when the
+     file exists and is unreadable, non-regular/symlink, malformed, has a channel other than
+     `"paseo"`/`"relay"`, has a non-UUID `paseo` target, or has an invalid/mismatched
+     `paseo_home`), any candidate with a live non-`RETIRED `, non-`baton-writer=1` child in
+     `paseo ls -g --json` (`labels["paseo.parent-agent-id"]`), or any UUID listed via `--exclude` /
+     `~/.local/state/ade/helper-prune.exclude` (`ADE_HELPER_PRUNE_EXCLUDE`, fail-closed on
+     unreadable/malformed file).
+  5. Archive via `paseo agent archive <aid> --json` (no `--force`, 30 s timeout) and verify readback
+     `Archived is True` via `paseo agent inspect <aid> --json`. Under `--apply`, holds a
+     non-blocking exclusive flock (`archive-retired.lock`) and appends one compact JSON line per
+     attempt to `archive-retired.log` in `--state-dir` (`ADE_ARCHIVE_RETIRED_STATE` or
+     `~/.local/state/ade`). Never archives workspaces.
+
+Options:
+  --apply              perform archives (default: dry-run, changes nothing)
+  --check              explicit dry-run (mutually exclusive with --apply)
+  --min-idle S         minimum quiet seconds since UpdatedAt (default: 120)
+  --exclude UUID       full agent UUID to never archive (repeatable)
+  --exclude-file PATH  exclude file path (default: ADE_HELPER_PRUNE_EXCLUDE or
+                       ~/.local/state/ade/helper-prune.exclude)
+  --state-dir PATH     lock and log directory (default: ADE_ARCHIVE_RETIRED_STATE or
+                       ~/.local/state/ade)
+  --watcher-file PATH  load-watch watcher.json path (default: $LW_STATE_DIR/watcher.json or
+                       ~/.local/state/load-watch/watcher.json)
+  --paseo-bin PATH     paseo executable (default: ADE_PASEO_BIN or `paseo`)
+  --json               print JSON summary instead of one-line text
+
+Exit codes: 0 ok (or lock held), 1 runtime/fail-closed error, 2 bad CLI arguments.
+"""
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import importlib.util
+import json
+import math
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+RETIRED_PREFIX = "RETIRED "
+DEFAULT_MIN_IDLE = 120.0
+LS_TIMEOUT = 60
+INSPECT_TIMEOUT = 30
+ARCHIVE_TIMEOUT = 30
+MAX_WATCHER_BYTES = 65536
+
+
+class ExcludeRefused(Exception):
+    """Exclude file exists but is unreadable or contains a malformed entry (fail closed)."""
+
+
+def clean(text: str, limit: int = 160) -> str:
+    return " ".join((text or "").split())[:limit]
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_succession():
+    """Load sibling bin/ade_lead_succession.py by absolute path (works under `python3 -I`)."""
+    path = Path(__file__).resolve().with_name("ade_lead_succession.py")
+    if not path.is_file():
+        return None
+    key = "_ade_archive_retired_lead_succession"
+    found = sys.modules.get(key)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    spec = importlib.util.spec_from_file_location(key, path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        return None
+    return module
+
+
+def handoff_successor(aid: str) -> str | None:
+    """Return completed handoff successor UUID on this PASEO_HOME, or None (fail closed)."""
+    if not isinstance(aid, str) or not UUID_RE.fullmatch(aid):
+        return None
+    mod = _load_succession()
+    if mod is None:
+        return None
+    try:
+        succ = mod.successor_of(aid)
+    except Exception:
+        return None
+    return succ if isinstance(succ, str) and UUID_RE.fullmatch(succ) else None
+
+
+def resolve_paseo_bin(cli_value: str | None = None) -> str:
+    if cli_value:
+        return cli_value
+    env_val = os.environ.get("ADE_PASEO_BIN", "").strip()
+    return env_val or "paseo"
+
+
+def default_state_dir() -> Path:
+    return Path(os.environ.get("ADE_ARCHIVE_RETIRED_STATE") or Path.home() / ".local/state/ade")
+
+
+def default_exclude_file() -> Path:
+    return Path(os.environ.get("ADE_HELPER_PRUNE_EXCLUDE") or Path.home() / ".local/state/ade/helper-prune.exclude")
+
+
+def default_watcher_file() -> Path:
+    lw = Path(os.environ.get("LW_STATE_DIR") or Path.home() / ".local/state/load-watch")
+    return lw / "watcher.json"
+
+
+def default_paseo_home() -> Path:
+    return Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+
+
+def load_excludes(cli: list[str] | tuple[str, ...], path: Path) -> set[str]:
+    """Read CLI excludes plus exclude file (one full UUID per line, `#` comments).
+
+    Missing file is empty; unreadable file or any non-UUID line raises ExcludeRefused (fail closed).
+    """
+    ids = {i.lower() for i in cli}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ids
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ExcludeRefused(f"cannot read {path}: {clean(str(exc), 120)}") from exc
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip().lower()
+        if not line:
+            continue
+        if not UUID_RE.fullmatch(line):
+            raise ExcludeRefused(f"{path}:{lineno}: not a full agent id")
+        ids.add(line)
+    return ids
+
+
+def load_watcher(path: Path, active_paseo_home: Path | None = None) -> tuple[str | None, str | None]:
+    """Read load-watch `watcher.json` fail-closed.
+
+    Returns `(watcher_agent_id_lower, error_reason)`.
+    - Missing file -> `(None, None)`.
+    - Exact `channel == "relay"` -> `(None, None)`.
+    - Exact `channel == "paseo"` with full-UUID `target` and `paseo_home` matching the active
+      `PASEO_HOME` (`None` resolves to `~/.paseo`, or an absolute path string) ->
+      `(target.strip().lower(), None)`.
+    - Anything else (unreadable, symlink, non-regular, oversized, corrupt JSON, non-dict,
+      unknown/padded channel, non-UUID `paseo` target, malformed/relative/mismatched `paseo_home`)
+      -> `(None, error_reason)` (fail closed).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"watcher unreadable ({path}): {clean(str(exc), 120)}"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, f"watcher is not a regular file ({path})"
+        raw = os.read(fd, MAX_WATCHER_BYTES + 1)
+    except OSError as exc:
+        return None, f"watcher read failed ({path}): {clean(str(exc), 120)}"
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_WATCHER_BYTES:
+        return None, f"watcher file exceeds {MAX_WATCHER_BYTES} bytes ({path})"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"watcher corrupt JSON ({path}): {clean(str(exc), 120)}"
+    if not isinstance(data, dict):
+        return None, f"watcher JSON is not an object ({path})"
+    channel = data.get("channel")
+    if not isinstance(channel, str) or channel not in ("paseo", "relay"):
+        return None, f"watcher has invalid channel ({path})"
+    if channel == "relay":
+        return None, None
+    target = data.get("target")
+    if not isinstance(target, str):
+        return None, f"watcher paseo channel missing valid target ({path})"
+    norm_target = target.strip().lower()
+    if not UUID_RE.fullmatch(norm_target):
+        return None, f"watcher paseo target is not a full UUID ({path})"
+    raw_home = data.get("paseo_home")
+    if raw_home is None:
+        watcher_home_path = Path.home() / ".paseo"
+    elif isinstance(raw_home, str) and raw_home and os.path.isabs(raw_home):
+        watcher_home_path = Path(raw_home)
+    else:
+        return None, f"watcher paseo_home is invalid ({path})"
+    try:
+        watcher_home = watcher_home_path.resolve()
+        expected_home = (active_paseo_home or default_paseo_home()).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"watcher paseo_home unresolvable ({path}): {clean(str(exc), 120)}"
+    if watcher_home != expected_home:
+        return None, f"watcher paseo_home mismatch ({path})"
+    return norm_target, None
+
+
+def parents_with_live_children(rows: list) -> set[str]:
+    """Return lowercase parent UUIDs referenced by any live non-RETIRED, non-baton-writer=1 child."""
+    parents: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("archived") is True or bool(row.get("archivedAt")):
+            continue
+        name = row.get("name")
+        if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
+            continue
+        labels = row.get("labels")
+        if isinstance(labels, dict):
+            if str(labels.get("baton-writer") or "") == "1":
+                continue
+            parent = labels.get("paseo.parent-agent-id")
+        else:
+            parent = None
+        if not isinstance(parent, str) or not parent.strip():
+            parent = row.get("parentAgentId")
+        if not isinstance(parent, str):
+            continue
+        norm_parent = parent.strip().lower()
+        row_id = str(row.get("id") or "").strip().lower()
+        if norm_parent and norm_parent != row_id:
+            parents.add(norm_parent)
+    return parents
+
+
+def parse_aware_iso(value) -> float | None:
+    """Epoch seconds for a valid timezone-aware ISO 8601 timestamp, else None."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    ts = dt.timestamp()
+    return ts if math.isfinite(ts) else None
+
+
+def run_paseo_json(paseo_bin: str, argv: list[str], timeout: int) -> tuple[int, object | None, str]:
+    try:
+        proc = subprocess.run([paseo_bin, *argv], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return -1, None, f"timed out after {timeout}s"
+    except OSError as exc:
+        return -1, None, clean(str(exc), 160)
+    if proc.returncode != 0:
+        return proc.returncode, None, clean(proc.stderr or proc.stdout, 160)
+    if not proc.stdout.strip():
+        return 0, None, ""
+    try:
+        return 0, json.loads(proc.stdout), ""
+    except ValueError as exc:
+        return -2, None, f"invalid JSON: {clean(str(exc), 120)}"
+
+
+def acquire_lock(path: Path):
+    """Non-blocking exclusive flock. Returns `(fh, locked_by_other, error)`."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = path.open("a", encoding="utf-8")
+    except OSError as exc:
+        return None, False, clean(str(exc), 120)
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fh, False, None
+    except OSError as exc:
+        fh.close()
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+            return None, True, None
+        return None, False, clean(str(exc), 120)
+
+
+def ensure_log_writable(path: Path) -> str | None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.close(fd)
+        return None
+    except OSError as exc:
+        return clean(str(exc), 120)
+
+
+def append_log(path: Path, entry: dict) -> str | None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+        return None
+    except OSError as exc:
+        return clean(str(exc), 120)
+
+
+def evaluate_inspect(
+    aid: str,
+    info: object,
+    by_name_list: bool,
+    by_handoff_list: str | None,
+    min_idle: float,
+    now: float,
+) -> tuple[dict | None, str | None]:
+    """Validate fresh `paseo agent inspect` payload. Returns `(plan_item, skip_reason)`."""
+    if not isinstance(info, dict):
+        return None, "inspect-invalid"
+    if info.get("Id") != aid:
+        return None, "id-mismatch"
+    if info.get("Archived") is not False:
+        return None, "archived-or-unknown"
+    status = info.get("Status")
+    if status not in ("idle", "closed"):
+        return None, "not-idle"
+    perms = info.get("PendingPermissions")
+    if not isinstance(perms, list) or perms != []:
+        return None, "pending-permissions"
+    updated_ts = parse_aware_iso(info.get("UpdatedAt"))
+    if updated_ts is None:
+        return None, "invalid-updated-at"
+    age = now - updated_ts
+    if not math.isfinite(age) or age < 0:
+        return None, "future-updated-at"
+    if age < min_idle:
+        return None, "recently-active"
+    inspect_name = info.get("Name")
+    inspect_by_name = isinstance(inspect_name, str) and inspect_name.startswith(RETIRED_PREFIX)
+    inspect_by_handoff = handoff_successor(aid)
+    if by_name_list and not by_handoff_list and not inspect_by_name and inspect_by_handoff is None:
+        return None, "name-changed"
+    if not inspect_by_name and inspect_by_handoff is None:
+        return None, "retirement-unproven"
+    if inspect_by_name and inspect_by_handoff is not None:
+        proof = "both"
+    elif inspect_by_name:
+        proof = "retired-name"
+    else:
+        proof = "handoff-successor"
+    return {
+        "id": aid,
+        "status": status,
+        "proof": proof,
+        "idle_s": int(age),
+        "successor": inspect_by_handoff,
+    }, None
+
+
+def run_sweep(
+    *,
+    apply_: bool,
+    min_idle: float,
+    exclude_cli: list[str],
+    exclude_file: Path,
+    state_dir: Path,
+    watcher_file: Path,
+    paseo_bin: str,
+    now_fn=time.time,
+) -> tuple[dict, int]:
+    summary: dict = {
+        "mode": "apply" if apply_ else "dry-run",
+        "at": utc_now_iso(),
+        "min_idle_s": min_idle,
+        "locked": False,
+        "agents_seen": 0,
+        "candidates": 0,
+        "selected": [],
+        "archived": [],
+        "skipped": [],
+        "errors": [],
+    }
+    lock_fh = None
+    try:
+        if apply_:
+            lock_fh, locked, lock_err = acquire_lock(state_dir / "archive-retired.lock")
+            if locked:
+                summary["locked"] = True
+                return summary, 0
+            if lock_err is not None:
+                summary["errors"].append({"id": "", "what": f"lock not available: {lock_err}"})
+                return summary, 1
+
+        try:
+            excludes = load_excludes(exclude_cli, exclude_file)
+        except ExcludeRefused as exc:
+            summary["errors"].append({"id": "", "what": str(exc)})
+            return summary, 1
+
+        watcher_id, watcher_err = load_watcher(watcher_file)
+        if watcher_err is not None:
+            summary["errors"].append({"id": "", "what": watcher_err})
+
+        rc, rows, err = run_paseo_json(paseo_bin, ["ls", "-g", "--json"], timeout=LS_TIMEOUT)
+        if rc != 0 or not isinstance(rows, list):
+            detail = err or "paseo ls -g did not return a JSON list"
+            summary["errors"].append({"id": "", "what": f"paseo ls -g failed (rc {rc}): {detail}"})
+            return summary, 1
+
+        self_id = (os.environ.get("PASEO_AGENT_ID") or "").strip().lower()
+        live_parents = parents_with_live_children(rows)
+        log_path = state_dir / "archive-retired.log"
+        log_checked = False
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            summary["agents_seen"] += 1
+            aid = row.get("id")
+            raw_name = row.get("name")
+            by_name = isinstance(raw_name, str) and raw_name.startswith(RETIRED_PREFIX)
+            valid_uuid = isinstance(aid, str) and bool(UUID_RE.fullmatch(aid))
+            by_handoff = handoff_successor(aid) if valid_uuid else None
+            if not by_name and by_handoff is None:
+                continue
+            summary["candidates"] += 1
+            if not valid_uuid:
+                summary["skipped"].append({"id": str(aid or ""), "reason": "invalid-id"})
+                continue
+            if aid.lower() == self_id and self_id:
+                summary["skipped"].append({"id": aid, "reason": "self"})
+                continue
+            if watcher_err is not None:
+                summary["skipped"].append({"id": aid, "reason": "watcher-unreadable"})
+                continue
+            if watcher_id is not None and aid.lower() == watcher_id:
+                summary["skipped"].append({"id": aid, "reason": "load-watcher"})
+                continue
+            if aid.lower() in excludes:
+                summary["skipped"].append({"id": aid, "reason": "excluded"})
+                continue
+            if aid.lower() in live_parents:
+                summary["skipped"].append({"id": aid, "reason": "has-children"})
+                continue
+
+            ins_rc, ins_data, ins_err = run_paseo_json(
+                paseo_bin, ["agent", "inspect", aid, "--json"], timeout=INSPECT_TIMEOUT
+            )
+            if ins_rc != 0:
+                summary["skipped"].append({"id": aid, "reason": "inspect-failed", "detail": ins_err})
+                continue
+
+            item, skip_reason = evaluate_inspect(aid, ins_data, by_name, by_handoff, min_idle, now_fn())
+            if skip_reason is not None or item is None:
+                summary["skipped"].append({"id": aid, "reason": skip_reason or "inspect-failed"})
+                continue
+
+            if not apply_:
+                summary["selected"].append(item)
+                continue
+
+            if not log_checked:
+                log_err = ensure_log_writable(log_path)
+                if log_err is not None:
+                    summary["errors"].append({"id": "", "what": f"log not writable, nothing archived: {log_err}"})
+                    break
+                log_checked = True
+
+            # Re-read exclude list and watcher right before each archive (fail closed).
+            try:
+                fresh_excludes = load_excludes(exclude_cli, exclude_file)
+            except ExcludeRefused as exc:
+                summary["errors"].append({"id": aid, "what": f"exclude list unreadable, stopping: {exc}"})
+                break
+            if aid.lower() in fresh_excludes:
+                summary["skipped"].append({"id": aid, "reason": "excluded"})
+                continue
+
+            fresh_watcher_id, fresh_watcher_err = load_watcher(watcher_file)
+            if fresh_watcher_err is not None:
+                summary["errors"].append({"id": aid, "what": fresh_watcher_err})
+                summary["skipped"].append({"id": aid, "reason": "watcher-unreadable"})
+                continue
+            if fresh_watcher_id is not None and aid.lower() == fresh_watcher_id:
+                summary["skipped"].append({"id": aid, "reason": "load-watcher"})
+                continue
+
+            summary["selected"].append(item)
+
+            arc_rc, _arc_data, arc_err = run_paseo_json(
+                paseo_bin, ["agent", "archive", aid, "--json"], timeout=ARCHIVE_TIMEOUT
+            )
+            verified = False
+            err_msg = ""
+            if arc_rc != 0:
+                err_msg = f"archive failed (rc {arc_rc}): {arc_err}"
+            else:
+                rb_rc, rb_data, rb_err = run_paseo_json(
+                    paseo_bin, ["agent", "inspect", aid, "--json"], timeout=INSPECT_TIMEOUT
+                )
+                if (
+                    rb_rc == 0
+                    and isinstance(rb_data, dict)
+                    and rb_data.get("Id") == aid
+                    and rb_data.get("Archived") is True
+                ):
+                    verified = True
+                else:
+                    err_msg = (
+                        f"readback inspect failed (rc {rb_rc}): {rb_err}"
+                        if rb_rc != 0
+                        else "readback did not confirm Archived=true"
+                    )
+
+            log_entry = {
+                "ts": utc_now_iso(),
+                "agent": aid,
+                "proof": item["proof"],
+                "status": item["status"],
+                "rc": arc_rc,
+                "verified": verified,
+            }
+            if err_msg:
+                log_entry["error"] = clean(err_msg, 160)
+            write_err = append_log(log_path, log_entry)
+            if write_err is not None and not any(
+                e.get("what", "").startswith("log write failed") for e in summary["errors"]
+            ):
+                summary["errors"].append({"id": "", "what": f"log write failed: {write_err}"})
+
+            if verified:
+                summary["archived"].append(item)
+            else:
+                summary["errors"].append({"id": aid, "what": err_msg})
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
+
+    exit_code = 1 if summary["errors"] else 0
+    return summary, exit_code
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(prog="ade-archive-retired", description=__doc__.split("\n\n")[0])
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="archive eligible retired agents (default: dry-run)")
+    mode.add_argument("--check", action="store_true", help="dry-run only (default)")
+    ap.add_argument("--min-idle", type=float, default=DEFAULT_MIN_IDLE, help="minimum quiet seconds since UpdatedAt")
+    ap.add_argument("--exclude", action="append", default=[], help="full agent UUID to exclude (repeatable)")
+    ap.add_argument("--exclude-file", default=None, help="exclude file path")
+    ap.add_argument("--state-dir", default=None, help="lock and log directory")
+    ap.add_argument("--watcher-file", default=None, help="load-watch watcher.json path")
+    ap.add_argument("--paseo-bin", default=None, help="paseo executable (default: ADE_PASEO_BIN or 'paseo')")
+    ap.add_argument("--json", action="store_true", help="print JSON summary")
+    args = ap.parse_args(argv)
+    if not math.isfinite(args.min_idle) or args.min_idle < 0:
+        ap.error("--min-idle must be a finite non-negative number")
+    for raw in args.exclude:
+        if not UUID_RE.fullmatch(raw.strip().lower()):
+            ap.error(f"--exclude must be a full agent UUID, not {raw!r}")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    summary, code = run_sweep(
+        apply_=args.apply,
+        min_idle=args.min_idle,
+        exclude_cli=[x.strip().lower() for x in args.exclude],
+        exclude_file=Path(args.exclude_file) if args.exclude_file else default_exclude_file(),
+        state_dir=Path(args.state_dir) if args.state_dir else default_state_dir(),
+        watcher_file=Path(args.watcher_file) if args.watcher_file else default_watcher_file(),
+        paseo_bin=resolve_paseo_bin(args.paseo_bin),
+    )
+    if args.json:
+        print(json.dumps(summary, sort_keys=True))
+    else:
+        if summary["locked"]:
+            print("archive-retired: lock held, skipping")
+        elif args.apply:
+            suffix = f", {len(summary['errors'])} errors" if summary["errors"] else ""
+            print(f"archived {len(summary['archived'])} retired agents (skipped {len(summary['skipped'])}{suffix})")
+        else:
+            suffix = f", {len(summary['errors'])} errors" if summary["errors"] else ""
+            print(f"would archive {len(summary['selected'])} retired agents (skipped {len(summary['skipped'])}{suffix})")
+        for err in summary["errors"]:
+            prefix = f"{err['id']}: " if err.get("id") else ""
+            print(f"ade-archive-retired: {prefix}{err.get('what', '')}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

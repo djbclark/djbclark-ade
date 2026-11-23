@@ -80,10 +80,15 @@ recognized but refused today: it calls `bin/ade-supervisor-rehandoff`, a stub th
 scan log `re-handoff executor failed`. Do not set `live` in the plist until a reviewed executor exists; that executor
 alone may archive or relaunch, and only an agent the plan names whose `family` is `pi` (a non-Pi agent is never in the plan). The notices to the lead are unchanged either way.
 
-`config/launchd/com.djbclark.ade-pin-sweep.plist` (2026-11-20) re-applies the non-worker pin every 900 s: it runs
-`bin/ade-pin-sweep`, which calls `bin/ade-pin-interactive` (the `ade.interactive=1` label tag) and
-`bin/ade-pin-workspaces pin` (the native sidebar pin, driving the UI's `workspace.pin.set` RPC through the bundled
-CLI client). Both idempotent, zero-token, macOS only. Install the same way:
+`config/launchd/com.djbclark.ade-pin-sweep.plist` (2026-11-20; updated 2026-11-23) runs every 900 s via
+`bin/ade-pin-sweep`: first `bin/ade-archive-retired --apply` (safely re-archiving idle/closed `RETIRED ` tabs and
+completed-handoff predecessors that Paseo un-archived on a late message, verifying `Archived: false`,
+`Status in ("idle", "closed")`, `PendingPermissions == []`, a `--min-idle` 120 s quiet grace, exclude list and
+standing load watcher fail-closed, with a non-blocking flock and JSONL audit log in `~/.local/state/ade/`), then
+`bin/ade-pin-interactive` (the `ade.interactive=1` label tag, skipping archived, `RETIRED `, and completed-handoff
+agents) and `bin/ade-pin-workspaces pin` (the native sidebar pin, driving the UI's `workspace.pin.set` RPC through the
+bundled CLI client, skipping worker boxes and `RETIRED ` windows). All three are idempotent and zero-token; the native
+pin step is macOS only. Install the same way:
 
 ```sh
 bin/ade-sched install config/launchd/com.djbclark.ade-pin-sweep.plist --ade ~/src/djbclark-ade \
