@@ -95,14 +95,23 @@ template into live `~/.codex/config.toml` still needs the operator's yes (order 
     budget while the first-pass cap equals it, or burn the entry bound while a later secret glob still has
     rem; absolute deep globs keep the pattern fallback only when that shared budget did not truncate),
     fails closed (C7). Quoted-delimiter heredoc bodies (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`, `<<\EOF`,
-    `<<E'O'F`) fed to non-shell commands (`cat`, `tee`, `gh`, `python3`, `pbcopy`, `clip`, …) still have
-    every literal (non-glob) word checked against the policy, but skip filesystem glob analysis so
+    `<<E'O'F`) belonging to simple top-level pipelines whose every stage command is in a tight data-sink
+    allowlist (`cat`, `tee`, `gh`, `clip`, `pbcopy`, `xclip`, `xsel`, `wl-copy`, `jq`, `yq`, `python3`,
+    `python`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `cut`, `base64`, `shasum`, `sha256sum`, `md5`,
+    `md5sum`, `git`, `diff`, excluding `python`/`python3 -c` and `git -c`/`--config-env`/`--exec-path`)
+    still have every literal (non-glob) word checked against the policy **and** every glob word checked
+    with the pattern-only engine (`glob_pattern_only`, zero filesystem scans, so `~/.ssh/id_*`, `*.key`,
+    and `.env*` still block even inside `python3 - <<'EOF'`), skipping only the filesystem glob walk so
     markdown `**bold**` / `*italic*` or Python `**kwargs` prose does not exhaust the glob budget
-    (2026-11-22). Quoted-delimiter heredocs fed to a shell interpreter (`sh`, `bash`, `zsh`, `dash`,
-    `ksh`, `fish`, `eval`, `source`, `.`, directly, through wrappers such as `env`/`sudo`/`timeout`,
-    piped into a shell, or written to a file executed later in the same command), unquoted heredocs
-    (`<<EOF`, `<<-EOF`), unterminated or unparseable heredocs, redirection headers, and commands after
-    the terminator all keep full literal + glob analysis (fail closed).
+    (2026-11-22). Everything else fails closed to full literal + filesystem glob walk + pattern analysis:
+    any command not in the allowlist, any command whose outside lines contain a shell interpreter,
+    wrapper, compound keyword (`if`/`for`/`while`/`until`/`case`/`fi`/`done`/`esac`/`coproc`/`select`/
+    `function`), subshell or brace group around `<<`, process substitution (`<(`/ `>(`), backtick,
+    nested `<<`, `exec`/`alias`/`mkfifo`/`chmod`/`make`/`read`/scripting-interpreter runner, non-stdout/
+    stderr fd duplication (`>&3`), dynamic command name, execution of a file written by a heredoc,
+    unquoted heredocs (`<<EOF`, `<<-EOF`), unterminated or unparseable heredocs, unclosed quotes/groups
+    at EOF, redirection headers, commands after the terminator, or a heredoc scanner timeout (`OutOfTime`
+    raises `GlobBudgetExceeded`, fail closed). Python 3.9 compatible (`ast.parse(..., feature_version=(3, 9))`).
   - **B1d.** Codex `apply_patch` headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, `*** Move to:`) inside a
     `*** Begin Patch` block, in the command or any other string of a non-file tool. Only a genuine patch payload leaves the
     patch body out of the shell words, so a patch whose code mentions `.env` passes there: the `apply_patch` tool, or a
