@@ -108,7 +108,11 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 12
+    assert len(by_id) == 13
+    assert by_id["paseo-settings-search"]["pr"] == 9875
+    assert by_id["paseo-settings-search"]["expected_head"] == "084d2be0cc12e38bb961684bf45fac7de34e50c6"
+    assert by_id["paseo-settings-search"]["targets"] == ["desktop-build-3", "android-build-3"]
+    assert by_id["paseo-settings-search"]["trial_required"] is True
     assert by_id["paseo-pi-permission-selected-action"]["order"] < by_id["paseo-pi-ask-user-question-scope"]["order"]
     assert by_id["paseo-sync-sidebar-order"]["pr"] == 9830 and by_id["paseo-sync-sidebar-order"]["trial_required"]
     assert "local_path" not in by_id["paseo-about-fork-marker"]
