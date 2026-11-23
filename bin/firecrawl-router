@@ -75,6 +75,14 @@ Environment:
   FIRECRAWL_ROUTER_MIT_MAX_FETCH / FIRECRAWL_ROUTER_MIT_MAX_BROWSER / FIRECRAWL_ROUTER_MIT_COOLDOWN_S /
   FIRECRAWL_ROUTER_MIT_SOCKS_HOST / FIRECRAWL_ROUTER_MIT_SOCKS_PORT / FIRECRAWL_ROUTER_MIT_HOST /
   FIRECRAWL_ROUTER_MIT_CHROME  optional overrides for bin/firecrawl_mit_bridge.py (never from requests)
+  FIRECRAWL_ROUTER_OA_FALLBACK OpenAlex + Crossref Free-OA fallback for failed scholarly POST /v{1,2}/scrape:
+                               "off" (default), "allowlist" (vetted OA repositories), or "pinned"
+  FIRECRAWL_ROUTER_OA_VERSIONS "all" (default: published/accepted/submitted) or "peer-reviewed"
+  FIRECRAWL_ROUTER_OA_CONTENT_API "off" (default) or "on" (opt-in content.openalex.org cached PDFs)
+  FIRECRAWL_ROUTER_OA_ENROLLED "on" (default) or "off" (rescue enrolled hosts if mit-bridge failed closed)
+  FIRECRAWL_ROUTER_OA_SECRETSPEC_BIN / FIRECRAWL_ROUTER_OA_STATE_DIR / FIRECRAWL_ROUTER_OA_MAX_CONCURRENT /
+  FIRECRAWL_ROUTER_OA_COOLDOWN_S / FIRECRAWL_ROUTER_OA_CONTACT
+                               optional overrides for bin/firecrawl_oa_fallback.py (never from requests)
 
 The base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM) must each be https:// or loopback http
 (127.0.0.1, localhost, ::1) with a plain host[:port] (no userinfo), checked at startup; no variable lifts that.
@@ -115,23 +123,41 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-# Load sibling helper under python3 -I (isolated mode omits script dir from sys.path).
-def _load_mit_bridge_module():
-    if "firecrawl_mit_bridge" in sys.modules:
-        return sys.modules["firecrawl_mit_bridge"]
-    bridge_path = Path(__file__).resolve().parent / "firecrawl_mit_bridge.py"
-    if not bridge_path.is_file():
+# Load sibling helpers under python3 -I (isolated mode omits script dir from sys.path).
+def _load_sibling_module(name: str, filename: str):
+    if name in sys.modules:
+        return sys.modules[name]
+    mod_path = Path(__file__).resolve().parent / filename
+    if not mod_path.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("firecrawl_mit_bridge", str(bridge_path))
+    spec = importlib.util.spec_from_file_location(name, str(mod_path))
     if spec is None or spec.loader is None:
         return None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["firecrawl_mit_bridge"] = mod
-    spec.loader.exec_module(mod)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001 - fail closed if sibling is missing/broken
+        sys.modules.pop(name, None)
+        print(
+            f"firecrawl-router: failed to load sibling {filename} ({type(exc).__name__}); failing closed",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
     return mod
 
 
+def _load_mit_bridge_module():
+    return _load_sibling_module("firecrawl_mit_bridge", "firecrawl_mit_bridge.py")
+
+
+def _load_oa_fallback_module():
+    return _load_sibling_module("firecrawl_oa_fallback", "firecrawl_oa_fallback.py")
+
+
 _MIT_BRIDGE_MOD = _load_mit_bridge_module()
+_OA_FALLBACK_MOD = _load_oa_fallback_module()
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
@@ -571,7 +597,7 @@ def build_extractor(env) -> Extractor | None:
 class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
                  token: str = "", log=sys.stderr, extractor: Extractor | None = None,
-                 search_timeout: float = 35.0, mit_bridge=None):
+                 search_timeout: float = 35.0, mit_bridge=None, oa_fallback=None):
         self.extractor = extractor
         if extractor:
             extractor.log = log
@@ -581,6 +607,12 @@ class Router:
         if mit_bridge is not None:
             mit_bridge.log = log
             mit_bridge._reply_cls = Reply
+        self.oa_fallback = oa_fallback
+        if oa_fallback is not None:
+            oa_fallback.log = log
+            oa_fallback._reply_cls = Reply
+            if getattr(oa_fallback, "client", None) is not None:
+                oa_fallback.client.log = log
         self.timeout = timeout
         self.search_timeout = search_timeout
         self.token = token
@@ -689,6 +721,9 @@ class Router:
         first = call(self.primary, method, path, headers, body, timeout)
         reason = fallback_reason(path, first)
         bridge_log_note = ""
+        oa_log_note = ""
+        was_enrolled = False
+        b_note = ""
         if self.mit_bridge is not None and self.mit_bridge.enabled:
             b_reply, b_backend, b_note, was_enrolled = self.mit_bridge.maybe_bridge(
                 method, path, body, first, reason, Reply
@@ -700,29 +735,60 @@ class Router:
                 if b_note and b_note != "primary-ok":
                     first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
                                   first.body, first.error)
-                note = (f"mit-bridge skipped:{b_note}" if b_note and b_note != "primary-ok"
-                        else (reason and f"{reason}; enrolled"))
-                self._log(method, path, "primary", first, t0, note)
-                return self.rewrite(first, "primary"), "primary"
-            if b_note.startswith("snapshot-"):
+                if b_note == "primary-ok":
+                    note = reason and f"{reason}; enrolled"
+                    self._log(method, path, "primary", first, t0, note)
+                    return self.rewrite(first, "primary"), "primary"
+            elif b_note.startswith("snapshot-"):
                 bridge_log_note = f"mit-bridge skipped:{b_note}"
                 if _MIT_BRIDGE_MOD is None or _MIT_BRIDGE_MOD.needs_browser_bridge(first, reason):
                     first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
                                   first.body, first.error)
+        if self.oa_fallback is not None and self.oa_fallback.enabled:
+            oa_reply, oa_backend, oa_note = self.oa_fallback.maybe_fallback(
+                method, path, body, first, reason, Reply, was_enrolled=was_enrolled
+            )
+            if oa_reply is not None and oa_backend:
+                notes = []
+                if was_enrolled and b_note and b_note != "primary-ok":
+                    notes.append(f"mit-bridge skipped:{b_note}")
+                elif bridge_log_note:
+                    notes.append(bridge_log_note)
+                if oa_note:
+                    notes.append(oa_note)
+                self._log(method, path, oa_backend, oa_reply, t0, "; ".join(notes))
+                return oa_reply, oa_backend
+            if oa_note:
+                first = Reply(first.status, {**first.headers, "X-Firecrawl-OA-Fallback": f"skipped:{oa_note}"},
+                              first.body, first.error)
+                oa_log_note = f"oa-fallback skipped:{oa_note}"
+        if was_enrolled:
+            notes = []
+            if b_note and b_note != "primary-ok":
+                notes.append(f"mit-bridge skipped:{b_note}")
+            elif reason:
+                notes.append(f"{reason}; enrolled")
+            if oa_log_note:
+                notes.append(oa_log_note)
+            self._log(method, path, "primary", first, t0, "; ".join(notes))
+            return self.rewrite(first, "primary"), "primary"
+        extra_notes = [n for n in (bridge_log_note, oa_log_note) if n]
         if not reason or not self.fallback:
             note = reason and f"{reason}; no fallback"
-            if bridge_log_note:
-                note = f"{note}; {bridge_log_note}" if note else bridge_log_note
+            if extra_notes:
+                joined = "; ".join(extra_notes)
+                note = f"{note}; {joined}" if note else joined
             self._log(method, path, "primary", first, t0, note)
             return self.rewrite(first, "primary"), "primary"
         second = call(self.fallback, method, path, headers, body, timeout)
         if 200 <= second.status < 300 or first.status == 0:
-            note = f"{reason}; {bridge_log_note}" if bridge_log_note else reason
+            joined = "; ".join(extra_notes)
+            note = f"{reason}; {joined}" if joined else reason
             self._log(method, path, "fallback", second, t0, note)
             return self.rewrite(second, "fallback"), "fallback"
         note = f"{reason}; fallback HTTP {second.status or second.error}"
-        if bridge_log_note:
-            note = f"{note}; {bridge_log_note}"
+        if extra_notes:
+            note = f"{note}; {'; '.join(extra_notes)}"
         self._log(method, path, "primary", first, t0, note)
         return self.rewrite(first, "primary"), "primary"
 
@@ -808,8 +874,17 @@ def build_router(env, token: str) -> Router:
         if mit_mode in ("pdf", "all"):
             print("firecrawl-router: FIRECRAWL_ROUTER_MIT_BRIDGE enabled but firecrawl_mit_bridge.py is missing; failing closed",
                   file=sys.stderr, flush=True)
+    oa_mode = (env.get("FIRECRAWL_ROUTER_OA_FALLBACK") or "off").strip().lower()
+    if _OA_FALLBACK_MOD is not None:
+        oa_fallback = _OA_FALLBACK_MOD.build_oa_fallback(env)
+    else:
+        oa_fallback = None
+        if oa_mode in ("allowlist", "pinned"):
+            print("firecrawl-router: FIRECRAWL_ROUTER_OA_FALLBACK enabled but firecrawl_oa_fallback.py is missing; failing closed",
+                  file=sys.stderr, flush=True)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
-                  extractor=build_extractor(env), search_timeout=search_timeout, mit_bridge=mit_bridge)
+                  extractor=build_extractor(env), search_timeout=search_timeout,
+                  mit_bridge=mit_bridge, oa_fallback=oa_fallback)
 
 
 def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:
@@ -864,7 +939,14 @@ def main(argv=None) -> int:
             threading.Event().wait()
         except KeyboardInterrupt:
             return 0
-    hidden = ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_SELFHOST_URL", "FIRECRAWL_ROUTER_SIPB_KEY", "FIRECRAWL_ROUTER_LITELLM_KEY")
+    hidden = (
+        "FIRECRAWL_SELFHOST_API_KEY",
+        "FIRECRAWL_SELFHOST_URL",
+        "FIRECRAWL_ROUTER_SIPB_KEY",
+        "FIRECRAWL_ROUTER_LITELLM_KEY",
+        "OPENALEX_API_KEY",
+        "FIRECRAWL_ROUTER_OPENALEX_KEY",
+    )
     env = {k: v for k, v in os.environ.items() if k not in hidden}
     env["FIRECRAWL_API_URL"] = router.public_base
     env["FIRECRAWL_API_KEY"] = token or "router-open"

@@ -812,7 +812,8 @@ class ChildEnvTest(unittest.TestCase):
         import tempfile
         from unittest import mock
         secrets_ = {"FIRECRAWL_SELFHOST_API_KEY": "gate-secret", "FIRECRAWL_ROUTER_SIPB_KEY": "sipb-secret",
-                    "FIRECRAWL_ROUTER_LITELLM_KEY": "litellm-secret"}
+                    "FIRECRAWL_ROUTER_LITELLM_KEY": "litellm-secret", "OPENALEX_API_KEY": "openalex-secret",
+                    "FIRECRAWL_ROUTER_OPENALEX_KEY": "openalex-secret-2"}
         env = {"FIRECRAWL_SELFHOST_URL": "http://127.0.0.1:9", "PATH": os.environ.get("PATH", ""), **secrets_}
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "env.json"
@@ -1442,6 +1443,15 @@ print(json.dumps({{"verdict": "enrolled", "mit": {{"class": "bad\\r\\nInjected: 
             }, "")
         self.assertIsNone(r.mit_bridge)
         self.assertIn("firecrawl_mit_bridge.py is missing", err.getvalue())
+
+        err2 = io.StringIO()
+        with unittest.mock.patch.object(fr, "_OA_FALLBACK_MOD", None), unittest.mock.patch.object(sys, "stderr", err2):
+            r2 = fr.build_router({
+                "FIRECRAWL_SELFHOST_URL": self.primary.base,
+                "FIRECRAWL_ROUTER_OA_FALLBACK": "allowlist",
+            }, "")
+        self.assertIsNone(r2.oa_fallback)
+        self.assertIn("firecrawl_oa_fallback.py is missing", err2.getvalue())
 
 
 if __name__ == "__main__":
