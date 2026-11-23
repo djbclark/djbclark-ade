@@ -135,7 +135,16 @@ def _load_sibling_module(name: str, filename: str):
         return None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001 - fail closed if sibling is missing/broken
+        sys.modules.pop(name, None)
+        print(
+            f"firecrawl-router: failed to load sibling {filename} ({type(exc).__name__}); failing closed",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
     return mod
 
 

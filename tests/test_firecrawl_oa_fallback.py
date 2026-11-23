@@ -393,6 +393,97 @@ class CandidateRankingTest(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(cands[0].host, "repo.unlisted-uni.example")
 
+    def test_f6_content_api_gating_and_f9_5_distinct_trusted_repo_same_institution(self):
+        # F6: omitted open_access.is_oa or omitted/false has_content.pdf MUST NOT enable content.openalex.org
+        for bad_work in (
+            {"content_urls": {"pdf": "https://content.openalex.org/works/W123.pdf"}},
+            {"open_access": {"is_oa": True}, "content_urls": {"pdf": "https://content.openalex.org/works/W123.pdf"}},
+            {"open_access": {"is_oa": True}, "has_content": {"pdf": False},
+             "content_urls": {"pdf": "https://content.openalex.org/works/W123.pdf"}},
+            {"open_access": {"is_oa": False}, "has_content": {"pdf": True},
+             "content_urls": {"pdf": "https://content.openalex.org/works/W123.pdf"}},
+        ):
+            cands, err = oa.rank_oa_candidates(bad_work, "dl.acm.org", content_api_allowed=True)
+            self.assertEqual((cands, err), ([], "not-oa"), bad_work)
+
+        # F9.5: direct.mit.edu -> dspace.mit.edu and pubmed.ncbi.nlm.nih.gov -> pmc.ncbi.nlm.nih.gov allowed
+        mit_work = {
+            "open_access": {"is_oa": True, "oa_status": "green"},
+            "locations": [
+                {
+                    "is_oa": True,
+                    "pdf_url": "https://direct.mit.edu/coli/article-pdf/123/paper.pdf",
+                    "version": "publishedVersion",
+                    "license": "cc-by",
+                    "source": {"display_name": "MIT Press", "type": "journal"},
+                },
+                {
+                    "is_oa": True,
+                    "pdf_url": "https://dspace.mit.edu/bitstream/handle/1721.1/12345/paper.pdf",
+                    "version": "acceptedVersion",
+                    "license": "cc-by",
+                    "source": {"display_name": "DSpace@MIT", "type": "repository"},
+                },
+                {
+                    "is_oa": True,
+                    "pdf_url": "https://internal.mit.edu/secret/paper.pdf",
+                    "version": "publishedVersion",
+                    "license": "cc-by",
+                    "source": {"display_name": "Internal MIT", "type": "repository"},
+                },
+            ],
+        }
+        cands, err = oa.rank_oa_candidates(mit_work, "direct.mit.edu", host_policy="pinned")
+        self.assertEqual(err, "")
+        self.assertEqual([c.host for c in cands], ["dspace.mit.edu"])
+
+        pmc_work = {
+            "open_access": {"is_oa": True, "oa_status": "green"},
+            "locations": [{
+                "is_oa": True,
+                "pdf_url": None,
+                "landing_page_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10823577/",
+                "version": "publishedVersion",
+                "license": "public-domain",
+                "source": {"display_name": "PMC", "type": "repository"},
+            }],
+        }
+        cands_pmc, err_pmc = oa.rank_oa_candidates(pmc_work, "pubmed.ncbi.nlm.nih.gov", host_policy="allowlist")
+        self.assertEqual(err_pmc, "")
+        self.assertEqual([c.host for c in cands_pmc], ["pmc.ncbi.nlm.nih.gov"])
+
+    def test_f1_path_traversal_blocked_on_ncbi_and_arxiv(self):
+        bad_ncbi_urls = (
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/../../entrez/eutils/efetch.fcgi",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/%2e%2e/%2e%2e/entrez",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/%2E%2E/pubmed/12345",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/./10823577",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/foo%2f..%2fbar",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/",
+        )
+        for u in bad_ncbi_urls:
+            with self.subTest(url=u):
+                self.assertFalse(oa._trusted_host_path_ok("www.ncbi.nlm.nih.gov", u))
+                self.assertFalse(oa._is_trusted_html_url("www.ncbi.nlm.nih.gov", u))
+                w = {
+                    "open_access": {"is_oa": True, "oa_status": "green"},
+                    "locations": [{"is_oa": True, "pdf_url": None, "landing_page_url": u, "version": "publishedVersion"}],
+                }
+                cands, _ = oa.rank_oa_candidates(w, "onlinelibrary.wiley.com", host_policy="allowlist")
+                self.assertEqual(cands, [])
+
+        bad_arxiv_html = (
+            "https://arxiv.org/html/../abs/2309.06180",
+            "https://arxiv.org/html/%2e%2e/abs/2309.06180",
+            "https://arxiv.org/html/./2309.06180",
+            "https://arxiv.org/html/",
+        )
+        for u in bad_arxiv_html:
+            with self.subTest(url=u):
+                self.assertFalse(oa._is_trusted_html_url("arxiv.org", u))
+        self.assertTrue(oa._is_trusted_html_url("arxiv.org", "https://arxiv.org/html/2309.06180v1"))
+        self.assertTrue(oa._trusted_host_path_ok("www.ncbi.nlm.nih.gov", "https://www.ncbi.nlm.nih.gov/pmc/articles/10823577"))
+
 
 class SsrfAndPinnedIpTest(unittest.TestCase):
     """Category 4: SSRF IP filtering, pinned connection, and redirect defenses."""
@@ -404,16 +495,25 @@ class SsrfAndPinnedIpTest(unittest.TestCase):
         blocked = [
             ["127.0.0.1"],
             ["::1"],
+            ["0.0.0.0"],
+            ["::"],
             ["10.0.0.1"],
             ["172.16.0.1"],
             ["192.168.1.5"],
             ["169.254.169.254"],
+            ["fe80::1%en0"],
+            ["fc00::1"],
+            ["fd12:3456:789a::1"],
+            ["224.0.0.1"],
+            ["ff02::1"],
             ["100.64.0.1"],
             ["100.127.255.254"],
             ["::ffff:127.0.0.1"],
             ["::ffff:100.64.0.5"],
+            ["::ffff:224.0.0.1"],
             ["64:ff9b::127.0.0.1"],
             ["64:ff9b::10.0.0.1"],
+            ["64:ff9b:1::1"],
             ["93.184.216.34", "127.0.0.1"],  # mixed global + private MUST be refused
         ]
         for ips in blocked:
@@ -489,6 +589,140 @@ class SsrfAndPinnedIpTest(unittest.TestCase):
             self.assertIsNone(body)
             self.assertEqual(err, "too-many-redirects")
             self.assertEqual(hop_n["n"], 6)
+
+    def test_f2_allowlist_no_parent_climb_r2_second_hop_and_pinned_hop1_ssrf(self):
+        with tempfile.TemporaryDirectory() as td:
+            # 1. Institutional repos MUST NOT climb to parent (dspace.mit.edu -> internal.mit.edu, dash.harvard.edu -> intranet.harvard.edu)
+            for start_url, start_host, target_loc in (
+                ("https://dspace.mit.edu/bitstream/1.pdf", "dspace.mit.edu", "https://internal.mit.edu/secret.pdf"),
+                ("https://dash.harvard.edu/bitstream/1.pdf", "dash.harvard.edu", "https://intranet.harvard.edu/secret.pdf"),
+            ):
+                with self.subTest(start=start_host, target=target_loc):
+                    c = oa.OaCandidate(start_url, start_host, True, "acceptedVersion", "cc-by", start_host, False, (5, 3, 1, 2, 1, 1))
+                    fb = oa.OaFallback(
+                        oa.OaFallbackConfig(mode="allowlist", secretspec_bin="", state_dir=td),
+                        log=io.StringIO(),
+                        conn_factory=_FakePinnedConnFactory(lambda rec, _loc=target_loc: (302, {"Location": _loc}, b"")),
+                        resolver=lambda h, p: "93.184.216.34",
+                    )
+                    body, _, _, err = fb._fetch_candidate(c, "dl.acm.org", time.monotonic() + 10)
+                    self.assertIsNone(body)
+                    self.assertEqual(err, "redirect-off-site")
+
+            # 2. content.openalex.org -> api.openalex.org refused; 2nd-hop R2 -> R2 refused
+            c_api = oa.OaCandidate(
+                "https://content.openalex.org/works/W4387321091.pdf", "content.openalex.org",
+                True, "publishedVersion", "cc-by", "OpenAlex Content Archive", True, (4, 2, 1, 3, 1, 1),
+            )
+            fb_api = oa.OaFallback(
+                oa.OaFallbackConfig(mode="allowlist", secretspec_bin="", state_dir=td),
+                log=io.StringIO(),
+                conn_factory=_FakePinnedConnFactory(lambda rec: (302, {"Location": "https://api.openalex.org/works/W1"}, b"")),
+                resolver=lambda h, p: "93.184.216.34",
+            )
+            self.assertEqual(fb_api._fetch_candidate(c_api, "dl.acm.org", time.monotonic() + 10)[3], "redirect-off-site")
+
+            def _r2_chain(rec):
+                if rec["host"] == "content.openalex.org":
+                    return (302, {"Location": "https://acct1.r2.cloudflarestorage.com/a.pdf"}, b"")
+                return (302, {"Location": "https://acct2.r2.cloudflarestorage.com/b.pdf"}, b"")
+            fb_r2 = oa.OaFallback(
+                oa.OaFallbackConfig(mode="allowlist", secretspec_bin="", state_dir=td),
+                log=io.StringIO(),
+                conn_factory=_FakePinnedConnFactory(_r2_chain),
+                resolver=lambda h, p: "93.184.216.34",
+            )
+            self.assertEqual(fb_r2._fetch_candidate(c_api, "dl.acm.org", time.monotonic() + 10)[3], "redirect-off-site")
+
+            # 3. www.ncbi.nlm.nih.gov/pmc/articles/... redirecting off prefix or via %2e%2e refused
+            c_ncbi = oa.OaCandidate(
+                "https://www.ncbi.nlm.nih.gov/pmc/articles/10823577", "www.ncbi.nlm.nih.gov",
+                False, "publishedVersion", "public-domain", "PMC", False, (3, 3, 0, 3, 1, 1),
+            )
+            for bad_loc in (
+                "https://www.ncbi.nlm.nih.gov/pubmed/10823577",
+                "https://www.ncbi.nlm.nih.gov/pmc/articles/%2e%2e/%2e%2e/entrez",
+            ):
+                fb_ncbi = oa.OaFallback(
+                    oa.OaFallbackConfig(mode="allowlist", secretspec_bin="", state_dir=td),
+                    log=io.StringIO(),
+                    conn_factory=_FakePinnedConnFactory(lambda rec, _loc=bad_loc: (302, {"Location": _loc}, b"")),
+                    resolver=lambda h, p: "93.184.216.34",
+                )
+                self.assertEqual(fb_ncbi._fetch_candidate(c_ncbi, "onlinelibrary.wiley.com", time.monotonic() + 10)[3], "allowlist-filtered")
+
+            # 4. Positive allowlist direct-subdomain redirect: zenodo.org -> files.zenodo.org allowed
+            c_zen = oa.OaCandidate(
+                "https://zenodo.org/records/123/files/paper.pdf", "zenodo.org",
+                True, "publishedVersion", "cc-by", "Zenodo", False, (6, 3, 1, 3, 1, 1),
+            )
+            def _zen_redir(rec):
+                if rec["host"] == "zenodo.org":
+                    return (302, {"Location": "https://files.zenodo.org/records/123/paper.pdf"}, b"")
+                return (200, {"Content-Type": "application/pdf"}, _valid_pdf_bytes())
+            fb_zen = oa.OaFallback(
+                oa.OaFallbackConfig(mode="allowlist", secretspec_bin="", state_dir=td),
+                log=io.StringIO(),
+                conn_factory=_FakePinnedConnFactory(_zen_redir),
+                resolver=lambda h, p: "93.184.216.34",
+            )
+            z_body, z_final, z_kind, z_err = fb_zen._fetch_candidate(c_zen, "dl.acm.org", time.monotonic() + 10)
+            self.assertEqual((z_kind, z_err, z_final), ("pdf", "", "https://files.zenodo.org/records/123/paper.pdf"))
+            self.assertIsNotNone(z_body)
+
+            # 5. pinned-mode hop-1 private IP refused and hop-1 publisher domain refused
+            c_pin = oa.OaCandidate(
+                "https://repo.example.org/paper.pdf", "repo.example.org",
+                True, "publishedVersion", "cc-by", "Repo", False, (0, 1, 1, 3, 1, 1),
+            )
+            fb_pin_ssrf = oa.OaFallback(
+                oa.OaFallbackConfig(mode="pinned", secretspec_bin="", state_dir=td),
+                log=io.StringIO(),
+                conn_factory=_FakePinnedConnFactory(lambda rec: (302, {"Location": "https://rebind.example.org/p.pdf"}, b"")),
+                resolver=lambda h, p: "93.184.216.34" if h == "repo.example.org" else None,
+            )
+            self.assertEqual(fb_pin_ssrf._fetch_candidate(c_pin, "dl.acm.org", time.monotonic() + 10)[3], "ssrf-blocked")
+
+            fb_pin_pub = oa.OaFallback(
+                oa.OaFallbackConfig(mode="pinned", secretspec_bin="", state_dir=td),
+                log=io.StringIO(),
+                conn_factory=_FakePinnedConnFactory(lambda rec: (302, {"Location": "https://dl.acm.org/doi/pdf/10.1145/1"}, b"")),
+                resolver=lambda h, p: "93.184.216.34",
+            )
+            self.assertEqual(fb_pin_pub._fetch_candidate(c_pin, "dl.acm.org", time.monotonic() + 10)[3], "redirect-publisher")
+
+    def test_f4_non_ascii_url_percent_encoded_and_ascii_safe(self):
+        seen_targets = []
+        def _ascii_enforcing_responder(rec):
+            # Enforce exact http.client ASCII putrequest encoding invariant!
+            rec["target"].encode("ascii")
+            seen_targets.append(rec["target"])
+            return (200, {"Content-Type": "application/pdf"}, _valid_pdf_bytes())
+
+        factory = _FakePinnedConnFactory(_ascii_enforcing_responder)
+        status, _, body, err = oa._pinned_https_request(
+            "https://hal.science/hal-01234567/document/résumé_über.pdf?q=naïve",
+            headers={"User-Agent": "firecrawl-router-oa/1.0"},
+            max_bytes=1024 * 1024,
+            deadline=time.monotonic() + 5,
+            conn_factory=factory,
+            resolver=lambda h, p: "93.184.216.34",
+        )
+        self.assertEqual((status, err), (200, ""))
+        self.assertIsNotNone(body)
+        self.assertEqual(seen_targets, ["/hal-01234567/document/r%C3%A9sum%C3%A9_%C3%BCber.pdf?q=na%C3%AFve"])
+
+        # Direct UnicodeEncodeError from connection layer returns url-refused (never uncaught)
+        factory_err = _FakePinnedConnFactory(lambda rec: UnicodeEncodeError("ascii", "x", 0, 1, "bad"))
+        status2, _, body2, err2 = oa._pinned_https_request(
+            "https://hal.science/doc.pdf",
+            headers={},
+            max_bytes=1024,
+            deadline=time.monotonic() + 5,
+            conn_factory=factory_err,
+            resolver=lambda h, p: "93.184.216.34",
+        )
+        self.assertEqual((status2, body2, err2), (0, None, "url-refused"))
 
 
 class OaFallbackEndToEndTest(unittest.TestCase):
@@ -998,6 +1232,196 @@ sys.stdout.write("OA_SECRET_TEST_KEY_12345\\n")
                 )
                 self.assertEqual(r2.returncode, 0, r2.stderr)
                 self.assertIn("firecrawl-router", r2.stdout)
+
+    def test_f3_router_starts_cleanly_when_mit_bridge_missing(self):
+        # Copy firecrawl-router + firecrawl_oa_fallback.py WITHOUT firecrawl_mit_bridge.py
+        iso_dir = self.root / "iso_bin"
+        iso_dir.mkdir(mode=0o700)
+        (iso_dir / "firecrawl-router").write_text((ROOT / "bin" / "firecrawl-router").read_text(encoding="utf-8"), encoding="utf-8")
+        (iso_dir / "firecrawl_oa_fallback.py").write_text((ROOT / "bin" / "firecrawl_oa_fallback.py").read_text(encoding="utf-8"), encoding="utf-8")
+        probe = (
+            "import importlib.machinery, importlib.util, sys; "
+            f"loader = importlib.machinery.SourceFileLoader('fr_iso', {str(iso_dir / 'firecrawl-router')!r}); "
+            "spec = importlib.util.spec_from_loader('fr_iso', loader); "
+            "mod = importlib.util.module_from_spec(spec); "
+            "sys.modules['fr_iso'] = mod; "
+            "loader.exec_module(mod); "
+            "assert mod._MIT_BRIDGE_MOD is None; "
+            "assert mod._OA_FALLBACK_MOD is None; "
+            "assert 'firecrawl_oa_fallback' not in sys.modules; "
+            "r = mod.build_router({'FIRECRAWL_SELFHOST_URL': 'http://127.0.0.1:9', 'FIRECRAWL_ROUTER_OA_FALLBACK': 'allowlist'}, ''); "
+            "assert r.mit_bridge is None and r.oa_fallback is None; "
+            "print('ISOLATED_OK')"
+        )
+        res = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, timeout=15, check=False)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "ISOLATED_OK")
+        self.assertIn("failed to load sibling firecrawl_oa_fallback.py (ImportError)", res.stderr)
+
+    def test_f8_streaming_caps_state_dir_symlink_converters_keystate_and_nits(self):
+        first = self._blocked_primary_reply(403)
+        # 1. Content-Length pre-check > 32 MiB rejected before reading chunks
+        def _resp_cl_big(rec):
+            if rec["host"] == "api.openalex.org":
+                return (200, {"Content-Type": "application/json"}, json.dumps(_acm_sosp_work()).encode())
+            return (200, {"Content-Type": "application/pdf", "Content-Length": str(oa.MAX_PDF_BYTES + 1)}, b"%PDF-1.7\n%%EOF\n")
+        inst_cl, _ = self._make_oa(_resp_cl_big)
+        self.assertEqual(
+            inst_cl.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply),
+            (None, None, "oa-too-large"),
+        )
+
+        # 2. Lied-about small Content-Length with >32 MiB chunked overflow rejected
+        def _resp_cl_lie(rec):
+            if rec["host"] == "api.openalex.org":
+                return (200, {"Content-Type": "application/json"}, json.dumps(_acm_sosp_work()).encode())
+            return (200, {"Content-Type": "application/pdf", "Content-Length": "100"}, [b"%PDF-1.7\n"] + [b"B" * (1024 * 1024)] * 33)
+        inst_lie, _ = self._make_oa(_resp_cl_lie)
+        self.assertEqual(
+            inst_lie.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply),
+            (None, None, "oa-too-large"),
+        )
+
+        # 3. >16 MiB HTML streaming abort
+        def _resp_html_big(rec):
+            if rec["host"] == "api.openalex.org":
+                return (200, {"Content-Type": "application/json"}, json.dumps(_wiley_pmc_work()).encode())
+            return (200, {"Content-Type": "text/html"}, [b"<html><body>"] + [b"X" * (1024 * 1024)] * 17)
+        inst_hb, _ = self._make_oa(_resp_html_big)
+        self.assertEqual(
+            inst_hb.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://onlinelibrary.wiley.com/doi/full/10.1002/14651858.cd001431.pub6"}).encode(), first, "403", fr.Reply),
+            (None, None, "oa-too-large"),
+        )
+
+        # 4. state_dir symlink refusal AND sweep_orphans() refuses to follow/delete run-* symlink
+        real_target = self.root / "outside_target"
+        real_target.mkdir(mode=0o700)
+        (real_target / "precious.txt").write_text("keep")
+        sym_state = self.root / "sym_state"
+        sym_state.symlink_to(real_target)
+        inst_sym, _ = self._make_oa(lambda rec: (200, {"Content-Type": "application/json"}, json.dumps(_acm_sosp_work()).encode()), state_dir=str(sym_state))
+        self.assertEqual(
+            inst_sym.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply),
+            (None, None, "state-dir-invalid"),
+        )
+        sweep_base = self.root / "sweep_sym"
+        sweep_base.mkdir(mode=0o700)
+        run_link = sweep_base / "run-symlink"
+        run_link.symlink_to(real_target)
+        inst_sw, _ = self._make_oa(lambda rec: (404, {}, b""), state_dir=str(sweep_base))
+        inst_sw.sweep_orphans(min_age_s=0.0)
+        self.assertTrue(real_target.exists())
+        self.assertTrue((real_target / "precious.txt").exists())
+
+        # 5. Converter abuse paths: >2 MiB stdout cap, timeout killpg, non-zero exit, missing binary
+        def _resp_acm(rec):
+            if rec["host"] == "api.openalex.org":
+                return (200, {"Content-Type": "application/json"}, json.dumps(_acm_sosp_work()).encode())
+            return (200, {"Content-Type": "application/pdf"}, _valid_pdf_bytes())
+
+        big_pdf = _write_exec(self.root / "big_pdftotext", f"#!{sys.executable}\nimport sys\nsys.stdout.write('A' * (3 * 1024 * 1024))\n")
+        inst_big_out, _ = self._make_oa(_resp_acm, pdftotext_bin=big_pdf)
+        r_bo, b_bo, _ = inst_big_out.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply)
+        self.assertEqual((r_bo.status, b_bo), (200, "oa-fallback"))
+        self.assertLessEqual(len(r_bo.json()["data"]["markdown"].encode("utf-8")), oa.MAX_MARKDOWN_BYTES)
+        self.assertIn("truncated to 2 MiB", r_bo.json()["data"]["warning"])
+
+        def _resp_pmc(rec):
+            if rec["host"] == "api.openalex.org":
+                return (200, {"Content-Type": "application/json"}, json.dumps(_wiley_pmc_work()).encode())
+            return (200, {"Content-Type": "text/html"}, b"<html><body><p>hi</p></body></html>")
+        big_pan = _write_exec(self.root / "big_pandoc", f"#!{sys.executable}\nimport sys\nsys.stdout.write('B' * (3 * 1024 * 1024))\n")
+        inst_big_pan, _ = self._make_oa(_resp_pmc, pandoc_bin=big_pan)
+        r_bp, b_bp, _ = inst_big_pan.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://onlinelibrary.wiley.com/doi/full/10.1002/14651858.cd001431.pub6"}).encode(), first, "403", fr.Reply)
+        self.assertEqual((r_bp.status, b_bp), (200, "oa-fallback"))
+        self.assertLessEqual(len(r_bp.json()["data"]["markdown"].encode("utf-8")), oa.MAX_MARKDOWN_BYTES)
+        self.assertIn("truncated to 2 MiB", r_bp.json()["data"]["warning"])
+
+        gpid_file = self.root / "oa_grandchild.pid"
+        hang_pdf = _write_exec(self.root / "hang_pdftotext", f"""#!{sys.executable}
+import subprocess, sys, time
+from pathlib import Path
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+Path({str(gpid_file)!r}).write_text(str(p.pid))
+time.sleep(30)
+""")
+        inst_to, _ = self._make_oa(_resp_acm, pdftotext_bin=hang_pdf, pdftotext_timeout=0.3)
+        self.assertEqual(
+            inst_to.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply),
+            (None, None, "pdftotext-timeout"),
+        )
+        if gpid_file.exists():
+            time.sleep(0.1)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(gpid_file.read_text()), 0)
+
+        fail_bin = _write_exec(self.root / "fail_conv", f"#!{sys.executable}\nimport sys; sys.exit(2)\n")
+        inst_pf, _ = self._make_oa(_resp_acm, pdftotext_bin=fail_bin)
+        self.assertEqual(inst_pf.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply), (None, None, "pdftotext-failed"))
+        inst_pm, _ = self._make_oa(_resp_acm, pdftotext_bin=str(self.root / "no_such_pdftotext"))
+        self.assertEqual(inst_pm.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply), (None, None, "pdftotext-missing"))
+        inst_panf, _ = self._make_oa(_resp_pmc, pandoc_bin=fail_bin)
+        self.assertEqual(inst_panf.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://onlinelibrary.wiley.com/doi/full/10.1002/14651858.cd001431.pub6"}).encode(), first, "403", fr.Reply), (None, None, "pandoc-failed"))
+        inst_panm, _ = self._make_oa(_resp_pmc, pandoc_bin=str(self.root / "no_such_pandoc"))
+        self.assertEqual(inst_panm.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://onlinelibrary.wiley.com/doi/full/10.1002/14651858.cd001431.pub6"}).encode(), first, "403", fr.Reply), (None, None, "pandoc-missing"))
+
+        # 6. mit-bridge returning (None, None, "primary-ok", True) with oa_fallback enabled -> OpenAlex NEVER called
+        class _PrimaryOkMitBridge:
+            enabled = True
+            log = io.StringIO()
+            _reply_cls = fr.Reply
+            def maybe_bridge(self, method, path, body, primary_reply, reason, rcls):
+                return None, None, "primary-ok", True
+        inst_never, f_never = self._make_oa(lambda rec: self.fail("should never hit OpenAlex"))
+        r_pok, fc_pok, _ = self._router(first, oa_inst=inst_never, mit_bridge=_PrimaryOkMitBridge())
+        with unittest.mock.patch.object(fr, "call", side_effect=fc_pok):
+            rep_pok, back_pok = r_pok.handle("POST", "/v2/scrape", {"Content-Type": "application/json"},
+                                             json.dumps({"url": "https://www.nature.com/articles/nature14539"}).encode())
+        self.assertEqual((rep_pok.status, back_pok), (200, "primary"))
+        self.assertEqual(f_never.calls, [])
+
+        # 7. KeyState & load_openalex_key failure paths + F7 401/403 keyless degradation & key clearing
+        calls = {"n": 0}
+        def _miss_loader():
+            calls["n"] += 1
+            return None
+        ks = oa.KeyState(_miss_loader, miss_cache_s=300.0)
+        self.assertIsNone(ks.get())
+        self.assertIsNone(ks.get())
+        self.assertEqual(calls["n"], 1)  # miss cached
+
+        rc1_ss = _write_exec(self.root / "ss_rc1", f"#!{sys.executable}\nimport sys; sys.exit(1)\n")
+        ws_ss = _write_exec(self.root / "ss_ws", f"#!{sys.executable}\nimport sys; sys.stdout.write('bad key with spaces\\n')\n")
+        self.assertIsNone(oa.load_openalex_key(rc1_ss, log=io.StringIO()))
+        self.assertIsNone(oa.load_openalex_key(ws_ss, log=io.StringIO()))
+        with unittest.mock.patch.object(oa.subprocess, "run", side_effect=subprocess.TimeoutExpired("ss", 15)):
+            self.assertIsNone(oa.load_openalex_key("/bin/true", log=io.StringIO()))
+
+        # F7: 401 and generic 403 degrade to keyless and clear cached key
+        for err_code in (401, 403):
+            with self.subTest(err_code=err_code):
+                seen = []
+                def _resp_auth(rec, _code=err_code):
+                    if rec["host"] == "api.openalex.org":
+                        seen.append(rec["headers"].get("Authorization"))
+                        if rec["headers"].get("Authorization"):
+                            return (_code, {"Content-Type": "application/json"}, b'{"error":"invalid_key"}')
+                        return (200, {"Content-Type": "application/json"}, json.dumps(_acm_sosp_work()).encode())
+                    return (200, {"Content-Type": "application/pdf"}, _valid_pdf_bytes())
+                inst_a, _ = self._make_oa(_resp_auth, secretspec_bin=self.secretspec_bin)
+                ra, ba, _ = inst_a.maybe_fallback("POST", "/v2/scrape", json.dumps({"url": "https://dl.acm.org/doi/pdf/10.1145/3600006.3613165"}).encode(), first, "403", fr.Reply)
+                self.assertEqual((ra.status, ba), (200, "oa-fallback"))
+                self.assertEqual(seen, ["Bearer OA_SECRET_TEST_KEY_12345", None])
+                self.assertIsNone(inst_a.key_state._key)  # key cleared for reload after cooldown
+
+        # 8. F9.1 pmid/pmcid validation, F9.2 oa-too-large doesn't trip breaker, F9.3 fallback sanitization
+        inst_nit, _ = self._make_oa(lambda rec: (200, {"Content-Type": "application/json", "Content-Length": str(oa.OPENALEX_MAX_BYTES + 1)}, b"{}"))
+        self.assertEqual(inst_nit.client.lookup_work("pmid", "../evil", time.monotonic() + 5), (None, "invalid-id"))
+        self.assertEqual(inst_nit.client.lookup_work("pmcid", "PMC12/evil", time.monotonic() + 5), (None, "invalid-id"))
+        self.assertEqual(inst_nit.client.lookup_work("doi", "10.1145/1.2", time.monotonic() + 5), (None, "oa-too-large"))
+        # Must NOT have tripped _openalex_breaker_until
+        self.assertEqual(inst_nit.client._openalex_breaker_until, 0.0)
+        self.assertEqual(oa._sanitize_text(None, fallback="bad\x00\x1bfallback"), "badfallback")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ import json
 import math
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import socket
@@ -155,6 +156,7 @@ MAX_COOLDOWN_S = 3600.0
 
 CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+NAT64_LOCAL_NET = ipaddress.ip_network("64:ff9b:1::/48")
 
 # Parity with fetch.py same_site() multi-tenant / ccTLD exclusions.
 SECOND_LEVEL_PARENTS = frozenset((
@@ -469,6 +471,17 @@ def same_publisher_domain(candidate_host: str, requested_host: str) -> bool:
     return _registrable_domain(candidate_host) == _registrable_domain(requested_host)
 
 
+def _is_excluded_publisher_host(candidate_host: str, requested_host: str) -> bool:
+    """Exclude failed host itself and same-publisher siblings, while allowing distinct vetted OA repos."""
+    if not candidate_host or not requested_host:
+        return False
+    if candidate_host == requested_host:
+        return True
+    if candidate_host in TRUSTED_OA_HOSTS:
+        return False
+    return same_publisher_domain(candidate_host, requested_host)
+
+
 def same_site(host: str, start_host: str, allowed: frozenset[str]) -> bool:
     """True if host is allowed, start_host, a subdomain of start_host, or a same-site sibling."""
     if host == start_host or host in allowed:
@@ -489,11 +502,37 @@ def _is_r2_storage_host(host: str) -> bool:
     return len(labels) >= 4 and all(bool(x) for x in labels)
 
 
+def _strict_path_prefix(path: str, prefix: str) -> bool:
+    """Enforce prefix confinement rejecting raw/unquoted dot-segments, backslashes, control chars, and encoded slashes/dots."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in path) or "\\" in path:
+        return False
+    low = path.lower()
+    if "%2f" in low or "%5c" in low or "%2e" in low:
+        return False
+    if any(seg in (".", "..") for seg in path.split("/")):
+        return False
+    unq = urllib.parse.unquote(path)
+    if any(ord(c) < 32 or ord(c) == 127 for c in unq) or "\\" in unq:
+        return False
+    if any(seg in (".", "..") for seg in unq.split("/")):
+        return False
+    norm_raw = posixpath.normpath(path)
+    norm_unq = posixpath.normpath(unq)
+    return (
+        norm_raw.startswith(prefix)
+        and len(norm_raw) > len(prefix)
+        and norm_unq.startswith(prefix)
+        and len(norm_unq) > len(prefix)
+    )
+
+
 def _trusted_host_path_ok(host: str, url: str) -> bool:
     """Enforce path restrictions for multi-purpose trusted hosts."""
     path = urllib.parse.urlsplit(url).path or ""
     if host == "www.ncbi.nlm.nih.gov":
-        return path.startswith("/pmc/articles/")
+        return _strict_path_prefix(path, "/pmc/articles/")
     if host == OPENALEX_CONTENT_HOST:
         return bool(CONTENT_API_PATH_RE.fullmatch(path))
     return True
@@ -504,9 +543,9 @@ def _is_trusted_html_url(host: str, url: str) -> bool:
         return False
     path = urllib.parse.urlsplit(url).path or ""
     if host == "www.ncbi.nlm.nih.gov":
-        return path.startswith("/pmc/articles/")
+        return _strict_path_prefix(path, "/pmc/articles/")
     if host == "arxiv.org":
-        return path.startswith("/html/")
+        return _strict_path_prefix(path, "/html/")
     return True
 
 
@@ -555,11 +594,19 @@ def _is_global_ip(addr: str) -> bool:
         return False
     mapped = getattr(ip, "ipv4_mapped", None)
     check = mapped or ip
-    if not check.is_global:
+    if (
+        not check.is_global
+        or check.is_multicast
+        or check.is_private
+        or check.is_loopback
+        or check.is_link_local
+        or check.is_reserved
+        or check.is_unspecified
+    ):
         return False
     if check.version == 4 and check in CGNAT_NET:
         return False
-    if check.version == 6 and check in NAT64_NET:
+    if check.version == 6 and (check in NAT64_NET or check in NAT64_LOCAL_NET):
         return False
     return True
 
@@ -678,9 +725,13 @@ def _pinned_https_request(
         return 0, {}, None, "ssrf-blocked"
 
     parts = urllib.parse.urlsplit(url)
-    target = parts.path or "/"
-    if parts.query:
-        target = f"{target}?{parts.query}"
+    try:
+        safe_path = urllib.parse.quote(parts.path or "/", safe="/:@!$&'()*+,;=-._~%")
+        safe_query = urllib.parse.quote(parts.query, safe="/?:@!$&'()*+,;=-._~%") if parts.query else ""
+        target = f"{safe_path}?{safe_query}" if safe_query else safe_path
+        target.encode("ascii")
+    except (UnicodeEncodeError, ValueError):
+        return 0, {}, None, "url-refused"
 
     conn = conn_factory(host, 443, pinned_ip=pinned_ip, timeout=min(FETCH_CONNECT_TIMEOUT_S, left))
     try:
@@ -691,6 +742,8 @@ def _pinned_https_request(
             return resp.status, resp_headers, b"", ""
         body, err = _read_bounded_response(resp, conn, max_bytes, deadline)
         return resp.status, resp_headers, body, err
+    except (UnicodeEncodeError, ValueError):
+        return 0, {}, None, "url-refused"
     except TimeoutError:
         return 0, {}, None, "fetch-timeout"
     except (OSError, http.client.HTTPException, ssl.SSLError):
@@ -758,6 +811,7 @@ class KeyState:
 
     def disable_for(self, seconds: float) -> None:
         with self._lock:
+            self._key = None
             self._disabled_until = max(self._disabled_until, time.monotonic() + max(0.0, seconds))
 
 
@@ -834,9 +888,8 @@ class OpenAlexClient:
 
     def record_content_api_status(self, status: int, headers: dict[str, str], body: bytes | None) -> None:
         self._update_rate_headers(headers)
-        if status == 403 and self.key_state is not None:
-            if body and b"key_not_activated" in body:
-                self.key_state.disable_for(KEY_403_COOLDOWN_S)
+        if status in (401, 403) and self.key_state is not None:
+            self.key_state.disable_for(KEY_403_COOLDOWN_S)
         elif status == 429:
             reason = self._parse_error_reason(body)
             if reason in ("daily_budget", "first_dollar", "not_enough_credits"):
@@ -890,8 +943,12 @@ class OpenAlexClient:
             encoded = urllib.parse.quote(value, safe="/.-")
             path_id = f"arxiv:{encoded}"
         elif kind == "pmid":
+            if not re.fullmatch(r"\d{5,10}", value, re.ASCII):
+                return None, "invalid-id"
             path_id = f"pmid:{value}"
         elif kind == "pmcid":
+            if not re.fullmatch(r"PMC\d{4,10}", value, re.ASCII):
+                return None, "invalid-id"
             path_id = f"pmcid:{value}"
         else:
             return None, "unsupported-id"
@@ -921,6 +978,8 @@ class OpenAlexClient:
             )
             self._update_rate_headers(resp_hdrs)
             if err:
+                if err == "oa-too-large":
+                    return None, "oa-too-large"
                 with self._lock:
                     self._openalex_breaker_until = time.monotonic() + OPENALEX_CIRCUIT_S
                 return None, "openalex-timeout" if err == "fetch-timeout" else f"openalex-{err}"
@@ -936,15 +995,12 @@ class OpenAlexClient:
                 return doc, ""
             if status == 404:
                 return None, "not-found"
-            if status == 403 and key and not retried_keyless:
-                reason = self._parse_error_reason(body)
-                if reason == "key_not_activated" or (body and b"key_not_activated" in body):
-                    if self.key_state is not None:
-                        self.key_state.disable_for(KEY_403_COOLDOWN_S)
-                    key = None
-                    retried_keyless = True
-                    continue
-                return None, "openalex-403"
+            if status in (401, 403) and key and not retried_keyless:
+                if self.key_state is not None:
+                    self.key_state.disable_for(KEY_403_COOLDOWN_S)
+                key = None
+                retried_keyless = True
+                continue
             if status == 429:
                 reason = self._parse_error_reason(body)
                 if reason in ("daily_budget", "first_dollar", "not_enough_credits"):
@@ -1043,11 +1099,13 @@ class OaCandidate:
 
 
 def _sanitize_text(val: object, fallback: str = "") -> str:
-    if not isinstance(val, str):
-        return fallback
-    cleaned = CONTROL_CHARS_RE.sub("", val)
-    cleaned = " ".join(cleaned.split())[:300]
-    return cleaned or fallback
+    if isinstance(val, str):
+        cleaned = " ".join(CONTROL_CHARS_RE.sub("", val).split())[:300]
+        if cleaned:
+            return cleaned
+    if isinstance(fallback, str) and fallback:
+        return " ".join(CONTROL_CHARS_RE.sub("", fallback).split())[:300]
+    return ""
 
 
 def _sanitize_version(val: object) -> str:
@@ -1111,7 +1169,8 @@ def rank_oa_candidates(
     has_content_obj = work.get("has_content") if isinstance(work.get("has_content"), dict) else {}
     has_content_pdf = (
         content_api_allowed
-        and has_content_obj.get("pdf") is not False
+        and has_content_obj.get("pdf") is True
+        and (oa_obj.get("is_oa") is True or bool(oa_locs))
         and isinstance(work.get("content_urls"), dict)
         and isinstance(work["content_urls"].get("pdf"), str)
     )
@@ -1147,7 +1206,7 @@ def rank_oa_candidates(
             return
         if raw_url in seen_urls:
             return
-        if same_publisher_domain(host, requested_host):
+        if _is_excluded_publisher_host(host, requested_host):
             return
         if host in BLOCKED_REDIRECTOR_HOSTS:
             return
@@ -1661,7 +1720,7 @@ class OaFallback:
                 return None, cur_url, "", "scheme-downgrade"
             if port != 443:
                 return None, cur_url, "", "port-refused"
-            if same_publisher_domain(host, requested_host):
+            if _is_excluded_publisher_host(host, requested_host):
                 return None, cur_url, "", "redirect-publisher"
             if host in BLOCKED_REDIRECTOR_HOSTS:
                 return None, cur_url, "", "redirect-blocked"
@@ -1676,10 +1735,15 @@ class OaFallback:
                         return None, cur_url, "", "allowlist-filtered"
             else:
                 if self.config.mode == "allowlist":
+                    # Never climb up to parent (e.g. dspace.mit.edu -> *.mit.edu).
                     allowed_redirect = (
-                        host in TRUSTED_OA_HOSTS
-                        or same_site(host, start_host, TRUSTED_OA_HOSTS)
-                        or (prev_host == OPENALEX_CONTENT_HOST and _is_r2_storage_host(host))
+                        (host in TRUSTED_OA_HOSTS and _trusted_host_path_ok(host, cur_url))
+                        or (
+                            start_host != OPENALEX_CONTENT_HOST
+                            and not _is_multi_tenant_parent(start_host)
+                            and (host == start_host or host.endswith("." + start_host))
+                        )
+                        or (cand.is_content_api and prev_host == OPENALEX_CONTENT_HOST and _is_r2_storage_host(host))
                     )
                     if not allowed_redirect:
                         return None, cur_url, "", "redirect-off-site"
