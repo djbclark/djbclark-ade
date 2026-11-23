@@ -976,6 +976,401 @@ def test_absolute_deep_glob_fails_closed_after_deferred_truncate(monkeypatch, tm
         hook.check_command(ck, "cat id_*")
 
 
+# ---- Quoted-delimiter heredoc glob skipping (2026-11-22) --------------------------------------------------------------
+def _markdown_with_bold_tokens(count: int = 40) -> str:
+    lines = ["# Report", ""]
+    for i in range(count):
+        lines.append("- **Section %d**: *item_%d* and **bold_%d** with *wild_%d* and **" % (i, i, i, i))
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("intro,term", [
+    ("cat > notes.md <<'EOF'", "EOF"),
+    ('cat > notes.md <<"EOF"', "EOF"),
+    ("cat > notes.md <<-'EOF'", "\tEOF"),
+    ('cat > notes.md <<-"EOF"', "\t\tEOF"),
+    (r"cat > notes.md <<\EOF", "EOF"),
+    (r"cat > notes.md <<E\OF", "EOF"),
+    ("cat > notes.md <<E'O'F", "EOF"),
+    ('cat > notes.md <<E"O"F', "EOF"),
+    ("cat > notes.md <<''EOF", "EOF"),
+    ("tee notes.md <<'EOF'", "EOF"),
+    ("gh pr comment 123 --body-file - <<'EOF'", "EOF"),
+    ("clip <<'EOF'", "EOF"),
+    ("pbcopy <<'EOF'", "EOF"),
+    ("python3 - <<'EOF'", "EOF"),
+])
+def test_quoted_heredoc_markdown_skips_glob_budget(monkeypatch, tmp_path, intro, term):
+    """Dozens of markdown **bold** / *italic* tokens inside a quoted-delimiter heredoc for a non-shell
+    command must not trigger GlobBudgetExceeded even under a tiny MAX_GLOB_SCAN budget."""
+    hook = load_hook()
+    for i in range(30):
+        (tmp_path / ("file%03d.txt" % i)).write_text("x\n")
+    ck = checker(hook, tmp_path)
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    cmd = "%s\n%s\n%s\n" % (intro, _markdown_with_bold_tokens(40), term)
+    assert hook.check_command(ck, cmd) is None
+    assert ck._scanned == 0   # zero filesystem glob walks for quoted heredoc body
+
+
+def test_quoted_heredoc_markdown_allowed_through_hook(env):
+    for i in range(30):
+        (env["proj"] / ("f%03d.txt" % i)).write_text("x\n")
+    cmd = "cat > notes.md <<'EOF'\n" + _markdown_with_bold_tokens(50) + "\nEOF\n"
+    rc, err = run(env, "Bash", {"command": cmd})
+    assert (rc, err) == (0, "")
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat > ~/.ssh/id_rsa <<'EOF'\nhello\nEOF\n",
+    "cat ~/.ssh/id_* <<'EOF'\nhello\nEOF\n",
+    "cat > .env <<'EOF'\n**bold**\nEOF\n",
+    "tee ~/.aws/credentials <<'EOF'\n**bold**\nEOF\n",
+])
+def test_quoted_heredoc_secret_in_header_still_denied(env, cmd):
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 - <<'EOF'\nopen('~/.ssh/id_rsa')\nEOF\n",
+    'python3 - <<\'EOF\'\nopen("~/.ssh/id_rsa")\nEOF\n',
+    "python3 - <<'EOF'\n# don't trip shlex\nopen('~/.ssh/id_rsa')\nEOF\n",
+    "cat > f.md <<'EOF'\nDon't forget open('~/.ssh/id_rsa')\nEOF\n",
+    "cat > f.md <<'EOF'\n~/.ssh/id_rsa\nEOF\n",
+    "cat > f.md <<'EOF'\n.env\nEOF\n",
+])
+def test_quoted_heredoc_literal_secret_in_body_still_denied(env, cmd):
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_quoted_heredoc_absolute_home_literal_secret_denied(env):
+    key = str(env["home"] / ".ssh" / "id_rsa")
+    cmd = "python3 - <<'EOF'\nopen('%s')\nEOF\n" % key
+    assert blocked(env, "Bash", {"command": cmd})
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "/bin/sh <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "/bin/bash -euo pipefail <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "zsh <<-'EOF'\n\tcat ~/.ssh/id_*\n\tEOF\n",
+    "dash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "ksh <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "fish <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "env bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "/usr/bin/env bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    'env -S "bash -e" <<\'EOF\'\ncat ~/.ssh/id_*\nEOF\n',
+    "sudo bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "sudo -u root /bin/sh <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "timeout 30 bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "<<'EOF' bash\ncat ~/.ssh/id_*\nEOF\n",
+    "0<<'EOF' /bin/sh\ncat ~/.ssh/id_*\nEOF\n",
+    "cat <<'EOF' | bash\ncat ~/.ssh/id_*\nEOF\n",
+    "cat <<'EOF' |& /bin/sh\ncat ~/.ssh/id_*\nEOF\n",
+    "cat <<'EOF' > >(bash)\ncat ~/.ssh/id_*\nEOF\n",
+    "tee >(bash) <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "cat <<'EOF' |\ncat ~/.ssh/id_*\nEOF\nbash\n",
+    "cat <<'EOF' |\ncat ~/.ssh/id_*\nEOF\n\n# comment\nbash\n",
+    "(cat <<'EOF') | bash\ncat ~/.ssh/id_*\nEOF\n",
+    "{ cat <<'EOF'; } | sh\ncat ~/.ssh/id_*\nEOF\n",
+    "source /dev/stdin <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    ". /dev/stdin <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    'eval "$(cat)" <<\'EOF\'\ncat ~/.ssh/id_*\nEOF\n',
+    "bash \\\n  <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    '"ba""sh" <<\'EOF\'\ncat ~/.ssh/id_*\nEOF\n',
+    "\\bash <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "S=bash; $S <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "exec <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "cat > /tmp/s.sh <<'EOF'\ncat ~/.ssh/id_*\nEOF\nbash /tmp/s.sh\n",
+    "cat > /tmp/s.sh <<'EOF'\ncat ~/.ssh/id_*\nEOF\nchmod +x /tmp/s.sh && /tmp/s.sh\n",
+    'F=/tmp/s.sh; cat > "${F}" <<\'EOF\'\ncat ~/.ssh/id_*\nEOF\nbash "$F"\n',
+])
+def test_quoted_heredoc_fed_to_shell_still_analyzes_globs(env, cmd):
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_quoted_heredoc_fed_to_shell_walks_cwd_star_glob(env):
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    assert blocked(env, "Bash", {"command": "bash <<'EOF'\ncat *\nEOF\n"})
+    assert not blocked(env, "Bash", {"command": "cat > notes.md <<'EOF'\n*bullet*\n*\nEOF\n"})
+
+
+def test_glob_after_quoted_heredoc_terminator_still_denied(env):
+    cmd = "cat > f.md <<'EOF'\n" + _markdown_with_bold_tokens(20) + "\nEOF\ncat ~/.ssh/id_*\n"
+    assert blocked(env, "Bash", {"command": cmd})
+
+
+def test_glob_same_line_after_quoted_heredoc_still_denied(env):
+    cmd = "cat > f.md <<'EOF' && cat ~/.ssh/id_*\n**bold**\nEOF\n"
+    assert blocked(env, "Bash", {"command": cmd})
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat <<EOF\n~/.ssh/id_*\nEOF\n",
+    "cat <<-EOF\n\t~/.ssh/id_*\n\tEOF\n",
+])
+def test_unquoted_heredoc_still_analyzes_globs(env, cmd):
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat > f.md <<'EOF'\n~/.ssh/id_*\n",
+    "cat > f.md <<-'EOF'\n~/.ssh/id_*\n    EOF\n",   # spaces do not terminate <<-
+    "cat > f.md <<''\n~/.ssh/id_*\n\n",              # empty delimiter fails closed
+    "cat > f.md <<$'EOF'\n~/.ssh/id_*\nEOF\n",       # $'...' delimiter fails closed
+])
+def test_unterminated_or_unparseable_heredoc_fails_closed(env, cmd):
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_tab_stripped_heredoc_spaces_vs_tabs(monkeypatch, tmp_path):
+    """<<-'EOF' strips only leading tabs, never spaces."""
+    hook = load_hook()
+    ck = checker(hook, tmp_path)
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    # Space-indented EOF inside body is NOT a terminator; real tab-indented EOF closes it.
+    cmd_ok = "cat > f.md <<-'EOF'\n\t**bold**\n    EOF\n\t**more**\n\tEOF\n"
+    assert hook.check_command(ck, cmd_ok) is None
+    assert ck._scanned == 0
+    # Space-indented EOF with no real terminator is unterminated -> fails closed and blocks secret glob.
+    cmd_bad = "cat > f.md <<-'EOF'\n\t**bold**\n    EOF\ncat %s/.ssh/id_*\n" % tmp_path
+    ck2 = checker(hook, tmp_path)
+    assert hook.check_command(ck2, cmd_bad) is not None
+
+
+def test_multiple_heredocs_on_one_line(env):
+    # One quoted (markdown) + one unquoted (secret glob) -> denied.
+    cmd_mixed = "cat <<'A' <<B\n**bold** **more**\nA\n~/.ssh/id_*\nB\n"
+    assert blocked(env, "Bash", {"command": cmd_mixed})
+    # Two quoted, both non-shell -> allowed.
+    cmd_both_quoted = "diff /dev/fd/3 /dev/fd/4 3<<'A' 4<<'B'\n**bold1**\nA\n**bold2**\nB\n"
+    assert not blocked(env, "Bash", {"command": cmd_both_quoted})
+    # Two quoted on same line, second fed to bash -> denied.
+    cmd_second_shell = "cat <<'A' && bash <<'B'\n**bold**\nA\ncat ~/.ssh/id_*\nB\n"
+    assert blocked(env, "Bash", {"command": cmd_second_shell})
+    # First quoted terminated, second unterminated -> fails closed -> denied.
+    cmd_second_unterm = "cat <<'A' <<'B'\n**bold**\nA\n~/.ssh/id_*\n"
+    assert blocked(env, "Bash", {"command": cmd_second_unterm})
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo \"<<'EOF'\" && cat ~/.ssh/id_*",
+    "echo \"<<'EOF'\"\ncat ~/.ssh/id_*\nEOF\n",
+    "echo '<<'\\''EOF'\\'''\ncat ~/.ssh/id_*\nEOF\n",
+    "# cat <<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "echo \\<<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "cat <<<'EOF'\ncat ~/.ssh/id_*\nEOF\n",
+    "echo ${x:-<<'EOF'}\ncat ~/.ssh/id_*\nEOF\n",
+    "echo $(cat <<'EOF')\ncat ~/.ssh/id_*\nEOF\n",
+    'echo "$(echo " <<\'EOF\' ")"\ncat ~/.ssh/id_*\nEOF\n',
+    'echo "$(case x in a) echo "<<\'EOF\'";; esac)"\ncat ~/.ssh/id_*\nEOF\n',
+])
+def test_fake_heredoc_introducers_do_not_hide_globs(env, cmd):
+    """Quoted, commented, escaped, here-string, or nested `<<'EOF'` must never swallow later commands."""
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+# ---- Adversary round 1 regression tests (H1-H5, M1) ------------------------------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    # H1.1: escaped `$` before `'` must not misclassify plain `'...'` as `$'...'`
+    "echo \\$'\\' <<'REAL'\n'\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+    # H1.2: escaped space / operator before `#` must not start a comment and drop `<<'REAL'`
+    "echo a\\ # <<'REAL'\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+    "echo \\;# <<'REAL'\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+    # H1.3: escaped `<` before `<<` must not drop `<<'REAL'`
+    "echo \\<<<'REAL'\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+    # H2.1: real heredoc inside `$(...)` containing `)` must fail closed
+    "x=$(cat <<'REAL'\n)\necho <<'FAKE'\nREAL\n)\ncat ~/.ssh/id_*\nFAKE\n",
+    # H2.2: `case` inside subshell `(` inside `$(...)` must fail closed
+    'echo "$( (case x in a) : ;; esac); echo " <<\'EOF\' " )"\ncat ~/.ssh/id_*\nEOF\n',
+    # H2.3: backtick backslash unescaping (`\\'`) must fail closed
+    "echo `echo \\\\' ` <<'REAL'\n'`\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+    # H2.4: single quote inside double-quoted `${...}` must fail closed
+    "echo \"${x:-'}\" <<'REAL'\n'}\"\necho <<'FAKE'\nREAL\ncat ~/.ssh/id_*\nFAKE\n",
+])
+def test_adversary_h1_h2_scanner_desync_bypasses_blocked(env, cmd):
+    """Adversary PR 951 H1 & H2: escaped lookbacks and nested construct desyncs must fail closed."""
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    # H3.1: multi-line subshell / brace piped to shell
+    "(\n  cat <<'EOF'\ncat *\nEOF\n) | bash\n",
+    "{\n  cat <<'EOF'\ncat *\nEOF\n} | bash\n",
+    # H3.2: single-line case inside subshell piped to shell
+    "(case a in a) cat <<'EOF' ;; esac) | bash\ncat *\nEOF\n",
+    # H3.3: compound-command redirections
+    "if true; then bash; fi <<'EOF'\ncat *\nEOF\n",
+    "for x in 1; do bash; done <<'EOF'\ncat *\nEOF\n",
+    "while IFS= read -r l; do eval \"$l\"; done <<'EOF'\ncat *\nEOF\n",
+    "case 1 in 1) bash;; esac <<'EOF'\ncat *\nEOF\n",
+    # H3.4: exec FD heredoc with a second redirection
+    "exec 3<<'EOF' 4>/dev/null\ncat *\nEOF\nbash <&3\n",
+    # H3.5: glued env -S flag
+    "env -S'bash -s' ignored <<'EOF'\ncat *\nEOF\n",
+    # H3.6: shell functions, aliases, zsh repeat, pre-opened FD to process-sub, make -f -
+    "f() { bash; }; f <<'EOF'\ncat *\nEOF\n",
+    "f() {\n  cat <<'EOF'\ncat *\nEOF\n}\nf | bash\n",
+    "shopt -s expand_aliases 2>/dev/null; alias r=bash\nr <<'EOF'\ncat *\nEOF\n",
+    "repeat 1 bash <<'EOF'\ncat *\nEOF\n",
+    "exec 3> >(bash); cat <<'EOF' >&3\ncat *\nEOF\nexec 3>&-; wait\n",
+    "make -s -f - <<'EOF'\nall:\n\t@cat *\nEOF\n",
+    # H3.7: write-then-execute bypasses
+    "cat > s.sh <<'EOF'\ncat *\nEOF\ncat s.sh | bash\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\neval \"$(cat s.sh)\"\n",
+    "dd of=s.sh 2>/dev/null <<'EOF'\ncat *\nEOF\nbash s.sh\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\ncp s.sh s2.sh && bash s2.sh\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\nchmod +x s.sh && env s.sh\n",
+    "mkfifo p; bash < p &\ncat > p <<'EOF'\ncat *\nEOF\nwait\n",
+    # Inline-code flags on allowlisted interpreters / non-allowlisted runners
+    "python3 -c 'import subprocess,sys; subprocess.run([\"bash\"], stdin=sys.stdin)' <<'EOF'\ncat *\nEOF\n",
+    "awk '{system($0)}' <<'EOF'\ncat *\nEOF\n",
+    "perl -e 'system $_ while <>' <<'EOF'\ncat *\nEOF\n",
+    "git -c core.pager=bash status <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\npython3 -c 'import subprocess; subprocess.run([\"bash\", \"s.sh\"])'\n",
+])
+def test_adversary_h3_allowlist_and_outside_checks_block_cwd_star(env, cmd):
+    """Adversary PR 951 H3: every compound/exec/wrapper/function/alias/indirect bypass must fail closed
+    to full filesystem glob walking (proven using cwd `cat *` beside `server.key`, which pattern-only cannot see)."""
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 - <<'EOF'\nimport glob, os; print(glob.glob(os.path.expanduser('~/.ssh/id_*')))\nEOF\n",
+    "python3 - <<'EOF'\nimport glob; print(glob.glob('*.key'))\nEOF\n",
+    "python3 - <<'EOF'\nimport glob; print(glob.glob('.env*'))\nEOF\n",
+    "cat > notes.md <<'EOF'\n~/.ssh/id_*\nEOF\n",
+    "cat > notes.md <<'EOF'\n*.key\nEOF\n",
+    "cat > notes.md <<'EOF'\n.env*\nEOF\n",
+])
+def test_adversary_h5_pattern_only_blocks_explicit_secret_globs_in_quoted_bodies(env, cmd):
+    """Adversary PR 951 H5: glob_pattern_only still runs on allowlisted quoted heredoc bodies (zero fs scans)."""
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_adversary_h5_body_pattern_only_does_not_poison_outside_walk_cache(env):
+    """Checking `*` with pattern-only inside a quoted heredoc body must not cache `None` in `ck._words`
+    and bypass the filesystem walk for `cat *` after the heredoc."""
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    cmd = "cat > notes.md <<'EOF'\n*\nEOF\ncat *\n"
+    assert blocked(env, "Bash", {"command": cmd})
+
+
+def test_adversary_h4_linear_backslash_continuations_and_timeout_fails_closed(monkeypatch, tmp_path):
+    """Adversary PR 951 H4: 30,000 backslash-continued lines must run in O(N) (no O(N^2) blowup),
+    and an OutOfTime inside split_quoted_heredocs must raise GlobBudgetExceeded (fail closed, never fail open)."""
+    hook = load_hook()
+    ck = checker(hook, tmp_path)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    # 30,000 backslash-continued lines: split_quoted_heredocs must complete linearly in well under 2 s (was 27.8 s).
+    huge = ("echo a \\\n" * 30000) + "ok # <<\ncat %s/.ssh/id_*\n" % tmp_path
+    t0 = time.monotonic()
+    full_text, lit_bodies = hook.split_quoted_heredocs(huge)
+    assert time.monotonic() - t0 < 2.0
+    assert lit_bodies == [] and full_text == huge
+    # End-to-end check_command with 5,000 backslash-continued lines + trailing secret glob: fast and blocks.
+    cmd = ("echo \\\n" * 5000) + "ok # <<\ncat %s/.ssh/id_*\n" % tmp_path
+    t0 = time.monotonic()
+    found = hook.check_command(ck, cmd)
+    assert found and found[0] == "~/.ssh/**", found
+    assert time.monotonic() - t0 < 2.0
+    # Forced OutOfTime inside split_quoted_heredocs must fail closed (GlobBudgetExceeded), never fail open.
+    hook._DEADLINE[0] = time.monotonic() - 1.0
+    with pytest.raises(hook.GlobBudgetExceeded):
+        hook.check_command(checker(hook, tmp_path), "cat > notes.md <<'EOF'\n**bold**\nEOF\n")
+
+
+def test_adversary_m1_unclosed_stack_at_eof_and_many_heredocs_linear(tmp_path):
+    """Adversary PR 951 M1: unclosed quote/group at EOF fails closed on earlier heredocs;
+    many file-writing heredocs scale linearly (single pass over outside lines)."""
+    hook = load_hook()
+    (tmp_path / "server.key").write_text("PRIVATE\n")
+    ck = hook.Checker(
+        hook.Policy(["*.key"], [], homes=[str(tmp_path)], fold=False),
+        str(tmp_path),
+    )
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    # Earlier quoted heredoc contains `*`, later line has an unclosed quote -> fails closed -> walks `*` -> blocks.
+    cmd_unclosed = "cat > notes.md <<'EOF'\n*\nEOF\necho \"unclosed\n"
+    found = hook.check_command(ck, cmd_unclosed)
+    assert found and found[0] == "*.key", found
+    # 500 file-writing heredocs: must complete quickly in O(N + M) without O(M^2) slowdown.
+    many = "".join("cat > f%d.md <<'EOF'\n**bold_%d**\nEOF\n" % (i, i) for i in range(500))
+    ck2 = checker(hook, tmp_path)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    t0 = time.monotonic()
+    assert hook.check_command(ck2, many) is None
+    assert time.monotonic() - t0 < 2.0
+    assert ck2._scanned == 0
+
+
+# ---- Adversary round 2 regression tests (R2-H1, R2-H2, R2-H3, R2-L1) -----------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    # R2-H1: heredoc delimiter ending in `<` (`<<\<`) must not merge with adjacent `<<'REAL'`
+    "cat >/dev/null <<\\<<<'REAL'\n<\ncat >/dev/null <<'true'\nREAL\ncat *\ntrue\n",
+    # R2-H2: `$((case ...))` / `((...))` inside quotes must fail closed
+    'cat >/dev/null "$((case a in a) : ;; esac); cat " <<\'true\' " )"\ncat *\ntrue\n',
+    # R2-H3: double-quoted `$(...)` command substitutions in outside lines
+    "cat > s1.sh <<'EOF'\ncat *\nEOF\necho \"$(bash s1.sh)\"\n",
+    "cat > s2.sh <<'EOF'\ncat *\nEOF\nX=\"$(bash s2.sh)\"\necho \"$X\"\n",
+    "cat > s7.sh <<'EOF'\ncat *\nEOF\ncat <<< \"$(sh s7.sh)\"\n",
+    "cat > s17.sh <<'EOF'\ncat *\nEOF\nprintf '%s\\n' \"$(bash s17.sh)\"\n",
+    "cat > s20.sh <<'EOF'\ncat *\nEOF\necho \"${x:-$(bash s20.sh)}\"\n",
+    # R2-H3: non-allowlisted outside commands (`install`, `ln`, `osascript`, `rbash`, script execution)
+    "cat > s3.sh <<'EOF'\n#!/bin/sh\ncat *\nEOF\ninstall -m 755 s3.sh run3.sh && run3.sh\n",
+    "cat > s14.sh <<'EOF'\ncat *\nEOF\nln -sf /bin/sh mysh && mysh s14.sh\n",
+    "cat > s5.scpt <<'EOF'\ndo shell script \"cat \" & \"*\"\nEOF\nosascript s5.scpt\n",
+    "rbash <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\nrbash s.sh\n",
+    "cat > s.py <<'EOF'\nimport glob; print(glob.glob('*'))\nEOF\npython3 s.py\n",
+    # R2-H3: path spoofing (`./cat`, `/tmp/cat` outside SAFE_BIN_DIRS)
+    "./cat <<'EOF'\ncat *\nEOF\n",
+    "/tmp/cat <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\n./cat s.sh\n",
+    # R2-L1: attached `git -c<key>=<val>` form
+    "git -calias.x='!sh' status <<'EOF'\ncat *\nEOF\n",
+    "cat > s.sh <<'EOF'\ncat *\nEOF\ngit -ccore.pager=sh status\n",
+])
+def test_adversary_r2_h1_h2_h3_l1_bypasses_blocked(env, cmd):
+    """Adversary PR 951 Round 2: delimiter-end `<`, `$((case ...))`, double-quoted `$(...)`, non-allowlisted
+    outside commands (`install`, `ln`, `osascript`, `rbash`, `python3 s.py`), path spoofing (`./cat`, `/tmp/cat`),
+    and attached `git -c...` must all fail closed to full filesystem glob analysis."""
+    (env["proj"] / "server.key").write_text("PRIVATE\n")
+    assert blocked(env, "Bash", {"command": cmd}), cmd
+
+
+def test_adversary_r2_osascript_and_allowlist_paths_fail_closed():
+    """Verify exact osascript repro fails closed in split_quoted_heredocs and path spoofing is rejected."""
+    hook = load_hook()
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    osa = "cat > s5.scpt <<'EOF'\ndo shell script \"cat *\"\nEOF\nosascript s5.scpt\n"
+    assert hook.split_quoted_heredocs(osa) == (osa, [])
+    for h, want in [
+        ("cat", True), ("/bin/cat", True), ("/usr/bin/cat", True),
+        ("/opt/homebrew/bin/gh", True), ("/usr/local/bin/jq", True),
+        ("./cat", False), ("/tmp/cat", False), ("/bin/./cat", False),
+        ("/bin/../tmp/cat", False), ("/bin//cat", False), ("/bin/bash", False),
+        ("rbash", False), ("install", False), ("ln", False), ("osascript", False),
+    ]:
+        assert hook._is_allowlisted_cmd(h, hook.SAFE_OUTSIDE_CMDS) is want, h
+
+
+def test_adversary_r2_safe_bin_dir_path_still_allowed(monkeypatch, tmp_path):
+    """Allowlisted commands invoked via SAFE_BIN_DIRS (`/bin/cat`, `/usr/bin/tee`) still skip fs walks."""
+    hook = load_hook()
+    for i in range(30):
+        (tmp_path / ("f%03d.txt" % i)).write_text("x\n")
+    ck = checker(hook, tmp_path)
+    monkeypatch.setattr(hook, "MAX_GLOB_SCAN", 5)
+    hook._DEADLINE[0] = time.monotonic() + 5.0
+    cmd = "/bin/cat > notes.md <<'EOF'\n" + _markdown_with_bold_tokens(40) + "\nEOF\n/bin/echo ok\n"
+    assert hook.check_command(ck, cmd) is None
+    assert ck._scanned == 0
+
+
 # ---- Codex payloads ---------------------------------------------------------------------------------------------------
 def patch(*headers, body="+x\n"):
     return "*** Begin Patch\n" + "".join("%s\n%s" % (h, body) for h in headers) + "*** End Patch\n"
