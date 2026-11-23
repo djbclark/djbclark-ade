@@ -3222,7 +3222,8 @@ def test_cross_provider_accept_verifies_target_mode_provider_model_and_thinking(
     ' antigravity/gemini-4-neon', 'antigravity/gemini-4-neon ',
     'antigravity/gemini 4', 'antigravity/gemini\n4', 'antigravity/gemini\x004',
     'antigravity/gemini-*', 'antigravity/gemini-?', 'antigravity/gemini-[4]',
-    '-claude/opus', 'claude/-opus', 'claude/opus;rm', 42,
+    '-claude/opus', 'claude/-opus', 'claude/opus;rm',
+    'Antigravity/gemini-4-neon', 'Claude/claude-opus-5-5', 'CODEX/gpt-6-astra', 42,
 ])
 def test_invalid_provider_flag_refused_before_any_native_call(setup, bad):
     service, native, checkpoint = _cross_setup(setup)
@@ -3239,13 +3240,59 @@ def test_provider_and_route_kind_are_mutually_exclusive(setup):
     assert native.calls == [] and native.created == 0
 
 
-@pytest.mark.parametrize('retired', ['opencode/x', 'omp/x', 'crush/x', 'agy/x', 'grok/x'])
+@pytest.mark.parametrize('retired', [
+    'opencode/x', 'omp/x', 'crush/x', 'agy/x', 'grok/x',
+    'OpenCode/x', 'OPENCODE/x', 'AGY/gemini-4-neon', 'OMP/x', 'Grok/x', 'Crush/x',
+])
 @pytest.mark.parametrize('mode', [None, 'plan'])
 def test_retired_provider_refused_before_any_native_call(setup, retired, mode):
     service, native, checkpoint = _cross_setup(setup)
     with pytest.raises(ss.SessionError, match='retired provider'):
         service.handoff(checkpoint, quiesced=True, requested_provider=retired, requested_mode=mode)
     assert native.calls == [] and native.created == 0
+
+
+@pytest.mark.parametrize('placeholder', ['-', ' - ', ',', ' , ', '-,-'])
+@pytest.mark.parametrize('mode', [None, 'plan'])
+def test_placeholder_label_modes_refused_for_cross_provider_handoff(setup, placeholder, mode):
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    for row in providers:
+        if row['provider'] == 'antigravity':
+            row['modes'] = placeholder
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode=mode)
+    assert native.created == 0
+
+
+@pytest.mark.parametrize('bad_modes', [
+    [{'id': 'plan'}, {'id': 'plan'}],
+    [{'id': 'plan'}, 'bad'],
+    [{'id': 'plan'}, {'id': ''}],
+])
+def test_malformed_or_duplicate_target_structured_modes_refused_even_for_restrictive_mode(setup, bad_modes):
+    providers = [
+        {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available', 'modes': [{'id': 'bypassPermissions'}]},
+        {'provider': 'antigravity', 'enabled': 'Enabled', 'status': 'available', 'modes': bad_modes},
+    ]
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode='plan')
+    assert native.created == 0
+
+
+@pytest.mark.parametrize('catalog_kind', ['display-labels', 'structured'])
+@pytest.mark.parametrize('bad_mode', ['', 'auto', 'foo', 'full-access'])
+def test_non_restrictive_requested_mode_refused_uniformly_on_cross_provider_handoff(setup, catalog_kind, bad_mode):
+    providers = copy.deepcopy(LIVE_PROVIDERS)
+    if catalog_kind == 'structured':
+        for row in providers:
+            if row['provider'] == 'antigravity':
+                row['modes'] = [{'id': 'default'}, {'id': 'auto'}, {'id': 'plan'}, {'id': 'full-access'}]
+    service, native, checkpoint = _cross_setup(setup, providers=providers)
+    with pytest.raises(ss.SessionError, match='supported unattended'):
+        service.handoff(checkpoint, quiesced=True, requested_provider='antigravity/gemini-4-neon', requested_mode=bad_mode)
+    assert native.created == 0
 
 
 @pytest.mark.parametrize('target', ['pi/test-model', 'cursor/composer-2.5', 'hermes/hermes-4'])

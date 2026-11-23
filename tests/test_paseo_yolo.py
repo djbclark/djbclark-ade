@@ -91,8 +91,37 @@ def test_plan_launch_config_refuses_modeless_unsupported_and_retired(provider, m
     assert y.plan_launch_config(provider, row, requested='plan')['status'] == 'unavailable'
 
 
-@pytest.mark.parametrize('retired', sorted(y.RETIRED_PROVIDERS))
-def test_retired_providers_refused_even_with_restrictive_mode(retired):
-    assert y.plan_unattended_config(retired, catalog(retired, ['plan']), requested='plan')['status'] == 'unavailable'
+@pytest.mark.parametrize('retired', sorted(y.RETIRED_PROVIDERS) + ['OpenCode', 'OPENCODE', 'AGY', 'OMP', 'Grok', 'Crush'])
+@pytest.mark.parametrize('requested', [None, 'plan'])
+def test_retired_providers_refused_even_with_restrictive_mode_and_any_case(retired, requested):
+    assert y.plan_unattended_config(retired, catalog(retired, ['plan']), requested=requested)['status'] == 'unavailable'
+    assert y.plan_launch_config(retired, catalog(retired, ['plan']), requested=requested)['status'] == 'unavailable'
     with pytest.raises(y.ModeUnavailable):
-        y.resolve_launch_mode(retired, requested='plan')
+        y.resolve_launch_mode(f'{retired}/x', requested=requested)
+
+
+@pytest.mark.parametrize('placeholder', ['', '   ', '-', ' - ', ',', ' , ', '-,-', ' -, - '])
+@pytest.mark.parametrize('requested', [None, 'plan'])
+def test_plan_launch_config_refuses_placeholder_or_punctuation_label_strings(placeholder, requested):
+    row = {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available', 'modes': placeholder}
+    assert y.plan_launch_config('claude', row, requested=requested)['status'] == 'unavailable'
+
+
+@pytest.mark.parametrize('bad_modes', [
+    [{'id': 'plan'}, {'id': 'plan'}],
+    [{'id': 'plan'}, 'bad'],
+    [{'id': 'plan'}, {'id': ''}],
+    [{'id': 'plan'}, {'label': 'Plan'}],
+])
+def test_plan_launch_config_refuses_malformed_or_duplicate_structured_catalog_even_when_exempt(bad_modes):
+    row = {'provider': 'claude', 'enabled': True, 'status': 'ready', 'modes': bad_modes}
+    assert y.plan_launch_config('claude', row, requested='plan')['status'] == 'unavailable'
+
+
+@pytest.mark.parametrize('bad_requested', ['', 'auto', 'foo', 'bypassPermissions', 'full-access'])
+def test_plan_launch_config_rejects_non_restrictive_requested_uniformly(bad_requested):
+    structured = catalog('claude', ['bypassPermissions', 'auto', 'plan'])
+    labels = {'provider': 'claude', 'enabled': 'Enabled', 'status': 'available', 'modes': 'Auto, Plan, Bypass'}
+    for row in (structured, labels):
+        plan = y.plan_launch_config('claude', row, requested=bad_requested)
+        assert plan['status'] == 'unavailable' and plan['reason'] == 'unsupported requested mode'

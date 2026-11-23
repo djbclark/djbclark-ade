@@ -86,19 +86,21 @@ Claude Opus to Antigravity Gemini 4 Neon: `--provider antigravity/gemini-4-neon`
 pass `--provider PROVIDER/MODEL` instead of falling back to manual C1 so the
 transaction record, `ade_send_guard` redirect, claim rebind, `supervisor/lead`
 repoint and `RETIRED` rename all run automatically. Validation runs before any
-native call: `--provider` must split cleanly on a single `/` into non-empty
-concrete `provider` and `model` (no whitespace, control characters, wildcards,
-leading hyphens or `default` model), is mutually exclusive with `--route-kind`,
-and rejects retired providers (`paseo_yolo.RETIRED_PROVIDERS`). Mode planning
+native call: `--provider` must split cleanly on a single `/` into a lowercase
+concrete `provider` and non-empty concrete `model` (no whitespace, control
+characters, wildcards, leading hyphens or `default` model), is mutually
+exclusive with `--route-kind`, and rejects retired providers case-insensitively
+(`paseo_yolo.RETIRED_PROVIDERS`). Mode planning
 evaluates the **target** provider's own `paseo provider ls --json` entry via
 `paseo_yolo.plan_launch_config` (never the predecessor's `AvailableModes`):
-structured mode lists are checked for exact membership before launch (including
-restrictive `--mode` requests), empty/modeless catalogs (`pi`, `go`) stay
-fail-closed (they remain on `--route-kind` / `appoint`), and live `provider ls`
-entries that expose display labels only admit providers in
-`paseo_yolo.YOLO_MODE_BY_PROVIDER` (`claude`, `codex`, `antigravity`, `copilot`)
-with exact native `AvailableModes` + `Mode` readback verified by `accept` and
-`finish`. A duplicate `handoff` call with a different `--provider` is refused
+structured mode lists validate all entries (unique non-empty `id` strings) and
+check exact membership before launch (including restrictive `--mode` requests),
+empty/placeholder/modeless catalogs (`""`, `"-"`, `","`, `[]`; e.g. `pi`, `go`)
+stay fail-closed (they remain on `--route-kind` / `appoint`), and live
+`provider ls` entries that expose non-placeholder display labels only admit
+providers in `paseo_yolo.YOLO_MODE_BY_PROVIDER` (`claude`, `codex`,
+`antigravity`, `copilot`) with exact native `AvailableModes` + `Mode` readback
+verified by `accept` and `finish`. A duplicate `handoff` call with a different `--provider` is refused
 (unless replacing a terminal `creation-refused` record after confirming no
 labelled agent exists). When `--provider` overrides the predecessor's provider or
 model, the record stays `schema_version: 1` and adds `predecessor_provider`,

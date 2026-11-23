@@ -209,10 +209,10 @@ def _paseo_yolo():
     return paseo_yolo
 
 
-# Concrete `PROVIDER/MODEL` for `--provider` (2026-11-23): single `/`, no whitespace/control chars,
-# no wildcards, no leading `-`, concrete non-default model. Retired providers are rejected via
-# `paseo_yolo.RETIRED_PROVIDERS` before any native call.
-PROVIDER_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+# Concrete `PROVIDER/MODEL` for `--provider` (2026-11-23): single `/`, lowercase provider ID,
+# no whitespace/control chars, no wildcards, no leading `-`, concrete non-default model.
+# Retired providers are rejected case-insensitively via `paseo_yolo.RETIRED_PROVIDERS` before any native call.
+PROVIDER_RE = re.compile(r'[a-z0-9][a-z0-9_.-]{0,63}')
 MODEL_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}')
 
 
@@ -221,11 +221,12 @@ def provider_model_ident(value: str) -> tuple[str, str]:
             or value.count('/') != 1):
         raise SessionError('a concrete PROVIDER/MODEL (single /, no whitespace or control characters) is required')
     provider, model = value.split('/', 1)
-    if (PROVIDER_RE.fullmatch(provider) is None or MODEL_RE.fullmatch(model) is None
-            or model.lower() == 'default' or model in ('', '-')):
-        raise SessionError('a concrete PROVIDER/MODEL (no wildcards, leading hyphens or default model) is required')
-    if provider in _paseo_yolo().RETIRED_PROVIDERS:
+    if MODEL_RE.fullmatch(model) is None or model.lower() == 'default' or model in ('', '-'):
+        raise SessionError('a concrete PROVIDER/MODEL (lowercase provider, no wildcards, leading hyphens or default model) is required')
+    if provider.lower() in _paseo_yolo().RETIRED_PROVIDERS:
         raise SessionError(f'retired provider {provider!r} is not supported for handoff')
+    if PROVIDER_RE.fullmatch(provider) is None:
+        raise SessionError('a concrete PROVIDER/MODEL (lowercase provider, no wildcards, leading hyphens or default model) is required')
     return provider, model
 
 
@@ -511,7 +512,10 @@ class Service:
         plan = planner(provider, catalog, requested=requested)
         modes = catalog.get('modes')
         has_exact_modes = isinstance(modes, list)
-        has_label_modes = (not same_provider and isinstance(modes, str) and bool(modes.strip()))
+        has_label_modes = (
+            not same_provider and isinstance(modes, str)
+            and any(part.strip() not in ('', '-') for part in modes.split(','))
+        )
         if (plan.get('status') not in ('ready', 'exempt') or not plan.get('mode_id')
                 or plan.get('provider_options')
                 or plan.get('provider') not in (None, provider)
