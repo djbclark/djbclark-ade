@@ -1026,6 +1026,13 @@ def _has_recursive_flag(args: List[str]) -> bool:
     return False
 
 
+_CLEAN_REQUIRE_FORCE_OFF = frozenset({
+    "clean.requireforce=false", "clean.requireforce=0",
+    "clean.requireforce=no", "clean.requireforce=off", "clean.requireforce=",
+})
+_PARALLEL_SPLIT_RE = re.compile(r"(&&|\|\||[;|&])")
+
+
 def _is_git_clean(args: List[str]) -> bool:
     """True when a git argument list invokes a forced `git clean` (or disables `clean.requireForce`)."""
     k, sub, force_cfg = 0, None, False
@@ -1034,9 +1041,13 @@ def _is_git_clean(args: List[str]) -> bool:
         if a in ("-C", "--work-tree", "--git-dir", "--namespace") and k + 1 < len(args):
             k += 2
         elif a == "-c" and k + 1 < len(args):
-            if args[k + 1].casefold() in ("clean.requireforce=false", "clean.requireforce=0", "clean.requireforce=no"):
+            if args[k + 1].casefold() in _CLEAN_REQUIRE_FORCE_OFF:
                 force_cfg = True
             k += 2
+        elif a.startswith("-c") and len(a) > 2:
+            if a[2:].casefold() in _CLEAN_REQUIRE_FORCE_OFF:
+                force_cfg = True
+            k += 1
         elif a.startswith("-"):
             k += 1
         else:
@@ -1501,7 +1512,10 @@ class _Scan:
                     exempt.add(j + 1)
             exec_destructive = any(e in REMOVER_NAMES or e in SHELLS or e == "mv" for e in execs)
             for start, clause in _find_exec_clauses(words, idx0):
-                echain, _ = _chain(clause)
+                echain, env_split = _chain(clause)
+                if env_split is not None and _parallel_text_is_destructive(env_split):
+                    exec_destructive = True
+                    continue
                 if not echain:
                     continue
                 epi = echain[-1]
@@ -1514,6 +1528,11 @@ class _Scan:
                     exec_destructive = True
                 elif eprog == "rsync" and any(a.startswith("--del") for a in eargs):
                     exec_destructive = True
+                    eops = operands_of(eargs, start + epi + 1)
+                    if not eops:
+                        self.note("unp", "find -exec rsync --delete without operands")
+                    elif eops[-1][1] != "{}":
+                        self.remove_operand("rsync", eops[-1][1], eops[-1][0], st, cwd)
                     exempt.update(start + epi + 1 + offset for offset, a in enumerate(eargs) if a.startswith("--del"))
             if delete or exec_destructive:
                 if sub_in_args:
@@ -1639,32 +1658,63 @@ class _Scan:
                 continue
             break
         cmd = head[i:]
-        if not cmd:
+
+        def check_tail_items() -> bool:
             for w in tail:
                 if w not in (":::", "::::") and _parallel_text_is_destructive(w):
                     self.note("unp", "parallel destructive command")
-                    return
+                    return True
+            return False
+
+        if not cmd:
+            check_tail_items()
             return
         if any(re.search(r"\s", w) and _parallel_text_is_destructive(w) for w in cmd):
             self.note("unp", "parallel destructive command")
             return
-        pchain, env_split = _chain(cmd)
-        if env_split is not None and _parallel_text_is_destructive(env_split):
-            self.note("unp", "parallel destructive command")
-            return
-        if not pchain:
-            return
-        pprog, pargs = _name(cmd[pchain[-1]]), cmd[pchain[-1] + 1:]
-        if pprog == "mv":
-            self.note("unp", "parallel mv")
-        elif pprog in RECURSIVE_CHANGERS and _has_recursive_flag(pargs):
-            self.note("unp", "parallel %s -R" % pprog)
-        elif pprog == "git" and _is_git_clean(pargs):
-            self.note("unp", "parallel git clean")
-        elif pprog == "rsync" and any(a.startswith("--del") for a in pargs):
-            self.note("unp", "parallel rsync --delete")
-        elif pprog in SHELLS and any(_parallel_text_is_destructive(a) for a in pargs):
-            self.note("unp", "parallel shell with destructive command")
+        subcmds: List[List[str]] = []
+        cur: List[str] = []
+        for w in cmd:
+            parts = _PARALLEL_SPLIT_RE.split(w)
+            for part in parts:
+                if not part:
+                    continue
+                if part in (";", "&&", "||", "|", "&"):
+                    if cur:
+                        subcmds.append(cur)
+                        cur = []
+                else:
+                    cur.append(part)
+        if cur:
+            subcmds.append(cur)
+        inspect_tail = "{}" in cmd[0] or "{" in cmd[0]
+        for sub in subcmds:
+            pchain, env_split = _chain(sub)
+            if env_split is not None and _parallel_text_is_destructive(env_split):
+                self.note("unp", "parallel destructive command")
+                return
+            if not pchain:
+                continue
+            pprog, pargs = _name(sub[pchain[-1]]), sub[pchain[-1] + 1:]
+            if pprog in SHELLS or "{" in pprog:
+                inspect_tail = True
+            if pprog == "mv":
+                self.note("unp", "parallel mv")
+                return
+            if pprog in RECURSIVE_CHANGERS and _has_recursive_flag(pargs):
+                self.note("unp", "parallel %s -R" % pprog)
+                return
+            if pprog == "git" and _is_git_clean(pargs):
+                self.note("unp", "parallel git clean")
+                return
+            if pprog == "rsync" and any(a.startswith("--del") for a in pargs):
+                self.note("unp", "parallel rsync --delete")
+                return
+            if pprog in SHELLS and any(_parallel_text_is_destructive(a) for a in pargs):
+                self.note("unp", "parallel shell with destructive command")
+                return
+        if inspect_tail:
+            check_tail_items()
 
     def git(self, args: List[str], first: int, st: Stmt, cwd: Optional[str],
             chain: Optional[List[int]] = None, prev: Optional[Stmt] = None) -> None:
@@ -1680,9 +1730,13 @@ class _Scan:
                 bad = bad or why
                 k += 1
             elif a == "-c" and k + 1 < len(args):
-                if args[k + 1].casefold() in ("clean.requireforce=false", "clean.requireforce=0", "clean.requireforce=no"):
+                if args[k + 1].casefold() in _CLEAN_REQUIRE_FORCE_OFF:
                     force_cfg = True
                 k += 2
+            elif a.startswith("-c") and len(a) > 2:
+                if a[2:].casefold() in _CLEAN_REQUIRE_FORCE_OFF:
+                    force_cfg = True
+                k += 1
             elif a in ("--git-dir", "--namespace") and k + 1 < len(args):
                 k += 2
             elif a.startswith("-"):

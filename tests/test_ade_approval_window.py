@@ -2025,7 +2025,70 @@ def test_fed_mv_recursive_changer_git_clean_and_rsync_delete_are_held(command):
     "find build | parallel echo {}",
     "find build | parallel chmod +x {}",
     "find build | parallel git -C {} status",
+    "find build | parallel git -C {} clean -nd",
     "find build | parallel rsync -a e/ {}",
+    "parallel echo {} ::: mv",
 ])
 def test_safe_non_destructive_find_xargs_and_parallel_shapes_stay_allowed(command):
+    assert allowed_in(command, SRC_X), (command, held(command).rule)
+
+
+# ---------------------------------------------------------------- adversary PR 953 round 1 (MED-1, LOW-1..3)
+
+@pytest.mark.parametrize("command", [
+    "find build -name '*.d' -exec rsync -a --delete e/ ~ \\;",
+    "find build -name '*.d' -exec rsync -a --delete {} / \\;",
+    "find build -name '*.d' -exec rsync -a --delete {} ~ \\;",
+    "find build -name '*.d' -exec rsync -a --delete e/ \"$D\"/ \\;",
+    "find build -name '*.d' -exec rsync -a --delete \\;",
+])
+def test_find_exec_rsync_delete_judges_destination_operand(command):
+    """PR 953 MED-1: exempting --delete inside find -exec rsync must still judge non-{} destinations (and empty operands)."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -maxdepth 1 | parallel echo hi \\; mv {} /tmp/old/",
+    "find ~ -maxdepth 1 | parallel true \\&\\& mv {} /tmp/old/",
+    "find ~ -maxdepth 1 | parallel : \\; chmod -R 777 {}",
+    "find ~ -maxdepth 1 | parallel : \\; git -C {} clean -fdx",
+    "parallel sh -c {} ::: 'mv ~ /tmp/old/'",
+    "parallel {} ::: 'mv ~ /tmp/old/'",
+    "parallel : \\; sh -c {} ::: 'chmod -R 777 ~'",
+])
+def test_parallel_escaped_separators_and_tail_payloads_are_held(command):
+    """PR 953 LOW-1: parallel checks every separated sub-command and inspects ::: payloads when cmd runs them."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -mindepth 1 -maxdepth 1 -exec env -S 'mv {} /tmp/old/' \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec env -S 'chmod -R 777 {}' \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec env -S 'git -C {} clean -fdx' \\;",
+])
+def test_find_exec_env_split_string_is_held(command):
+    """PR 953 LOW-2: find -exec does not discard env -S split-string from _chain."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "find ~ -mindepth 1 -maxdepth 1 -exec git -c clean.requireForce=off clean -d {} \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec git -c clean.requireForce= clean -d {} \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec git -cclean.requireForce=false clean -d {} \\;",
+    "find ~ -mindepth 1 -maxdepth 1 -exec git -cclean.requireForce=off clean -d {} \\;",
+])
+def test_find_exec_git_clean_requireforce_off_and_attached_c_are_held(command):
+    """PR 953 LOW-3: _is_git_clean recognizes =off, =, and attached -c... forms."""
+    assert held_in_three_modes(command), (command, held(command).rule)
+
+
+@pytest.mark.parametrize("command", [
+    "git -c clean.requireForce=off clean -d",
+    "git -c clean.requireForce= clean -d",
+    "git -cclean.requireForce=false clean -d",
+    "git -cclean.requireForce=off clean -d",
+])
+def test_git_clean_requireforce_off_and_attached_c_are_held_at_home(command):
+    """PR 953 LOW-3: top-level git() recognizes =off, =, and attached -c... forms."""
+    assert not allowed_in(command, HOME), (command, held(command).rule)
     assert allowed_in(command, SRC_X), (command, held(command).rule)
