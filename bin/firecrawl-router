@@ -64,6 +64,17 @@ Environment:
                                gemini-free-lite (…_LITELLM_BASE, …_LITELLM_MODELS, comma list)
   FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 240: under
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
+  FIRECRAWL_ROUTER_LLM_ORDER   rung ordering: "default" (sipb then litellm), "oneshot-first" (prefer
+                               rungs whose one-shot window fits the page before chunked rungs), or
+                               "litellm,sipb" (litellm before sipb)
+  FIRECRAWL_ROUTER_MIT_BRIDGE  Mac-side MIT Libraries bridge for exact enrolled hosts on POST
+                               /v{1,2}/scrape: "off" (default), "pdf" (fetch.py + pdftotext), or
+                               "all" (adds browserfetch.py + pandoc --sandbox / page.txt)
+  FIRECRAWL_ROUTER_MIT_SNAPSHOT path to fresh (<= 7d), user-owned, non-writable enrollment snapshot
+  FIRECRAWL_ROUTER_MIT_FETCH_BIN / FIRECRAWL_ROUTER_MIT_BROWSER_BIN / FIRECRAWL_ROUTER_MIT_STATE_DIR /
+  FIRECRAWL_ROUTER_MIT_MAX_FETCH / FIRECRAWL_ROUTER_MIT_MAX_BROWSER / FIRECRAWL_ROUTER_MIT_COOLDOWN_S /
+  FIRECRAWL_ROUTER_MIT_SOCKS_HOST / FIRECRAWL_ROUTER_MIT_SOCKS_PORT / FIRECRAWL_ROUTER_MIT_HOST /
+  FIRECRAWL_ROUTER_MIT_CHROME  optional overrides for bin/firecrawl_mit_bridge.py (never from requests)
 
 The base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM) must each be https:// or loopback http
 (127.0.0.1, localhost, ::1) with a plain host[:port] (no userinfo), checked at startup; no variable lifts that.
@@ -86,10 +97,12 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import importlib.util
 import ipaddress
 import http.server
 import json
 import os
+from pathlib import Path
 import re
 import secrets
 import signal
@@ -102,9 +115,28 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+# Load sibling helper under python3 -I (isolated mode omits script dir from sys.path).
+def _load_mit_bridge_module():
+    if "firecrawl_mit_bridge" in sys.modules:
+        return sys.modules["firecrawl_mit_bridge"]
+    bridge_path = Path(__file__).resolve().parent / "firecrawl_mit_bridge.py"
+    if not bridge_path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("firecrawl_mit_bridge", str(bridge_path))
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["firecrawl_mit_bridge"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_MIT_BRIDGE_MOD = _load_mit_bridge_module()
+
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
-BOT_WALL_STATUSES = {202, 403, 405, 429, 503}
+BOT_WALL_STATUSES = {403, 405, 429, 503}
+SHORT_BOT_WALL_STATUSES = {202}  # HTTP 202 is only a bot wall when markdown is missing/short (e.g. AWS WAF vs hydrated IEEE Xplore)
 # Kept in step with the BLOCK_PATTERNS of bin/web-get until it was retired (2026-11-06). Matched only on a short page (a challenge
 # interstitial), so an article that mentions "captcha" is not a bot wall.
 BOT_WALL_RE = re.compile("|".join([
@@ -237,9 +269,11 @@ def fallback_reason(path: str, reply: Reply) -> str:
     route = path.split("?", 1)[0].rstrip("/")
     if route.endswith("/scrape") and isinstance(data, dict):
         code = (data.get("metadata") or {}).get("statusCode")
+        md = data.get("markdown")
         if code in BOT_WALL_STATUSES:
             return f"page status {code}"
-        md = data.get("markdown")
+        if code in SHORT_BOT_WALL_STATUSES and (not isinstance(md, str) or len(md.strip()) < BOT_WALL_MAX_CHARS):
+            return f"page status {code}"
         if isinstance(md, str) and len(md) < BOT_WALL_MAX_CHARS:
             m = BOT_WALL_RE.search(md)
             if m:
@@ -364,10 +398,12 @@ def parse_json_text(text: str):
 class Extractor:
     """Runs the query/json formats over a page's markdown, rung by rung."""
 
-    def __init__(self, rungs: list[Rung], deadline: float = 240.0, call_timeout: float = 240.0):
+    def __init__(self, rungs: list[Rung], deadline: float = 240.0, call_timeout: float = 240.0,
+                 prefer_oneshot: bool = False):
         self.rungs = rungs
         self.deadline = deadline
         self.call_timeout = call_timeout
+        self.prefer_oneshot = prefer_oneshot
         self.log = sys.stderr
         self._tl = threading.local()  # t_end of the scrape being served on this thread
 
@@ -475,9 +511,10 @@ class Extractor:
         fields, used, errors = {}, [], []
         t_end = time.monotonic() + self.deadline
         self._tl.t_end = t_end
+        rungs = sorted(self.rungs, key=lambda r: len(md) > r.one_shot) if self.prefer_oneshot else self.rungs
         for want in wants:
             key = "json" if want["kind"] == "json" else "answer"
-            for rung in self.rungs:
+            for rung in rungs:
                 if time.monotonic() > t_end:
                     errors.append("deadline")
                     break
@@ -505,28 +542,45 @@ def build_extractor(env) -> Extractor | None:
         return None
     sipb_base = _check_base("FIRECRAWL_ROUTER_SIPB_BASE",
                             (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"))
-    rungs = [Rung("sipb", sipb_base,
-                  env.get("FIRECRAWL_ROUTER_SIPB_KEY", ""),
-                  env.get("FIRECRAWL_ROUTER_SIPB_MODEL") or "qwen3.6:35b-a3b-q4_K_M",
-                  SIPB_ONE_SHOT_CHARS, SIPB_CHUNK_CHARS, check_truncation=True)]
+    sipb_rungs = [Rung("sipb", sipb_base,
+                       env.get("FIRECRAWL_ROUTER_SIPB_KEY", ""),
+                       env.get("FIRECRAWL_ROUTER_SIPB_MODEL") or "qwen3.6:35b-a3b-q4_K_M",
+                       SIPB_ONE_SHOT_CHARS, SIPB_CHUNK_CHARS, check_truncation=True)]
     lite_base = _check_base("FIRECRAWL_ROUTER_LITELLM_BASE",
                             (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/"))
-    for m in (env.get("FIRECRAWL_ROUTER_LITELLM_MODELS") or "gemini-free,gemini-free-lite").split(","):
-        if m.strip():
-            rungs.append(Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
-                              BIG_ONE_SHOT_CHARS, BIG_CHUNK_CHARS))
-    return Extractor(rungs, float(env.get("FIRECRAWL_ROUTER_LLM_DEADLINE") or 240))
+    lite_rungs = [
+        Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
+             BIG_ONE_SHOT_CHARS, BIG_CHUNK_CHARS)
+        for m in (env.get("FIRECRAWL_ROUTER_LITELLM_MODELS") or "gemini-free,gemini-free-lite").split(",")
+        if m.strip()
+    ]
+    order = (env.get("FIRECRAWL_ROUTER_LLM_ORDER") or "default").strip().lower()
+    if order == "litellm,sipb":
+        rungs = lite_rungs + sipb_rungs
+        prefer_oneshot = False
+    elif order == "oneshot-first":
+        rungs = sipb_rungs + lite_rungs
+        prefer_oneshot = True
+    else:
+        rungs = sipb_rungs + lite_rungs
+        prefer_oneshot = False
+    return Extractor(rungs, float(env.get("FIRECRAWL_ROUTER_LLM_DEADLINE") or 240),
+                     prefer_oneshot=prefer_oneshot)
 
 
 class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
                  token: str = "", log=sys.stderr, extractor: Extractor | None = None,
-                 search_timeout: float = 35.0):
+                 search_timeout: float = 35.0, mit_bridge=None):
         self.extractor = extractor
         if extractor:
             extractor.log = log
         self.primary = primary
         self.fallback = fallback
+        self.mit_bridge = mit_bridge
+        if mit_bridge is not None:
+            mit_bridge.log = log
+            mit_bridge._reply_cls = Reply
         self.timeout = timeout
         self.search_timeout = search_timeout
         self.token = token
@@ -634,14 +688,42 @@ class Router:
             return reply, b.name
         first = call(self.primary, method, path, headers, body, timeout)
         reason = fallback_reason(path, first)
+        bridge_log_note = ""
+        if self.mit_bridge is not None and self.mit_bridge.enabled:
+            b_reply, b_backend, b_note, was_enrolled = self.mit_bridge.maybe_bridge(
+                method, path, body, first, reason, Reply
+            )
+            if b_reply is not None and b_backend:
+                self._log(method, path, b_backend, b_reply, t0, b_note)
+                return b_reply, b_backend
+            if was_enrolled:
+                if b_note and b_note != "primary-ok":
+                    first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
+                                  first.body, first.error)
+                note = (f"mit-bridge skipped:{b_note}" if b_note and b_note != "primary-ok"
+                        else (reason and f"{reason}; enrolled"))
+                self._log(method, path, "primary", first, t0, note)
+                return self.rewrite(first, "primary"), "primary"
+            if b_note.startswith("snapshot-"):
+                bridge_log_note = f"mit-bridge skipped:{b_note}"
+                if _MIT_BRIDGE_MOD is None or _MIT_BRIDGE_MOD.needs_browser_bridge(first, reason):
+                    first = Reply(first.status, {**first.headers, "X-Firecrawl-MIT-Bridge": f"skipped:{b_note}"},
+                                  first.body, first.error)
         if not reason or not self.fallback:
-            self._log(method, path, "primary", first, t0, reason and f"{reason}; no fallback")
+            note = reason and f"{reason}; no fallback"
+            if bridge_log_note:
+                note = f"{note}; {bridge_log_note}" if note else bridge_log_note
+            self._log(method, path, "primary", first, t0, note)
             return self.rewrite(first, "primary"), "primary"
         second = call(self.fallback, method, path, headers, body, timeout)
         if 200 <= second.status < 300 or first.status == 0:
-            self._log(method, path, "fallback", second, t0, reason)
+            note = f"{reason}; {bridge_log_note}" if bridge_log_note else reason
+            self._log(method, path, "fallback", second, t0, note)
             return self.rewrite(second, "fallback"), "fallback"
-        self._log(method, path, "primary", first, t0, f"{reason}; fallback HTTP {second.status or second.error}")
+        note = f"{reason}; fallback HTTP {second.status or second.error}"
+        if bridge_log_note:
+            note = f"{note}; {bridge_log_note}"
+        self._log(method, path, "primary", first, t0, note)
         return self.rewrite(first, "primary"), "primary"
 
     def _log(self, method, path, backend, reply, t0, note) -> None:
@@ -718,8 +800,16 @@ def build_router(env, token: str) -> Router:
         fb_url = (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/")
         fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url), fb_key)
     search_timeout = float(env.get("FIRECRAWL_ROUTER_SEARCH_TIMEOUT") or 35)
+    mit_mode = (env.get("FIRECRAWL_ROUTER_MIT_BRIDGE") or "off").strip().lower()
+    if _MIT_BRIDGE_MOD is not None:
+        mit_bridge = _MIT_BRIDGE_MOD.build_mit_bridge(env)
+    else:
+        mit_bridge = None
+        if mit_mode in ("pdf", "all"):
+            print("firecrawl-router: FIRECRAWL_ROUTER_MIT_BRIDGE enabled but firecrawl_mit_bridge.py is missing; failing closed",
+                  file=sys.stderr, flush=True)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
-                  extractor=build_extractor(env), search_timeout=search_timeout)
+                  extractor=build_extractor(env), search_timeout=search_timeout, mit_bridge=mit_bridge)
 
 
 def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:
