@@ -31,6 +31,20 @@ policy below allows, for any agent.
 returns the documented allow decision under the same policy and window check. It prints nothing otherwise, so the normal prompt
 is shown.
 
+***4.*** **`approval-gate` CLI gates in `djbclark-ade` (2026-11-23)**:
+
+***a.*** *`load-watch ci decide DIR local` (`load-watch-ci-local`, `policy = "window-ok"`)*: for the same non-glob,
+non-`ci`-override `local` scope that a live `bgrun` ticket covers, `bin/load-watch` checks
+`approval-gate check --gate load-watch-ci-local` (binary resolved from `ADE_APPROVAL_GATE_BIN` or
+`~/.local/bin/approval-gate`, 5 s timeout, scrubbed environment, fail closed). When it exits 0, the `local` decision is
+recorded without a `sudo-ask -k` dialog and logged as `lw-local-approval-window` in `~/.local/state/bg/approvals.log`
+(a concurrent `ci` row still forces the dialog). Non-eligible decisions (`pending`, `DIR/*` globs, and overriding an
+existing `ci` decision) never consult `approval-gate` and still prompt via `sudo-ask -k`.
+
+***b.*** *`ade-merge-ready approve-post` (`ade-merge-ready-approve-post`, `policy = "always-prompt"`)*: PR merge sign-off is
+pinned strictly to `always-prompt` (`config/approval-gates.toml`) — `bin/ade-merge-ready` never consults `approval-gate`
+and never accepts an open approval window; it always prompts afresh with `sudo-ask -k` (or `sudo -k`).
+
 ## II. The window file
 
 `/var/db/sudo-ask/grant` (directory `root:wheel 0755`, file `root:wheel 0644`), JSON `{expires_utc, granted_utc,

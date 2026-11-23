@@ -1135,6 +1135,9 @@ def confirm_approve_post(repo: str, rows: list[dict]) -> None:
             f"approve-post: {len(rows)} PRs do not fit in one confirmation dialog (it would be cut off); "
             "select fewer with --prs; nothing was posted"
         )
+    # 2026-11-23: PR merge sign-off is pinned to `always-prompt` (site-public-djbclark `config/approval-gates.toml`
+    # gate `ade-merge-ready-approve-post`, `policy = "always-prompt"`): never consult `approval-gate` or accept an
+    # open approval window; always prompt afresh via `sudo-ask -k` (or `sudo -k`).
     print(f"ade-merge-ready: asking djbclark to confirm: {text}", file=sys.stderr)
     if os.path.isfile(SUDO_ASK) and os.access(SUDO_ASK, os.X_OK):
         # The Allow dialog shows `text` (mouse click only); sudo then asks for Touch ID or the password.
